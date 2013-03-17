@@ -6,5 +6,5 @@ if [ $? -ne 0 ]; then
 fi
 
 dd bs=512 count=2880 if=/dev/zero of=floppy.img
-dd status=noxfer conv=notrunc if=bboeos.bin of=floppy.img
+dd conv=notrunc if=bboeos.bin of=floppy.img
 #rm bboeos.bin

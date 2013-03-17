@@ -19,7 +19,6 @@ start:
 	call print_string
 
 	jmp $			; Jump here - infinite loop!
-	
 
 	welcome_string db 'Welcome to BBoeOS!', 0
 	version_string db 'Version 0.0.1dev', 0
@@ -41,4 +40,3 @@ print_string:			; Routine: output string in SI to screen
 
 	times 510-($-$$) db 0	; Pad remainder of boot sector with 0s
 	dw 0xAA55		; The standard PC boot signature
-	
