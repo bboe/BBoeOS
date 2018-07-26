@@ -9,7 +9,7 @@ start:
         mov si, version_string
         call print_string
 
-read_key:
+        .read_key:
         mov bl, 1               ; Don't advance cursor after output
         mov si, prompt
         call print_string
@@ -26,10 +26,14 @@ read_key:
         jmp .readline
 
         .endline:
+        call advance_cursor
+        jmp .read_key            ; Loop on user input
+
+advance_cursor:
         mov ah, 2               ; int 10h 'set cursor position' function
         inc dh                  ; Move cursor to next row
         int 10h                 ; Call 'set cursor position' function
-        jmp read_key            ; Loop on user input
+        ret
 
 print_string:                   ; Routine: output string in `si` to screen
         mov ah, 0Eh             ; int 10h 'print char' function
@@ -45,9 +49,7 @@ print_string:                   ; Routine: output string in `si` to screen
         cmp bl, 1               ; Skip cursor advance if bl is 1
         je .done
 
-        mov ah, 2               ; int 10h 'set cursor position' function
-        inc dh                  ; Move cursor to next row
-        int 10h                 ; Call 'set cursor position' function
+        call advance_cursor
 
         .done:
         ret
