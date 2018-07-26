@@ -7,14 +7,14 @@ start:
         mov si, version_string
         call print_string
 
-        mov si, another_string
+read_key:
+        mov si, prompt
         call print_string
 
-        jmp $                   ; Jump here - infinite loop!
+        mov ah, 00h             ; int 16h 'keyboard read' function
+        int 16h                 ; 'Call 'keyboard read' function
 
-        welcome_string db `Welcome to BBoeOS!\0`
-        version_string db `Version 0.0.2dev\0`
-        another_string db `...\0`
+        jmp read_key            ; Loop on user input
 
 print_string:                   ; Routine: output string in `si` to screen
         mov ah, 0Eh             ; int 10h 'print char' function
@@ -32,5 +32,12 @@ print_string:                   ; Routine: output string in `si` to screen
         int 10h                 ; Call 'set cursor position' function
         ret
 
+        ;; Strings
+        welcome_string db `Welcome to BBoeOS!\0`
+        version_string db `Version 0.0.3dev\0`
+        prompt db `$ \0`
+
+
+        ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
         dw 0AA55h               ; The standard PC boot signature
