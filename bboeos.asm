@@ -1,5 +1,3 @@
-        BITS 16
-
 start:
         mov ax, 07C0h           ; Set data segment to where we're loaded
         mov ds, ax
