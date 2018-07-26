@@ -9,25 +9,27 @@ start:
         mov si, version_string
         call print_string
 
-        .read_key:
+        .prompt:
         mov bl, 1               ; Don't advance cursor after output
         mov si, prompt
         call print_string
 
-        .readline:
+        .read_char:
         mov ah, 00h             ; int 16h 'keyboard read' function
         int 16h                 ; 'Call 'keyboard read' function
 
         cmp al, `\r`            ; Loop until '\r' is read (return key)
-        je .endline
+        je .end
+        cmp al, 0               ; Ignore special characters
+        je .read_char
 
         mov ah, 0Eh             ; int 10h 'print char' function
         int 10h
-        jmp .readline
+        jmp .read_char
 
-        .endline:
+        .end:
         call advance_cursor
-        jmp .read_key            ; Loop on user input
+        jmp .prompt             ; Loop on user input
 
 advance_cursor:
         mov ah, 2               ; int 10h 'set cursor position' function
@@ -35,23 +37,24 @@ advance_cursor:
         int 10h                 ; Call 'set cursor position' function
         ret
 
+
 print_string:                   ; Routine: output string in `si` to screen
         mov ah, 0Eh             ; int 10h 'print char' function
 
         .repeat:
         lodsb                   ; Load the next character from the string
         cmp al, `\0`
-        je .stringend           ; If character is '\0', end the loop
+        je .break               ; If character is '\0', end the loop
         int 10h                 ; Call 'print char' function
         jmp .repeat
 
-        .stringend:
+        .break:
         cmp bl, 1               ; Skip cursor advance if bl is 1
-        je .done
+        je .end
 
         call advance_cursor
 
-        .done:
+        .end:
         ret
 
         ;; Strings
