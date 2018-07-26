@@ -1,7 +1,6 @@
+        org 7C00h               ; BIOS loads programs into 0x7C00 so we should
+                                ; set that as our program's origin
 start:
-        mov ax, 07C0h           ; Set data segment to where we're loaded
-        mov ds, ax
-
         mov si, welcome_string  ; Put string position into SI
         call print_string
 
