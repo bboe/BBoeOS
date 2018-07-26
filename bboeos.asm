@@ -22,6 +22,8 @@ start:
         je .end
         cmp al, 0               ; Ignore special characters
         je .read_char
+        cmp al, 1Bh             ; Special command on escape
+        je .clear_screen
 
         mov ah, 0Eh             ; int 10h 'print char' function
         int 10h
@@ -30,6 +32,13 @@ start:
         .end:
         call advance_cursor
         jmp .prompt             ; Loop on user input
+
+        .clear_screen:
+        mov ah, 00h
+        mov al, 03h
+        int 10h
+        mov dh, 0
+        jmp .prompt
 
 advance_cursor:
         mov ah, 2               ; int 10h 'set cursor position' function
