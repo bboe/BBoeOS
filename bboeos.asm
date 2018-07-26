@@ -5,18 +5,10 @@ start:
         mov ds, ax
 
         mov si, welcome_string  ; Put string position into SI
-        call print_string       ; Call our string-printing routine
-
-        mov ah, 2               ; Set cursor position
-        inc dh                  ; Move to next row
-        int 10h
+        call print_string
 
         mov si, version_string
         call print_string
-
-        mov ah, 2               ; Set cursor position
-        inc dh                  ; Move to next row
-        int 10h
 
         mov si, another_string
         call print_string
@@ -38,8 +30,10 @@ print_string:                   ; Routine: output string in SI to screen
         jmp .repeat
 
         .done:
+        mov ah, 2               ; Set cursor position command
+        inc dh                  ; Move cursor to next row
+        int 10h                 ; Call command
         ret
-
 
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
         dw 0AA55h               ; The standard PC boot signature
