@@ -14,9 +14,21 @@ read_key:
         mov si, prompt
         call print_string
 
+        .readline:
         mov ah, 00h             ; int 16h 'keyboard read' function
         int 16h                 ; 'Call 'keyboard read' function
 
+        cmp al, `\r`            ; Loop until '\r' is read (return key)
+        je .endline
+
+        mov ah, 0Eh             ; int 10h 'print char' function
+        int 10h
+        jmp .readline
+
+        .endline:
+        mov ah, 2               ; int 10h 'set cursor position' function
+        inc dh                  ; Move cursor to next row
+        int 10h                 ; Call 'set cursor position' function
         jmp read_key            ; Loop on user input
 
 print_string:                   ; Routine: output string in `si` to screen
@@ -24,7 +36,7 @@ print_string:                   ; Routine: output string in `si` to screen
 
         .repeat:
         lodsb                   ; Load the next character from the string
-        cmp al, 0
+        cmp al, `\0`
         je .stringend           ; If character is '\0', end the loop
         int 10h                 ; Call 'print char' function
         jmp .repeat
