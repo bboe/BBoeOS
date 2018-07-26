@@ -4,22 +4,28 @@ start:
         mov ax, 07C0h           ; Set data segment to where we're loaded
         mov ds, ax
 
+        mov si, welcome_string  ; Put string position into SI
+        call print_string       ; Call our string-printing routine
 
-	mov si, welcome_string	; Put string position into SI
-	call print_string	; Call our string-printing routine
+        mov ah, 2               ; Set cursor position
+        inc dh                  ; Move to next row
+        int 10h
 
-	mov ah, 02h
-	mov dh, 1
-	int 10h
+        mov si, version_string
+        call print_string
 
-	mov si, version_string
-	call print_string
+        mov ah, 2               ; Set cursor position
+        inc dh                  ; Move to next row
+        int 10h
 
-	jmp $			; Jump here - infinite loop!
+        mov si, another_string
+        call print_string
 
-	welcome_string db 'Welcome to BBoeOS!', 0
-	version_string db 'Version 0.0.1dev', 0
+        jmp $                   ; Jump here - infinite loop!
 
+        welcome_string db 'Welcome to BBoeOS!', 0
+        version_string db 'Version 0.0.2dev', 0
+        another_string db '...', 0
 
 print_string:			; Routine: output string in SI to screen
 	mov ah, 0Eh		; int 10h 'print char' function
