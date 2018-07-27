@@ -3,9 +3,8 @@
         %assign buffer 9000h
 
 start:
-        mov ax, 7d20h
-        mov sp, 8000h
-        mov ss, ax           ; Set up stack pointer and space
+        xor dx, dx
+        mov ds, dx
 
         call clear_screen
         mov si, welcome
