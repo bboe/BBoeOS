@@ -14,7 +14,7 @@ start:
         mov si, prompt
         call print_string
         call read_line
-        call handle_command
+        call process_line
         jmp .prompt             ; Loop on user input
 
 clear_screen:
@@ -24,19 +24,6 @@ clear_screen:
         int 10h
         mov dh, 0               ; Reset the row number
         pop ax
-        ret
-
-handle_command:
-        call move_cursor_to_next_line
-        cmp cx, 0               ; Test if command was typed
-        jne .has_command
-        mov si, zero_message
-        jmp .done
-        .has_command:
-        mov si, buffer
-        .done:
-        call print_string
-        call move_cursor_to_next_line
         ret
 
 move_cursor_to_next_line:
@@ -67,6 +54,33 @@ print_string:
         pop ax
         ret
 
+process_command:
+        cld
+        inc cx
+        mov esi, buffer
+        mov edi, command_help
+        repe cmpsb
+        jz .help
+        mov si, invalid_message
+        jmp .done
+        .help:
+        mov si, message_help
+        .done:
+        ret
+
+process_line:
+        call move_cursor_to_next_line
+        cmp cx, 0               ; Test if command was typed
+        jne .has_command
+        mov si, zero_message
+        jmp .done
+        .has_command:
+        call process_command
+        .done:
+        call print_string
+        call move_cursor_to_next_line
+        ret
+
 read_line:
         push ax
         push bx
@@ -93,12 +107,15 @@ read_line:
         .end:
         mov bx, cx              ; Add null terminating character to buffer
         mov byte [bx], 00h
-        sub cx, buffer          ; Store how many characters were read in cx
+        sub cx, buffer         ; Store how many characters were read in cx
         pop bx
         pop ax
         ret
 
         ;; Strings
+        command_help db `help\0`
+        invalid_message db `invalid command\0`
+        message_help db `Available commands: help\0`
         prompt db `$ \0`
         version db `Version 0.0.3dev\0`
         welcome db `Welcome to BBoeOS!\0`
