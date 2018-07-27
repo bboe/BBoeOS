@@ -15,6 +15,7 @@
 ## Resources
 
 * https://en.wikibooks.org/wiki/X86_Assembly/Bootloaders
+* http://www.ousob.com/ng/asm/ng6f862.php
 * https://neosmart.net/wiki/mbr-boot-process/
 * https://en.wikipedia.org/wiki/INT_10H
 * https://en.wikipedia.org/wiki/Mode_13h
