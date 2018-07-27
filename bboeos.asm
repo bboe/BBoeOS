@@ -1,7 +1,7 @@
         org 7C00h               ; BIOS loads programs into 0x7C00 so we should
-
-        %assign buffer 8C00h
                                 ; set that as our program's origin
+        %assign buffer 8C00h
+
 start:
         mov si, welcome
         call print_string
@@ -22,6 +22,23 @@ clear_screen:
         mov ax, 03h
         int 10h
         mov dh, 0               ; Reset the row number
+        pop ax
+        ret
+
+color:
+        push ax
+        push bx
+        mov ax, 0Dh
+        int 10h                 ; change to 16-color graphics mode
+
+        inc byte [bg_color]
+
+        mov ax, 0B00h
+        mov bh, 0
+        mov byte bl, [bg_color]
+        int 10h                 ; update background color
+
+        pop bx
         pop ax
         ret
 
@@ -63,6 +80,11 @@ process_command:
         jz .clear
 
         mov esi, buffer
+        mov edi, command_color
+        repe cmpsb
+        jz .color
+
+        mov esi, buffer
         mov edi, command_help
         repe cmpsb
         jz .help
@@ -72,6 +94,11 @@ process_command:
 
         .clear:
         call clear_screen
+        mov si, 0
+        jmp .done
+
+        .color:
+        call color
         mov si, 0
         jmp .done
 
@@ -127,8 +154,12 @@ read_line:
         pop ax
         ret
 
+        ;; Values
+        bg_color db 0
+
         ;; Strings
         command_clear db `clear\0`
+        command_color db `color\0`
         command_help db `help\0`
         invalid_message db `invalid command\0`
         message_help db `Available commands: clear help\0`
