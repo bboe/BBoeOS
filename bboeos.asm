@@ -27,17 +27,44 @@ clear_screen:
 
 color:
         push ax
-        push bx
         mov ax, 0Dh
         int 10h                 ; change to 16-color graphics mode
+        call handle_color_mode
+        call clear_screen
+        pop ax
+        ret
 
+handle_color_mode:
+        push ax
+        push bx
+
+        .loop:
+        .read_char:
+        mov ah, 00h             ; int 16h 'keyboard read' function
+        int 16h                 ; 'Call 'keyboard read' function
+
+        cmp al, 'q'             ; Loop until 'q' is read (return key)
+        je .end
+        cmp al, 'j'
+        je .background_backward
+        cmp al, 'k'
+        je .background_forward
+
+        jmp .loop
+
+        .background_backward:
+        dec byte [bg_color]
+        jmp .change_background
+        .background_forward:
         inc byte [bg_color]
-
+        .change_background:
         mov ax, 0B00h
         mov bh, 0
         mov byte bl, [bg_color]
         int 10h                 ; update background color
+        jmp .loop
 
+        .end:
         pop bx
         pop ax
         ret
@@ -90,21 +117,21 @@ process_command:
         jz .help
 
         mov si, invalid_message
-        jmp .done
+        jmp .end
 
         .clear:
         call clear_screen
         mov si, 0
-        jmp .done
+        jmp .end
 
         .color:
         call color
         mov si, 0
-        jmp .done
+        jmp .end
 
         .help:
         mov si, message_help
-        .done:
+        .end:
         ret
 
 process_line:
@@ -117,10 +144,10 @@ process_line:
         call process_command
         .output:
         cmp si, 0
-        jz .done
+        jz .end
         call print_string
         call move_cursor_to_next_line
-        .done:
+        .end:
         ret
 
 read_line:
