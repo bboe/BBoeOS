@@ -19,8 +19,7 @@ start:
 
 clear_screen:
         push ax
-        mov ax, 0003h
-        mov al, 03h
+        mov ax, 03h
         int 10h
         mov dh, 0               ; Reset the row number
         pop ax
@@ -57,12 +56,25 @@ print_string:
 process_command:
         cld
         inc cx
+
+        mov esi, buffer
+        mov edi, command_clear
+        repe cmpsb
+        jz .clear
+
         mov esi, buffer
         mov edi, command_help
         repe cmpsb
         jz .help
+
         mov si, invalid_message
         jmp .done
+
+        .clear:
+        call clear_screen
+        mov si, 0
+        jmp .done
+
         .help:
         mov si, message_help
         .done:
@@ -73,12 +85,15 @@ process_line:
         cmp cx, 0               ; Test if command was typed
         jne .has_command
         mov si, zero_message
-        jmp .done
+        jmp .output
         .has_command:
         call process_command
-        .done:
+        .output:
+        cmp si, 0
+        jz .done
         call print_string
         call move_cursor_to_next_line
+        .done:
         ret
 
 read_line:
@@ -113,9 +128,10 @@ read_line:
         ret
 
         ;; Strings
+        command_clear db `clear\0`
         command_help db `help\0`
         invalid_message db `invalid command\0`
-        message_help db `Available commands: help\0`
+        message_help db `Available commands: clear help\0`
         prompt db `$ \0`
         version db `Version 0.0.3dev\0`
         welcome db `Welcome to BBoeOS!\0`
