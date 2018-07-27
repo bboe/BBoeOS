@@ -58,8 +58,6 @@ handle_color_mode:
         mov ah, 00h             ; int 16h 'keyboard read' function
         int 16h                 ; 'Call 'keyboard read' function
 
-        cmp al, ' '
-        je .write
         cmp al, 'a'
         je .cursor_left
         cmp al, 'd'
@@ -104,9 +102,7 @@ handle_color_mode:
         mov ax, 0200h
         mov bh, 0
         int 10h
-        jmp .loop
 
-        .write:
         mov ax, 092Ah
         mov bx, 0003h
         mov cx, 1
