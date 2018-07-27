@@ -242,7 +242,7 @@ read_line:
         invalid_message db `invalid command\0`
         message_help db `Available commands: clear color help\0`
         prompt db `$ \0`
-        version db `Version 0.0.3dev\0`
+        version db `Version 0.1.0 (2018/07/27)\0`
         welcome db `Welcome to BBoeOS!\0`
         zero_message db `Nothing entered\0`
 
