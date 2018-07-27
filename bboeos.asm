@@ -3,64 +3,32 @@
         %assign buffer 8C00h
                                 ; set that as our program's origin
 start:
-        mov cl, 0               ; Advance cursor after output
-
         mov si, welcome
         call print_string
-
+        call move_cursor_to_next_line
         mov si, version
         call print_string
+        call move_cursor_to_next_line
 
         .prompt:
-
-        mov bx, buffer          ; Initialize character counter
-
-        mov cl, 1               ; Don't advance cursor after output
         mov si, prompt
         call print_string
-
-        .read_char:
-        mov ah, 00h             ; int 16h 'keyboard read' function
-        int 16h                 ; 'Call 'keyboard read' function
-
-        cmp al, `\r`            ; Loop until '\r' is read (return key)
-        je .handle_command
-        cmp al, 0               ; Ignore special characters
-        je .read_char
-        cmp al, 1Bh             ; Special command on escape
-        je .clear_screen
-
-        mov byte [bx], al
-        .done_incrementing:
-        inc bx                  ; Increment character counter
-
-        mov ah, 0Eh             ; int 10h 'print char' function
-        int 10h
-        jmp .read_char
-
-        .handle_command:
-        mov byte [bx], 00h
+        call read_line
         call handle_command
-        call advance_cursor
         jmp .prompt             ; Loop on user input
 
-        .clear_screen:
-        mov ah, 00h
+clear_screen:
+        push ax
+        mov ax, 0003h
         mov al, 03h
         int 10h
-        mov dh, 0
-        jmp .prompt
-
-advance_cursor:
-        mov ah, 2               ; int 10h 'set cursor position' function
-        mov bh, 0
-        inc dh                  ; Move cursor to next row
-        int 10h                 ; Call 'set cursor position' function
+        mov dh, 0               ; Reset the row number
+        pop ax
         ret
 
 handle_command:
-        call advance_cursor
-        cmp bx, 0
+        call move_cursor_to_next_line
+        cmp cx, 0               ; Test if command was typed
         jne .has_command
         mov si, zero_message
         jmp .done
@@ -68,29 +36,69 @@ handle_command:
         mov si, buffer
         .done:
         call print_string
+        call move_cursor_to_next_line
         ret
 
-print_string:                   ; Routine: output string in `si` to screen
+move_cursor_to_next_line:
+        push ax
+        push bx
+        mov ah, 2               ; int 10h 'set cursor position' function
+        mov bh, 0
+        inc dh                  ; Move cursor to next row
+        int 10h                 ; Call 'set cursor position' function
+        pop bx
+        pop ax
+        ret
+
+print_string:
+        push ax
+        push bx
         mov ah, 0Eh             ; int 10h 'print char' function
+        mov bx, 0
 
         .repeat:
         lodsb                   ; Load the next character from the string
         cmp al, `\0`
-        je .break               ; If character is '\0', end the loop
+        je .end                 ; If character is '\0', end the loop
         int 10h                 ; Call 'print char' function
         jmp .repeat
+        .end:
+        pop bx
+        pop ax
+        ret
 
-        .break:
-        cmp cl, 1               ; Skip cursor advance if cl is 1
+read_line:
+        push ax
+        push bx
+        mov cx, buffer
+
+        .read_char:
+        mov ah, 00h             ; int 16h 'keyboard read' function
+        int 16h                 ; 'Call 'keyboard read' function
+
+        cmp al, `\r`            ; Loop until '\r' is read (return key)
         je .end
+        cmp al, 0               ; Ignore special characters
+        je .read_char
+        mov ah, 0Eh             ; echo character
+        mov bx, 0
+        int 10h
 
-        call advance_cursor
+        mov bx, cx              ; Add character to buffer
+        mov byte [bx], al
+        inc cx
+
+        jmp .read_char
 
         .end:
+        mov bx, cx              ; Add null terminating character to buffer
+        mov byte [bx], 00h
+        sub cx, buffer          ; Store how many characters were read in cx
+        pop bx
+        pop ax
         ret
 
         ;; Strings
-        command_message db `Something\0`
         prompt db `$ \0`
         version db `Version 0.0.3dev\0`
         welcome db `Welcome to BBoeOS!\0`
