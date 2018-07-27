@@ -3,10 +3,10 @@
 start:
         mov bl, 0               ; Advance cursor after output
 
-        mov si, welcome_string
+        mov si, welcome
         call print_string
 
-        mov si, version_string
+        mov si, version
         call print_string
 
         .prompt:
@@ -46,7 +46,6 @@ advance_cursor:
         int 10h                 ; Call 'set cursor position' function
         ret
 
-
 print_string:                   ; Routine: output string in `si` to screen
         mov ah, 0Eh             ; int 10h 'print char' function
 
@@ -67,10 +66,9 @@ print_string:                   ; Routine: output string in `si` to screen
         ret
 
         ;; Strings
-        welcome_string db `Welcome to BBoeOS!\0`
-        version_string db `Version 0.0.3dev\0`
         prompt db `$ \0`
-
+        version db `Version 0.0.3dev\0`
+        welcome db `Welcome to BBoeOS!\0`
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
