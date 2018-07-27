@@ -1,8 +1,13 @@
         org 7C00h               ; BIOS loads programs into 0x7C00 so we should
                                 ; set that as our program's origin
-        %assign buffer 8C00h
+        %assign buffer 9000h
 
 start:
+        mov ax, 7d20h
+        mov sp, 8000h
+        mov ss, ax           ; Set up stack pointer and space
+
+        call clear_screen
         mov si, welcome
         call print_string
         call move_cursor_to_next_line
@@ -19,9 +24,16 @@ start:
 
 clear_screen:
         push ax
-        mov ax, 03h
-        int 10h
-        mov dh, 0               ; Reset the row number
+        push bx
+        mov ax, 07h
+        int 10h                 ; Set text-mode
+
+        mov ax, 02h
+        mov bx, 0
+        mov dx, 0
+        int 10h                 ; Reset the cursor
+
+        pop bx
         pop ax
         ret
 
@@ -37,19 +49,32 @@ color:
 handle_color_mode:
         push ax
         push bx
+        push cx
+        push dx
+
+        mov dx, 0
 
         .loop:
         .read_char:
         mov ah, 00h             ; int 16h 'keyboard read' function
         int 16h                 ; 'Call 'keyboard read' function
 
-        cmp al, 'q'             ; Loop until 'q' is read (return key)
-        je .end
+        cmp al, ' '
+        je .write
+        cmp al, 'a'
+        je .cursor_left
+        cmp al, 'd'
+        je .cursor_right
         cmp al, 'j'
         je .background_backward
         cmp al, 'k'
         je .background_forward
-
+        cmp al, 'q'             ; Loop until 'q' is read (return key)
+        je .end
+        cmp al, 's'
+        je .cursor_down
+        cmp al, 'w'
+        je .cursor_up
         jmp .loop
 
         .background_backward:
@@ -61,10 +86,37 @@ handle_color_mode:
         mov ax, 0B00h
         mov bh, 0
         mov byte bl, [bg_color]
-        int 10h                 ; update background color
+        int 10h                 ; update background color=
+        jmp .loop
+
+
+        .cursor_down:
+        inc dh
+        jmp .move_cursor
+        .cursor_left:
+        dec dl
+        jmp .move_cursor
+        .cursor_right:
+        inc dl
+        jmp .move_cursor
+        .cursor_up:
+        dec dh
+        .move_cursor:
+        mov ax, 0200h
+        mov bh, 0
+        int 10h
+        jmp .loop
+
+        .write:
+        mov ax, 092Ah
+        mov bx, 0003h
+        mov cx, 1
+        int 10h
         jmp .loop
 
         .end:
+        pop dx
+        pop cx
         pop bx
         pop ax
         ret
@@ -189,7 +241,7 @@ read_line:
         command_color db `color\0`
         command_help db `help\0`
         invalid_message db `invalid command\0`
-        message_help db `Available commands: clear help\0`
+        message_help db `Available commands: clear color help\0`
         prompt db `$ \0`
         version db `Version 0.0.3dev\0`
         welcome db `Welcome to BBoeOS!\0`
