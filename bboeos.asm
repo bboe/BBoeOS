@@ -36,20 +36,17 @@ clear_screen:
         pop ax
         ret
 
-color:
+graphics:
         push ax
         mov ax, 0Dh
         int 10h                 ; change to 16-color graphics mode
-        call handle_color_mode
+        call handle_graphics_mode
         call clear_screen
         pop ax
         ret
 
-handle_color_mode:
-        push ax
-        push bx
-        push cx
-        push dx
+handle_graphics_mode:
+        pusha
 
         mov dx, 0
 
@@ -86,7 +83,6 @@ handle_color_mode:
         int 10h                 ; update background color=
         jmp .loop
 
-
         .cursor_down:
         inc dh
         jmp .move_cursor
@@ -110,10 +106,7 @@ handle_color_mode:
         jmp .loop
 
         .end:
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        popa
         ret
 
 move_cursor_to_next_line:
@@ -154,14 +147,19 @@ process_command:
         jz .clear
 
         mov esi, buffer
-        mov edi, command_color
+        mov edi, command_graphics
         repe cmpsb
-        jz .color
+        jz .graphics
 
         mov esi, buffer
         mov edi, command_help
         repe cmpsb
         jz .help
+
+        mov esi, buffer
+        mov edi, command_time
+        repe cmpsb
+        jz .time
 
         mov si, invalid_message
         jmp .end
@@ -171,22 +169,25 @@ process_command:
         mov si, 0
         jmp .end
 
-        .color:
-        call color
+        .graphics:
+        call graphics
         mov si, 0
         jmp .end
 
         .help:
         mov si, message_help
+        jmp .end
+
+        .time:
+        mov si, command_time
+
         .end:
         ret
 
 process_line:
         call move_cursor_to_next_line
         cmp cx, 0               ; Test if command was typed
-        jne .has_command
-        mov si, zero_message
-        jmp .output
+        jz .end
         .has_command:
         call process_command
         .output:
@@ -233,14 +234,14 @@ read_line:
 
         ;; Strings
         command_clear db `clear\0`
-        command_color db `color\0`
+        command_graphics db `graphics\0`
         command_help db `help\0`
-        invalid_message db `invalid command\0`
-        message_help db `Available commands: clear color help\0`
+        command_time db `time\0`
+        invalid_message db `that's a invalid command\0`
+        message_help db `Available commands: clear graphics help time\0`
         prompt db `$ \0`
         version db `Version 0.1.0 (2018/07/27)\0`
         welcome db `Welcome to BBoeOS!\0`
-        zero_message db `Nothing entered\0`
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
