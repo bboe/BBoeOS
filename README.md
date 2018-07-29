@@ -14,11 +14,8 @@
 
 ## Resources
 
-* https://en.wikibooks.org/wiki/X86_Assembly/Bootloaders
-* http://www.ousob.com/ng/asm/ng6f862.php
 * https://neosmart.net/wiki/mbr-boot-process/
-* https://en.wikipedia.org/wiki/INT_10H
-* https://en.wikipedia.org/wiki/Mode_13h
+* https://en.wikibooks.org/wiki/X86_Assembly/Bootloaders
+* http://www.ousob.com/ng/asm/ng1f806.php
 * https://en.wikipedia.org/wiki/BIOS_interrupt_call
 * ftp://ftp.embeddedarm.com/old/saved-downloads-manuals/EBIOS-UM.PDF
-* http://www.ousob.com/ng/asm/ng1f806.php
