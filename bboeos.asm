@@ -1,6 +1,6 @@
         org 7C00h               ; BIOS loads programs into 0x7C00 so we should
                                 ; set that as our program's origin
-        %assign buffer 9000h
+        %assign buffer 500h
 
 start:
         xor dx, dx
