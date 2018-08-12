@@ -176,26 +176,33 @@ handle_graphics_mode:
         ret
 
 process_command:
+        ;; Input string length is in cx
+        push bx
+
         cld
         inc cx
+        mov bx, cx              ; Save string length
 
-        mov esi, buffer
-        mov edi, command_clear
+        mov si, buffer
+        mov di, command_clear
         repe cmpsb
         jz .clear
 
-        mov esi, buffer
-        mov edi, command_graphics
+        mov cx, bx              ; Reset string length
+        mov si, buffer
+        mov di, command_graphics
         repe cmpsb
         jz .graphics
 
-        mov esi, buffer
-        mov edi, command_help
+        mov cx, bx              ; Reset string length
+        mov si, buffer
+        mov di, command_help
         repe cmpsb
         jz .help
 
-        mov esi, buffer
-        mov edi, command_time
+        mov cx, bx              ; Reset string length
+        mov si, buffer
+        mov di, command_time
         repe cmpsb
         jz .time
 
@@ -220,6 +227,7 @@ process_command:
         mov si, command_time
 
         .end:
+        pop bx
         ret
 
 process_line:
