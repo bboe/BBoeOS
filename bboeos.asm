@@ -274,6 +274,8 @@ read_line:
         je .end
         cmp al, 0               ; Ignore special characters
         je .read_char
+        cmp al, `\b`            ; Was backspace typed?
+        je .backspace
         mov ah, 0Eh             ; echo character
         mov bx, 0
         int 10h
@@ -282,6 +284,18 @@ read_line:
         mov byte [bx], al
         inc cx
 
+        jmp .read_char
+
+        .backspace:
+        mov ah, 0Eh
+        mov bx, 0
+        int 10h                 ; Output backspace character
+        mov al, ' '
+        int 10h                 ; Output space character
+        mov al, `\b`
+        int 10h                 ; Output backspace character
+
+        dec cx
         jmp .read_char
 
         .end:
