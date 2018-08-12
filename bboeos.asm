@@ -1,5 +1,4 @@
-        org 7C00h               ; BIOS loads programs into 0x7C00 so we should
-                                ; set that as our program's origin
+        org 7C00h               ; offset where bios loads our first stage
         %assign buffer 500h
 
 start:
@@ -12,16 +11,12 @@ start:
         mov ax, 50h             ; Linear 0x500 is start of free space
         cli                     ; Disable interrupts while adjusting stack
         mov ss, ax
-        mov sp, 7700h           ; 0050h:7700h is equivalent to 7c00
+        mov sp, 7700h           ; 0050h:7700h is equivalent to 0x7c00
         sti                     ; Enable interrupts
 
         call clear_screen
         mov si, WELCOME
         call print_string
-        call move_cursor_to_next_line
-        mov si, VERSION
-        call print_string
-        call move_cursor_to_next_line
 
         mov ax, 0
         int 13h                 ; reset disk
@@ -29,7 +24,6 @@ start:
 
         mov si, LOADING
         call print_string
-        call move_cursor_to_next_line
 
         mov ax, 0201h           ; read 1 sector
         mov bx, 7E00h           ; 0x7C00 + 512
@@ -63,23 +57,6 @@ clear_screen:
         mov dx, 0
         int 10h                 ; Reset the cursor
 
-        mov [row_number], dl
-
-        pop dx
-        pop bx
-        pop ax
-        ret
-
-move_cursor_to_next_line:
-        push ax
-        push bx
-        push dx
-        mov ah, 2               ; int 10h 'set cursor position' function
-        mov bh, 0
-        mov dh, [row_number]
-        inc dh                  ; Move cursor to next row
-        int 10h                 ; Call 'set cursor position' function
-        mov [row_number], dh
         pop dx
         pop bx
         pop ax
@@ -106,13 +83,11 @@ print_string:
 
         ;; Variables
         boot_disk db 0
-        row_number db 0
 
         ;;  Constants
-        DISK_FAILURE db `Disk failure\0`
-        LOADING db `Loading...\0`
-        VERSION db `Version 0.1.0 (2018/08/11)\0`
-        WELCOME db `Welcome to BBoeOS!\0`
+        DISK_FAILURE db `Disk failure\r\n\0`
+        LOADING db `Loading...\r\n\0`
+        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.2.0 (2018/08/11)\r\n\0`
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
@@ -248,7 +223,6 @@ process_command:
         ret
 
 process_line:
-        call move_cursor_to_next_line
         cmp cx, 0               ; Test if command was typed
         jz .end
         .has_command:
@@ -257,7 +231,6 @@ process_line:
         cmp si, 0
         jz .end
         call print_string
-        call move_cursor_to_next_line
         .end:
         ret
 
@@ -270,15 +243,17 @@ read_line:
         mov ah, 00h             ; int 16h 'keyboard read' function
         int 16h                 ; 'Call 'keyboard read' function
 
-        cmp al, `\r`            ; Loop until '\r' is read (return key)
-        je .end
         cmp al, 0               ; Ignore special characters
         je .read_char
-        cmp al, `\b`            ; Was backspace typed?
-        je .backspace
+
         mov ah, 0Eh             ; echo character
         mov bx, 0
         int 10h
+
+        cmp al, `\r`            ; Loop until '\r' is read (return key)
+        je .end
+        cmp al, `\b`            ; Was backspace typed?
+        je .backspace
 
         mov bx, cx              ; Add character to buffer
         mov byte [bx], al
@@ -287,9 +262,6 @@ read_line:
         jmp .read_char
 
         .backspace:
-        mov ah, 0Eh
-        mov bx, 0
-        int 10h                 ; Output backspace character
         mov al, ' '
         int 10h                 ; Output space character
         mov al, `\b`
@@ -299,6 +271,8 @@ read_line:
         jmp .read_char
 
         .end:
+        mov al, `\n`
+        int 10h                 ; Output newline character
         mov bx, cx              ; Add null terminating character to buffer
         mov byte [bx], 00h
         sub cx, buffer         ; Store how many characters were read in cx
@@ -314,6 +288,6 @@ read_line:
         command_graphics db `graphics\0`
         command_help db `help\0`
         command_time db `time\0`
-        invalid_message db `that's a invalid command\0`
-        message_help db `Available commands: clear graphics help time\0`
+        invalid_message db `that's a invalid command\r\n\0`
+        message_help db `Available commands: clear graphics help time\r\n\0`
         prompt db `$ \0`
