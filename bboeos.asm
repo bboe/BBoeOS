@@ -245,6 +245,8 @@ read_line:
 
         cmp al, 0               ; Ignore special characters
         je .read_char
+        cmp al, `\b`            ; Was backspace typed?
+        je .backspace
 
         mov ah, 0Eh             ; echo character
         mov bx, 0
@@ -252,8 +254,6 @@ read_line:
 
         cmp al, `\r`            ; Loop until '\r' is read (return key)
         je .end
-        cmp al, `\b`            ; Was backspace typed?
-        je .backspace
 
         mov bx, cx              ; Add character to buffer
         mov byte [bx], al
@@ -262,11 +262,17 @@ read_line:
         jmp .read_char
 
         .backspace:
+        cmp cx, buffer
+        je .read_char
+
+        mov ah, 0Eh             ; echo character
+        mov bx, 0
+        int 10h
+
         mov al, ' '
         int 10h                 ; Output space character
         mov al, `\b`
         int 10h                 ; Output backspace character
-
         dec cx
         jmp .read_char
 
