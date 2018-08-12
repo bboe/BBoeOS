@@ -3,27 +3,58 @@
         %assign buffer 500h
 
 start:
-        xor dx, dx
-        mov ds, dx
+        ;; Set initial state
+        xor ax, ax
+        mov ds, ax
+        mov es, ax
+        mov [boot_disk], dl
+
+        mov ax, 50h             ; Linear 0x500 is start of free space
+        cli                     ; Disable interrupts while adjusting stack
+        mov ss, ax
+        mov sp, 7700h           ; 0050h:7700h is equivalent to 7c00
+        sti                     ; Enable interrupts
 
         call clear_screen
-        mov si, welcome
+        mov si, WELCOME
         call print_string
         call move_cursor_to_next_line
-        mov si, version
+        mov si, VERSION
         call print_string
         call move_cursor_to_next_line
 
-        .prompt:
-        mov si, prompt
+        mov ax, 0
+        int 13h                 ; reset disk
+        jc .error
+
+        mov si, LOADING
         call print_string
-        call read_line
-        call process_line
-        jmp .prompt             ; Loop on user input
+        call move_cursor_to_next_line
+
+        mov ax, 0201h           ; read 1 sector
+        mov bx, 7E00h           ; 0x7C00 + 512
+        mov cx, 2               ; start at cylinder 0 sector 2
+        mov dh, 0               ; start at head 0
+        mov dl, [boot_disk]
+        int 13h                 ; read
+
+        jc .error
+        cmp al, 1
+        jne .error
+        jmp cli
+
+        .error:
+        mov si, DISK_FAILURE
+        call print_string
+
+        .halt:
+        hlt
+        jmp .halt
 
 clear_screen:
         push ax
         push bx
+        push dx
         mov ax, 07h
         int 10h                 ; Set text-mode
 
@@ -32,9 +63,69 @@ clear_screen:
         mov dx, 0
         int 10h                 ; Reset the cursor
 
+        mov [row_number], dl
+
+        pop dx
         pop bx
         pop ax
         ret
+
+move_cursor_to_next_line:
+        push ax
+        push bx
+        push dx
+        mov ah, 2               ; int 10h 'set cursor position' function
+        mov bh, 0
+        mov dh, [row_number]
+        inc dh                  ; Move cursor to next row
+        int 10h                 ; Call 'set cursor position' function
+        mov [row_number], dh
+        pop dx
+        pop bx
+        pop ax
+        ret
+
+print_string:
+        push ax
+        push bx
+        push dx
+        mov ah, 0Eh             ; int 10h 'print char' function
+        mov bx, 0
+
+        .repeat:
+        lodsb                   ; Load the next character from the string
+        cmp al, `\0`
+        je .end                 ; If character is '\0', end the loop
+        int 10h                 ; Call 'print char' function
+        jmp .repeat
+        .end:
+        pop dx
+        pop bx
+        pop ax
+        ret
+
+        ;; Variables
+        boot_disk db 0
+        row_number db 0
+
+        ;;  Constants
+        DISK_FAILURE db `Disk failure\0`
+        LOADING db `Loading...\0`
+        VERSION db `Version 0.1.0 (2018/08/11)\0`
+        WELCOME db `Welcome to BBoeOS!\0`
+
+        ;; End of MBR
+        times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
+        dw 0AA55h               ; The standard PC boot signature
+
+
+cli:
+        mov si, prompt
+        call print_string
+        call read_line
+        call process_line
+        jmp cli             ; Loop on user input
+
 
 graphics:
         push ax
@@ -107,34 +198,6 @@ handle_graphics_mode:
 
         .end:
         popa
-        ret
-
-move_cursor_to_next_line:
-        push ax
-        push bx
-        mov ah, 2               ; int 10h 'set cursor position' function
-        mov bh, 0
-        inc dh                  ; Move cursor to next row
-        int 10h                 ; Call 'set cursor position' function
-        pop bx
-        pop ax
-        ret
-
-print_string:
-        push ax
-        push bx
-        mov ah, 0Eh             ; int 10h 'print char' function
-        mov bx, 0
-
-        .repeat:
-        lodsb                   ; Load the next character from the string
-        cmp al, `\0`
-        je .end                 ; If character is '\0', end the loop
-        int 10h                 ; Call 'print char' function
-        jmp .repeat
-        .end:
-        pop bx
-        pop ax
         ret
 
 process_command:
@@ -240,9 +303,3 @@ read_line:
         invalid_message db `that's a invalid command\0`
         message_help db `Available commands: clear graphics help time\0`
         prompt db `$ \0`
-        version db `Version 0.1.0 (2018/07/27)\0`
-        welcome db `Welcome to BBoeOS!\0`
-
-        ;; End of MBR
-        times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
-        dw 0AA55h               ; The standard PC boot signature
