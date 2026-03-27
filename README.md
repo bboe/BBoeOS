@@ -10,7 +10,9 @@
 
     ./make_os.sh
 
-* Load floppy.img in as a floppy drive in Virtualbox
+* Run with QEMU:
+
+    qemu-system-i386 -drive file=floppy.img,format=raw
 
 ## Resources
 
