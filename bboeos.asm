@@ -361,19 +361,26 @@ read_line:
 
         .read_char:
         mov ah, 00h             ; int 16h 'keyboard read' function
-        int 16h                 ; 'Call 'keyboard read' function
+        int 16h                 ; Call 'keyboard read' function
 
-        cmp al, 0               ; Ignore special characters
+        cmp al, 0               ; Ignore extended keys
         je .read_char
-        cmp al, `\b`            ; Was backspace typed?
+        cmp al, `\b`            ; Backspace
         je .backspace
+        cmp al, 03h             ; Ctrl+C — cancel line
+        je .ctrl_c
+        cmp al, 04h             ; Ctrl+D — shutdown
+        je .ctrl_d
+        cmp al, 0Ch             ; Ctrl+L — clear screen
+        je .ctrl_l
+        cmp al, `\r`            ; Enter
+        je .end
+        cmp al, 20h             ; Ignore other control characters
+        jl .read_char
 
         mov ah, 0Eh             ; echo character
         xor bx, bx
         int 10h
-
-        cmp al, `\r`            ; Loop until '\r' is read (return key)
-        je .end
 
         mov bx, cx              ; Add character to buffer
         mov byte [bx], al
@@ -385,7 +392,7 @@ read_line:
         cmp cx, buffer
         je .read_char
 
-        mov ah, 0Eh             ; echo character
+        mov ah, 0Eh
         xor bx, bx
         int 10h
 
@@ -396,9 +403,33 @@ read_line:
         dec cx
         jmp .read_char
 
-        .end:
+        .ctrl_c:
+        mov ah, 0Eh
+        xor bx, bx
+        mov al, `\r`
+        int 10h
         mov al, `\n`
-        int 10h                 ; Output newline character
+        int 10h
+        mov cx, buffer
+        jmp .return
+
+        .ctrl_d:
+        call shutdown
+        jmp .read_char          ; If shutdown fails, continue
+
+        .ctrl_l:
+        call clear_screen
+        mov cx, buffer          ; Reset to start of buffer
+        jmp .return
+
+        .end:
+        mov ah, 0Eh
+        xor bx, bx
+        mov al, `\r`
+        int 10h
+        mov al, `\n`
+        int 10h
+        .return:
         mov bx, cx              ; Add null terminating character to buffer
         mov byte [bx], 00h
         sub cx, buffer         ; Store how many characters were read in cx
