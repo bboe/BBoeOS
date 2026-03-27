@@ -225,6 +225,12 @@ process_command:
 
         mov cx, bx              ; Reset string length
         mov si, buffer
+        mov di, command_reboot
+        repe cmpsb
+        jz .reboot
+
+        mov cx, bx              ; Reset string length
+        mov si, buffer
         mov di, command_shutdown
         repe cmpsb
         jz .shutdown
@@ -255,6 +261,11 @@ process_command:
 
         .help:
         mov si, message_help
+        jmp .end
+
+        .reboot:
+        call reboot
+        xor si, si
         jmp .end
 
         .shutdown:
@@ -401,6 +412,10 @@ print_time:
         pop ax
         ret
 
+reboot:
+        int 19h                 ; Bootstrap loader — re-reads and executes boot sector
+        ret
+
 shutdown:
         ;; Try QEMU ACPI shutdown (PIIX4 PM control port)
         mov dx, 0604h
@@ -423,10 +438,11 @@ shutdown:
         command_date db `date\0`
         command_graphics db `graphics\0`
         command_help db `help\0`
+        command_reboot db `reboot\0`
         command_shutdown db `shutdown\0`
         command_time db `time\0`
         invalid_message db `that's an invalid command\r\n\0`
-        message_help db `Available commands: clear date graphics help shutdown time\r\n\0`
+        message_help db `Available commands: clear date graphics help reboot shutdown time\r\n\0`
         newline db `\r\n\0`
         prompt db `$ \0`
         shutdown_fail db `APM shutdown not supported\r\n\0`
