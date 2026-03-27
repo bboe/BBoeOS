@@ -259,7 +259,9 @@ process_command:
         jmp .end
 
         .time:
-        mov si, command_time
+        call print_time
+        mov si, newline
+        jmp .end
 
         .end:
         pop bx
@@ -329,6 +331,57 @@ read_line:
         pop ax
         ret
 
+print_bcd:
+        ;; Print AL as two BCD digits
+        push ax
+        push cx
+        mov cl, al
+        shr al, 4              ; High nibble
+        add al, '0'
+        call print_char
+        mov al, cl
+        and al, 0Fh            ; Low nibble
+        add al, '0'
+        call print_char
+        pop cx
+        pop ax
+        ret
+
+print_char:
+        push ax
+        push bx
+        mov ah, 0Eh
+        mov bx, 0
+        int 10h
+        pop bx
+        pop ax
+        ret
+
+print_time:
+        push ax
+        push cx
+        push dx
+
+        ;; Read RTC time via BIOS (BCD format)
+        mov ah, 02h
+        int 1Ah
+
+        mov al, ch              ; Hours
+        call print_bcd
+        mov al, ':'
+        call print_char
+        mov al, cl              ; Minutes
+        call print_bcd
+        mov al, ':'
+        call print_char
+        mov al, dh              ; Seconds
+        call print_bcd
+
+        pop dx
+        pop cx
+        pop ax
+        ret
+
 shutdown:
         ;; Try QEMU ACPI shutdown (PIIX4 PM control port)
         mov dx, 0604h
@@ -354,5 +407,6 @@ shutdown:
         command_time db `time\0`
         invalid_message db `that's a invalid command\r\n\0`
         message_help db `Available commands: clear graphics help shutdown time\r\n\0`
+        newline db `\r\n\0`
         prompt db `$ \0`
         shutdown_fail db `APM shutdown not supported\r\n\0`
