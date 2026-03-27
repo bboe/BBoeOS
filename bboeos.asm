@@ -150,16 +150,40 @@ handle_graphics_mode:
         jmp .loop
 
         .cursor_down:
+        cmp dh, 24
+        jge .wrap_top
         inc dh
         jmp .move_cursor
+        .wrap_top:
+        mov dh, 0
+        jmp .move_cursor
+
         .cursor_left:
+        cmp dl, 0
+        jle .wrap_right
         dec dl
         jmp .move_cursor
+        .wrap_right:
+        mov dl, 39
+        jmp .move_cursor
+
         .cursor_right:
+        cmp dl, 39
+        jge .wrap_left
         inc dl
         jmp .move_cursor
+        .wrap_left:
+        mov dl, 0
+        jmp .move_cursor
+
         .cursor_up:
+        cmp dh, 0
+        jle .wrap_bottom
         dec dh
+        jmp .move_cursor
+        .wrap_bottom:
+        mov dh, 24
+
         .move_cursor:
         mov ax, 0200h
         mov bh, 0
