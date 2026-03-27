@@ -49,8 +49,8 @@ clear_screen:
         push ax
         push bx
         push dx
-        mov ax, 07h
-        int 10h                 ; Set text-mode
+        mov ax, 03h
+        int 10h                 ; Set 80x25 color text mode
 
         mov ax, 02h
         mov bx, 0
