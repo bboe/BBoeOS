@@ -84,7 +84,7 @@ print_string:
         ;;  Constants
         DISK_FAILURE db `Disk failure\r\n\0`
         NEWLINE db `\r\n\0`
-        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.2.0 (2018/08/11)\r\n\0`
+        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.3.0 (2026/03/27)\r\n\0`
 
 print_bcd:
         ;; Print AL as two BCD digits
