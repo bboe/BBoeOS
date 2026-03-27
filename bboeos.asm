@@ -18,7 +18,7 @@ start:
         mov si, WELCOME
         call print_string
 
-        mov ax, 0
+        xor ax, ax
         int 13h                 ; reset disk
         jc .error
 
@@ -47,27 +47,16 @@ start:
 
 clear_screen:
         push ax
-        push bx
-        push dx
         mov ax, 03h
         int 10h                 ; Set 80x25 color text mode
-
-        mov ax, 02h
-        mov bx, 0
-        mov dx, 0
-        int 10h                 ; Reset the cursor
-
-        pop dx
-        pop bx
         pop ax
         ret
 
 print_string:
         push ax
         push bx
-        push dx
         mov ah, 0Eh             ; int 10h 'print char' function
-        mov bx, 0
+        xor bx, bx
 
         .repeat:
         lodsb                   ; Load the next character from the string
@@ -76,7 +65,6 @@ print_string:
         int 10h                 ; Call 'print char' function
         jmp .repeat
         .end:
-        pop dx
         pop bx
         pop ax
         ret
@@ -98,8 +86,13 @@ cli:
         mov si, prompt
         call print_string
         call read_line
-        call process_line
-        jmp cli             ; Loop on user input
+        test cx, cx
+        jz cli
+        call process_command
+        test si, si
+        jz cli
+        call print_string
+        jmp cli
 
 
 graphics:
@@ -114,7 +107,7 @@ graphics:
 handle_graphics_mode:
         pusha
 
-        mov dx, 0
+        xor dx, dx
 
         .loop:
         .read_char:
@@ -247,7 +240,7 @@ process_command:
 
         .clear:
         call clear_screen
-        mov si, 0
+        xor si, si
         jmp .end
 
         .date:
@@ -257,7 +250,7 @@ process_command:
 
         .graphics:
         call graphics
-        mov si, 0
+        xor si, si
         jmp .end
 
         .help:
@@ -278,18 +271,6 @@ process_command:
         pop bx
         ret
 
-process_line:
-        cmp cx, 0               ; Test if command was typed
-        jz .end
-        .has_command:
-        call process_command
-        .output:
-        cmp si, 0
-        jz .end
-        call print_string
-        .end:
-        ret
-
 read_line:
         push ax
         push bx
@@ -305,7 +286,7 @@ read_line:
         je .backspace
 
         mov ah, 0Eh             ; echo character
-        mov bx, 0
+        xor bx, bx
         int 10h
 
         cmp al, `\r`            ; Loop until '\r' is read (return key)
@@ -322,7 +303,7 @@ read_line:
         je .read_char
 
         mov ah, 0Eh             ; echo character
-        mov bx, 0
+        xor bx, bx
         int 10h
 
         mov al, ' '
@@ -389,7 +370,7 @@ print_char:
         push ax
         push bx
         mov ah, 0Eh
-        mov bx, 0
+        xor bx, bx
         int 10h
         pop bx
         pop ax
