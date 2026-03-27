@@ -89,9 +89,6 @@ cli:
         test cx, cx
         jz cli
         call process_command
-        test si, si
-        jz cli
-        call print_string
         jmp cli
 
 
@@ -102,6 +99,21 @@ graphics:
         call handle_graphics_mode
         call clear_screen
         pop ax
+        ret
+
+handle_clear:
+        call clear_screen
+        xor si, si
+        ret
+
+handle_date:
+        call print_date
+        mov si, newline
+        ret
+
+handle_graphics:
+        call graphics
+        xor si, si
         ret
 
 handle_graphics_mode:
@@ -192,93 +204,60 @@ handle_graphics_mode:
         popa
         ret
 
-process_command:
-        ;; Input string length is in cx
-        push bx
-
-        cld
-        inc cx
-        mov bx, cx              ; Save string length
-
-        mov si, buffer
-        mov di, command_clear
-        repe cmpsb
-        jz .clear
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_date
-        repe cmpsb
-        jz .date
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_graphics
-        repe cmpsb
-        jz .graphics
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_help
-        repe cmpsb
-        jz .help
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_reboot
-        repe cmpsb
-        jz .reboot
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_shutdown
-        repe cmpsb
-        jz .shutdown
-
-        mov cx, bx              ; Reset string length
-        mov si, buffer
-        mov di, command_time
-        repe cmpsb
-        jz .time
-
-        mov si, invalid_message
-        jmp .end
-
-        .clear:
-        call clear_screen
+handle_help:
+        call print_help
         xor si, si
-        jmp .end
+        ret
 
-        .date:
-        call print_date
-        mov si, newline
-        jmp .end
-
-        .graphics:
-        call graphics
-        xor si, si
-        jmp .end
-
-        .help:
-        mov si, message_help
-        jmp .end
-
-        .reboot:
+handle_reboot:
         call reboot
         xor si, si
-        jmp .end
+        ret
 
-        .shutdown:
+handle_shutdown:
         call shutdown
         mov si, shutdown_fail
-        jmp .end
+        ret
 
-        .time:
+handle_time:
         call print_time
         mov si, newline
+        ret
+
+process_command:
+        push bx
+        push dx
+        cld
+        inc cx
+        mov dx, cx              ; Save string length in DX
+
+        mov bx, command_table
+        .loop:
+        mov di, [bx]            ; Load command string pointer
+        test di, di
+        jz .invalid             ; End of table — no match
+
+        mov cx, dx              ; Restore length
+        mov si, buffer
+        repe cmpsb
+        jnz .next
+
+        call word [bx+2]        ; Call handler
         jmp .end
 
+        .next:
+        add bx, 4
+        jmp .loop
+
+        .invalid:
+        mov si, invalid_message
+
         .end:
+        test si, si
+        jz .done
+        call print_string
+        .done:
+        pop dx
         pop bx
         ret
 
@@ -387,6 +366,26 @@ print_char:
         pop ax
         ret
 
+print_help:
+        push bx
+        mov si, help_prefix
+        call print_string
+        mov bx, command_table
+        .loop:
+        mov si, [bx]
+        test si, si
+        jz .end
+        call print_string
+        mov al, ' '
+        call print_char
+        add bx, 4
+        jmp .loop
+        .end:
+        mov si, newline
+        call print_string
+        pop bx
+        ret
+
 print_time:
         push ax
         push cx
@@ -433,16 +432,27 @@ shutdown:
         ;; Values
         bg_color db 0
 
+        ;; Data
+        command_table:
+            dw .clear,    handle_clear
+            dw .date,     handle_date
+            dw .graphics, handle_graphics
+            dw .help,     handle_help
+            dw .reboot,   handle_reboot
+            dw .shutdown, handle_shutdown
+            dw .time,     handle_time
+            dw 0
+            .clear    db `clear\0`
+            .date     db `date\0`
+            .graphics db `graphics\0`
+            .help     db `help\0`
+            .reboot   db `reboot\0`
+            .shutdown db `shutdown\0`
+            .time     db `time\0`
+
         ;; Strings
-        command_clear db `clear\0`
-        command_date db `date\0`
-        command_graphics db `graphics\0`
-        command_help db `help\0`
-        command_reboot db `reboot\0`
-        command_shutdown db `shutdown\0`
-        command_time db `time\0`
+        help_prefix db `Available commands: \0`
         invalid_message db `that's an invalid command\r\n\0`
-        message_help db `Available commands: clear date graphics help reboot shutdown time\r\n\0`
         newline db `\r\n\0`
         prompt db `$ \0`
         shutdown_fail db `APM shutdown not supported\r\n\0`
