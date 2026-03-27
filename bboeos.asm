@@ -214,6 +214,12 @@ process_command:
 
         mov cx, bx              ; Reset string length
         mov si, buffer
+        mov di, command_date
+        repe cmpsb
+        jz .date
+
+        mov cx, bx              ; Reset string length
+        mov si, buffer
         mov di, command_graphics
         repe cmpsb
         jz .graphics
@@ -242,6 +248,11 @@ process_command:
         .clear:
         call clear_screen
         mov si, 0
+        jmp .end
+
+        .date:
+        call print_date
+        mov si, newline
         jmp .end
 
         .graphics:
@@ -347,6 +358,33 @@ print_bcd:
         pop ax
         ret
 
+print_date:
+        push ax
+        push cx
+        push dx
+
+        ;; Read RTC date via BIOS (BCD format)
+        mov ah, 04h
+        int 1Ah
+
+        mov al, ch              ; Century
+        call print_bcd
+        mov al, cl              ; Year
+        call print_bcd
+        mov al, '-'
+        call print_char
+        mov al, dh              ; Month
+        call print_bcd
+        mov al, '-'
+        call print_char
+        mov al, dl              ; Day
+        call print_bcd
+
+        pop dx
+        pop cx
+        pop ax
+        ret
+
 print_char:
         push ax
         push bx
@@ -401,12 +439,13 @@ shutdown:
 
         ;; Strings
         command_clear db `clear\0`
+        command_date db `date\0`
         command_graphics db `graphics\0`
         command_help db `help\0`
         command_shutdown db `shutdown\0`
         command_time db `time\0`
         invalid_message db `that's a invalid command\r\n\0`
-        message_help db `Available commands: clear graphics help shutdown time\r\n\0`
+        message_help db `Available commands: clear date graphics help shutdown time\r\n\0`
         newline db `\r\n\0`
         prompt db `$ \0`
         shutdown_fail db `APM shutdown not supported\r\n\0`
