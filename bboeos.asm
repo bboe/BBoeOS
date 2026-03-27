@@ -444,7 +444,7 @@ shutdown:
         command_help db `help\0`
         command_shutdown db `shutdown\0`
         command_time db `time\0`
-        invalid_message db `that's a invalid command\r\n\0`
+        invalid_message db `that's an invalid command\r\n\0`
         message_help db `Available commands: clear date graphics help shutdown time\r\n\0`
         newline db `\r\n\0`
         prompt db `$ \0`
