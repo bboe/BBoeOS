@@ -25,7 +25,7 @@ start:
         mov si, LOADING
         call print_string
 
-        mov ax, 0201h           ; read 1 sector
+        mov ax, 0202h           ; read 2 sectors
         mov bx, 7E00h           ; 0x7C00 + 512
         mov cx, 2               ; start at cylinder 0 sector 2
         mov dh, 0               ; start at head 0
@@ -33,7 +33,7 @@ start:
         int 13h                 ; read
 
         jc .error
-        cmp al, 1
+        cmp al, 2
         jne .error
         jmp cli
 
@@ -226,6 +226,12 @@ process_command:
 
         mov cx, bx              ; Reset string length
         mov si, buffer
+        mov di, command_shutdown
+        repe cmpsb
+        jz .shutdown
+
+        mov cx, bx              ; Reset string length
+        mov si, buffer
         mov di, command_time
         repe cmpsb
         jz .time
@@ -245,6 +251,11 @@ process_command:
 
         .help:
         mov si, message_help
+        jmp .end
+
+        .shutdown:
+        call shutdown
+        mov si, shutdown_fail
         jmp .end
 
         .time:
@@ -318,6 +329,20 @@ read_line:
         pop ax
         ret
 
+shutdown:
+        ;; Try QEMU ACPI shutdown (PIIX4 PM control port)
+        mov dx, 0604h
+        mov ax, 2000h
+        out dx, ax
+
+        ;; Try Bochs/old QEMU shutdown port
+        mov dx, 0B004h
+        mov ax, 2000h
+        out dx, ax
+
+        ;; If still running, shutdown is not supported
+        ret
+
         ;; Values
         bg_color db 0
 
@@ -325,7 +350,9 @@ read_line:
         command_clear db `clear\0`
         command_graphics db `graphics\0`
         command_help db `help\0`
+        command_shutdown db `shutdown\0`
         command_time db `time\0`
         invalid_message db `that's a invalid command\r\n\0`
-        message_help db `Available commands: clear graphics help time\r\n\0`
+        message_help db `Available commands: clear graphics help shutdown time\r\n\0`
         prompt db `$ \0`
+        shutdown_fail db `APM shutdown not supported\r\n\0`
