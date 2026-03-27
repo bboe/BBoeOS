@@ -22,7 +22,11 @@ start:
         int 13h                 ; reset disk
         jc .error
 
-        mov si, LOADING
+        call print_date
+        mov al, ' '
+        call print_char
+        call print_time
+        mov si, NEWLINE
         call print_string
 
         mov ax, 0202h           ; read 2 sectors
@@ -74,8 +78,78 @@ print_string:
 
         ;;  Constants
         DISK_FAILURE db `Disk failure\r\n\0`
-        LOADING db `Loading...\r\n\0`
+        NEWLINE db `\r\n\0`
         WELCOME db `Welcome to BBoeOS!\r\nVersion 0.2.0 (2018/08/11)\r\n\0`
+
+print_bcd:
+        ;; Print AL as two BCD digits
+        push ax
+        push cx
+        mov cl, al
+        shr al, 4              ; High nibble
+        add al, '0'
+        call print_char
+        mov al, cl
+        and al, 0Fh            ; Low nibble
+        add al, '0'
+        call print_char
+        pop cx
+        pop ax
+        ret
+
+print_char:
+        push ax
+        push bx
+        mov ah, 0Eh
+        xor bx, bx
+        int 10h
+        pop bx
+        pop ax
+        ret
+
+print_date:
+        push ax
+        push cx
+        push dx
+        mov ah, 04h
+        int 1Ah
+        mov al, ch              ; Century
+        call print_bcd
+        mov al, cl              ; Year
+        call print_bcd
+        mov al, '-'
+        call print_char
+        mov al, dh              ; Month
+        call print_bcd
+        mov al, '-'
+        call print_char
+        mov al, dl              ; Day
+        call print_bcd
+        pop dx
+        pop cx
+        pop ax
+        ret
+
+print_time:
+        push ax
+        push cx
+        push dx
+        mov ah, 02h
+        int 1Ah
+        mov al, ch              ; Hours
+        call print_bcd
+        mov al, ':'
+        call print_char
+        mov al, cl              ; Minutes
+        call print_bcd
+        mov al, ':'
+        call print_char
+        mov al, dh              ; Seconds
+        call print_bcd
+        pop dx
+        pop cx
+        pop ax
+        ret
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
@@ -223,59 +297,6 @@ handle_time:
         mov si, newline
         ret
 
-print_bcd:
-        ;; Print AL as two BCD digits
-        push ax
-        push cx
-        mov cl, al
-        shr al, 4              ; High nibble
-        add al, '0'
-        call print_char
-        mov al, cl
-        and al, 0Fh            ; Low nibble
-        add al, '0'
-        call print_char
-        pop cx
-        pop ax
-        ret
-
-print_char:
-        push ax
-        push bx
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
-        pop bx
-        pop ax
-        ret
-
-print_date:
-        push ax
-        push cx
-        push dx
-
-        ;; Read RTC date via BIOS (BCD format)
-        mov ah, 04h
-        int 1Ah
-
-        mov al, ch              ; Century
-        call print_bcd
-        mov al, cl              ; Year
-        call print_bcd
-        mov al, '-'
-        call print_char
-        mov al, dh              ; Month
-        call print_bcd
-        mov al, '-'
-        call print_char
-        mov al, dl              ; Day
-        call print_bcd
-
-        pop dx
-        pop cx
-        pop ax
-        ret
-
 print_help:
         push bx
         mov si, help_prefix
@@ -294,31 +315,6 @@ print_help:
         mov si, newline
         call print_string
         pop bx
-        ret
-
-print_time:
-        push ax
-        push cx
-        push dx
-
-        ;; Read RTC time via BIOS (BCD format)
-        mov ah, 02h
-        int 1Ah
-
-        mov al, ch              ; Hours
-        call print_bcd
-        mov al, ':'
-        call print_char
-        mov al, cl              ; Minutes
-        call print_bcd
-        mov al, ':'
-        call print_char
-        mov al, dh              ; Seconds
-        call print_bcd
-
-        pop dx
-        pop cx
-        pop ax
         ret
 
 process_command:
