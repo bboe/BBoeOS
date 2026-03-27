@@ -39,6 +39,11 @@ start:
         jc .error
         cmp al, 2
         jne .error
+
+        xor ah, ah
+        int 1Ah                 ; CX:DX = ticks since midnight
+        mov [boot_ticks_low], dx
+        mov [boot_ticks_high], cx
         jmp cli
 
         .error:
@@ -297,6 +302,11 @@ handle_time:
         mov si, newline
         ret
 
+handle_uptime:
+        call print_uptime
+        mov si, newline
+        ret
+
 print_help:
         push bx
         mov si, help_prefix
@@ -315,6 +325,72 @@ print_help:
         mov si, newline
         call print_string
         pop bx
+        ret
+
+print_dec_byte:
+        ;; Print AL as 2 decimal digits
+        push ax
+        push cx
+        xor ah, ah
+        mov cl, 10
+        div cl                  ; AL = tens, AH = ones
+        add al, '0'
+        call print_char
+        mov al, ah
+        add al, '0'
+        call print_char
+        pop cx
+        pop ax
+        ret
+
+print_uptime:
+        push eax
+        push ecx
+        push edx
+
+        xor ah, ah
+        int 1Ah                 ; CX:DX = current ticks since midnight
+
+        movzx eax, cx           ; Build 32-bit current ticks in EAX
+        shl eax, 16
+        or ax, dx
+
+        movzx ecx, word [boot_ticks_high]
+        shl ecx, 16
+        or cx, [boot_ticks_low]
+
+        sub eax, ecx            ; EAX = elapsed ticks
+
+        xor edx, edx
+        mov ecx, 18
+        div ecx                 ; EAX = elapsed seconds
+
+        xor edx, edx
+        mov ecx, 3600
+        div ecx                 ; EAX = hours, EDX = remaining seconds
+
+        push dx                 ; Save remaining seconds
+        call print_dec_byte     ; Print hours (in AL)
+        mov al, ':'
+        call print_char
+
+        pop ax                  ; Remaining seconds
+        xor ah, ah
+        mov cl, 60
+        div cl                  ; AL = minutes, AH = seconds
+
+        push ax                 ; Save seconds
+        call print_dec_byte     ; Print minutes (in AL)
+        mov al, ':'
+        call print_char
+
+        pop ax
+        mov al, ah              ; Seconds
+        call print_dec_byte
+
+        pop edx
+        pop ecx
+        pop eax
         ret
 
 process_command:
@@ -457,6 +533,8 @@ shutdown:
 
         ;; Values
         bg_color db 0
+        boot_ticks_high dw 0
+        boot_ticks_low  dw 0
 
         ;; Data
         command_table:
@@ -467,6 +545,7 @@ shutdown:
             dw .reboot,   handle_reboot
             dw .shutdown, handle_shutdown
             dw .time,     handle_time
+            dw .uptime,   handle_uptime
             dw 0
             .clear    db `clear\0`
             .date     db `date\0`
@@ -475,6 +554,7 @@ shutdown:
             .reboot   db `reboot\0`
             .shutdown db `shutdown\0`
             .time     db `time\0`
+            .uptime   db `uptime\0`
 
         ;; Strings
         help_prefix db `Available commands: \0`
