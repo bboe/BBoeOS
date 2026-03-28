@@ -1,5 +1,6 @@
         org 7C00h               ; offset where bios loads our first stage
         %assign buffer 500h
+        %assign max_input 256
 
 start:
         ;; Set initial state
@@ -506,6 +507,8 @@ read_line:
         jl .read_char
 
         call .insert_char       ; Insert character at cursor
+        jnc .read_char
+        call visual_bell
         jmp .read_char
 
         .extended_key:
@@ -599,9 +602,9 @@ read_line:
         mov di, kill_buffer
         mov bx, dx
         sub bx, cx
-        cmp bx, 80
+        cmp bx, max_input
         jle .ck_save
-        mov bx, 80
+        mov bx, max_input
         .ck_save:
         mov [kill_length], bx
         .ck_copy:
@@ -640,9 +643,13 @@ read_line:
         push bx
         call .insert_char
         pop bx
+        jc .cy_full             ; Stop yanking if buffer full
         inc si
         dec bx
         jnz .cy_loop
+        jmp .cy_done
+        .cy_full:
+        call visual_bell
         .cy_done:
         pop si
         jmp .read_char
@@ -672,6 +679,15 @@ read_line:
 
         ;; Insert char in AL at cursor, shift buffer right, redraw
         .insert_char:
+        push bx
+        mov bx, dx
+        sub bx, buffer
+        cmp bx, max_input
+        pop bx
+        jl .ic_ok
+        stc                     ; Set carry flag to signal buffer full
+        ret
+        .ic_ok:
         push si
         push ax
         mov si, dx
@@ -703,6 +719,7 @@ read_line:
         mov bx, dx
         sub bx, cx
         call cursor_back_n
+        clc                     ; Clear carry flag to signal success
         pop si
         ret
 
@@ -761,11 +778,32 @@ shutdown:
         ;; If still running, shutdown is not supported
         ret
 
+visual_bell:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov ax, 0B00h
+        mov bx, 0004h          ; Border color = red
+        int 10h
+        mov ah, 86h
+        xor cx, cx
+        mov dx, 0C350h         ; 50,000 µs = 50ms
+        int 15h
+        mov ax, 0B00h
+        xor bx, bx             ; Border color = black
+        int 10h
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
         ;; Values
         bg_color db 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
-        kill_buffer times 80 db 0
+        kill_buffer times max_input db 0
         kill_length dw 0
 
         ;; Data
