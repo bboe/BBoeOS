@@ -73,6 +73,7 @@ read_line:
         cmp al, 20h             ; Ignore other control characters
         jl .read_char
 
+        call serial_char        ; Echo to COM1
         call .insert_char       ; Insert character at cursor
         jnc .read_char
         call visual_bell
@@ -109,6 +110,10 @@ read_line:
         .backspace:
         cmp cx, buffer
         je .read_char
+        push ax
+        mov al, `\b`
+        call serial_char
+        pop ax
         dec cx
         mov bx, 1
         call cursor_back_n
@@ -131,12 +136,10 @@ read_line:
         jmp .read_char
 
         .ctrl_c:
-        mov ah, 0Eh
-        xor bx, bx
         mov al, `\r`
-        int 10h
+        call print_char
         mov al, `\n`
-        int 10h
+        call print_char
         mov cx, buffer
         mov dx, buffer
         jmp .return
@@ -228,12 +231,10 @@ read_line:
         jmp .return
 
         .end:
-        mov ah, 0Eh
-        xor bx, bx
         mov al, `\r`
-        int 10h
+        call print_char
         mov al, `\n`
-        int 10h
+        call print_char
         .return:
         mov bx, dx              ; Add null terminating character to buffer
         mov byte [bx], 00h

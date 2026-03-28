@@ -69,18 +69,14 @@ clear_screen:
 
 print_string:
         push ax
-        push bx
-        mov ah, 0Eh             ; int 10h 'print char' function
-        xor bx, bx
 
         .repeat:
         lodsb                   ; Load the next character from the string
         cmp al, `\0`
         je .end                 ; If character is '\0', end the loop
-        int 10h                 ; Call 'print char' function
+        call print_char
         jmp .repeat
         .end:
-        pop bx
         pop ax
         ret
 
@@ -111,9 +107,21 @@ print_bcd:
 print_char:
         push ax
         push bx
+        push dx
+        push ax                 ; Save char for serial
         mov ah, 0Eh
         xor bx, bx
         int 10h
+        ;; Mirror to COM1
+        mov dx, 3FDh           ; Line status register
+        .serial_wait:
+        in al, dx
+        test al, 20h           ; Transmit holding register empty?
+        jz .serial_wait
+        pop ax                  ; Restore original char
+        mov dx, 3F8h           ; COM1 data register
+        out dx, al
+        pop dx
         pop bx
         pop ax
         ret
@@ -159,6 +167,23 @@ print_time:
         call print_bcd
         pop dx
         pop cx
+        pop ax
+        ret
+
+serial_char:
+        ;; Write AL to COM1 (preserves all registers)
+        push ax
+        push dx
+        push ax                 ; Save char
+        mov dx, 3FDh           ; Line status register
+        .wait:
+        in al, dx
+        test al, 20h           ; Transmit holding register empty?
+        jz .wait
+        pop ax                  ; Restore char
+        mov dx, 3F8h           ; COM1 data register
+        out dx, al
+        pop dx
         pop ax
         ret
 
