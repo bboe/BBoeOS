@@ -1,6 +1,6 @@
         org 7C00h               ; offset where bios loads our first stage
         %include "constants.asm"
-        %assign stage2_sectors (dir_sector - 2)
+        %assign STAGE2_SECTORS (DIR_SECTOR - 2)
 
 start:
         ;; Set initial state
@@ -30,7 +30,7 @@ start:
         mov si, NEWLINE
         call print_string
 
-        mov ax, 0200h | stage2_sectors
+        mov ax, 0200h | STAGE2_SECTORS
         mov bx, 7E00h           ; 0x7C00 + 512
         mov cx, 2               ; start at cylinder 0 sector 2
         mov dh, 0               ; start at head 0
@@ -38,7 +38,7 @@ start:
         int 13h                 ; read
 
         jc .error
-        cmp al, stage2_sectors
+        cmp al, STAGE2_SECTORS
         jne .error
 
         xor ah, ah
@@ -196,14 +196,14 @@ boot_shell:
 
         mov cx, [bx+14]        ; File size in bytes
         mov bl, [bx+12]        ; Start sector
-        mov di, program_base    ; Destination
+        mov di, PROGRAM_BASE    ; Destination
 
 .load_sector:
         mov al, bl
         call read_sector
         jc .no_shell
 
-        ;; Copy sector from disk_buffer to destination
+        ;; Copy sector from DISK_BUFFER to destination
         push cx
         cmp cx, 512
         jle .partial
@@ -214,7 +214,7 @@ boot_shell:
         shr cx, 1
 .copy:
         cld
-        mov si, disk_buffer
+        mov si, DISK_BUFFER
         rep movsw
         pop cx
 
@@ -225,7 +225,7 @@ boot_shell:
 
 .loaded:
         mov [shell_sp], sp
-        jmp program_base
+        jmp PROGRAM_BASE
 
         .no_shell:
         mov si, SHELL_ERROR
@@ -243,7 +243,7 @@ boot_shell:
         bg_color db 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
-        kill_buffer times max_input db 0
+        kill_buffer times MAX_INPUT db 0
         kill_length dw 0
         shell_sp dw 0
 

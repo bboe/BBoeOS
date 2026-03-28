@@ -4,7 +4,7 @@
 
 main:
         cld
-        mov si, s_prompt
+        mov si, PROMPT
         mov ah, 13h             ; io_puts
         int 30h
 
@@ -19,13 +19,13 @@ main:
         ;; Check for "cat " prefix
         cmp dx, 5               ; Need at least "cat X"
         jl .dispatch
-        mov si, buffer
-        mov di, s_cat_pfx
+        mov si, BUFFER
+        mov di, CAT_PREFIX
         mov cx, 4
         repe cmpsb
         jne .dispatch
 
-        ;; SI = buffer + 4 = start of filename argument
+        ;; SI = BUFFER + 4 = start of filename argument
         call cmd_cat
         jmp .output
 
@@ -37,7 +37,7 @@ main:
         jz .invalid
 
         mov cx, dx
-        mov si, buffer
+        mov si, BUFFER
         repe cmpsb
         jne .next
 
@@ -49,7 +49,7 @@ main:
         jmp .loop
 
 .invalid:
-        mov si, s_invalid
+        mov si, INVALID_CMD
 
 .output:
         test si, si
@@ -76,7 +76,7 @@ cmd_cat:
         int 30h
         jc .disk_err
 
-        mov si, disk_buffer
+        mov si, DISK_BUFFER
 .print:
         lodsb
         cmp al, 0Ah             ; Convert \n to \r\n
@@ -92,15 +92,15 @@ cmd_cat:
         loop .print
 
 .empty:
-        mov si, s_nl
+        mov si, NEWLINE
         jmp .done
 
 .not_found:
-        mov si, s_no_file
+        mov si, FILE_NOT_FOUND
         jmp .done
 
 .disk_err:
-        mov si, s_disk_err
+        mov si, DISK_ERROR
 
 .done:
         pop cx
@@ -108,7 +108,7 @@ cmd_cat:
         ret
 
 cmd_cat_usage:
-        mov si, s_cat_usage
+        mov si, CAT_USAGE
         ret
 
 cmd_clear:
@@ -145,7 +145,7 @@ cmd_date:
         int 30h
         mov al, dl
         call print_bcd
-        mov si, s_nl
+        mov si, NEWLINE
         ret
 
 cmd_time:
@@ -165,12 +165,12 @@ cmd_time:
         int 30h
         pop ax                  ; Restore seconds
         call print_bcd
-        mov si, s_nl
+        mov si, NEWLINE
         ret
 
 cmd_help:
         push bx
-        mov si, s_help_pfx
+        mov si, HELP_PREFIX
         mov ah, 13h             ; io_puts
         int 30h
         mov bx, cmd_table
@@ -187,26 +187,26 @@ cmd_help:
         jmp .help_loop
 .help_end:
         pop bx
-        mov si, s_nl
+        mov si, NEWLINE
         ret
 
 cmd_ls:
         push bx
-        mov al, dir_sector
+        mov al, DIR_SECTOR
         mov ah, 01h             ; fs_read
         int 30h
         jc .ls_err
-        mov bx, disk_buffer
+        mov bx, DISK_BUFFER
 .ls_loop:
         cmp byte [bx], 0
         je .ls_done
         mov si, bx
         mov ah, 13h             ; io_puts
         int 30h
-        mov si, s_nl
+        mov si, NEWLINE
         mov ah, 13h             ; io_puts
         int 30h
-        add bx, dir_entry_size
+        add bx, DIR_ENTRY_SIZE
         jmp .ls_loop
 .ls_done:
         pop bx
@@ -214,13 +214,13 @@ cmd_ls:
         ret
 .ls_err:
         pop bx
-        mov si, s_disk_err
+        mov si, DISK_ERROR
         ret
 
 cmd_shutdown:
         mov ah, 0F2h            ; sys_shutdown
         int 30h
-        mov si, s_sd_fail
+        mov si, SHUTDOWN_FAIL
         ret
 
 cmd_uptime:
@@ -249,7 +249,7 @@ cmd_uptime:
         pop ax
         mov al, ah              ; Seconds
         call print_dec2
-        mov si, s_nl
+        mov si, NEWLINE
         ret
 
 print_bcd:
@@ -308,12 +308,12 @@ cmd_table:
         .uptime   db `uptime\0`
 
 ;;; Strings
-s_cat_pfx   db `cat \0`
-s_cat_usage db `Usage: cat <filename>\r\n\0`
-s_disk_err  db `Disk read error\r\n\0`
-s_help_pfx  db `Commands: \0`
-s_invalid   db `unknown command\r\n\0`
-s_nl        db `\r\n\0`
-s_no_file   db `File not found\r\n\0`
-s_prompt    db `$ \0`
-s_sd_fail   db `APM shutdown failed\r\n\0`
+CAT_PREFIX   db `cat \0`
+CAT_USAGE db `Usage: cat <filename>\r\n\0`
+DISK_ERROR  db `Disk read error\r\n\0`
+HELP_PREFIX  db `Commands: \0`
+INVALID_CMD   db `unknown command\r\n\0`
+NEWLINE        db `\r\n\0`
+FILE_NOT_FOUND   db `File not found\r\n\0`
+PROMPT    db `$ \0`
+SHUTDOWN_FAIL   db `APM shutdown failed\r\n\0`

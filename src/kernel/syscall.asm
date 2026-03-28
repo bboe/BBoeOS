@@ -107,7 +107,7 @@ syscall_handler:
         mov ds, ax
         mov es, ax
         mov sp, [shell_sp]
-        jmp program_base
+        jmp PROGRAM_BASE
 
         .sys_reboot:
         call reboot

@@ -37,8 +37,8 @@ read_line:
         push ax
         push bx
         push dx
-        mov cx, buffer          ; Cursor position
-        mov dx, buffer          ; End of buffer
+        mov cx, BUFFER          ; Cursor position
+        mov dx, BUFFER          ; End of buffer
 
         .read_char:
         ;; Check serial port for data
@@ -109,7 +109,7 @@ read_line:
         jmp .read_char          ; Ignore other extended keys
 
         .cursor_left:
-        cmp cx, buffer
+        cmp cx, BUFFER
         je .read_char
         dec cx
         push ax
@@ -134,7 +134,7 @@ read_line:
         jmp .read_char
 
         .backspace:
-        cmp cx, buffer
+        cmp cx, BUFFER
         je .read_char
         push ax
         mov al, `\b`
@@ -157,12 +157,12 @@ read_line:
         jmp .read_char
 
         .ctrl_a:
-        cmp cx, buffer
+        cmp cx, BUFFER
         je .read_char
         push ax
         push si
         mov si, cx
-        sub si, buffer
+        sub si, BUFFER
         mov al, `\b`
         .ca_serial:
         call serial_char
@@ -171,9 +171,9 @@ read_line:
         pop si
         pop ax
         mov bx, cx
-        sub bx, buffer
+        sub bx, BUFFER
         call cursor_back_n
-        mov cx, buffer
+        mov cx, BUFFER
         jmp .read_char
 
         .ctrl_c:
@@ -181,8 +181,8 @@ read_line:
         call print_char
         mov al, `\n`
         call print_char
-        mov cx, buffer
-        mov dx, buffer
+        mov cx, BUFFER
+        mov dx, BUFFER
         jmp .return
 
         .ctrl_d:
@@ -214,9 +214,9 @@ read_line:
         mov di, kill_buffer
         mov bx, dx
         sub bx, cx
-        cmp bx, max_input
+        cmp bx, MAX_INPUT
         jle .ck_save
-        mov bx, max_input
+        mov bx, MAX_INPUT
         .ck_save:
         mov [kill_length], bx
         .ck_copy:
@@ -288,8 +288,8 @@ read_line:
         call serial_char
         pop ax
         call clear_screen
-        mov cx, buffer          ; Reset to start of buffer
-        mov dx, buffer
+        mov cx, BUFFER          ; Reset to start of buffer
+        mov dx, BUFFER
         jmp .return
 
         .end:
@@ -301,7 +301,7 @@ read_line:
         mov bx, dx              ; Add null terminating character to buffer
         mov byte [bx], 00h
         mov cx, dx
-        sub cx, buffer         ; Store how many characters were read in cx
+        sub cx, BUFFER         ; Store how many characters were read in cx
         pop dx
         pop bx
         pop ax
@@ -311,8 +311,8 @@ read_line:
         .insert_char:
         push bx
         mov bx, dx
-        sub bx, buffer
-        cmp bx, max_input
+        sub bx, BUFFER
+        cmp bx, MAX_INPUT
         pop bx
         jl .ic_ok
         stc                     ; Set carry flag to signal buffer full

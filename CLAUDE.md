@@ -63,7 +63,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## File Structure
 
-- `src/include/constants.asm` — Shared constants (`buffer`, `disk_buffer`, `dir_sector`, `program_base`, etc.)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, etc.)
 - `src/kernel/bboeos.asm` — Stage 1 boot code, shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
 - `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
@@ -79,9 +79,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Preserve existing comments when editing code.
 - Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
 - Commands with arguments (like `cat`) use prefix matching before the table dispatch.
-- Programs are loaded at `program_base` (`0x6000`). The shell is the first program loaded at boot.
+- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot.
 - Stage 1 functions must fit within the 512-byte MBR.
-- When adding the `dir_sector` constant, stage 2 sector count adjusts automatically.
+- When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
+- **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
 - Screen-only operations (cursor repositioning, insert/delete redraws) use direct `int 10h` calls with parallel `serial_char` calls for serial console sync. Do not route screen redraw loops through `print_char` as that would produce duplicate serial output.
 
 ## 16-bit Real Mode Constraints
