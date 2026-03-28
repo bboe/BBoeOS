@@ -1,6 +1,11 @@
         org 7C00h               ; offset where bios loads our first stage
         %assign buffer 500h
+        %assign dir_entry_size 16
+        %assign dir_max_entries 32
+        %assign dir_sector 6
+        %assign disk_buffer 9000h
         %assign max_input 256
+        %assign stage2_sectors (dir_sector - 2)
 
 start:
         ;; Set initial state
@@ -30,7 +35,7 @@ start:
         mov si, NEWLINE
         call print_string
 
-        mov ax, 0203h           ; read 3 sectors
+        mov ax, 0200h | stage2_sectors
         mov bx, 7E00h           ; 0x7C00 + 512
         mov cx, 2               ; start at cylinder 0 sector 2
         mov dh, 0               ; start at head 0
@@ -38,7 +43,7 @@ start:
         int 13h                 ; read
 
         jc .error
-        cmp al, 3
+        cmp al, stage2_sectors
         jne .error
 
         xor ah, ah
@@ -185,25 +190,33 @@ cli:
 
         ;; Data
         command_table:
+            dw .cat,      handle_cat
             dw .clear,    handle_clear
             dw .date,     handle_date
             dw .graphics, handle_graphics
             dw .help,     handle_help
+            dw .ls,       handle_ls
             dw .reboot,   handle_reboot
             dw .shutdown, handle_shutdown
             dw .time,     handle_time
             dw .uptime,   handle_uptime
             dw 0
+            .cat      db `cat\0`
             .clear    db `clear\0`
             .date     db `date\0`
             .graphics db `graphics\0`
             .help     db `help\0`
+            .ls       db `ls\0`
             .reboot   db `reboot\0`
             .shutdown db `shutdown\0`
             .time     db `time\0`
             .uptime   db `uptime\0`
 
         ;; Strings
+        cat_prefix db `cat \0`
+        cat_usage db `Usage: cat <filename>\r\n\0`
+        disk_error db `Disk read error\r\n\0`
+        file_not_found db `File not found\r\n\0`
         help_prefix db `Available commands: \0`
         invalid_message db `that's an invalid command\r\n\0`
         newline db `\r\n\0`

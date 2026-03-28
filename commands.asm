@@ -1,3 +1,45 @@
+cat_file:
+        ;; SI = pointer to filename argument (null-terminated)
+        push bx
+        push cx
+
+        call find_file
+        jc .cat_not_found
+
+        ;; BX = directory entry: [BX+12] = start sector, [BX+14] = file size
+        mov cx, [bx+14]        ; CX = file size in bytes
+        test cx, cx
+        jz .cat_empty
+        mov al, [bx+12]        ; Start sector number
+        call read_sector
+        jc .cat_disk_err
+
+        mov si, disk_buffer
+        .cat_print:
+        lodsb
+        call print_char
+        loop .cat_print
+
+        .cat_empty:
+        mov si, newline
+        jmp .cat_done
+
+        .cat_not_found:
+        mov si, file_not_found
+        jmp .cat_done
+
+        .cat_disk_err:
+        mov si, disk_error
+
+        .cat_done:
+        pop cx
+        pop bx
+        ret
+
+handle_cat:
+        mov si, cat_usage
+        ret
+
 handle_clear:
         call clear_screen
         xor si, si
@@ -16,6 +58,41 @@ handle_graphics:
 handle_help:
         call print_help
         xor si, si
+        ret
+
+handle_ls:
+        push bx
+        push cx
+
+        mov al, dir_sector
+        call read_sector
+        jc .ls_err
+
+        mov bx, disk_buffer
+        mov cx, dir_max_entries
+
+        .ls_loop:
+        cmp byte [bx], 0       ; Empty entry = end of directory
+        je .ls_done
+        mov si, bx
+        call print_string
+        push si
+        mov si, newline
+        call print_string
+        pop si
+        add bx, dir_entry_size
+        loop .ls_loop
+
+        .ls_done:
+        pop cx
+        pop bx
+        xor si, si
+        ret
+
+        .ls_err:
+        pop cx
+        pop bx
+        mov si, disk_error
         ret
 
 handle_reboot:
@@ -131,6 +208,20 @@ process_command:
         inc cx
         mov dx, cx              ; Save string length in DX
 
+        ;; Check for 'cat ' prefix
+        cmp dx, 5               ; Need at least "cat X" (4 + 1 char)
+        jl .table_dispatch
+        mov si, buffer
+        mov di, cat_prefix
+        mov cx, 4
+        repe cmpsb
+        jne .table_dispatch
+
+        ;; SI = buffer + 4 = start of filename argument
+        call cat_file
+        jmp .end
+
+        .table_dispatch:
         mov bx, command_table
         .loop:
         mov di, [bx]            ; Load command string pointer
