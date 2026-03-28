@@ -57,9 +57,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 21h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
 | 30h   | scr_clear    | Clear screen                                          |
 | 31h   | scr_graphics | Enter graphics mode                                   |
-| F0h   | sys_exit     | Return to shell                                       |
-| F1h   | sys_reboot   | Reboot                                                |
-| F2h   | sys_shutdown  | Shutdown                                              |
+| F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
+| F1h   | sys_exit     | Reload and return to shell                             |
+| F2h   | sys_reboot   | Reboot                                                |
+| F3h   | sys_shutdown  | Shutdown                                              |
 
 ## File Structure
 
@@ -69,9 +70,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `graphics` mode, `reboot`, `shutdown`
-- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands
+- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec
+- `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
-- `make_os.sh` — Build script (assembles kernel and shell, creates floppy image)
+- `make_os.sh` — Build script (assembles kernel and programs, creates floppy image)
 
 ## Key Conventions
 
@@ -79,7 +81,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Preserve existing comments when editing code.
 - Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
 - Commands with arguments (like `cat`) use prefix matching before the table dispatch.
-- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot.
+- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot. Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.

@@ -34,7 +34,7 @@ main:
 .loop:
         mov di, [bx]
         test di, di
-        jz .invalid
+        jz .not_found
 
         mov cx, dx
         mov si, BUFFER
@@ -48,7 +48,11 @@ main:
         add bx, 4
         jmp .loop
 
-.invalid:
+.not_found:
+        ;; Try to execute as external program
+        mov si, BUFFER
+        mov ah, SYS_EXEC
+        int 30h                 ; Does not return on success
         mov si, INVALID_CMD
 
 .output:
@@ -219,35 +223,6 @@ cmd_time:
         mov si, NEWLINE
         ret
 
-cmd_uptime:
-        mov ah, SYS_RTC_UPTIME
-        int 30h                 ; AX = elapsed seconds
-
-        xor dx, dx
-        mov cx, 3600
-        div cx                  ; AX = hours, DX = remaining seconds
-        push dx
-        call print_dec2
-        mov al, ':'
-        mov ah, SYS_IO_PUTC
-        int 30h
-
-        pop ax                  ; Remaining seconds
-        xor ah, ah
-        mov cl, 60
-        div cl                  ; AL = minutes, AH = seconds
-        push ax
-        call print_dec2
-        mov al, ':'
-        mov ah, SYS_IO_PUTC
-        int 30h
-
-        pop ax
-        mov al, ah              ; Seconds
-        call print_dec2
-        mov si, NEWLINE
-        ret
-
 ;;; Utility functions
 
 print_bcd:
@@ -266,21 +241,6 @@ print_bcd:
         pop cx
         ret
 
-print_dec2:
-        ;; Print AL as 2 decimal digits via io_putc
-        aam                     ; AH = AL/10, AL = AL%10
-        xchg al, ah             ; AL = tens, AH = ones
-        add al, '0'
-        push ax
-        mov ah, SYS_IO_PUTC
-        int 30h
-        pop ax
-        mov al, ah
-        add al, '0'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        ret
-
 syscall_null:
         int 30h
         xor si, si
@@ -297,7 +257,6 @@ cmd_table:
         dw .reboot,   cmd_reboot
         dw .shutdown, cmd_shutdown
         dw .time,     cmd_time
-        dw .uptime,   cmd_uptime
         dw 0
         .cat      db `cat\0`
         .clear    db `clear\0`
@@ -308,7 +267,6 @@ cmd_table:
         .reboot   db `reboot\0`
         .shutdown db `shutdown\0`
         .time     db `time\0`
-        .uptime   db `uptime\0`
 
 ;;; Strings
 CAT_PREFIX    db `cat \0`

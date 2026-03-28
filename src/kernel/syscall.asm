@@ -23,6 +23,8 @@ syscall_handler:
         cmp ah, SYS_SCR_GRAPHICS ; scr_graphics
         je .scr_graphics
 
+        cmp ah, SYS_EXEC       ; sys_exec
+        je .sys_exec
         cmp ah, SYS_EXIT       ; sys_exit
         je .sys_exit
         cmp ah, SYS_REBOOT     ; sys_reboot
@@ -101,13 +103,53 @@ syscall_handler:
         call graphics
         iret
 
+        .sys_exec:
+        ;; Execute program: SI = filename
+        ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
+        ;; If file not found, returns with carry set
+        call find_file
+        jc .exec_fail
+        ;; Save SP from before INT 30h (skip iret frame: IP, CS, flags)
+        mov bp, sp
+        add bp, 6
+        mov [shell_sp], bp
+        ;; Load program sectors into PROGRAM_BASE
+        mov cx, [bx+14]        ; File size in bytes
+        mov bl, [bx+12]        ; Start sector
+        mov di, PROGRAM_BASE
+        .exec_load:
+        mov al, bl
+        call read_sector
+        jc .exec_fail
+        push cx
+        cmp cx, 512
+        jle .exec_partial
+        mov cx, 256             ; Full sector = 256 words
+        jmp .exec_copy
+        .exec_partial:
+        inc cx                  ; Round up to whole words
+        shr cx, 1
+        .exec_copy:
+        cld
+        mov si, DISK_BUFFER
+        rep movsw
+        pop cx
+        sub cx, 512
+        jle .exec_run
+        inc bl
+        jmp .exec_load
+        .exec_run:
+        jmp PROGRAM_BASE
+        .exec_fail:
+        iret
+
         .sys_exit:
-        ;; Restore stack and jump back to shell
+        ;; Restore stack and reload shell
         xor ax, ax
         mov ds, ax
         mov es, ax
         mov sp, [shell_sp]
-        jmp PROGRAM_BASE
+        jmp boot_shell
 
         .sys_reboot:
         call reboot
