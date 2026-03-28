@@ -447,12 +447,16 @@ read_line:
         je .extended_key
         cmp al, 01h             ; Ctrl+A — beginning of line
         je .ctrl_a
+        cmp al, 02h             ; Ctrl+B — cursor left
+        je .cursor_left
         cmp al, 03h             ; Ctrl+C — cancel line
         je .ctrl_c
         cmp al, 04h             ; Ctrl+D — shutdown
         je .ctrl_d
         cmp al, 05h             ; Ctrl+E — end of line
         je .ctrl_e
+        cmp al, 06h             ; Ctrl+F — cursor right
+        je .cursor_right
         cmp al, `\b`            ; Backspace
         je .backspace
         cmp al, 0Bh             ; Ctrl+K — kill to end of line
