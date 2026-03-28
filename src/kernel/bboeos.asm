@@ -17,18 +17,11 @@ start:
 
         call clear_screen
         mov si, WELCOME
-        call print_string
+        call put_string
 
         xor ax, ax
         int 13h                 ; reset disk
         jc .error
-
-        call print_date
-        mov al, ' '
-        call print_char
-        call print_time
-        mov si, NEWLINE
-        call print_string
 
         mov ax, 0200h | STAGE2_SECTORS
         mov bx, 7E00h           ; 0x7C00 + 512
@@ -50,7 +43,7 @@ start:
 
         .error:
         mov si, DISK_FAILURE
-        call print_string
+        call put_string
 
         .halt:
         hlt
@@ -63,125 +56,14 @@ clear_screen:
         pop ax
         ret
 
-print_string:
-        push ax
-
-        .repeat:
-        lodsb                   ; Load the next character from the string
-        cmp al, `\0`
-        je .end                 ; If character is '\0', end the loop
-        call print_char
-        jmp .repeat
-        .end:
-        pop ax
-        ret
+%include "ansi.asm"
 
         ;; Variables
         boot_disk db 0
 
-        ;;  Constants
+        ;; Strings
         DISK_FAILURE db `Disk failure\r\n\0`
-        NEWLINE db `\r\n\0`
         WELCOME db `Welcome to BBoeOS!\r\nVersion 0.3.0 (2026/03/27)\r\n\0`
-
-print_bcd:
-        ;; Print AL as two BCD digits
-        push ax
-        push cx
-        mov cl, al
-        shr al, 4              ; High nibble
-        add al, '0'
-        call print_char
-        mov al, cl
-        and al, 0Fh            ; Low nibble
-        add al, '0'
-        call print_char
-        pop cx
-        pop ax
-        ret
-
-print_char:
-        push ax
-        push bx
-        push dx
-        push ax                 ; Save char for serial
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
-        ;; Mirror to COM1
-        mov dx, 3FDh           ; Line status register
-        .serial_wait:
-        in al, dx
-        test al, 20h           ; Transmit holding register empty?
-        jz .serial_wait
-        pop ax                  ; Restore original char
-        mov dx, 3F8h           ; COM1 data register
-        out dx, al
-        pop dx
-        pop bx
-        pop ax
-        ret
-
-print_date:
-        push ax
-        push cx
-        push dx
-        mov ah, 04h
-        int 1Ah
-        mov al, ch              ; Century
-        call print_bcd
-        mov al, cl              ; Year
-        call print_bcd
-        mov al, '-'
-        call print_char
-        mov al, dh              ; Month
-        call print_bcd
-        mov al, '-'
-        call print_char
-        mov al, dl              ; Day
-        call print_bcd
-        pop dx
-        pop cx
-        pop ax
-        ret
-
-print_time:
-        push ax
-        push cx
-        push dx
-        mov ah, 02h
-        int 1Ah
-        mov al, ch              ; Hours
-        call print_bcd
-        mov al, ':'
-        call print_char
-        mov al, cl              ; Minutes
-        call print_bcd
-        mov al, ':'
-        call print_char
-        mov al, dh              ; Seconds
-        call print_bcd
-        pop dx
-        pop cx
-        pop ax
-        ret
-
-serial_char:
-        ;; Write AL to COM1 (preserves all registers)
-        push ax
-        push dx
-        push ax                 ; Save char
-        mov dx, 3FDh           ; Line status register
-        .wait:
-        in al, dx
-        test al, 20h           ; Transmit holding register empty?
-        jz .wait
-        pop ax                  ; Restore char
-        mov dx, 3F8h           ; COM1 data register
-        out dx, al
-        pop dx
-        pop ax
-        ret
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
@@ -229,12 +111,11 @@ boot_shell:
 
         .no_shell:
         mov si, SHELL_ERROR
-        call print_string
+        call put_string
         .shell_halt:
         hlt
         jmp .shell_halt
 
-%include "readline.asm"
 %include "io.asm"
 %include "syscall.asm"
 %include "system.asm"
@@ -242,8 +123,6 @@ boot_shell:
         ;; Values
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
-        kill_buffer times MAX_INPUT db 0
-        kill_length dw 0
         shell_sp dw 0
 
         ;; Strings

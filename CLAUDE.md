@@ -16,8 +16,8 @@ Requires `nasm` (`brew install nasm`).
 
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
-- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, displays date/time, saves boot tick count. Contains shared functions: `clear_screen`, `print_string`, `print_char`, `print_bcd`, `print_date`, `print_time`, `serial_char`.
-- **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem, line editor, graphics mode.
+- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, ANSI parser (`put_char`, `put_string`), `serial_char`.
+- **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
 - **Shell** (`src/programs/shell.asm`): Loaded from filesystem at `program_base` (`0x6000`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0x9000` for filesystem reads.
@@ -39,7 +39,7 @@ Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
 ### Serial Console
 
-All output is mirrored to COM1 (`print_char` writes to both screen and serial). `serial_char` writes to COM1 only (used for input echo and cursor movement in `readline.asm`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_char` (in stage 1 MBR) includes an ANSI escape sequence parser — raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nD` for cursor back) are translated to INT 10h calls for the screen. `serial_char` writes to COM1 only (used internally by `put_char` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -50,9 +50,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 00h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
 | 01h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
-| 11h   | io_gets      | Read line into buffer, CX = length                    |
-| 12h   | io_putc      | Print char in AL (screen + serial)                    |
-| 13h   | io_puts      | Print string at SI (screen + serial)                  |
+| 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
+| 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
 | 20h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
 | 21h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
 | 30h   | scr_clear    | Clear screen                                          |
@@ -67,15 +66,15 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
 - `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
 - `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`, `NEWLINE`
-- `src/kernel/bboeos.asm` — Stage 1 boot code, shell loader, `%include` directives, variables, strings
-- `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
-- `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
+- `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
+- `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
+- `src/kernel/io.asm` — `find_file`, `read_sector`
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
-- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec
+- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
 - `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
@@ -90,7 +89,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
-- Screen-only operations (cursor repositioning, insert/delete redraws) use direct `int 10h` calls with parallel `serial_char` calls for serial console sync. Do not route screen redraw loops through `print_char` as that would produce duplicate serial output.
+- All output goes through `put_char` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back) via `SYS_IO_PUTC` for all output.
 
 ## 16-bit Real Mode Constraints
 
@@ -99,7 +98,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - INT 10h AH=03h clobbers CX (returns cursor scanline shape) — save any value in CX before calling.
 - `mul` clobbers DX (result in DX:AX) — save DX if needed.
 - 32-bit registers (EAX, ECX, EDX) are usable with operand-size prefix (386+).
-- Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. Use `cursor_back_n` (INT 10h AH=02h/03h) for proper screen cursor positioning.
+- Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
 
 ## Testing
 

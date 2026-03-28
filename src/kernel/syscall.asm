@@ -6,8 +6,6 @@ syscall_handler:
 
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
-        cmp ah, SYS_IO_GETS    ; io_gets
-        je .io_gets
         cmp ah, SYS_IO_PUTC    ; io_putc
         je .io_putc
         cmp ah, SYS_IO_PUTS    ; io_puts
@@ -40,20 +38,34 @@ syscall_handler:
         iret
 
         .io_getc:
-        mov ah, 00h
+        ;; Poll both keyboard and serial, return char in AL, scan code in AH
+        .getc_poll:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h            ; Serial data ready?
+        jnz .getc_serial
+        mov ah, 01h
         int 16h
+        jz .getc_poll           ; Neither ready, keep polling
+        mov ah, 00h
+        int 16h                 ; Consume the key
         iret
-
-        .io_gets:
-        call read_line
+        .getc_serial:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read the byte
+        pop dx
+        xor ah, ah              ; No scan code from serial
         iret
 
         .io_putc:
-        call print_char
+        call put_char
         iret
 
         .io_puts:
-        call print_string
+        call put_string
         iret
 
         .rtc_datetime:
@@ -94,6 +106,12 @@ syscall_handler:
         iret
 
         .scr_clear:
+        ;; Clear serial terminal
+        mov al, `\r`
+        call serial_char
+        mov al, 0Ch             ; Form feed
+        call serial_char
+        ;; Clear screen
         call clear_screen
         iret
 

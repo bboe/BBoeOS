@@ -12,7 +12,6 @@
         %assign SYS_FS_READ 01h
 
         %assign SYS_IO_GETC 10h
-        %assign SYS_IO_GETS 11h
         %assign SYS_IO_PUTC 12h
         %assign SYS_IO_PUTS 13h
 

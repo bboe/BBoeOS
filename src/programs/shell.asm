@@ -8,8 +8,7 @@ main:
         mov ah, SYS_IO_PUTS
         int 30h
 
-        mov ah, SYS_IO_GETS
-        int 30h
+        call read_line
         test cx, cx
         jz main
 
@@ -126,11 +125,367 @@ cmd_shutdown:
         mov si, SHUTDOWN_FAIL
         ret
 
+;;; Line editor
+
+read_line:
+        push ax
+        push bx
+        push dx
+        mov cx, BUFFER          ; Cursor position
+        mov dx, BUFFER          ; End of buffer
+
+        .read_char:
+        mov ah, SYS_IO_GETC
+        int 30h
+
+        cmp al, 0               ; Extended key
+        je .extended_key
+        cmp al, 0E0h            ; Extended key (alternate)
+        je .extended_key
+        cmp al, 01h             ; Ctrl+A — beginning of line
+        je .ctrl_a
+        cmp al, 02h             ; Ctrl+B — cursor left
+        je .cursor_left
+        cmp al, 03h             ; Ctrl+C — cancel line
+        je .ctrl_c
+        cmp al, 04h             ; Ctrl+D — shutdown
+        je .ctrl_d
+        cmp al, 05h             ; Ctrl+E — end of line
+        je .ctrl_e
+        cmp al, 06h             ; Ctrl+F — cursor right
+        je .cursor_right
+        cmp al, `\b`            ; Backspace
+        je .backspace
+        cmp al, 7Fh             ; DEL (serial terminal backspace)
+        je .backspace
+        cmp al, 0Bh             ; Ctrl+K — kill to end of line
+        je .ctrl_k
+        cmp al, 0Ch             ; Ctrl+L — clear screen
+        je .ctrl_l
+        cmp al, `\r`            ; Enter
+        je .end
+        cmp al, 19h             ; Ctrl+Y — yank from kill buffer
+        je .ctrl_y
+        cmp al, 20h             ; Ignore other control characters
+        jl .read_char
+
+        call .insert_char       ; Insert character at cursor
+        jnc .read_char
+        call visual_bell
+        jmp .read_char
+
+        .extended_key:
+        cmp ah, 4Bh             ; Left arrow
+        je .cursor_left
+        cmp ah, 4Dh             ; Right arrow
+        je .cursor_right
+        cmp ah, 53h             ; Delete
+        je .delete
+        jmp .read_char          ; Ignore other extended keys
+
+        .cursor_left:
+        cmp cx, BUFFER
+        je .read_char
+        dec cx
+        mov bx, 1
+        call emit_cursor_back
+        jmp .read_char
+
+        .cursor_right:
+        cmp cx, dx
+        je .read_char
+        mov bx, cx
+        mov al, [bx]
+        call putc
+        inc cx
+        jmp .read_char
+
+        .backspace:
+        cmp cx, BUFFER
+        je .read_char
+        dec cx
+        mov bx, 1
+        call emit_cursor_back
+        call .delete_at_cursor
+        jmp .read_char
+
+        .delete:
+        cmp cx, dx
+        je .read_char
+        call .delete_at_cursor
+        jmp .read_char
+
+        .ctrl_a:
+        cmp cx, BUFFER
+        je .read_char
+        mov bx, cx
+        sub bx, BUFFER
+        call emit_cursor_back
+        mov cx, BUFFER
+        jmp .read_char
+
+        .ctrl_c:
+        mov al, `\r`
+        call putc
+        mov al, `\n`
+        call putc
+        mov cx, BUFFER
+        mov dx, BUFFER
+        jmp .return
+
+        .ctrl_d:
+        mov ah, SYS_SHUTDOWN
+        int 30h
+        jmp .read_char          ; If shutdown fails, continue
+
+        .ctrl_e:
+        cmp cx, dx
+        je .read_char
+        .ce_loop:
+        mov bx, cx
+        mov al, [bx]
+        call putc
+        inc cx
+        cmp cx, dx
+        jne .ce_loop
+        jmp .read_char
+
+        .ctrl_k:
+        cmp cx, dx
+        je .read_char
+        push si
+        push di
+        ;; Copy killed text to kill buffer
+        mov si, cx
+        mov di, kill_buffer
+        mov bx, dx
+        sub bx, cx
+        cmp bx, MAX_INPUT
+        jle .ck_save
+        mov bx, MAX_INPUT
+        .ck_save:
+        mov [kill_length], bx
+        .ck_copy:
+        mov al, [si]
+        mov [di], al
+        inc si
+        inc di
+        dec bx
+        jnz .ck_copy
+        ;; Erase killed text: print spaces, then cursor back
+        mov bx, dx
+        sub bx, cx              ; Count of chars to erase
+        push bx                 ; Save count for cursor_back
+        mov si, bx
+        .ck_erase:
+        mov al, ' '
+        call putc
+        dec si
+        jnz .ck_erase
+        pop bx
+        call emit_cursor_back
+        mov dx, cx              ; Truncate buffer at cursor
+        pop di
+        pop si
+        jmp .read_char
+
+        .ctrl_y:
+        push si
+        mov si, kill_buffer
+        mov bx, [kill_length]
+        test bx, bx
+        jz .cy_done
+        .cy_loop:
+        mov al, [si]
+        push bx
+        call .insert_char
+        pop bx
+        jc .cy_full             ; Stop yanking if buffer full
+        inc si
+        dec bx
+        jnz .cy_loop
+        jmp .cy_done
+        .cy_full:
+        call visual_bell
+        .cy_done:
+        pop si
+        jmp .read_char
+
+        .ctrl_l:
+        mov ah, SYS_SCR_CLEAR
+        int 30h
+        mov cx, BUFFER
+        mov dx, BUFFER
+        jmp .return
+
+        .end:
+        mov al, `\r`
+        call putc
+        mov al, `\n`
+        call putc
+        .return:
+        mov bx, dx              ; Add null terminating character to buffer
+        mov byte [bx], 00h
+        mov cx, dx
+        sub cx, BUFFER         ; Store how many characters were read in cx
+        pop dx
+        pop bx
+        pop ax
+        ret
+
+        ;; Insert char in AL at cursor, shift buffer right, redraw
+        .insert_char:
+        push bx
+        mov bx, dx
+        sub bx, BUFFER
+        cmp bx, MAX_INPUT
+        pop bx
+        jl .ic_ok
+        stc                     ; Set carry flag to signal buffer full
+        ret
+        .ic_ok:
+        push si
+        push ax
+        mov si, dx
+        .ic_shift:
+        cmp si, cx
+        jle .ic_insert
+        dec si
+        mov al, [si]
+        mov [si+1], al
+        jmp .ic_shift
+        .ic_insert:
+        pop ax
+        mov bx, cx
+        mov [bx], al
+        inc dx
+        ;; Print from cursor to end via putc
+        mov si, cx
+        .ic_print:
+        cmp si, dx
+        jge .ic_repos
+        mov bx, si
+        mov al, [bx]
+        call putc
+        inc si
+        jmp .ic_print
+        .ic_repos:
+        inc cx
+        mov bx, dx
+        sub bx, cx
+        call emit_cursor_back
+        clc                     ; Clear carry flag to signal success
+        pop si
+        ret
+
+        ;; Delete char at cursor, shift buffer left, redraw
+        .delete_at_cursor:
+        push si
+        mov si, cx
+        inc si
+        .dac_shift:
+        cmp si, dx
+        jge .dac_redraw
+        mov al, [si]
+        dec si
+        mov [si], al
+        inc si
+        inc si
+        jmp .dac_shift
+        .dac_redraw:
+        dec dx
+        ;; Print from cursor to end, space to erase, then cursor back
+        mov si, cx
+        .dac_print:
+        cmp si, dx
+        jge .dac_erase
+        mov bx, si
+        mov al, [bx]
+        call putc
+        inc si
+        jmp .dac_print
+        .dac_erase:
+        mov al, ' '
+        call putc               ; Erase trailing character
+        mov bx, dx
+        sub bx, cx
+        inc bx
+        call emit_cursor_back
+        pop si
+        ret
+
 ;;; Utility functions
+
+emit_cursor_back:
+        ;; Emit ESC[nD sequence via putc
+        ;; Input: BX = count (0 = no-op)
+        test bx, bx
+        jz .ecb_done
+        push ax
+        mov al, 1Bh
+        call putc
+        mov al, '['
+        call putc
+        mov ax, bx
+        call .emit_decimal
+        mov al, 'D'
+        call putc
+        pop ax
+.ecb_done:
+        ret
+
+.emit_decimal:
+        ;; Emit AX as decimal digits via putc
+        push cx
+        push dx
+        xor cx, cx              ; Digit count
+.ed_div:
+        xor dx, dx
+        mov bx, 10
+        div bx                  ; AX = quotient, DX = remainder
+        push dx                 ; Push digit
+        inc cx
+        test ax, ax
+        jnz .ed_div
+.ed_print:
+        pop ax
+        add al, '0'
+        call putc
+        loop .ed_print
+        pop dx
+        pop cx
+        ret
+
+putc:
+        ;; Print char in AL via SYS_IO_PUTC
+        mov ah, SYS_IO_PUTC
+        int 30h
+        ret
 
 syscall_null:
         int 30h
         xor si, si
+        ret
+
+visual_bell:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov ax, 0B00h
+        mov bx, 0004h          ; Border color = red
+        int 10h
+        mov ah, 86h
+        xor cx, cx
+        mov dx, 0C350h         ; 50,000 µs = 50ms
+        int 15h
+        mov ax, 0B00h
+        xor bx, bx             ; Border color = black
+        int 10h
+        pop dx
+        pop cx
+        pop bx
+        pop ax
         ret
 
 ;;; Command table
@@ -150,6 +505,10 @@ HELP_PREFIX   db `Commands: \0`
 INVALID_CMD   db `unknown command\r\n\0`
 PROMPT        db `$ \0`
 SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
+
+;;; Variables
+kill_buffer times MAX_INPUT db 0
+kill_length dw 0
 
 %include "str_disk_error.asm"
 %include "str_newline.asm"
