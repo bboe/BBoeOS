@@ -63,8 +63,8 @@ main:
         int 30h
         jmp main
 
-;;; Command handlers
-;;; Return: SI = string to print, or SI = 0 for no output
+;; Command handlers
+;; Return: SI = string to print, or SI = 0 for no output
 
 cmd_help:
         push bx
@@ -98,7 +98,7 @@ cmd_shutdown:
         mov si, SHUTDOWN_FAIL
         ret
 
-;;; Line editor
+;; Line editor
 
 read_line:
         push ax
@@ -387,7 +387,7 @@ read_line:
         pop si
         ret
 
-;;; Utility functions
+;; Utility functions
 
 emit_cursor_back:
         ;; Emit ESC[nD sequence via putc
@@ -461,7 +461,7 @@ visual_bell:
         pop ax
         ret
 
-;;; Command table
+;; Command table
 cmd_table:
         dw .help,     cmd_help
         dw .reboot,   cmd_reboot
@@ -471,13 +471,13 @@ cmd_table:
         .reboot   db `reboot\0`
         .shutdown db `shutdown\0`
 
-;;; Strings
+;; Strings
 HELP_PREFIX   db `Commands: \0`
 INVALID_CMD   db `unknown command\r\n\0`
 PROMPT        db `$ \0`
 SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
 
-;;; Variables
+;; Variables
 kill_buffer times MAX_INPUT db 0
 kill_length dw 0
 

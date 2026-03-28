@@ -92,5 +92,5 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-;;; Variables
+;; Variables
 bg_color db 0

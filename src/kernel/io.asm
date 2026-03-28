@@ -49,6 +49,40 @@ find_file:
         clc
         jmp .ff_done
 
+load_file:
+        ;; Load file sectors into memory
+        ;; Input: BX = directory entry pointer (from find_file)
+        ;;        DI = destination address
+        ;; Output: Carry set on disk error
+        ;; Clobbers: SI, CX, DI
+        mov cx, [bx+14]        ; File size in bytes
+        mov bl, [bx+12]        ; Start sector
+        .lf_sector:
+        mov al, bl
+        call read_sector
+        jc .lf_done
+        push cx
+        cmp cx, 512
+        jle .lf_partial
+        mov cx, 256             ; Full sector = 256 words
+        jmp .lf_copy
+        .lf_partial:
+        inc cx                  ; Round up to whole words
+        shr cx, 1
+        .lf_copy:
+        cld
+        mov si, DISK_BUFFER
+        rep movsw
+        pop cx
+        sub cx, 512
+        jle .lf_loaded
+        inc bl                  ; Next sector
+        jmp .lf_sector
+        .lf_loaded:
+        clc
+        .lf_done:
+        ret
+
 read_sector:
         ;; Read one sector into DISK_BUFFER
         ;; Input: AL = sector number (1-based CHS, cylinder 0, head 0)

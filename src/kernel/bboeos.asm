@@ -76,36 +76,10 @@ boot_shell:
         call find_file
         jc .no_shell
 
-        mov cx, [bx+14]        ; File size in bytes
-        mov bl, [bx+12]        ; Start sector
-        mov di, PROGRAM_BASE    ; Destination
-
-.load_sector:
-        mov al, bl
-        call read_sector
+        mov di, PROGRAM_BASE
+        call load_file
         jc .no_shell
 
-        ;; Copy sector from DISK_BUFFER to destination
-        push cx
-        cmp cx, 512
-        jle .partial
-        mov cx, 256             ; Full sector = 256 words
-        jmp .copy
-.partial:
-        inc cx                  ; Round up to whole words
-        shr cx, 1
-.copy:
-        cld
-        mov si, DISK_BUFFER
-        rep movsw
-        pop cx
-
-        sub cx, 512
-        jle .loaded
-        inc bl                  ; Next sector
-        jmp .load_sector
-
-.loaded:
         mov [shell_sp], sp
         jmp PROGRAM_BASE
 

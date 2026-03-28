@@ -125,32 +125,10 @@ syscall_handler:
         mov bp, sp
         add bp, 6
         mov [shell_sp], bp
-        ;; Load program sectors into PROGRAM_BASE
-        mov cx, [bx+14]        ; File size in bytes
-        mov bl, [bx+12]        ; Start sector
+        ;; Load program into PROGRAM_BASE
         mov di, PROGRAM_BASE
-        .exec_load:
-        mov al, bl
-        call read_sector
+        call load_file
         jc .exec_fail
-        push cx
-        cmp cx, 512
-        jle .exec_partial
-        mov cx, 256             ; Full sector = 256 words
-        jmp .exec_copy
-        .exec_partial:
-        inc cx                  ; Round up to whole words
-        shr cx, 1
-        .exec_copy:
-        cld
-        mov si, DISK_BUFFER
-        rep movsw
-        pop cx
-        sub cx, 512
-        jle .exec_run
-        inc bl
-        jmp .exec_load
-        .exec_run:
         jmp PROGRAM_BASE
         .exec_fail:
         stc

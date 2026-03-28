@@ -27,6 +27,9 @@ main:
 
 .disk_err:
         mov si, DISK_ERROR
+        jmp .output
+
+.output:
         mov ah, SYS_IO_PUTS
         int 30h
         mov ah, SYS_EXIT

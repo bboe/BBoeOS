@@ -99,8 +99,7 @@ put_char:
         xor dx, dx
         mov bx, 80
         div bx                  ; AX = new row, DX = new col
-        mov dh, al
-        mov dl, dl              ; DL already has new col from DX
+        mov dh, al              ; DL already has new col from remainder
         mov ah, 02h
         xor bx, bx
         int 10h                 ; Set cursor position

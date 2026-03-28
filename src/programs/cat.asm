@@ -70,7 +70,7 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-;;; Strings
+;; Strings
 USAGE db `Usage: cat <filename>\r\n\0`
 
 %include "str_disk_error.asm"
