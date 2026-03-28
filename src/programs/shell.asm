@@ -119,27 +119,6 @@ cmd_clear:
         mov ah, SYS_SCR_CLEAR
         jmp syscall_null
 
-cmd_date:
-        mov ah, SYS_RTC_DATETIME
-        int 30h
-        ;; CH=century, CL=year, DH=month, DL=day
-        mov al, ch
-        call print_bcd
-        mov al, cl
-        call print_bcd
-        mov al, '-'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        mov al, dh
-        call print_bcd
-        mov al, '-'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        mov al, dl
-        call print_bcd
-        mov si, NEWLINE
-        ret
-
 cmd_graphics:
         mov ah, SYS_SCR_GRAPHICS
         jmp syscall_null
@@ -203,43 +182,7 @@ cmd_shutdown:
         mov si, SHUTDOWN_FAIL
         ret
 
-cmd_time:
-        mov ah, SYS_RTC_DATETIME
-        int 30h
-        ;; BH=hours, BL=minutes, AL=seconds
-        push ax                 ; Save seconds
-        mov al, bh
-        call print_bcd
-        mov al, ':'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        mov al, bl
-        call print_bcd
-        mov al, ':'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        pop ax                  ; Restore seconds
-        call print_bcd
-        mov si, NEWLINE
-        ret
-
 ;;; Utility functions
-
-print_bcd:
-        ;; Print AL as two BCD digits via io_putc
-        push cx
-        mov cl, al
-        shr al, 4               ; High nibble
-        add al, '0'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        mov al, cl
-        and al, 0Fh             ; Low nibble
-        add al, '0'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        pop cx
-        ret
 
 syscall_null:
         int 30h
@@ -250,23 +193,19 @@ syscall_null:
 cmd_table:
         dw .cat,      cmd_cat_usage
         dw .clear,    cmd_clear
-        dw .date,     cmd_date
         dw .graphics, cmd_graphics
         dw .help,     cmd_help
         dw .ls,       cmd_ls
         dw .reboot,   cmd_reboot
         dw .shutdown, cmd_shutdown
-        dw .time,     cmd_time
         dw 0
         .cat      db `cat\0`
         .clear    db `clear\0`
-        .date     db `date\0`
         .graphics db `graphics\0`
         .help     db `help\0`
         .ls       db `ls\0`
         .reboot   db `reboot\0`
         .shutdown db `shutdown\0`
-        .time     db `time\0`
 
 ;;; Strings
 CAT_PREFIX    db `cat \0`
