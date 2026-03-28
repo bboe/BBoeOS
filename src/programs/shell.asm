@@ -13,21 +13,23 @@ main:
         test cx, cx
         jz main
 
-        inc cx                  ; Include null terminator
-        mov dx, cx              ; Save length in DX
-
-        ;; Check for "cat " prefix
-        cmp dx, 5               ; Need at least "cat X"
-        jl .dispatch
+        ;; Split command at first space
         mov si, BUFFER
-        mov di, CAT_PREFIX
-        mov cx, 4
-        repe cmpsb
-        jne .dispatch
-
-        ;; SI = BUFFER + 4 = start of filename argument
-        call cmd_cat
-        jmp .output
+        mov word [EXEC_ARG], 0
+.find_space:
+        lodsb
+        cmp al, ' '
+        je .found_space
+        test al, al
+        jnz .find_space
+        jmp .split_done
+.found_space:
+        mov byte [si-1], 0     ; Null-terminate command name
+        mov [EXEC_ARG], si     ; Point to argument
+.split_done:
+        ;; DX = command name length including null terminator
+        mov dx, si
+        sub dx, BUFFER
 
 .dispatch:
         mov bx, cmd_table
@@ -64,56 +66,6 @@ main:
 
 ;;; Command handlers
 ;;; Return: SI = string to print, or SI = 0 for no output
-
-cmd_cat:
-        push bx
-        push cx
-        mov ah, SYS_FS_FIND
-        int 30h
-        jc .not_found
-
-        mov cx, [bx+14]        ; File size
-        test cx, cx
-        jz .empty
-        mov al, [bx+12]        ; Start sector
-        mov ah, SYS_FS_READ
-        int 30h
-        jc .disk_err
-
-        mov si, DISK_BUFFER
-.print:
-        lodsb
-        cmp al, 0Ah             ; Convert \n to \r\n
-        jne .putc
-        push ax
-        mov al, 0Dh
-        mov ah, SYS_IO_PUTC
-        int 30h
-        pop ax
-.putc:
-        mov ah, SYS_IO_PUTC
-        int 30h
-        loop .print
-
-.empty:
-        mov si, NEWLINE
-        jmp .done
-
-.not_found:
-        mov si, FILE_NOT_FOUND
-        jmp .done
-
-.disk_err:
-        mov si, DISK_ERROR
-
-.done:
-        pop cx
-        pop bx
-        ret
-
-cmd_cat_usage:
-        mov si, CAT_USAGE
-        ret
 
 cmd_clear:
         mov ah, SYS_SCR_CLEAR
@@ -191,7 +143,6 @@ syscall_null:
 
 ;;; Command table
 cmd_table:
-        dw .cat,      cmd_cat_usage
         dw .clear,    cmd_clear
         dw .graphics, cmd_graphics
         dw .help,     cmd_help
@@ -199,7 +150,6 @@ cmd_table:
         dw .reboot,   cmd_reboot
         dw .shutdown, cmd_shutdown
         dw 0
-        .cat      db `cat\0`
         .clear    db `clear\0`
         .graphics db `graphics\0`
         .help     db `help\0`
@@ -208,12 +158,10 @@ cmd_table:
         .shutdown db `shutdown\0`
 
 ;;; Strings
-CAT_PREFIX    db `cat \0`
-CAT_USAGE     db `Usage: cat <filename>\r\n\0`
-DISK_ERROR    db `Disk read error\r\n\0`
-FILE_NOT_FOUND db `File not found\r\n\0`
 HELP_PREFIX   db `Commands: \0`
 INVALID_CMD   db `unknown command\r\n\0`
-NEWLINE       db `\r\n\0`
 PROMPT        db `$ \0`
 SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
+
+%include "str_disk_error.asm"
+%include "str_newline.asm"

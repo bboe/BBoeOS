@@ -64,24 +64,29 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## File Structure
 
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, `SYS_*` syscall numbers, `EXEC_ARG`, etc.)
+- `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
+- `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
+- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`, `NEWLINE`
 - `src/kernel/bboeos.asm` — Stage 1 boot code, shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
 - `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `graphics` mode, `reboot`, `shutdown`
+- `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
+- `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
-- `make_os.sh` — Build script (assembles kernel and programs, creates floppy image)
+- `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 
 ## Key Conventions
 
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
 - Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
-- Commands with arguments (like `cat`) use prefix matching before the table dispatch.
-- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot. Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
+- The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
+- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot. Programs `%include` only the granular shared files they need (e.g., `print_bcd.asm`, `str_newline.asm`) at the end of the source.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
