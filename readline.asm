@@ -94,7 +94,6 @@ read_line:
         cmp al, 20h             ; Ignore other control characters
         jl .read_char
 
-        call serial_char        ; Echo to COM1
         call .insert_char       ; Insert character at cursor
         jnc .read_char
         call visual_bell
@@ -113,6 +112,10 @@ read_line:
         cmp cx, buffer
         je .read_char
         dec cx
+        push ax
+        mov al, `\b`
+        call serial_char
+        pop ax
         mov bx, 1
         call cursor_back_n
         jmp .read_char
@@ -120,10 +123,12 @@ read_line:
         .cursor_right:
         cmp cx, dx
         je .read_char
+        mov bx, cx
+        mov al, [bx]            ; Print char under cursor to advance
+        call serial_char
         mov ah, 0Eh
         xor bx, bx
         mov bx, cx
-        mov al, [bx]            ; Print char under cursor to advance
         int 10h
         inc cx
         jmp .read_char
@@ -154,6 +159,17 @@ read_line:
         .ctrl_a:
         cmp cx, buffer
         je .read_char
+        push ax
+        push si
+        mov si, cx
+        sub si, buffer
+        mov al, `\b`
+        .ca_serial:
+        call serial_char
+        dec si
+        jnz .ca_serial
+        pop si
+        pop ax
         mov bx, cx
         sub bx, buffer
         call cursor_back_n
@@ -180,6 +196,7 @@ read_line:
         .ce_loop:
         mov bx, cx
         mov al, [bx]
+        call serial_char
         xor bx, bx
         int 10h
         inc cx
@@ -217,11 +234,25 @@ read_line:
         push si                 ; Save count
         .ck_erase:
         mov al, ' '
+        call serial_char
         int 10h
         dec si
         jnz .ck_erase
         pop bx                  ; Restore count
         call cursor_back_n
+        ;; Send backspaces to serial to reposition
+        push ax
+        push bx
+        mov al, `\b`
+        .ck_serial_back:
+        test bx, bx
+        jz .ck_serial_done
+        call serial_char
+        dec bx
+        jmp .ck_serial_back
+        .ck_serial_done:
+        pop bx
+        pop ax
         mov dx, cx              ; Truncate buffer at cursor
         pop di
         pop si
@@ -250,6 +281,12 @@ read_line:
         jmp .read_char
 
         .ctrl_l:
+        push ax
+        mov al, `\r`
+        call serial_char
+        mov al, 0Ch             ; Form feed — clears most terminals
+        call serial_char
+        pop ax
         call clear_screen
         mov cx, buffer          ; Reset to start of buffer
         mov dx, buffer
@@ -304,6 +341,7 @@ read_line:
         cmp si, dx
         jge .ic_repos
         mov al, [si]
+        call serial_char
         int 10h
         inc si
         jmp .ic_print
@@ -312,6 +350,17 @@ read_line:
         mov bx, dx
         sub bx, cx
         call cursor_back_n
+        ;; Send backspaces to serial to reposition
+        push ax
+        mov al, `\b`
+        .ic_serial_back:
+        test bx, bx
+        jz .ic_serial_done
+        call serial_char
+        dec bx
+        jmp .ic_serial_back
+        .ic_serial_done:
+        pop ax
         clc                     ; Clear carry flag to signal success
         pop si
         ret
@@ -340,15 +389,28 @@ read_line:
         cmp si, dx
         jge .dac_erase
         mov al, [si]
+        call serial_char
         int 10h
         inc si
         jmp .dac_print
         .dac_erase:
         mov al, ' '
+        call serial_char
         int 10h                 ; Erase trailing character
         mov bx, dx
         sub bx, cx
         inc bx
         call cursor_back_n
+        ;; Send backspaces to serial to reposition
+        push ax
+        mov al, `\b`
+        .dac_serial_back:
+        test bx, bx
+        jz .dac_serial_done
+        call serial_char
+        dec bx
+        jmp .dac_serial_back
+        .dac_serial_done:
+        pop ax
         pop si
         ret
