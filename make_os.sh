@@ -1,6 +1,6 @@
 #!/bin/sh
 
-nasm -f bin -o os.bin bboeos.asm
+nasm -f bin -i src/kernel/ -o os.bin src/kernel/bboeos.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi

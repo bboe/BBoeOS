@@ -17,7 +17,7 @@ Requires `nasm` (`brew install nasm`).
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
 - **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, displays date/time, saves boot tick count. Contains shared functions: `clear_screen`, `print_string`, `print_char`, `print_bcd`, `print_date`, `print_time`, `serial_char`.
-- **Stage 2**: CLI loop, command dispatch, line editor, graphics mode, filesystem.
+- **Stage 2**: CLI loop, command dispatch, line editor, graphics mode, filesystem, syscall interface (INT 30h).
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0x9000` for filesystem reads.
 - **Stack** at `0050h:7700h` (linear `0x7C00`, grows downward).
@@ -40,14 +40,33 @@ Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
 All output is mirrored to COM1 (`print_char` writes to both screen and serial). `serial_char` writes to COM1 only (used for input echo and cursor movement in `readline.asm`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
+### Syscall Interface (INT 30h)
+
+Programs loaded from the filesystem can use INT 30h for OS services:
+
+| AH    | Name         | Description                                          |
+|-------|--------------|------------------------------------------------------|
+| 00h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
+| 01h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
+| 11h   | io_gets      | Read line into buffer, CX = length                    |
+| 12h   | io_putc      | Print char in AL (screen + serial)                    |
+| 13h   | io_puts      | Print string at SI (screen + serial)                  |
+| 20h   | scr_clear    | Clear screen                                          |
+| F0h   | sys_exit     | Return to shell                                       |
+| F1h   | sys_reboot   | Reboot                                                |
+| F2h   | sys_shutdown  | Shutdown                                              |
+
 ## File Structure
 
-- `bboeos.asm` — Stage 1 boot code, CLI loop, `%include` directives, variables, command table, strings
-- `readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
-- `commands.asm` — Command handlers (`handle_*`), `cat_file`, `process_command`, `print_help`, `print_uptime`, `print_dec_byte`
-- `io.asm` — `find_file`, `read_sector`, `visual_bell`
-- `system.asm` — `graphics` mode, `reboot`, `shutdown`
+- `src/kernel/bboeos.asm` — Stage 1 boot code, CLI loop, `%include` directives, variables, command table, strings
+- `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
+- `src/kernel/commands.asm` — Command handlers (`handle_*`), `cat_file`, `process_command`, `print_help`, `print_uptime`, `print_dec_byte`
+- `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
+- `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
+- `src/kernel/system.asm` — `graphics` mode, `reboot`, `shutdown`
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
+- `make_os.sh` — Build script (assembles kernel and creates floppy image)
 
 ## Key Conventions
 

@@ -50,6 +50,7 @@ start:
         int 1Ah                 ; CX:DX = ticks since midnight
         mov [boot_ticks_low], dx
         mov [boot_ticks_high], cx
+        call install_syscalls
         jmp cli
 
         .error:
@@ -193,6 +194,7 @@ serial_char:
 
 
 cli:
+        mov [cli_sp], sp
         mov si, prompt
         call print_string
         call read_line
@@ -204,10 +206,12 @@ cli:
 %include "readline.asm"
 %include "commands.asm"
 %include "io.asm"
+%include "syscall.asm"
 %include "system.asm"
 
         ;; Values
         bg_color db 0
+        cli_sp dw 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
         kill_buffer times max_input db 0
