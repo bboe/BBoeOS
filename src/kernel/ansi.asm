@@ -8,6 +8,18 @@ put_char:
         push cx
         push dx
 
+        ;; Convert \n to \r\n for both serial and screen
+        cmp al, 0Ah
+        jne .serial
+        push ax
+        mov al, 0Dh
+        call serial_char        ; Send \r to serial
+        mov ah, 0Eh
+        xor bx, bx
+        int 10h                 ; Send \r to screen
+        pop ax
+
+.serial:
         ;; Always send raw byte to serial
         call serial_char
 

@@ -28,12 +28,11 @@ main:
         pop ax
         mov al, ah              ; Seconds
         call print_dec
-        mov si, NEWLINE
-        mov ah, SYS_IO_PUTS
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
         int 30h
 
         mov ah, SYS_EXIT
         int 30h
 
 %include "print_dec.asm"
-%include "str_newline.asm"

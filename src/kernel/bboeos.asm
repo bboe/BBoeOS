@@ -62,8 +62,8 @@ clear_screen:
         boot_disk db 0
 
         ;; Strings
-        DISK_FAILURE db `Disk failure\r\n\0`
-        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.4.0 (2026/03/28)\r\n\0`
+        DISK_FAILURE db `Disk failure\n\0`
+        WELCOME db `Welcome to BBoeOS!\nVersion 0.4.0 (2026/03/28)\n\0`
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
@@ -100,5 +100,5 @@ boot_shell:
         shell_sp dw 0
 
         ;; Strings
-        SHELL_ERROR db `Shell not found\r\n\0`
+        SHELL_ERROR db `Shell not found\n\0`
         SHELL_NAME db `shell\0`

@@ -15,8 +15,8 @@ main:
         mov si, bx
         mov ah, SYS_IO_PUTS
         int 30h
-        mov si, NEWLINE
-        mov ah, SYS_IO_PUTS
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
         int 30h
         add bx, DIR_ENTRY_SIZE
         jmp .loop
@@ -36,4 +36,3 @@ main:
         int 30h
 
 %include "str_disk_error.asm"
-%include "str_newline.asm"

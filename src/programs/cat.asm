@@ -31,14 +31,6 @@ main:
         mov si, DISK_BUFFER
 .print:
         lodsb
-        cmp al, 0Ah             ; Convert \n to \r\n
-        jne .putc
-        push ax
-        mov al, 0Dh
-        mov ah, SYS_IO_PUTC
-        int 30h
-        pop ax
-.putc:
         mov ah, SYS_IO_PUTC
         int 30h
         loop .print
@@ -50,8 +42,11 @@ main:
         jmp .read_sector
 
 .empty:
-        mov si, NEWLINE
-        jmp .output
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
+        int 30h
+        mov ah, SYS_EXIT
+        int 30h
 
 .not_found:
         mov si, FILE_NOT_FOUND
@@ -71,8 +66,7 @@ main:
         int 30h
 
 ;; Strings
-USAGE db `Usage: cat <filename>\r\n\0`
+USAGE db `Usage: cat <filename>\n\0`
 
 %include "str_disk_error.asm"
 %include "str_file_not_found.asm"
-%include "str_newline.asm"

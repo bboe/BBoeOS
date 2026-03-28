@@ -39,7 +39,7 @@ Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_char` (in stage 1 MBR) includes an ANSI escape sequence parser — raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nD` for cursor back) are translated to INT 10h calls for the screen. `serial_char` writes to COM1 only (used internally by `put_char` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_char` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nD` for cursor back) are translated to INT 10h calls for the screen. `serial_char` writes to COM1 only (used internally by `put_char` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -65,7 +65,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, `SYS_*` syscall numbers, `EXEC_ARG`, etc.)
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
 - `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
-- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`, `NEWLINE`
+- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
 - `src/kernel/io.asm` — `find_file`, `read_sector`

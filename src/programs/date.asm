@@ -42,12 +42,11 @@ main:
         pop ax                  ; Restore seconds
         call print_bcd
 
-        mov si, NEWLINE
-        mov ah, SYS_IO_PUTS
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
         int 30h
 
         mov ah, SYS_EXIT
         int 30h
 
 %include "print_bcd.asm"
-%include "str_newline.asm"

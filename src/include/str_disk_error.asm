@@ -1,1 +1,1 @@
-DISK_ERROR db `Disk read error\r\n\0`
+DISK_ERROR db `Disk read error\n\0`

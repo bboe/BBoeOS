@@ -85,7 +85,10 @@ cmd_help:
         jmp .help_loop
 .help_end:
         pop bx
-        mov si, NEWLINE
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
+        int 30h
+        xor si, si
         ret
 
 cmd_reboot:
@@ -198,8 +201,6 @@ read_line:
         jmp .read_char
 
         .ctrl_c:
-        mov al, `\r`
-        call putc
         mov al, `\n`
         call putc
         mov cx, BUFFER
@@ -292,8 +293,6 @@ read_line:
         jmp .return
 
         .end:
-        mov al, `\r`
-        call putc
         mov al, `\n`
         call putc
         .return:
@@ -473,12 +472,10 @@ cmd_table:
 
 ;; Strings
 HELP_PREFIX   db `Commands: \0`
-INVALID_CMD   db `unknown command\r\n\0`
+INVALID_CMD   db `unknown command\n\0`
 PROMPT        db `$ \0`
-SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
+SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 
 ;; Variables
 kill_buffer times MAX_INPUT db 0
 kill_length dw 0
-
-%include "str_newline.asm"
