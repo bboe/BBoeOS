@@ -1,33 +1,33 @@
 syscall_handler:
-        cmp ah, 00h             ; fs_find
+        cmp ah, SYS_FS_FIND    ; fs_find
         je .fs_find
-        cmp ah, 01h             ; fs_read
+        cmp ah, SYS_FS_READ    ; fs_read
         je .fs_read
 
-        cmp ah, 10h             ; io_getc
+        cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
-        cmp ah, 11h             ; io_gets
+        cmp ah, SYS_IO_GETS    ; io_gets
         je .io_gets
-        cmp ah, 12h             ; io_putc
+        cmp ah, SYS_IO_PUTC    ; io_putc
         je .io_putc
-        cmp ah, 13h             ; io_puts
+        cmp ah, SYS_IO_PUTS    ; io_puts
         je .io_puts
 
-        cmp ah, 20h             ; rtc_datetime
+        cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
-        cmp ah, 21h             ; rtc_uptime
+        cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
-        cmp ah, 30h             ; scr_clear
+        cmp ah, SYS_SCR_CLEAR  ; scr_clear
         je .scr_clear
-        cmp ah, 31h             ; scr_graphics
+        cmp ah, SYS_SCR_GRAPHICS ; scr_graphics
         je .scr_graphics
 
-        cmp ah, 0F0h            ; sys_exit
+        cmp ah, SYS_EXIT       ; sys_exit
         je .sys_exit
-        cmp ah, 0F1h            ; sys_reboot
+        cmp ah, SYS_REBOOT     ; sys_reboot
         je .sys_reboot
-        cmp ah, 0F2h            ; sys_shutdown
+        cmp ah, SYS_SHUTDOWN   ; sys_shutdown
         je .sys_shutdown
         iret
 

@@ -5,10 +5,10 @@
 main:
         cld
         mov si, PROMPT
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
 
-        mov ah, 11h             ; io_gets
+        mov ah, SYS_IO_GETS
         int 30h
         test cx, cx
         jz main
@@ -54,7 +54,7 @@ main:
 .output:
         test si, si
         jz main
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
         jmp main
 
@@ -64,7 +64,7 @@ main:
 cmd_cat:
         push bx
         push cx
-        mov ah, 00h             ; fs_find
+        mov ah, SYS_FS_FIND
         int 30h
         jc .not_found
 
@@ -72,7 +72,7 @@ cmd_cat:
         test cx, cx
         jz .empty
         mov al, [bx+12]        ; Start sector
-        mov ah, 01h             ; fs_read
+        mov ah, SYS_FS_READ
         int 30h
         jc .disk_err
 
@@ -83,11 +83,11 @@ cmd_cat:
         jne .putc
         push ax
         mov al, 0Dh
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         pop ax
 .putc:
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         loop .print
 
@@ -112,11 +112,11 @@ cmd_cat_usage:
         ret
 
 cmd_clear:
-        mov ah, 30h             ; scr_clear
+        mov ah, SYS_SCR_CLEAR
         jmp syscall_null
 
 cmd_date:
-        mov ah, 20h             ; rtc_datetime
+        mov ah, SYS_RTC_DATETIME
         int 30h
         ;; CH=century, CL=year, DH=month, DL=day
         mov al, ch
@@ -124,12 +124,12 @@ cmd_date:
         mov al, cl
         call print_bcd
         mov al, '-'
-        mov ah, 12h
+        mov ah, SYS_IO_PUTC
         int 30h
         mov al, dh
         call print_bcd
         mov al, '-'
-        mov ah, 12h
+        mov ah, SYS_IO_PUTC
         int 30h
         mov al, dl
         call print_bcd
@@ -137,23 +137,23 @@ cmd_date:
         ret
 
 cmd_graphics:
-        mov ah, 31h             ; scr_graphics
+        mov ah, SYS_SCR_GRAPHICS
         jmp syscall_null
 
 cmd_help:
         push bx
         mov si, HELP_PREFIX
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
         mov bx, cmd_table
 .help_loop:
         mov si, [bx]
         test si, si
         jz .help_end
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
         mov al, ' '
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         add bx, 4
         jmp .help_loop
@@ -165,7 +165,7 @@ cmd_help:
 cmd_ls:
         push bx
         mov al, DIR_SECTOR
-        mov ah, 01h             ; fs_read
+        mov ah, SYS_FS_READ
         int 30h
         jc .ls_err
         mov bx, DISK_BUFFER
@@ -173,10 +173,10 @@ cmd_ls:
         cmp byte [bx], 0
         je .ls_done
         mov si, bx
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
         mov si, NEWLINE
-        mov ah, 13h             ; io_puts
+        mov ah, SYS_IO_PUTS
         int 30h
         add bx, DIR_ENTRY_SIZE
         jmp .ls_loop
@@ -190,29 +190,29 @@ cmd_ls:
         ret
 
 cmd_reboot:
-        mov ah, 0F1h            ; sys_reboot
+        mov ah, SYS_REBOOT
         jmp syscall_null
 
 cmd_shutdown:
-        mov ah, 0F2h            ; sys_shutdown
+        mov ah, SYS_SHUTDOWN
         int 30h
         mov si, SHUTDOWN_FAIL
         ret
 
 cmd_time:
-        mov ah, 20h             ; rtc_datetime
+        mov ah, SYS_RTC_DATETIME
         int 30h
         ;; BH=hours, BL=minutes, AL=seconds
         push ax                 ; Save seconds
         mov al, bh
         call print_bcd
         mov al, ':'
-        mov ah, 12h
+        mov ah, SYS_IO_PUTC
         int 30h
         mov al, bl
         call print_bcd
         mov al, ':'
-        mov ah, 12h
+        mov ah, SYS_IO_PUTC
         int 30h
         pop ax                  ; Restore seconds
         call print_bcd
@@ -220,7 +220,7 @@ cmd_time:
         ret
 
 cmd_uptime:
-        mov ah, 22h             ; rtc_uptime
+        mov ah, SYS_RTC_UPTIME
         int 30h                 ; AX = elapsed seconds
 
         xor dx, dx
@@ -229,7 +229,7 @@ cmd_uptime:
         push dx
         call print_dec2
         mov al, ':'
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
 
         pop ax                  ; Remaining seconds
@@ -239,7 +239,7 @@ cmd_uptime:
         push ax
         call print_dec2
         mov al, ':'
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
 
         pop ax
@@ -256,12 +256,12 @@ print_bcd:
         mov cl, al
         shr al, 4               ; High nibble
         add al, '0'
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         mov al, cl
         and al, 0Fh             ; Low nibble
         add al, '0'
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         pop cx
         ret
@@ -272,12 +272,12 @@ print_dec2:
         xchg al, ah             ; AL = tens, AH = ones
         add al, '0'
         push ax
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         pop ax
         mov al, ah
         add al, '0'
-        mov ah, 12h             ; io_putc
+        mov ah, SYS_IO_PUTC
         int 30h
         ret
 

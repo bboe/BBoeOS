@@ -63,7 +63,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## File Structure
 
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, etc.)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/kernel/bboeos.asm` — Stage 1 boot code, shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
 - `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
