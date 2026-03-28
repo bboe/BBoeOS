@@ -20,8 +20,6 @@ syscall_handler:
 
         cmp ah, SYS_SCR_CLEAR  ; scr_clear
         je .scr_clear
-        cmp ah, SYS_SCR_GRAPHICS ; scr_graphics
-        je .scr_graphics
 
         cmp ah, SYS_EXEC       ; sys_exec
         je .sys_exec
@@ -97,10 +95,6 @@ syscall_handler:
 
         .scr_clear:
         call clear_screen
-        iret
-
-        .scr_graphics:
-        call graphics
         iret
 
         .sys_exec:

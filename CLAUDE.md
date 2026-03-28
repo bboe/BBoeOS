@@ -56,7 +56,6 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 20h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
 | 21h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
 | 30h   | scr_clear    | Clear screen                                          |
-| 31h   | scr_graphics | Enter graphics mode                                   |
 | F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F1h   | sys_exit     | Reload and return to shell                             |
 | F2h   | sys_reboot   | Reboot                                                |
@@ -72,9 +71,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
 - `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
-- `src/kernel/system.asm` — `graphics` mode, `reboot`, `shutdown`
+- `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
+- `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem

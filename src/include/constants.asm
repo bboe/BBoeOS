@@ -20,7 +20,6 @@
         %assign SYS_RTC_UPTIME 21h
 
         %assign SYS_SCR_CLEAR 30h
-        %assign SYS_SCR_GRAPHICS 31h
 
         %assign SYS_EXEC 0F0h
         %assign SYS_EXIT 0F1h

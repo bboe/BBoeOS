@@ -240,7 +240,6 @@ boot_shell:
 %include "system.asm"
 
         ;; Values
-        bg_color db 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
         kill_buffer times MAX_INPUT db 0

@@ -71,10 +71,6 @@ cmd_clear:
         mov ah, SYS_SCR_CLEAR
         jmp syscall_null
 
-cmd_graphics:
-        mov ah, SYS_SCR_GRAPHICS
-        jmp syscall_null
-
 cmd_help:
         push bx
         mov si, HELP_PREFIX
@@ -144,14 +140,12 @@ syscall_null:
 ;;; Command table
 cmd_table:
         dw .clear,    cmd_clear
-        dw .graphics, cmd_graphics
         dw .help,     cmd_help
         dw .ls,       cmd_ls
         dw .reboot,   cmd_reboot
         dw .shutdown, cmd_shutdown
         dw 0
         .clear    db `clear\0`
-        .graphics db `graphics\0`
         .help     db `help\0`
         .ls       db `ls\0`
         .reboot   db `reboot\0`
