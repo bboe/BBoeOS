@@ -115,18 +115,6 @@ cmd_clear:
         mov ah, 30h             ; scr_clear
         jmp syscall_null
 
-cmd_graphics:
-        mov ah, 31h             ; scr_graphics
-        jmp syscall_null
-
-cmd_reboot:
-        mov ah, 0F1h            ; sys_reboot
-
-syscall_null:
-        int 30h
-        xor si, si
-        ret
-
 cmd_date:
         mov ah, 20h             ; rtc_datetime
         int 30h
@@ -148,25 +136,9 @@ cmd_date:
         mov si, NEWLINE
         ret
 
-cmd_time:
-        mov ah, 20h             ; rtc_datetime
-        int 30h
-        ;; BH=hours, BL=minutes, AL=seconds
-        push ax                 ; Save seconds
-        mov al, bh
-        call print_bcd
-        mov al, ':'
-        mov ah, 12h
-        int 30h
-        mov al, bl
-        call print_bcd
-        mov al, ':'
-        mov ah, 12h
-        int 30h
-        pop ax                  ; Restore seconds
-        call print_bcd
-        mov si, NEWLINE
-        ret
+cmd_graphics:
+        mov ah, 31h             ; scr_graphics
+        jmp syscall_null
 
 cmd_help:
         push bx
@@ -217,10 +189,34 @@ cmd_ls:
         mov si, DISK_ERROR
         ret
 
+cmd_reboot:
+        mov ah, 0F1h            ; sys_reboot
+        jmp syscall_null
+
 cmd_shutdown:
         mov ah, 0F2h            ; sys_shutdown
         int 30h
         mov si, SHUTDOWN_FAIL
+        ret
+
+cmd_time:
+        mov ah, 20h             ; rtc_datetime
+        int 30h
+        ;; BH=hours, BL=minutes, AL=seconds
+        push ax                 ; Save seconds
+        mov al, bh
+        call print_bcd
+        mov al, ':'
+        mov ah, 12h
+        int 30h
+        mov al, bl
+        call print_bcd
+        mov al, ':'
+        mov ah, 12h
+        int 30h
+        pop ax                  ; Restore seconds
+        call print_bcd
+        mov si, NEWLINE
         ret
 
 cmd_uptime:
@@ -251,6 +247,8 @@ cmd_uptime:
         call print_dec2
         mov si, NEWLINE
         ret
+
+;;; Utility functions
 
 print_bcd:
         ;; Print AL as two BCD digits via io_putc
@@ -283,6 +281,11 @@ print_dec2:
         int 30h
         ret
 
+syscall_null:
+        int 30h
+        xor si, si
+        ret
+
 ;;; Command table
 cmd_table:
         dw .cat,      cmd_cat_usage
@@ -308,12 +311,12 @@ cmd_table:
         .uptime   db `uptime\0`
 
 ;;; Strings
-CAT_PREFIX   db `cat \0`
-CAT_USAGE db `Usage: cat <filename>\r\n\0`
-DISK_ERROR  db `Disk read error\r\n\0`
-HELP_PREFIX  db `Commands: \0`
+CAT_PREFIX    db `cat \0`
+CAT_USAGE     db `Usage: cat <filename>\r\n\0`
+DISK_ERROR    db `Disk read error\r\n\0`
+FILE_NOT_FOUND db `File not found\r\n\0`
+HELP_PREFIX   db `Commands: \0`
 INVALID_CMD   db `unknown command\r\n\0`
-NEWLINE        db `\r\n\0`
-FILE_NOT_FOUND   db `File not found\r\n\0`
-PROMPT    db `$ \0`
-SHUTDOWN_FAIL   db `APM shutdown failed\r\n\0`
+NEWLINE       db `\r\n\0`
+PROMPT        db `$ \0`
+SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
