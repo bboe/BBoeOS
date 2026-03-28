@@ -41,8 +41,27 @@ read_line:
         mov dx, buffer          ; End of buffer
 
         .read_char:
-        mov ah, 00h             ; int 16h 'keyboard read' function
-        int 16h                 ; Call 'keyboard read' function
+        ;; Check serial port for data
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h            ; Data ready?
+        jnz .from_serial
+        ;; Check keyboard (non-blocking)
+        mov ah, 01h
+        int 16h
+        jz .read_char           ; Neither ready, keep polling
+        mov ah, 00h
+        int 16h                 ; Consume the key
+        jmp .dispatch
+        .from_serial:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read the byte
+        pop dx
+        xor ah, ah              ; No scan code from serial
+        .dispatch:
 
         cmp al, 0               ; Extended key
         je .extended_key
@@ -61,6 +80,8 @@ read_line:
         cmp al, 06h             ; Ctrl+F — cursor right
         je .cursor_right
         cmp al, `\b`            ; Backspace
+        je .backspace
+        cmp al, 7Fh             ; DEL (serial terminal backspace)
         je .backspace
         cmp al, 0Bh             ; Ctrl+K — kill to end of line
         je .ctrl_k
@@ -111,6 +132,10 @@ read_line:
         cmp cx, buffer
         je .read_char
         push ax
+        mov al, `\b`
+        call serial_char
+        mov al, ' '
+        call serial_char
         mov al, `\b`
         call serial_char
         pop ax
