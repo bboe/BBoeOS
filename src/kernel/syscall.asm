@@ -31,11 +31,11 @@ syscall_handler:
 
         .fs_find:
         call find_file
-        iret
+        jmp .iret_cf
 
         .fs_read:
         call read_sector
-        iret
+        jmp .iret_cf
 
         .io_getc:
         ;; Poll both keyboard and serial, return char in AL, scan code in AH
@@ -153,7 +153,8 @@ syscall_handler:
         .exec_run:
         jmp PROGRAM_BASE
         .exec_fail:
-        iret
+        stc
+        jmp .iret_cf
 
         .sys_exit:
         ;; Restore stack and reload shell
@@ -169,6 +170,20 @@ syscall_handler:
 
         .sys_shutdown:
         call shutdown
+        iret
+
+        .iret_cf:
+        ;; Return via iret, propagating current CF to caller's saved flags
+        ;; Stack: [IP] [CS] [FLAGS]
+        push bp
+        mov bp, sp
+        jnc .iret_clc
+        or word [bp+6], 0001h   ; Set CF in saved FLAGS
+        pop bp
+        iret
+        .iret_clc:
+        and word [bp+6], 0FFFEh ; Clear CF in saved FLAGS
+        pop bp
         iret
 
 install_syscalls:

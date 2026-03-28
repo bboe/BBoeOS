@@ -74,6 +74,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
+- `src/programs/ls.asm` — Ls program: lists files in the directory
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem

@@ -88,33 +88,6 @@ cmd_help:
         mov si, NEWLINE
         ret
 
-cmd_ls:
-        push bx
-        mov al, DIR_SECTOR
-        mov ah, SYS_FS_READ
-        int 30h
-        jc .ls_err
-        mov bx, DISK_BUFFER
-.ls_loop:
-        cmp byte [bx], 0
-        je .ls_done
-        mov si, bx
-        mov ah, SYS_IO_PUTS
-        int 30h
-        mov si, NEWLINE
-        mov ah, SYS_IO_PUTS
-        int 30h
-        add bx, DIR_ENTRY_SIZE
-        jmp .ls_loop
-.ls_done:
-        pop bx
-        xor si, si
-        ret
-.ls_err:
-        pop bx
-        mov si, DISK_ERROR
-        ret
-
 cmd_reboot:
         mov ah, SYS_REBOOT
         jmp syscall_null
@@ -491,12 +464,10 @@ visual_bell:
 ;;; Command table
 cmd_table:
         dw .help,     cmd_help
-        dw .ls,       cmd_ls
         dw .reboot,   cmd_reboot
         dw .shutdown, cmd_shutdown
         dw 0
         .help     db `help\0`
-        .ls       db `ls\0`
         .reboot   db `reboot\0`
         .shutdown db `shutdown\0`
 
@@ -510,5 +481,4 @@ SHUTDOWN_FAIL db `APM shutdown failed\r\n\0`
 kill_buffer times MAX_INPUT db 0
 kill_length dw 0
 
-%include "str_disk_error.asm"
 %include "str_newline.asm"
