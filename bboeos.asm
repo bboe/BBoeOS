@@ -29,7 +29,7 @@ start:
         mov si, NEWLINE
         call print_string
 
-        mov ax, 0202h           ; read 2 sectors
+        mov ax, 0203h           ; read 3 sectors
         mov bx, 7E00h           ; 0x7C00 + 512
         mov cx, 2               ; start at cylinder 0 sector 2
         mov dh, 0               ; start at head 0
@@ -37,7 +37,7 @@ start:
         int 13h                 ; read
 
         jc .error
-        cmp al, 2
+        cmp al, 3
         jne .error
 
         xor ah, ah
@@ -465,6 +465,8 @@ read_line:
         je .ctrl_l
         cmp al, `\r`            ; Enter
         je .end
+        cmp al, 19h             ; Ctrl+Y — yank from kill buffer
+        je .ctrl_y
         cmp al, 20h             ; Ignore other control characters
         jl .read_char
 
@@ -564,6 +566,25 @@ read_line:
         cmp cx, dx
         je .read_char
         push si
+        push di
+        ;; Copy killed text to kill buffer
+        mov si, cx
+        mov di, kill_buffer
+        mov bx, dx
+        sub bx, cx
+        cmp bx, 80
+        jle .ck_save
+        mov bx, 80
+        .ck_save:
+        mov [kill_length], bx
+        .ck_copy:
+        mov al, [si]
+        mov [di], al
+        inc si
+        inc di
+        dec bx
+        jnz .ck_copy
+        ;; Erase killed text from screen
         mov ah, 0Eh
         xor bx, bx
         mov si, dx
@@ -581,6 +602,25 @@ read_line:
         dec si
         jnz .ck_back
         mov dx, cx              ; Truncate buffer at cursor
+        pop di
+        pop si
+        jmp .read_char
+
+        .ctrl_y:
+        push si
+        mov si, kill_buffer
+        mov bx, [kill_length]
+        test bx, bx
+        jz .cy_done
+        .cy_loop:
+        mov al, [si]
+        push bx
+        call .insert_char
+        pop bx
+        inc si
+        dec bx
+        jnz .cy_loop
+        .cy_done:
         pop si
         jmp .read_char
 
@@ -717,6 +757,8 @@ shutdown:
         bg_color db 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
+        kill_buffer times 80 db 0
+        kill_length dw 0
 
         ;; Data
         command_table:
