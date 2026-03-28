@@ -14,11 +14,20 @@ main:
         mov cx, [bx+14]        ; File size
         test cx, cx
         jz .empty
-        mov al, [bx+12]        ; Start sector
+        mov bl, [bx+12]        ; Start sector
+
+.read_sector:
+        mov al, bl
         mov ah, SYS_FS_READ
         int 30h
         jc .disk_err
 
+        ;; Print up to 512 bytes or remaining bytes
+        mov dx, cx              ; Save remaining bytes
+        cmp cx, 512
+        jle .print_sector
+        mov cx, 512
+.print_sector:
         mov si, DISK_BUFFER
 .print:
         lodsb
@@ -33,6 +42,12 @@ main:
         mov ah, SYS_IO_PUTC
         int 30h
         loop .print
+
+        sub dx, 512
+        jle .empty
+        mov cx, dx              ; Remaining bytes
+        inc bl                  ; Next sector
+        jmp .read_sector
 
 .empty:
         mov si, NEWLINE
