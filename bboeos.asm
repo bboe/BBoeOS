@@ -170,6 +170,41 @@ cli:
         call process_command
         jmp cli
 
+cursor_back_n:
+        ;; Move cursor back by BX positions
+        test bx, bx
+        jz .done
+        push ax
+        push bx
+        push cx
+        push dx
+        push bx                 ; Save count on stack
+        mov ah, 03h
+        xor bx, bx
+        int 10h                 ; DH=row, DL=col (CX clobbered with cursor shape)
+        pop cx                  ; Restore count
+        movzx ax, dh
+        push dx
+        mov bx, 80
+        mul bx                  ; AX = row * 80
+        pop dx
+        movzx bx, dl
+        add ax, bx              ; AX = linear position
+        sub ax, cx              ; AX = new linear position
+        xor dx, dx
+        mov bx, 80
+        div bx                  ; AX = new row, DX = new col
+        mov dh, al
+        mov ah, 02h
+        xor bx, bx
+        int 10h                 ; Set cursor position
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        .done:
+        ret
+
 graphics:
         push ax
         mov ax, 0Dh
@@ -486,10 +521,8 @@ read_line:
         cmp cx, buffer
         je .read_char
         dec cx
-        mov ah, 0Eh
-        xor bx, bx
-        mov al, `\b`
-        int 10h
+        mov bx, 1
+        call cursor_back_n
         jmp .read_char
 
         .cursor_right:
@@ -507,10 +540,8 @@ read_line:
         cmp cx, buffer
         je .read_char
         dec cx
-        mov ah, 0Eh
-        xor bx, bx
-        mov al, `\b`
-        int 10h
+        mov bx, 1
+        call cursor_back_n
         call .delete_at_cursor
         jmp .read_char
 
@@ -523,14 +554,10 @@ read_line:
         .ctrl_a:
         cmp cx, buffer
         je .read_char
-        mov ah, 0Eh
-        xor bx, bx
-        .ca_loop:
-        mov al, `\b`
-        int 10h
-        dec cx
-        cmp cx, buffer
-        jne .ca_loop
+        mov bx, cx
+        sub bx, buffer
+        call cursor_back_n
+        mov cx, buffer
         jmp .read_char
 
         .ctrl_c:
@@ -595,12 +622,8 @@ read_line:
         int 10h
         dec si
         jnz .ck_erase
-        pop si                  ; Restore count
-        .ck_back:
-        mov al, `\b`
-        int 10h
-        dec si
-        jnz .ck_back
+        pop bx                  ; Restore count
+        call cursor_back_n
         mov dx, cx              ; Truncate buffer at cursor
         pop di
         pop si
@@ -675,19 +698,11 @@ read_line:
         int 10h
         inc si
         jmp .ic_print
-        ;; Backspace to cursor + 1
         .ic_repos:
         inc cx
-        mov si, dx
-        sub si, cx
-        .ic_back:
-        test si, si
-        jz .ic_done
-        mov al, `\b`
-        int 10h
-        dec si
-        jmp .ic_back
-        .ic_done:
+        mov bx, dx
+        sub bx, cx
+        call cursor_back_n
         pop si
         ret
 
@@ -721,17 +736,10 @@ read_line:
         .dac_erase:
         mov al, ' '
         int 10h                 ; Erase trailing character
-        mov si, dx
-        sub si, cx
-        inc si
-        .dac_back:
-        test si, si
-        jz .dac_done
-        mov al, `\b`
-        int 10h
-        dec si
-        jmp .dac_back
-        .dac_done:
+        mov bx, dx
+        sub bx, cx
+        inc bx
+        call cursor_back_n
         pop si
         ret
 
