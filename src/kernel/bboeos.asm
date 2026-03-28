@@ -63,7 +63,7 @@ clear_screen:
 
         ;; Strings
         DISK_FAILURE db `Disk failure\r\n\0`
-        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.3.0 (2026/03/27)\r\n\0`
+        WELCOME db `Welcome to BBoeOS!\r\nVersion 0.4.0 (2026/03/28)\r\n\0`
 
         ;; End of MBR
         times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
