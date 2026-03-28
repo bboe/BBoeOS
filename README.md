@@ -27,13 +27,16 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 ## File Structure
 
 ```
+src/include/          Shared includes
+  constants.asm       Shared constants (memory addresses, filesystem params)
 src/kernel/           Kernel assembly source
-  bboeos.asm          Stage 1 boot code, CLI loop, variables, command table
-  commands.asm        Command handlers, process_command, cat_file
+  bboeos.asm          Stage 1 boot code, shell loader, shared functions
   io.asm              Filesystem I/O (find_file, read_sector), visual_bell
   readline.asm        Line editor with cursor movement, kill/yank
   syscall.asm         INT 30h syscall handler
   system.asm          Graphics mode, reboot, shutdown
+src/programs/         User-space programs
+  shell.asm           Shell: CLI loop, command dispatch, built-in commands
 add_file.sh           Host-side script to add files to floppy image
 make_os.sh            Build script
 ```

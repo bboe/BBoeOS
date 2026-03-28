@@ -1,10 +1,5 @@
         org 7C00h               ; offset where bios loads our first stage
-        %assign buffer 500h
-        %assign dir_entry_size 16
-        %assign dir_max_entries 32
-        %assign dir_sector 6
-        %assign disk_buffer 9000h
-        %assign max_input 256
+        %include "constants.asm"
         %assign stage2_sectors (dir_sector - 2)
 
 start:
@@ -51,7 +46,7 @@ start:
         mov [boot_ticks_low], dx
         mov [boot_ticks_high], cx
         call install_syscalls
-        jmp cli
+        jmp boot_shell
 
         .error:
         mov si, DISK_FAILURE
@@ -193,61 +188,65 @@ serial_char:
         dw 0AA55h               ; The standard PC boot signature
 
 
-cli:
-        mov [cli_sp], sp
-        mov si, prompt
+boot_shell:
+        ;; Load shell program from filesystem
+        mov si, SHELL_NAME
+        call find_file
+        jc .no_shell
+
+        mov cx, [bx+14]        ; File size in bytes
+        mov bl, [bx+12]        ; Start sector
+        mov di, program_base    ; Destination
+
+.load_sector:
+        mov al, bl
+        call read_sector
+        jc .no_shell
+
+        ;; Copy sector from disk_buffer to destination
+        push cx
+        cmp cx, 512
+        jle .partial
+        mov cx, 256             ; Full sector = 256 words
+        jmp .copy
+.partial:
+        inc cx                  ; Round up to whole words
+        shr cx, 1
+.copy:
+        cld
+        mov si, disk_buffer
+        rep movsw
+        pop cx
+
+        sub cx, 512
+        jle .loaded
+        inc bl                  ; Next sector
+        jmp .load_sector
+
+.loaded:
+        mov [shell_sp], sp
+        jmp program_base
+
+        .no_shell:
+        mov si, SHELL_ERROR
         call print_string
-        call read_line
-        test cx, cx
-        jz cli
-        call process_command
-        jmp cli
+        .shell_halt:
+        hlt
+        jmp .shell_halt
 
 %include "readline.asm"
-%include "commands.asm"
 %include "io.asm"
 %include "syscall.asm"
 %include "system.asm"
 
         ;; Values
         bg_color db 0
-        cli_sp dw 0
         boot_ticks_high dw 0
         boot_ticks_low  dw 0
         kill_buffer times max_input db 0
         kill_length dw 0
-
-        ;; Data
-        command_table:
-            dw .cat,      handle_cat
-            dw .clear,    handle_clear
-            dw .date,     handle_date
-            dw .graphics, handle_graphics
-            dw .help,     handle_help
-            dw .ls,       handle_ls
-            dw .reboot,   handle_reboot
-            dw .shutdown, handle_shutdown
-            dw .time,     handle_time
-            dw .uptime,   handle_uptime
-            dw 0
-            .cat      db `cat\0`
-            .clear    db `clear\0`
-            .date     db `date\0`
-            .graphics db `graphics\0`
-            .help     db `help\0`
-            .ls       db `ls\0`
-            .reboot   db `reboot\0`
-            .shutdown db `shutdown\0`
-            .time     db `time\0`
-            .uptime   db `uptime\0`
+        shell_sp dw 0
 
         ;; Strings
-        cat_prefix db `cat \0`
-        cat_usage db `Usage: cat <filename>\r\n\0`
-        disk_error db `Disk read error\r\n\0`
-        file_not_found db `File not found\r\n\0`
-        help_prefix db `Available commands: \0`
-        invalid_message db `that's an invalid command\r\n\0`
-        newline db `\r\n\0`
-        prompt db `$ \0`
-        shutdown_fail db `APM shutdown not supported\r\n\0`
+        SHELL_ERROR db `Shell not found\r\n\0`
+        SHELL_NAME db `shell\0`

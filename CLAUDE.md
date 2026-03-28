@@ -17,7 +17,8 @@ Requires `nasm` (`brew install nasm`).
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
 - **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, displays date/time, saves boot tick count. Contains shared functions: `clear_screen`, `print_string`, `print_char`, `print_bcd`, `print_date`, `print_time`, `serial_char`.
-- **Stage 2**: CLI loop, command dispatch, line editor, graphics mode, filesystem, syscall interface (INT 30h).
+- **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem, line editor, graphics mode.
+- **Shell** (`src/programs/shell.asm`): Loaded from filesystem at `program_base` (`0x6000`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0x9000` for filesystem reads.
 - **Stack** at `0050h:7700h` (linear `0x7C00`, grows downward).
@@ -32,7 +33,7 @@ Trivial read-only filesystem on the floppy disk:
 - **Sector dir_sector (6)**: File table / directory (32 entries x 16 bytes)
 - **Sectors dir_sector+1 onward**: File data
 
-Directory entry format (16 bytes): 12 bytes filename (null-terminated), 2 bytes start sector, 2 bytes file size. Files are limited to one sector (512 bytes).
+Directory entry format (16 bytes): 12 bytes filename (null-terminated), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
 Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
@@ -52,28 +53,33 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 11h   | io_gets      | Read line into buffer, CX = length                    |
 | 12h   | io_putc      | Print char in AL (screen + serial)                    |
 | 13h   | io_puts      | Print string at SI (screen + serial)                  |
-| 20h   | scr_clear    | Clear screen                                          |
+| 20h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
+| 21h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
+| 30h   | scr_clear    | Clear screen                                          |
+| 31h   | scr_graphics | Enter graphics mode                                   |
 | F0h   | sys_exit     | Return to shell                                       |
 | F1h   | sys_reboot   | Reboot                                                |
 | F2h   | sys_shutdown  | Shutdown                                              |
 
 ## File Structure
 
-- `src/kernel/bboeos.asm` — Stage 1 boot code, CLI loop, `%include` directives, variables, command table, strings
-- `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
-- `src/kernel/commands.asm` — Command handlers (`handle_*`), `cat_file`, `process_command`, `print_help`, `print_uptime`, `print_dec_byte`
+- `src/include/constants.asm` — Shared constants (`buffer`, `disk_buffer`, `dir_sector`, `program_base`, etc.)
+- `src/kernel/bboeos.asm` — Stage 1 boot code, shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`, `visual_bell`
+- `src/kernel/readline.asm` — `cursor_back_n`, `read_line` with full line editing (insert, delete, cursor movement, kill/yank)
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `graphics` mode, `reboot`, `shutdown`
+- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
-- `make_os.sh` — Build script (assembles kernel and creates floppy image)
+- `make_os.sh` — Build script (assembles kernel and shell, creates floppy image)
 
 ## Key Conventions
 
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
-- Command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `handle_*` function, a table entry, and the command string.
-- Commands with arguments (like `cat`) use prefix matching in `process_command` before the table dispatch.
+- Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
+- Commands with arguments (like `cat`) use prefix matching before the table dispatch.
+- Programs are loaded at `program_base` (`0x6000`). The shell is the first program loaded at boot.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `dir_sector` constant, stage 2 sector count adjusts automatically.
 - Screen-only operations (cursor repositioning, insert/delete redraws) use direct `int 10h` calls with parallel `serial_char` calls for serial console sync. Do not route screen redraw loops through `print_char` as that would produce duplicate serial output.

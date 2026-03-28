@@ -26,10 +26,6 @@ if [ ${#FILENAME} -gt $FNAME_MAX ]; then
 fi
 
 FILE_SIZE=$(wc -c < "$FILE" | tr -d ' ')
-if [ "$FILE_SIZE" -gt 512 ]; then
-    echo "Error: file exceeds 512 bytes (single-sector limit)" >&2
-    exit 1
-fi
 if [ "$FILE_SIZE" -eq 0 ]; then
     echo "Error: file is empty" >&2
     exit 1
