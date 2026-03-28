@@ -445,12 +445,18 @@ read_line:
         je .extended_key
         cmp al, 0E0h            ; Extended key (alternate)
         je .extended_key
-        cmp al, `\b`            ; Backspace
-        je .backspace
+        cmp al, 01h             ; Ctrl+A — beginning of line
+        je .ctrl_a
         cmp al, 03h             ; Ctrl+C — cancel line
         je .ctrl_c
         cmp al, 04h             ; Ctrl+D — shutdown
         je .ctrl_d
+        cmp al, 05h             ; Ctrl+E — end of line
+        je .ctrl_e
+        cmp al, `\b`            ; Backspace
+        je .backspace
+        cmp al, 0Bh             ; Ctrl+K — kill to end of line
+        je .ctrl_k
         cmp al, 0Ch             ; Ctrl+L — clear screen
         je .ctrl_l
         cmp al, `\r`            ; Enter
@@ -508,6 +514,19 @@ read_line:
         call .delete_at_cursor
         jmp .read_char
 
+        .ctrl_a:
+        cmp cx, buffer
+        je .read_char
+        mov ah, 0Eh
+        xor bx, bx
+        .ca_loop:
+        mov al, `\b`
+        int 10h
+        dec cx
+        cmp cx, buffer
+        jne .ca_loop
+        jmp .read_char
+
         .ctrl_c:
         mov ah, 0Eh
         xor bx, bx
@@ -522,6 +541,44 @@ read_line:
         .ctrl_d:
         call shutdown
         jmp .read_char          ; If shutdown fails, continue
+
+        .ctrl_e:
+        cmp cx, dx
+        je .read_char
+        mov ah, 0Eh
+        .ce_loop:
+        mov bx, cx
+        mov al, [bx]
+        xor bx, bx
+        int 10h
+        inc cx
+        cmp cx, dx
+        jne .ce_loop
+        jmp .read_char
+
+        .ctrl_k:
+        cmp cx, dx
+        je .read_char
+        push si
+        mov ah, 0Eh
+        xor bx, bx
+        mov si, dx
+        sub si, cx              ; Count of chars to erase
+        push si                 ; Save count
+        .ck_erase:
+        mov al, ' '
+        int 10h
+        dec si
+        jnz .ck_erase
+        pop si                  ; Restore count
+        .ck_back:
+        mov al, `\b`
+        int 10h
+        dec si
+        jnz .ck_back
+        mov dx, cx              ; Truncate buffer at cursor
+        pop si
+        jmp .read_char
 
         .ctrl_l:
         call clear_screen
