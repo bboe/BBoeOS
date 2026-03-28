@@ -17,6 +17,13 @@ cat_file:
         mov si, disk_buffer
         .cat_print:
         lodsb
+        cmp al, `\n`
+        jne .cat_putc
+        push ax
+        mov al, `\r`
+        call print_char
+        pop ax
+        .cat_putc:
         call print_char
         loop .cat_print
 
