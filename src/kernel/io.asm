@@ -63,7 +63,7 @@ load_file:
         jc .lf_done
         push cx
         cmp cx, 512
-        jle .lf_partial
+        jbe .lf_partial
         mov cx, 256             ; Full sector = 256 words
         jmp .lf_copy
         .lf_partial:
@@ -75,7 +75,7 @@ load_file:
         rep movsw
         pop cx
         sub cx, 512
-        jle .lf_loaded
+        jbe .lf_loaded
         inc bl                  ; Next sector
         jmp .lf_sector
         .lf_loaded:

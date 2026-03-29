@@ -3,6 +3,7 @@
 %include "constants.asm"
 
 main:
+        cld
         mov si, [EXEC_ARG]
         test si, si
         jz .usage
@@ -25,7 +26,7 @@ main:
         ;; Print up to 512 bytes or remaining bytes
         mov dx, cx              ; Save remaining bytes
         cmp cx, 512
-        jle .print_sector
+        jbe .print_sector
         mov cx, 512
 .print_sector:
         mov si, DISK_BUFFER
@@ -36,7 +37,7 @@ main:
         loop .print
 
         sub dx, 512
-        jle .empty
+        jbe .empty
         mov cx, dx              ; Remaining bytes
         inc bl                  ; Next sector
         jmp .read_sector

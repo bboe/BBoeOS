@@ -235,7 +235,7 @@ read_line:
         mov bx, dx
         sub bx, cx
         cmp bx, MAX_INPUT
-        jle .ck_save
+        jbe .ck_save
         mov bx, MAX_INPUT
         .ck_save:
         mov [kill_length], bx
@@ -312,7 +312,7 @@ read_line:
         sub bx, BUFFER
         cmp bx, MAX_INPUT
         pop bx
-        jl .ic_ok
+        jb .ic_ok
         stc                     ; Set carry flag to signal buffer full
         ret
         .ic_ok:

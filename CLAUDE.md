@@ -99,6 +99,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - INT 10h AH=03h clobbers CX (returns cursor scanline shape) — save any value in CX before calling.
 - `mul` clobbers DX (result in DX:AX) — save DX if needed.
 - 32-bit registers (EAX, ECX, EDX) are usable with operand-size prefix (386+).
+- Use unsigned conditional jumps (`jb`/`jbe`/`ja`/`jae`) for byte counts, file sizes, and buffer lengths — not signed (`jl`/`jle`/`jg`/`jge`). Signed jumps misinterpret values > 32767.
+- Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.) — the direction flag may be in an unknown state at program entry.
 - Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
 
 ## Testing
