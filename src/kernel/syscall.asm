@@ -15,6 +15,8 @@ syscall_handler:
         je .net_arp
         cmp ah, SYS_NET_INIT   ; net_init
         je .net_init
+        cmp ah, SYS_NET_PING   ; net_ping
+        je .net_ping
         cmp ah, SYS_NET_RECV   ; net_recv
         je .net_recv
         cmp ah, SYS_NET_SEND   ; net_send
@@ -95,6 +97,10 @@ syscall_handler:
         pop cx
         pop si
         clc
+        jmp .iret_cf
+
+        .net_ping:
+        call icmp_ping
         jmp .iret_cf
 
         .net_recv:

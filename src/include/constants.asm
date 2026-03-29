@@ -20,8 +20,9 @@
 
         %assign SYS_NET_ARP 20h
         %assign SYS_NET_INIT 21h
-        %assign SYS_NET_RECV 22h
-        %assign SYS_NET_SEND 23h
+        %assign SYS_NET_PING 22h
+        %assign SYS_NET_RECV 23h
+        %assign SYS_NET_SEND 24h
 
         %assign SYS_RTC_DATETIME 30h
         %assign SYS_RTC_UPTIME 31h

@@ -816,7 +816,237 @@ arp_table_lookup:
         pop ax
         ret
 
+icmp_ping:
+        ;; Send ICMP echo request and wait for reply
+        ;; Input: SI = pointer to 4-byte target IP
+        ;; Output: AX = round-trip time in timer ticks, CF set on timeout
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+
+        mov [.ip_target], si
+
+        ;; Build ICMP echo request in icmp_buf (16 bytes: 8 header + 8 data)
+        mov di, icmp_buf
+        cld
+        mov al, 8              ; Type: Echo Request
+        stosb
+        xor al, al             ; Code: 0
+        stosb
+        xor ax, ax             ; Checksum placeholder
+        stosw
+        mov ax, 0100h          ; Identifier: 1 (big-endian)
+        stosw
+        mov ax, [ping_seq]
+        xchg al, ah            ; Big-endian
+        stosw
+        inc word [ping_seq]
+        xor ax, ax             ; 8 bytes of payload data (zeros)
+        stosw
+        stosw
+        stosw
+        stosw
+
+        ;; Compute ICMP checksum
+        mov si, icmp_buf
+        mov cx, 16
+        call ip_checksum
+        mov [icmp_buf + 2], ax
+
+        ;; Record start time
+        xor ah, ah
+        int 1Ah                ; CX:DX = ticks since midnight
+        mov [.ip_start], dx
+
+        ;; Send via IP
+        mov bx, [.ip_target]
+        mov al, 1              ; Protocol: ICMP
+        mov si, icmp_buf
+        mov cx, 16
+        call ip_send
+        jc .ping_timeout
+
+        ;; Poll for ICMP echo reply
+        mov bx, 0FFFFh
+        .ping_poll:
+        call ne2k_recv
+        jc .ping_next
+
+        ;; Check: EtherType=IP (offset 12-13), Protocol=ICMP (offset 23),
+        ;; ICMP Type=Echo Reply (offset 34)
+        cmp byte [di+12], 08h
+        jne .ping_other
+        cmp byte [di+13], 00h
+        jne .ping_other
+        cmp byte [di+23], 1   ; IP protocol = ICMP
+        jne .ping_other
+        cmp byte [di+34], 0   ; ICMP type = Echo Reply
+        jne .ping_other
+
+        ;; Got reply — compute RTT
+        xor ah, ah
+        int 1Ah
+        sub dx, [.ip_start]
+        mov ax, dx
+        clc
+        jmp .ping_done
+
+        .ping_other:
+        ;; Handle ARP while waiting
+        push si
+        mov si, di
+        call arp_handle_packet
+        pop si
+
+        .ping_next:
+        dec bx
+        jnz .ping_poll
+
+        .ping_timeout:
+        xor ax, ax
+        stc
+
+        .ping_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        ret
+
+        .ip_start dw 0
+        .ip_target dw 0
+
+ip_checksum:
+        ;; Compute ones-complement checksum over a buffer
+        ;; Input: SI = data pointer, CX = length in bytes (must be even)
+        ;; Output: AX = checksum (complemented, ready to store)
+        push bx
+        push cx
+        push si
+
+        xor bx, bx
+        shr cx, 1             ; Word count
+        .cksum_loop:
+        lodsw
+        add bx, ax
+        adc bx, 0             ; Fold carry
+        loop .cksum_loop
+
+        not bx
+        mov ax, bx
+
+        pop si
+        pop cx
+        pop bx
+        ret
+
+ip_send:
+        ;; Send an IP packet wrapped in an Ethernet frame
+        ;; Input: BX = pointer to 4-byte dest IP
+        ;;        AL = IP protocol number
+        ;;        SI = pointer to payload data
+        ;;        CX = payload length in bytes
+        ;; Output: CF set on error (ARP timeout or send failure)
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+
+        ;; Save inputs
+        mov [.is_proto], al
+        mov [.is_plen], cx
+        mov [.is_payload], si
+        mov [.is_destip], bx
+
+        ;; 1. Resolve destination MAC via ARP (may use NET_TX_BUF)
+        mov si, bx
+        call arp_resolve
+        jc .ip_send_done
+
+        ;; 2. Build Ethernet header at NET_TX_BUF
+        mov si, di             ; SI = resolved dest MAC
+        mov di, NET_TX_BUF
+        cld
+        movsw                  ; Dest MAC
+        movsw
+        movsw
+        mov si, mac_addr       ; Src MAC
+        movsw
+        movsw
+        movsw
+        mov ax, 0008h          ; EtherType: IPv4 (0x0800 big-endian)
+        stosw
+
+        ;; 3. Build IP header at NET_TX_BUF + 14 (DI is already there)
+        mov al, 45h            ; Version 4, IHL 5 (20 bytes)
+        stosb
+        xor al, al             ; DSCP/ECN = 0
+        stosb
+        mov ax, [.is_plen]     ; Total length = 20 + payload
+        add ax, 20
+        xchg al, ah            ; Big-endian
+        stosw
+        mov ax, [ip_id]        ; Identification
+        xchg al, ah
+        stosw
+        inc word [ip_id]
+        mov al, 40h            ; Flags: Don't Fragment
+        stosb
+        xor al, al             ; Fragment offset: 0
+        stosb
+        mov al, 64             ; TTL
+        stosb
+        mov al, [.is_proto]    ; Protocol
+        stosb
+        xor ax, ax             ; Header checksum (placeholder)
+        stosw
+        push si
+        mov si, our_ip         ; Source IP
+        movsd
+        mov si, [.is_destip]   ; Destination IP
+        movsd
+        pop si
+
+        ;; 4. Copy payload to NET_TX_BUF + 34 (DI is already there)
+        mov si, [.is_payload]
+        mov cx, [.is_plen]
+        rep movsb
+
+        ;; 5. Compute and store IP header checksum
+        mov si, NET_TX_BUF + 14
+        mov cx, 20
+        call ip_checksum
+        mov [NET_TX_BUF + 24], ax ; Offset 14 + 10
+
+        ;; 6. Send the frame
+        mov si, NET_TX_BUF
+        mov cx, [.is_plen]
+        add cx, 34             ; 14 (Eth) + 20 (IP) + payload
+        call ne2k_send
+
+        .ip_send_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+        .is_destip dw 0
+        .is_payload dw 0
+        .is_plen dw 0
+        .is_proto db 0
+
         ;; Network state
         arp_evict dw 0
         arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
+        icmp_buf times 16 db 0
+        ip_id dw 1
         our_ip db 10, 0, 2, 15
+        ping_seq dw 1
