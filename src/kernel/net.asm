@@ -222,3 +222,111 @@ ne2k_init:
         pop cx
         pop ax
         ret
+
+ne2k_send:
+        ;; Send a raw Ethernet frame via the NE2000
+        ;; Input: SI = pointer to frame data, CX = frame length in bytes
+        ;; Output: CF clear on success, CF set on error
+        push ax
+        push cx
+        push dx
+        push si
+
+        ;; Ensure minimum Ethernet frame size (60 bytes, NIC adds 4-byte FCS)
+        cmp cx, 60
+        jae .len_ok
+        mov cx, 60
+        .len_ok:
+
+        push cx                ; Save frame length for TX byte count
+
+        ;; Round up to even byte count for word-mode DMA
+        inc cx
+        and cx, 0FFFEh
+
+        ;; Set remote DMA start address to TX buffer (page * 256)
+        mov dx, NE2K_BASE + 08h ; RSAR0
+        xor al, al
+        out dx, al
+        inc dx                  ; RSAR1
+        mov al, NE2K_TX_PAGE
+        out dx, al
+
+        ;; Set remote byte count
+        mov dx, NE2K_BASE + 0Ah ; RBCR0
+        mov al, cl
+        out dx, al
+        inc dx                  ; RBCR1
+        mov al, ch
+        out dx, al
+
+        ;; Start remote write DMA
+        mov dx, NE2K_BASE       ; CR
+        mov al, 12h             ; Page 0, start, remote write
+        out dx, al
+
+        ;; Write frame data to NIC via data port
+        shr cx, 1              ; Word count
+        mov dx, NE2K_BASE + 10h ; Data port
+        cld
+        rep outsw
+
+        ;; Wait for remote DMA complete
+        mov dx, NE2K_BASE + 07h ; ISR
+        .wait_dma:
+        in al, dx
+        test al, 40h           ; RDC bit
+        jz .wait_dma
+        mov al, 40h
+        out dx, al             ; Acknowledge RDC
+
+        pop cx                 ; Restore frame length
+
+        ;; Set TX page start register
+        mov dx, NE2K_BASE + 04h ; TPSR
+        mov al, NE2K_TX_PAGE
+        out dx, al
+
+        ;; Set TX byte count
+        mov dx, NE2K_BASE + 05h ; TBCR0
+        mov al, cl
+        out dx, al
+        inc dx                  ; TBCR1
+        mov al, ch
+        out dx, al
+
+        ;; Issue transmit command
+        mov dx, NE2K_BASE       ; CR
+        mov al, 26h             ; Page 0, start, transmit
+        out dx, al
+
+        ;; Wait for transmit complete (PTX or TXE bit in ISR)
+        mov dx, NE2K_BASE + 07h ; ISR
+        mov cx, 0FFFFh
+        .wait_tx:
+        in al, dx
+        test al, 0Ah           ; PTX (02h) or TXE (08h)
+        jnz .tx_done
+        loop .wait_tx
+        stc                    ; Timeout
+        jmp .send_done
+
+        .tx_done:
+        test al, 08h           ; Transmit error?
+        jnz .tx_error
+        mov al, 0Ah
+        out dx, al             ; Acknowledge PTX + TXE
+        clc
+        jmp .send_done
+
+        .tx_error:
+        mov al, 0Ah
+        out dx, al             ; Acknowledge
+        stc
+
+        .send_done:
+        pop si
+        pop dx
+        pop cx
+        pop ax
+        ret

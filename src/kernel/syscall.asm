@@ -13,6 +13,8 @@ syscall_handler:
 
         cmp ah, SYS_NET_INIT   ; net_init
         je .net_init
+        cmp ah, SYS_NET_SEND   ; net_send
+        je .net_send
 
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
@@ -85,6 +87,10 @@ syscall_handler:
         pop cx
         pop si
         clc
+        jmp .iret_cf
+
+        .net_send:
+        call ne2k_send
         jmp .iret_cf
 
         .rtc_datetime:
