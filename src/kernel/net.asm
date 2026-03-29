@@ -330,3 +330,144 @@ ne2k_send:
         pop cx
         pop ax
         ret
+
+ne2k_recv:
+        ;; Receive a packet from the NE2000 RX ring buffer (polled)
+        ;; Output: DI = NET_RX_BUF (packet data), CX = packet length
+        ;;         CF clear if packet received, CF set if no packet available
+        push ax
+        push bx
+        push dx
+        push si
+
+        ;; Read CURR from page 1
+        mov dx, NE2K_BASE       ; CR
+        mov al, 62h             ; Page 1, start, DMA abort
+        out dx, al
+        mov dx, NE2K_BASE + 07h ; CURR (page 1)
+        in al, dx
+        mov bl, al              ; BL = CURR
+
+        ;; Switch back to page 0
+        mov dx, NE2K_BASE       ; CR
+        mov al, 22h             ; Page 0, start, DMA abort
+        out dx, al
+
+        ;; Next read page = BOUNDARY + 1 (wrap at PSTOP)
+        mov dx, NE2K_BASE + 03h ; BOUNDARY
+        in al, dx
+        inc al
+        cmp al, NE2K_RX_STOP
+        jb .no_wrap_read
+        mov al, NE2K_RX_START
+        .no_wrap_read:
+
+        ;; If next read page == CURR, ring is empty
+        cmp al, bl
+        je .no_packet
+
+        mov bh, al              ; BH = page to read from
+
+        ;; Read 4-byte ring buffer header via remote DMA
+        mov dx, NE2K_BASE + 08h ; RSAR0
+        xor al, al
+        out dx, al              ; Address low = 0 (page-aligned)
+        inc dx                  ; RSAR1
+        mov al, bh
+        out dx, al              ; Address high = read page
+
+        mov dx, NE2K_BASE + 0Ah ; RBCR0
+        mov al, 4
+        out dx, al
+        inc dx                  ; RBCR1
+        xor al, al
+        out dx, al
+
+        mov dx, NE2K_BASE       ; CR
+        mov al, 0Ah             ; Start, remote read DMA
+        out dx, al
+
+        ;; Read header (word mode): word 1 = [next_page:status], word 2 = length
+        mov dx, NE2K_BASE + 10h ; Data port
+        in ax, dx               ; AL = status, AH = next page
+        mov bl, ah              ; BL = next page pointer
+        in ax, dx               ; AX = total length (including 4-byte header)
+        sub ax, 4
+        mov cx, ax              ; CX = Ethernet frame length
+
+        ;; Wait for header DMA complete
+        mov dx, NE2K_BASE + 07h ; ISR
+        .wait_hdr_dma:
+        in al, dx
+        test al, 40h            ; RDC bit
+        jz .wait_hdr_dma
+        mov al, 40h
+        out dx, al              ; Acknowledge
+
+        ;; Read packet data at (read_page * 256 + 4)
+        push cx                 ; Save packet length
+
+        ;; Round up to even for word-mode DMA
+        mov ax, cx
+        inc ax
+        and ax, 0FFFEh
+        mov cx, ax
+
+        mov dx, NE2K_BASE + 08h ; RSAR0
+        mov al, 4               ; Past the 4-byte header
+        out dx, al
+        inc dx                  ; RSAR1
+        mov al, bh              ; Read page
+        out dx, al
+
+        mov dx, NE2K_BASE + 0Ah ; RBCR0
+        mov al, cl
+        out dx, al
+        inc dx                  ; RBCR1
+        mov al, ch
+        out dx, al
+
+        mov dx, NE2K_BASE       ; CR
+        mov al, 0Ah             ; Start, remote read DMA
+        out dx, al
+
+        ;; Read packet data into NET_RX_BUF
+        shr cx, 1              ; Word count
+        mov di, NET_RX_BUF
+        mov dx, NE2K_BASE + 10h ; Data port
+        cld
+        rep insw
+
+        ;; Wait for packet DMA complete
+        mov dx, NE2K_BASE + 07h ; ISR
+        .wait_pkt_dma:
+        in al, dx
+        test al, 40h            ; RDC bit
+        jz .wait_pkt_dma
+        mov al, 40h
+        out dx, al              ; Acknowledge
+
+        ;; Update BOUNDARY = next_page - 1 (wrap at PSTART)
+        mov al, bl              ; Next page from header
+        dec al
+        cmp al, NE2K_RX_START
+        jae .no_wrap_bndy
+        mov al, NE2K_RX_STOP - 1
+        .no_wrap_bndy:
+        mov dx, NE2K_BASE + 03h ; BOUNDARY
+        out dx, al
+
+        pop cx                 ; Restore packet length
+        mov di, NET_RX_BUF
+        clc
+        jmp .recv_done
+
+        .no_packet:
+        stc
+
+        .recv_done:
+        pop si
+        pop dx
+        pop bx
+        pop ax
+        ret

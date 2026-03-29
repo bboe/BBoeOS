@@ -19,7 +19,8 @@
         %assign SYS_IO_PUTS 13h
 
         %assign SYS_NET_INIT 20h
-        %assign SYS_NET_SEND 21h
+        %assign SYS_NET_RECV 21h
+        %assign SYS_NET_SEND 22h
 
         %assign SYS_RTC_DATETIME 30h
         %assign SYS_RTC_UPTIME 31h
