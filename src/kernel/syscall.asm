@@ -11,6 +11,9 @@ syscall_handler:
         cmp ah, SYS_IO_PUTS    ; io_puts
         je .io_puts
 
+        cmp ah, SYS_NET_INIT   ; net_init
+        je .net_init
+
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
@@ -67,6 +70,21 @@ syscall_handler:
         .io_puts:
         call put_string
         iret
+
+        .net_init:
+        call ne2k_probe
+        jc .iret_cf
+        ;; Copy MAC address to caller's buffer at DI
+        push si
+        push cx
+        cld
+        mov si, mac_addr
+        mov cx, 3              ; 6 bytes = 3 words
+        rep movsw
+        pop cx
+        pop si
+        clc
+        jmp .iret_cf
 
         .rtc_datetime:
         ;; Returns date+time in BCD:

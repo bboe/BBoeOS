@@ -15,7 +15,8 @@ IMG="$1"
 FILE="$2"
 FILENAME=$(basename "$FILE")
 
-DIR_SECTOR_OFFSET=$((5 * 512))  # Sector 6 at byte offset 2560
+DIR_SECTOR=$(grep '%assign DIR_SECTOR' src/include/constants.asm | awk '{print $3}')
+DIR_SECTOR_OFFSET=$(( (DIR_SECTOR - 1) * 512 ))
 ENTRY_SIZE=16
 MAX_ENTRIES=32
 FNAME_MAX=11
@@ -33,7 +34,7 @@ fi
 
 # Find next free directory entry and next free data sector
 NEXT_ENTRY=-1
-NEXT_DATA_SECTOR=7  # First data sector
+NEXT_DATA_SECTOR=$((DIR_SECTOR + 1))  # First data sector
 
 for i in $(seq 0 $((MAX_ENTRIES - 1))); do
     OFFSET=$((DIR_SECTOR_OFFSET + i * ENTRY_SIZE))

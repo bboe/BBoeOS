@@ -91,6 +91,7 @@ boot_shell:
         jmp .shell_halt
 
 %include "io.asm"
+%include "net.asm"
 %include "syscall.asm"
 %include "system.asm"
 
