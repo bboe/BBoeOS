@@ -74,6 +74,7 @@ syscall_handler:
         .net_init:
         call ne2k_probe
         jc .iret_cf
+        call ne2k_init
         ;; Copy MAC address to caller's buffer at DI
         push si
         push cx

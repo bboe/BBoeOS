@@ -32,6 +32,11 @@ main:
         mov al, `\n`
         mov ah, SYS_IO_PUTC
         int 30h
+
+        mov si, MSG_INIT
+        mov ah, SYS_IO_PUTS
+        int 30h
+
         mov ah, SYS_EXIT
         int 30h
 
@@ -44,6 +49,7 @@ main:
 
         ;; Data
         my_mac times 6 db 0
+        MSG_INIT db `NIC initialized\n\0`
         MSG_MAC db `NIC found: \0`
         MSG_NO_NIC db `No NIC found\n\0`
 

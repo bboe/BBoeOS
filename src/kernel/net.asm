@@ -1,3 +1,8 @@
+        ;; NE2000 on-board RAM page layout (16KB = 64 pages of 256 bytes)
+        %assign NE2K_RX_START 46h  ; RX ring start (6 TX pages = 1536 bytes)
+        %assign NE2K_RX_STOP 80h   ; RX ring end (one past last page)
+        %assign NE2K_TX_PAGE 40h   ; TX buffer start page
+
 ne2k_probe:
         ;; Probe and reset NE2000 NIC, read MAC address into mac_addr
         ;; Output: CF clear on success, CF set on failure (no NIC or timeout)
@@ -122,3 +127,98 @@ ne2k_probe:
 
         ;; Variables
         mac_addr times 6 db 0
+
+ne2k_init:
+        ;; Fully initialize the NE2000 for sending and receiving packets
+        ;; Must be called after successful ne2k_probe
+        push ax
+        push cx
+        push dx
+        push si
+
+        ;; Page 0, stop, DMA abort
+        mov dx, NE2K_BASE
+        mov al, 21h
+        out dx, al
+
+        ;; Set up RX ring buffer pages
+        mov dx, NE2K_BASE + 01h ; PSTART
+        mov al, NE2K_RX_START
+        out dx, al
+        mov dx, NE2K_BASE + 02h ; PSTOP
+        mov al, NE2K_RX_STOP
+        out dx, al
+        mov dx, NE2K_BASE + 03h ; BOUNDARY
+        mov al, NE2K_RX_START
+        out dx, al
+
+        ;; Set TX page start
+        mov dx, NE2K_BASE + 04h ; TPSR
+        mov al, NE2K_TX_PAGE
+        out dx, al
+
+        ;; Switch to page 1 to set CURR and physical address
+        mov dx, NE2K_BASE       ; CR
+        mov al, 61h             ; Page 1, stop, DMA abort
+        out dx, al
+
+        ;; Set CURR (next page NIC will write to)
+        mov dx, NE2K_BASE + 07h ; CURR (page 1)
+        mov al, NE2K_RX_START + 1
+        out dx, al
+
+        ;; Program physical address registers PAR0-PAR5 (page 1, regs 01h-06h)
+        cld
+        mov si, mac_addr
+        mov dx, NE2K_BASE + 01h
+        mov cx, 6
+        .set_mac:
+        lodsb
+        out dx, al
+        inc dx
+        loop .set_mac
+
+        ;; Set multicast filter to accept all (MAR0-MAR7, page 1, regs 08h-0Fh)
+        mov dx, NE2K_BASE + 08h
+        mov cx, 8
+        mov al, 0FFh
+        .set_mar:
+        out dx, al
+        inc dx
+        loop .set_mar
+
+        ;; Switch back to page 0
+        mov dx, NE2K_BASE       ; CR
+        mov al, 21h             ; Page 0, stop, DMA abort
+        out dx, al
+
+        ;; Accept broadcast and unicast packets
+        mov dx, NE2K_BASE + 0Ch ; RCR
+        mov al, 04h             ; AB (Accept Broadcast)
+        out dx, al
+
+        ;; Normal transmit mode (no loopback)
+        mov dx, NE2K_BASE + 0Dh ; TCR
+        xor al, al
+        out dx, al
+
+        ;; Clear all pending interrupts
+        mov dx, NE2K_BASE + 07h ; ISR
+        mov al, 0FFh
+        out dx, al
+
+        ;; Disable interrupt generation (polled mode)
+        mov dx, NE2K_BASE + 0Fh ; IMR
+        xor al, al
+        out dx, al
+
+        ;; Start the NIC
+        mov dx, NE2K_BASE       ; CR
+        mov al, 22h             ; Page 0, start, DMA abort
+        out dx, al
+
+        pop si
+        pop dx
+        pop cx
+        pop ax
+        ret
