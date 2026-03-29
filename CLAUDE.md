@@ -57,7 +57,13 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
-| 20h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
+| 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
+| 21h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
+| 22h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |
+| 23h   | net_recv     | Receive frame, DI = buf, CX = len, CF if none          |
+| 24h   | net_send     | Send raw Ethernet frame, SI = frame, CX = len, CF err  |
+| 25h   | net_udp_recv | UDP recv, DI = data, CX = len, BX = src port, CF none  |
+| 26h   | net_udp_send | UDP send, BX = IP, DI = src port, DX = dst port, SI = data, CX = len |
 | 30h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
 | 31h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
 | 40h   | scr_clear    | Clear screen                                          |
@@ -79,14 +85,18 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`
-- `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe` — included in stage 2
+- `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
+- `src/programs/dns.asm` — DNS program: resolves example.com via UDP DNS query
 - `src/programs/ls.asm` — Ls program: lists files in the directory
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
+- `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
+- `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request
+- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to 10.0.2.2
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 

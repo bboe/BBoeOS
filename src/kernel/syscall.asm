@@ -21,6 +21,10 @@ syscall_handler:
         je .net_recv
         cmp ah, SYS_NET_SEND   ; net_send
         je .net_send
+        cmp ah, SYS_NET_UDP_RECV ; net_udp_recv
+        je .net_udp_recv
+        cmp ah, SYS_NET_UDP_SEND ; net_udp_send
+        je .net_udp_send
 
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
@@ -109,6 +113,14 @@ syscall_handler:
 
         .net_send:
         call ne2k_send
+        jmp .iret_cf
+
+        .net_udp_recv:
+        call udp_recv
+        jmp .iret_cf
+
+        .net_udp_send:
+        call udp_send
         jmp .iret_cf
 
         .rtc_datetime:
