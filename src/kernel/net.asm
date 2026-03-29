@@ -1,4 +1,6 @@
         ;; NE2000 on-board RAM page layout (16KB = 64 pages of 256 bytes)
+        %assign ARP_ENTRY_SIZE 10  ; 4 bytes IP + 6 bytes MAC
+        %assign ARP_TABLE_SIZE 8
         %assign NE2K_RX_START 46h  ; RX ring start (6 TX pages = 1536 bytes)
         %assign NE2K_RX_STOP 80h   ; RX ring end (one past last page)
         %assign NE2K_TX_PAGE 40h   ; TX buffer start page
@@ -471,3 +473,350 @@ ne2k_recv:
         pop bx
         pop ax
         ret
+
+arp_handle_packet:
+        ;; Process a received Ethernet frame for ARP
+        ;; Input: SI = pointer to received frame (NET_RX_BUF)
+        ;; Updates ARP table on reply, sends reply to requests for our IP
+        push ax
+        push cx
+        push si
+        push di
+
+        ;; Check EtherType at offset 12 = 0x0806 (ARP)
+        cmp byte [si+12], 08h
+        jne .arp_done
+        cmp byte [si+13], 06h
+        jne .arp_done
+
+        ;; Check opcode at offset 20-21
+        cmp byte [si+20], 0
+        jne .arp_done
+        mov al, [si+21]
+        cmp al, 2              ; ARP reply
+        je .arp_reply
+        cmp al, 1              ; ARP request
+        je .arp_request_in
+        jmp .arp_done
+
+        .arp_reply:
+        ;; Add sender to ARP table (sender MAC at +22, sender IP at +28)
+        push si
+        lea di, [si+22]       ; DI = sender MAC
+        add si, 28            ; SI = sender IP
+        call arp_table_add
+        pop si
+        jmp .arp_done
+
+        .arp_request_in:
+        ;; Check if target IP (offset +38) matches our IP
+        mov eax, [si+38]
+        cmp eax, [our_ip]
+        jne .arp_done
+
+        ;; Add requester to our ARP table
+        push si
+        lea di, [si+22]       ; DI = sender MAC
+        add si, 28            ; SI = sender IP
+        call arp_table_add
+        pop si
+
+        ;; Build ARP reply at NET_TX_BUF
+        mov di, NET_TX_BUF
+        cld
+
+        ;; Ethernet dest = requester's MAC (from offset +6 in received frame)
+        push si
+        add si, 6
+        movsw
+        movsw
+        movsw
+        pop si
+
+        ;; Ethernet src = our MAC
+        push si
+        mov si, mac_addr
+        movsw
+        movsw
+        movsw
+        pop si
+
+        ;; EtherType: ARP
+        mov ax, 0608h
+        stosw
+
+        ;; ARP header: hwtype, proto, sizes, opcode=reply
+        mov ax, 0100h
+        stosw
+        mov ax, 0008h
+        stosw
+        mov ax, 0406h
+        stosw
+        mov ax, 0200h          ; Opcode: reply
+        stosw
+
+        ;; Sender = us (MAC + IP)
+        push si
+        mov si, mac_addr
+        movsw
+        movsw
+        movsw
+        mov si, our_ip
+        movsd
+        pop si
+
+        ;; Target = requester (MAC at +22, IP at +28)
+        push si
+        add si, 22
+        movsw
+        movsw
+        movsw
+        pop si
+        push si
+        add si, 28
+        movsd
+        pop si
+
+        ;; Pad to 60 bytes
+        xor ax, ax
+        mov cx, 9
+        rep stosw
+
+        ;; Send reply
+        push si
+        mov si, NET_TX_BUF
+        mov cx, 60
+        call ne2k_send
+        pop si
+
+        .arp_done:
+        pop di
+        pop si
+        pop cx
+        pop ax
+        ret
+
+arp_resolve:
+        ;; Resolve an IP address to a MAC address via ARP
+        ;; Input: SI = pointer to 4-byte target IP
+        ;; Output: DI = pointer to 6-byte MAC in ARP table, CF set on timeout
+        push ax
+        push bx
+        push cx
+        push dx
+
+        ;; Check ARP table first
+        call arp_table_lookup
+        jnc .resolve_done
+
+        ;; Not cached — send ARP request and poll for reply
+        call arp_send_request
+        jc .resolve_timeout
+
+        mov bx, 0FFFFh         ; Timeout counter
+        .resolve_poll:
+        call ne2k_recv
+        jc .resolve_next       ; No packet available
+
+        ;; Got a packet — check if it's ARP
+        push si
+        mov si, di             ; SI = received packet
+        call arp_handle_packet
+        pop si
+
+        ;; Check table again
+        call arp_table_lookup
+        jnc .resolve_done
+
+        .resolve_next:
+        dec bx
+        jnz .resolve_poll
+
+        .resolve_timeout:
+        stc
+
+        .resolve_done:
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+arp_send_request:
+        ;; Send an ARP request for the given IP
+        ;; Input: SI = pointer to 4-byte target IP
+        ;; Output: CF from ne2k_send
+        push ax
+        push cx
+        push si
+        push di
+
+        ;; Build Ethernet + ARP frame at NET_TX_BUF
+        mov di, NET_TX_BUF
+        cld
+
+        ;; Ethernet dest: broadcast
+        mov al, 0FFh
+        mov cx, 6
+        rep stosb
+
+        ;; Ethernet src: our MAC
+        push si
+        mov si, mac_addr
+        movsw
+        movsw
+        movsw
+        pop si
+
+        ;; EtherType: ARP (0x0806 big-endian)
+        mov ax, 0608h          ; Stored little-endian: 08h, 06h
+        stosw
+
+        ;; ARP: hardware type 0x0001, protocol type 0x0800
+        mov ax, 0100h          ; 00h, 01h
+        stosw
+        mov ax, 0008h          ; 08h, 00h
+        stosw
+
+        ;; Hardware size 6, protocol size 4
+        mov ax, 0406h
+        stosw
+
+        ;; Opcode: request (0x0001)
+        mov ax, 0100h          ; 00h, 01h
+        stosw
+
+        ;; Sender MAC
+        push si
+        mov si, mac_addr
+        movsw
+        movsw
+        movsw
+        pop si
+
+        ;; Sender IP (our_ip)
+        push si
+        mov si, our_ip
+        movsd
+        pop si
+
+        ;; Target MAC: zeros
+        xor ax, ax
+        stosw
+        stosw
+        stosw
+
+        ;; Target IP (from caller's SI)
+        push si
+        movsd
+        pop si
+
+        ;; Pad to 60 bytes (42 so far, 18 more = 9 words)
+        xor ax, ax
+        mov cx, 9
+        rep stosw
+
+        ;; Send the frame
+        mov si, NET_TX_BUF
+        mov cx, 60
+        call ne2k_send
+
+        pop di
+        pop si
+        pop cx
+        pop ax
+        ret
+
+arp_table_add:
+        ;; Add or update an ARP table entry
+        ;; Input: SI = pointer to 4-byte IP, DI = pointer to 6-byte MAC
+        push ax
+        push bx
+        push cx
+        push si
+        push di
+
+        mov bx, arp_table
+        mov cx, ARP_TABLE_SIZE
+        mov eax, [si]
+
+        ;; Find existing entry or first empty slot
+        .add_loop:
+        cmp dword [bx], 0
+        je .add_here
+        cmp [bx], eax
+        je .add_here
+        add bx, ARP_ENTRY_SIZE
+        loop .add_loop
+
+        ;; Table full — round-robin eviction
+        mov ax, [arp_evict]
+        mov bx, ax
+        shl ax, 1              ; ax = idx * 2
+        shl bx, 3              ; bx = idx * 8
+        add ax, bx             ; ax = idx * 10 = idx * ARP_ENTRY_SIZE
+        add ax, arp_table
+        mov bx, ax
+        mov ax, [arp_evict]
+        inc ax
+        cmp ax, ARP_TABLE_SIZE
+        jb .no_wrap
+        xor ax, ax
+        .no_wrap:
+        mov [arp_evict], ax
+
+        .add_here:
+        mov [bx], eax          ; Store IP
+        ;; Copy 6-byte MAC
+        mov si, di             ; Source = MAC pointer
+        lea di, [bx+4]        ; Dest = table MAC field
+        cld
+        movsw
+        movsw
+        movsw
+
+        pop di
+        pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+arp_table_lookup:
+        ;; Look up an IP in the ARP table
+        ;; Input: SI = pointer to 4-byte IP
+        ;; Output: DI = pointer to 6-byte MAC, CF set if not found
+        push ax
+        push bx
+        push cx
+
+        mov bx, arp_table
+        mov cx, ARP_TABLE_SIZE
+        mov eax, [si]
+
+        .lookup_loop:
+        cmp dword [bx], 0     ; Empty entry?
+        je .lookup_miss
+        cmp [bx], eax
+        je .lookup_hit
+        add bx, ARP_ENTRY_SIZE
+        loop .lookup_loop
+
+        .lookup_miss:
+        stc
+        jmp .lookup_done
+
+        .lookup_hit:
+        lea di, [bx+4]        ; DI = pointer to MAC (past IP)
+        clc
+
+        .lookup_done:
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+        ;; Network state
+        arp_evict dw 0
+        arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
+        our_ip db 10, 0, 2, 15

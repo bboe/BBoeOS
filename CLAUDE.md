@@ -74,6 +74,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
 - `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
 - `src/include/print_hex.asm` — Shared: `print_hex` (prints AL as two uppercase hex digits)
+- `src/include/print_mac.asm` — Shared: `print_mac` (prints SI as colon-separated hex MAC address)
 - `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings

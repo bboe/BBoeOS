@@ -11,6 +11,8 @@ syscall_handler:
         cmp ah, SYS_IO_PUTS    ; io_puts
         je .io_puts
 
+        cmp ah, SYS_NET_ARP    ; net_arp
+        je .net_arp
         cmp ah, SYS_NET_INIT   ; net_init
         je .net_init
         cmp ah, SYS_NET_RECV   ; net_recv
@@ -74,6 +76,10 @@ syscall_handler:
         .io_puts:
         call put_string
         iret
+
+        .net_arp:
+        call arp_resolve
+        jmp .iret_cf
 
         .net_init:
         call ne2k_probe
