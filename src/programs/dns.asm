@@ -16,6 +16,7 @@ main:
         test bx, bx
         jz .no_arg
         mov [domain_arg], bx
+        mov byte [found_a], 0
 
         ;; Print "Querying <domain>...\n"
         mov si, MSG_QUERY
@@ -124,7 +125,10 @@ main:
         add di, bx             ; Skip rdata
         dec byte [ans_count]
         jnz .answer_loop
-        jmp .no_answer
+        cmp byte [found_a], 0
+        je .no_answer
+        mov ah, SYS_EXIT
+        int 30h
 
         .found_cname:
         ;; Print "<rr_name> is a CNAME for <target>\n"
@@ -183,6 +187,10 @@ main:
         mov al, `\n`
         mov ah, SYS_IO_PUTC
         int 30h
+        mov byte [found_a], 1
+        add di, 4              ; Advance past 4-byte IP to next RR
+        dec byte [ans_count]
+        jnz .answer_loop
         mov ah, SYS_EXIT
         int 30h
 
@@ -290,6 +298,7 @@ encode_domain:
         ;; Data
         ans_count db 0
         cname_buf times 256 db 0
+        found_a db 0
         dns_base dw 0
         dns_header:
         db 00h, 01h           ; Transaction ID
