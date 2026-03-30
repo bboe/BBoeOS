@@ -11,6 +11,21 @@ syscall_handler:
         cmp ah, SYS_IO_PUTS    ; io_puts
         je .io_puts
 
+        cmp ah, SYS_NET_ARP    ; net_arp
+        je .net_arp
+        cmp ah, SYS_NET_INIT   ; net_init
+        je .net_init
+        cmp ah, SYS_NET_PING   ; net_ping
+        je .net_ping
+        cmp ah, SYS_NET_RECV   ; net_recv
+        je .net_recv
+        cmp ah, SYS_NET_SEND   ; net_send
+        je .net_send
+        cmp ah, SYS_NET_UDP_RECV ; net_udp_recv
+        je .net_udp_recv
+        cmp ah, SYS_NET_UDP_SEND ; net_udp_send
+        je .net_udp_send
+
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
@@ -67,6 +82,46 @@ syscall_handler:
         .io_puts:
         call put_string
         iret
+
+        .net_arp:
+        call arp_resolve
+        jmp .iret_cf
+
+        .net_init:
+        call ne2k_probe
+        jc .iret_cf
+        call ne2k_init
+        ;; Copy MAC address to caller's buffer at DI
+        push si
+        push cx
+        cld
+        mov si, mac_addr
+        mov cx, 3              ; 6 bytes = 3 words
+        rep movsw
+        pop cx
+        pop si
+        clc
+        jmp .iret_cf
+
+        .net_ping:
+        call icmp_ping
+        jmp .iret_cf
+
+        .net_recv:
+        call ne2k_recv
+        jmp .iret_cf
+
+        .net_send:
+        call ne2k_send
+        jmp .iret_cf
+
+        .net_udp_recv:
+        call udp_recv
+        jmp .iret_cf
+
+        .net_udp_send:
+        call udp_send
+        jmp .iret_cf
 
         .rtc_datetime:
         ;; Returns date+time in BCD:

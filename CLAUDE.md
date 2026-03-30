@@ -8,6 +8,7 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 ./make_os.sh                                           # assemble and create floppy image
 qemu-system-i386 -drive file=floppy.img,format=raw     # run in QEMU
 qemu-system-i386 -drive file=floppy.img,format=raw -serial stdio  # with serial console
+qemu-system-i386 -drive file=floppy.img,format=raw -serial stdio -netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300  # with NE2000 NIC
 ```
 
 Requires `nasm` (`brew install nasm`).
@@ -30,12 +31,16 @@ Trivial read-only filesystem on the floppy disk:
 
 - **Sector 1**: MBR (stage 1)
 - **Sectors 2 to dir_sector-1**: Stage 2
-- **Sector dir_sector (6)**: File table / directory (32 entries x 16 bytes)
+- **Sector dir_sector (10)**: File table / directory (32 entries x 16 bytes)
 - **Sectors dir_sector+1 onward**: File data
 
 Directory entry format (16 bytes): 12 bytes filename (null-terminated), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
 Use `./add_file.sh floppy.img <file>` to add files to the image after building.
+
+### Networking
+
+NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers: `NET_TX_BUF` at `0x9200` (1536 bytes), `NET_RX_BUF` at `0x9800` (1536 bytes).
 
 ### Serial Console
 
@@ -52,9 +57,16 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
-| 20h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
-| 21h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
-| 30h   | scr_clear    | Clear screen                                          |
+| 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
+| 21h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
+| 22h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |
+| 23h   | net_recv     | Receive frame, DI = buf, CX = len, CF if none          |
+| 24h   | net_send     | Send raw Ethernet frame, SI = frame, CX = len, CF err  |
+| 25h   | net_udp_recv | UDP recv, DI = data, CX = len, BX = src port, CF none  |
+| 26h   | net_udp_send | UDP send, BX = IP, DI = src port, DX = dst port, SI = data, CX = len |
+| 30h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
+| 31h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
+| 40h   | scr_clear    | Clear screen                                          |
 | F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F1h   | sys_exit     | Reload and return to shell                             |
 | F2h   | sys_reboot   | Reboot                                                |
@@ -62,23 +74,31 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## File Structure
 
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `PROGRAM_BASE`, `SYS_*` syscall numbers, `EXEC_ARG`, etc.)
+- `add_file.sh` — Host-side script to add files to the floppy image filesystem
+- `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
 - `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
+- `src/include/print_hex.asm` — Shared: `print_hex` (prints AL as two uppercase hex digits)
+- `src/include/print_mac.asm` — Shared: `print_mac` (prints SI as colon-separated hex MAC address)
 - `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
-- `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
+- `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `read_sector`
+- `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
+- `src/programs/dns.asm` — DNS program: resolves example.com via UDP DNS query
 - `src/programs/ls.asm` — Ls program: lists files in the directory
+- `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
+- `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
+- `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request
+- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to 10.0.2.2
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
-- `add_file.sh` — Host-side script to add files to the floppy image filesystem
-- `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 
 ## Key Conventions
 
