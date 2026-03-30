@@ -77,6 +77,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
 - `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
+- `src/include/dns_query.asm` — Shared: `dns_query` (sends DNS A query for domain at SI; returns DI = first answer record, AL = ANCOUNT, CF on error; caller defines `dns_base`, `dns_query_buf`, `dns_server_ip`)
+- `src/include/encode_domain.asm` — Shared: `encode_domain` (encodes null-terminated domain string at SI into DNS QNAME wire format at DI, CF on error)
 - `src/include/parse_ip.asm` — Shared: `parse_ip` (parses dotted-decimal string at SI into 4-byte buffer at DI, CF on error)
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
 - `src/include/print_byte_dec.asm` — Shared: `print_byte_dec` (prints AL as 1-3 digit decimal, no leading zeros)
@@ -94,12 +96,12 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
-- `src/programs/dns.asm` — DNS program: resolves example.com via UDP DNS query
+- `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
 - `src/programs/ls.asm` — Ls program: lists files in the directory
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
 - `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
 - `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request
-- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to a user-supplied IP address
+- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS)
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 

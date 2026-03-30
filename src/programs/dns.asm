@@ -29,70 +29,15 @@ main:
         mov ah, SYS_IO_PUTS
         int 30h
 
-        ;; Build DNS query: fixed header + encoded QNAME + QTYPE + QCLASS
-        mov di, dns_query_buf
-        mov si, dns_header
-        mov cx, 12
-        rep movsb              ; Copy 12-byte header
+        ;; Send DNS A query and position DI at first answer record
         mov si, [domain_arg]
-        call encode_domain     ; Append QNAME
-        jc .no_arg
-        mov ax, 0100h          ; QTYPE: A (big-endian 0x0001)
-        stosw
-        mov ax, 0100h          ; QCLASS: IN (big-endian 0x0001)
-        stosw
-        mov cx, di
-        sub cx, dns_query_buf  ; CX = total query length
+        call dns_query
+        jc .dns_err
+        test al, al
+        jz .no_answer
+        mov [ans_count], al
 
-        ;; Send DNS query
-        mov bx, dns_server
-        mov di, 1024           ; Source port
-        mov dx, 53             ; Dest port (DNS)
-        mov si, dns_query_buf
-        mov ah, SYS_NET_UDP_SEND
-        int 30h
-        jc .send_err
-
-        ;; Poll for DNS response
-        mov bx, 0FFFFh
-        .poll:
-        mov ah, SYS_NET_UDP_RECV
-        int 30h
-        jnc .got_response
-        dec bx
-        jnz .poll
-
-        mov si, MSG_TIMEOUT
-        mov ah, SYS_IO_PUTS
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
-
-        .got_response:
-        ;; DI = DNS response payload, CX = length
-        mov [dns_base], di     ; Save message base for compression pointer resolution
-        ;; Check ANCOUNT at offset 6-7 (big-endian)
-        cmp byte [di+7], 0
-        je .no_answer
-        mov al, [di+7]
-        mov [ans_count], al    ; Save ANCOUNT (low byte sufficient)
-
-        ;; Skip DNS header (12 bytes)
-        add di, 12
-
-        ;; Skip QNAME (length-prefixed labels, null-terminated)
-        .skip_qname:
-        cmp byte [di], 0
-        je .qname_done
-        movzx bx, byte [di]   ; Label length
-        inc di
-        add di, bx             ; Skip label bytes
-        jmp .skip_qname
-        .qname_done:
-        inc di                 ; Skip null terminator
-        add di, 4              ; Skip QTYPE + QCLASS
-
-        ;; Walk answer records, printing each CNAME and the final A
+        ;; Walk answer records, printing each CNAME and all A records
         .answer_loop:
         mov [rr_name_ptr], di  ; Save RR name start for decode_domain
 
@@ -165,7 +110,10 @@ main:
         pop di                 ; Restore DI to next RR position
         dec byte [ans_count]
         jnz .answer_loop
-        jmp .no_answer
+        cmp byte [found_a], 0
+        je .no_answer
+        mov ah, SYS_EXIT
+        int 30h
 
         .found_a:
         ;; Print "<rr_name> is at <ip>\n"
@@ -208,8 +156,8 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-        .send_err:
-        mov si, MSG_SEND_ERR
+        .dns_err:
+        mov si, MSG_DNS_ERR
         mov ah, SYS_IO_PUTS
         int 30h
         mov ah, SYS_EXIT
@@ -260,69 +208,28 @@ decode_domain:
         stosb
         ret
 
-encode_domain:
-        ;; Encode null-terminated domain string into DNS QNAME format
-        ;; Input: SI = domain string, DI = output buffer
-        ;; Output: DI advanced past encoded name, CF set on error
-        ;; Clobbers: AX, BX, CX
-        .label_start:
-        mov bx, di             ; BX = position of length byte (fill in later)
-        inc di                 ; Skip length byte
-        xor cx, cx             ; CX = character count for this label
-        .char_loop:
-        lodsb
-        cmp al, '.'
-        je .dot
-        test al, al
-        jz .end
-        stosb
-        inc cx
-        jmp .char_loop
-        .dot:
-        test cx, cx
-        jz .error              ; Empty label (leading or consecutive dots)
-        mov [bx], cl           ; Fill in length byte
-        jmp .label_start
-        .end:
-        test cx, cx
-        jz .error              ; Empty input or trailing dot
-        mov [bx], cl           ; Fill in length byte
-        xor al, al
-        stosb                  ; Null terminator
-        clc
-        ret
-        .error:
-        stc
-        ret
-
         ;; Data
         ans_count db 0
         cname_buf times 256 db 0
-        found_a db 0
         dns_base dw 0
-        dns_header:
-        db 00h, 01h           ; Transaction ID
-        db 01h, 00h           ; Flags: standard query, recursion desired
-        db 00h, 01h           ; QDCOUNT: 1
-        db 00h, 00h           ; ANCOUNT: 0
-        db 00h, 00h           ; NSCOUNT: 0
-        db 00h, 00h           ; ARCOUNT: 0
         dns_query_buf times 300 db 0
-        dns_server db 10, 0, 2, 3
+        dns_server_ip db 10, 0, 2, 3
         domain_arg dw 0
+        found_a db 0
         my_mac times 6 db 0
         rr_name_buf times 256 db 0
         rr_name_ptr dw 0
 
         MSG_CNAME db ` is a CNAME for \0`
+        MSG_DNS_ERR db `DNS query failed\n\0`
         MSG_ELLIPSIS db `...\n\0`
         MSG_IS_AT db ` is at \0`
         MSG_NO_ANS db `No answer in DNS response\n\0`
         MSG_NO_NIC db `No NIC found\n\0`
         MSG_QUERY db `Querying \0`
-        MSG_SEND_ERR db `Send failed\n\0`
-        MSG_TIMEOUT db `DNS timeout\n\0`
         MSG_USAGE db `Usage: dns <domain>\n\0`
 
+%include "dns_query.asm"
+%include "encode_domain.asm"
 %include "print_byte_dec.asm"
 %include "print_ip.asm"
