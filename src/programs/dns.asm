@@ -130,37 +130,6 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-print_byte_dec:
-        ;; Print AL as 1-3 digit decimal (0-255), no leading zeros
-        push ax
-        push bx
-        push cx
-
-        xor ah, ah
-        xor bx, bx            ; Digit count
-        mov cl, 10
-        .div_loop:
-        div cl                 ; AL = quotient, AH = remainder (digit)
-        push ax
-        inc bx
-        test al, al
-        jz .print_digits
-        xor ah, ah
-        jmp .div_loop
-        .print_digits:
-        pop ax
-        mov al, ah
-        add al, '0'
-        mov ah, SYS_IO_PUTC
-        int 30h
-        dec bx
-        jnz .print_digits
-
-        pop cx
-        pop bx
-        pop ax
-        ret
-
         ;; Data
         dns_server db 10, 0, 2, 3
         my_mac times 6 db 0
@@ -187,3 +156,5 @@ print_byte_dec:
         MSG_RESULT db `example.com is at \0`
         MSG_SEND_ERR db `Send failed\n\0`
         MSG_TIMEOUT db `DNS timeout\n\0`
+
+%include "print_byte_dec.asm"
