@@ -964,7 +964,16 @@ ip_send:
         mov [.is_destip], bx
 
         ;; 1. Resolve destination MAC via ARP (may use NET_TX_BUF)
+        ;;    If dest is not on local subnet (10.0.2.0/24), use gateway
         mov si, bx
+        mov eax, [si]
+        and eax, 0FFFFFFh          ; Mask to first 3 bytes (subnet /24)
+        mov edx, [our_ip]
+        and edx, 0FFFFFFh
+        cmp eax, edx
+        je .ip_send_local
+        mov si, gateway_ip         ; Non-local: route via gateway
+        .ip_send_local:
         call arp_resolve
         jc .ip_send_done
 
@@ -1158,6 +1167,7 @@ udp_send:
         ;; Network state
         arp_evict dw 0
         arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
+        gateway_ip db 10, 0, 2, 2
         icmp_buf times 16 db 0
         ip_id dw 1
         our_ip db 10, 0, 2, 15

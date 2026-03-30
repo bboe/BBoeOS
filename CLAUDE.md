@@ -77,9 +77,12 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `add_file.sh` — Host-side script to add files to the floppy image filesystem
 - `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
+- `src/include/parse_ip.asm` — Shared: `parse_ip` (parses dotted-decimal string at SI into 4-byte buffer at DI, CF on error)
 - `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
+- `src/include/print_byte_dec.asm` — Shared: `print_byte_dec` (prints AL as 1-3 digit decimal, no leading zeros)
 - `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
 - `src/include/print_hex.asm` — Shared: `print_hex` (prints AL as two uppercase hex digits)
+- `src/include/print_ip.asm` — Shared: `print_ip` (prints SI as dotted-decimal IPv4 address)
 - `src/include/print_mac.asm` — Shared: `print_mac` (prints SI as colon-separated hex MAC address)
 - `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
@@ -96,7 +99,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
 - `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
 - `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request
-- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to 10.0.2.2
+- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to a user-supplied IP address
 - `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
 - `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
 
