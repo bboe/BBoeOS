@@ -72,6 +72,8 @@ main:
         ;; Check ANCOUNT at offset 6-7 (big-endian)
         cmp byte [di+7], 0
         je .no_answer
+        mov al, [di+7]
+        mov [ans_count], al    ; Save ANCOUNT (low byte sufficient)
 
         ;; Skip DNS header (12 bytes)
         add di, 12
@@ -88,25 +90,38 @@ main:
         inc di                 ; Skip null terminator
         add di, 4              ; Skip QTYPE + QCLASS
 
-        ;; Now at answer section
-        ;; Skip name field (may be compressed pointer 0xC0xx or labels)
+        ;; Loop through answer records looking for TYPE A (0x0001)
+        .answer_loop:
+        ;; Skip answer name (compressed pointer or labels)
         cmp byte [di], 0C0h
-        jb .skip_answer_name
+        jb .skip_ans_labels
         add di, 2              ; Compressed pointer = 2 bytes
-        jmp .at_answer_rr
-        .skip_answer_name:
-        .skip_aname:
+        jmp .check_type
+        .skip_ans_labels:
         cmp byte [di], 0
-        je .aname_done
+        je .ans_labels_done
         movzx bx, byte [di]
         inc di
         add di, bx
-        jmp .skip_aname
-        .aname_done:
+        jmp .skip_ans_labels
+        .ans_labels_done:
         inc di
 
-        .at_answer_rr:
-        ;; type(2) + class(2) + TTL(4) + rdlength(2) = 10 bytes before rdata
+        .check_type:
+        ;; TYPE is big-endian; A record = 0x0001 = word 0x0100 little-endian
+        cmp word [di], 0100h
+        je .found_a
+        ;; Not A: skip CLASS(2) + TTL(4) = 6, read RDLENGTH(2), skip rdata
+        add di, 6
+        movzx bx, byte [di+1]  ; RDLENGTH low byte (high byte is 0 for normal records)
+        add di, 2
+        add di, bx             ; Skip rdata
+        dec byte [ans_count]
+        jnz .answer_loop
+        jmp .no_answer
+
+        .found_a:
+        ;; TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes before rdata
         add di, 10
 
         ;; Print "<domain> is at <ip>\n"
@@ -188,6 +203,7 @@ encode_domain:
         ret
 
         ;; Data
+        ans_count db 0
         dns_header:
         db 00h, 01h           ; Transaction ID
         db 01h, 00h           ; Flags: standard query, recursion desired
