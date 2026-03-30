@@ -69,6 +69,7 @@ main:
 
         .got_response:
         ;; DI = DNS response payload, CX = length
+        mov [dns_base], di     ; Save message base for compression pointer resolution
         ;; Check ANCOUNT at offset 6-7 (big-endian)
         cmp byte [di+7], 0
         je .no_answer
@@ -90,13 +91,15 @@ main:
         inc di                 ; Skip null terminator
         add di, 4              ; Skip QTYPE + QCLASS
 
-        ;; Loop through answer records looking for TYPE A (0x0001)
+        ;; Walk answer records, printing each CNAME and the final A
         .answer_loop:
+        mov [rr_name_ptr], di  ; Save RR name start for decode_domain
+
         ;; Skip answer name (compressed pointer or labels)
         cmp byte [di], 0C0h
         jb .skip_ans_labels
-        add di, 2              ; Compressed pointer = 2 bytes
-        jmp .check_type
+        add di, 2
+        jmp .at_rr_type
         .skip_ans_labels:
         cmp byte [di], 0
         je .ans_labels_done
@@ -107,25 +110,69 @@ main:
         .ans_labels_done:
         inc di
 
-        .check_type:
-        ;; TYPE is big-endian; A record = 0x0001 = word 0x0100 little-endian
+        .at_rr_type:
+        ;; TYPE is big-endian; check for A (0x0001) and CNAME (0x0005)
         cmp word [di], 0100h
         je .found_a
-        ;; Not A: skip CLASS(2) + TTL(4) = 6, read RDLENGTH(2), skip rdata
-        add di, 6
-        movzx bx, byte [di+1]  ; RDLENGTH low byte (high byte is 0 for normal records)
+        cmp word [di], 0500h
+        je .found_cname
+
+        ;; Unknown type: skip TYPE(2)+CLASS(2)+TTL(4) = 8 bytes to RDLENGTH
+        add di, 8
+        movzx bx, byte [di+1]  ; RDLENGTH low byte (big-endian, high byte assumed 0)
         add di, 2
         add di, bx             ; Skip rdata
         dec byte [ans_count]
         jnz .answer_loop
         jmp .no_answer
 
-        .found_a:
-        ;; TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes before rdata
-        add di, 10
+        .found_cname:
+        ;; Print "<rr_name> is a CNAME for <target>\n"
+        ;; Advance DI to rdata: TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2) = 10 bytes
+        add di, 8              ; Skip TYPE(2)+CLASS(2)+TTL(4) to reach RDLENGTH
+        movzx bx, byte [di+1]  ; RDLENGTH low byte
+        add di, 2              ; DI = rdata start (CNAME target in wire format)
+        mov ax, di
+        add ax, bx
+        push ax                ; Push next-RR position
+        ;; Decode RR name into rr_name_buf
+        push di
+        mov si, [rr_name_ptr]
+        mov di, rr_name_buf
+        call decode_domain
+        pop di
+        ;; Decode CNAME target into cname_buf
+        mov si, di
+        mov di, cname_buf
+        call decode_domain
+        ;; Print "<rr_name> is a CNAME for <target>\n"
+        mov si, rr_name_buf
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov si, MSG_CNAME
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov si, cname_buf
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov al, `\n`
+        mov ah, SYS_IO_PUTC
+        int 30h
+        pop di                 ; Restore DI to next RR position
+        dec byte [ans_count]
+        jnz .answer_loop
+        jmp .no_answer
 
-        ;; Print "<domain> is at <ip>\n"
-        mov si, [domain_arg]
+        .found_a:
+        ;; Print "<rr_name> is at <ip>\n"
+        ;; Decode RR name into rr_name_buf
+        push di
+        mov si, [rr_name_ptr]
+        mov di, rr_name_buf
+        call decode_domain
+        pop di
+        add di, 10             ; Skip TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2) to rdata
+        mov si, rr_name_buf
         mov ah, SYS_IO_PUTS
         int 30h
         mov si, MSG_IS_AT
@@ -167,6 +214,44 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
+decode_domain:
+        ;; Decode DNS wire-format name to null-terminated dotted string
+        ;; Input: SI = pointer to wire-format name
+        ;;        DI = output buffer
+        ;;        [dns_base] = start of DNS message (for pointer resolution)
+        ;; Output: null-terminated string written at DI
+        ;; Clobbers: AX, BX, CX
+        xor bh, bh             ; BH = labels-written count (0 = first label)
+        .loop:
+        mov al, [si]
+        test al, al
+        jz .done               ; Null label = end of name
+        cmp al, 0C0h
+        jae .pointer           ; Compression pointer
+        ;; Regular label: AL = length
+        movzx cx, al
+        inc si
+        test bh, bh
+        jz .write_label        ; No dot before first label
+        mov al, '.'
+        stosb
+        .write_label:
+        inc bh
+        rep movsb
+        jmp .loop
+        .pointer:
+        ;; Offset = ((al & 0x3F) << 8) | [si+1]
+        and al, 3Fh
+        mov ah, [si+1]
+        xchg al, ah            ; AX = (high_6bits << 8) | low_8bits
+        add ax, [dns_base]
+        mov si, ax             ; Follow pointer
+        jmp .loop
+        .done:
+        xor al, al
+        stosb
+        ret
+
 encode_domain:
         ;; Encode null-terminated domain string into DNS QNAME format
         ;; Input: SI = domain string, DI = output buffer
@@ -204,6 +289,8 @@ encode_domain:
 
         ;; Data
         ans_count db 0
+        cname_buf times 256 db 0
+        dns_base dw 0
         dns_header:
         db 00h, 01h           ; Transaction ID
         db 01h, 00h           ; Flags: standard query, recursion desired
@@ -215,7 +302,10 @@ encode_domain:
         dns_server db 10, 0, 2, 3
         domain_arg dw 0
         my_mac times 6 db 0
+        rr_name_buf times 256 db 0
+        rr_name_ptr dw 0
 
+        MSG_CNAME db ` is a CNAME for \0`
         MSG_ELLIPSIS db `...\n\0`
         MSG_IS_AT db ` is at \0`
         MSG_NO_ANS db `No answer in DNS response\n\0`
