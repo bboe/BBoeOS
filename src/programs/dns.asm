@@ -11,16 +11,43 @@ main:
         int 30h
         jc .no_nic
 
-        ;; Send DNS query for example.com
+        ;; Require domain argument
+        mov bx, [EXEC_ARG]
+        test bx, bx
+        jz .no_arg
+        mov [domain_arg], bx
+
+        ;; Print "Querying <domain>...\n"
         mov si, MSG_QUERY
         mov ah, SYS_IO_PUTS
         int 30h
+        mov si, bx
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov si, MSG_ELLIPSIS
+        mov ah, SYS_IO_PUTS
+        int 30h
 
+        ;; Build DNS query: fixed header + encoded QNAME + QTYPE + QCLASS
+        mov di, dns_query_buf
+        mov si, dns_header
+        mov cx, 12
+        rep movsb              ; Copy 12-byte header
+        mov si, [domain_arg]
+        call encode_domain     ; Append QNAME
+        jc .no_arg
+        mov ax, 0100h          ; QTYPE: A (big-endian 0x0001)
+        stosw
+        mov ax, 0100h          ; QCLASS: IN (big-endian 0x0001)
+        stosw
+        mov cx, di
+        sub cx, dns_query_buf  ; CX = total query length
+
+        ;; Send DNS query
         mov bx, dns_server
         mov di, 1024           ; Source port
         mov dx, 53             ; Dest port (DNS)
-        mov si, dns_query
-        mov cx, dns_query_len
+        mov si, dns_query_buf
         mov ah, SYS_NET_UDP_SEND
         int 30h
         jc .send_err
@@ -82,27 +109,15 @@ main:
         ;; type(2) + class(2) + TTL(4) + rdlength(2) = 10 bytes before rdata
         add di, 10
 
-        ;; Print result
-        mov si, MSG_RESULT
+        ;; Print "<domain> is at <ip>\n"
+        mov si, [domain_arg]
         mov ah, SYS_IO_PUTS
         int 30h
-
-        ;; Print IP address from rdata (4 bytes at DI)
-        mov si, di
-        mov cx, 4
-        .print_ip:
-        lodsb
-        call print_byte_dec
-        dec cx
-        jz .ip_done
-        push cx
-        mov al, '.'
-        mov ah, SYS_IO_PUTC
+        mov si, MSG_IS_AT
+        mov ah, SYS_IO_PUTS
         int 30h
-        pop cx
-        jmp .print_ip
-        .ip_done:
-
+        mov si, di
+        call print_ip
         mov al, `\n`
         mov ah, SYS_IO_PUTC
         int 30h
@@ -111,6 +126,13 @@ main:
 
         .no_nic:
         mov si, MSG_NO_NIC
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov ah, SYS_EXIT
+        int 30h
+
+        .no_arg:
+        mov si, MSG_USAGE
         mov ah, SYS_IO_PUTS
         int 30h
         mov ah, SYS_EXIT
@@ -130,31 +152,62 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-        ;; Data
-        dns_server db 10, 0, 2, 3
-        my_mac times 6 db 0
+encode_domain:
+        ;; Encode null-terminated domain string into DNS QNAME format
+        ;; Input: SI = domain string, DI = output buffer
+        ;; Output: DI advanced past encoded name, CF set on error
+        ;; Clobbers: AX, BX, CX
+        .label_start:
+        mov bx, di             ; BX = position of length byte (fill in later)
+        inc di                 ; Skip length byte
+        xor cx, cx             ; CX = character count for this label
+        .char_loop:
+        lodsb
+        cmp al, '.'
+        je .dot
+        test al, al
+        jz .end
+        stosb
+        inc cx
+        jmp .char_loop
+        .dot:
+        test cx, cx
+        jz .error              ; Empty label (leading or consecutive dots)
+        mov [bx], cl           ; Fill in length byte
+        jmp .label_start
+        .end:
+        test cx, cx
+        jz .error              ; Empty input or trailing dot
+        mov [bx], cl           ; Fill in length byte
+        xor al, al
+        stosb                  ; Null terminator
+        clc
+        ret
+        .error:
+        stc
+        ret
 
-        ;; DNS query for example.com A record
-        dns_query:
+        ;; Data
+        dns_header:
         db 00h, 01h           ; Transaction ID
         db 01h, 00h           ; Flags: standard query, recursion desired
         db 00h, 01h           ; QDCOUNT: 1
         db 00h, 00h           ; ANCOUNT: 0
         db 00h, 00h           ; NSCOUNT: 0
         db 00h, 00h           ; ARCOUNT: 0
-        db 7, 'example'       ; QNAME: example.com
-        db 3, 'com'
-        db 0                  ; Root label terminator
-        db 00h, 01h           ; QTYPE: A
-        db 00h, 01h           ; QCLASS: IN
-        dns_query_end:
-        dns_query_len equ (dns_query_end - dns_query)
+        dns_query_buf times 300 db 0
+        dns_server db 10, 0, 2, 3
+        domain_arg dw 0
+        my_mac times 6 db 0
 
+        MSG_ELLIPSIS db `...\n\0`
+        MSG_IS_AT db ` is at \0`
         MSG_NO_ANS db `No answer in DNS response\n\0`
         MSG_NO_NIC db `No NIC found\n\0`
-        MSG_QUERY db `Querying example.com...\n\0`
-        MSG_RESULT db `example.com is at \0`
+        MSG_QUERY db `Querying \0`
         MSG_SEND_ERR db `Send failed\n\0`
         MSG_TIMEOUT db `DNS timeout\n\0`
+        MSG_USAGE db `Usage: dns <domain>\n\0`
 
 %include "print_byte_dec.asm"
+%include "print_ip.asm"
