@@ -43,9 +43,6 @@ main:
         jmp .read_sector
 
 .empty:
-        mov al, `\n`
-        mov ah, SYS_IO_PUTC
-        int 30h
         mov ah, SYS_EXIT
         int 30h
 
