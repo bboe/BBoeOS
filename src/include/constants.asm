@@ -12,8 +12,9 @@
         %assign PROGRAM_BASE 6000h
 
         ;; Syscall numbers (INT 30h, passed in AH)
-        %assign SYS_FS_FIND 00h
-        %assign SYS_FS_READ 01h
+        %assign SYS_FS_CHMOD 00h
+        %assign SYS_FS_FIND 01h
+        %assign SYS_FS_READ 02h
 
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h

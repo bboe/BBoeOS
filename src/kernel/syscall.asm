@@ -1,4 +1,6 @@
 syscall_handler:
+        cmp ah, SYS_FS_CHMOD   ; fs_chmod
+        je .fs_chmod
         cmp ah, SYS_FS_FIND    ; fs_find
         je .fs_find
         cmp ah, SYS_FS_READ    ; fs_read
@@ -43,6 +45,21 @@ syscall_handler:
         cmp ah, SYS_SHUTDOWN   ; sys_shutdown
         je .sys_shutdown
         iret
+
+        .fs_chmod:
+        ;; Update flags byte for a file: SI = filename, AL = new flags value
+        push ax                ; Save new flags value
+        call find_file         ; BX = directory entry in DISK_BUFFER
+        jc .fs_chmod_err
+        pop ax
+        mov [bx+11], al        ; Write new flags byte
+        mov al, DIR_SECTOR
+        call write_sector
+        jmp .iret_cf
+        .fs_chmod_err:
+        pop ax
+        stc
+        jmp .iret_cf
 
         .fs_find:
         call find_file

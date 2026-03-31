@@ -52,8 +52,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 | AH    | Name         | Description                                          |
 |-------|--------------|------------------------------------------------------|
-| 00h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
-| 01h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 00h   | fs_chmod     | Set file flags, SI = filename, AL = flags, CF on err  |
+| 01h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
+| 02h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
@@ -94,6 +95,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
+- `src/programs/chmod.asm` — Chmod program: sets or clears the executable bit with `+x`/`-x`
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
