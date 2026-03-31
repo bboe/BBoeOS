@@ -15,6 +15,12 @@ main:
         mov si, bx
         mov ah, SYS_IO_PUTS
         int 30h
+        test byte [bx+11], FLAG_EXEC
+        jz .no_star
+        mov al, '*'
+        mov ah, SYS_IO_PUTC
+        int 30h
+        .no_star:
         mov al, `\n`
         mov ah, SYS_IO_PUTC
         int 30h

@@ -1,8 +1,14 @@
 syscall_handler:
+        cmp ah, SYS_FS_CHMOD   ; fs_chmod
+        je .fs_chmod
+        cmp ah, SYS_FS_COPY    ; fs_copy
+        je .fs_copy
         cmp ah, SYS_FS_FIND    ; fs_find
         je .fs_find
         cmp ah, SYS_FS_READ    ; fs_read
         je .fs_read
+        cmp ah, SYS_FS_RENAME  ; fs_rename
+        je .fs_rename
 
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
@@ -44,12 +50,237 @@ syscall_handler:
         je .sys_shutdown
         iret
 
+        .fs_chmod:
+        ;; Update flags byte for a file: SI = filename, AL = new flags value
+        ;; On error: CF set, AL = ERR_PROTECTED/ERR_NOT_FOUND
+        ;; Protect shell: cannot be chmod'd
+        call .check_shell
+        jne .fs_chmod_find
+        mov al, ERR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_chmod_find:
+        push ax                ; Save new flags value
+        call find_file         ; BX = directory entry in DISK_BUFFER
+        jnc .fs_chmod_do
+        pop ax
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .fs_chmod_do:
+        pop ax
+        mov [bx+11], al        ; Write new flags byte
+        mov al, DIR_SECTOR
+        call write_sector
+        jmp .iret_cf
+
+        .fs_copy:
+        ;; Copy file: SI = source filename, DI = dest filename
+        ;; On error: CF set, AL = ERR_EXISTS/ERR_NOT_FOUND
+        ;; Check dest doesn't already exist
+        push si
+        push di
+        mov si, di
+        call find_file
+        pop di
+        pop si
+        jc .copy_check_src
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .copy_check_src:
+        ;; Find source entry (re-reads directory into DISK_BUFFER)
+        push di
+        call find_file         ; BX = source entry in DISK_BUFFER
+        pop di
+        jnc .copy_got_src
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .copy_got_src:
+        ;; Build stack frame before scan clobbers BX
+        ;; Layout (after all pushes, BP = SP):
+        ;;   [bp+0]  next_sec   [bp+2]  free_entry  [bp+4]  size
+        ;;   [bp+6]  src_sec    [bp+8]  flags        [bp+10] dest name ptr
+        push di                        ; [bp+10]: dest name ptr
+        xor ax, ax
+        mov al, [bx+11]
+        push ax                        ; [bp+8]: flags
+        xor ax, ax
+        mov al, [bx+12]
+        push ax                        ; [bp+6]: src_sec
+        mov ax, [bx+14]
+        push ax                        ; [bp+4]: size
+        ;; Scan directory: BX = free_entry (0=none), DL = next_sec
+        xor bx, bx
+        mov dl, DIR_SECTOR
+        inc dl                         ; DL = next_sec = DIR_SECTOR+1
+        mov si, DISK_BUFFER
+        mov cx, DIR_MAX_ENTRIES
+        .copy_scan:
+        cmp byte [si], 0
+        jne .copy_scan_occupied
+        test bx, bx
+        jnz .copy_scan_next
+        mov bx, si                     ; record free entry ptr
+        jmp .copy_scan_next
+        .copy_scan_occupied:
+        xor ax, ax
+        mov al, [si+12]                ; start sector
+        push bx
+        xor bx, bx
+        mov bx, [si+14]                ; size in bytes
+        add bx, 511
+        shr bx, 9                      ; ceil(size/512) = sectors used
+        add al, bl                     ; end sector = start + sectors
+        pop bx
+        cmp al, dl
+        jbe .copy_scan_next
+        mov dl, al                     ; update next_sec
+        .copy_scan_next:
+        add si, DIR_ENTRY_SIZE
+        loop .copy_scan
+        ;; Check a free directory entry was found
+        test bx, bx
+        jnz .copy_push_scan
+        add sp, 6                      ; discard size, src_sec, flags
+        pop di
+        mov al, ERR_DIR_FULL
+        stc
+        jmp .iret_cf
+        .copy_push_scan:
+        push bx                        ; [bp+2]: free_entry
+        push dx                        ; [bp+0]: next_sec (in DL)
+        mov bp, sp
+        ;; Copy sectors: BL = src_sec, CL = dest_sec, DI = remaining bytes
+        xor bx, bx
+        mov bl, [bp+6]                 ; BL = src_sec
+        xor cx, cx
+        mov cl, [bp+0]                 ; CL = next_sec (dest sector)
+        mov di, [bp+4]                 ; DI = remaining bytes
+        .copy_sector:
+        mov al, bl
+        call read_sector
+        jc .copy_disk_err
+        mov al, cl
+        call write_sector
+        jc .copy_disk_err
+        inc bl
+        inc cl
+        sub di, 512
+        jbe .copy_sectors_done
+        jmp .copy_sector
+        .copy_disk_err:
+        add sp, 10                     ; discard frame except dest name
+        pop di
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .copy_sectors_done:
+        ;; Re-read directory (overwritten during sector copies)
+        mov al, DIR_SECTOR
+        call read_sector
+        jc .copy_dir_err
+        ;; Write new directory entry: name (11 bytes, null-padded), then metadata
+        mov bx, [bp+2]                 ; BX = free_entry ptr
+        mov si, [bp+10]                ; SI = dest name ptr
+        push cx
+        mov cx, 11
+        .copy_write_name:
+        mov al, [si]
+        test al, al
+        jz .copy_name_null
+        inc si
+        mov [bx], al
+        inc bx
+        dec cx
+        jnz .copy_write_name
+        jmp .copy_write_meta
+        .copy_name_null:
+        mov byte [bx], 0
+        inc bx
+        dec cx
+        jnz .copy_name_null
+        .copy_write_meta:
+        pop cx
+        ;; BX = free_entry + 11 (flags byte position)
+        mov al, [bp+8]
+        mov [bx], al                   ; flags
+        inc bx
+        mov al, [bp+0]
+        mov [bx], al                   ; start sector low byte
+        inc bx
+        mov byte [bx], 0               ; start sector high byte
+        inc bx
+        mov ax, [bp+4]
+        mov [bx], ax                   ; file size (2 bytes)
+        mov al, DIR_SECTOR
+        call write_sector
+        add sp, 12                     ; discard full frame (6 words)
+        jmp .iret_cf
+        .copy_dir_err:
+        add sp, 10                     ; discard frame except dest name
+        pop di
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+
         .fs_find:
         call find_file
         jmp .iret_cf
 
         .fs_read:
         call read_sector
+        jmp .iret_cf
+
+        .fs_rename:
+        ;; Rename file: SI = old filename, DI = new filename (max 10 chars)
+        ;; On error: CF set, AL = ERR_PROTECTED/ERR_EXISTS/ERR_NOT_FOUND
+        ;; Protect shell: cannot be renamed
+        call .check_shell
+        jne .fs_rename_check_dup
+        mov al, ERR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_rename_check_dup:
+        ;; Check new name doesn't already exist
+        push si
+        mov si, di
+        call find_file
+        pop si
+        jc .fs_rename_find_old ; New name not found: proceed
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .fs_rename_find_old:
+        ;; find_file preserves DI, so DI still holds new name after the call
+        call find_file         ; BX = directory entry in DISK_BUFFER
+        jnc .fs_rename_do
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .fs_rename_do:
+        push cx
+        mov cx, 11
+        .rename_copy:
+        mov al, [di]
+        test al, al
+        jz .rename_null
+        inc di
+        mov [bx], al
+        inc bx
+        dec cx
+        jnz .rename_copy
+        jmp .rename_done
+        .rename_null:
+        mov byte [bx], 0
+        inc bx
+        dec cx
+        jnz .rename_null
+        .rename_done:
+        pop cx
+        mov al, DIR_SECTOR
+        call write_sector
         jmp .iret_cf
 
         .io_getc:
@@ -173,9 +404,19 @@ syscall_handler:
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
-        ;; If file not found, returns with carry set
+        ;; On error: CF set, AL = ERR_NOT_FOUND or ERR_NOT_EXEC
         call find_file
-        jc .exec_fail
+        jnc .exec_check_flag
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .exec_check_flag:
+        test byte [bx+11], FLAG_EXEC  ; Check executable bit in flags byte
+        jnz .exec_load
+        mov al, ERR_NOT_EXEC
+        stc
+        jmp .iret_cf
+        .exec_load:
         ;; Save SP from before INT 30h (skip iret frame: IP, CS, flags)
         mov bp, sp
         add bp, 6
@@ -183,11 +424,12 @@ syscall_handler:
         ;; Load program into PROGRAM_BASE
         mov di, PROGRAM_BASE
         call load_file
-        jc .exec_fail
-        jmp PROGRAM_BASE
-        .exec_fail:
+        jnc .exec_run
+        mov al, ERR_NOT_FOUND
         stc
         jmp .iret_cf
+        .exec_run:
+        jmp PROGRAM_BASE
 
         .sys_exit:
         ;; Restore stack and reload shell
@@ -218,6 +460,20 @@ syscall_handler:
         and word [bp+6], 0FFFEh ; Clear CF in saved FLAGS
         pop bp
         iret
+
+        .check_shell:
+        ;; Returns ZF set if SI points to "shell" (null-terminated)
+        push si
+        push di
+        push cx
+        cld
+        mov di, SHELL_NAME
+        mov cx, 6              ; 5 chars + null terminator
+        repe cmpsb
+        pop cx
+        pop di
+        pop si
+        ret
 
 install_syscalls:
         ;; Install INT 30h handler

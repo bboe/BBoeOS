@@ -34,7 +34,7 @@ Trivial read-only filesystem on the floppy disk:
 - **Sector dir_sector (10)**: File table / directory (32 entries x 16 bytes)
 - **Sectors dir_sector+1 onward**: File data
 
-Directory entry format (16 bytes): 12 bytes filename (null-terminated), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
+Directory entry format (16 bytes): 11 bytes filename (null-terminated, max 10 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
 Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
@@ -52,8 +52,11 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 | AH    | Name         | Description                                          |
 |-------|--------------|------------------------------------------------------|
-| 00h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
-| 01h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 00h   | fs_chmod     | Set file flags, SI = filename, AL = flags, CF on err  |
+| 01h   | fs_copy      | Copy file, SI = src filename, DI = dest filename, CF on err |
+| 02h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
+| 03h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 04h   | fs_rename    | Rename file, SI = old filename, DI = new filename, CF on err |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
@@ -89,15 +92,18 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
-- `src/kernel/io.asm` — `find_file`, `read_sector`
+- `src/kernel/io.asm` — `find_file`, `load_file`, `read_sector`, `write_sector`
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
+- `src/programs/chmod.asm` — Chmod program: sets or clears the executable bit with `+x`/`-x`
+- `src/programs/cp.asm` — Cp program: copies a file to a new name
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
-- `src/programs/ls.asm` — Ls program: lists files in the directory
+- `src/programs/ls.asm` — Ls program: lists files in the directory, marks executables with `*`
+- `src/programs/mv.asm` — Mv program: renames a file
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
 - `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
 - `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request

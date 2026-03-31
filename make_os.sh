@@ -19,5 +19,5 @@ done
 dd bs=512 count=2880 if=/dev/zero of=floppy.img
 dd conv=notrunc if=os.bin of=floppy.img
 for bin in "$tmpdir"/*; do
-    ./add_file.sh floppy.img "$bin"
+    ./add_file.sh -x floppy.img "$bin"
 done

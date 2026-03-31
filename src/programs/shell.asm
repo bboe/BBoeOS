@@ -54,7 +54,12 @@ main:
         mov si, BUFFER
         mov ah, SYS_EXEC
         int 30h                 ; Does not return on success
+        cmp al, ERR_NOT_EXEC
+        je .not_exec
         mov si, INVALID_CMD
+        jmp .output
+        .not_exec:
+        mov si, NOT_EXEC
 
 .output:
         test si, si
@@ -473,6 +478,7 @@ cmd_table:
 ;; Strings
 HELP_PREFIX   db `Commands: \0`
 INVALID_CMD   db `unknown command\n\0`
+NOT_EXEC      db `not executable\n\0`
 PROMPT        db `$ \0`
 SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 

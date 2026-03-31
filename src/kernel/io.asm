@@ -102,3 +102,22 @@ read_sector:
         pop bx
         ret
 
+write_sector:
+        ;; Write DISK_BUFFER to one sector on disk
+        ;; Input: AL = sector number (1-based CHS, cylinder 0, head 0)
+        ;; Sets carry flag on error
+        push bx
+        push cx
+        push dx
+        mov cl, al              ; CL = sector number
+        xor ch, ch              ; CH = cylinder 0
+        xor dh, dh              ; DH = head 0
+        mov dl, [boot_disk]     ; DL = drive number
+        mov bx, DISK_BUFFER     ; ES:BX = buffer
+        mov ax, 0301h           ; AH=03 (write), AL=01 (1 sector)
+        int 13h
+        pop dx
+        pop cx
+        pop bx
+        ret
+
