@@ -15,6 +15,7 @@
         %assign SYS_FS_CHMOD 00h
         %assign SYS_FS_FIND 01h
         %assign SYS_FS_READ 02h
+        %assign SYS_FS_RENAME 03h
 
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h

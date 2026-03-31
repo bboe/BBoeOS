@@ -5,6 +5,8 @@ syscall_handler:
         je .fs_find
         cmp ah, SYS_FS_READ    ; fs_read
         je .fs_read
+        cmp ah, SYS_FS_RENAME  ; fs_rename
+        je .fs_rename
 
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
@@ -67,6 +69,34 @@ syscall_handler:
 
         .fs_read:
         call read_sector
+        jmp .iret_cf
+
+        .fs_rename:
+        ;; Rename file: SI = old filename, DI = new filename (max 10 chars)
+        ;; find_file preserves DI, so DI still holds new name after the call
+        call find_file         ; BX = directory entry in DISK_BUFFER
+        jc .iret_cf
+        push cx
+        mov cx, 11
+        .rename_copy:
+        mov al, [di]
+        test al, al
+        jz .rename_null
+        inc di
+        mov [bx], al
+        inc bx
+        dec cx
+        jnz .rename_copy
+        jmp .rename_done
+        .rename_null:
+        mov byte [bx], 0
+        inc bx
+        dec cx
+        jnz .rename_null
+        .rename_done:
+        pop cx
+        mov al, DIR_SECTOR
+        call write_sector
         jmp .iret_cf
 
         .io_getc:
