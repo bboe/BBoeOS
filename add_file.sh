@@ -50,6 +50,11 @@ for i in $(seq 0 $((MAX_ENTRIES - 1))); do
         NEXT_ENTRY=$i
         break
     fi
+    ENTRY_NAME=$(dd if="$IMG" bs=1 skip="$OFFSET" count=11 2>/dev/null | tr -d '\000')
+    if [ "$ENTRY_NAME" = "$FILENAME" ]; then
+        echo "Error: file '${FILENAME}' already exists" >&2
+        exit 1
+    fi
     # Track next free data sector from this entry
     SECTOR_OFFSET=$((OFFSET + 12))
     START_SEC=$(dd if="$IMG" bs=1 skip="$SECTOR_OFFSET" count=2 2>/dev/null | od -An -tu2 | tr -d ' ')

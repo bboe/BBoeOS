@@ -80,6 +80,12 @@ syscall_handler:
         ;; Protect shell: cannot be renamed
         call .check_shell
         je .fs_rename_prot
+        ;; Check new name doesn't already exist
+        push si
+        mov si, di
+        call find_file
+        pop si
+        jnc .fs_rename_prot    ; New name exists: reject with carry
         ;; find_file preserves DI, so DI still holds new name after the call
         call find_file         ; BX = directory entry in DISK_BUFFER
         jc .iret_cf
