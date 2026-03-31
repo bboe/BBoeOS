@@ -34,7 +34,7 @@ Trivial read-only filesystem on the floppy disk:
 - **Sector dir_sector (10)**: File table / directory (32 entries x 16 bytes)
 - **Sectors dir_sector+1 onward**: File data
 
-Directory entry format (16 bytes): 12 bytes filename (null-terminated), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
+Directory entry format (16 bytes): 11 bytes filename (null-terminated, max 10 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
 Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 

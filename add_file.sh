@@ -1,13 +1,20 @@
 #!/bin/sh
 #
-# Usage: ./add_file.sh <floppy.img> <file_to_add>
+# Usage: ./add_file.sh [-x] <floppy.img> <file_to_add>
 #
 # Adds a file to the BBoeOS floppy image filesystem.
+# Use -x to mark the file as executable (sets FLAG_EXEC in the flags byte).
 
 set -e
 
+EXECUTABLE=0
+if [ "$1" = "-x" ]; then
+    EXECUTABLE=1
+    shift
+fi
+
 if [ $# -ne 2 ]; then
-    echo "Usage: $0 <floppy.img> <file_to_add>" >&2
+    echo "Usage: $0 [-x] <floppy.img> <file_to_add>" >&2
     exit 1
 fi
 
@@ -19,7 +26,7 @@ DIR_SECTOR=$(grep '%assign DIR_SECTOR' src/include/constants.asm | awk '{print $
 DIR_SECTOR_OFFSET=$(( (DIR_SECTOR - 1) * 512 ))
 ENTRY_SIZE=16
 MAX_ENTRIES=32
-FNAME_MAX=11
+FNAME_MAX=10
 
 if [ ${#FILENAME} -gt $FNAME_MAX ]; then
     echo "Error: filename '${FILENAME}' exceeds ${FNAME_MAX} characters" >&2
@@ -61,17 +68,20 @@ fi
 
 ENTRY_OFFSET=$((DIR_SECTOR_OFFSET + NEXT_ENTRY * ENTRY_SIZE))
 
-# Write filename (null-padded to 12 bytes)
+# Write filename (null-padded to 11 bytes) at offset 0
 printf '%s' "$FILENAME" | dd of="$IMG" bs=1 seek="$ENTRY_OFFSET" conv=notrunc 2>/dev/null
-# Null-pad remaining bytes
-REMAINING=$((12 - ${#FILENAME}))
+REMAINING=$((11 - ${#FILENAME}))
 dd if=/dev/zero of="$IMG" bs=1 seek=$((ENTRY_OFFSET + ${#FILENAME})) count="$REMAINING" conv=notrunc 2>/dev/null
 
-# Write start sector (2 bytes, little-endian)
+# Write flags byte at offset 11
+printf "\\$(printf '%03o' $EXECUTABLE)" | \
+    dd of="$IMG" bs=1 seek=$((ENTRY_OFFSET + 11)) conv=notrunc 2>/dev/null
+
+# Write start sector (2 bytes, little-endian) at offset 12
 printf "\\$(printf '%03o' $((NEXT_DATA_SECTOR & 0xFF)))\\$(printf '%03o' $(((NEXT_DATA_SECTOR >> 8) & 0xFF)))" | \
     dd of="$IMG" bs=1 seek=$((ENTRY_OFFSET + 12)) conv=notrunc 2>/dev/null
 
-# Write file size (2 bytes, little-endian)
+# Write file size (2 bytes, little-endian) at offset 14
 printf "\\$(printf '%03o' $((FILE_SIZE & 0xFF)))\\$(printf '%03o' $(((FILE_SIZE >> 8) & 0xFF)))" | \
     dd of="$IMG" bs=1 seek=$((ENTRY_OFFSET + 14)) conv=notrunc 2>/dev/null
 

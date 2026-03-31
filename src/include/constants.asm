@@ -4,6 +4,7 @@
         %assign DIR_SECTOR 10
         %assign DISK_BUFFER 9000h     ; 512 bytes (one sector)
         %assign EXEC_ARG 4FEh
+        %assign FLAG_EXEC 01h         ; Directory entry flags: bit 0 = executable
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
         %assign NET_TX_BUF 9200h     ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)

@@ -173,9 +173,11 @@ syscall_handler:
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
-        ;; If file not found, returns with carry set
+        ;; If file not found or not executable, returns with carry set
         call find_file
         jc .exec_fail
+        test byte [bx+11], FLAG_EXEC  ; Check executable bit in flags byte
+        jz .exec_fail
         ;; Save SP from before INT 30h (skip iret frame: IP, CS, flags)
         mov bp, sp
         add bp, 6
