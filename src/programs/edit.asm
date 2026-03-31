@@ -843,6 +843,15 @@ render:
         ;; Print status bar on row 24 (no trailing newline)
         cmp byte [confirm_quit], 0
         jne .status_confirm
+        ;; Check for a one-shot status message
+        cmp word [status_msg], 0
+        je .status_normal
+        mov si, [status_msg]
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov word [status_msg], 0
+        jmp .reposition
+        .status_normal:
         ;; Normal status: "filename [modified]  line N"
         mov si, [filename]
         mov ah, SYS_IO_PUTS
@@ -1015,27 +1024,19 @@ save_file:
         jc .write_err
 
         mov byte [dirty], 0
-        mov si, MSG_SAVED
-        mov ah, SYS_IO_PUTS
-        int 30h
+        mov word [status_msg], MSG_SAVED
         jmp .done
 
         .too_big:
-        mov si, MSG_TOO_BIG
-        mov ah, SYS_IO_PUTS
-        int 30h
+        mov word [status_msg], MSG_TOO_BIG
         jmp .done
 
         .write_err:
-        mov si, MSG_WRITE_ERR
-        mov ah, SYS_IO_PUTS
-        int 30h
+        mov word [status_msg], MSG_WRITE_ERR
         jmp .done
 
         .dir_err:
-        mov si, MSG_WRITE_ERR
-        mov ah, SYS_IO_PUTS
-        int 30h
+        mov word [status_msg], MSG_WRITE_ERR
 
         .done:
         pop di
@@ -1058,6 +1059,7 @@ save_file:
         gap_start     dw 0
         kill_len      dw 0
         orig_size     dw 0
+        status_msg    dw 0
         view_col      dw 0
         view_line     dw 0
 
@@ -1069,8 +1071,8 @@ save_file:
         MSG_LOAD_ERR     db `Load error\n\0`
         MSG_MODIFIED     db ` [modified]\0`
         MSG_NEW_FILE_ERR db `New files not supported: create with add_file.sh first\n\0`
-        MSG_SAVED        db `Saved.\n\0`
-        MSG_TOO_BIG      db `File too large to save (exceeds original size)\n\0`
+        MSG_SAVED        db `Saved.\0`
+        MSG_TOO_BIG      db `File too large to save (exceeds original size)\0`
         MSG_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
         MSG_USAGE        db `Usage: edit <filename>\n\0`
-        MSG_WRITE_ERR    db `Write error\n\0`
+        MSG_WRITE_ERR    db `Write error\0`
