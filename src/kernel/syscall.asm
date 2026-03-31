@@ -286,6 +286,16 @@ syscall_handler:
         .io_getc:
         ;; Poll both keyboard and serial, return char in AL, scan code in AH
         .getc_poll:
+        ;; Drain pushback buffer first (used when ESC sequence detection reads ahead)
+        cmp byte [serial_pb_count], 0
+        je .getc_poll_hw
+        mov al, [serial_pb_buf]    ; return first buffered byte
+        mov ah, [serial_pb_buf+1]
+        mov [serial_pb_buf], ah    ; shift second byte down
+        xor ah, ah
+        dec byte [serial_pb_count]
+        iret
+        .getc_poll_hw:
         push dx
         mov dx, 3FDh
         in al, dx
@@ -303,7 +313,89 @@ syscall_handler:
         mov dx, 3F8h
         in al, dx               ; Read the byte
         pop dx
-        xor ah, ah              ; No scan code from serial
+        cmp al, 1Bh             ; ESC? May be start of arrow key sequence
+        jne .getc_serial_done
+        ;; Poll for '[' with timeout
+        push cx
+        mov cx, 0FFFFh
+        .getc_esc_bracket:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h
+        jnz .getc_read_bracket
+        loop .getc_esc_bracket
+        pop cx
+        jmp .getc_serial_esc    ; Timeout: standalone ESC
+        .getc_read_bracket:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read second byte
+        pop dx
+        cmp al, '['
+        je .getc_esc_final
+        ;; Not '[': push it back and return ESC
+        mov [serial_pb_buf], al
+        mov byte [serial_pb_count], 1
+        pop cx
+        jmp .getc_serial_esc
+        .getc_esc_final:
+        ;; Poll for final byte (A/B/C/D) with timeout
+        mov cx, 0FFFFh
+        .getc_esc_final_poll:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h
+        jnz .getc_read_final
+        loop .getc_esc_final_poll
+        pop cx
+        mov byte [serial_pb_buf], '['
+        mov byte [serial_pb_count], 1
+        jmp .getc_serial_esc    ; Timeout: return ESC, push back '['
+        .getc_read_final:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read third byte
+        pop dx
+        pop cx
+        cmp al, 'A'
+        je .getc_arrow_up
+        cmp al, 'B'
+        je .getc_arrow_down
+        cmp al, 'C'
+        je .getc_arrow_right
+        cmp al, 'D'
+        je .getc_arrow_left
+        ;; Unknown third byte: push back '[' and the byte, return ESC
+        mov byte [serial_pb_buf], '['
+        mov [serial_pb_buf+1], al
+        mov byte [serial_pb_count], 2
+        jmp .getc_serial_esc
+        .getc_arrow_up:
+        xor al, al
+        mov ah, 48h
+        iret
+        .getc_arrow_down:
+        xor al, al
+        mov ah, 50h
+        iret
+        .getc_arrow_right:
+        xor al, al
+        mov ah, 4Dh
+        iret
+        .getc_arrow_left:
+        xor al, al
+        mov ah, 4Bh
+        iret
+        .getc_serial_esc:
+        xor ah, ah
+        mov al, 1Bh
+        iret
+        .getc_serial_done:
+        xor ah, ah
         iret
 
         .io_putc:

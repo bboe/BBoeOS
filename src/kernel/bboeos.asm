@@ -96,8 +96,10 @@ boot_shell:
 %include "system.asm"
 
         ;; Values
-        boot_ticks_high dw 0
-        boot_ticks_low  dw 0
+        boot_ticks_high  dw 0
+        boot_ticks_low   dw 0
+        serial_pb_buf    db 0, 0 ; serial pushback buffer (up to 2 bytes)
+        serial_pb_count  db 0    ; number of bytes in pushback buffer
         shell_sp dw 0
 
         ;; Strings
