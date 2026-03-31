@@ -50,6 +50,9 @@ syscall_handler:
 
         .fs_chmod:
         ;; Update flags byte for a file: SI = filename, AL = new flags value
+        ;; Protect shell: cannot be chmod'd
+        call .check_shell
+        je .fs_chmod_prot
         push ax                ; Save new flags value
         call find_file         ; BX = directory entry in DISK_BUFFER
         jc .fs_chmod_err
@@ -60,6 +63,7 @@ syscall_handler:
         jmp .iret_cf
         .fs_chmod_err:
         pop ax
+        .fs_chmod_prot:
         stc
         jmp .iret_cf
 
@@ -73,6 +77,9 @@ syscall_handler:
 
         .fs_rename:
         ;; Rename file: SI = old filename, DI = new filename (max 10 chars)
+        ;; Protect shell: cannot be renamed
+        call .check_shell
+        je .fs_rename_prot
         ;; find_file preserves DI, so DI still holds new name after the call
         call find_file         ; BX = directory entry in DISK_BUFFER
         jc .iret_cf
@@ -97,6 +104,9 @@ syscall_handler:
         pop cx
         mov al, DIR_SECTOR
         call write_sector
+        jmp .iret_cf
+        .fs_rename_prot:
+        stc
         jmp .iret_cf
 
         .io_getc:
@@ -267,6 +277,20 @@ syscall_handler:
         and word [bp+6], 0FFFEh ; Clear CF in saved FLAGS
         pop bp
         iret
+
+        .check_shell:
+        ;; Returns ZF set if SI points to "shell" (null-terminated)
+        push si
+        push di
+        push cx
+        cld
+        mov di, SHELL_NAME
+        mov cx, 6              ; 5 chars + null terminator
+        repe cmpsb
+        pop cx
+        pop di
+        pop si
+        ret
 
 install_syscalls:
         ;; Install INT 30h handler
