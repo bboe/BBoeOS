@@ -44,7 +44,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_char` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nD` for cursor back) are translated to INT 10h calls for the screen. `serial_char` writes to COM1 only (used internally by `put_char` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_char` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back) are translated to INT 10h calls for the screen. `serial_char` writes to COM1 only (used internally by `put_char` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -57,6 +57,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 02h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
 | 03h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
 | 04h   | fs_rename    | Rename file, SI = old filename, DI = new filename, CF on err |
+| 05h   | fs_write     | Write disk_buffer to sector AL, CF on error           |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
@@ -100,8 +101,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/chmod.asm` — Chmod program: sets or clears the executable bit with `+x`/`-x`
 - `src/programs/cp.asm` — Cp program: copies a file to a new name
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
-- `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
+- `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
+- `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit
 - `src/programs/ls.asm` — Ls program: lists files in the directory, marks executables with `*`
 - `src/programs/mv.asm` — Mv program: renames a file
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
@@ -121,7 +123,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
-- All output goes through `put_char` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back) via `SYS_IO_PUTC` for all output.
+- All output goes through `put_char` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `SYS_IO_PUTC` for all output.
 
 ## 16-bit Real Mode Constraints
 

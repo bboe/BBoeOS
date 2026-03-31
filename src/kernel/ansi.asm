@@ -86,11 +86,29 @@ put_char:
         jnz .has_param
         mov bx, 1              ; Default parameter is 1
 .has_param:
+        cmp al, 'A'            ; Cursor up
+        je .cursor_up
         cmp al, 'C'            ; Cursor forward
         je .cursor_forward
         cmp al, 'D'            ; Cursor back
         je .cursor_back
         ;; Unknown command — ignore
+        jmp .done
+
+.cursor_up:
+        ;; Move cursor up by BX rows
+        push bx                 ; Save count
+        mov ah, 03h
+        xor bx, bx
+        int 10h                 ; DH=row, DL=col (clobbers CX)
+        pop cx                  ; CX = count
+        sub dh, cl
+        jnb .cursor_up_set
+        xor dh, dh
+.cursor_up_set:
+        mov ah, 02h
+        xor bx, bx
+        int 10h
         jmp .done
 
 .cursor_back:
