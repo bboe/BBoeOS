@@ -50,21 +50,26 @@ syscall_handler:
 
         .fs_chmod:
         ;; Update flags byte for a file: SI = filename, AL = new flags value
+        ;; On error: CF set, AL = ERR_PROTECTED/ERR_NOT_FOUND
         ;; Protect shell: cannot be chmod'd
         call .check_shell
-        je .fs_chmod_prot
+        jne .fs_chmod_find
+        mov al, ERR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_chmod_find:
         push ax                ; Save new flags value
         call find_file         ; BX = directory entry in DISK_BUFFER
-        jc .fs_chmod_err
+        jnc .fs_chmod_do
+        pop ax
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .fs_chmod_do:
         pop ax
         mov [bx+11], al        ; Write new flags byte
         mov al, DIR_SECTOR
         call write_sector
-        jmp .iret_cf
-        .fs_chmod_err:
-        pop ax
-        .fs_chmod_prot:
-        stc
         jmp .iret_cf
 
         .fs_find:
@@ -77,18 +82,31 @@ syscall_handler:
 
         .fs_rename:
         ;; Rename file: SI = old filename, DI = new filename (max 10 chars)
+        ;; On error: CF set, AL = ERR_PROTECTED/ERR_EXISTS/ERR_NOT_FOUND
         ;; Protect shell: cannot be renamed
         call .check_shell
-        je .fs_rename_prot
+        jne .fs_rename_check_dup
+        mov al, ERR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_rename_check_dup:
         ;; Check new name doesn't already exist
         push si
         mov si, di
         call find_file
         pop si
-        jnc .fs_rename_prot    ; New name exists: reject with carry
+        jc .fs_rename_find_old ; New name not found: proceed
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .fs_rename_find_old:
         ;; find_file preserves DI, so DI still holds new name after the call
         call find_file         ; BX = directory entry in DISK_BUFFER
-        jc .iret_cf
+        jnc .fs_rename_do
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .fs_rename_do:
         push cx
         mov cx, 11
         .rename_copy:
@@ -110,9 +128,6 @@ syscall_handler:
         pop cx
         mov al, DIR_SECTOR
         call write_sector
-        jmp .iret_cf
-        .fs_rename_prot:
-        stc
         jmp .iret_cf
 
         .io_getc:
@@ -236,11 +251,19 @@ syscall_handler:
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
-        ;; If file not found or not executable, returns with carry set
+        ;; On error: CF set, AL = ERR_NOT_FOUND or ERR_NOT_EXEC
         call find_file
-        jc .exec_fail
+        jnc .exec_check_flag
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .exec_check_flag:
         test byte [bx+11], FLAG_EXEC  ; Check executable bit in flags byte
-        jz .exec_fail
+        jnz .exec_load
+        mov al, ERR_NOT_EXEC
+        stc
+        jmp .iret_cf
+        .exec_load:
         ;; Save SP from before INT 30h (skip iret frame: IP, CS, flags)
         mov bp, sp
         add bp, 6
@@ -248,11 +271,12 @@ syscall_handler:
         ;; Load program into PROGRAM_BASE
         mov di, PROGRAM_BASE
         call load_file
-        jc .exec_fail
-        jmp PROGRAM_BASE
-        .exec_fail:
+        jnc .exec_run
+        mov al, ERR_NOT_FOUND
         stc
         jmp .iret_cf
+        .exec_run:
+        jmp PROGRAM_BASE
 
         .sys_exit:
         ;; Restore stack and reload shell

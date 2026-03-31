@@ -3,6 +3,10 @@
         %assign DIR_MAX_ENTRIES 32
         %assign DIR_SECTOR 10
         %assign DISK_BUFFER 9000h     ; 512 bytes (one sector)
+        %assign ERR_EXISTS    01h     ; Rename error: destination name already exists
+        %assign ERR_NOT_EXEC  02h     ; Exec error: file exists but is not executable
+        %assign ERR_NOT_FOUND 03h     ; File not found
+        %assign ERR_PROTECTED 04h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 4FEh
         %assign FLAG_EXEC 01h         ; Directory entry flags: bit 0 = executable
         %assign MAX_INPUT 256

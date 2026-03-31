@@ -36,15 +36,20 @@ main:
         mov al, dl             ; AL = new flags value
         mov ah, SYS_FS_CHMOD
         int 30h
-        jc .not_found
+        jnc .done
 
-        mov ah, SYS_EXIT
-        int 30h
-
-        .not_found:
+        cmp al, ERR_PROTECTED
+        je .protected
+        ;; ERR_NOT_FOUND (or unknown)
         mov si, MSG_NOT_FOUND
+        jmp .error
+        .protected:
+        mov si, MSG_PROTECTED
+        .error:
         mov ah, SYS_IO_PUTS
         int 30h
+
+        .done:
         mov ah, SYS_EXIT
         int 30h
 
@@ -56,4 +61,5 @@ main:
         int 30h
 
         MSG_NOT_FOUND db `File not found\n\0`
-        MSG_USAGE db `Usage: chmod [+x|-x] <file>\n\0`
+        MSG_PROTECTED db `File is protected\n\0`
+        MSG_USAGE     db `Usage: chmod [+x|-x] <file>\n\0`

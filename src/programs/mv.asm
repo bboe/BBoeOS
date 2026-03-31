@@ -53,15 +53,25 @@ main:
         ;; SI = oldname, DI = newname
         mov ah, SYS_FS_RENAME
         int 30h
-        jc .not_found
+        jnc .done
 
-        mov ah, SYS_EXIT
-        int 30h
-
-        .not_found:
+        cmp al, ERR_EXISTS
+        je .exists
+        cmp al, ERR_PROTECTED
+        je .protected
+        ;; ERR_NOT_FOUND (or unknown)
         mov si, MSG_NOT_FOUND
+        jmp .error
+        .exists:
+        mov si, MSG_EXISTS
+        jmp .error
+        .protected:
+        mov si, MSG_PROTECTED
+        .error:
         mov ah, SYS_IO_PUTS
         int 30h
+
+        .done:
         mov ah, SYS_EXIT
         int 30h
 
@@ -79,6 +89,8 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
+        MSG_EXISTS    db `File already exists\n\0`
         MSG_NOT_FOUND db `File not found\n\0`
+        MSG_PROTECTED db `File is protected\n\0`
         MSG_TOO_LONG  db `Name too long (max 10 chars)\n\0`
         MSG_USAGE     db `Usage: mv <oldname> <newname>\n\0`
