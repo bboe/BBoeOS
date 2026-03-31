@@ -9,6 +9,8 @@ syscall_handler:
         je .fs_read
         cmp ah, SYS_FS_RENAME  ; fs_rename
         je .fs_rename
+        cmp ah, SYS_FS_WRITE   ; fs_write
+        je .fs_write
 
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
@@ -231,6 +233,11 @@ syscall_handler:
 
         .fs_read:
         call read_sector
+        jmp .iret_cf
+
+        .fs_write:
+        ;; Write DISK_BUFFER to sector: AL = sector number, CF on error
+        call write_sector
         jmp .iret_cf
 
         .fs_rename:
