@@ -31,9 +31,9 @@ main:
         jc .new_file            ; file not found -- create it
 
         ;; Record original on-disk size and start sector
-        mov ax, [bx+14]
+        mov ax, [bx+DIR_OFF_SIZE]
         mov [orig_size], ax
-        mov al, [bx+12]
+        mov al, [bx+DIR_OFF_SECTOR]
         mov [file_sector], al
 
         ;; Load file content into gap buffer: text goes AFTER the gap so
@@ -953,9 +953,9 @@ save_file:
         mov si, [filename]
         mov ah, SYS_FS_CREATE
         int 30h
+        mov [file_sector], al  ; save start sector BEFORE pop
         pop ax
         jc .create_err
-        mov [file_sector], al
         jmp .write_sectors
 
         .check_size:
@@ -1037,8 +1037,8 @@ save_file:
         int 30h
         jc .dir_err
         call buf_length
-        mov [bx+14], ax        ; update size field in DISK_BUFFER (directory)
-        mov al, DIR_SECTOR
+        mov [bx+DIR_OFF_SIZE], ax        ; update size field in DISK_BUFFER (directory)
+        xor al, al                       ; AL=0 = write back directory sector
         mov ah, SYS_FS_WRITE
         int 30h
         jc .write_err

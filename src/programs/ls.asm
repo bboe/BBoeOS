@@ -3,19 +3,23 @@
 %include "constants.asm"
 
 main:
-        mov al, DIR_SECTOR
+        mov byte [cur_sec], DIR_SECTOR
+
+.next_sector:
+        mov al, [cur_sec]
         mov ah, SYS_FS_READ
         int 30h
         jc .disk_err
 
         mov bx, DISK_BUFFER
+        mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
 .loop:
         cmp byte [bx], 0
-        je .done
+        je .try_next_sector
         mov si, bx
         mov ah, SYS_IO_PUTS
         int 30h
-        test byte [bx+11], FLAG_EXEC
+        test byte [bx+DIR_OFF_FLAGS], FLAG_EXEC
         jz .no_star
         mov al, '*'
         mov ah, SYS_IO_PUTC
@@ -25,7 +29,14 @@ main:
         mov ah, SYS_IO_PUTC
         int 30h
         add bx, DIR_ENTRY_SIZE
-        jmp .loop
+        loop .loop
+
+.try_next_sector:
+        inc byte [cur_sec]
+        mov al, [cur_sec]
+        sub al, DIR_SECTOR
+        cmp al, DIR_SECTORS
+        jb .next_sector
 
 .done:
         mov ah, SYS_EXIT
@@ -33,12 +44,11 @@ main:
 
 .disk_err:
         mov si, DISK_ERROR
-        jmp .output
-
-.output:
         mov ah, SYS_IO_PUTS
         int 30h
         mov ah, SYS_EXIT
         int 30h
+
+cur_sec db 0
 
 %include "str_disk_error.asm"
