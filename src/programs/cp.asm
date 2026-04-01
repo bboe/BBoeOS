@@ -39,7 +39,7 @@ main:
         test al, al
         jz .count_done
         inc cx
-        cmp cx, 10
+        cmp cx, DIR_NAME_LEN - 1
         ja .name_too_long
         jmp .count_dest
         .name_too_long:
@@ -92,5 +92,5 @@ main:
         MSG_DIR_FULL  db `Directory full\n\0`
         MSG_EXISTS    db `File already exists\n\0`
         MSG_NOT_FOUND db `File not found\n\0`
-        MSG_TOO_LONG  db `Name too long (max 10 chars)\n\0`
+        MSG_TOO_LONG  db `Name too long (max 26 chars)\n\0`
         MSG_USAGE     db `Usage: cp <srcname> <destname>\n\0`

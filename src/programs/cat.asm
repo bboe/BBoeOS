@@ -12,10 +12,10 @@ main:
         int 30h
         jc .not_found
 
-        mov cx, [bx+14]        ; File size
+        mov cx, [bx+DIR_OFF_SIZE]        ; File size
         test cx, cx
         jz .empty
-        mov bl, [bx+12]        ; Start sector
+        mov bl, [bx+DIR_OFF_SECTOR]        ; Start sector
 
 .read_sector:
         mov al, bl

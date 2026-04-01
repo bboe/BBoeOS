@@ -31,10 +31,10 @@ Trivial read-only filesystem on the floppy disk:
 
 - **Sector 1**: MBR (stage 1)
 - **Sectors 2 to dir_sector-1**: Stage 2
-- **Sector dir_sector (10)**: File table / directory (32 entries x 16 bytes)
-- **Sectors dir_sector+1 onward**: File data
+- **Sectors dir_sector to dir_sector+1**: File table / directory (2 sectors, 32 entries x 32 bytes)
+- **Sectors dir_sector+2 onward**: File data
 
-Directory entry format (16 bytes): 11 bytes filename (null-terminated, max 10 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
+Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
 Use `./add_file.sh floppy.img <file>` to add files to the image after building.
 
@@ -55,10 +55,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 00h   | fs_chmod     | Set file flags, SI = filename, AL = flags, CF on err  |
 | 01h   | fs_copy      | Copy file, SI = src filename, DI = dest filename, CF on err |
 | 02h   | fs_create    | Create file, SI = filename, AL = start sector, CF on err |
-| 03h   | fs_find      | Find file, SI = filename, BX = entry ptr, CF on err  |
+| 03h   | fs_find      | Find file, SI = filename, BX = entry ptr in disk_buffer, CF on err |
 | 04h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
 | 05h   | fs_rename    | Rename file, SI = old filename, DI = new filename, CF on err |
-| 06h   | fs_write     | Write disk_buffer to sector AL, CF on error           |
+| 06h   | fs_write     | Write disk_buffer to sector AL (AL=0: write back directory), CF on error |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
