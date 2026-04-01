@@ -19,10 +19,11 @@
         ;; Syscall numbers (INT 30h, passed in AH)
         %assign SYS_FS_CHMOD  00h
         %assign SYS_FS_COPY   01h
-        %assign SYS_FS_FIND   02h
-        %assign SYS_FS_READ   03h
-        %assign SYS_FS_RENAME 04h
-        %assign SYS_FS_WRITE  05h
+        %assign SYS_FS_CREATE 02h
+        %assign SYS_FS_FIND   03h
+        %assign SYS_FS_READ   04h
+        %assign SYS_FS_RENAME 05h
+        %assign SYS_FS_WRITE  06h
 
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h

@@ -28,7 +28,7 @@ main:
         mov si, bx
         mov ah, SYS_FS_FIND
         int 30h
-        jc .new_file_err       ; file not found -- can't create new files yet
+        jc .new_file            ; file not found -- create it
 
         ;; Record original on-disk size and start sector
         mov ax, [bx+14]
@@ -71,24 +71,25 @@ main:
         add dx, 512
         cmp dx, [orig_size]
         jb .load_loop
+        jmp .init_cursor
 
+        .new_file:
+        ;; Defer file creation until first save (file_sector=0 signals new file)
+        mov byte [file_sector], 0
+        mov word [orig_size], 0
+        mov word [gap_start], 0
+        mov word [gap_end], BUF_SIZE
+        .init_cursor:
         ;; Set cursor to start of file
         mov word [cursor_col], 0
         mov word [cursor_line], 0
         mov word [view_line], 0
-        mov byte [dirty], 0
+        mov word [view_col], 0
 
         .editor_loop:
         call render
         call get_input
         jmp .editor_loop
-
-        .new_file_err:
-        mov si, MSG_NEW_FILE_ERR
-        mov ah, SYS_IO_PUTS
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
 
         .load_err:
         mov si, MSG_LOAD_ERR
@@ -945,6 +946,23 @@ save_file:
         ;; Compute new content length
         call buf_length        ; AX = new size in bytes
 
+        ;; New file: create on disk before first save
+        cmp byte [file_sector], 0
+        jne .check_size
+        push ax
+        mov si, [filename]
+        mov ah, SYS_FS_CREATE
+        int 30h
+        pop ax
+        jc .create_err
+        mov [file_sector], al
+        jmp .write_sectors
+
+        .check_size:
+        ;; New files (orig_size=0) can grow freely
+        cmp word [orig_size], 0
+        je .write_sectors
+
         ;; Compute orig_sectors = ceil(orig_size / 512)
         mov cx, [orig_size]
         add cx, 511
@@ -969,6 +987,8 @@ save_file:
 
         cmp dx, cx
         ja .too_big
+
+        .write_sectors:
 
         ;; Write data sectors
         mov al, [file_sector]
@@ -1023,8 +1043,14 @@ save_file:
         int 30h
         jc .write_err
 
+        call buf_length
+        mov [orig_size], ax    ; update so future saves know the sector limit
         mov byte [dirty], 0
         mov word [status_msg], MSG_SAVED
+        jmp .done
+
+        .create_err:
+        mov word [status_msg], MSG_CREATE_ERR
         jmp .done
 
         .too_big:
@@ -1067,10 +1093,10 @@ save_file:
 ;;; Strings (sorted)
 ;;; -----------------------------------------------------------------------
         MSG_COL          db `  col \0`
+        MSG_CREATE_ERR   db `Cannot create file (directory full?)\0`
         MSG_LINE         db `  line \0`
         MSG_LOAD_ERR     db `Load error\n\0`
         MSG_MODIFIED     db ` [modified]\0`
-        MSG_NEW_FILE_ERR db `New files not supported: create with add_file.sh first\n\0`
         MSG_SAVED        db `Saved.\0`
         MSG_TOO_BIG      db `File too large to save (exceeds original size)\0`
         MSG_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`

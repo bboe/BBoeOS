@@ -3,6 +3,8 @@ syscall_handler:
         je .fs_chmod
         cmp ah, SYS_FS_COPY    ; fs_copy
         je .fs_copy
+        cmp ah, SYS_FS_CREATE  ; fs_create
+        je .fs_create
         cmp ah, SYS_FS_FIND    ; fs_find
         je .fs_find
         cmp ah, SYS_FS_READ    ; fs_read
@@ -225,6 +227,92 @@ syscall_handler:
         pop di
         mov al, ERR_NOT_FOUND
         stc
+        jmp .iret_cf
+
+        .fs_create:
+        ;; Create file: SI = filename
+        ;; On success: CF clear, AL = start sector
+        ;; On error: CF set, AL = ERR_EXISTS/ERR_DIR_FULL
+        ;; Check name doesn't already exist (also loads DIR_SECTOR into DISK_BUFFER)
+        call find_file
+        jc .create_scan
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .create_scan:
+        ;; Save filename pointer, scan directory for free entry and next free sector
+        mov di, si             ; DI = filename for later
+        xor bx, bx            ; BX = first free entry (0 = none found)
+        mov dl, DIR_SECTOR
+        inc dl                 ; DL = next free sector
+        mov si, DISK_BUFFER
+        mov cx, DIR_MAX_ENTRIES
+        .create_scan_loop:
+        cmp byte [si], 0
+        jne .create_occupied
+        test bx, bx
+        jnz .create_scan_next
+        mov bx, si             ; record first free entry
+        jmp .create_scan_next
+        .create_occupied:
+        xor ax, ax
+        mov al, [si+12]        ; start sector
+        push bx
+        xor bx, bx
+        mov bx, [si+14]        ; size in bytes
+        add bx, 511
+        shr bx, 9              ; ceil(size/512) = sectors used
+        add al, bl             ; end sector = start + sectors
+        pop bx
+        cmp al, dl
+        jbe .create_scan_next
+        mov dl, al             ; update next free sector
+        .create_scan_next:
+        add si, DIR_ENTRY_SIZE
+        loop .create_scan_loop
+        ;; Check a free entry was found
+        test bx, bx
+        jnz .create_write_entry
+        mov al, ERR_DIR_FULL
+        stc
+        jmp .iret_cf
+        .create_write_entry:
+        ;; Write filename from DI into entry at BX, null-pad to 11 bytes
+        push dx                ; save next_sec in DL
+        mov si, di             ; SI = filename
+        mov cx, 11
+        .create_copy_name:
+        mov al, [si]
+        test al, al
+        jz .create_pad_name
+        inc si
+        mov [bx], al
+        inc bx
+        dec cx
+        jnz .create_copy_name
+        jmp .create_write_meta
+        .create_pad_name:
+        mov byte [bx], 0
+        inc bx
+        dec cx
+        jnz .create_pad_name
+        .create_write_meta:
+        ;; BX = entry + 11 (flags position)
+        pop dx                 ; DL = next free sector
+        mov byte [bx], 0      ; flags = 0
+        inc bx
+        mov [bx], dl           ; start sector low byte
+        inc bx
+        mov byte [bx], 0      ; start sector high byte
+        inc bx
+        mov word [bx], 0      ; size = 0
+        ;; Write directory back to disk
+        mov al, DIR_SECTOR
+        call write_sector
+        jc .iret_cf
+        ;; Return start sector in AL
+        mov al, dl
+        clc
         jmp .iret_cf
 
         .fs_find:
