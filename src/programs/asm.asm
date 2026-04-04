@@ -275,26 +275,42 @@ handle_cld:
 ;;; handle_cmp
 ;;; -----------------------------------------------------------------------
 handle_cmp:
-        ;; cmp r16, imm16
         call skip_ws
-        call parse_register    ; AL = reg
+        call parse_register    ; AL = reg, AH = size
         push ax
         call skip_comma
-        call resolve_value     ; AX = imm16
+        call resolve_value     ; AX = immediate
         mov cx, ax             ; CX = immediate
-        pop bx                 ; BL = reg
-        ;; Emit: 81 modrm(mod=11, /7, rm=reg) imm16
+        pop bx                 ; BL = reg, BH = size
+        cmp bh, 8
+        je .cmp_r8
+        ;; cmp r16, imm16: Emit: 81 modrm(mod=11, /7, rm=reg) imm16
         mov al, 81h
         call emit_byte_al
-        mov al, bl
-        or al, 0F8h            ; modrm: 11 111 reg (mod=11, reg=7, rm=BL)
-        and al, 0FFh           ; mask
-        ;; Actually: modrm = (3 << 6) | (7 << 3) | rm = C0 | 38 | rm = F8 | rm
+        ;; modrm = (3 << 6) | (7 << 3) | rm = C0 | 38 | rm = F8 | rm
         mov al, bl
         or al, 0F8h
         call emit_byte_al
         mov ax, cx
         call emit_word_ax
+        ret
+        .cmp_r8:
+        ;; Short form for AL: 3C imm8
+        test bl, bl
+        jnz .cmp_r8_general
+        mov al, 3Ch
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+        .cmp_r8_general:
+        mov al, 80h
+        call emit_byte_al
+        mov al, bl
+        or al, 0F8h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -345,6 +361,27 @@ handle_jbe:
 ;;; -----------------------------------------------------------------------
 handle_jc:
         mov al, 72h
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
+;;; handle_je (alias for jz)
+;;; -----------------------------------------------------------------------
+handle_je:
+        mov al, 74h
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
+;;; handle_jnc
+;;; -----------------------------------------------------------------------
+handle_jnc:
+        mov al, 73h
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
+;;; handle_jne
+;;; -----------------------------------------------------------------------
+handle_jne:
+        mov al, 75h
         jmp encode_rel8_jump
 
 ;;; -----------------------------------------------------------------------
@@ -559,6 +596,32 @@ handle_test:
         pop ax
         ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
         call make_modrm_reg_reg ; AL=src, BL=dst
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_xor: xor r, r
+;;; -----------------------------------------------------------------------
+handle_xor:
+        call skip_ws
+        call parse_register    ; AH = size, AL = reg num (dst)
+        push ax
+        call skip_comma
+        call parse_register    ; AH = size, AL = reg num (src)
+        pop bx                 ; BL = dst reg
+        ;; xor r8,r8: opcode 30, xor r16,r16: opcode 31
+        push ax
+        cmp ah, 8
+        je .xor8
+        mov al, 31h
+        jmp .xor_emit
+        .xor8:
+        mov al, 30h
+        .xor_emit:
+        call emit_byte_al
+        pop ax
+        ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
+        call make_modrm_reg_reg
         call emit_byte_al
         ret
 
@@ -1612,6 +1675,9 @@ resolve_value:
         push bx
         push cx
         call skip_ws
+        ;; Check for character literal: 'c'
+        cmp byte [si], 27h    ; single quote
+        je .char_literal
         ;; Check if starts with digit -- it's a number
         mov al, [si]
         cmp al, '0'
@@ -1619,6 +1685,19 @@ resolve_value:
         cmp al, '9'
         ja .try_symbol
         call parse_number
+        pop cx
+        pop bx
+        ret
+
+        .char_literal:
+        inc si                 ; skip opening quote
+        xor ah, ah
+        mov al, [si]           ; AL = character value
+        inc si
+        cmp byte [si], 27h    ; closing quote
+        jne .char_done
+        inc si                 ; skip closing quote
+        .char_done:
         pop cx
         pop bx
         ret
@@ -1852,13 +1931,18 @@ mnemonic_table:
         dw STR_INT, handle_int
         dw STR_JBE, handle_jbe
         dw STR_JC,  handle_jc
+        dw STR_JE,  handle_je
         dw STR_JMP, handle_jmp
+        dw STR_JNC, handle_jnc
+        dw STR_JNE, handle_jne
+        dw STR_JNZ, handle_jne
         dw STR_JZ,  handle_jz
         dw STR_LODSB, handle_lodsb
         dw STR_LOOP, handle_loop
         dw STR_MOV, handle_mov
         dw STR_SUB, handle_sub
         dw STR_TEST, handle_test
+        dw STR_XOR, handle_xor
         dw 0
 
 ;;; Mnemonic strings
@@ -1871,7 +1955,11 @@ STR_INCLUDE db 'include',0
 STR_INT     db 'int',0
 STR_JBE     db 'jbe',0
 STR_JC      db 'jc',0
+STR_JE      db 'je',0
 STR_JMP     db 'jmp',0
+STR_JNC     db 'jnc',0
+STR_JNE     db 'jne',0
+STR_JNZ     db 'jnz',0
 STR_JZ      db 'jz',0
 STR_LODSB   db 'lodsb',0
 STR_LOOP    db 'loop',0
@@ -1880,6 +1968,7 @@ STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
 STR_SUB     db 'sub',0
 STR_TEST    db 'test',0
+STR_XOR     db 'xor',0
 
 ;;; Register table: 2-char name, reg number, size (8 or 16)
 reg_table:

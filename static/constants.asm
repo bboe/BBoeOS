@@ -4,6 +4,8 @@
         %assign DIR_MAX_ENTRIES 32
         %assign DIR_SECTOR 10
         %assign DISK_BUFFER 9000h
+        %assign ERR_NOT_FOUND 04h
+        %assign ERR_PROTECTED 05h
         %assign EXEC_ARG 4FEh
         %assign FLAG_EXEC 01h
         %assign MAX_INPUT 256
