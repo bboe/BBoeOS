@@ -21,3 +21,8 @@ dd conv=notrunc if=os.bin of=floppy.img
 for bin in "$tmpdir"/*; do
     ./add_file.sh -x floppy.img "$bin"
 done
+
+# Add static files (non-executable)
+for f in static/*; do
+    [ -f "$f" ] && ./add_file.sh floppy.img "$f"
+done

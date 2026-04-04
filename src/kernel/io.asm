@@ -45,6 +45,7 @@ find_file:
         push ax
         push cx
         push dx
+        push si
         push di
 
         mov dx, si              ; DX = filename to find
@@ -94,6 +95,7 @@ find_file:
 
         .ff_done:
         pop di
+        pop si
         pop dx
         pop cx
         pop ax
