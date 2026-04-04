@@ -106,6 +106,27 @@ find_file:
         clc
         jmp .ff_done
 
+lba_to_chs:
+        ;; Convert 1-based logical sector to CHS for IDE geometry
+        ;; (63 sectors/track, 16 heads)
+        ;; Input: AL = logical sector (1-based)
+        ;; Output: CH = cylinder, CL = sector (1-based), DH = head
+        ;; Clobbers: AX
+        push bx
+        dec al                  ; 0-based LBA
+        xor ah, ah
+        mov bl, 63              ; sectors per track
+        div bl                  ; AL = track, AH = sector_in_track
+        mov cl, ah
+        inc cl                  ; CL = 1-based sector (1-63)
+        xor ah, ah
+        mov bl, 16              ; heads per cylinder
+        div bl                  ; AL = cylinder, AH = head
+        mov ch, al
+        mov dh, ah
+        pop bx
+        ret
+
 load_file:
         ;; Load file sectors into memory
         ;; Input: BX = pointer to directory entry in DISK_BUFFER
@@ -142,17 +163,15 @@ load_file:
 
 read_sector:
         ;; Read one sector into DISK_BUFFER
-        ;; Input: AL = sector number (1-based CHS, cylinder 0, head 0)
+        ;; Input: AL = logical sector number (1-based)
         ;; Sets carry flag on error
         push bx
         push cx
         push dx
-        mov cl, al              ; CL = sector number
-        xor ch, ch              ; CH = cylinder 0
-        xor dh, dh              ; DH = head 0
-        mov dl, [boot_disk]     ; DL = drive number
-        mov bx, DISK_BUFFER     ; ES:BX = buffer
-        mov ax, 0201h           ; AH=02 (read), AL=01 (1 sector)
+        call lba_to_chs
+        mov dl, [boot_disk]
+        mov bx, DISK_BUFFER
+        mov ax, 0201h
         int 13h
         pop dx
         pop cx
@@ -219,17 +238,15 @@ scan_dir_entries:
 
 write_sector:
         ;; Write DISK_BUFFER to one sector on disk
-        ;; Input: AL = sector number (1-based CHS, cylinder 0, head 0)
+        ;; Input: AL = logical sector number (1-based)
         ;; Sets carry flag on error
         push bx
         push cx
         push dx
-        mov cl, al              ; CL = sector number
-        xor ch, ch              ; CH = cylinder 0
-        xor dh, dh              ; DH = head 0
-        mov dl, [boot_disk]     ; DL = drive number
-        mov bx, DISK_BUFFER     ; ES:BX = buffer
-        mov ax, 0301h           ; AH=03 (write), AL=01 (1 sector)
+        call lba_to_chs
+        mov dl, [boot_disk]
+        mov bx, DISK_BUFFER
+        mov ax, 0301h
         int 13h
         pop dx
         pop cx
