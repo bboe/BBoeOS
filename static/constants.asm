@@ -2,8 +2,12 @@
         %assign BUFFER 500h
         %assign DIR_ENTRY_SIZE 32
         %assign DIR_MAX_ENTRIES 32
+        %assign DIR_NAME_LEN 27
         %assign DIR_SECTOR 10
         %assign DISK_BUFFER 9000h
+        %assign ERR_DIR_FULL 01h
+        %assign ERR_EXISTS 02h
+        %assign ERR_NOT_EXEC 03h
         %assign ERR_NOT_FOUND 04h
         %assign ERR_PROTECTED 05h
         %assign EXEC_ARG 4FEh

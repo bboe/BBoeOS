@@ -413,7 +413,18 @@ handle_cmp:
         pop bx                 ; BL = reg, BH = size
         cmp bh, 8
         je .cmp_r8
-        ;; cmp r16, imm16: Emit: 81 modrm(mod=11, /7, rm=reg) imm16
+        ;; cmp r16, imm: use 83h if fits in byte
+        cmp cx, 127
+        ja .cmp_r16_full
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0F8h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+        .cmp_r16_full:
         mov al, 81h
         call emit_byte_al
         ;; modrm = (3 << 6) | (7 << 3) | rm = C0 | 38 | rm = F8 | rm
@@ -499,17 +510,25 @@ handle_int:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_ja
+;;; -----------------------------------------------------------------------
+handle_ja:
+        mov al, 77h
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
+;;; handle_jb / handle_jc
+;;; -----------------------------------------------------------------------
+handle_jb:
+handle_jc:
+        mov al, 72h
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
 ;;; handle_jbe
 ;;; -----------------------------------------------------------------------
 handle_jbe:
         mov al, 76h
-        jmp encode_rel8_jump
-
-;;; -----------------------------------------------------------------------
-;;; handle_jc
-;;; -----------------------------------------------------------------------
-handle_jc:
-        mov al, 72h
         jmp encode_rel8_jump
 
 ;;; -----------------------------------------------------------------------
@@ -598,6 +617,8 @@ handle_mov:
         ;; Dispatch based on operand types
         ;; OP_REG=0, OP_IMM=1, OP_MEM_DIRECT=2, OP_MEM_BX_DISP=3
         mov al, [op1_type]
+        cmp al, 3              ; dst is [reg] or [reg+disp]
+        je .mov_mem_dst
         cmp al, 0              ; dst is register
         jne .mov_done
 
@@ -683,8 +704,7 @@ handle_mov:
         jmp .mov_done
 
         .mov_rm_bx_disp:
-        ;; mov r, [bx+disp8]: 8B (16-bit) or 8A (8-bit)
-        ;; modrm: mod=01, reg=dst, rm=111 (bx)
+        ;; mov r, [reg+disp8]: 8B (16-bit) or 8A (8-bit)
         cmp byte [op1_size], 8
         je .mov_rm_bx8
         mov al, 8Bh
@@ -693,13 +713,49 @@ handle_mov:
         mov al, 8Ah
         .mov_rm_bx_emit:
         call emit_byte_al
-        ;; modrm = (1 << 6) | (reg << 3) | 7 = 40 | (reg << 3) | 7
+        ;; Get rm field from addressing register
+        mov al, [op2_reg]
+        call reg_to_rm
+        mov bl, al
         mov al, [op1_reg]
         shl al, 3
-        or al, 47h
+        or al, bl
+        ;; mod=00 if no displacement, mod=01 if disp8
+        cmp word [op2_val], 0
+        jne .mov_rm_with_disp
+        call emit_byte_al
+        jmp .mov_done
+        .mov_rm_with_disp:
+        or al, 40h             ; mod=01
         call emit_byte_al
         mov ax, [op2_val]
         call emit_byte_al      ; disp8
+        jmp .mov_done
+
+        .mov_mem_dst:
+        ;; mov [reg], imm: C6 /0 modrm imm8 (byte) or C7 /0 modrm imm16
+        cmp byte [op2_type], 1
+        jne .mov_done
+        mov al, [op1_reg]
+        call reg_to_rm
+        cmp byte [op1_size], 8
+        je .mov_mem_dst8
+        push ax
+        mov al, 0C7h
+        call emit_byte_al
+        pop ax
+        call emit_byte_al
+        mov ax, [op2_val]
+        call emit_word_ax
+        jmp .mov_done
+        .mov_mem_dst8:
+        push ax
+        mov al, 0C6h
+        call emit_byte_al
+        pop ax
+        call emit_byte_al
+        mov al, [op2_val]
+        call emit_byte_al
         jmp .mov_done
 
         .mov_done:
@@ -789,19 +845,50 @@ handle_sub:
 ;;; -----------------------------------------------------------------------
 handle_test:
         call skip_ws
-        call parse_register    ; AH = size, AL = reg num (dst)
-        push ax
+        call parse_operand     ; AH=type, AL=reg, DX=val
+        mov [op1_type], ah
+        mov [op1_reg], al
+        mov [op1_val], dx
         call skip_comma
-        call parse_register    ; AH = size, AL = reg num (src)
-        pop bx                 ; BL = dst reg
-        ;; test r, r: opcode 85 (16-bit), modrm = 11 src dst
+        cmp byte [op1_type], 0
+        jne .test_mem
+        ;; test r, r: second operand is register
+        call parse_register
+        mov bl, [op1_reg]      ; BL = dst reg
         push ax
-        mov al, 85h
+        cmp byte [op1_size], 8
+        je .test_rr8
+        mov al, 85h            ; test r16, r16
+        jmp .test_rr_emit
+        .test_rr8:
+        mov al, 84h            ; test r8, r8
+        .test_rr_emit:
         call emit_byte_al
         pop ax
-        ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
-        call make_modrm_reg_reg ; AL=src, BL=dst
+        call make_modrm_reg_reg
         call emit_byte_al
+        ret
+        .test_mem:
+        ;; test byte [reg+disp], imm8: F6 modrm [disp] imm8
+        call resolve_value     ; AX = immediate
+        push ax
+        mov al, 0F6h
+        call emit_byte_al
+        ;; modrm: /0 with memory addressing
+        mov al, [op1_reg]
+        call reg_to_rm         ; AL = rm
+        cmp word [op1_val], 0
+        jne .test_mem_disp
+        call emit_byte_al      ; mod=00, /0, rm
+        jmp .test_mem_imm
+        .test_mem_disp:
+        or al, 40h             ; mod=01
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_byte_al      ; disp8
+        .test_mem_imm:
+        pop ax
+        call emit_byte_al      ; imm8
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -1100,6 +1187,30 @@ make_modrm_reg_reg:
         shl al, 3
         or al, bl
         or al, 0C0h
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; reg_to_rm: convert register number to 16-bit addressing ModRM rm field
+;;; Input: AL = register number (3=bx, 5=bp, 6=si, 7=di)
+;;; Output: AL = rm field value
+;;; -----------------------------------------------------------------------
+reg_to_rm:
+        cmp al, 3
+        je .rm_bx
+        cmp al, 6
+        je .rm_si
+        cmp al, 7
+        je .rm_di
+        mov al, 6              ; bp -> rm=6
+        ret
+        .rm_bx:
+        mov al, 7
+        ret
+        .rm_si:
+        mov al, 4
+        ret
+        .rm_di:
+        mov al, 5
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -1624,9 +1735,25 @@ parse_number:
 ;;; -----------------------------------------------------------------------
 parse_operand:
         call skip_ws
+        ;; Check for 'byte' size prefix
+        push si
+        mov di, STR_BYTE
+        call match_word
+        jc .no_byte_prefix
+        add sp, 2
+        mov byte [op1_size], 8
+        call skip_ws
+        cmp byte [si], '['
+        je .mem_operand
+        ;; 'byte' before a register (e.g., "mov byte bl, [var]") -- just a hint
+        jmp .try_register
+        .no_byte_prefix:
+        pop si
+
         cmp byte [si], '['
         je .mem_operand
 
+        .try_register:
         ;; Try register first
         push si
         call parse_register
@@ -2019,10 +2146,47 @@ resolve_value:
         pop si
         pop cx
         mov [si], cl           ; restore delimiter
+        ;; Check for +/- arithmetic after symbol
+        call skip_ws
+        cmp byte [si], '+'
+        je .expr_add
+        cmp byte [si], '-'
+        je .expr_sub
+        cmp byte [si], '/'
+        je .expr_div
+        .expr_done:
         pop di
         pop cx
         pop bx
         ret
+        .expr_add:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value     ; recursive: get RHS
+        mov cx, ax
+        pop ax
+        add ax, cx
+        jmp .expr_done
+        .expr_sub:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        sub ax, cx
+        jmp .expr_done
+        .expr_div:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        xor dx, dx
+        div cx
+        jmp .expr_done
 
 ;;; -----------------------------------------------------------------------
 ;;; skip_comma: skip whitespace, comma, whitespace
@@ -2207,6 +2371,8 @@ mnemonic_table:
         dw STR_DIV, handle_div
         dw STR_INC, handle_inc
         dw STR_INT, handle_int
+        dw STR_JA,  handle_ja
+        dw STR_JB,  handle_jb
         dw STR_JBE, handle_jbe
         dw STR_JC,  handle_jc
         dw STR_JE,  handle_je
@@ -2233,6 +2399,7 @@ STR_AAM     db 'aam',0
 STR_ADD     db 'add',0
 STR_AND     db 'and',0
 STR_ASSIGN  db 'assign',0
+STR_BYTE    db 'byte',0
 STR_CALL    db 'call',0
 STR_CLD     db 'cld',0
 STR_CMP     db 'cmp',0
@@ -2241,6 +2408,8 @@ STR_DIV     db 'div',0
 STR_INC     db 'inc',0
 STR_INCLUDE db 'include',0
 STR_INT     db 'int',0
+STR_JA      db 'ja',0
+STR_JB      db 'jb',0
 STR_JBE     db 'jbe',0
 STR_JC      db 'jc',0
 STR_JE      db 'je',0
