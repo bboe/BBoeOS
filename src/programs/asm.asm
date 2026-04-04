@@ -264,6 +264,135 @@ flush_output:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_aam
+;;; -----------------------------------------------------------------------
+handle_aam:
+        mov al, 0D4h
+        call emit_byte_al
+        mov al, 0Ah
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_add: add r, imm
+;;; -----------------------------------------------------------------------
+handle_add:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        call skip_comma
+        call resolve_value     ; AX = immediate
+        mov cx, ax
+        pop bx                 ; BL = reg, BH = size
+        cmp bh, 8
+        je .add_r8
+        ;; add r16, imm: short forms
+        test bl, bl
+        jnz .add_r16_general
+        ;; AX short form: 05 imm16
+        mov al, 05h
+        call emit_byte_al
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .add_r16_general:
+        ;; Use 83h if imm fits in signed byte
+        cmp cx, 127
+        ja .add_r16_full
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0C0h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+        .add_r16_full:
+        mov al, 81h
+        call emit_byte_al
+        mov al, bl
+        or al, 0C0h
+        call emit_byte_al
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .add_r8:
+        ;; add r8, imm8. Short form for AL: 04 imm8
+        test bl, bl
+        jnz .add_r8_general
+        mov al, 04h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+        .add_r8_general:
+        mov al, 80h
+        call emit_byte_al
+        mov al, bl
+        or al, 0C0h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_and: and r, imm
+;;; -----------------------------------------------------------------------
+handle_and:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        call skip_comma
+        call resolve_value     ; AX = immediate
+        mov cx, ax
+        pop bx                 ; BL = reg, BH = size
+        cmp bh, 8
+        je .and_r8
+        ;; and r16, imm16: 81 modrm(/4) imm16
+        mov al, 81h
+        call emit_byte_al
+        mov al, bl
+        or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
+        call emit_byte_al
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .and_r8:
+        ;; and r8, imm8. Short form for AL: 24 imm8
+        test bl, bl
+        jnz .and_r8_general
+        mov al, 24h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+        .and_r8_general:
+        mov al, 80h
+        call emit_byte_al
+        mov al, bl
+        or al, 0E0h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_call: call near label
+;;; -----------------------------------------------------------------------
+handle_call:
+        call skip_ws
+        ;; Emit E8 rel16
+        mov al, 0E8h
+        call emit_byte_al
+        call resolve_label     ; AX = target address
+        ;; rel16 = target - (cur_addr + 2) (2 bytes for the rel16 itself)
+        mov bx, [cur_addr]
+        add bx, 2
+        sub ax, bx
+        call emit_word_ax
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_cld
 ;;; -----------------------------------------------------------------------
 handle_cld:
@@ -310,6 +439,26 @@ handle_cmp:
         or al, 0F8h
         call emit_byte_al
         mov al, cl
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_div: div r8 or div r16
+;;; -----------------------------------------------------------------------
+handle_div:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        cmp ah, 8
+        je .div8
+        mov al, 0F7h
+        jmp .div_emit
+        .div8:
+        mov al, 0F6h
+        .div_emit:
+        call emit_byte_al
+        pop ax
+        or al, 0F0h            ; modrm = C0 | (6<<3) | rm = F0 | rm
         call emit_byte_al
         ret
 
@@ -557,6 +706,62 @@ handle_mov:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_pop: pop r16
+;;; -----------------------------------------------------------------------
+handle_pop:
+        call skip_ws
+        call parse_register    ; AL = reg
+        add al, 58h            ; 58+reg
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_push: push r16
+;;; -----------------------------------------------------------------------
+handle_push:
+        call skip_ws
+        call parse_register    ; AL = reg
+        add al, 50h            ; 50+reg
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_ret
+;;; -----------------------------------------------------------------------
+handle_ret:
+        mov al, 0C3h
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_shr: shr r8, imm8
+;;; -----------------------------------------------------------------------
+handle_shr:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        call skip_comma
+        call resolve_value     ; AX = shift count
+        mov cl, al
+        pop bx                 ; BL = reg, BH = size
+        ;; shr r8, imm8: C0 /5 imm8. shr r16, imm8: C1 /5 imm8
+        cmp bh, 8
+        je .shr8
+        mov al, 0C1h
+        jmp .shr_emit
+        .shr8:
+        mov al, 0C0h
+        .shr_emit:
+        call emit_byte_al
+        ;; modrm = C0 | (5<<3) | rm = E8 | rm
+        mov al, bl
+        or al, 0E8h
+        call emit_byte_al
+        mov al, cl
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_sub
 ;;; -----------------------------------------------------------------------
 handle_sub:
@@ -596,6 +801,32 @@ handle_test:
         pop ax
         ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
         call make_modrm_reg_reg ; AL=src, BL=dst
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_xchg: xchg r, r
+;;; -----------------------------------------------------------------------
+handle_xchg:
+        call skip_ws
+        call parse_register
+        mov bl, al              ; BL = first operand (rm field)
+        mov bh, ah
+        call skip_comma
+        call parse_register     ; AL = second operand (reg field)
+        push ax
+        cmp bh, 8
+        je .xchg8
+        mov al, 87h
+        jmp .xchg_emit
+        .xchg8:
+        mov al, 86h
+        .xchg_emit:
+        call emit_byte_al
+        pop ax
+        ;; Swap: NASM puts first operand in reg, second in rm
+        xchg al, bl
+        call make_modrm_reg_reg ; AL=first(reg), BL=second(rm)
         call emit_byte_al
         ret
 
@@ -1675,9 +1906,11 @@ resolve_value:
         push bx
         push cx
         call skip_ws
-        ;; Check for character literal: 'c'
+        ;; Check for character literal: 'c' or `\n`
         cmp byte [si], 27h    ; single quote
         je .char_literal
+        cmp byte [si], '`'
+        je .backtick_literal
         ;; Check if starts with digit -- it's a number
         mov al, [si]
         cmp al, '0'
@@ -1698,6 +1931,46 @@ resolve_value:
         jne .char_done
         inc si                 ; skip closing quote
         .char_done:
+        pop cx
+        pop bx
+        ret
+
+        .backtick_literal:
+        inc si                 ; skip opening backtick
+        xor ah, ah
+        mov al, [si]
+        cmp al, '\'
+        jne .bt_plain
+        ;; Escape sequence
+        inc si
+        mov al, [si]
+        cmp al, 'n'
+        je .bt_n
+        cmp al, '0'
+        je .bt_0
+        cmp al, 't'
+        je .bt_t
+        cmp al, 'r'
+        je .bt_r
+        jmp .bt_skip_close     ; unknown escape, use char as-is
+        .bt_n:
+        mov al, 0Ah
+        jmp .bt_skip_close
+        .bt_0:
+        xor al, al
+        jmp .bt_skip_close
+        .bt_t:
+        mov al, 09h
+        jmp .bt_skip_close
+        .bt_r:
+        mov al, 0Dh
+        .bt_skip_close:
+        .bt_plain:
+        inc si
+        cmp byte [si], '`'
+        jne .bt_done
+        inc si                 ; skip closing backtick
+        .bt_done:
         pop cx
         pop bx
         ret
@@ -1925,8 +2198,13 @@ sym_lookup:
 ;;; Mnemonic table: pairs of (name_ptr, handler_ptr), terminated by 0
 ;;; -----------------------------------------------------------------------
 mnemonic_table:
+        dw STR_AAM, handle_aam
+        dw STR_ADD, handle_add
+        dw STR_AND, handle_and
+        dw STR_CALL, handle_call
         dw STR_CLD, handle_cld
         dw STR_CMP, handle_cmp
+        dw STR_DIV, handle_div
         dw STR_INC, handle_inc
         dw STR_INT, handle_int
         dw STR_JBE, handle_jbe
@@ -1940,16 +2218,26 @@ mnemonic_table:
         dw STR_LODSB, handle_lodsb
         dw STR_LOOP, handle_loop
         dw STR_MOV, handle_mov
+        dw STR_POP, handle_pop
+        dw STR_PUSH, handle_push
+        dw STR_RET, handle_ret
+        dw STR_SHR, handle_shr
         dw STR_SUB, handle_sub
         dw STR_TEST, handle_test
+        dw STR_XCHG, handle_xchg
         dw STR_XOR, handle_xor
         dw 0
 
 ;;; Mnemonic strings
+STR_AAM     db 'aam',0
+STR_ADD     db 'add',0
+STR_AND     db 'and',0
 STR_ASSIGN  db 'assign',0
+STR_CALL    db 'call',0
 STR_CLD     db 'cld',0
 STR_CMP     db 'cmp',0
 STR_DB      db 'db',0
+STR_DIV     db 'div',0
 STR_INC     db 'inc',0
 STR_INCLUDE db 'include',0
 STR_INT     db 'int',0
@@ -1965,9 +2253,14 @@ STR_LODSB   db 'lodsb',0
 STR_LOOP    db 'loop',0
 STR_MOV     db 'mov',0
 STR_ORG     db 'org',0
+STR_POP     db 'pop',0
+STR_PUSH    db 'push',0
+STR_RET     db 'ret',0
 STR_SHORT   db 'short',0
+STR_SHR     db 'shr',0
 STR_SUB     db 'sub',0
 STR_TEST    db 'test',0
+STR_XCHG    db 'xchg',0
 STR_XOR     db 'xor',0
 
 ;;; Register table: 2-char name, reg number, size (8 or 16)

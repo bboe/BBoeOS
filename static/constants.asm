@@ -23,6 +23,9 @@
         %assign SYS_IO_PUTC 12h
         %assign SYS_IO_PUTS 13h
 
+        %assign SYS_RTC_DATETIME 30h
+        %assign SYS_RTC_UPTIME 31h
+
         %assign SYS_SCR_CLEAR 40h
 
         %assign SYS_EXEC 0F0h
