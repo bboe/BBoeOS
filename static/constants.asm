@@ -2,8 +2,16 @@
         %assign BUFFER 500h
         %assign DIR_ENTRY_SIZE 32
         %assign DIR_MAX_ENTRIES 32
+        %assign DIR_NAME_LEN 27
+        %assign DIR_OFF_FLAGS 27
         %assign DIR_SECTOR 10
+        %assign DIR_SECTORS 2
         %assign DISK_BUFFER 9000h
+        %assign ERR_DIR_FULL 01h
+        %assign ERR_EXISTS 02h
+        %assign ERR_NOT_EXEC 03h
+        %assign ERR_NOT_FOUND 04h
+        %assign ERR_PROTECTED 05h
         %assign EXEC_ARG 4FEh
         %assign FLAG_EXEC 01h
         %assign MAX_INPUT 256
@@ -20,6 +28,9 @@
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h
         %assign SYS_IO_PUTS 13h
+
+        %assign SYS_RTC_DATETIME 30h
+        %assign SYS_RTC_UPTIME 31h
 
         %assign SYS_SCR_CLEAR 40h
 
