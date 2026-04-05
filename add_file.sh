@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Usage: ./add_file.sh [-x] <floppy.img> <file_to_add>
+# Usage: ./add_file.sh [-x] <drive.img> <file_to_add>
 #
 # Adds a file to the BBoeOS floppy image filesystem.
 # Use -x to mark the file as executable (sets FLAG_EXEC in the flags byte).
@@ -14,7 +14,7 @@ if [ "$1" = "-x" ]; then
 fi
 
 if [ $# -ne 2 ]; then
-    echo "Usage: $0 [-x] <floppy.img> <file_to_add>" >&2
+    echo "Usage: $0 [-x] <drive.img> <file_to_add>" >&2
     exit 1
 fi
 

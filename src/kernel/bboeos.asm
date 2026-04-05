@@ -23,6 +23,24 @@ start:
         int 13h                 ; reset disk
         jc .error
 
+        ;; Query drive geometry for LBA-to-CHS conversion
+        push es                 ; INT 13h AH=08h clobbers ES:DI
+        mov ah, 08h
+        mov dl, [boot_disk]
+        int 13h                 ; CH=max cyl low, CL=max sector|cyl high, DH=max head
+        pop es
+        jc .default_geo         ; fallback if query fails
+        mov al, cl
+        and al, 3Fh             ; sectors per track (bits 0-5 of CL)
+        mov [sectors_per_track], al
+        inc dh                  ; max head is 0-based, convert to count
+        mov [heads_per_cyl], dh
+        jmp .geo_done
+        .default_geo:
+        mov byte [sectors_per_track], 63
+        mov byte [heads_per_cyl], 16
+        .geo_done:
+
         mov ax, 0200h | STAGE2_SECTORS
         mov bx, 7E00h           ; 0x7C00 + 512
         mov cx, 2               ; start at cylinder 0 sector 2
@@ -60,6 +78,8 @@ clear_screen:
 
         ;; Variables
         boot_disk db 0
+        heads_per_cyl db 16
+        sectors_per_track db 63
 
         ;; Strings
         DISK_FAILURE db `Disk failure\n\0`
