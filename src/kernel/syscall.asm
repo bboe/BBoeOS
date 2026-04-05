@@ -7,6 +7,8 @@ syscall_handler:
         je .fs_create
         cmp ah, SYS_FS_FIND    ; fs_find
         je .fs_find
+        cmp ah, SYS_FS_MKDIR   ; fs_mkdir
+        je .fs_mkdir
         cmp ah, SYS_FS_READ    ; fs_read
         je .fs_read
         cmp ah, SYS_FS_RENAME  ; fs_rename
@@ -72,7 +74,6 @@ syscall_handler:
         stc
         jmp .iret_cf
         .fs_chmod_do:
-        call dir_load_entry    ; BX = entry ptr
         pop ax                 ; AL = new flags value
         mov [bx+DIR_OFF_FLAGS], al
         call dir_write_back
@@ -98,7 +99,6 @@ syscall_handler:
         call find_file         ; BX = entry index
         pop di
         jc .copy_src_err
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
         jmp .copy_got_src
         .copy_src_err:
         mov al, ERR_NOT_FOUND
@@ -164,23 +164,7 @@ syscall_handler:
         ;; Copy name (null-padded to DIR_NAME_LEN)
         push cx
         push bx                        ; save entry base
-        mov cx, DIR_NAME_LEN - 1
-        .copy_write_name:
-        mov al, [si]
-        test al, al
-        jz .copy_name_null
-        inc si
-        mov [bx], al
-        inc bx
-        dec cx
-        jnz .copy_write_name
-        jmp .copy_write_meta
-        .copy_name_null:
-        mov byte [bx], 0
-        inc bx
-        dec cx
-        jnz .copy_name_null
-        .copy_write_meta:
+        call .write_dir_name
         pop bx                         ; BX = entry base
         pop cx
         ;; Write metadata at fixed offsets
@@ -202,69 +186,178 @@ syscall_handler:
         jmp .iret_cf
 
         .fs_create:
-        ;; Create file: SI = filename
+        ;; Create file: SI = filename (may contain one '/')
         ;; On success: CF clear, AL = start sector
         ;; On error: CF set, AL = ERR_EXISTS/ERR_DIR_FULL
-        ;; Check name doesn't already exist (also loads DIR_SECTOR into DISK_BUFFER)
+        ;; Check name doesn't already exist
         call find_file
         jc .create_scan
         mov al, ERR_EXISTS
         stc
         jmp .iret_cf
         .create_scan:
-        ;; Save filename pointer, scan directory for free entry and next free sector
-        mov di, si             ; DI = filename for later
-        call scan_dir_entries  ; BX = free entry index, DL = next data sector
-        ;; Check a free entry was found
+        mov di, si             ; DI = full filename for later
+        ;; Get next free data sector (global scan)
+        call scan_dir_entries  ; BX = free root entry, DL = next data sector
+        push dx                ; save next_sec
+        ;; Check if path has '/' (subdirectory)
+        push di
+        .create_find_slash:
+        mov al, [di]
+        test al, al
+        jz .create_no_slash
+        cmp al, '/'
+        je .create_in_subdir
+        inc di
+        jmp .create_find_slash
+        .create_no_slash:
+        pop di                 ; DI = filename (no slash)
+        ;; Create in root directory
         cmp bx, 0FFFFh
         jne .create_write_entry
+        pop dx
         mov al, ERR_DIR_FULL
         stc
         jmp .iret_cf
         .create_write_entry:
-        ;; Load the directory sector containing the free entry
+        ;; Load root sector with free entry
+        pop dx                 ; DL = next data sector
         push dx
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
+        call dir_load_entry    ; BX = entry ptr (uses root index from scan_dir_entries)
         pop dx
-        ;; Write filename from DI into entry at BX, null-pad
-        push dx                ; save next_sec in DL
-        push bx                ; save entry base
-        mov si, di             ; SI = filename
-        mov cx, DIR_NAME_LEN - 1
-        .create_copy_name:
-        mov al, [si]
-        test al, al
-        jz .create_pad_name
-        inc si
-        mov [bx], al
-        inc bx
-        dec cx
-        jnz .create_copy_name
-        jmp .create_write_meta
-        .create_pad_name:
-        mov byte [bx], 0
-        inc bx
-        dec cx
-        jnz .create_pad_name
-        .create_write_meta:
+        jmp .create_do_write
+
+        .create_in_subdir:
+        ;; DI points to '/'. Stack has: [saved DI (full path)], [next_sec]
+        mov byte [di], 0       ; null-terminate dir name
+        pop si                 ; SI = start of path = dir name
+        push di                ; save '/' position
+        ;; Find the subdirectory in root
+        push dx                ; save next_sec across find_file
+        push si
+        call find_file         ; BX = dir entry index
+        pop si
+        pop dx
+        jc .create_subdir_err
+        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        jz .create_subdir_err
+        ;; Read subdirectory sector
+        mov al, [bx+DIR_OFF_SECTOR]
+        mov [dir_loaded_sec], al
+        call read_sector
+        jc .create_subdir_err
+        ;; Find free entry in subdirectory sector
+        mov bx, DISK_BUFFER
+        mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
+        .create_sub_scan:
+        cmp byte [bx], 0
+        je .create_sub_found
+        add bx, DIR_ENTRY_SIZE
+        loop .create_sub_scan
+        ;; No free entry in subdirectory
+        pop di                 ; restore '/'
+        mov byte [di], '/'
+        pop dx
+        mov al, ERR_DIR_FULL
+        stc
+        jmp .iret_cf
+        .create_sub_found:
+        ;; BX = free entry ptr in subdirectory's DISK_BUFFER
+        pop di                 ; restore '/' position
+        mov byte [di], '/'
+        inc di                 ; DI = filename after '/'
+        pop dx                 ; DL = next data sector
+        jmp .create_do_write
+
+        .create_subdir_err:
+        pop di
+        mov byte [di], '/'
+        pop dx
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+
+        .create_do_write:
+        ;; BX = entry ptr in DISK_BUFFER, DI = filename to write, DL = start sector
+        push dx
+        push bx
+        mov si, di
+        call .write_dir_name
         pop bx                 ; BX = entry base
         pop dx                 ; DL = next free sector
         mov byte [bx+DIR_OFF_FLAGS], 0
         mov [bx+DIR_OFF_SECTOR], dl
         mov byte [bx+DIR_OFF_SECTOR+1], 0
         mov word [bx+DIR_OFF_SIZE], 0
-        ;; Write directory back to disk
         call dir_write_back
         jc .iret_cf
-        ;; Return start sector in AL
         mov al, dl
         clc
         jmp .iret_cf
 
         .fs_find:
-        call find_file         ; BX = entry index
+        call find_file         ; BX = entry index within loaded sector
         jc .iret_cf
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
+        ;; Convert index to pointer (entry is already in DISK_BUFFER)
+        and bx, 0Fh            ; index within sector (0-15)
+        shl bx, 5              ; * DIR_ENTRY_SIZE (32)
+        add bx, DISK_BUFFER
+        jmp .iret_cf
+
+        .fs_mkdir:
+        ;; Create subdirectory: SI = name (no slashes)
+        ;; On success: CF clear, AL = allocated sector
+        ;; On error: CF set, AL = ERR_EXISTS/ERR_DIR_FULL
+        ;; Check name doesn't already exist
+        call find_file
+        jc .mkdir_scan
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .mkdir_scan:
+        mov di, si             ; DI = dirname for later
+        call scan_dir_entries  ; BX = free entry index, DL = next data sector
+        cmp bx, 0FFFFh
+        jne .mkdir_write_entry
+        mov al, ERR_DIR_FULL
+        stc
+        jmp .iret_cf
+        .mkdir_write_entry:
+        ;; Load the root sector containing the free entry
+        push dx
+        call dir_load_entry    ; BX = entry ptr (uses root index from scan)
+        pop dx
+        ;; Write directory name, null-padded
+        push dx
+        push bx
+        mov si, di
+        call .write_dir_name
+        pop bx                 ; BX = entry base
+        pop dx                 ; DL = next free sector
+        mov byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        mov [bx+DIR_OFF_SECTOR], dl
+        mov byte [bx+DIR_OFF_SECTOR+1], 0
+        mov word [bx+DIR_OFF_SIZE], 512
+        ;; Write root directory sector back
+        call dir_write_back
+        jc .iret_cf
+        ;; Zero-fill the subdirectory sector
+        push dx
+        push di
+        mov di, DISK_BUFFER
+        mov cx, 256
+        xor ax, ax
+        cld
+        rep stosw              ; fill 512 bytes with zeros
+        pop di
+        pop dx
+        ;; Write the zeroed sector to disk
+        mov al, dl
+        call write_sector
+        jc .iret_cf
+        ;; Return allocated sector in AL
+        mov al, dl
+        clc
         jmp .iret_cf
 
         .fs_read:
@@ -305,7 +398,6 @@ syscall_handler:
         ;; find_file preserves DI, so DI still holds new name after the call
         call find_file         ; BX = entry index
         jc .fs_rename_not_found
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
         jmp .fs_rename_do
         .fs_rename_not_found:
         mov al, ERR_NOT_FOUND
@@ -313,23 +405,10 @@ syscall_handler:
         jmp .iret_cf
         .fs_rename_do:
         push cx
-        mov cx, DIR_NAME_LEN - 1
-        .rename_copy:
-        mov al, [di]
-        test al, al
-        jz .rename_null
-        inc di
-        mov [bx], al
-        inc bx
-        dec cx
-        jnz .rename_copy
-        jmp .rename_done
-        .rename_null:
-        mov byte [bx], 0
-        inc bx
-        dec cx
-        jnz .rename_null
-        .rename_done:
+        push si
+        mov si, di
+        call .write_dir_name
+        pop si
         pop cx
         call dir_write_back
         jmp .iret_cf
@@ -550,7 +629,6 @@ syscall_handler:
         ;; On error: CF set, AL = ERR_NOT_FOUND or ERR_NOT_EXEC
         call find_file
         jc .exec_not_found
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
         jmp .exec_check_flag
         .exec_not_found:
         mov al, ERR_NOT_FOUND
@@ -619,6 +697,29 @@ syscall_handler:
         pop cx
         pop di
         pop si
+        ret
+
+        .write_dir_name:
+        ;; Copy null-terminated name from SI into entry at BX, padding with
+        ;; zeros up to DIR_NAME_LEN - 1 bytes total. SI is advanced past the
+        ;; null terminator and BX is advanced DIR_NAME_LEN - 1 bytes.
+        ;; Clobbers: AX, BX (advanced), CX, SI (advanced)
+        mov cx, DIR_NAME_LEN - 1
+        .wdn_copy:
+        mov al, [si]
+        test al, al
+        jz .wdn_pad
+        inc si
+        mov [bx], al
+        inc bx
+        dec cx
+        jnz .wdn_copy
+        ret
+        .wdn_pad:
+        mov byte [bx], 0
+        inc bx
+        dec cx
+        jnz .wdn_pad
         ret
 
 install_syscalls:
