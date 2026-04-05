@@ -45,7 +45,7 @@ for src in $PROGRAMS; do
     ref_size=$(wc -c < "$ref")
 
     # Fresh floppy for each test
-    cp floppy.img "/tmp/test_floppy_${name}.img"
+    cp drive.img "/tmp/test_floppy_${name}.img"
 
     rm -f /tmp/asm_ser.in /tmp/asm_ser.out /tmp/asm_mon.in /tmp/asm_mon.out
     mkfifo /tmp/asm_ser.in /tmp/asm_ser.out /tmp/asm_mon.in /tmp/asm_mon.out

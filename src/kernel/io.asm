@@ -107,20 +107,19 @@ find_file:
         jmp .ff_done
 
 lba_to_chs:
-        ;; Convert 1-based logical sector to CHS for IDE geometry
-        ;; (63 sectors/track, 16 heads)
+        ;; Convert 1-based logical sector to CHS using detected geometry
         ;; Input: AL = logical sector (1-based)
         ;; Output: CH = cylinder, CL = sector (1-based), DH = head
         ;; Clobbers: AX
         push bx
         dec al                  ; 0-based LBA
         xor ah, ah
-        mov bl, 63              ; sectors per track
+        mov bl, [sectors_per_track]
         div bl                  ; AL = track, AH = sector_in_track
         mov cl, ah
-        inc cl                  ; CL = 1-based sector (1-63)
+        inc cl                  ; CL = 1-based sector
         xor ah, ah
-        mov bl, 16              ; heads per cylinder
+        mov bl, [heads_per_cyl]
         div bl                  ; AL = cylinder, AH = head
         mov ch, al
         mov dh, ah

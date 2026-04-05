@@ -14,15 +14,15 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 
 * Run with QEMU:
 
-    qemu-system-i386 -drive file=floppy.img,format=raw
+    qemu-system-i386 -drive file=drive.img,format=raw
 
 * Run with serial console:
 
-    qemu-system-i386 -drive file=floppy.img,format=raw -serial stdio
+    qemu-system-i386 -drive file=drive.img,format=raw -serial stdio
 
 * Add a file to the filesystem:
 
-    ./add_file.sh floppy.img <file>
+    ./add_file.sh drive.img <file>
 
 ## File Structure
 

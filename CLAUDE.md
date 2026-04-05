@@ -6,9 +6,10 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 
 ```sh
 ./make_os.sh                                           # assemble and create floppy image
-qemu-system-i386 -drive file=floppy.img,format=raw     # run in QEMU
-qemu-system-i386 -drive file=floppy.img,format=raw -serial stdio  # with serial console
-qemu-system-i386 -drive file=floppy.img,format=raw -serial stdio -netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300  # with NE2000 NIC
+qemu-system-i386 -drive file=drive.img,format=raw     # run in QEMU (IDE mode)
+qemu-system-i386 -drive file=drive.img,if=floppy,format=raw  # run as floppy
+qemu-system-i386 -drive file=drive.img,format=raw -serial stdio  # with serial console
+qemu-system-i386 -drive file=drive.img,format=raw -serial stdio -netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300  # with NE2000 NIC
 ```
 
 Requires `nasm` (`brew install nasm`).
@@ -36,7 +37,7 @@ Trivial read-only filesystem on the floppy disk:
 
 Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
-Use `./add_file.sh floppy.img <file>` to add files to the image after building.
+Use `./add_file.sh drive.img <file>` to add files to the image after building.
 
 ### Networking
 
