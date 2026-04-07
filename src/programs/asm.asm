@@ -41,6 +41,31 @@ main:
         je .usage              ; empty second arg
         mov [out_name], si
 
+        ;; Compute src_prefix = directory portion of src_name (incl. trailing '/')
+        ;; Walk src_name and remember position just past the last '/'
+        mov si, [src_name]
+        mov di, src_prefix     ; di tracks length of valid prefix
+        .pfx_scan:
+        mov al, [si]
+        test al, al
+        jz .pfx_scan_done
+        inc si
+        cmp al, '/'
+        jne .pfx_scan
+        ;; Found a '/'; copy src_name[0..si) to src_prefix
+        mov bx, [src_name]
+        mov di, src_prefix
+        .pfx_copy:
+        mov al, [bx]
+        mov [di], al
+        inc bx
+        inc di
+        cmp bx, si
+        jb .pfx_copy
+        jmp .pfx_scan
+        .pfx_scan_done:
+        mov byte [di], 0       ; null-terminate prefix
+
         ;; -- Pass 1: collect labels, compute sizes --
         mov byte [pass], 1
         mov word [sym_count], 0
@@ -1298,6 +1323,27 @@ include_push:
         pop cx
         pop di
         pop si
+        ;; Construct include_path = src_prefix + (include name at SI)
+        mov bx, src_prefix
+        mov di, include_path
+        .ip_pfx:
+        mov al, [bx]
+        test al, al
+        jz .ip_name
+        mov [di], al
+        inc bx
+        inc di
+        jmp .ip_pfx
+        .ip_name:
+        mov al, [si]
+        mov [di], al
+        inc di
+        test al, al
+        jz .ip_done
+        inc si
+        jmp .ip_name
+        .ip_done:
+        mov si, include_path
         ;; Open included file
         mov ah, SYS_FS_FIND
         int 30h
@@ -2675,6 +2721,7 @@ file_size     dw 0
 file_start    db 0
 global_scope  dw 0FFFFh
 inc_depth     db 0
+include_path  times 32 db 0
 last_sym_idx  dw 0
 op1_reg       db 0
 op1_size      db 0
@@ -2693,4 +2740,5 @@ pass          db 0
 src_buf_pos   dw 0
 src_buf_valid dw 0
 src_name      dw 0
+src_prefix    times 32 db 0
 sym_count     dw 0

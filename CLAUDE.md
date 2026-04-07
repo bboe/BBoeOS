@@ -37,7 +37,7 @@ Trivial read-only filesystem on the floppy disk:
 
 Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`, `FLAG_DIR = 0x02`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
-Subdirectories: one level under root only. A subdirectory occupies `DIR_SECTORS` (= 2) consecutive sectors and holds 32 entries, matching the root layout. File paths in syscalls and programs may contain a single `/` to reference a file inside a subdirectory (e.g., `dir/file`). Executables live in `bin/`; the shell automatically retries `bin/<name>` when an external command is not found in the root directory.
+Subdirectories: one level under root only. A subdirectory occupies `DIR_SECTORS` (= 2) consecutive sectors and holds 32 entries, matching the root layout. File paths in syscalls and programs may contain a single `/` to reference a file inside a subdirectory (e.g., `dir/file`). Executables live in `bin/`; the shell automatically retries `bin/<name>` when an external command is not found in the root directory. Static reference sources (the `.asm` files used by the self-hosted assembler tests) live in `src/`. The assembler resolves `%include` paths relative to the directory of its source argument, so `asm src/cat.asm out` correctly finds `src/constants.asm`.
 
 Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir> <file>` to add a file inside a subdirectory, and `./add_file.py --mkdir <dirname>` to create a subdirectory.
 

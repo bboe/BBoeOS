@@ -63,7 +63,7 @@ for src in $PROGRAMS; do
     QEMU_PID=$!
 
     sleep 3
-    printf "asm %s.asm %s\r" "$name" "$out" > /tmp/asm_ser.in
+    printf "asm src/%s.asm %s\r" "$name" "$out" > /tmp/asm_ser.in
     sleep 8
 
     kill $QEMU_PID $SER_PID $MON_PID 2>/dev/null

@@ -23,7 +23,8 @@ for bin in "$tmpdir"/*; do
     ./add_file.py -x -d bin "$bin"
 done
 
-# Add static files (non-executable)
+# Add static files (non-executable) into src/
+./add_file.py --mkdir src
 for f in static/*; do
-    [ -f "$f" ] && ./add_file.py "$f"
+    [ -f "$f" ] && ./add_file.py -d src "$f"
 done
