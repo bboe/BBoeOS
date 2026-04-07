@@ -35,7 +35,8 @@ dir_write_back:
         pop ax
         ret
 
-        dir_loaded_sec db 0
+        dir_loaded_sec  db 0
+        dir_search_start db 0
 
 find_file:
         ;; Search directory for a filename, with optional path support
@@ -61,8 +62,9 @@ find_file:
         jmp .ff_scan_slash
 
         .ff_no_slash:
-        ;; No slash — search root directory as before
+        ;; No slash — search root directory
         mov dx, si
+        mov byte [dir_search_start], DIR_SECTOR
         jmp .ff_search_root
 
         .ff_has_slash:
@@ -81,18 +83,14 @@ find_file:
         ;; BX = pointer to entry in DISK_BUFFER (from root search)
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .ff_not_found        ; not a directory
-        ;; Read the subdirectory's data sector
+        ;; Read the subdirectory's first data sector
         mov al, [bx+DIR_OFF_SECTOR]
-        mov [dir_loaded_sec], al
-        call read_sector
-        jc .ff_done
-        ;; Search the subdirectory sector for the filename after '/'
+        mov [dir_search_start], al
+        ;; Search subdir entries for the filename after '/'
         inc di                  ; skip past '/'
         mov dx, di              ; DX = filename within subdir
-        mov di, DISK_BUFFER
-        mov cx, DIR_MAX_ENTRIES / DIR_SECTORS ; 16 entries per sector
         xor bx, bx             ; BX = entry index within subdir
-        jmp .ff_search
+        jmp .ff_load_sector
 
         .ff_search_root:
         xor bx, bx
@@ -128,10 +126,9 @@ find_file:
         loop .ff_search
 
         .ff_try_next_sector:
-        ;; For subdirectory searches (single sector), we're done
-        ;; For root searches, try next sector
+        ;; Try next sector relative to dir_search_start
         mov al, [dir_loaded_sec]
-        sub al, DIR_SECTOR
+        sub al, [dir_search_start]
         inc al
         cmp al, DIR_SECTORS
         jae .ff_not_found
@@ -139,8 +136,12 @@ find_file:
         add bx, cx
         mov al, bl
         shr al, 4
-        add al, DIR_SECTOR
-        cmp al, DIR_SECTOR + DIR_SECTORS
+        add al, [dir_search_start]
+        push bx
+        mov bl, [dir_search_start]
+        add bl, DIR_SECTORS
+        cmp al, bl
+        pop bx
         jb .ff_load_sector
 
         .ff_not_found:
@@ -315,7 +316,7 @@ scan_dir_entries:
         mov dl, al
 
         .sd_check_subdir:
-        ;; If this is a directory, also scan its sector for files
+        ;; If this is a directory, also scan its sectors for files
         test byte [si+DIR_OFF_FLAGS], FLAG_DIR
         jz .sd_skip
         push ax
@@ -323,18 +324,20 @@ scan_dir_entries:
         push cx
         push si
         push di
-        push dx
-        ;; Read the subdirectory sector
+        ;; AL = current subdir sector, AH = remaining sectors to scan
         mov al, [si+DIR_OFF_SECTOR]
+        mov ah, DIR_SECTORS
+        .sd_subloop:
+        push ax
         call read_sector
-        pop dx
-        jc .sd_subdir_done
-        ;; Scan entries in subdirectory for max data sector
+        pop ax
+        jc .sd_subdir_err
         mov si, DISK_BUFFER
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
         .sd_sub_entry:
         cmp byte [si], 0
         je .sd_sub_skip
+        push ax
         push bx
         xor ax, ax
         mov al, [si+DIR_OFF_SECTOR]
@@ -343,13 +346,20 @@ scan_dir_entries:
         add bx, 511
         shr bx, 9
         add al, bl
-        pop bx
         cmp al, dl
-        jbe .sd_sub_skip
+        jbe .sd_sub_pop
         mov dl, al
+        .sd_sub_pop:
+        pop bx
+        pop ax
         .sd_sub_skip:
         add si, DIR_ENTRY_SIZE
         loop .sd_sub_entry
+        inc al
+        dec ah
+        jnz .sd_subloop
+        jmp .sd_subdir_done
+        .sd_subdir_err:
         .sd_subdir_done:
         pop di
         pop si

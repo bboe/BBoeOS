@@ -179,11 +179,11 @@ syscall_handler:
         call .subdir_find_free
         pop cx
         jc .copy_subdir_err
-        ;; AL = subdir sector, BX = entry pointer in DISK_BUFFER
+        ;; BX = entry pointer in DISK_BUFFER, dir_loaded_sec = current sector
         mov al, [dir_loaded_sec]
         ;; Compute dest_entry_off = BX - DISK_BUFFER
         sub bx, DISK_BUFFER
-        ;; Build packed sector word: low = subdir sector, high = next_dat
+        ;; Build packed sector word: low = current subdir sector, high = next_dat
         mov ah, [bp+0]         ; high byte = next_dat
         mov [bp+0], ax         ; replace next_dat slot with packed sectors
         mov [bp+2], bx         ; replace root_idx slot with entry_offset
@@ -311,7 +311,7 @@ syscall_handler:
         mov al, [bx+DIR_OFF_SECTOR]
         call .subdir_find_free
         jc .create_subdir_pop
-        ;; BX = free entry ptr in subdirectory's DISK_BUFFER
+        ;; BX = free entry ptr in subdir DISK_BUFFER (current sector)
         pop di                 ; restore '/' position
         mov byte [di], '/'
         inc di                 ; DI = filename after '/'
@@ -383,11 +383,11 @@ syscall_handler:
         mov byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         mov [bx+DIR_OFF_SECTOR], dl
         mov byte [bx+DIR_OFF_SECTOR+1], 0
-        mov word [bx+DIR_OFF_SIZE], 512
+        mov word [bx+DIR_OFF_SIZE], DIR_SECTORS * 512
         ;; Write root directory sector back
         call dir_write_back
         jc .iret_cf
-        ;; Zero-fill the subdirectory sector
+        ;; Zero-fill DISK_BUFFER once and write it to each subdir sector
         push dx
         push di
         mov di, DISK_BUFFER
@@ -397,13 +397,24 @@ syscall_handler:
         rep stosw              ; fill 512 bytes with zeros
         pop di
         pop dx
-        ;; Write the zeroed sector to disk
+        push dx
+        mov ah, DIR_SECTORS
+        .mkdir_zero_loop:
+        push ax
         mov al, dl
         call write_sector
-        jc .iret_cf
+        pop ax
+        jc .mkdir_zero_err
+        inc dl
+        dec ah
+        jnz .mkdir_zero_loop
+        pop dx
         ;; Return allocated sector in AL
         mov al, dl
         clc
+        jmp .iret_cf
+        .mkdir_zero_err:
+        pop dx
         jmp .iret_cf
 
         .fs_read:
@@ -820,13 +831,13 @@ syscall_handler:
         iret
 
         .check_shell:
-        ;; Returns ZF set if SI points to "shell" (null-terminated)
+        ;; Returns ZF set if SI points to the shell path (null-terminated)
         push si
         push di
         push cx
         cld
         mov di, SHELL_NAME
-        mov cx, 6              ; 5 chars + null terminator
+        mov cx, 10             ; "bin/shell" + null terminator
         repe cmpsb
         pop cx
         pop di
@@ -834,15 +845,20 @@ syscall_handler:
         ret
 
         .subdir_find_free:
-        ;; Read a subdirectory's data sector and return the first empty entry.
+        ;; Scan a subdirectory's DIR_SECTORS data sectors for the first
+        ;; empty entry.
         ;; Input: AL = subdirectory's first data sector
         ;; Output: CF clear, BX = entry pointer in DISK_BUFFER on success.
-        ;;         dir_loaded_sec set to the loaded sector.
+        ;;         dir_loaded_sec set to the sector containing the entry.
         ;;         CF set on failure with AL = ERR_NOT_FOUND (read error)
         ;;         or ERR_DIR_FULL (no empty entry).
         ;; Clobbers: AX, BX, CX
+        mov ah, DIR_SECTORS
+        .sff_loop:
+        push ax
         mov [dir_loaded_sec], al
         call read_sector
+        pop ax
         jnc .sff_scan_init
         mov al, ERR_NOT_FOUND
         stc
@@ -855,6 +871,9 @@ syscall_handler:
         je .sff_found
         add bx, DIR_ENTRY_SIZE
         loop .sff_scan
+        inc al
+        dec ah
+        jnz .sff_loop
         mov al, ERR_DIR_FULL
         stc
         ret

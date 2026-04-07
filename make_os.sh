@@ -18,8 +18,9 @@ done
 
 dd bs=512 count=2880 if=/dev/zero of=drive.img
 dd conv=notrunc if=os.bin of=drive.img
+./add_file.py --mkdir bin
 for bin in "$tmpdir"/*; do
-    ./add_file.py -x "$bin"
+    ./add_file.py -x -d bin "$bin"
 done
 
 # Add static files (non-executable)

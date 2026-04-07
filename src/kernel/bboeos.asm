@@ -124,4 +124,4 @@ boot_shell:
 
         ;; Strings
         SHELL_ERROR db `Shell not found\n\0`
-        SHELL_NAME db `shell\0`
+        SHELL_NAME db `bin/shell\0`

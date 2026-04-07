@@ -18,18 +18,16 @@ main:
         jc .not_found
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .not_dir
-        ;; Read the subdirectory's data sector
+        ;; Set up to iterate the subdirectory's sectors
         mov al, [bx+DIR_OFF_SECTOR]
-        mov ah, SYS_FS_READ
-        int 30h
-        jc .disk_err
-        ;; List entries from the subdirectory sector
-        mov bx, DISK_BUFFER
-        mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
-        jmp .loop
+        mov [cur_sec], al
+        add al, DIR_SECTORS
+        mov [end_sec], al
+        jmp .next_sector
 
 .list_root:
         mov byte [cur_sec], DIR_SECTOR
+        mov byte [end_sec], DIR_SECTOR + DIR_SECTORS
 
 .next_sector:
         mov al, [cur_sec]
@@ -65,13 +63,9 @@ main:
         loop .loop
 
 .try_next_sector:
-        ;; Only iterate multiple sectors for root directory
-        cmp byte [cur_sec], 0
-        je .done                ; was listing a subdirectory (cur_sec=0)
         inc byte [cur_sec]
         mov al, [cur_sec]
-        sub al, DIR_SECTOR
-        cmp al, DIR_SECTORS
+        cmp al, [end_sec]
         jb .next_sector
 
 .done:
@@ -95,6 +89,7 @@ main:
         int 30h
 
 cur_sec db 0
+end_sec db 0
 
 MSG_NOT_DIR   db `Not a directory\n\0`
 MSG_NOT_FOUND db `Not found\n\0`
