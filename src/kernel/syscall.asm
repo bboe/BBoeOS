@@ -296,12 +296,7 @@ syscall_handler:
         jmp .iret_cf
 
         .fs_find:
-        call find_file         ; BX = entry index within loaded sector
-        jc .iret_cf
-        ;; Convert index to pointer (entry is already in DISK_BUFFER)
-        and bx, 0Fh            ; index within sector (0-15)
-        shl bx, 5              ; * DIR_ENTRY_SIZE (32)
-        add bx, DISK_BUFFER
+        call find_file         ; BX = pointer to entry in DISK_BUFFER
         jmp .iret_cf
 
         .fs_mkdir:

@@ -366,12 +366,14 @@ scan_dir_entries:
         pop dx
         ;; Recompute SI to point to the current entry in the re-read sector
         push ax
+        push cx
         mov ax, di
         and al, 0Fh
         mov cl, 5
         shl ax, cl
         mov si, DISK_BUFFER
         add si, ax
+        pop cx
         pop ax
 
         .sd_skip:
