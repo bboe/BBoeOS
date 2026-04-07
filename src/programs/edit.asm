@@ -30,6 +30,9 @@ main:
         int 30h
         jc .new_file            ; file not found -- create it
 
+        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        jnz .is_dir
+
         ;; Record original on-disk size and start sector
         mov ax, [bx+DIR_OFF_SIZE]
         mov [orig_size], ax
@@ -90,6 +93,13 @@ main:
         call render
         call get_input
         jmp .editor_loop
+
+        .is_dir:
+        mov si, MSG_IS_DIR
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov ah, SYS_EXIT
+        int 30h
 
         .load_err:
         mov si, MSG_LOAD_ERR
@@ -1094,6 +1104,7 @@ save_file:
 ;;; -----------------------------------------------------------------------
         MSG_COL          db `  col \0`
         MSG_CREATE_ERR   db `Cannot create file (directory full?)\0`
+        MSG_IS_DIR       db `Is a directory\n\0`
         MSG_LINE         db `  line \0`
         MSG_LOAD_ERR     db `Load error\n\0`
         MSG_MODIFIED     db ` [modified]\0`

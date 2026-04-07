@@ -12,6 +12,9 @@ main:
         int 30h
         jc .not_found
 
+        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        jnz .is_dir
+
         mov cx, [bx+DIR_OFF_SIZE]        ; File size
         test cx, cx
         jz .empty
@@ -46,6 +49,10 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
+.is_dir:
+        mov si, MSG_IS_DIR
+        jmp .output
+
 .not_found:
         mov si, FILE_NOT_FOUND
         jmp .output
@@ -64,7 +71,8 @@ main:
         int 30h
 
 ;; Strings
-USAGE db `Usage: cat <filename>\n\0`
+MSG_IS_DIR db `Is a directory\n\0`
+USAGE      db `Usage: cat <filename>\n\0`
 
 %include "str_disk_error.asm"
 %include "str_file_not_found.asm"
