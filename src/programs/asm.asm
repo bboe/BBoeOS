@@ -13,6 +13,7 @@
         %assign SRC_BUF       2500h
         %assign INC_SAVE      2700h     ; include stack save area (10 bytes per level)
         %assign INC_SRC_SAVE  2740h     ; saved source buffer (512 bytes per level)
+        %assign JUMP_MAX      128       ; max jcc/jmp instructions per source
 
 ;;; -----------------------------------------------------------------------
 ;;; Main entry point
@@ -66,16 +67,44 @@ main:
         .pfx_scan_done:
         mov byte [di], 0       ; null-terminate prefix
 
-        ;; -- Pass 1: collect labels, compute sizes --
+        ;; -- Pass 1: collect labels and converge jump sizes --
+        ;; Iterate sizing passes optimistically: jumps start short, and
+        ;; any forward jcc/jmp whose target turns out to be out of rel8
+        ;; range is promoted to the near (rel16) form. Each jump can grow
+        ;; at most once, so this loop terminates in O(number of jumps).
         mov byte [pass], 1
         mov word [sym_count], 0
         mov word [org_value], 0
+        ;; Clear jump_table (all jumps start short)
+        push di
+        push cx
+        mov di, jump_table
+        mov cx, JUMP_MAX
+        xor al, al
+        cld
+        rep stosb
+        pop cx
+        pop di
+        mov word [iter_count], 0
+        .pass1_loop:
+        mov byte [growth_flag], 0
         mov word [cur_addr], 0
         mov word [global_scope], 0FFFFh
+        mov word [jump_index], 0
         call do_pass
-
         test byte [err_flag], 0FFh
         jnz .err_pass1
+        inc word [iter_count]
+        ;; Always run at least 2 iterations: iter 1 builds the symbol
+        ;; table; iter 2 is the first one that can verify forward refs.
+        cmp word [iter_count], 2
+        jb .pass1_loop
+        ;; Loop while any jump grew this iteration.
+        test byte [growth_flag], 0FFh
+        jnz .pass1_loop
+        ;; Safety bound to catch bugs.
+        cmp word [iter_count], 16
+        jae .err_pass1
 
         ;; -- Create output file --
         mov si, [out_name]
@@ -89,6 +118,7 @@ main:
         mov ax, [org_value]
         mov [cur_addr], ax
         mov word [global_scope], 0FFFFh
+        mov word [jump_index], 0
         mov al, [out_start_sec]
         mov [out_sector], al
         mov word [out_pos], 0
@@ -233,20 +263,76 @@ emit_word_ax:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; encode_rel8_jump: AL = opcode, SI points to label name
+;;; encode_rel8_jump: AL = opcode, SI points to operand (label name).
+;;; Iterative pass 1 chooses short (rel8) or near (rel16) form per jump,
+;;; growing instructions that don't fit; pass 2 trusts the choice.
+;;; jump_table[idx] = 0 means short, 1 means near.
 ;;; -----------------------------------------------------------------------
 encode_rel8_jump:
-        push ax
-        call emit_byte_al      ; emit opcode
+        push ax                        ; save opcode
         call skip_ws
-        ;; Resolve target address
-        call resolve_label     ; AX = target address
-        ;; Compute rel8 = target - (cur_addr + 1)
-        mov bx, [cur_addr]
-        inc bx                 ; cur_addr will be past the rel8 byte
-        sub ax, bx             ; AX = relative offset
+
+        ;; Acquire this jump's index in the per-pass jump table.
+        mov bx, [jump_index]
+        inc word [jump_index]
+
+        ;; If already marked near, skip the short-form path entirely.
+        cmp byte [jump_table + bx], 0
+        jne .long_form
+
+        ;; Currently short. In pass 2 we trust it and emit; in pass 1 we
+        ;; check whether the target (if known) still fits in rel8.
+        cmp byte [pass], 1
+        jne .emit_short
+
+        push bx                        ; save index across peek
+        call peek_label_target         ; CF clear -> AX = target addr
+        pop bx
+        jc .emit_short                 ; unknown target -> stay short for now
+        ;; Compute displacement vs (cur_addr + 2)
+        mov dx, [cur_addr]
+        add dx, 2
+        sub ax, dx                     ; AX = signed displacement
+        ;; In rel8 range iff AX + 128 in [0, 255]
+        add ax, 128
+        cmp ax, 256
+        jb .emit_short
+        ;; Out of range -- promote to near and signal growth
+        mov byte [jump_table + bx], 1
+        mov byte [growth_flag], 1
+        ;; Fall through to .long_form
+
+        .long_form:
+        pop ax                         ; restore opcode
+        cmp al, 0EBh
+        je .long_jmp
+        ;; Near jcc: 0F (7X + 10h) rel16
+        add al, 10h
+        push ax
+        mov al, 0Fh
         call emit_byte_al
         pop ax
+        call emit_byte_al
+        jmp .long_emit_disp
+        .long_jmp:
+        mov al, 0E9h
+        call emit_byte_al
+        .long_emit_disp:
+        call resolve_label             ; advances SI; AX = target (or placeholder)
+        mov bx, [cur_addr]
+        add bx, 2
+        sub ax, bx
+        call emit_word_ax
+        ret
+
+        .emit_short:
+        pop ax                         ; restore opcode
+        call emit_byte_al
+        call resolve_label             ; advances SI; AX = target (or placeholder)
+        mov bx, [cur_addr]
+        inc bx
+        sub ax, bx
+        call emit_byte_al
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -304,14 +390,26 @@ handle_aam:
 handle_add:
         call skip_ws
         call parse_register    ; AL = reg, AH = size
-        push ax
+        push ax                ; save dst reg+size
         call skip_comma
-        ;; Try register form first (add reg, reg)
-        call parse_register
-        jc .add_imm
+        ;; Use parse_operand so we get reg / mem_direct / imm uniformly
+        call parse_operand
+        mov [op2_type], ah
+        mov [op2_reg], al
+        mov [op2_val], dx
+        cmp byte [op2_type], 0
+        je .add_rr
+        cmp byte [op2_type], 2
+        je .add_rm_direct
+        ;; immediate
+        mov cx, dx
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .add_r8
+        jmp .add_r16_imm
+        .add_rr:
         ;; reg-reg: opcode 00 (8-bit) / 01 (16-bit), modrm reg=src, rm=dst
         pop bx                 ; BL = dst reg, BH = dst size
-        push ax                ; save src reg
         cmp bh, 8
         je .add_rr8
         mov al, 01h
@@ -320,16 +418,29 @@ handle_add:
         mov al, 00h
         .add_rr_emit:
         call emit_byte_al
-        pop ax                 ; AL = src reg
+        mov al, [op2_reg]      ; src reg goes in reg field
         call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
         call emit_byte_al
         ret
-        .add_imm:
-        call resolve_value     ; AX = immediate
-        mov cx, ax
-        pop bx                 ; BL = reg, BH = size
+        .add_rm_direct:
+        ;; add r16, [disp16]: 03 modrm disp16 (or 02 for r8)
+        pop bx                 ; BL = dst reg, BH = dst size
         cmp bh, 8
-        je .add_r8
+        je .add_rm8
+        mov al, 03h
+        jmp .add_rm_emit
+        .add_rm8:
+        mov al, 02h
+        .add_rm_emit:
+        call emit_byte_al
+        mov al, bl
+        shl al, 3
+        or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
+        call emit_byte_al
+        mov ax, [op2_val]
+        call emit_word_ax
+        ret
+        .add_r16_imm:
         ;; add r16, imm: short forms
         test bl, bl
         jnz .add_r16_general
@@ -1136,16 +1247,18 @@ handle_movzx:
         call parse_register    ; AL = dst reg, AH = size (16)
         mov [op1_reg], al
         call skip_comma
-        call parse_operand     ; AH = type, AL = mem reg, DX = disp
+        call parse_operand     ; AH = type, AL = reg, DX = disp
         mov [op2_type], ah
         mov [op2_reg], al
         mov [op2_val], dx
-        ;; 0F B6 modrm [disp8]
+        ;; 0F B6 prefix
         mov al, 0Fh
         call emit_byte_al
         mov al, 0B6h
         call emit_byte_al
-        ;; modrm: reg = dst, rm = mem reg
+        cmp byte [op2_type], 0
+        je .movzx_rr
+        ;; mem (reg + disp form): modrm reg=dst, rm=reg_to_rm(mem reg)
         mov al, [op2_reg]
         call reg_to_rm
         mov bl, al
@@ -1160,6 +1273,14 @@ handle_movzx:
         or al, 40h             ; mod = 01 (disp8)
         call emit_byte_al
         mov al, [op2_val]
+        call emit_byte_al
+        ret
+        .movzx_rr:
+        ;; reg-reg: modrm = 11 dst src
+        mov al, [op1_reg]
+        shl al, 3
+        or al, [op2_reg]
+        or al, 0C0h
         call emit_byte_al
         ret
 
@@ -1456,14 +1577,13 @@ handle_unknown_word:
         cmp byte [di], '.'
         je .bare_local
         mov bx, 0FFFFh
-        call sym_add
-        mov ax, [sym_count]
-        dec ax
+        call sym_set
+        mov ax, [last_sym_idx]
         mov [global_scope], ax
         jmp .bare_added
         .bare_local:
         mov bx, [global_scope]
-        call sym_add
+        call sym_set
         .bare_added:
         pop si
         jmp .bare_continue
@@ -2076,10 +2196,9 @@ parse_line:
         mov si, di
         mov ax, [cur_addr]
         mov bx, 0FFFFh         ; scope = global
-        call sym_add
+        call sym_set
         ;; Update global_scope to this symbol's index
-        mov ax, [sym_count]
-        dec ax
+        mov ax, [last_sym_idx]
         mov [global_scope], ax
         pop di
         jmp .skip_add_label
@@ -2087,7 +2206,7 @@ parse_line:
         mov si, di
         mov ax, [cur_addr]
         mov bx, [global_scope]
-        call sym_add
+        call sym_set
         .skip_add_label:
         ;; If pass 2, update global_scope for global labels
         cmp byte [pass], 2
@@ -2468,6 +2587,78 @@ parse_register:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; peek_label_target: SI -> label name. Looks up the label without
+;;; advancing SI. Returns AX = address with CF clear if found, CF set
+;;; if not found. Only the bare label name is recognised (no arithmetic).
+;;; -----------------------------------------------------------------------
+peek_label_target:
+        push si
+        push bx
+        push cx
+        push dx
+        push di
+        ;; Find end of label name (letters, digits, '_', '.')
+        mov di, si
+        .pl_find_end:
+        mov al, [di]
+        cmp al, '.'
+        je .pl_is_id
+        cmp al, '_'
+        je .pl_is_id
+        cmp al, 'a'
+        jb .pl_check_upper
+        cmp al, 'z'
+        jbe .pl_is_id
+        jmp .pl_end
+        .pl_check_upper:
+        cmp al, 'A'
+        jb .pl_check_dig
+        cmp al, 'Z'
+        jbe .pl_is_id
+        .pl_check_dig:
+        cmp al, '0'
+        jb .pl_end
+        cmp al, '9'
+        ja .pl_end
+        .pl_is_id:
+        inc di
+        jmp .pl_find_end
+        .pl_end:
+        ;; Save delim, null-terminate label
+        mov cl, [di]
+        mov byte [di], 0
+        push di
+        ;; Determine scope from leading char
+        cmp byte [si], '.'
+        jne .pl_global
+        mov bx, [global_scope]
+        jmp .pl_lookup
+        .pl_global:
+        mov bx, 0FFFFh
+        .pl_lookup:
+        mov word [last_sym_idx], 0FFFFh
+        call sym_lookup                ; sets last_sym_idx only when found
+        pop di
+        mov [di], cl                   ; restore delim
+        cmp word [last_sym_idx], 0FFFFh
+        je .pl_not_found
+        clc
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        pop si
+        ret
+        .pl_not_found:
+        stc
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        pop si
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; print_hex_word: print AX as 4-digit hex
 ;;; -----------------------------------------------------------------------
 print_hex_word:
@@ -2821,11 +3012,10 @@ sym_add:
 sym_add_const:
         push bx
         mov bx, 0FFFFh
-        call sym_add
+        call sym_set
         ;; Fix type to 1 (constant)
         push ax
-        mov ax, [sym_count]
-        dec ax
+        mov ax, [last_sym_idx]
         call sym_entry_addr    ; DI = entry address
         mov byte [di+SYM_NAME_LEN+2], 1
         pop ax
@@ -2920,6 +3110,46 @@ sym_lookup:
         pop cx
         ret
 
+;;; -----------------------------------------------------------------------
+;;; sym_set: update existing entry's value, or add a new entry.
+;;; SI = name (null-terminated), AX = value, BX = scope.
+;;; On return: last_sym_idx = the entry's index.
+;;; Used by pass 1, which iterates -- the first iteration adds entries
+;;; and subsequent iterations update them as cur_addr shifts.
+;;; -----------------------------------------------------------------------
+sym_set:
+        mov [ss_value], ax
+        mov [ss_scope], bx
+        push di
+        push cx
+        push dx
+        mov word [last_sym_idx], 0FFFFh
+        call sym_lookup
+        cmp word [last_sym_idx], 0FFFFh
+        je .ss_add
+        ;; Found -- update value in place
+        mov ax, [last_sym_idx]
+        call sym_entry_addr    ; DI = entry address
+        mov ax, [ss_value]
+        mov [di+SYM_NAME_LEN], ax
+        pop dx
+        pop cx
+        pop di
+        ret
+        .ss_add:
+        pop dx
+        pop cx
+        pop di
+        mov ax, [ss_value]
+        mov bx, [ss_scope]
+        call sym_add
+        ;; Record the new entry's index in last_sym_idx for callers.
+        push ax
+        mov ax, [sym_count]
+        dec ax
+        mov [last_sym_idx], ax
+        pop ax
+        ret
 
 ;;; -----------------------------------------------------------------------
 ;;; Mnemonic table: pairs of (name_ptr, handler_ptr), terminated by 0
@@ -2937,6 +3167,7 @@ mnemonic_table:
         dw STR_INC, handle_inc
         dw STR_INT, handle_int
         dw STR_JA,  handle_ja
+        dw STR_JAE, handle_jnc
         dw STR_JB,  handle_jb
         dw STR_JBE, handle_jbe
         dw STR_JC,  handle_jc
@@ -2987,6 +3218,7 @@ STR_INC     db 'inc',0
 STR_INCLUDE db 'include',0
 STR_INT     db 'int',0
 STR_JA      db 'ja',0
+STR_JAE     db 'jae',0
 STR_JB      db 'jb',0
 STR_JBE     db 'jbe',0
 STR_JC      db 'jc',0
@@ -3062,8 +3294,12 @@ file_cur_sec  db 0
 file_size     dw 0
 file_start    db 0
 global_scope  dw 0FFFFh
+growth_flag   db 0
 inc_depth     db 0
 include_path  times 32 db 0
+iter_count    dw 0
+jump_index    dw 0
+jump_table    times JUMP_MAX db 0
 last_sym_idx  dw 0
 op1_reg       db 0
 op1_size      db 0
@@ -3083,4 +3319,6 @@ src_buf_pos   dw 0
 src_buf_valid dw 0
 src_name      dw 0
 src_prefix    times 32 db 0
+ss_scope      dw 0
+ss_value      dw 0
 sym_count     dw 0
