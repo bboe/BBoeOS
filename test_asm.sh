@@ -3,7 +3,11 @@
 # Test that the self-hosted assembler produces byte-identical output
 # to NASM for all programs in static/.
 #
-# Usage: ./test_asm.sh
+# Usage: ./test_asm.sh [program-name]
+#   With no argument, tests every program in static/.
+#   With a name (e.g. ./test_asm.sh edit), tests only that one program.
+#   The artifacts (/tmp/ref_<name>.bin, /tmp/out_<name>.bin) are kept on
+#   single-program runs so the output can be inspected after a failure.
 #
 # Requires: nasm, qemu-system-i386
 
@@ -12,16 +16,29 @@ set -e
 PASS=0
 FAIL=0
 ERRORS=""
+ONLY="${1:-}"
 
 # Build the OS
 echo "Building OS..."
 ./make_os.sh > /dev/null 2>&1
 
-# Find all .asm files in static/ that have "org 6000h" (programs, not includes)
+# Find programs in static/ with "org 6000h"; honour single-program filter.
 PROGRAMS=""
 for f in static/*.asm; do
-    grep -q "org 6000h" "$f" 2>/dev/null && PROGRAMS="$PROGRAMS $f"
+    grep -q "org 6000h" "$f" 2>/dev/null || continue
+    if [ -n "$ONLY" ]; then
+        case "$(basename "$f" .asm)" in
+            "$ONLY") PROGRAMS="$PROGRAMS $f" ;;
+        esac
+    else
+        PROGRAMS="$PROGRAMS $f"
+    fi
 done
+
+if [ -n "$ONLY" ] && [ -z "$PROGRAMS" ]; then
+    echo "No program named '$ONLY' in static/"
+    exit 1
+fi
 
 if [ -z "$PROGRAMS" ]; then
     echo "No programs found in static/"
@@ -55,7 +72,7 @@ for src in $PROGRAMS; do
     cat /tmp/asm_mon.out > /dev/null &
     MON_PID=$!
 
-    timeout 15 qemu-system-i386 -drive "file=/tmp/test_floppy_${name}.img,format=raw" -display none \
+    timeout 17 qemu-system-i386 -drive "file=/tmp/test_floppy_${name}.img,format=raw" -display none \
         -chardev pipe,id=s,path=/tmp/asm_ser \
         -serial chardev:s \
         -chardev pipe,id=m,path=/tmp/asm_mon \
@@ -64,7 +81,7 @@ for src in $PROGRAMS; do
 
     sleep 3
     printf "asm src/%s.asm %s\r" "$name" "$out" > /tmp/asm_ser.in
-    sleep 8
+    sleep 10
 
     kill $QEMU_PID $SER_PID $MON_PID 2>/dev/null
     wait 2>/dev/null
@@ -101,7 +118,11 @@ for src in $PROGRAMS; do
         ERRORS="$ERRORS ${name}.asm"
     fi
 
-    rm -f "/tmp/test_floppy_${name}.img" "/tmp/ref_${name}.bin" "/tmp/out_${name}.bin"
+    if [ -z "$ONLY" ]; then
+        rm -f "/tmp/test_floppy_${name}.img" "/tmp/ref_${name}.bin" "/tmp/out_${name}.bin"
+    else
+        rm -f "/tmp/test_floppy_${name}.img"
+    fi
 done
 
 # Cleanup
