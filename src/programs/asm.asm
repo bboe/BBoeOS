@@ -306,6 +306,25 @@ handle_add:
         call parse_register    ; AL = reg, AH = size
         push ax
         call skip_comma
+        ;; Try register form first (add reg, reg)
+        call parse_register
+        jc .add_imm
+        ;; reg-reg: opcode 00 (8-bit) / 01 (16-bit), modrm reg=src, rm=dst
+        pop bx                 ; BL = dst reg, BH = dst size
+        push ax                ; save src reg
+        cmp bh, 8
+        je .add_rr8
+        mov al, 01h
+        jmp .add_rr_emit
+        .add_rr8:
+        mov al, 00h
+        .add_rr_emit:
+        call emit_byte_al
+        pop ax                 ; AL = src reg
+        call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
+        call emit_byte_al
+        ret
+        .add_imm:
         call resolve_value     ; AX = immediate
         mov cx, ax
         pop bx                 ; BL = reg, BH = size
@@ -418,6 +437,14 @@ handle_call:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_clc
+;;; -----------------------------------------------------------------------
+handle_clc:
+        mov al, 0F8h
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_cld
 ;;; -----------------------------------------------------------------------
 handle_cld:
@@ -435,9 +462,32 @@ handle_cmp:
         mov [op1_reg], al
         mov [op1_val], dx
         call skip_comma
+        ;; If first operand is a register, try parse_register for reg-reg form
+        cmp byte [op1_type], 0
+        jne .cmp_imm_only
+        call parse_register
+        jc .cmp_imm_only
+        ;; cmp reg, reg: opcode 38 (8) / 39 (16), modrm reg=src, rm=dst
+        mov bl, [op1_reg]
+        push ax                ; save src reg+size
+        cmp byte [op1_size], 8
+        je .cmp_rr8
+        mov al, 39h
+        jmp .cmp_rr_emit
+        .cmp_rr8:
+        mov al, 38h
+        .cmp_rr_emit:
+        call emit_byte_al
+        pop ax                 ; AL = src reg
+        call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
+        call emit_byte_al
+        ret
+        .cmp_imm_only:
         call resolve_value
         mov cx, ax             ; CX = immediate
         ;; Check operand type
+        cmp byte [op1_type], 2
+        je .cmp_mem_direct
         cmp byte [op1_type], 3
         je .cmp_mem
         cmp byte [op1_type], 0
@@ -458,6 +508,15 @@ handle_cmp:
         call emit_byte_al
         ret
         .cmp_r16_full:
+        ;; cmp AX, imm16 has a short form: 3D imm16
+        test bl, bl
+        jnz .cmp_r16_general
+        mov al, 3Dh
+        call emit_byte_al
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .cmp_r16_general:
         mov al, 81h
         call emit_byte_al
         mov al, bl
@@ -485,8 +544,14 @@ handle_cmp:
         call emit_byte_al
         ret
         .cmp_mem:
-        ;; cmp byte [reg], imm8 or cmp byte [reg+disp], imm8
+        ;; cmp byte [reg+disp], imm8 or cmp word [reg+disp], imm16
+        cmp byte [op1_size], 8
+        je .cmp_mem8
+        mov al, 81h
+        jmp .cmp_mem_modrm
+        .cmp_mem8:
         mov al, 80h
+        .cmp_mem_modrm:
         call emit_byte_al
         ;; Build modrm: /7 with memory addressing
         mov al, [op1_reg]
@@ -502,6 +567,35 @@ handle_cmp:
         mov ax, [op1_val]
         call emit_byte_al      ; disp8
         .cmp_mem_imm:
+        cmp byte [op1_size], 8
+        je .cmp_mem_imm8
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .cmp_mem_imm8:
+        mov al, cl
+        call emit_byte_al
+        ret
+        .cmp_mem_direct:
+        ;; cmp byte [disp16], imm8 or cmp word [disp16], imm16
+        cmp byte [op1_size], 8
+        je .cmp_md8
+        mov al, 81h
+        call emit_byte_al
+        mov al, 3Eh            ; modrm: mod=00, /7, rm=110 (disp16)
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
+        mov ax, cx
+        call emit_word_ax
+        ret
+        .cmp_md8:
+        mov al, 80h
+        call emit_byte_al
+        mov al, 3Eh
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
         mov al, cl
         call emit_byte_al
         .cmp_done:
@@ -899,9 +993,12 @@ handle_mov:
         jmp .mov_done
 
         .mov_mem_dst:
-        ;; mov [reg], imm: C6 /0 modrm imm8 (byte) or C7 /0 modrm imm16
+        ;; mov [reg], imm or mov [reg], reg
+        cmp byte [op2_type], 0
+        je .mov_mem_dst_reg
         cmp byte [op2_type], 1
         jne .mov_done
+        ;; mov [reg], imm: C6 /0 modrm imm8 (byte) or C7 /0 modrm imm16
         mov al, [op1_reg]
         call reg_to_rm
         cmp byte [op1_size], 8
@@ -923,11 +1020,33 @@ handle_mov:
         mov al, [op2_val]
         call emit_byte_al
         jmp .mov_done
+        .mov_mem_dst_reg:
+        ;; mov [reg], reg: 88 (8-bit) / 89 (16-bit), modrm reg=src, rm=dst
+        ;; (op1_size holds the second-parsed operand's size by convention)
+        cmp byte [op1_size], 8
+        je .mov_mem_dst_reg8
+        mov al, 89h
+        jmp .mov_mem_dst_reg_emit
+        .mov_mem_dst_reg8:
+        mov al, 88h
+        .mov_mem_dst_reg_emit:
+        call emit_byte_al
+        mov al, [op1_reg]
+        call reg_to_rm         ; AL = rm field
+        mov bl, al
+        mov al, [op2_reg]
+        shl al, 3
+        or al, bl              ; modrm with mod=00
+        call emit_byte_al
+        jmp .mov_done
 
         .mov_direct_dst:
-        ;; mov [disp16], imm: C6 06 disp16 imm8 (byte) or C7 06 disp16 imm16
+        ;; mov [disp16], imm or mov [disp16], reg
+        cmp byte [op2_type], 0
+        je .mov_dd_reg
         cmp byte [op2_type], 1
         jne .mov_done
+        ;; mov [disp16], imm: C6 06 disp16 imm8 (byte) or C7 06 disp16 imm16
         cmp byte [op1_size], 8
         je .mov_dd8
         mov al, 0C7h
@@ -949,8 +1068,56 @@ handle_mov:
         mov al, [op2_val]
         call emit_byte_al
         jmp .mov_done
+        .mov_dd_reg:
+        ;; mov [disp16], reg: short form A2/A3 for AL/AX, else 88/89 modrm
+        cmp byte [op1_size], 8
+        je .mov_dd_reg8
+        ;; 16-bit
+        cmp byte [op2_reg], 0
+        jne .mov_dd_reg16_general
+        mov al, 0A3h
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
+        jmp .mov_done
+        .mov_dd_reg16_general:
+        mov al, 89h
+        call emit_byte_al
+        mov al, [op2_reg]
+        shl al, 3
+        or al, 06h             ; modrm: mod=00, reg=src, rm=110 (disp16)
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
+        jmp .mov_done
+        .mov_dd_reg8:
+        cmp byte [op2_reg], 0
+        jne .mov_dd_reg8_general
+        mov al, 0A2h
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
+        jmp .mov_done
+        .mov_dd_reg8_general:
+        mov al, 88h
+        call emit_byte_al
+        mov al, [op2_reg]
+        shl al, 3
+        or al, 06h
+        call emit_byte_al
+        mov ax, [op1_val]
+        call emit_word_ax
+        jmp .mov_done
 
         .mov_done:
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_movsb: movsb (no operands)
+;;; -----------------------------------------------------------------------
+handle_movsb:
+        mov al, 0A4h
+        call emit_byte_al
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -958,6 +1125,61 @@ handle_mov:
 ;;; -----------------------------------------------------------------------
 handle_movsw:
         mov al, 0A5h
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_movzx: movzx r16, byte [reg+disp]
+;;; -----------------------------------------------------------------------
+handle_movzx:
+        call skip_ws
+        call parse_register    ; AL = dst reg, AH = size (16)
+        mov [op1_reg], al
+        call skip_comma
+        call parse_operand     ; AH = type, AL = mem reg, DX = disp
+        mov [op2_type], ah
+        mov [op2_reg], al
+        mov [op2_val], dx
+        ;; 0F B6 modrm [disp8]
+        mov al, 0Fh
+        call emit_byte_al
+        mov al, 0B6h
+        call emit_byte_al
+        ;; modrm: reg = dst, rm = mem reg
+        mov al, [op2_reg]
+        call reg_to_rm
+        mov bl, al
+        mov al, [op1_reg]
+        shl al, 3
+        or al, bl
+        cmp word [op2_val], 0
+        jne .movzx_disp
+        call emit_byte_al
+        ret
+        .movzx_disp:
+        or al, 40h             ; mod = 01 (disp8)
+        call emit_byte_al
+        mov al, [op2_val]
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_mul: mul r16
+;;; -----------------------------------------------------------------------
+handle_mul:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        cmp ah, 8
+        je .mul8
+        mov al, 0F7h
+        jmp .mul_emit
+        .mul8:
+        mov al, 0F6h
+        .mul_emit:
+        call emit_byte_al
+        pop ax
+        or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
         call emit_byte_al
         ret
 
@@ -1024,6 +1246,30 @@ handle_shr:
         or al, 0E8h
         call emit_byte_al
         mov al, cl
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_stc
+;;; -----------------------------------------------------------------------
+handle_stc:
+        mov al, 0F9h
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_stosb
+;;; -----------------------------------------------------------------------
+handle_stosb:
+        mov al, 0AAh
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_stosw
+;;; -----------------------------------------------------------------------
+handle_stosw:
+        mov al, 0ABh
         call emit_byte_al
         ret
 
@@ -1741,10 +1987,26 @@ parse_directive:
         ;; Check 'db'
         mov di, STR_DB
         call match_word
-        jc .try_mnemonic
+        jc .try_dw
         call skip_ws
         call parse_db
         jmp .pd_done
+
+        .try_dw:
+        ;; Check 'dw' — emit each value as a 16-bit little-endian word
+        mov di, STR_DW
+        call match_word
+        jc .try_mnemonic
+        call skip_ws
+        .dw_next:
+        call resolve_value     ; AX = value
+        call emit_word_ax
+        call skip_ws
+        cmp byte [si], ','
+        jne .pd_done
+        inc si
+        call skip_ws
+        jmp .dw_next
 
         .try_mnemonic:
         ;; Not a directive — try instruction mnemonic
@@ -2035,6 +2297,19 @@ parse_operand:
         ;; 'byte' before a register (e.g., "mov byte bl, [var]") — just a hint
         jmp .try_register
         .no_byte_prefix:
+        pop si
+        ;; Check for 'word' size prefix (no-op since 16 is the default)
+        push si
+        mov di, STR_WORD
+        call match_word
+        jc .no_word_prefix
+        add sp, 2
+        mov byte [op1_size], 16
+        call skip_ws
+        cmp byte [si], '['
+        je .mem_operand
+        jmp .try_register
+        .no_word_prefix:
         pop si
 
         cmp byte [si], '['
@@ -2586,6 +2861,14 @@ sym_lookup:
         mov di, SYM_TABLE
         xor dx, dx             ; DX = index
         .sym_search:
+        ;; Filter by scope: BL = wanted scope; entry's scope at di+SYM_NAME_LEN+3.
+        ;; Wanted 0xFF means global; only match entries whose scope is 0xFF.
+        ;; Wanted other means local; only match entries whose scope == BL.
+        push ax
+        mov al, [di+SYM_NAME_LEN+3]
+        cmp al, bl
+        pop ax
+        jne .sym_next
         ;; Compare names
         push si
         push di
@@ -2646,6 +2929,7 @@ mnemonic_table:
         dw STR_ADD, handle_add
         dw STR_AND, handle_and
         dw STR_CALL, handle_call
+        dw STR_CLC, handle_clc
         dw STR_CLD, handle_cld
         dw STR_CMP, handle_cmp
         dw STR_DEC, handle_dec
@@ -2667,12 +2951,18 @@ mnemonic_table:
         dw STR_LODSB, handle_lodsb
         dw STR_LOOP, handle_loop
         dw STR_MOV, handle_mov
+        dw STR_MOVSB, handle_movsb
         dw STR_MOVSW, handle_movsw
+        dw STR_MOVZX, handle_movzx
+        dw STR_MUL, handle_mul
         dw STR_POP, handle_pop
         dw STR_PUSH, handle_push
         dw STR_REP, handle_rep
         dw STR_RET, handle_ret
         dw STR_SHR, handle_shr
+        dw STR_STC, handle_stc
+        dw STR_STOSB, handle_stosb
+        dw STR_STOSW, handle_stosw
         dw STR_SUB, handle_sub
         dw STR_TEST, handle_test
         dw STR_XCHG, handle_xchg
@@ -2686,11 +2976,13 @@ STR_AND     db 'and',0
 STR_ASSIGN  db 'assign',0
 STR_BYTE    db 'byte',0
 STR_CALL    db 'call',0
+STR_CLC     db 'clc',0
 STR_CLD     db 'cld',0
 STR_CMP     db 'cmp',0
 STR_DEC     db 'dec',0
 STR_DIV     db 'div',0
 STR_DB      db 'db',0
+STR_DW      db 'dw',0
 STR_INC     db 'inc',0
 STR_INCLUDE db 'include',0
 STR_INT     db 'int',0
@@ -2709,7 +3001,10 @@ STR_JZ      db 'jz',0
 STR_LODSB   db 'lodsb',0
 STR_LOOP    db 'loop',0
 STR_MOV     db 'mov',0
+STR_MOVSB   db 'movsb',0
 STR_MOVSW   db 'movsw',0
+STR_MOVZX   db 'movzx',0
+STR_MUL     db 'mul',0
 STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
@@ -2717,9 +3012,13 @@ STR_PUSH    db 'push',0
 STR_REP     db 'rep',0
 STR_RET     db 'ret',0
 STR_SHR     db 'shr',0
+STR_STC     db 'stc',0
+STR_STOSB   db 'stosb',0
+STR_STOSW   db 'stosw',0
 STR_SUB     db 'sub',0
 STR_TEST    db 'test',0
 STR_TIMES   db 'times',0
+STR_WORD    db 'word',0
 STR_XCHG    db 'xchg',0
 STR_XOR     db 'xor',0
 
