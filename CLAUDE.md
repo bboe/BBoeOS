@@ -37,7 +37,7 @@ Trivial read-only filesystem on the floppy disk:
 
 Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
-Use `./add_file.sh drive.img <file>` to add files to the image after building.
+Use `./add_file.py <file>` to add files to the image after building.
 
 ### Networking
 
@@ -80,7 +80,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## File Structure
 
-- `add_file.sh` — Host-side script to add files to the floppy image filesystem
+- `add_file.py` — Host-side script to add files to the drive image filesystem
 - `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm` — Shared: `dns_query` (sends DNS A query for domain at SI; returns DI = first answer record, AL = ANCOUNT, CF on error; caller defines `dns_base`, `dns_query_buf`, `dns_server_ip`)

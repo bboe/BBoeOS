@@ -5,6 +5,7 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 ## Dependencies
 
 * nasm: `brew install nasm`
+* python3 (for `add_file.py`)
 
 ## Building and running BBoeOS
 
@@ -22,7 +23,7 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 
 * Add a file to the filesystem:
 
-    ./add_file.sh drive.img <file>
+    ./add_file.py <file>
 
 ## File Structure
 
@@ -37,7 +38,7 @@ src/kernel/           Kernel assembly source
   system.asm          Graphics mode, reboot, shutdown
 src/programs/         User-space programs
   shell.asm           Shell: CLI loop, command dispatch, built-in commands
-add_file.sh           Host-side script to add files to floppy image
+add_file.py           Host-side script to add files to drive image
 make_os.sh            Build script
 ```
 
