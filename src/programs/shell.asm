@@ -50,8 +50,25 @@ main:
         jmp .loop
 
 .not_found:
-        ;; Try to execute as external program
+        ;; Try to execute as external program by literal name
         mov si, BUFFER
+        mov ah, SYS_EXEC
+        int 30h                 ; Does not return on success
+        cmp al, ERR_NOT_EXEC
+        je .not_exec
+        ;; Not found in root: retry inside bin/
+        mov si, BUFFER
+        mov di, exec_path + 4   ; just past "bin/"
+        mov cx, DIR_NAME_LEN    ; name + null
+        .copy_name:
+        lodsb
+        stosb
+        test al, al
+        jz .copy_done
+        loop .copy_name
+        .copy_done:
+        mov byte [di], 0        ; ensure null-termination
+        mov si, exec_path
         mov ah, SYS_EXEC
         int 30h                 ; Does not return on success
         cmp al, ERR_NOT_EXEC
@@ -483,5 +500,7 @@ PROMPT        db `$ \0`
 SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 
 ;; Variables
-kill_buffer times MAX_INPUT db 0
-kill_length dw 0
+exec_path     db `bin/`              ; 4 bytes prefix
+              times DIR_NAME_LEN+1 db 0 ; name (up to 26 chars) + null + safety byte
+kill_buffer   times MAX_INPUT db 0
+kill_length   dw 0

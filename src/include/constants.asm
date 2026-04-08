@@ -14,6 +14,7 @@
         %assign ERR_NOT_FOUND 04h     ; File not found
         %assign ERR_PROTECTED 05h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 4FEh
+        %assign FLAG_DIR  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXEC 01h         ; Directory entry flags: bit 0 = executable
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
@@ -26,9 +27,10 @@
         %assign SYS_FS_COPY   01h
         %assign SYS_FS_CREATE 02h
         %assign SYS_FS_FIND   03h
-        %assign SYS_FS_READ   04h
-        %assign SYS_FS_RENAME 05h
-        %assign SYS_FS_WRITE  06h
+        %assign SYS_FS_MKDIR  04h
+        %assign SYS_FS_READ   05h
+        %assign SYS_FS_RENAME 06h
+        %assign SYS_FS_WRITE  07h
 
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h

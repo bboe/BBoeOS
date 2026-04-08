@@ -32,12 +32,14 @@ Trivial read-only filesystem on the floppy disk:
 
 - **Sector 1**: MBR (stage 1)
 - **Sectors 2 to dir_sector-1**: Stage 2
-- **Sectors dir_sector to dir_sector+1**: File table / directory (2 sectors, 32 entries x 32 bytes)
+- **Sectors dir_sector to dir_sector+1**: File table / root directory (`DIR_SECTORS` = 2 sectors, 32 entries x 32 bytes)
 - **Sectors dir_sector+2 onward**: File data
 
-Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
+Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`, `FLAG_DIR = 0x02`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
-Use `./add_file.py <file>` to add files to the image after building.
+Subdirectories: one level under root only. A subdirectory occupies `DIR_SECTORS` (= 2) consecutive sectors and holds 32 entries, matching the root layout. File paths in syscalls and programs may contain a single `/` to reference a file inside a subdirectory (e.g., `dir/file`). Executables live in `bin/`; the shell automatically retries `bin/<name>` when an external command is not found in the root directory. Static reference sources (the `.asm` files used by the self-hosted assembler tests) live in `src/`. The assembler resolves `%include` paths relative to the directory of its source argument, so `asm src/cat.asm out` correctly finds `src/constants.asm`.
+
+Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir> <file>` to add a file inside a subdirectory, and `./add_file.py --mkdir <dirname>` to create a subdirectory.
 
 ### Networking
 
@@ -57,9 +59,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 01h   | fs_copy      | Copy file, SI = src filename, DI = dest filename, CF on err |
 | 02h   | fs_create    | Create file, SI = filename, AL = start sector, CF on err |
 | 03h   | fs_find      | Find file, SI = filename, BX = entry ptr in disk_buffer, CF on err |
-| 04h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
-| 05h   | fs_rename    | Rename file, SI = old filename, DI = new filename, CF on err |
-| 06h   | fs_write     | Write disk_buffer to sector AL (AL=0: write back directory), CF on error |
+| 04h   | fs_mkdir     | Create subdirectory, SI = name, AL = start sector, CF on err |
+| 05h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 06h   | fs_rename    | Rename file, SI = old name, DI = new name (same dir), CF on err |
+| 07h   | fs_write     | Write disk_buffer to sector AL (AL=0: write back directory), CF on error |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
@@ -106,8 +109,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit
-- `src/programs/ls.asm` — Ls program: lists files in the directory, marks executables with `*`
-- `src/programs/mv.asm` — Mv program: renames a file
+- `src/programs/ls.asm` — Ls program: lists files in the root directory or a subdirectory, marks executables with `*` and directories with `/`
+- `src/programs/mkdir.asm` — Mkdir program: creates a subdirectory under root
+- `src/programs/mv.asm` — Mv program: renames a file (within the same directory)
 - `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
 - `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
 - `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request

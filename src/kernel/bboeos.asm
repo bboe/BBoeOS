@@ -95,7 +95,6 @@ boot_shell:
         mov si, SHELL_NAME
         call find_file
         jc .no_shell
-        call dir_load_entry    ; BX = entry ptr in DISK_BUFFER
 
         mov di, PROGRAM_BASE
         call load_file
@@ -125,4 +124,4 @@ boot_shell:
 
         ;; Strings
         SHELL_ERROR db `Shell not found\n\0`
-        SHELL_NAME db `shell\0`
+        SHELL_NAME db `bin/shell\0`
