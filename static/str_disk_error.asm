@@ -1,1 +1,1 @@
-DISK_ERROR db `Disk read error\n\0`
+../src/include/str_disk_error.asm
