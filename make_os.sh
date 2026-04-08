@@ -19,10 +19,10 @@ done
 dd bs=512 count=2880 if=/dev/zero of=drive.img
 dd conv=notrunc if=os.bin of=drive.img
 for bin in "$tmpdir"/*; do
-    ./add_file.sh -x drive.img "$bin"
+    ./add_file.py -x "$bin"
 done
 
 # Add static files (non-executable)
 for f in static/*; do
-    [ -f "$f" ] && ./add_file.sh drive.img "$f"
+    [ -f "$f" ] && ./add_file.py "$f"
 done
