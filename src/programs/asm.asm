@@ -1685,12 +1685,39 @@ parse_directive:
         ;; Check 'org'
         mov di, STR_ORG
         call match_word
-        jc .try_db
+        jc .try_times
         call skip_ws
         call resolve_value     ; AX = value
         mov [org_value], ax
         mov [cur_addr], ax
         jmp .pd_done
+
+        .try_times:
+        ;; Check 'times N <directive>' — repeats the inner directive N times.
+        ;; Currently supports `times N db <values>` (the only form we use).
+        mov di, STR_TIMES
+        call match_word
+        jc .try_db
+        call skip_ws
+        call resolve_value     ; CX = repeat count (via AX)
+        mov cx, ax
+        call skip_ws
+        ;; Expect 'db' next
+        mov di, STR_DB
+        call match_word
+        jc .pd_done            ; only db form supported for now
+        call skip_ws
+        ;; Save the data position so we can re-parse it for each iteration
+        mov dx, si
+        .times_loop:
+        test cx, cx
+        jz .pd_done
+        mov si, dx
+        push cx
+        call parse_db
+        pop cx
+        dec cx
+        jmp .times_loop
 
         .try_db:
         ;; Check 'db'
@@ -2274,6 +2301,7 @@ resolve_label:
 resolve_value:
         push bx
         push cx
+        push di
         call skip_ws
         ;; Check for character literal: 'c' or `\n`
         cmp byte [si], 27h    ; single quote
@@ -2287,9 +2315,7 @@ resolve_value:
         cmp al, '9'
         ja .try_symbol
         call parse_number
-        pop cx
-        pop bx
-        ret
+        jmp .check_expr
 
         .char_literal:
         inc si                 ; skip opening quote
@@ -2297,12 +2323,9 @@ resolve_value:
         mov al, [si]           ; AL = character value
         inc si
         cmp byte [si], 27h    ; closing quote
-        jne .char_done
+        jne .check_expr
         inc si                 ; skip closing quote
-        .char_done:
-        pop cx
-        pop bx
-        ret
+        jmp .check_expr
 
         .backtick_literal:
         inc si                 ; skip opening backtick
@@ -2337,16 +2360,12 @@ resolve_value:
         .bt_plain:
         inc si
         cmp byte [si], '`'
-        jne .bt_done
+        jne .check_expr
         inc si                 ; skip closing backtick
-        .bt_done:
-        pop cx
-        pop bx
-        ret
+        jmp .check_expr
 
         .try_symbol:
         ;; Read identifier and look up in symbol table
-        push di
         mov di, si
         ;; Find end of identifier (letters, digits, '_', '.')
         .find_end:
@@ -2388,7 +2407,8 @@ resolve_value:
         pop si
         pop cx
         mov [si], cl           ; restore delimiter
-        ;; Check for +/- arithmetic after symbol
+        .check_expr:
+        ;; Check for +/-/* arithmetic after the parsed value
         call skip_ws
         cmp byte [si], '+'
         je .expr_add
@@ -2677,6 +2697,7 @@ STR_RET     db 'ret',0
 STR_SHR     db 'shr',0
 STR_SUB     db 'sub',0
 STR_TEST    db 'test',0
+STR_TIMES   db 'times',0
 STR_XCHG    db 'xchg',0
 STR_XOR     db 'xor',0
 
