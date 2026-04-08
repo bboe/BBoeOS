@@ -954,6 +954,14 @@ handle_mov:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_movsw: movsw (no operands)
+;;; -----------------------------------------------------------------------
+handle_movsw:
+        mov al, 0A5h
+        call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_pop: pop r16
 ;;; -----------------------------------------------------------------------
 handle_pop:
@@ -971,6 +979,16 @@ handle_push:
         call parse_register    ; AL = reg
         add al, 50h            ; 50+reg
         call emit_byte_al
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; handle_rep: rep prefix — emits 0xF3 then parses the next mnemonic
+;;; -----------------------------------------------------------------------
+handle_rep:
+        mov al, 0F3h
+        call emit_byte_al
+        call skip_ws
+        call parse_mnemonic
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -2649,8 +2667,10 @@ mnemonic_table:
         dw STR_LODSB, handle_lodsb
         dw STR_LOOP, handle_loop
         dw STR_MOV, handle_mov
+        dw STR_MOVSW, handle_movsw
         dw STR_POP, handle_pop
         dw STR_PUSH, handle_push
+        dw STR_REP, handle_rep
         dw STR_RET, handle_ret
         dw STR_SHR, handle_shr
         dw STR_SUB, handle_sub
@@ -2689,10 +2709,12 @@ STR_JZ      db 'jz',0
 STR_LODSB   db 'lodsb',0
 STR_LOOP    db 'loop',0
 STR_MOV     db 'mov',0
+STR_MOVSW   db 'movsw',0
 STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
 STR_PUSH    db 'push',0
+STR_REP     db 'rep',0
 STR_RET     db 'ret',0
 STR_SHR     db 'shr',0
 STR_SUB     db 'sub',0
