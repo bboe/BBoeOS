@@ -1,1 +1,1 @@
-FILE_NOT_FOUND db `File not found\n\0`
+../src/include/str_file_not_found.asm
