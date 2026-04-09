@@ -1,4 +1,4 @@
-        org 6000h
+        org 0600h
 
 %include "constants.asm"
 

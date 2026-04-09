@@ -20,10 +20,10 @@ Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h
 
 - **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, ANSI parser (`put_char`, `put_string`), `serial_char`.
 - **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
-- **Shell** (`src/programs/shell.asm`): Loaded from filesystem at `program_base` (`0x6000`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
+- **Shell** (`src/programs/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
-- **Disk buffer** at `0x9000` for filesystem reads.
-- **Stack** at `0050h:7700h` (linear `0x7C00`, grows downward).
+- **Disk buffer** at `0xE000` for filesystem reads.
+- **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
 - Stage 2 sector count is derived from `dir_sector` via `%assign stage2_sectors (dir_sector - 2)`.
 
 ### Filesystem
@@ -43,7 +43,7 @@ Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir
 
 ### Networking
 
-NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers: `NET_TX_BUF` at `0x9200` (1536 bytes), `NET_RX_BUF` at `0x9800` (1536 bytes).
+NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers: `NET_TX_BUF` at `0xE200` (1536 bytes), `NET_RX_BUF` at `0xE800` (1536 bytes).
 
 ### Serial Console
 
@@ -126,7 +126,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Preserve existing comments when editing code.
 - Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
 - The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
-- Programs are loaded at `PROGRAM_BASE` (`0x6000`). The shell is the first program loaded at boot. Programs `%include` only the granular shared files they need (e.g., `print_bcd.asm`, `str_newline.asm`) at the end of the source.
+- Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs `%include` only the granular shared files they need (e.g., `print_bcd.asm`, `str_newline.asm`) at the end of the source.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIR_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
