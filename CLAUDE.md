@@ -6,11 +6,12 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 
 ```sh
 ./make_os.sh                                           # assemble and create floppy image
-qemu-system-i386 -drive file=drive.img,format=raw     # run in QEMU (IDE mode)
-qemu-system-i386 -drive file=drive.img,if=floppy,format=raw  # run as floppy
-qemu-system-i386 -drive file=drive.img,format=raw -serial stdio  # with serial console
-qemu-system-i386 -drive file=drive.img,format=raw -serial stdio -netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300  # with NE2000 NIC
+qemu-system-i386 -drive file=drive.img,format=raw     # run in QEMU
 ```
+
+Optional flags: `-serial stdio` for serial console, `if=floppy` on the drive
+for floppy mode, and `-netdev user,id=net0 -device
+ne2k_isa,netdev=net0,irq=3,iobase=0x300` for the NE2000 NIC.
 
 Requires `nasm` (`brew install nasm`).
 
@@ -87,39 +88,24 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `add_file.py` — Host-side script to add files to the drive image filesystem
 - `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
-- `src/include/dns_query.asm` — Shared: `dns_query` (sends DNS A query for domain at SI; returns DI = first answer record, AL = ANCOUNT, CF on error; caller defines `dns_base`, `dns_query_buf`, `dns_server_ip`)
-- `src/include/encode_domain.asm` — Shared: `encode_domain` (encodes null-terminated domain string at SI into DNS QNAME wire format at DI, CF on error)
-- `src/include/parse_ip.asm` — Shared: `parse_ip` (parses dotted-decimal string at SI into 4-byte buffer at DI, CF on error)
-- `src/include/print_bcd.asm` — Shared: `print_bcd` (prints AL as two BCD digits)
-- `src/include/print_byte_dec.asm` — Shared: `print_byte_dec` (prints AL as 1-3 digit decimal, no leading zeros)
-- `src/include/print_dec.asm` — Shared: `print_dec` (prints AL as two zero-padded decimal digits)
-- `src/include/print_hex.asm` — Shared: `print_hex` (prints AL as two uppercase hex digits)
-- `src/include/print_ip.asm` — Shared: `print_ip` (prints SI as dotted-decimal IPv4 address)
-- `src/include/print_mac.asm` — Shared: `print_mac` (prints SI as colon-separated hex MAC address)
-- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`
+- `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
+- `src/include/print_*.asm` — Shared formatters: `print_bcd`, `print_byte_dec`, `print_dec`, `print_hex`, `print_ip`, `print_mac`.
+- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`.
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_char`, `put_string`), `serial_char` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `load_file`, `read_sector`, `write_sector`
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/programs/cat.asm` — Cat program: displays file contents with `\n` to `\r\n` conversion
-- `src/programs/chmod.asm` — Chmod program: sets or clears the executable bit with `+x`/`-x`
-- `src/programs/cp.asm` — Cp program: copies a file to a new name
-- `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
-- `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
-- `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
-- `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit (gap buffer is segment-0 limited to 20 KB; cannot open `asm.asm` — see "Known limitations" in README.md)
-- `src/programs/hello.asm` — Hello program: prints `Hello, world!` (smallest program; useful as a self-host smoke test)
-- `src/programs/ls.asm` — Ls program: lists files in the root directory or a subdirectory, marks executables with `*` and directories with `/`
-- `src/programs/mkdir.asm` — Mkdir program: creates a subdirectory under root
-- `src/programs/mv.asm` — Mv program: renames a file (within the same directory)
-- `src/programs/netinit.asm` — Netinit program: probes NE2000 NIC and displays MAC address
-- `src/programs/netrecv.asm` — Netrecv program: sends ARP request and hex-dumps reply
-- `src/programs/netsend.asm` — Netsend program: sends broadcast ARP request
-- `src/programs/ping.asm` — Ping program: sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS)
-- `src/programs/shell.asm` — Shell program: CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank)
-- `src/programs/uptime.asm` — Uptime program: displays HH:MM:SS since boot
+- `src/programs/` single-purpose utilities (behavior follows the name): `arp`, `cat`, `chmod`, `cp`, `date`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
+- `src/programs/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
+- `src/programs/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
+- `src/programs/draw.asm` — 16-color graphics mode with cursor and background controls.
+- `src/programs/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUF_BASE` is `%define`d to `program_end` and `BUF_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (110 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
+- `src/programs/hello.asm` — Prints `Hello, world!`; smallest program, useful as a self-host smoke test.
+- `src/programs/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
+- `src/programs/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
+- `src/programs/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
 
 ## Key Conventions
 
