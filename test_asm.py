@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """Test that the self-hosted assembler produces byte-identical output to NASM.
 
-With no argument, tests every program in static/ that has `org 6000h`.
+With no argument, tests every program in static/ that has `org 0600h`.
 With a name (e.g. ./test_asm.py edit), tests only that one program. On
 single-program runs the artifacts (nasm reference binary, extracted output,
 drive image) are copied to a persistent temp directory so they can be
 inspected after a failure; its path is printed at the end.
-
-asm.asm is excluded from the default suite -- self-assembly takes ~10 minutes
-in TCG QEMU, so it must be requested explicitly with `./test_asm.py asm`.
 
 Requires: nasm, qemu-system-i386
 """
@@ -36,13 +33,11 @@ from add_file import (
 )
 
 BOOT_TIMEOUT = 30
-CMD_TIMEOUT_DEFAULT = 60
-CMD_TIMEOUT_SLOW = 1200  # asm self-assembly takes ~10 minutes in TCG QEMU
+CMD_TIMEOUT = 8
 IMAGE = Path("drive.img")
 ORG_DIRECTIVE = "org 0600h"
 PROMPT = b"$ "
 SER_BASENAME = "ser"
-SLOW_PROGRAMS = {"asm"}
 STATIC_DIR = Path("static")
 
 
@@ -95,8 +90,6 @@ def discover_programs(*, only: str | None) -> list[Path]:
         if only is not None:
             if name == only:
                 programs.append(src)
-            continue
-        if name in SLOW_PROGRAMS:
             continue
         programs.append(src)
     return programs
@@ -279,10 +272,9 @@ def test_program(
     out_name = f"{name}_t"
     drive = tempdir / f"drive_{name}.img"
     shutil.copy(IMAGE, drive)
-    cmd_timeout = CMD_TIMEOUT_SLOW if name in SLOW_PROGRAMS else CMD_TIMEOUT_DEFAULT
 
     run_in_qemu(
-        cmd_timeout=cmd_timeout,
+        cmd_timeout=CMD_TIMEOUT,
         command=f"asm src/{name}.asm {out_name}\r",
         drive=drive,
         tempdir=tempdir,
