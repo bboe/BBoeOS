@@ -43,118 +43,6 @@ SERIAL_BASENAME = "ser"
 STATIC_DIR = Path("static")
 
 
-def compile_c_sources() -> list[tuple[Path, str | None]]:
-    """Compile each src/c/*.c to static/<name>.asm via cc.py.
-
-    If a symlink already exists at the target path, its link target is
-    saved so it can be restored later.  Returns a list of
-    (generated_path, original_link_target_or_None) pairs.
-    """
-    if not C_DIR.is_dir():
-        return []
-    generated: list[tuple[Path, str | None]] = []
-    for c_source in sorted(C_DIR.glob("*.c")):
-        name = c_source.stem
-        target = STATIC_DIR / f"{name}.asm"
-        old_link: str | None = None
-        if target.is_symlink():
-            old_link = Path(target).readlink()
-            target.unlink()
-        elif target.exists():
-            target.unlink()
-        subprocess.run(
-            ["./cc.py", str(c_source), str(target)],
-            check=True,
-        )
-        generated.append((target, old_link))
-    return generated
-
-
-def cleanup_fifos(*, temporary_directory: Path) -> None:
-    """Remove the serial FIFO pipes from temporary_directory."""
-    for path in fifo_paths(temporary_directory=temporary_directory):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-
-
-def compare_drive_output(
-    *,
-    directory_sector: int,
-    directory_sectors: int,
-    drive: Path,
-    output_binary: Path,
-    output_name: str,
-    reference_bytes: bytes,
-) -> tuple[bool, str]:
-    """Extract the assembled output from the drive image and compare to the NASM reference."""
-    image = bytearray(drive.read_bytes())
-    base = (directory_sector - 1) * SECTOR_SIZE
-    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
-        if image[entry_offset] == 0:
-            continue
-        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode(errors="replace")
-        if entry_name != output_name:
-            continue
-        start_sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-        data_offset = (start_sector - 1) * SECTOR_SIZE
-        output_data = bytes(image[data_offset : data_offset + size])
-        output_binary.write_bytes(output_data)
-        if output_data == reference_bytes:
-            return True, ""
-        return False, f"expected {len(reference_bytes)} bytes, got {size} bytes"
-    return False, "output file not found on drive"
-
-
-def discover_programs(*, only: str | None) -> list[Path]:
-    """Return the list of static/*.asm programs that target PROGRAM_BASE."""
-    programs: list[Path] = []
-    for source in sorted(STATIC_DIR.glob("*.asm")):
-        if ORG_DIRECTIVE not in source.read_text(errors="replace"):
-            continue
-        name = source.stem
-        if only is not None:
-            if name == only:
-                programs.append(source)
-            continue
-        programs.append(source)
-    return programs
-
-
-def fifo_paths(*, temporary_directory: Path) -> tuple[Path, Path]:
-    """Return the (input, output) FIFO paths for QEMU serial communication."""
-    return (
-        temporary_directory / f"{SERIAL_BASENAME}.in",
-        temporary_directory / f"{SERIAL_BASENAME}.out",
-    )
-
-
-def main() -> int:
-    """Run the self-hosted assembler test suite."""
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "program",
-        nargs="?",
-        help="restrict the test to one program (e.g. 'edit')",
-    )
-    arguments = parser.parse_args()
-
-    # Compile C sources to .asm and place in static/ so make_os.sh
-    # includes them on the disk image alongside hand-written .asm files.
-    generated = compile_c_sources()
-    if generated:
-        c_names = " ".join(t.stem + ".c" for t, _ in generated)
-        print(f"Compiled C sources: {c_names}")
-
-    try:
-        return _run_tests(arguments=arguments, generated=generated)
-    finally:
-        restore_static(generated)
-
-
 def _run_tests(*, arguments: argparse.Namespace, generated: list) -> int:  # noqa: ARG001
     """Execute the test loop: build OS, discover programs, compare outputs."""
     print("Building OS...")
@@ -229,6 +117,118 @@ def _run_tests(*, arguments: argparse.Namespace, generated: list) -> int:  # noq
     if persisted is not None:
         print(f"Artifacts kept in: {persisted}")
     return 1 if fail_count else 0
+
+
+def cleanup_fifos(*, temporary_directory: Path) -> None:
+    """Remove the serial FIFO pipes from temporary_directory."""
+    for path in fifo_paths(temporary_directory=temporary_directory):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
+
+def compare_drive_output(
+    *,
+    directory_sector: int,
+    directory_sectors: int,
+    drive: Path,
+    output_binary: Path,
+    output_name: str,
+    reference_bytes: bytes,
+) -> tuple[bool, str]:
+    """Extract the assembled output from the drive image and compare to the NASM reference."""
+    image = bytearray(drive.read_bytes())
+    base = (directory_sector - 1) * SECTOR_SIZE
+    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
+        if image[entry_offset] == 0:
+            continue
+        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode(errors="replace")
+        if entry_name != output_name:
+            continue
+        start_sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
+        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
+        data_offset = (start_sector - 1) * SECTOR_SIZE
+        output_data = bytes(image[data_offset : data_offset + size])
+        output_binary.write_bytes(output_data)
+        if output_data == reference_bytes:
+            return True, ""
+        return False, f"expected {len(reference_bytes)} bytes, got {size} bytes"
+    return False, "output file not found on drive"
+
+
+def compile_c_sources() -> list[tuple[Path, str | None]]:
+    """Compile each src/c/*.c to static/<name>.asm via cc.py.
+
+    If a symlink already exists at the target path, its link target is
+    saved so it can be restored later.  Returns a list of
+    (generated_path, original_link_target_or_None) pairs.
+    """
+    if not C_DIR.is_dir():
+        return []
+    generated: list[tuple[Path, str | None]] = []
+    for c_source in sorted(C_DIR.glob("*.c")):
+        name = c_source.stem
+        target = STATIC_DIR / f"{name}.asm"
+        old_link: str | None = None
+        if target.is_symlink():
+            old_link = Path(target).readlink()
+            target.unlink()
+        elif target.exists():
+            target.unlink()
+        subprocess.run(
+            ["./cc.py", str(c_source), str(target)],
+            check=True,
+        )
+        generated.append((target, old_link))
+    return generated
+
+
+def discover_programs(*, only: str | None) -> list[Path]:
+    """Return the list of static/*.asm programs that target PROGRAM_BASE."""
+    programs: list[Path] = []
+    for source in sorted(STATIC_DIR.glob("*.asm")):
+        if ORG_DIRECTIVE not in source.read_text(errors="replace"):
+            continue
+        name = source.stem
+        if only is not None:
+            if name == only:
+                programs.append(source)
+            continue
+        programs.append(source)
+    return programs
+
+
+def fifo_paths(*, temporary_directory: Path) -> tuple[Path, Path]:
+    """Return the (input, output) FIFO paths for QEMU serial communication."""
+    return (
+        temporary_directory / f"{SERIAL_BASENAME}.in",
+        temporary_directory / f"{SERIAL_BASENAME}.out",
+    )
+
+
+def main() -> int:
+    """Run the self-hosted assembler test suite."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "program",
+        nargs="?",
+        help="restrict the test to one program (e.g. 'edit')",
+    )
+    arguments = parser.parse_args()
+
+    # Compile C sources to .asm and place in static/ so make_os.sh
+    # includes them on the disk image alongside hand-written .asm files.
+    generated = compile_c_sources()
+    if generated:
+        c_names = " ".join(t.stem + ".c" for t, _ in generated)
+        print(f"Compiled C sources: {c_names}")
+
+    try:
+        return _run_tests(arguments=arguments, generated=generated)
+    finally:
+        restore_static(generated)
 
 
 def persist_artifacts(*, temporary_directory: Path) -> Path:

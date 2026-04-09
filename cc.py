@@ -43,96 +43,6 @@ TOKEN_PATTERN = re.compile(
 )
 
 
-def tokenize(source: str, /) -> list[tuple[str, str, int]]:
-    """Tokenize C source code into a list of (kind, text, line) tuples."""
-    tokens: list[tuple[str, str, int]] = []
-    position = 0
-    line = 1
-    while position < len(source):
-        match = TOKEN_PATTERN.match(source, position)
-        if not match:
-            message = f"line {line}: unexpected character {source[position]!r}"
-            raise SyntaxError(message)
-        kind = match.lastgroup
-        assert kind is not None
-        text = match.group()
-        if kind in {"WS", "LINE_COMMENT", "BLOCK_COMMENT"}:
-            line += text.count("\n")
-        else:
-            if kind == "IDENT" and text in KEYWORDS:
-                kind = text.upper()
-            tokens.append((kind, text, line))
-        position = match.end()
-    tokens.append(("EOF", "", line))
-    return tokens
-
-
-class Parser:
-    """Recursive descent parser that produces a lightweight AST."""
-
-    def __init__(self, tokens: list[tuple[str, str, int]]) -> None:
-        """Initialize parser with token list."""
-        self.tokens = tokens
-        self.position = 0
-
-    def peek(self) -> tuple[str, str, int]:
-        """Return the current token without consuming it."""
-        return self.tokens[self.position]
-
-    def eat(self, kind: str | None = None) -> tuple[str, str, int]:
-        """Consume and return the next token, optionally asserting its kind."""
-        token = self.tokens[self.position]
-        if kind is not None and token[0] != kind:
-            message = f"line {token[2]}: expected {kind}, got {token[0]} ({token[1]!r})"
-            raise SyntaxError(
-                message,
-            )
-        self.position += 1
-        return token
-
-    def parse_program(self) -> tuple[str, list]:
-        """Parse the full program."""
-        functions = []
-        while self.peek()[0] != "EOF":
-            functions.append(self.parse_function())
-        return ("program", functions)
-
-    def parse_function(self) -> tuple:
-        """Parse a function declaration."""
-        self.eat("VOID")
-        name = self.eat("IDENT")[1]
-        self.eat("LPAREN")
-        self.eat("RPAREN")
-        self.eat("LBRACE")
-        body: list[tuple] = []
-        while self.peek()[0] != "RBRACE":
-            body.append(self.parse_statement())
-        self.eat("RBRACE")
-        return ("function", name, body)
-
-    def parse_statement(self) -> tuple:
-        """Parse a statement (currently only function calls)."""
-        name = self.eat("IDENT")[1]
-        self.eat("LPAREN")
-        arguments: list[tuple] = []
-        if self.peek()[0] != "RPAREN":
-            arguments.append(self.parse_expression())
-            while self.peek()[0] == "COMMA":
-                self.eat("COMMA")
-                arguments.append(self.parse_expression())
-        self.eat("RPAREN")
-        self.eat("SEMI")
-        return ("call", name, arguments)
-
-    def parse_expression(self) -> tuple:
-        """Parse an expression (currently only string literals)."""
-        token = self.eat("STRING")
-        # Strip surrounding quotes; inner content (with C escapes) is
-        # passed through to asm backtick strings, which share the same
-        # escape rules (\n, \t, \0, \\).
-        return ("string", token[1][1:-1])
-
-
 class CodeGenerator:
     """Generate NASM assembly from the parsed AST."""
 
@@ -140,6 +50,18 @@ class CodeGenerator:
         """Initialize code generator state."""
         self.lines: list[str] = []
         self.strings: list[tuple[str, str]] = []
+
+    def builtin_puts(self, arguments: list[tuple]) -> None:
+        """Emit assembly for the puts() builtin."""
+        if len(arguments) != 1 or arguments[0][0] != "string":
+            message = "puts() expects exactly one string argument"
+            raise SyntaxError(message)
+        content = arguments[0][1]
+        label = f"_str_{len(self.strings)}"
+        self.strings.append((label, content))
+        self.emit(f"        mov si, {label}")
+        self.emit("        mov ah, SYS_IO_PUTS")
+        self.emit("        int 30h")
 
     def emit(self, line: str = "") -> None:
         """Append an assembly line to the output."""
@@ -184,17 +106,71 @@ class CodeGenerator:
             raise SyntaxError(message)
         handler(arguments)
 
-    def builtin_puts(self, arguments: list[tuple]) -> None:
-        """Emit assembly for the puts() builtin."""
-        if len(arguments) != 1 or arguments[0][0] != "string":
-            message = "puts() expects exactly one string argument"
-            raise SyntaxError(message)
-        content = arguments[0][1]
-        label = f"_str_{len(self.strings)}"
-        self.strings.append((label, content))
-        self.emit(f"        mov si, {label}")
-        self.emit("        mov ah, SYS_IO_PUTS")
-        self.emit("        int 30h")
+
+class Parser:
+    """Recursive descent parser that produces a lightweight AST."""
+
+    def __init__(self, tokens: list[tuple[str, str, int]]) -> None:
+        """Initialize parser with token list."""
+        self.tokens = tokens
+        self.position = 0
+
+    def eat(self, kind: str | None = None) -> tuple[str, str, int]:
+        """Consume and return the next token, optionally asserting its kind."""
+        token = self.tokens[self.position]
+        if kind is not None and token[0] != kind:
+            message = f"line {token[2]}: expected {kind}, got {token[0]} ({token[1]!r})"
+            raise SyntaxError(
+                message,
+            )
+        self.position += 1
+        return token
+
+    def parse_expression(self) -> tuple:
+        """Parse an expression (currently only string literals)."""
+        token = self.eat("STRING")
+        # Strip surrounding quotes; inner content (with C escapes) is
+        # passed through to asm backtick strings, which share the same
+        # escape rules (\n, \t, \0, \\).
+        return ("string", token[1][1:-1])
+
+    def parse_function(self) -> tuple:
+        """Parse a function declaration."""
+        self.eat("VOID")
+        name = self.eat("IDENT")[1]
+        self.eat("LPAREN")
+        self.eat("RPAREN")
+        self.eat("LBRACE")
+        body: list[tuple] = []
+        while self.peek()[0] != "RBRACE":
+            body.append(self.parse_statement())
+        self.eat("RBRACE")
+        return ("function", name, body)
+
+    def parse_program(self) -> tuple[str, list]:
+        """Parse the full program."""
+        functions = []
+        while self.peek()[0] != "EOF":
+            functions.append(self.parse_function())
+        return ("program", functions)
+
+    def parse_statement(self) -> tuple:
+        """Parse a statement (currently only function calls)."""
+        name = self.eat("IDENT")[1]
+        self.eat("LPAREN")
+        arguments: list[tuple] = []
+        if self.peek()[0] != "RPAREN":
+            arguments.append(self.parse_expression())
+            while self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+                arguments.append(self.parse_expression())
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return ("call", name, arguments)
+
+    def peek(self) -> tuple[str, str, int]:
+        """Return the current token without consuming it."""
+        return self.tokens[self.position]
 
 
 def main() -> int:
@@ -213,6 +189,30 @@ def main() -> int:
     else:
         sys.stdout.write(output)
     return 0
+
+
+def tokenize(source: str, /) -> list[tuple[str, str, int]]:
+    """Tokenize C source code into a list of (kind, text, line) tuples."""
+    tokens: list[tuple[str, str, int]] = []
+    position = 0
+    line = 1
+    while position < len(source):
+        match = TOKEN_PATTERN.match(source, position)
+        if not match:
+            message = f"line {line}: unexpected character {source[position]!r}"
+            raise SyntaxError(message)
+        kind = match.lastgroup
+        assert kind is not None
+        text = match.group()
+        if kind in {"WS", "LINE_COMMENT", "BLOCK_COMMENT"}:
+            line += text.count("\n")
+        else:
+            if kind == "IDENT" and text in KEYWORDS:
+                kind = text.upper()
+            tokens.append((kind, text, line))
+        position = match.end()
+    tokens.append(("EOF", "", line))
+    return tokens
 
 
 if __name__ == "__main__":

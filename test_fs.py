@@ -116,13 +116,6 @@ def find_entry(
     return None
 
 
-def make_drive(*, name: str, temporary_directory: Path) -> Path:
-    """Create a copy of the base drive image for a test case."""
-    drive = temporary_directory / f"drive_{name}.img"
-    shutil.copy(IMAGE, drive)
-    return drive
-
-
 def main() -> int:
     """Run the filesystem regression test suite."""
     parser = argparse.ArgumentParser(
@@ -189,6 +182,13 @@ def main() -> int:
     if fail_count:
         print("Failed:", " ".join(failed))
     return 1 if fail_count else 0
+
+
+def make_drive(*, name: str, temporary_directory: Path) -> Path:
+    """Create a copy of the base drive image for a test case."""
+    drive = temporary_directory / f"drive_{name}.img"
+    shutil.copy(IMAGE, drive)
+    return drive
 
 
 def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
