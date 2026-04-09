@@ -144,4 +144,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 
 ## Testing
 
-No automated tests. Test manually in QEMU after each change. Use `-serial stdio` to test serial console. Use `-machine acpi=off` to test shutdown failure path.
+Manual testing in QEMU is still the primary workflow — use `-serial stdio` to exercise the serial console and `-machine acpi=off` to test the shutdown failure path.
+
+Automated self-hosting test: `./test_asm.py` boots the OS in QEMU and has the self-hosted assembler reassemble each program in `static/`, then diffs the result byte-for-byte against NASM's output. It drives QEMU via a serial fifo and waits for the `$ ` shell prompt (no fixed sleeps), so small programs finish in a second or two.
+
+- `./test_asm.py` — run the full suite (excludes `asm.asm`)
+- `./test_asm.py <name>` — run a single program; on single-program runs the nasm reference, assembled output, and drive image are copied to a persistent temp directory whose path is printed at the end
+- `./test_asm.py asm` — the self-assembly path, ~10 minutes under TCG (excluded from the default suite for this reason)
