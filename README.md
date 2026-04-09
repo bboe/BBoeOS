@@ -28,9 +28,8 @@ A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real
 * Run the self-hosting assembler test suite (diffs each program in `static/`
   against NASM output after reassembling it inside the OS):
 
-    ./test_asm.py            # full suite (excludes the slow asm self-assembly)
+    ./test_asm.py            # full suite
     ./test_asm.py edit       # one program; artifacts kept in a temp dir
-    ./test_asm.py asm        # self-assembly path, ~10 minutes under TCG
 
 ## File Structure
 
