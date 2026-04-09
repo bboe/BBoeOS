@@ -238,27 +238,27 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
     """Copy a file into a subdirectory and verify the entry shows up there."""
     drive = make_drive(name="copy_subdirectory", temporary_directory=temporary_directory)
     boot_and_run(
-        commands=["mkdir d", "cp src/hello.asm d/h"],
+        commands=["mkdir d", "cp src/cat.asm d/h"],
         drive=drive,
         temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
 
-    d_entry = find_entry(
+    directory_entry = find_entry(
         directory_sectors=directory_sectors,
         directory_start_sector=directory_sector,
         image=image,
         name="d",
     )
-    assert d_entry is not None and d_entry[0] & FLAG_DIRECTORY, "d/ not created"
-    h_entry = find_entry(
+    assert directory_entry is not None and directory_entry[0] & FLAG_DIRECTORY, "d/ not created"
+    file_entry = find_entry(
         directory_sectors=directory_sectors,
-        directory_start_sector=d_entry[1],
+        directory_start_sector=directory_entry[1],
         image=image,
         name="h",
     )
-    assert h_entry is not None, "d/h not found"
-    _, h_sector, h_size = h_entry
+    assert file_entry is not None, "d/h not found"
+    _, file_sector, file_size = file_entry
 
     source_entry = find_entry(
         directory_sectors=directory_sectors,
@@ -270,11 +270,11 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
         directory_sectors=directory_sectors,
         directory_start_sector=source_entry[1],
         image=image,
-        name="hello.asm",
+        name="cat.asm",
     )
     _, hello_sector, hello_size = hello
-    assert h_size == hello_size
-    h_data = image[(h_sector - 1) * SECTOR_SIZE :][:h_size]
+    assert file_size == hello_size
+    h_data = image[(file_sector - 1) * SECTOR_SIZE :][:file_size]
     hello_data = image[(hello_sector - 1) * SECTOR_SIZE :][:hello_size]
     assert h_data == hello_data, "subdirectory copy data mismatch"
 
@@ -287,7 +287,7 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     """
     drive = make_drive(name="cross_move", temporary_directory=temporary_directory)
     boot_and_run(
-        commands=["cp src/hello.asm a.txt", "mv a.txt bin/a.txt"],
+        commands=["cp src/cat.asm a.txt", "mv a.txt bin/a.txt"],
         drive=drive,
         temporary_directory=temporary_directory,
     )
@@ -330,7 +330,7 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
         directory_sectors=directory_sectors,
         directory_start_sector=source_entry[1],
         image=image,
-        name="hello.asm",
+        name="cat.asm",
     )
     _, hello_sector, hello_size = hello
     assert moved_size == hello_size

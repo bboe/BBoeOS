@@ -53,7 +53,7 @@ CHARACTER_ESCAPES = {
 
 COMPARISON_OPERATORS = frozenset({"EQ", "GE", "GT", "LE", "LT", "NE"})
 
-KEYWORDS = frozenset({"char", "int", "sizeof", "void", "while"})
+KEYWORDS = frozenset({"char", "if", "int", "sizeof", "void", "while"})
 
 JUMP_WHEN_FALSE = {
     "!=": "je",
@@ -113,6 +113,7 @@ class CodeGenerator:
         self.label_id: int = 0
         self.lines: list[str] = []
         self.locals: dict[str, int] = {}
+        self.needs_argv_buf: bool = False
         self.strings: list[tuple[str, str]] = []
 
     def allocate_local(self, name: str, /) -> int:
@@ -170,6 +171,54 @@ class CodeGenerator:
         """Append a line of assembly to the output buffer."""
         self.lines.append(line)
 
+    def emit_argument_vector_startup(self, parameters: list[tuple], /) -> None:
+        """Emit inline startup code that parses EXEC_ARG into argc/argv."""
+        argc_name = None
+        argv_name = None
+        for type_string, pname, is_array in parameters:
+            if is_array:
+                argv_name = pname
+            elif argc_name is None:
+                argc_name = pname
+        if not argv_name:
+            return
+
+        self.needs_argv_buf = True
+        label_index = self.new_label()
+
+        self.emit("        cld")
+        self.emit("        xor cx, cx")
+        self.emit("        mov si, [EXEC_ARG]")
+        self.emit("        test si, si")
+        self.emit(f"        jz .args_done_{label_index}")
+        self.emit("        mov di, _argv")
+        self.emit(f".scan_{label_index}:")
+        self.emit("        cmp byte [si], ' '")
+        self.emit(f"        jne .check_{label_index}")
+        self.emit("        inc si")
+        self.emit(f"        jmp .scan_{label_index}")
+        self.emit(f".check_{label_index}:")
+        self.emit("        cmp byte [si], 0")
+        self.emit(f"        je .args_done_{label_index}")
+        self.emit("        mov [di], si")
+        self.emit("        add di, 2")
+        self.emit("        inc cx")
+        self.emit(f".end_{label_index}:")
+        self.emit("        cmp byte [si], 0")
+        self.emit(f"        je .args_done_{label_index}")
+        self.emit("        cmp byte [si], ' '")
+        self.emit(f"        je .term_{label_index}")
+        self.emit("        inc si")
+        self.emit(f"        jmp .end_{label_index}")
+        self.emit(f".term_{label_index}:")
+        self.emit("        mov byte [si], 0")
+        self.emit("        inc si")
+        self.emit(f"        jmp .scan_{label_index}")
+        self.emit(f".args_done_{label_index}:")
+        if argc_name:
+            self.emit(f"        mov [bp-{self.locals[argc_name]}], cx")
+        self.emit(f"        mov word [bp-{self.locals[argv_name]}], _argv")
+
     def generate(self, ast: tuple, /) -> str:
         """Generate assembly for an entire program AST.
 
@@ -191,6 +240,8 @@ class CodeGenerator:
             self.emit(";; --- array data ---")
             for label, elems in self.arrays:
                 self.emit(f"{label}: dw {', '.join(elems)}")
+        if self.needs_argv_buf:
+            self.emit("_argv: times 32 db 0")
         return "\n".join(self.lines) + "\n"
 
     def generate_call(self, statement: tuple, /) -> None:
@@ -279,10 +330,15 @@ class CodeGenerator:
 
     def generate_function(self, function: tuple, /) -> None:
         """Generate assembly for a single function definition."""
-        _, name, body = function
+        _, name, parameters, body = function
         self.array_sizes = {}
         self.frame_size = 0
         self.locals = {}
+
+        # Allocate parameters as locals.
+        for _type, pname, _is_array in parameters:
+            self.allocate_local(pname)
+
         self.scan_locals(body)
 
         self.emit(f"{name}:")
@@ -290,6 +346,10 @@ class CodeGenerator:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
             self.emit(f"        sub sp, {self.frame_size}")
+
+        # Emit argc/argv startup for main with parameters.
+        if name == "main" and parameters:
+            self.emit_argument_vector_startup(parameters)
 
         for body_statement in body:
             self.generate_statement(body_statement)
@@ -303,6 +363,29 @@ class CodeGenerator:
         else:
             self.emit("        ret")
         self.emit()
+
+    def generate_if(self, statement: tuple, /) -> None:
+        """Generate assembly for an if statement.
+
+        Raises:
+            SyntaxError: If the condition is not a comparison.
+
+        """
+        _, condition, body = statement
+        label_index = self.new_label()
+        if condition[0] != "binary_operator" or condition[1] not in JUMP_WHEN_FALSE:
+            message = f"if condition must be a comparison, got {condition}"
+            raise SyntaxError(message)
+        _, operator, left, right = condition
+        self.generate_expression(left)
+        self.emit("        push ax")
+        self.generate_expression(right)
+        self.emit("        pop cx")
+        self.emit("        cmp cx, ax")
+        self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
+        for body_statement in body:
+            self.generate_statement(body_statement)
+        self.emit(f".if_{label_index}_end:")
 
     def generate_statement(self, statement: tuple, /) -> None:
         """Generate assembly for a single statement.
@@ -337,6 +420,8 @@ class CodeGenerator:
             _, vname, expression = statement
             self.generate_expression(expression)
             self.emit(f"        mov [bp-{self.locals[vname]}], ax")
+        elif kind == "if":
+            self.generate_if(statement)
         elif kind == "while":
             self.generate_while(statement)
         elif kind == "call":
@@ -523,13 +608,32 @@ class Parser:
         self.parse_type()
         name = self.eat("IDENT")[1]
         self.eat("LPAREN")
+        parameters = self.parse_parameters()
         self.eat("RPAREN")
         self.eat("LBRACE")
         body: list[tuple] = []
         while self.peek()[0] != "RBRACE":
             body.append(self.parse_statement())
         self.eat("RBRACE")
-        return ("function", name, body)
+        return ("function", name, parameters, body)
+
+    def parse_if(self) -> tuple:
+        """Parse an if statement.
+
+        Returns:
+            An AST node for the if statement.
+
+        """
+        self.eat("IF")
+        self.eat("LPAREN")
+        condition = self.parse_expression()
+        self.eat("RPAREN")
+        self.eat("LBRACE")
+        body: list[tuple] = []
+        while self.peek()[0] != "RBRACE":
+            body.append(self.parse_statement())
+        self.eat("RBRACE")
+        return ("if", condition, body)
 
     def parse_multiplicative(self) -> tuple:
         """Parse a multiplicative expression (multiplication and division).
@@ -544,6 +648,37 @@ class Parser:
             right = self.parse_primary()
             node = ("binary_operator", operator_token[1], node, right)
         return node
+
+    def parse_parameter(self) -> tuple:
+        """Parse a single function parameter.
+
+        Returns:
+            A (type, name, is_array) triple.
+
+        """
+        type_string = self.parse_type()
+        name = self.eat("IDENT")[1]
+        is_array = False
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            self.eat("RBRACKET")
+            is_array = True
+        return (type_string, name, is_array)
+
+    def parse_parameters(self) -> list[tuple]:
+        """Parse a function parameter list.
+
+        Returns:
+            A list of (type, name, is_array) triples.
+
+        """
+        if self.peek()[0] == "RPAREN":
+            return []
+        parameters = [self.parse_parameter()]
+        while self.peek()[0] == "COMMA":
+            self.eat("COMMA")
+            parameters.append(self.parse_parameter())
+        return parameters
 
     def parse_primary(self) -> tuple:
         """Parse a primary expression (literals, variables, indexing, parens).
@@ -626,6 +761,8 @@ class Parser:
         token = self.peek()
         if token[0] in TYPE_TOKENS:
             return self.parse_variable_declaration()
+        if token[0] == "IF":
+            return self.parse_if()
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":

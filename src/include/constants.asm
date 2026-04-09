@@ -1,12 +1,12 @@
         %assign BUFFER 500h
         %assign DIR_ENTRY_SIZE 32
-        %assign DIR_MAX_ENTRIES 32
+        %assign DIR_MAX_ENTRIES 48
         %assign DIR_NAME_LEN 25         ; 24 chars + null
         %assign DIR_OFF_FLAGS (DIR_NAME_LEN)
         %assign DIR_OFF_SECTOR (DIR_NAME_LEN + 1)
         %assign DIR_OFF_SIZE (DIR_NAME_LEN + 3)   ; 32-bit (4 bytes)
         %assign DIR_SECTOR 11
-        %assign DIR_SECTORS 2
+        %assign DIR_SECTORS 3
         %assign DISK_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERR_DIR_FULL  01h     ; Copy error: no free directory entries
         %assign ERR_EXISTS    02h     ; Rename/copy error: destination name already exists
