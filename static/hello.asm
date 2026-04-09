@@ -1,1 +1,1 @@
-../src/programs/hello.asm
+../src/asm/hello.asm

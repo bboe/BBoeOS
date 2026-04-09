@@ -1,1 +1,1 @@
-../src/programs/netrecv.asm
+../src/asm/netrecv.asm

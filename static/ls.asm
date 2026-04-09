@@ -1,1 +1,1 @@
-../src/programs/ls.asm
+../src/asm/ls.asm

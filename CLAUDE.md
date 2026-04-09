@@ -21,7 +21,7 @@ Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h
 
 - **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, ANSI parser (`put_char`, `put_string`), `serial_char`.
 - **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
-- **Shell** (`src/programs/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
+- **Shell** (`src/asm/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
 - **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
@@ -97,15 +97,15 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/programs/` single-purpose utilities (behavior follows the name): `arp`, `cat`, `chmod`, `cp`, `date`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
-- `src/programs/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
-- `src/programs/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
-- `src/programs/draw.asm` — 16-color graphics mode with cursor and background controls.
-- `src/programs/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUF_BASE` is `%define`d to `program_end` and `BUF_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (110 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
-- `src/programs/hello.asm` — Prints `Hello, world!`; smallest program, useful as a self-host smoke test.
-- `src/programs/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
-- `src/programs/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
-- `src/programs/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
+- `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `cat`, `chmod`, `cp`, `date`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
+- `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
+- `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
+- `src/asm/draw.asm` — 16-color graphics mode with cursor and background controls.
+- `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUF_BASE` is `%define`d to `program_end` and `BUF_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (110 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
+- `src/asm/hello.asm` — Prints `Hello, world!`; smallest program, useful as a self-host smoke test.
+- `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
+- `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
+- `src/asm/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
 
 ## Key Conventions
 

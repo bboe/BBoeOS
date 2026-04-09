@@ -1,1 +1,1 @@
-../src/programs/chmod.asm
+../src/asm/chmod.asm

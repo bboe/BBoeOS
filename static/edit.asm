@@ -1,1 +1,1 @@
-../src/programs/edit.asm
+../src/asm/edit.asm

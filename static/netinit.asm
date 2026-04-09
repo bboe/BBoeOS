@@ -1,1 +1,1 @@
-../src/programs/netinit.asm
+../src/asm/netinit.asm

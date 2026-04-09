@@ -1,1 +1,1 @@
-../src/programs/draw.asm
+../src/asm/draw.asm

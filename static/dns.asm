@@ -1,1 +1,1 @@
-../src/programs/dns.asm
+../src/asm/dns.asm

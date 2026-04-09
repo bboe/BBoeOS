@@ -8,7 +8,7 @@ fi
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-for src in src/programs/*.asm; do
+for src in src/asm/*.asm; do
     name=$(basename "$src" .asm)
     nasm -f bin -i src/include/ -o "$tmpdir/$name" "$src"
     if [ $? -ne 0 ]; then

@@ -1,1 +1,1 @@
-../src/programs/cat.asm
+../src/asm/cat.asm

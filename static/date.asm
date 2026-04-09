@@ -1,1 +1,1 @@
-../src/programs/date.asm
+../src/asm/date.asm

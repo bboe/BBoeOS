@@ -1,1 +1,1 @@
-../src/programs/cp.asm
+../src/asm/cp.asm

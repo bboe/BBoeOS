@@ -1,1 +1,1 @@
-../src/programs/ping.asm
+../src/asm/ping.asm

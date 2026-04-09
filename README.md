@@ -42,7 +42,7 @@ src/kernel/           Kernel assembly source
   readline.asm        Line editor with cursor movement, kill/yank
   syscall.asm         INT 30h syscall handler
   system.asm          Graphics mode, reboot, shutdown
-src/programs/         User-space programs
+src/asm/              User-space programs (assembly sources)
   shell.asm           Shell: CLI loop, command dispatch, built-in commands
 add_file.py           Host-side script to add files to drive image
 make_os.sh            Build script

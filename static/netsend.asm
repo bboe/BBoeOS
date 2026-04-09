@@ -1,1 +1,1 @@
-../src/programs/netsend.asm
+../src/asm/netsend.asm

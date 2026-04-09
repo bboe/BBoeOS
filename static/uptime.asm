@@ -1,1 +1,1 @@
-../src/programs/uptime.asm
+../src/asm/uptime.asm
