@@ -144,7 +144,7 @@ main:
         mov ax, [out_total]
         mov [bx+DIR_OFF_SIZE], ax
         mov byte [bx+DIR_OFF_FLAGS], FLAG_EXEC
-        xor al, al                     ; AL=0 = write back directory
+        xor cx, cx                     ; CX=0 = write back directory
         mov ah, SYS_FS_WRITE
         int 30h
         jc .err_write_dir
@@ -369,8 +369,9 @@ flush_output:
         mov cx, 256
         cld
         rep movsw
-        ;; Write sector
-        mov al, [out_sector]
+        ;; Write sector (CX = 16-bit sector)
+        xor ch, ch
+        mov cl, [out_sector]
         mov ah, SYS_FS_WRITE
         int 30h
         inc byte [out_sector]
@@ -1925,8 +1926,9 @@ load_src_sector:
         jbe .set_valid
         mov bx, 512
         .set_valid:
-        ;; Read sector
-        mov al, [file_cur_sec]
+        ;; Read sector (CX = 16-bit sector)
+        xor ch, ch
+        mov cl, [file_cur_sec]
         mov ah, SYS_FS_READ
         int 30h
         jc .no_more

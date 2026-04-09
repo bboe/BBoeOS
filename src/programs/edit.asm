@@ -36,8 +36,8 @@ main:
         ;; Record original on-disk size and start sector
         mov ax, [bx+DIR_OFF_SIZE]
         mov [orig_size], ax
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [file_sector], al
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [file_sector], ax
 
         ;; Load file content into gap buffer: text goes AFTER the gap so
         ;; gap_start=0 and cursor_line/col=0 are consistent (cursor at start).
@@ -48,13 +48,15 @@ main:
         mov [gap_end], ax
 
         ;; Read sectors into BUF_BASE + gap_end
-        mov al, [file_sector]
+        mov cx, [file_sector]
         mov di, BUF_BASE
         add di, [gap_end]      ; DI = first byte of content area
         xor dx, dx             ; DX = bytes loaded so far
         .load_loop:
+        push cx
         mov ah, SYS_FS_READ
         int 30h
+        pop cx
         jc .load_err
         ;; Copy only the valid bytes for this sector (avoid overrunning buffer)
         push si
@@ -70,7 +72,7 @@ main:
         rep movsb
         pop cx
         pop si
-        inc al
+        inc cx
         add dx, 512
         cmp dx, [orig_size]
         jb .load_loop
@@ -78,7 +80,7 @@ main:
 
         .new_file:
         ;; Defer file creation until first save (file_sector=0 signals new file)
-        mov byte [file_sector], 0
+        mov word [file_sector], 0
         mov word [orig_size], 0
         mov word [gap_start], 0
         mov word [gap_end], BUF_SIZE
@@ -957,13 +959,13 @@ save_file:
         call buf_length        ; AX = new size in bytes
 
         ;; New file: create on disk before first save
-        cmp byte [file_sector], 0
+        cmp word [file_sector], 0
         jne .check_size
         push ax
         mov si, [filename]
         mov ah, SYS_FS_CREATE
         int 30h
-        mov [file_sector], al  ; save start sector BEFORE pop
+        mov [file_sector], ax  ; save start sector BEFORE pop
         pop ax
         jc .create_err
         jmp .write_sectors
@@ -1001,11 +1003,11 @@ save_file:
         .write_sectors:
 
         ;; Write data sectors
-        mov al, [file_sector]
+        mov cx, [file_sector]  ; CX = current sector
         xor bx, bx             ; BX = logical offset into content
         .write_loop:
         ;; Fill DISK_BUFFER with up to 512 bytes of content
-        push ax
+        push cx
         push bx
         mov di, DISK_BUFFER
         mov cx, 512
@@ -1024,21 +1026,21 @@ save_file:
         rep stosb              ; zero-pad remainder
         .do_write:
         pop bx
-        pop ax
-        push ax
+        pop cx                 ; CX = sector
+        push cx
         push bx
         mov ah, SYS_FS_WRITE
         int 30h
         pop bx
-        pop ax
+        pop cx
         jc .write_err
-        inc al
+        inc cx                 ; next sector
         add bx, 512
         ;; Check if all content written
-        push ax
+        push cx
         call buf_length
         cmp bx, ax
-        pop ax
+        pop cx
         jb .write_loop
 
         ;; Re-read directory and update size in entry
@@ -1048,7 +1050,7 @@ save_file:
         jc .dir_err
         call buf_length
         mov [bx+DIR_OFF_SIZE], ax        ; update size field in DISK_BUFFER (directory)
-        xor al, al                       ; AL=0 = write back directory sector
+        xor cx, cx                       ; CX=0 = write back directory sector
         mov ah, SYS_FS_WRITE
         int 30h
         jc .write_err
@@ -1089,7 +1091,7 @@ save_file:
         cursor_col    dw 0
         cursor_line   dw 0
         dirty         db 0
-        file_sector   db 0
+        file_sector   dw 0
         filename      dw 0
         gap_end       dw BUF_SIZE
         gap_start     dw 0

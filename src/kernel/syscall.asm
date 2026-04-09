@@ -246,7 +246,8 @@ syscall_handler:
         mov [bx+DIR_OFF_SECTOR], al    ; start sector
         mov byte [bx+DIR_OFF_SECTOR+1], 0
         mov ax, [bp+4]
-        mov [bx+DIR_OFF_SIZE], ax      ; file size
+        mov [bx+DIR_OFF_SIZE], ax      ; file size (low 16 bits)
+        mov word [bx+DIR_OFF_SIZE+2], 0 ; zero the high 16 bits
         call dir_write_back
         add sp, 12                     ; discard full frame (6 words)
         jmp .iret_cf
@@ -329,20 +330,20 @@ syscall_handler:
         jmp .iret_cf
 
         .create_do_write:
-        ;; BX = entry ptr in DISK_BUFFER, DI = filename to write, DL = start sector
+        ;; BX = entry ptr in DISK_BUFFER, DI = filename to write, DX = start sector
         push dx
         push bx
         mov si, di
         call .write_dir_name
         pop bx                 ; BX = entry base
-        pop dx                 ; DL = next free sector
+        pop dx                 ; DX = next free sector (16-bit)
         mov byte [bx+DIR_OFF_FLAGS], 0
-        mov [bx+DIR_OFF_SECTOR], dl
-        mov byte [bx+DIR_OFF_SECTOR+1], 0
+        mov [bx+DIR_OFF_SECTOR], dx
         mov word [bx+DIR_OFF_SIZE], 0
+        mov word [bx+DIR_OFF_SIZE+2], 0
         call dir_write_back
         jc .iret_cf
-        mov al, dl
+        mov ax, dx             ; AX = full 16-bit start sector
         clc
         jmp .iret_cf
 
@@ -384,6 +385,7 @@ syscall_handler:
         mov [bx+DIR_OFF_SECTOR], dl
         mov byte [bx+DIR_OFF_SECTOR+1], 0
         mov word [bx+DIR_OFF_SIZE], DIR_SECTORS * 512
+        mov word [bx+DIR_OFF_SIZE+2], 0
         ;; Write root directory sector back
         call dir_write_back
         jc .iret_cf
@@ -418,17 +420,20 @@ syscall_handler:
         jmp .iret_cf
 
         .fs_read:
+        ;; Read sector CX into DISK_BUFFER, CF on error (16-bit sector)
+        mov ax, cx
         call read_sector
         jmp .iret_cf
 
         .fs_write:
-        ;; Write DISK_BUFFER to sector: AL = sector number, CF on error
-        ;; Special: AL=0 writes back the directory sector loaded by dir_load_entry
-        test al, al
+        ;; Write DISK_BUFFER to sector CX (16-bit), CF on error
+        ;; Special: CX=0 writes back the directory sector loaded by dir_load_entry
+        test cx, cx
         jnz .fs_write_sector
         call dir_write_back
         jmp .iret_cf
         .fs_write_sector:
+        mov ax, cx
         call write_sector
         jmp .iret_cf
 

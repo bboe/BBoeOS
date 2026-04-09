@@ -57,12 +57,12 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 |-------|--------------|------------------------------------------------------|
 | 00h   | fs_chmod     | Set file flags, SI = filename, AL = flags, CF on err  |
 | 01h   | fs_copy      | Copy file, SI = src filename, DI = dest filename, CF on err |
-| 02h   | fs_create    | Create file, SI = filename, AL = start sector, CF on err |
+| 02h   | fs_create    | Create file, SI = filename, AX = start sector, CF on err |
 | 03h   | fs_find      | Find file, SI = filename, BX = entry ptr in disk_buffer, CF on err |
 | 04h   | fs_mkdir     | Create subdirectory, SI = name, AL = start sector, CF on err |
-| 05h   | fs_read      | Read sector AL into disk_buffer, CF on error          |
+| 05h   | fs_read      | Read sector CX (16-bit) into disk_buffer, CF on error |
 | 06h   | fs_rename    | Rename file, SI = old name, DI = new name (same dir), CF on err |
-| 07h   | fs_write     | Write disk_buffer to sector AL (AL=0: write back directory), CF on error |
+| 07h   | fs_write     | Write disk_buffer to sector CX (16-bit; CX=0: write back directory), CF on error |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
 | 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |

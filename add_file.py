@@ -12,11 +12,11 @@ ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
 FLAG_DIR = 0x02
 FLAG_EXEC = 0x01
-FNAME_MAX = 26
-NAME_FIELD = 27
-OFF_FLAGS = 27
-OFF_SECTOR = 28
-OFF_SIZE = 30
+FNAME_MAX = 24
+NAME_FIELD = 25
+OFF_FLAGS = 25
+OFF_SECTOR = 26
+OFF_SIZE = 28          # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
 
 CONSTANTS_PATH = "src/include/constants.asm"
@@ -91,7 +91,7 @@ def compute_next_data_sector(image: bytearray, dir_sector: int, dir_sectors: int
 def entry_end_sector(image: bytearray, entry_off: int) -> int:
     """Return the first sector past the data for the given directory entry."""
     start = struct.unpack_from("<H", image, entry_off + OFF_SECTOR)[0]
-    size = struct.unpack_from("<H", image, entry_off + OFF_SIZE)[0]
+    size = struct.unpack_from("<I", image, entry_off + OFF_SIZE)[0]
     sectors_used = (size + SECTOR_SIZE - 1) // SECTOR_SIZE
     return start + sectors_used
 
@@ -246,7 +246,7 @@ def write_entry(
     image[entry_off:entry_off + NAME_FIELD] = name_bytes
     image[entry_off + OFF_FLAGS] = flags
     struct.pack_into("<H", image, entry_off + OFF_SECTOR, start_sector)
-    struct.pack_into("<H", image, entry_off + OFF_SIZE, size)
+    struct.pack_into("<I", image, entry_off + OFF_SIZE, size)
 
 
 if __name__ == "__main__":

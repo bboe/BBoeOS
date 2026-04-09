@@ -19,18 +19,18 @@ main:
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .not_dir
         ;; Set up to iterate the subdirectory's sectors
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [cur_sec], al
-        add al, DIR_SECTORS
-        mov [end_sec], al
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [cur_sec], ax
+        add ax, DIR_SECTORS
+        mov [end_sec], ax
         jmp .next_sector
 
 .list_root:
-        mov byte [cur_sec], DIR_SECTOR
-        mov byte [end_sec], DIR_SECTOR + DIR_SECTORS
+        mov word [cur_sec], DIR_SECTOR
+        mov word [end_sec], DIR_SECTOR + DIR_SECTORS
 
 .next_sector:
-        mov al, [cur_sec]
+        mov cx, [cur_sec]
         mov ah, SYS_FS_READ
         int 30h
         jc .disk_err
@@ -63,9 +63,9 @@ main:
         loop .loop
 
 .try_next_sector:
-        inc byte [cur_sec]
-        mov al, [cur_sec]
-        cmp al, [end_sec]
+        inc word [cur_sec]
+        mov ax, [cur_sec]
+        cmp ax, [end_sec]
         jb .next_sector
 
 .done:
@@ -88,8 +88,8 @@ main:
         mov ah, SYS_EXIT
         int 30h
 
-cur_sec db 0
-end_sec db 0
+cur_sec dw 0
+end_sec dw 0
 
 MSG_NOT_DIR   db `Not a directory\n\0`
 MSG_NOT_FOUND db `Not found\n\0`
