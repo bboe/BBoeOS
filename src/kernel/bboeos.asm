@@ -9,10 +9,16 @@ start:
         mov es, ax
         mov [boot_disk], dl
 
-        mov ax, 50h             ; Linear 0x500 is start of free space
+        ;; Dedicated stack segment: SS=0x9000, SP=0xFFF0 puts the stack in
+        ;; the top 64 KB of conventional memory (linear 0x90000-0x9FFF0),
+        ;; physically isolated from DISK_BUFFER, NET_RX_BUF, the kernel,
+        ;; and every program buffer in segment 0.  The stack owns its
+        ;; entire segment and can never collide with data memory.
         cli                     ; Disable interrupts while adjusting stack
+        mov ax, 9000h
         mov ss, ax
-        mov sp, 7700h           ; 0050h:7700h is equivalent to 0x7c00
+        mov sp, 0FFF0h
+        xor ax, ax              ; restore AX=0 for callers below
         sti                     ; Enable interrupts
 
         call clear_screen

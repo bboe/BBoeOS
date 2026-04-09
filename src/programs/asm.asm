@@ -1,19 +1,27 @@
-        org 6000h
+        org 0600h
 
 %include "constants.asm"
 
-        ;; Memory layout
-        %assign SYM_TABLE     0600h
-        %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
-        %assign SYM_MAX       256       ; 256 * 28 = 7168 bytes (0x0600-0x21FF)
-        %assign SYM_NAME_LEN  24        ; 23 chars + null
-        %assign LINE_BUF      2200h
-        %assign LINE_MAX      255
-        %assign OUT_BUF       2300h
-        %assign SRC_BUF       2500h
-        %assign INC_SAVE      2700h     ; include stack save area (10 bytes per level)
-        %assign INC_SRC_SAVE  2740h     ; saved source buffer (512 bytes per level)
+        ;; Memory layout. The assembler's scratch buffers are split across
+        ;; two free regions of conventional memory to avoid the loaded
+        ;; binary at PROGRAM_BASE=0x0600, stage 1's live code at
+        ;; 0x7C00-0x7DFF, and stage 2 at 0x7E00-0x8DFF:
+        ;;   - small buffers at 0x3000-0x3FFF (asm.asm ends well below 0x3000)
+        ;;   - SYM_TABLE at 0x9000+ (just past stage 2, below 0xE000)
+        ;; Fixed addresses are used (rather than labels) because the
+        ;; self-hosted assembler only understands %assign and %include,
+        ;; not %define/equ.
+        %assign INC_SAVE      3500h     ; include stack save area (10 bytes per level)
+        %assign INC_SRC_SAVE  3540h     ; saved source buffer (512 bytes per level)
         %assign JUMP_MAX      256       ; max jcc/jmp instructions per source
+        %assign LINE_BUF      3000h
+        %assign LINE_MAX      255
+        %assign OUT_BUF       3100h
+        %assign SRC_BUF       3300h
+        %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
+        %assign SYM_MAX       256       ; 256 * 28 = 7168 bytes
+        %assign SYM_NAME_LEN  24        ; 23 chars + null
+        %assign SYM_TABLE     9000h
 
 ;;; -----------------------------------------------------------------------
 ;;; Main entry point

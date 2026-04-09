@@ -7,7 +7,7 @@
         %assign DIR_OFF_SIZE (DIR_NAME_LEN + 3)
         %assign DIR_SECTOR 10
         %assign DIR_SECTORS 2
-        %assign DISK_BUFFER 9000h     ; 512 bytes (one sector)
+        %assign DISK_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERR_DIR_FULL  01h     ; Copy error: no free directory entries
         %assign ERR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERR_NOT_EXEC  03h     ; Exec error: file exists but is not executable
@@ -18,9 +18,9 @@
         %assign FLAG_EXEC 01h         ; Directory entry flags: bit 0 = executable
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
-        %assign NET_TX_BUF 9200h     ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
-        %assign NET_RX_BUF 9800h     ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
-        %assign PROGRAM_BASE 6000h
+        %assign NET_TX_BUF 0E200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign NET_RX_BUF 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign PROGRAM_BASE 0600h
 
         ;; Syscall numbers (INT 30h, passed in AH)
         %assign SYS_FS_CHMOD  00h
