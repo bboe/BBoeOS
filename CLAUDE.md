@@ -109,6 +109,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
 - `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit
+- `src/programs/hello.asm` — Hello program: prints `Hello, world!` (smallest program; useful as a self-host smoke test)
 - `src/programs/ls.asm` — Ls program: lists files in the root directory or a subdirectory, marks executables with `*` and directories with `/`
 - `src/programs/mkdir.asm` — Mkdir program: creates a subdirectory under root
 - `src/programs/mv.asm` — Mv program: renames a file (within the same directory)
