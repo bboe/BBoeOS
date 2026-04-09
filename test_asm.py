@@ -33,12 +33,40 @@ from add_file import (
 )
 
 BOOT_TIMEOUT = 30
+C_DIR = Path("src/c")
 CMD_TIMEOUT = 8
 IMAGE = Path("drive.img")
 ORG_DIRECTIVE = "org 0600h"
 PROMPT = b"$ "
 SER_BASENAME = "ser"
 STATIC_DIR = Path("static")
+
+
+def compile_c_sources() -> list[tuple[Path, str | None]]:
+    """Compile each src/c/*.c to static/<name>.asm via cc.py.
+
+    If a symlink already exists at the target path, its link target is
+    saved so it can be restored later.  Returns a list of
+    (generated_path, original_link_target_or_None) pairs.
+    """
+    if not C_DIR.is_dir():
+        return []
+    generated: list[tuple[Path, str | None]] = []
+    for c_src in sorted(C_DIR.glob("*.c")):
+        name = c_src.stem
+        target = STATIC_DIR / f"{name}.asm"
+        old_link: str | None = None
+        if target.is_symlink():
+            old_link = os.readlink(target)
+            target.unlink()
+        elif target.exists():
+            target.unlink()
+        subprocess.run(
+            ["./cc.py", str(c_src), str(target)],
+            check=True,
+        )
+        generated.append((target, old_link))
+    return generated
 
 
 def cleanup_fifos(*, tempdir: Path) -> None:
@@ -114,6 +142,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Compile C sources to .asm and place in static/ so make_os.sh
+    # includes them on the disk image alongside hand-written .asm files.
+    generated = compile_c_sources()
+    if generated:
+        c_names = " ".join(t.stem + ".c" for t, _ in generated)
+        print(f"Compiled C sources: {c_names}")
+
+    try:
+        return _run_tests(args, generated)
+    finally:
+        restore_static(generated)
+
+
+def _run_tests(args: argparse.Namespace, generated: list) -> int:
     print("Building OS...")
     subprocess.run(
         ["./make_os.sh"],
@@ -200,6 +242,14 @@ def persist_artifacts(*, tempdir: Path) -> Path:
             continue
         shutil.copy(item, persist / item.name)
     return persist
+
+
+def restore_static(generated: list[tuple[Path, str | None]]) -> None:
+    """Undo compile_c_sources(): delete generated files, restore symlinks."""
+    for target, old_link in generated:
+        target.unlink(missing_ok=True)
+        if old_link is not None:
+            target.symlink_to(old_link)
 
 
 def run_in_qemu(

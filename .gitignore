@@ -1,5 +1,5 @@
 *~
 *.bin
 *.img
+.venv/
 __pycache__/
-drive.img

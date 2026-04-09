@@ -43,6 +43,7 @@ src/kernel/           Kernel assembly source
   syscall.asm         INT 30h syscall handler
   system.asm          Graphics mode, reboot, shutdown
 src/asm/              User-space programs (assembly sources)
+src/c/                User-space programs (C sources, compiled by cc.py)
   shell.asm           Shell: CLI loop, command dispatch, built-in commands
 add_file.py           Host-side script to add files to drive image
 make_os.sh            Build script
