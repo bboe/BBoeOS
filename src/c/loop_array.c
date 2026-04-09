@@ -1,9 +1,9 @@
 void main() {
     char *messages[] = {"a", "b", "c"};
     int i = 0;
-    while (i < 3) {
+    while (i < sizeof(messages) / sizeof(char*)) {
         puts(messages[i]);
-        i += 1;
+        i = i + 1;
     }
     putc('\n');
 }

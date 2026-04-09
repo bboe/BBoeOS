@@ -2016,6 +2016,19 @@ handle_xchg:
         mov bh, ah
         call skip_comma
         call parse_register     ; AL = second operand (reg field)
+        ;; Short form: xchg ax, r16 → 90h + reg (16-bit only)
+        cmp bh, 8
+        je .xchg_long
+        cmp bl, 0
+        je .xchg_short          ; first=AX: emit 90h + second
+        cmp al, 0
+        jne .xchg_long
+        mov al, bl              ; second=AX: emit 90h + first
+        .xchg_short:
+        add al, 90h
+        call emit_byte_al
+        ret
+        .xchg_long:
         push ax
         cmp bh, 8
         je .xchg8

@@ -21,8 +21,10 @@ Grammar:
     comparison_expression := additive_expression
                            (('<'|'>'|'<='|'>='|'=='|'!=')
                             additive_expression)?
-    additive_expression  := primary (('+'|'-') primary)*
-    primary              := NUMBER | STRING
+    additive_expression  := multiplicative_expression
+                           (('+'|'-') multiplicative_expression)*
+    multiplicative_expression := primary (('*'|'/') primary)*
+    primary              := NUMBER | STRING | sizeof
                           | IDENT ('[' expression ']')? | '(' expression ')'
 
 Builtins:
@@ -51,7 +53,7 @@ CHARACTER_ESCAPES = {
 
 COMPARISON_OPERATORS = frozenset({"EQ", "GE", "GT", "LE", "LT", "NE"})
 
-KEYWORDS = frozenset({"char", "int", "void", "while"})
+KEYWORDS = frozenset({"char", "int", "sizeof", "void", "while"})
 
 JUMP_WHEN_FALSE = {
     "!=": "je",
@@ -81,6 +83,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<LT><)
   | (?P<MINUS>-)
   | (?P<PLUS>\+)
+  | (?P<SLASH>/)
   | (?P<STAR>\*)
   | (?P<LBRACE>\{)
   | (?P<LBRACKET>\[)
@@ -94,6 +97,8 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
+MULTIPLICATIVE_OPERATORS = frozenset({"SLASH", "STAR"})
+
 TYPE_TOKENS = frozenset({"CHAR", "INT", "VOID"})
 
 
@@ -102,6 +107,7 @@ class CodeGenerator:
 
     def __init__(self) -> None:
         """Initialize code generator state."""
+        self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
         self.frame_size: int = 0
         self.label_id: int = 0
@@ -233,6 +239,16 @@ class CodeGenerator:
             self.emit("        pop bx")
             self.emit("        add bx, ax")
             self.emit("        mov ax, [bx]")
+        elif kind == "sizeof_type":
+            type_sizes = {"char": 1, "char*": 2, "int": 2, "void": 0}
+            self.emit(f"        mov ax, {type_sizes.get(expression[1], 2)}")
+        elif kind == "sizeof_variable":
+            vname = expression[1]
+            if vname in self.array_sizes:
+                size = self.array_sizes[vname] * 2  # word-sized elements
+            else:
+                size = 2  # all non-array variables are word-sized
+            self.emit(f"        mov ax, {size}")
         elif kind == "binary_operator":
             _, operator, left, right = expression
             self.generate_expression(left)
@@ -244,6 +260,13 @@ class CodeGenerator:
             elif operator == "-":
                 self.emit("        sub cx, ax")
                 self.emit("        mov ax, cx")
+            elif operator == "*":
+                self.emit("        mul cx")
+            elif operator == "/":
+                # CX=left, AX=right — swap so AX=dividend, CX=divisor
+                self.emit("        xchg ax, cx")
+                self.emit("        xor dx, dx")
+                self.emit("        div cx")
             elif operator in JUMP_WHEN_FALSE:
                 self.emit("        cmp cx, ax")
                 self.emit("        mov ax, 0")
@@ -257,6 +280,7 @@ class CodeGenerator:
     def generate_function(self, function: tuple, /) -> None:
         """Generate assembly for a single function definition."""
         _, name, body = function
+        self.array_sizes = {}
         self.frame_size = 0
         self.locals = {}
         self.scan_locals(body)
@@ -307,6 +331,7 @@ class CodeGenerator:
                         raise SyntaxError(message)
                 arr_label = f"_arr_{len(self.arrays)}"
                 self.arrays.append((arr_label, elem_labels))
+                self.array_sizes[vname] = len(elem_labels)
                 self.emit(f"        mov word [bp-{self.locals[vname]}], {arr_label}")
         elif kind == "assignment":
             _, vname, expression = statement
@@ -397,10 +422,10 @@ class Parser:
             An AST node for the additive expression.
 
         """
-        node = self.parse_primary()
+        node = self.parse_multiplicative()
         while self.peek()[0] in ADDITIVE_OPERATORS:
             operator_token = self.eat()
-            right = self.parse_primary()
+            right = self.parse_multiplicative()
             node = ("binary_operator", operator_token[1], node, right)
         return node
 
@@ -506,6 +531,20 @@ class Parser:
         self.eat("RBRACE")
         return ("function", name, body)
 
+    def parse_multiplicative(self) -> tuple:
+        """Parse a multiplicative expression (multiplication and division).
+
+        Returns:
+            An AST node for the multiplicative expression.
+
+        """
+        node = self.parse_primary()
+        while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_primary()
+            node = ("binary_operator", operator_token[1], node, right)
+        return node
+
     def parse_primary(self) -> tuple:
         """Parse a primary expression (literals, variables, indexing, parens).
 
@@ -517,6 +556,8 @@ class Parser:
 
         """
         token = self.peek()
+        if token[0] == "SIZEOF":
+            return self.parse_sizeof()
         if token[0] == "NUMBER":
             self.eat()
             return ("int", int(token[1], 0))
@@ -553,6 +594,24 @@ class Parser:
         while self.peek()[0] != "EOF":
             functions.append(self.parse_function())
         return ("program", functions)
+
+    def parse_sizeof(self) -> tuple:
+        """Parse a sizeof expression.
+
+        Returns:
+            An AST node for sizeof(type) or sizeof(variable).
+
+        """
+        self.eat("SIZEOF")
+        self.eat("LPAREN")
+        # sizeof(type) or sizeof(variable)
+        if self.peek()[0] in TYPE_TOKENS:
+            type_string = self.parse_type()
+            self.eat("RPAREN")
+            return ("sizeof_type", type_string)
+        name = self.eat("IDENT")[1]
+        self.eat("RPAREN")
+        return ("sizeof_variable", name)
 
     def parse_statement(self) -> tuple:
         """Parse a single statement.
