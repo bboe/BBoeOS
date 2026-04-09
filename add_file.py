@@ -12,11 +12,11 @@ ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
 FLAG_DIR = 0x02
 FLAG_EXEC = 0x01
-FNAME_MAX = 26
-NAME_FIELD = 27
-OFF_FLAGS = 27
-OFF_SECTOR = 28
-OFF_SIZE = 30
+FNAME_MAX = 24
+NAME_FIELD = 25
+OFF_FLAGS = 25
+OFF_SECTOR = 26
+OFF_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
 
 CONSTANTS_PATH = "src/include/constants.asm"
@@ -31,9 +31,7 @@ def add_file(
 ) -> None:
     filename = os.path.basename(file_path)
     if len(filename) > FNAME_MAX:
-        raise SystemExit(
-            f"Error: filename '{filename}' exceeds {FNAME_MAX} characters"
-        )
+        raise SystemExit(f"Error: filename '{filename}' exceeds {FNAME_MAX} characters")
 
     with open(file_path, "rb") as f:
         file_data = f.read()
@@ -70,7 +68,9 @@ def add_file(
     print(f"Added '{rel}' ({file_size} bytes) at sector {next_data_sector}")
 
 
-def compute_next_data_sector(image: bytearray, dir_sector: int, dir_sectors: int) -> int:
+def compute_next_data_sector(
+    image: bytearray, dir_sector: int, dir_sectors: int
+) -> int:
     """Return the next free data sector, accounting for files inside subdirectories."""
     next_sec = dir_sector + dir_sectors
     for entry_off in iter_entries(image, (dir_sector - 1) * SECTOR_SIZE, dir_sectors):
@@ -91,7 +91,7 @@ def compute_next_data_sector(image: bytearray, dir_sector: int, dir_sectors: int
 def entry_end_sector(image: bytearray, entry_off: int) -> int:
     """Return the first sector past the data for the given directory entry."""
     start = struct.unpack_from("<H", image, entry_off + OFF_SECTOR)[0]
-    size = struct.unpack_from("<H", image, entry_off + OFF_SIZE)[0]
+    size = struct.unpack_from("<I", image, entry_off + OFF_SIZE)[0]
     sectors_used = (size + SECTOR_SIZE - 1) // SECTOR_SIZE
     return start + sectors_used
 
@@ -106,7 +106,7 @@ def find_free_entry(
     for entry_off in iter_entries(image, parent_offset, dir_sectors):
         if image[entry_off] == 0:
             return entry_off
-        name = bytes(image[entry_off:entry_off + NAME_FIELD]).rstrip(b"\x00").decode()
+        name = bytes(image[entry_off : entry_off + NAME_FIELD]).rstrip(b"\x00").decode()
         if name == filename:
             raise SystemExit(f"Error: '{filename}' already exists")
     return None
@@ -119,7 +119,9 @@ def find_subdir_entry(
     for entry_off in iter_entries(image, (dir_sector - 1) * SECTOR_SIZE, dir_sectors):
         if image[entry_off] == 0:
             continue
-        entry_name = bytes(image[entry_off:entry_off + NAME_FIELD]).rstrip(b"\x00").decode()
+        entry_name = (
+            bytes(image[entry_off : entry_off + NAME_FIELD]).rstrip(b"\x00").decode()
+        )
         if entry_name != name:
             continue
         if not (image[entry_off + OFF_FLAGS] & FLAG_DIR):
@@ -140,9 +142,7 @@ def load_image(image_path: str) -> bytearray:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Add a file to a BBoeOS drive image."
-    )
+    parser = argparse.ArgumentParser(description="Add a file to a BBoeOS drive image.")
     parser.add_argument(
         "-d",
         "--subdir",
@@ -154,7 +154,9 @@ def main() -> None:
         action="store_true",
         help="mark the file as executable (sets FLAG_EXEC)",
     )
-    parser.add_argument("file", help="path to the file to add (or directory name with --mkdir)")
+    parser.add_argument(
+        "file", help="path to the file to add (or directory name with --mkdir)"
+    )
     parser.add_argument(
         "--image",
         default="drive.img",
@@ -203,7 +205,7 @@ def mkdir(*, dirname: str, image_path: str) -> None:
         raise SystemExit(
             f"Error: directory would extend past end of image (need {data_off + dir_bytes} bytes)"
         )
-    image[data_off:data_off + dir_bytes] = b"\x00" * dir_bytes
+    image[data_off : data_off + dir_bytes] = b"\x00" * dir_bytes
     save_image(image_path, image)
 
     print(f"Created directory '{dirname}' at sector {next_data_sector}")
@@ -231,7 +233,7 @@ def write_data(image: bytearray, start_sector: int, data: bytes) -> None:
         raise SystemExit(
             f"Error: data would extend past end of image (need {data_off + len(data)} bytes)"
         )
-    image[data_off:data_off + len(data)] = data
+    image[data_off : data_off + len(data)] = data
 
 
 def write_entry(
@@ -243,10 +245,10 @@ def write_entry(
     size: int,
 ) -> None:
     name_bytes = name.encode().ljust(NAME_FIELD, b"\x00")
-    image[entry_off:entry_off + NAME_FIELD] = name_bytes
+    image[entry_off : entry_off + NAME_FIELD] = name_bytes
     image[entry_off + OFF_FLAGS] = flags
     struct.pack_into("<H", image, entry_off + OFF_SECTOR, start_sector)
-    struct.pack_into("<H", image, entry_off + OFF_SIZE, size)
+    struct.pack_into("<I", image, entry_off + OFF_SIZE, size)
 
 
 if __name__ == "__main__":

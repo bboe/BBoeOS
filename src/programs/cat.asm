@@ -15,22 +15,22 @@ main:
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jnz .is_dir
 
-        mov cx, [bx+DIR_OFF_SIZE]        ; File size
-        test cx, cx
+        mov dx, [bx+DIR_OFF_SIZE]        ; File size in DX
+        test dx, dx
         jz .empty
-        mov bl, [bx+DIR_OFF_SECTOR]        ; Start sector
+        mov cx, [bx+DIR_OFF_SECTOR]      ; Start sector in CX
 
 .read_sector:
-        mov al, bl
-        mov ah, SYS_FS_READ
+        mov ah, SYS_FS_READ              ; reads sector CX into DISK_BUFFER
         int 30h
         jc .disk_err
 
         ;; Print up to 512 bytes or remaining bytes
-        mov dx, cx              ; Save remaining bytes
-        cmp cx, 512
-        jbe .print_sector
+        push cx                 ; Save sector across print loop
         mov cx, 512
+        cmp dx, 512
+        jae .print_sector
+        mov cx, dx
 .print_sector:
         mov si, DISK_BUFFER
 .print:
@@ -38,11 +38,11 @@ main:
         mov ah, SYS_IO_PUTC
         int 30h
         loop .print
+        pop cx                  ; Restore sector
 
         sub dx, 512
         jbe .empty
-        mov cx, dx              ; Remaining bytes
-        inc bl                  ; Next sector
+        inc cx                  ; Next sector
         jmp .read_sector
 
 .empty:

@@ -49,6 +49,22 @@ add_file.py           Host-side script to add files to drive image
 make_os.sh            Build script
 ```
 
+## Known limitations / TODO
+
+* **`edit` cannot open `asm.asm`.** The gap buffer is 20 KB at `0x2000` with
+  the 2.5 KB kill buffer at `0x7000`, sandwiched between the edit binary
+  (loaded at `PROGRAM_BASE` = `0x0600`) and the resident kernel (stage 1 MBR
+  at `0x7C00`, stage 2 above it through `~0xE000`). The hard ceiling for a
+  contiguous gap buffer in segment 0 is ~27 KB (the gap from just past the
+  edit binary up to `0x7C00`); a separate ~4.5 KB of slack exists above the
+  NIC buffers at `0xEE00`–`0xFFFF` and could host the kill buffer, but
+  `static/asm.asm` is ~96 KB so neither rearrangement helps. The real fix is
+  to relocate the gap buffer into its own segment(s): one segment at e.g.
+  `1000h:0000` gets 64 KB; splitting across two segments gets 128 KB and
+  clears `asm.asm` with headroom. Requires widening `gap_start`/`gap_end` to
+  17-bit (or dword) and routing every `BUF_BASE` access through a
+  segment-aware helper.
+
 ## Resources
 
 * https://neosmart.net/wiki/mbr-boot-process/

@@ -6,21 +6,20 @@ dir_load_entry:
         push ax
         push cx
         ;; Compute sector: DIR_SECTOR + (index / entries_per_sector)
-        mov al, bl
+        mov ax, bx
         mov cl, 4               ; 16 entries per sector = 2^4
-        shr al, cl
-        add al, DIR_SECTOR
-        mov [dir_loaded_sec], al
+        shr ax, cl
+        add ax, DIR_SECTOR
+        mov [dir_loaded_sec], ax
         ;; Compute offset: (index % 16) * DIR_ENTRY_SIZE
-        mov al, bl
-        and al, 0Fh             ; index % 16
-        xor ah, ah
+        mov ax, bx
+        and ax, 0Fh             ; index % 16
         mov cl, 5               ; DIR_ENTRY_SIZE = 32 = 2^5
         shl ax, cl              ; * 32
         mov bx, ax
         add bx, DISK_BUFFER
         ;; Read the sector
-        mov al, [dir_loaded_sec]
+        mov ax, [dir_loaded_sec]
         call read_sector
         pop cx
         pop ax
@@ -30,13 +29,13 @@ dir_write_back:
         ;; Write the directory sector last loaded by dir_load_entry
         ;; Sets CF on error
         push ax
-        mov al, [dir_loaded_sec]
+        mov ax, [dir_loaded_sec]
         call write_sector
         pop ax
         ret
 
-        dir_loaded_sec  db 0
-        dir_search_start db 0
+        dir_loaded_sec  dw 0
+        dir_search_start dw 0
 
 find_file:
         ;; Search directory for a filename, with optional path support
@@ -64,7 +63,7 @@ find_file:
         .ff_no_slash:
         ;; No slash — search root directory
         mov dx, si
-        mov byte [dir_search_start], DIR_SECTOR
+        mov word [dir_search_start], DIR_SECTOR
         jmp .ff_search_root
 
         .ff_has_slash:
@@ -83,9 +82,9 @@ find_file:
         ;; BX = pointer to entry in DISK_BUFFER (from root search)
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .ff_not_found        ; not a directory
-        ;; Read the subdirectory's first data sector
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [dir_search_start], al
+        ;; Read the subdirectory's first data sector (16-bit)
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [dir_search_start], ax
         ;; Search subdir entries for the filename after '/'
         inc di                  ; skip past '/'
         mov dx, di              ; DX = filename within subdir
@@ -94,18 +93,18 @@ find_file:
 
         .ff_search_root:
         xor bx, bx
-        mov al, DIR_SECTOR
+        mov ax, DIR_SECTOR
 
         .ff_load_sector:
-        mov [dir_loaded_sec], al
+        mov [dir_loaded_sec], ax
         call read_sector
         jc .ff_done
         mov di, DISK_BUFFER
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
 
         .ff_search:
-        cmp byte [di], 0       ; Empty entry = end of listing in this sector
-        je .ff_try_next_sector
+        cmp byte [di], 0       ; Empty slot — skip (holes are allowed)
+        je .ff_skip_entry
 
         mov si, dx              ; User's filename
         push di                 ; Save entry pointer
@@ -121,28 +120,22 @@ find_file:
 
         .ff_no_match:
         pop di
+        .ff_skip_entry:
         add di, DIR_ENTRY_SIZE
         inc bx
         loop .ff_search
 
         .ff_try_next_sector:
         ;; Try next sector relative to dir_search_start
-        mov al, [dir_loaded_sec]
-        sub al, [dir_search_start]
-        inc al
-        cmp al, DIR_SECTORS
+        mov ax, [dir_loaded_sec]
+        sub ax, [dir_search_start]
+        inc ax
+        cmp ax, DIR_SECTORS
         jae .ff_not_found
-        ;; Advance BX to start of next sector
-        add bx, cx
-        mov al, bl
-        shr al, 4
-        add al, [dir_search_start]
-        push bx
-        mov bl, [dir_search_start]
-        add bl, DIR_SECTORS
-        cmp al, bl
-        pop bx
-        jb .ff_load_sector
+        ;; Advance to next sector
+        mov ax, [dir_loaded_sec]
+        inc ax
+        jmp .ff_load_sector
 
         .ff_not_found:
         stc
@@ -166,13 +159,14 @@ find_file:
         xor bx, bx
         mov al, DIR_SECTOR
         .fdr_load:
+        xor ah, ah
         call read_sector
         jc .fdr_done
         mov di, DISK_BUFFER
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
         .fdr_search:
-        cmp byte [di], 0
-        je .fdr_try_next
+        cmp byte [di], 0       ; Empty slot — skip (holes are allowed)
+        je .fdr_skip
         mov si, dx
         push di
         .fdr_cmp:
@@ -186,6 +180,7 @@ find_file:
         jmp .fdr_cmp
         .fdr_no_match:
         pop di
+        .fdr_skip:
         add di, DIR_ENTRY_SIZE
         inc bx
         loop .fdr_search
@@ -206,21 +201,25 @@ find_file:
 
 lba_to_chs:
         ;; Convert 1-based logical sector to CHS using detected geometry
-        ;; Input: AL = logical sector (1-based)
-        ;; Output: CH = cylinder, CL = sector (1-based), DH = head
+        ;; Input: AX = logical sector (1-based, 16-bit)
+        ;; Output: CH = cylinder low 8 bits, CL bits 0-5 = sector (1-based)
+        ;;         CL bits 6-7 = cylinder bits 8-9, DH = head
         ;; Clobbers: AX
         push bx
-        dec al                  ; 0-based LBA
-        xor ah, ah
+        dec ax                  ; 0-based LBA
+        xor dx, dx
         mov bl, [sectors_per_track]
-        div bl                  ; AL = track, AH = sector_in_track
-        mov cl, ah
-        inc cl                  ; CL = 1-based sector
-        xor ah, ah
+        xor bh, bh
+        div bx                  ; AX = track (LBA/spt), DX = sector_in_track
+        mov cl, dl
+        inc cl                  ; CL = 1-based sector (low 6 bits)
+        xor dx, dx
         mov bl, [heads_per_cyl]
-        div bl                  ; AL = cylinder, AH = head
-        mov ch, al
-        mov dh, ah
+        div bx                  ; AX = cylinder, DX = head
+        mov ch, al              ; CH = cylinder low 8 bits
+        shl ah, 6               ; encode cyl bits 8-9 into CL bits 6-7
+        or cl, ah
+        mov dh, dl              ; DH = head
         pop bx
         ret
 
@@ -230,10 +229,10 @@ load_file:
         ;;        DI = destination address
         ;; Output: Carry set on disk error
         ;; Clobbers: SI, CX, DI
-        mov cx, [bx+DIR_OFF_SIZE]   ; File size in bytes
-        mov bl, [bx+DIR_OFF_SECTOR] ; Start sector
+        mov cx, [bx+DIR_OFF_SIZE]   ; File size in bytes (low 16)
+        mov bx, [bx+DIR_OFF_SECTOR] ; Start sector (16-bit)
         .lf_sector:
-        mov al, bl
+        mov ax, bx
         call read_sector
         jc .lf_done
         push cx
@@ -251,7 +250,7 @@ load_file:
         pop cx
         sub cx, 512
         jbe .lf_loaded
-        inc bl                  ; Next sector
+        inc bx                  ; Next sector
         jmp .lf_sector
         .lf_loaded:
         clc
@@ -260,12 +259,12 @@ load_file:
 
 read_sector:
         ;; Read one sector into DISK_BUFFER
-        ;; Input: AL = logical sector number (1-based)
+        ;; Input: AX = logical sector number (1-based, 16-bit)
         ;; Sets carry flag on error
         push bx
         push cx
         push dx
-        call lba_to_chs
+        call lba_to_chs         ; CH/CL/DH set; AX clobbered
         mov dl, [boot_disk]
         mov bx, DISK_BUFFER
         mov ax, 0201h
@@ -279,15 +278,16 @@ scan_dir_entries:
         ;; Scan all directory sectors (including subdirectories) for next data sector
         ;; Also finds first free entry in root directory
         ;; Returns: BX = first free root entry index (0xFFFF if full)
-        ;;          DL = next free data sector
+        ;;          DX = next free data sector (16-bit)
         ;; Clobbers: AX, CX, SI
         push di
         mov bx, 0FFFFh                ; BX = free entry index (none)
-        mov dl, DIR_SECTOR + DIR_SECTORS ; DL = next data sector
+        mov dx, DIR_SECTOR + DIR_SECTORS ; DX = next data sector (16-bit)
         xor di, di                    ; DI = current entry index
         mov al, DIR_SECTOR
 
         .sd_next_sector:
+        xor ah, ah
         call read_sector
         jc .sd_done
         mov si, DISK_BUFFER
@@ -302,20 +302,32 @@ scan_dir_entries:
         jmp .sd_skip
 
         .sd_occupied:
+        ;; end_sec = entry.start + ceil(entry.size / 512)
+        ;; Compute (size_high:size_low + 511) >> 9 in BX:AX, then add start.
+        push ax
         push bx
-        xor ax, ax
-        mov al, [si+DIR_OFF_SECTOR]
-        xor bx, bx
-        mov bx, [si+DIR_OFF_SIZE]
-        add bx, 511
-        shr bx, 9
-        add al, bl
+        push cx
+        mov ax, [si+DIR_OFF_SIZE]
+        add ax, 511
+        mov bx, [si+DIR_OFF_SIZE+2]
+        adc bx, 0
+        mov cl, 9
+        .sd_sh_loop:
+        shr bx, 1
+        rcr ax, 1
+        dec cl
+        jnz .sd_sh_loop
+        ;; AX = sectors_used. Add start sector.
+        mov bx, [si+DIR_OFF_SECTOR]
+        add bx, ax                     ; BX = end sector
+        cmp bx, dx
+        jbe .sd_no_update
+        mov dx, bx
+        .sd_no_update:
+        pop cx
         pop bx
-        cmp al, dl
-        jbe .sd_check_subdir
-        mov dl, al
+        pop ax
 
-        .sd_check_subdir:
         ;; If this is a directory, also scan its sectors for files
         test byte [si+DIR_OFF_FLAGS], FLAG_DIR
         jz .sd_skip
@@ -324,9 +336,9 @@ scan_dir_entries:
         push cx
         push si
         push di
-        ;; AL = current subdir sector, AH = remaining sectors to scan
-        mov al, [si+DIR_OFF_SECTOR]
-        mov ah, DIR_SECTORS
+        ;; AX = current subdir sector (16-bit), DI = remaining sectors to scan
+        mov ax, [si+DIR_OFF_SECTOR]
+        mov di, DIR_SECTORS
         .sd_subloop:
         push ax
         call read_sector
@@ -339,24 +351,32 @@ scan_dir_entries:
         je .sd_sub_skip
         push ax
         push bx
-        xor ax, ax
-        mov al, [si+DIR_OFF_SECTOR]
-        xor bx, bx
-        mov bx, [si+DIR_OFF_SIZE]
-        add bx, 511
-        shr bx, 9
-        add al, bl
-        cmp al, dl
-        jbe .sd_sub_pop
-        mov dl, al
-        .sd_sub_pop:
+        ;; Compute end_sec for the sub entry just like above
+        mov ax, [si+DIR_OFF_SIZE]
+        add ax, 511
+        mov bx, [si+DIR_OFF_SIZE+2]
+        adc bx, 0
+        push cx
+        mov cl, 9
+        .sd_sub_sh_loop:
+        shr bx, 1
+        rcr ax, 1
+        dec cl
+        jnz .sd_sub_sh_loop
+        pop cx
+        mov bx, [si+DIR_OFF_SECTOR]
+        add bx, ax                     ; BX = end sector (16-bit)
+        cmp bx, dx
+        jbe .sd_sub_no_update
+        mov dx, bx
+        .sd_sub_no_update:
         pop bx
         pop ax
         .sd_sub_skip:
         add si, DIR_ENTRY_SIZE
         loop .sd_sub_entry
-        inc al
-        dec ah
+        inc ax
+        dec di
         jnz .sd_subloop
         jmp .sd_subdir_done
         .sd_subdir_err:
@@ -372,6 +392,7 @@ scan_dir_entries:
         pop ax                 ; AX = DI (current root entry index)
         shr al, 4
         add al, DIR_SECTOR
+        xor ah, ah
         call read_sector
         pop dx
         ;; Recompute SI to point to the current entry in the re-read sector
@@ -408,7 +429,7 @@ scan_dir_entries:
 
 write_sector:
         ;; Write DISK_BUFFER to one sector on disk
-        ;; Input: AL = logical sector number (1-based)
+        ;; Input: AX = logical sector number (1-based, 16-bit)
         ;; Sets carry flag on error
         push bx
         push cx

@@ -1,11 +1,11 @@
         %assign BUFFER 500h
         %assign DIR_ENTRY_SIZE 32
         %assign DIR_MAX_ENTRIES 32
-        %assign DIR_NAME_LEN 27         ; 26 chars + null
+        %assign DIR_NAME_LEN 25         ; 24 chars + null
         %assign DIR_OFF_FLAGS (DIR_NAME_LEN)
         %assign DIR_OFF_SECTOR (DIR_NAME_LEN + 1)
-        %assign DIR_OFF_SIZE (DIR_NAME_LEN + 3)
-        %assign DIR_SECTOR 10
+        %assign DIR_OFF_SIZE (DIR_NAME_LEN + 3)   ; 32-bit (4 bytes)
+        %assign DIR_SECTOR 11
         %assign DIR_SECTORS 2
         %assign DISK_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERR_DIR_FULL  01h     ; Copy error: no free directory entries
@@ -28,9 +28,9 @@
         %assign SYS_FS_CREATE 02h
         %assign SYS_FS_FIND   03h
         %assign SYS_FS_MKDIR  04h
-        %assign SYS_FS_READ   05h
+        %assign SYS_FS_READ   05h    ; sector in CX (16-bit)
         %assign SYS_FS_RENAME 06h
-        %assign SYS_FS_WRITE  07h
+        %assign SYS_FS_WRITE  07h    ; sector in CX (16-bit), CX=0 writes back the loaded directory sector
 
         %assign SYS_IO_GETC 10h
         %assign SYS_IO_PUTC 12h

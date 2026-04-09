@@ -119,7 +119,7 @@ main:
         mov ah, SYS_FS_CREATE
         int 30h
         jc .err_create
-        mov [out_start_sec], al
+        mov [out_start_sec], ax
 
         ;; -- Pass 2: emit bytes --
         mov byte [pass], 2
@@ -127,8 +127,8 @@ main:
         mov [cur_addr], ax
         mov word [global_scope], 0FFFFh
         mov word [jump_index], 0
-        mov al, [out_start_sec]
-        mov [out_sector], al
+        mov ax, [out_start_sec]
+        mov [out_sector], ax
         mov word [out_pos], 0
         mov word [out_total], 0
         call do_pass
@@ -144,7 +144,7 @@ main:
         mov ax, [out_total]
         mov [bx+DIR_OFF_SIZE], ax
         mov byte [bx+DIR_OFF_FLAGS], FLAG_EXEC
-        xor al, al                     ; AL=0 = write back directory
+        xor cx, cx                     ; CX=0 = write back directory
         mov ah, SYS_FS_WRITE
         int 30h
         jc .err_write_dir
@@ -204,9 +204,9 @@ do_pass:
         jc .pass_err
         mov ax, [bx+DIR_OFF_SIZE]
         mov [file_size], ax
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [file_start], al
-        mov [file_cur_sec], al
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [file_start], ax
+        mov [file_cur_sec], ax
         mov word [src_buf_pos], 0
         mov word [src_buf_valid], 0
         mov byte [inc_depth], 0
@@ -369,11 +369,11 @@ flush_output:
         mov cx, 256
         cld
         rep movsw
-        ;; Write sector
-        mov al, [out_sector]
+        ;; Write sector (CX = 16-bit sector)
+        mov cx, [out_sector]
         mov ah, SYS_FS_WRITE
         int 30h
-        inc byte [out_sector]
+        inc word [out_sector]
         mov word [out_pos], 0
         .fl_done:
         pop di
@@ -1802,15 +1802,15 @@ include_pop:
         push di
         ;; Restore from INC_SAVE
         mov bx, INC_SAVE
-        mov al, [bx]
-        mov [file_start], al
-        mov al, [bx+1]
-        mov [file_cur_sec], al
+        mov ax, [bx]
+        mov [file_start], ax
         mov ax, [bx+2]
-        mov [file_size], ax
+        mov [file_cur_sec], ax
         mov ax, [bx+4]
-        mov [src_buf_pos], ax
+        mov [file_size], ax
         mov ax, [bx+6]
+        mov [src_buf_pos], ax
+        mov ax, [bx+8]
         mov [src_buf_valid], ax
         ;; Restore SRC_BUF
         mov si, INC_SRC_SAVE
@@ -1835,16 +1835,16 @@ include_push:
         push bx
         ;; Save current file state to INC_SAVE
         mov bx, INC_SAVE
-        mov al, [file_start]
-        mov [bx], al
-        mov al, [file_cur_sec]
-        mov [bx+1], al
-        mov ax, [file_size]
+        mov ax, [file_start]
+        mov [bx], ax
+        mov ax, [file_cur_sec]
         mov [bx+2], ax
-        mov ax, [src_buf_pos]
+        mov ax, [file_size]
         mov [bx+4], ax
-        mov ax, [src_buf_valid]
+        mov ax, [src_buf_pos]
         mov [bx+6], ax
+        mov ax, [src_buf_valid]
+        mov [bx+8], ax
         ;; Save SRC_BUF content
         push si
         push di
@@ -1884,9 +1884,9 @@ include_push:
         jc .inc_err
         mov ax, [bx+DIR_OFF_SIZE]
         mov [file_size], ax
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [file_start], al
-        mov [file_cur_sec], al
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [file_start], ax
+        mov [file_cur_sec], ax
         mov word [src_buf_pos], 0
         mov word [src_buf_valid], 0
         inc byte [inc_depth]
@@ -1910,9 +1910,8 @@ load_src_sector:
         push di
         ;; Compute bytes already consumed
         ;; sectors_read = file_cur_sec - file_start
-        mov al, [file_cur_sec]
-        sub al, [file_start]
-        xor ah, ah
+        mov ax, [file_cur_sec]
+        sub ax, [file_start]
         ;; bytes_consumed = sectors_read * 512
         mov cl, 9
         shl ax, cl
@@ -1925,8 +1924,8 @@ load_src_sector:
         jbe .set_valid
         mov bx, 512
         .set_valid:
-        ;; Read sector
-        mov al, [file_cur_sec]
+        ;; Read sector (CX = 16-bit sector)
+        mov cx, [file_cur_sec]
         mov ah, SYS_FS_READ
         int 30h
         jc .no_more
@@ -1940,7 +1939,7 @@ load_src_sector:
         pop bx
         mov [src_buf_valid], bx
         mov word [src_buf_pos], 0
-        inc byte [file_cur_sec]
+        inc word [file_cur_sec]
         clc
         pop di
         pop si
@@ -3533,9 +3532,9 @@ MSG_USAGE   db `Usage: asm <source> <output>\n\0`
 cmp_op1_size  db 0
 cur_addr      dw 0
 err_flag      db 0
-file_cur_sec  db 0
+file_cur_sec  dw 0
 file_size     dw 0
-file_start    db 0
+file_start    dw 0
 global_scope  dw 0FFFFh
 growth_flag   db 0
 inc_depth     db 0
@@ -3554,8 +3553,8 @@ op2_val       dw 0
 org_value     dw 0
 out_name      dw 0
 out_pos       dw 0
-out_sector    db 0
-out_start_sec db 0
+out_sector    dw 0
+out_start_sec dw 0
 out_total     dw 0
 pass          db 0
 src_buf_pos   dw 0
