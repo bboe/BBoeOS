@@ -39,7 +39,7 @@ main:
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
 .loop:
         cmp byte [bx], 0
-        je .try_next_sector
+        je .skip_entry         ; empty slot (hole) — skip
         mov si, bx
         mov ah, SYS_IO_PUTS
         int 30h
@@ -59,6 +59,7 @@ main:
         mov al, `\n`
         mov ah, SYS_IO_PUTC
         int 30h
+        .skip_entry:
         add bx, DIR_ENTRY_SIZE
         loop .loop
 

@@ -24,6 +24,7 @@ Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
 - **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
+- **Resident kernel** (stage 1 MBR + stage 2) lives in segment 0 from `0x7C00` up through (roughly) `0xE000`, where the disk and NIC buffers begin. Programs loaded at `PROGRAM_BASE` (`0x0600`) may allocate working buffers in segment 0, but everything between `0x7C00` and `0xEE00` is off-limits — overwriting it corrupts the live kernel and the next `int 30h` jumps into trashed code.
 - Stage 2 sector count is derived from `dir_sector` via `%assign stage2_sectors (dir_sector - 2)`.
 
 ### Filesystem
@@ -59,9 +60,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 01h   | fs_copy      | Copy file, SI = src filename, DI = dest filename, CF on err |
 | 02h   | fs_create    | Create file, SI = filename, AX = start sector, CF on err |
 | 03h   | fs_find      | Find file, SI = filename, BX = entry ptr in disk_buffer, CF on err |
-| 04h   | fs_mkdir     | Create subdirectory, SI = name, AL = start sector, CF on err |
+| 04h   | fs_mkdir     | Create subdirectory, SI = name, AX = start sector, CF on err |
 | 05h   | fs_read      | Read sector CX (16-bit) into disk_buffer, CF on error |
-| 06h   | fs_rename    | Rename file, SI = old name, DI = new name (same dir), CF on err |
+| 06h   | fs_rename    | Rename or move file, SI = old name, DI = new name, CF on err |
 | 07h   | fs_write     | Write disk_buffer to sector CX (16-bit; CX=0: write back directory), CF on error |
 | 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
 | 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
@@ -108,7 +109,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/programs/date.asm` — Date program: displays YYYY-MM-DD HH:MM:SS
 - `src/programs/dns.asm` — DNS program: resolves arbitrary domains, displays CNAME chains and all A records
 - `src/programs/draw.asm` — Draw program: 16-color graphics mode with cursor and background controls
-- `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit
+- `src/programs/edit.asm` — Edit program: full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit (gap buffer is segment-0 limited to 20 KB; cannot open `asm.asm` — see "Known limitations" in README.md)
 - `src/programs/hello.asm` — Hello program: prints `Hello, world!` (smallest program; useful as a self-host smoke test)
 - `src/programs/ls.asm` — Ls program: lists files in the root directory or a subdirectory, marks executables with `*` and directories with `/`
 - `src/programs/mkdir.asm` — Mkdir program: creates a subdirectory under root
@@ -152,3 +153,5 @@ Automated self-hosting test: `./test_asm.py` boots the OS in QEMU and has the se
 - `./test_asm.py` — run the full suite (excludes `asm.asm`)
 - `./test_asm.py <name>` — run a single program; on single-program runs the nasm reference, assembled output, and drive image are copied to a persistent temp directory whose path is printed at the end
 - `./test_asm.py asm` — the self-assembly path, ~10 minutes under TCG (excluded from the default suite for this reason)
+
+Filesystem regression tests: `./test_fs.py` boots the OS, runs shell command sequences, and inspects the resulting drive image to verify fs_copy / fs_mkdir / fs_find / fs_create handle large files (>64 KB), sectors past 255, and entries that live in the second directory sector. `./test_fs.py <name>` runs a single test.

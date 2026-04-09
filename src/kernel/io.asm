@@ -6,22 +6,20 @@ dir_load_entry:
         push ax
         push cx
         ;; Compute sector: DIR_SECTOR + (index / entries_per_sector)
-        mov al, bl
+        mov ax, bx
         mov cl, 4               ; 16 entries per sector = 2^4
-        shr al, cl
-        add al, DIR_SECTOR
-        mov [dir_loaded_sec], al
+        shr ax, cl
+        add ax, DIR_SECTOR
+        mov [dir_loaded_sec], ax
         ;; Compute offset: (index % 16) * DIR_ENTRY_SIZE
-        mov al, bl
-        and al, 0Fh             ; index % 16
-        xor ah, ah
+        mov ax, bx
+        and ax, 0Fh             ; index % 16
         mov cl, 5               ; DIR_ENTRY_SIZE = 32 = 2^5
         shl ax, cl              ; * 32
         mov bx, ax
         add bx, DISK_BUFFER
         ;; Read the sector
-        mov al, [dir_loaded_sec]
-        xor ah, ah
+        mov ax, [dir_loaded_sec]
         call read_sector
         pop cx
         pop ax
@@ -31,14 +29,13 @@ dir_write_back:
         ;; Write the directory sector last loaded by dir_load_entry
         ;; Sets CF on error
         push ax
-        mov al, [dir_loaded_sec]
-        xor ah, ah
+        mov ax, [dir_loaded_sec]
         call write_sector
         pop ax
         ret
 
-        dir_loaded_sec  db 0
-        dir_search_start db 0
+        dir_loaded_sec  dw 0
+        dir_search_start dw 0
 
 find_file:
         ;; Search directory for a filename, with optional path support
@@ -66,7 +63,7 @@ find_file:
         .ff_no_slash:
         ;; No slash — search root directory
         mov dx, si
-        mov byte [dir_search_start], DIR_SECTOR
+        mov word [dir_search_start], DIR_SECTOR
         jmp .ff_search_root
 
         .ff_has_slash:
@@ -85,9 +82,9 @@ find_file:
         ;; BX = pointer to entry in DISK_BUFFER (from root search)
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .ff_not_found        ; not a directory
-        ;; Read the subdirectory's first data sector
-        mov al, [bx+DIR_OFF_SECTOR]
-        mov [dir_search_start], al
+        ;; Read the subdirectory's first data sector (16-bit)
+        mov ax, [bx+DIR_OFF_SECTOR]
+        mov [dir_search_start], ax
         ;; Search subdir entries for the filename after '/'
         inc di                  ; skip past '/'
         mov dx, di              ; DX = filename within subdir
@@ -96,19 +93,18 @@ find_file:
 
         .ff_search_root:
         xor bx, bx
-        mov al, DIR_SECTOR
+        mov ax, DIR_SECTOR
 
         .ff_load_sector:
-        mov [dir_loaded_sec], al
-        xor ah, ah
+        mov [dir_loaded_sec], ax
         call read_sector
         jc .ff_done
         mov di, DISK_BUFFER
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
 
         .ff_search:
-        cmp byte [di], 0       ; Empty entry = end of listing in this sector
-        je .ff_try_next_sector
+        cmp byte [di], 0       ; Empty slot — skip (holes are allowed)
+        je .ff_skip_entry
 
         mov si, dx              ; User's filename
         push di                 ; Save entry pointer
@@ -124,28 +120,22 @@ find_file:
 
         .ff_no_match:
         pop di
+        .ff_skip_entry:
         add di, DIR_ENTRY_SIZE
         inc bx
         loop .ff_search
 
         .ff_try_next_sector:
         ;; Try next sector relative to dir_search_start
-        mov al, [dir_loaded_sec]
-        sub al, [dir_search_start]
-        inc al
-        cmp al, DIR_SECTORS
+        mov ax, [dir_loaded_sec]
+        sub ax, [dir_search_start]
+        inc ax
+        cmp ax, DIR_SECTORS
         jae .ff_not_found
-        ;; Advance BX to start of next sector
-        add bx, cx
-        mov al, bl
-        shr al, 4
-        add al, [dir_search_start]
-        push bx
-        mov bl, [dir_search_start]
-        add bl, DIR_SECTORS
-        cmp al, bl
-        pop bx
-        jb .ff_load_sector
+        ;; Advance to next sector
+        mov ax, [dir_loaded_sec]
+        inc ax
+        jmp .ff_load_sector
 
         .ff_not_found:
         stc
@@ -175,8 +165,8 @@ find_file:
         mov di, DISK_BUFFER
         mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
         .fdr_search:
-        cmp byte [di], 0
-        je .fdr_try_next
+        cmp byte [di], 0       ; Empty slot — skip (holes are allowed)
+        je .fdr_skip
         mov si, dx
         push di
         .fdr_cmp:
@@ -190,6 +180,7 @@ find_file:
         jmp .fdr_cmp
         .fdr_no_match:
         pop di
+        .fdr_skip:
         add di, DIR_ENTRY_SIZE
         inc bx
         loop .fdr_search

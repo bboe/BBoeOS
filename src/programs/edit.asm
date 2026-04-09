@@ -6,9 +6,13 @@
         ;;   [0 .. gap_start)        text before cursor  (logical offsets 0..gap_start-1)
         ;;   [gap_start .. gap_end)  gap (free space)
         ;;   [gap_end .. BUF_SIZE)   text after cursor   (logical offsets gap_start..len-1)
-        %assign BUF_BASE      0600h   ; start of gap buffer (just above input buffer at 0x500)
+        ;; Memory layout in segment 0 (must avoid edit code at 0x0600 and
+        ;; the MBR/stage-2 kernel at 0x7C00+):
+        ;;   0x2000..0x7000  gap buffer (20 KB)
+        ;;   0x7000..0x7A00  kill buffer (2.5 KB)
+        %assign BUF_BASE      2000h   ; start of gap buffer
         %assign BUF_SIZE      5000h   ; 20KB
-        %assign KILL_BUF      5600h   ; kill buffer: free region between gap buf and program (0x5600–0x5FFF)
+        %assign KILL_BUF      7000h
         %assign KILL_BUF_SIZE 0A00h   ; 2560 bytes
 
         ;; Screen layout: rows 0–23 for text, row 24 for status bar
@@ -33,8 +37,15 @@ main:
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jnz .is_dir
 
-        ;; Record original on-disk size and start sector
+        ;; Record original on-disk size and start sector. DIR_OFF_SIZE is
+        ;; 32-bit; the gap buffer tops out at BUF_SIZE so anything larger
+        ;; (including sizes with a nonzero high word) cannot be edited.
+        mov ax, [bx+DIR_OFF_SIZE+2]
+        test ax, ax
+        jnz .too_big
         mov ax, [bx+DIR_OFF_SIZE]
+        cmp ax, BUF_SIZE
+        ja .too_big
         mov [orig_size], ax
         mov ax, [bx+DIR_OFF_SECTOR]
         mov [file_sector], ax
@@ -95,6 +106,13 @@ main:
         call render
         call get_input
         jmp .editor_loop
+
+        .too_big:
+        mov si, MSG_FILE_TOO_BIG
+        mov ah, SYS_IO_PUTS
+        int 30h
+        mov ah, SYS_EXIT
+        int 30h
 
         .is_dir:
         mov si, MSG_IS_DIR
@@ -1106,6 +1124,7 @@ save_file:
 ;;; -----------------------------------------------------------------------
         MSG_COL          db `  col \0`
         MSG_CREATE_ERR   db `Cannot create file (directory full?)\0`
+        MSG_FILE_TOO_BIG db `File too large for edit buffer\n\0`
         MSG_IS_DIR       db `Is a directory\n\0`
         MSG_LINE         db `  line \0`
         MSG_LOAD_ERR     db `Load error\n\0`

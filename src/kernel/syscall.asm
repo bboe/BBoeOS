@@ -107,25 +107,28 @@ syscall_handler:
         jmp .iret_cf
         .copy_got_src:
         ;; Build stack frame. Layout (BP = SP after all pushes):
-        ;;   [bp+10] basename_ptr  [bp+8]  flags        [bp+6] src_sec
-        ;;   [bp+4]  size          [bp+2]  dest_entry_off
-        ;;   [bp+0]  packed: low=dest_entry_sec, high=next_data_sec
-        push di                        ; [bp+10]: basename (full dest for now)
+        ;;   [bp+14] basename_ptr    [bp+12] flags
+        ;;   [bp+10] src_sec (16)    [bp+8]  size_lo  [bp+6]  size_hi
+        ;;   [bp+4]  dest_entry_off  [bp+2]  dest_entry_sec (16)
+        ;;   [bp+0]  next_data_sec (16)
+        push di                        ; [bp+14]: basename (full dest for now)
         xor ax, ax
         mov al, [bx+DIR_OFF_FLAGS]
-        push ax                        ; [bp+8]: flags
-        xor ax, ax
-        mov al, [bx+DIR_OFF_SECTOR]
-        push ax                        ; [bp+6]: src_sec
+        push ax                        ; [bp+12]: flags
+        mov ax, [bx+DIR_OFF_SECTOR]
+        push ax                        ; [bp+10]: src_sec (16-bit)
         mov ax, [bx+DIR_OFF_SIZE]
-        push ax                        ; [bp+4]: size
+        push ax                        ; [bp+8]: size_lo
+        mov ax, [bx+DIR_OFF_SIZE+2]
+        push ax                        ; [bp+6]: size_hi
         ;; Scan directory globally for next data sector + free root entry
-        call scan_dir_entries  ; BX = free root idx, DL = next data sector
-        ;; Locate destination entry: examine dest path for '/'
-        push bx                ; save root_idx temporarily
-        push dx                ; save next_data_sec temporarily
-        mov bp, sp             ; [bp+0] = next_dat, [bp+2] = root_idx, [bp+4] = size, ...
-        mov di, [bp+10]        ; DI = full dest path
+        call scan_dir_entries  ; BX = free root idx, DX = next data sector (16)
+        ;; Reserve dest_entry_off / dest_entry_sec slots and save next_data_sec
+        push bx                        ; [bp+4]: temp = root_idx
+        push bx                        ; [bp+2]: temp = root_idx
+        push dx                        ; [bp+0]: next_data_sec (16-bit)
+        mov bp, sp
+        mov di, [bp+14]        ; DI = full dest path
         .copy_find_slash:
         mov al, [di]
         test al, al
@@ -140,7 +143,7 @@ syscall_handler:
         cmp bx, 0FFFFh
         jne .copy_root_resolve
         ;; No free root entry
-        add sp, 12
+        add sp, 16
         mov al, ERR_DIR_FULL
         stc
         jmp .iret_cf
@@ -155,18 +158,17 @@ syscall_handler:
         mov cx, ax             ; CX = entry offset
         mov ax, bx
         shr al, 4
-        add al, DIR_SECTOR     ; AL = dest_entry_sec
-        mov ah, [bp+0]         ; AH = next_data_sec
-        ;; Replace stack slots: [bp+0] = packed, [bp+2] = entry_off
-        mov [bp+0], ax
-        mov [bp+2], cx
+        xor ah, ah
+        add ax, DIR_SECTOR     ; AX = dest_entry_sec (16-bit)
+        mov [bp+2], ax         ; dest_entry_sec
+        mov [bp+4], cx         ; dest_entry_off
         pop cx
         jmp .copy_data
         .copy_dest_subdir:
         ;; DI points to '/'. Split path.
         mov byte [di], 0       ; null-terminate dirname
         push di                ; save '/' position
-        mov si, [bp+10]        ; SI = dirname (start of path)
+        mov si, [bp+14]        ; SI = dirname (start of path)
         call find_file         ; BX = subdir entry ptr in DISK_BUFFER
         pop di                 ; restore '/' position
         mov byte [di], '/'
@@ -175,81 +177,88 @@ syscall_handler:
         jz .copy_subdir_bad
         ;; Scan subdirectory for a free entry
         push cx
-        mov al, [bx+DIR_OFF_SECTOR]
+        mov ax, [bx+DIR_OFF_SECTOR]
         call .subdir_find_free
         pop cx
         jc .copy_subdir_err
         ;; BX = entry pointer in DISK_BUFFER, dir_loaded_sec = current sector
-        mov al, [dir_loaded_sec]
+        mov ax, [dir_loaded_sec]
         ;; Compute dest_entry_off = BX - DISK_BUFFER
         sub bx, DISK_BUFFER
-        ;; Build packed sector word: low = current subdir sector, high = next_dat
-        mov ah, [bp+0]         ; high byte = next_dat
-        mov [bp+0], ax         ; replace next_dat slot with packed sectors
-        mov [bp+2], bx         ; replace root_idx slot with entry_offset
+        mov [bp+2], ax                 ; dest_entry_sec = current subdir sector
+        mov [bp+4], bx                 ; dest_entry_off
         ;; Update basename pointer to skip past '/'
         inc di                 ; DI = basename
-        mov [bp+10], di
+        mov [bp+14], di
         jmp .copy_data
         .copy_subdir_bad:
         mov al, ERR_NOT_FOUND
         .copy_subdir_err:
         ;; AL = error code already set
-        add sp, 12
+        add sp, 16
         stc
         jmp .iret_cf
         .copy_data:
         ;; Stack frame finalized. Copy file data sectors.
-        ;; src_sec = [bp+6], next_dat = high byte of [bp+0], size = [bp+4]
-        xor bx, bx
-        mov bl, [bp+6]                 ; BL = src_sec
-        xor cx, cx
-        mov cl, [bp+0+1]               ; CL = next_data_sec (high byte of word)
-        mov di, [bp+4]                 ; DI = remaining bytes
+        ;; Compute total sector count from 32-bit size:
+        ;;   sectors = (size + 511) >> 9
+        mov ax, [bp+8]                 ; size_lo
+        mov dx, [bp+6]                 ; size_hi
+        add ax, 511
+        adc dx, 0
+        mov cl, 9
+        .copy_size_shr:
+        shr dx, 1
+        rcr ax, 1
+        dec cl
+        jnz .copy_size_shr
+        mov di, ax                     ; DI = sector count remaining
+        test di, di
+        jz .copy_sectors_done
+        mov bx, [bp+10]                ; BX = src_sec (16-bit)
+        mov cx, [bp+0]                 ; CX = next_data_sec (16-bit)
         .copy_sector:
-        mov al, bl
+        mov ax, bx
         call read_sector
         jc .copy_disk_err
-        mov al, cl
+        mov ax, cx
         call write_sector
         jc .copy_disk_err
-        inc bl
-        inc cl
-        sub di, 512
-        jbe .copy_sectors_done
-        jmp .copy_sector
+        inc bx
+        inc cx
+        dec di
+        jnz .copy_sector
+        jmp .copy_sectors_done
         .copy_disk_err:
-        add sp, 12
+        add sp, 16
         mov al, ERR_NOT_FOUND
         stc
         jmp .iret_cf
         .copy_sectors_done:
         ;; Re-read the destination entry's sector
-        mov al, [bp+0]                 ; AL = dest_entry_sec (low byte)
-        mov [dir_loaded_sec], al
+        mov ax, [bp+2]                 ; AX = dest_entry_sec (16-bit)
+        mov [dir_loaded_sec], ax
         call read_sector
         jc .copy_disk_err
         ;; Compute entry pointer
         mov bx, DISK_BUFFER
-        add bx, [bp+2]                 ; BX = DISK_BUFFER + dest_entry_off
-        mov si, [bp+10]                ; SI = basename ptr
+        add bx, [bp+4]                 ; BX = DISK_BUFFER + dest_entry_off
+        mov si, [bp+14]                ; SI = basename ptr
         ;; Copy name (null-padded to DIR_NAME_LEN)
-        push cx
         push bx                        ; save entry base
         call .write_dir_name
         pop bx                         ; BX = entry base
-        pop cx
         ;; Write metadata at fixed offsets
-        mov al, [bp+8]
+        mov al, [bp+12]
         mov [bx+DIR_OFF_FLAGS], al     ; flags
-        mov al, [bp+0+1]               ; AL = next_data_sec
-        mov [bx+DIR_OFF_SECTOR], al    ; start sector
-        mov byte [bx+DIR_OFF_SECTOR+1], 0
-        mov ax, [bp+4]
+        mov ax, [bp+0]                 ; AX = next_data_sec (16-bit)
+        mov [bx+DIR_OFF_SECTOR], ax    ; start sector
+        mov ax, [bp+8]
         mov [bx+DIR_OFF_SIZE], ax      ; file size (low 16 bits)
-        mov word [bx+DIR_OFF_SIZE+2], 0 ; zero the high 16 bits
+        mov ax, [bp+6]
+        mov [bx+DIR_OFF_SIZE+2], ax    ; file size (high 16 bits)
         call dir_write_back
-        add sp, 12                     ; discard full frame (6 words)
+        add sp, 16                     ; discard full frame (8 words)
         jmp .iret_cf
 
         .fs_create:
@@ -309,7 +318,7 @@ syscall_handler:
         test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
         jz .create_subdir_err
         ;; Scan subdirectory for a free entry
-        mov al, [bx+DIR_OFF_SECTOR]
+        mov ax, [bx+DIR_OFF_SECTOR]
         call .subdir_find_free
         jc .create_subdir_pop
         ;; BX = free entry ptr in subdir DISK_BUFFER (current sector)
@@ -353,7 +362,7 @@ syscall_handler:
 
         .fs_mkdir:
         ;; Create subdirectory: SI = name (no slashes)
-        ;; On success: CF clear, AL = allocated sector
+        ;; On success: CF clear, AX = allocated sector (16-bit)
         ;; On error: CF set, AL = ERR_EXISTS/ERR_DIR_FULL
         ;; Check name doesn't already exist
         call find_file
@@ -363,7 +372,7 @@ syscall_handler:
         jmp .iret_cf
         .mkdir_scan:
         mov di, si             ; DI = dirname for later
-        call scan_dir_entries  ; BX = free entry index, DL = next data sector
+        call scan_dir_entries  ; BX = free entry index, DX = next data sector (16)
         cmp bx, 0FFFFh
         jne .mkdir_write_entry
         mov al, ERR_DIR_FULL
@@ -380,10 +389,9 @@ syscall_handler:
         mov si, di
         call .write_dir_name
         pop bx                 ; BX = entry base
-        pop dx                 ; DL = next free sector
+        pop dx                 ; DX = next free sector (16-bit)
         mov byte [bx+DIR_OFF_FLAGS], FLAG_DIR
-        mov [bx+DIR_OFF_SECTOR], dl
-        mov byte [bx+DIR_OFF_SECTOR+1], 0
+        mov [bx+DIR_OFF_SECTOR], dx
         mov word [bx+DIR_OFF_SIZE], DIR_SECTORS * 512
         mov word [bx+DIR_OFF_SIZE+2], 0
         ;; Write root directory sector back
@@ -400,19 +408,20 @@ syscall_handler:
         pop di
         pop dx
         push dx
-        mov ah, DIR_SECTORS
+        mov cx, DIR_SECTORS
+        mov ax, dx             ; AX = first subdir sector
         .mkdir_zero_loop:
         push ax
-        mov al, dl
+        push cx
         call write_sector
+        pop cx
         pop ax
         jc .mkdir_zero_err
-        inc dl
-        dec ah
-        jnz .mkdir_zero_loop
+        inc ax
+        loop .mkdir_zero_loop
         pop dx
-        ;; Return allocated sector in AL
-        mov al, dl
+        ;; Return allocated sector in AX (16-bit)
+        mov ax, dx
         clc
         jmp .iret_cf
         .mkdir_zero_err:
@@ -512,12 +521,7 @@ syscall_handler:
         pop di
         pop si
         .rename_pfx_bad:
-        pop cx
-        pop di
-        pop si
-        mov al, ERR_NOT_FOUND
-        stc
-        jmp .iret_cf
+        jmp .fs_rename_cross
         .rename_pfx_ok:
         pop cx
         pop di
@@ -561,6 +565,128 @@ syscall_handler:
         pop si
         pop cx
         call dir_write_back
+        jmp .iret_cf
+
+        .fs_rename_cross:
+        ;; Cross-directory rename: src in one directory, dest in another.
+        ;; Stack at entry (from .fs_rename_check_prefix): [SI old], [DI new], [CX]
+        pop cx
+        pop di
+        pop si
+        ;; Check that the new name doesn't already exist
+        push si
+        mov si, di
+        call find_file
+        pop si
+        jc .frc_find_old
+        mov al, ERR_EXISTS
+        stc
+        jmp .iret_cf
+        .frc_find_old:
+        call find_file         ; BX = src entry pointer in DISK_BUFFER
+        jnc .frc_got_src
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .frc_got_src:
+        ;; Build frame. Layout (BP = SP after pushes):
+        ;;   [bp+12] basename ptr (within new path)
+        ;;   [bp+10] src_sec      [bp+8]  size_lo  [bp+6]  size_hi
+        ;;   [bp+4]  flags        [bp+2]  src_dir_sec  [bp+0] src_entry_off
+        push di                ; [bp+12]
+        mov ax, [bx+DIR_OFF_SECTOR]
+        push ax                ; [bp+10]
+        mov ax, [bx+DIR_OFF_SIZE]
+        push ax                ; [bp+8]
+        mov ax, [bx+DIR_OFF_SIZE+2]
+        push ax                ; [bp+6]
+        xor ax, ax
+        mov al, [bx+DIR_OFF_FLAGS]
+        push ax                ; [bp+4]
+        mov ax, [dir_loaded_sec]
+        push ax                ; [bp+2]
+        mov ax, bx
+        sub ax, DISK_BUFFER
+        push ax                ; [bp+0]
+        mov bp, sp
+        ;; Resolve destination directory by scanning new path for '/'
+        mov di, [bp+12]
+        .frc_scan:
+        mov al, [di]
+        test al, al
+        jz .frc_dst_root
+        cmp al, '/'
+        je .frc_dst_subdir
+        inc di
+        jmp .frc_scan
+        .frc_dst_root:
+        mov ax, DIR_SECTOR
+        jmp .frc_alloc
+        .frc_dst_subdir:
+        mov byte [di], 0
+        push di
+        mov si, [bp+12]
+        call find_file         ; BX = subdir entry in DISK_BUFFER
+        pop di
+        mov byte [di], '/'
+        jc .frc_bad_dir
+        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        jz .frc_bad_dir
+        mov ax, [bx+DIR_OFF_SECTOR]
+        inc di                 ; basename = char after '/'
+        mov [bp+12], di
+        jmp .frc_alloc
+        .frc_bad_dir:
+        add sp, 14
+        mov al, ERR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .frc_alloc:
+        call .subdir_find_free ; BX = entry ptr; dir_loaded_sec set
+        jnc .frc_write
+        add sp, 14
+        stc
+        jmp .iret_cf
+        .frc_write:
+        push bx
+        mov si, [bp+12]
+        call .write_dir_name
+        pop bx
+        mov al, [bp+4]
+        mov [bx+DIR_OFF_FLAGS], al
+        mov ax, [bp+10]
+        mov [bx+DIR_OFF_SECTOR], ax
+        mov ax, [bp+8]
+        mov [bx+DIR_OFF_SIZE], ax
+        mov ax, [bp+6]
+        mov [bx+DIR_OFF_SIZE+2], ax
+        call dir_write_back
+        jc .frc_disk_err
+        ;; Re-read src directory sector and zero the source entry
+        mov ax, [bp+2]
+        mov [dir_loaded_sec], ax
+        call read_sector
+        jc .frc_disk_err
+        mov bx, DISK_BUFFER
+        add bx, [bp+0]
+        push di
+        push cx
+        mov di, bx
+        mov cx, DIR_ENTRY_SIZE / 2
+        xor ax, ax
+        cld
+        rep stosw
+        pop cx
+        pop di
+        call dir_write_back
+        jc .frc_disk_err
+        add sp, 14
+        clc
+        jmp .iret_cf
+        .frc_disk_err:
+        add sp, 14
+        mov al, ERR_NOT_FOUND
+        stc
         jmp .iret_cf
 
         .io_getc:
@@ -852,17 +978,19 @@ syscall_handler:
         .subdir_find_free:
         ;; Scan a subdirectory's DIR_SECTORS data sectors for the first
         ;; empty entry.
-        ;; Input: AL = subdirectory's first data sector
+        ;; Input: AX = subdirectory's first data sector (16-bit)
         ;; Output: CF clear, BX = entry pointer in DISK_BUFFER on success.
         ;;         dir_loaded_sec set to the sector containing the entry.
         ;;         CF set on failure with AL = ERR_NOT_FOUND (read error)
         ;;         or ERR_DIR_FULL (no empty entry).
-        ;; Clobbers: AX, BX, CX
-        mov ah, DIR_SECTORS
+        ;; Clobbers: AX, BX, CX, DX
+        mov dx, DIR_SECTORS
         .sff_loop:
         push ax
-        mov [dir_loaded_sec], al
+        push dx
+        mov [dir_loaded_sec], ax
         call read_sector
+        pop dx
         pop ax
         jnc .sff_scan_init
         mov al, ERR_NOT_FOUND
@@ -876,8 +1004,8 @@ syscall_handler:
         je .sff_found
         add bx, DIR_ENTRY_SIZE
         loop .sff_scan
-        inc al
-        dec ah
+        inc ax
+        dec dx
         jnz .sff_loop
         mov al, ERR_DIR_FULL
         stc
