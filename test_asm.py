@@ -13,6 +13,7 @@ Requires: nasm, qemu-system-i386
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import select
 import shutil
@@ -25,8 +26,8 @@ from pathlib import Path
 
 from add_file import (
     NAME_FIELD,
-    OFF_SECTOR,
-    OFF_SIZE,
+    OFFSET_SECTOR,
+    OFFSET_SIZE,
     SECTOR_SIZE,
     iter_entries,
     read_assign,
@@ -34,11 +35,11 @@ from add_file import (
 
 BOOT_TIMEOUT = 30
 C_DIR = Path("src/c")
-CMD_TIMEOUT = 8
+COMMAND_TIMEOUT = 8
 IMAGE = Path("drive.img")
 ORG_DIRECTIVE = "org 0600h"
 PROMPT = b"$ "
-SER_BASENAME = "ser"
+SERIAL_BASENAME = "ser"
 STATIC_DIR = Path("static")
 
 
@@ -52,85 +53,84 @@ def compile_c_sources() -> list[tuple[Path, str | None]]:
     if not C_DIR.is_dir():
         return []
     generated: list[tuple[Path, str | None]] = []
-    for c_src in sorted(C_DIR.glob("*.c")):
-        name = c_src.stem
+    for c_source in sorted(C_DIR.glob("*.c")):
+        name = c_source.stem
         target = STATIC_DIR / f"{name}.asm"
         old_link: str | None = None
         if target.is_symlink():
-            old_link = os.readlink(target)
+            old_link = Path(target).readlink()
             target.unlink()
         elif target.exists():
             target.unlink()
         subprocess.run(
-            ["./cc.py", str(c_src), str(target)],
+            ["./cc.py", str(c_source), str(target)],
             check=True,
         )
         generated.append((target, old_link))
     return generated
 
 
-def cleanup_fifos(*, tempdir: Path) -> None:
-    for path in fifo_paths(tempdir=tempdir):
-        try:
+def cleanup_fifos(*, temporary_directory: Path) -> None:
+    """Remove the serial FIFO pipes from temporary_directory."""
+    for path in fifo_paths(temporary_directory=temporary_directory):
+        with contextlib.suppress(FileNotFoundError):
             path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def compare_drive_output(
     *,
-    dir_sector: int,
-    dir_sectors: int,
+    directory_sector: int,
+    directory_sectors: int,
     drive: Path,
-    out_bin: Path,
-    out_name: str,
-    ref_bytes: bytes,
+    output_binary: Path,
+    output_name: str,
+    reference_bytes: bytes,
 ) -> tuple[bool, str]:
+    """Extract the assembled output from the drive image and compare to the NASM reference."""
     image = bytearray(drive.read_bytes())
-    base = (dir_sector - 1) * SECTOR_SIZE
-    for entry_off in iter_entries(image, base, dir_sectors):
-        if image[entry_off] == 0:
+    base = (directory_sector - 1) * SECTOR_SIZE
+    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
+        if image[entry_offset] == 0:
             continue
-        entry_name = (
-            bytes(image[entry_off : entry_off + NAME_FIELD])
-            .rstrip(b"\x00")
-            .decode(errors="replace")
-        )
-        if entry_name != out_name:
+        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode(errors="replace")
+        if entry_name != output_name:
             continue
-        start_sec = struct.unpack_from("<H", image, entry_off + OFF_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_off + OFF_SIZE)[0]
-        data_off = (start_sec - 1) * SECTOR_SIZE
-        out_data = bytes(image[data_off : data_off + size])
-        out_bin.write_bytes(out_data)
-        if out_data == ref_bytes:
+        start_sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
+        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
+        data_offset = (start_sector - 1) * SECTOR_SIZE
+        output_data = bytes(image[data_offset : data_offset + size])
+        output_binary.write_bytes(output_data)
+        if output_data == reference_bytes:
             return True, ""
-        return False, f"expected {len(ref_bytes)} bytes, got {size} bytes"
+        return False, f"expected {len(reference_bytes)} bytes, got {size} bytes"
     return False, "output file not found on drive"
 
 
 def discover_programs(*, only: str | None) -> list[Path]:
+    """Return the list of static/*.asm programs that target PROGRAM_BASE."""
     programs: list[Path] = []
-    for src in sorted(STATIC_DIR.glob("*.asm")):
-        if ORG_DIRECTIVE not in src.read_text(errors="replace"):
+    for source in sorted(STATIC_DIR.glob("*.asm")):
+        if ORG_DIRECTIVE not in source.read_text(errors="replace"):
             continue
-        name = src.stem
+        name = source.stem
         if only is not None:
             if name == only:
-                programs.append(src)
+                programs.append(source)
             continue
-        programs.append(src)
+        programs.append(source)
     return programs
 
 
-def fifo_paths(*, tempdir: Path) -> tuple[Path, Path]:
+def fifo_paths(*, temporary_directory: Path) -> tuple[Path, Path]:
+    """Return the (input, output) FIFO paths for QEMU serial communication."""
     return (
-        tempdir / f"{SER_BASENAME}.in",
-        tempdir / f"{SER_BASENAME}.out",
+        temporary_directory / f"{SERIAL_BASENAME}.in",
+        temporary_directory / f"{SERIAL_BASENAME}.out",
     )
 
 
 def main() -> int:
+    """Run the self-hosted assembler test suite."""
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -140,7 +140,7 @@ def main() -> int:
         nargs="?",
         help="restrict the test to one program (e.g. 'edit')",
     )
-    args = parser.parse_args()
+    arguments = parser.parse_args()
 
     # Compile C sources to .asm and place in static/ so make_os.sh
     # includes them on the disk image alongside hand-written .asm files.
@@ -150,12 +150,13 @@ def main() -> int:
         print(f"Compiled C sources: {c_names}")
 
     try:
-        return _run_tests(args, generated)
+        return _run_tests(arguments=arguments, generated=generated)
     finally:
         restore_static(generated)
 
 
-def _run_tests(args: argparse.Namespace, generated: list) -> int:
+def _run_tests(*, arguments: argparse.Namespace, generated: list) -> int:  # noqa: ARG001
+    """Execute the test loop: build OS, discover programs, compare outputs."""
     print("Building OS...")
     subprocess.run(
         ["./make_os.sh"],
@@ -164,10 +165,10 @@ def _run_tests(args: argparse.Namespace, generated: list) -> int:
         stderr=subprocess.DEVNULL,
     )
 
-    programs = discover_programs(only=args.program)
+    programs = discover_programs(only=arguments.program)
     if not programs:
-        if args.program:
-            print(f"No program named '{args.program}' in static/")
+        if arguments.program:
+            print(f"No program named '{arguments.program}' in static/")
         else:
             print("No programs found in static/")
         return 1
@@ -175,45 +176,42 @@ def _run_tests(args: argparse.Namespace, generated: list) -> int:
     print("Programs to test:", " ".join(p.name for p in programs))
     print()
 
-    dir_sector = read_assign("DIR_SECTOR")
-    dir_sectors = read_assign("DIR_SECTORS")
-    keep_artifacts = args.program is not None
+    directory_sector = read_assign("DIR_SECTOR")
+    directory_sectors = read_assign("DIR_SECTORS")
+    keep_artifacts = arguments.program is not None
 
-    with tempfile.TemporaryDirectory(prefix="test_asm_") as tmp:
-        tempdir = Path(tmp)
-        refs: dict[str, Path] = {}
-        for src in programs:
-            name = src.stem
-            ref = tempdir / f"ref_{name}.bin"
+    with tempfile.TemporaryDirectory(prefix="test_asm_") as temporary_path:
+        temporary_directory = Path(temporary_path)
+        references: dict[str, Path] = {}
+        for source in programs:
+            name = source.stem
+            reference = temporary_directory / f"ref_{name}.bin"
             subprocess.run(
-                ["nasm", "-f", "bin", "-o", str(ref), str(src), "-I", "static/"],
+                ["nasm", "-f", "bin", "-o", str(reference), str(source), "-I", "static/"],
                 check=True,
             )
-            refs[name] = ref
+            references[name] = reference
 
         pass_count = 0
         fail_count = 0
         failed: list[str] = []
-        for src in programs:
-            name = src.stem
-            ref = refs[name]
-            out_bin = tempdir / f"out_{name}.bin"
+        for source in programs:
+            name = source.stem
+            reference = references[name]
+            output_binary = temporary_directory / f"out_{name}.bin"
             started = time.monotonic()
             ok, message = test_program(
-                dir_sector=dir_sector,
-                dir_sectors=dir_sectors,
+                directory_sector=directory_sector,
+                directory_sectors=directory_sectors,
                 name=name,
-                out_bin=out_bin,
-                ref=ref,
-                tempdir=tempdir,
+                output_binary=output_binary,
+                reference=reference,
+                temporary_directory=temporary_directory,
             )
             elapsed = time.monotonic() - started
             label = f"{name}.asm"
             if ok:
-                print(
-                    f"  PASS  {label:<20} {ref.stat().st_size:>6} bytes"
-                    f"  {elapsed:6.2f}s"
-                )
+                print(f"  PASS  {label:<20} {reference.stat().st_size:>6} bytes  {elapsed:6.2f}s")
                 pass_count += 1
             else:
                 print(f"  FAIL  {label:<20} {message}  {elapsed:6.2f}s")
@@ -222,7 +220,7 @@ def _run_tests(args: argparse.Namespace, generated: list) -> int:
 
         persisted: Path | None = None
         if keep_artifacts:
-            persisted = persist_artifacts(tempdir=tempdir)
+            persisted = persist_artifacts(temporary_directory=temporary_directory)
 
     print()
     print(f"{pass_count} passed, {fail_count} failed")
@@ -233,18 +231,18 @@ def _run_tests(args: argparse.Namespace, generated: list) -> int:
     return 1 if fail_count else 0
 
 
-def persist_artifacts(*, tempdir: Path) -> Path:
-    """Copy non-fifo artifacts out of `tempdir` to a persistent directory."""
+def persist_artifacts(*, temporary_directory: Path) -> Path:
+    """Copy non-fifo artifacts out of `temporary_directory` to a persistent directory."""
     persist = Path(tempfile.mkdtemp(prefix="test_asm_keep_"))
-    fifos = set(fifo_paths(tempdir=tempdir))
-    for item in tempdir.iterdir():
+    fifos = set(fifo_paths(temporary_directory=temporary_directory))
+    for item in temporary_directory.iterdir():
         if item in fifos or not item.is_file():
             continue
         shutil.copy(item, persist / item.name)
     return persist
 
 
-def restore_static(generated: list[tuple[Path, str | None]]) -> None:
+def restore_static(generated: list[tuple[Path, str | None]], /) -> None:
     """Undo compile_c_sources(): delete generated files, restore symlinks."""
     for target, old_link in generated:
         target.unlink(missing_ok=True)
@@ -254,21 +252,22 @@ def restore_static(generated: list[tuple[Path, str | None]]) -> None:
 
 def run_in_qemu(
     *,
-    cmd_timeout: float,
+    command_timeout: float,
     command: str,
     drive: Path,
-    tempdir: Path,
+    temporary_directory: Path,
 ) -> None:
-    setup_fifos(tempdir=tempdir)
-    ser_base = tempdir / SER_BASENAME
+    """Boot QEMU with the drive image, send a command via serial, and wait for completion."""
+    setup_fifos(temporary_directory=temporary_directory)
+    serial_base = temporary_directory / SERIAL_BASENAME
     qemu: subprocess.Popen | None = None
-    ser_fd: int | None = None
+    serial_file_descriptor: int | None = None
     try:
         qemu = subprocess.Popen(
             [
                 "qemu-system-i386",
                 "-chardev",
-                f"pipe,id=s,path={ser_base}",
+                f"pipe,id=s,path={serial_base}",
                 "-display",
                 "none",
                 "-drive",
@@ -280,99 +279,101 @@ def run_in_qemu(
             ],
         )
 
-        ser_fd = os.open(f"{ser_base}.out", os.O_RDONLY | os.O_NONBLOCK)
-        wait_for_bytes(fd=ser_fd, needle=PROMPT, proc=qemu, timeout=BOOT_TIMEOUT)
+        serial_file_descriptor = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
+        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=BOOT_TIMEOUT)
 
-        with open(f"{ser_base}.in", "w") as f:
-            f.write(command)
-        wait_for_bytes(fd=ser_fd, needle=PROMPT, proc=qemu, timeout=cmd_timeout)
+        Path(f"{serial_base}.in").write_text(command, encoding="utf-8")
+        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=command_timeout)
     finally:
-        if ser_fd is not None:
-            os.close(ser_fd)
+        if serial_file_descriptor is not None:
+            os.close(serial_file_descriptor)
         if qemu is not None:
-            terminate(proc=qemu)
-        cleanup_fifos(tempdir=tempdir)
+            terminate(process=qemu)
+        cleanup_fifos(temporary_directory=temporary_directory)
 
 
-def setup_fifos(*, tempdir: Path) -> None:
-    cleanup_fifos(tempdir=tempdir)
-    for path in fifo_paths(tempdir=tempdir):
+def setup_fifos(*, temporary_directory: Path) -> None:
+    """Create the serial FIFO pipes in temporary_directory for QEMU communication."""
+    cleanup_fifos(temporary_directory=temporary_directory)
+    for path in fifo_paths(temporary_directory=temporary_directory):
         os.mkfifo(path)
 
 
-def terminate(*, proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
+def terminate(*, process: subprocess.Popen) -> None:
+    """Kill the QEMU process and wait for it to exit."""
+    if process.poll() is not None:
         return
-    proc.kill()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
+    process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
 
 
 def test_program(
     *,
-    dir_sector: int,
-    dir_sectors: int,
+    directory_sector: int,
+    directory_sectors: int,
     name: str,
-    out_bin: Path,
-    ref: Path,
-    tempdir: Path,
+    output_binary: Path,
+    reference: Path,
+    temporary_directory: Path,
 ) -> tuple[bool, str]:
-    out_name = f"{name}_t"
-    drive = tempdir / f"drive_{name}.img"
+    """Assemble a single program in QEMU and compare the output to the NASM reference."""
+    output_name = f"{name}_t"
+    drive = temporary_directory / f"drive_{name}.img"
     shutil.copy(IMAGE, drive)
 
     run_in_qemu(
-        cmd_timeout=CMD_TIMEOUT,
-        command=f"asm src/{name}.asm {out_name}\r",
+        command_timeout=COMMAND_TIMEOUT,
+        command=f"asm src/{name}.asm {output_name}\r",
         drive=drive,
-        tempdir=tempdir,
+        temporary_directory=temporary_directory,
     )
     return compare_drive_output(
-        dir_sector=dir_sector,
-        dir_sectors=dir_sectors,
+        directory_sector=directory_sector,
+        directory_sectors=directory_sectors,
         drive=drive,
-        out_bin=out_bin,
-        out_name=out_name,
-        ref_bytes=ref.read_bytes(),
+        output_binary=output_binary,
+        output_name=output_name,
+        reference_bytes=reference.read_bytes(),
     )
 
 
 def wait_for_bytes(
     *,
-    fd: int,
+    file_descriptor: int,
     needle: bytes,
-    proc: subprocess.Popen,
+    process: subprocess.Popen,
     timeout: float,
 ) -> None:
-    """Read from `fd` until `needle` appears in the accumulated output.
+    """Read from `file_descriptor` until `needle` appears in the accumulated output.
 
-    `proc` is the QEMU process; if it exits before `needle` is seen, raise
+    `process` is the QEMU process; if it exits before `needle` is seen, raise
     RuntimeError. Raises TimeoutError if `timeout` seconds elapse.
     """
     deadline = time.monotonic() + timeout
-    buf = bytearray()
-    while needle not in buf:
+    buffer = bytearray()
+    while needle not in buffer:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(f"timed out waiting for {needle!r}")
-        if proc.poll() is not None:
+            message = f"timed out waiting for {needle!r}"
+            raise TimeoutError(message)
+        if process.poll() is not None:
+            message = f"qemu exited with {process.returncode} before {needle!r} appeared"
             raise RuntimeError(
-                f"qemu exited with {proc.returncode} before {needle!r} appeared"
+                message,
             )
-        ready, _, _ = select.select([fd], [], [], min(remaining, 0.1))
+        ready, _, _ = select.select([file_descriptor], [], [], min(remaining, 0.1))
         if not ready:
             continue
         try:
-            chunk = os.read(fd, 4096)
+            chunk = os.read(file_descriptor, 4096)
         except BlockingIOError:
             continue
         if not chunk:
             # No writer attached yet, or transient empty read — back off briefly.
             time.sleep(0.01)
             continue
-        buf.extend(chunk)
+        buffer.extend(chunk)
 
 
 if __name__ == "__main__":
