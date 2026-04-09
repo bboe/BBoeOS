@@ -7,13 +7,16 @@
         ;;   [gap_start .. gap_end)  gap (free space)
         ;;   [gap_end .. BUF_SIZE)   text after cursor   (logical offsets gap_start..len-1)
         ;; Memory layout in segment 0 (must avoid edit code at 0x0600 and
-        ;; the MBR/stage-2 kernel at 0x7C00+):
-        ;;   0x2000..0x7000  gap buffer (20 KB)
-        ;;   0x7000..0x7A00  kill buffer (2.5 KB)
-        %assign BUF_BASE      2000h   ; start of gap buffer
-        %assign BUF_SIZE      5000h   ; 20KB
-        %assign KILL_BUF      7000h
+        ;; the resident kernel at 0x7C00+):
+        ;;   program_end                  .. KILL_BUF             gap buffer
+        ;;   KILL_BUF (7C00h-KILL_BUF_SIZE) .. 7C00h               kill buffer
+        ;; The gap buffer floats on program_end, so it expands automatically
+        ;; as the program shrinks/grows and reclaims the previously-wasted
+        ;; gap between program_end and the old fixed 0x2000 base.
         %assign KILL_BUF_SIZE 0A00h   ; 2560 bytes
+        %define BUF_BASE      program_end
+        %define KILL_BUF      (7C00h - KILL_BUF_SIZE)
+        %define BUF_SIZE      (KILL_BUF - BUF_BASE)
 
         ;; Screen layout: rows 0–23 for text, row 24 for status bar
         %assign EDIT_ROWS 24
@@ -1134,3 +1137,9 @@ save_file:
         MSG_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
         MSG_USAGE        db `Usage: edit <filename>\n\0`
         MSG_WRITE_ERR    db `Write error\0`
+
+;;; -----------------------------------------------------------------------
+;;; program_end: BUF_BASE floats on this label so the gap buffer always
+;;; sits immediately after the program image.
+;;; -----------------------------------------------------------------------
+program_end:

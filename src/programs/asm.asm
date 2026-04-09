@@ -9,15 +9,19 @@
         ;;   - small buffers at 0x3000-0x3FFF (asm.asm ends well below 0x3000)
         ;;   - SYM_TABLE at 0x9000+ (just past stage 2, below 0xE000)
         ;; Fixed addresses are used (rather than labels) because the
-        ;; self-hosted assembler only understands %assign and %include,
-        ;; not %define/equ.
-        %assign INC_SAVE      3500h     ; include stack save area (12 bytes per level)
-        %assign INC_SRC_SAVE  3540h     ; saved source buffer (512 bytes per level)
+        ;; LINE_BUF/OUT_BUF/SRC_BUF/INC_SAVE/INC_SRC_SAVE float on top of
+        ;; program_end (defined at the end of this file) so they grow with
+        ;; the binary instead of sitting at fixed addresses. The pass 1
+        ;; iteration loop re-evaluates these every pass, and they're only
+        ;; ever used as 16-bit immediates / displacements, so the encoding
+        ;; size is fixed and the binary stabilizes after iter 2.
         %assign JUMP_MAX      512       ; max jcc/jmp instructions per source
-        %assign LINE_BUF      3000h
         %assign LINE_MAX      255
-        %assign OUT_BUF       3100h
-        %assign SRC_BUF       3300h
+        %define LINE_BUF      program_end
+        %define OUT_BUF       LINE_BUF + 256
+        %define SRC_BUF       OUT_BUF + 512
+        %define INC_SAVE      SRC_BUF + 512   ; include stack (12 bytes per level)
+        %define INC_SRC_SAVE  INC_SAVE + 64   ; saved source buffer (512 bytes per level)
         %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
         %assign SYM_MAX       704       ; 704 * 28 = 19712 bytes (0x9000-0xDCFF)
         %assign SYM_NAME_LEN  24        ; 23 chars + null
@@ -2559,10 +2563,16 @@ parse_directive:
         jne .not_percent
         inc si
 
-        ;; Check %assign
+        ;; Check %assign or %define — both bind NAME to an expression
+        ;; evaluated immediately. We don't do macro text substitution, so
+        ;; %define behaves identically to %assign here.
         mov di, STR_ASSIGN
         call match_word
+        jnc .do_assign
+        mov di, STR_DEFINE
+        call match_word
         jc .try_include
+        .do_assign:
         call skip_ws
         ;; Parse name
         mov di, si             ; DI = start of name
@@ -3907,6 +3917,7 @@ STR_DEC     db 'dec',0
 STR_DIV     db 'div',0
 STR_DB      db 'db',0
 STR_DD      db 'dd',0
+STR_DEFINE  db 'define',0
 STR_DW      db 'dw',0
 STR_INC     db 'inc',0
 STR_INCLUDE db 'include',0
@@ -4027,3 +4038,11 @@ src_prefix    times 32 db 0
 ss_scope      dw 0
 ss_value      dw 0
 sym_count     dw 0
+
+;;; -----------------------------------------------------------------------
+;;; program_end: marks the end of the loaded image. Floating buffers
+;;; (LINE_BUF, OUT_BUF, SRC_BUF, INC_SAVE, INC_SRC_SAVE) are %defined
+;;; relative to this label so they always sit immediately after the
+;;; program in memory.
+;;; -----------------------------------------------------------------------
+program_end:
