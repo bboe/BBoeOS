@@ -23,13 +23,16 @@ Grammar:
                             additive_expression)?
     additive_expression  := multiplicative_expression
                            (('+'|'-') multiplicative_expression)*
-    multiplicative_expression := primary (('*'|'/') primary)*
+    multiplicative_expression := primary (('*'|'/'|'%') primary)*
     primary              := NUMBER | STRING | sizeof
-                          | IDENT ('[' expression ']')? | '(' expression ')'
+                          | IDENT ('(' arguments ')' | '[' expression ']')?
+                          | '(' expression ')'
 
 Builtins:
-    puts(expression)  -- print string (no auto-newline)
-    putc(expression)  -- print single character
+    print_dec(expression) -- print integer as decimal
+    putc(expression)      -- print single character
+    puts(expression)      -- print string (no auto-newline)
+    uptime()              -- return seconds since boot
 
 Usage: cc.py <input.c> [output.asm]
 """
@@ -82,6 +85,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<GT>>)
   | (?P<LT><)
   | (?P<MINUS>-)
+  | (?P<PERCENT>%)
   | (?P<PLUS>\+)
   | (?P<SLASH>/)
   | (?P<STAR>\*)
@@ -97,7 +101,7 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-MULTIPLICATIVE_OPERATORS = frozenset({"SLASH", "STAR"})
+MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
 TYPE_TOKENS = frozenset({"CHAR", "INT", "VOID"})
 
@@ -109,11 +113,14 @@ class CodeGenerator:
         """Initialize code generator state."""
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
+        self.division_remainder: tuple | None = None
+        self.elide_frame: bool = False
         self.frame_size: int = 0
         self.label_id: int = 0
         self.lines: list[str] = []
         self.locals: dict[str, int] = {}
         self.needs_argv_buf: bool = False
+        self.needs_print_dec: bool = False
         self.strings: list[tuple[str, str]] = []
 
     def allocate_local(self, name: str, /) -> int:
@@ -126,6 +133,20 @@ class CodeGenerator:
         self.frame_size += 2
         self.locals[name] = self.frame_size
         return self.frame_size
+
+    def builtin_print_dec(self, arguments: list[tuple], /) -> None:
+        """Generate code for the print_dec() builtin.
+
+        Raises:
+            SyntaxError: If the wrong number of arguments is provided.
+
+        """
+        if len(arguments) != 1:
+            message = "print_dec() expects exactly one argument"
+            raise SyntaxError(message)
+        self.generate_expression(arguments[0])
+        self.emit("        call print_dec")
+        self.needs_print_dec = True
 
     def builtin_putc(self, arguments: list[tuple], /) -> None:
         """Generate code for the putc() builtin.
@@ -141,6 +162,8 @@ class CodeGenerator:
         if argument[0] == "string":
             byte_val = decode_first_character(argument[1])
             self.emit(f"        mov al, {byte_val}")
+        elif argument[0] == "int":
+            self.emit(f"        mov al, {argument[1]}")
         else:
             self.generate_expression(argument)
         self.emit("        mov ah, SYS_IO_PUTC")
@@ -165,6 +188,19 @@ class CodeGenerator:
             self.generate_expression(argument)
             self.emit("        mov si, ax")
         self.emit("        mov ah, SYS_IO_PUTS")
+        self.emit("        int 30h")
+
+    def builtin_uptime(self, arguments: list[tuple], /) -> None:
+        """Generate code for the uptime() builtin.
+
+        Raises:
+            SyntaxError: If arguments are provided.
+
+        """
+        if arguments:
+            message = "uptime() takes no arguments"
+            raise SyntaxError(message)
+        self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
 
     def emit(self, line: str = "") -> None:
@@ -216,8 +252,38 @@ class CodeGenerator:
         self.emit(f"        jmp .scan_{label_index}")
         self.emit(f".args_done_{label_index}:")
         if argc_name:
-            self.emit(f"        mov [bp-{self.locals[argc_name]}], cx")
-        self.emit(f"        mov word [bp-{self.locals[argv_name]}], _argv")
+            self.emit(f"        mov [{self.local_address(argc_name)}], cx")
+        self.emit(f"        mov word [{self.local_address(argv_name)}], _argv")
+
+    def emit_binary_operator_operands(self, left: tuple, right: tuple, /) -> None:
+        """Generate left into AX and right into CX.
+
+        When the right operand is a constant or variable, loads it
+        directly into CX without a push/pop round-trip.
+        """
+        if right[0] == "int":
+            self.generate_expression(left)
+            self.emit(f"        mov cx, {right[1]}")
+        elif right[0] == "variable" and right[1] in self.locals:
+            self.generate_expression(left)
+            self.emit(f"        mov cx, [{self.local_address(right[1])}]")
+        else:
+            self.generate_expression(left)
+            self.emit("        push ax")
+            self.generate_expression(right)
+            self.emit("        mov cx, ax")
+            self.emit("        pop ax")
+
+    @staticmethod
+    def extract_local_label(line: str, /) -> str | None:
+        """Return the _l_ label from a store or declaration, or None."""
+        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
+        if line.startswith("mov") and "[_l_" in line and "], " in line:
+            return line[line.index("[_l_") + 1 : line.index("]")]
+        # Declaration: _l_NAME: dw 0
+        if line.startswith("_l_") and line.endswith(": dw 0"):
+            return line[: line.index(":")]
+        return None
 
     def generate(self, ast: tuple, /) -> str:
         """Generate assembly for an entire program AST.
@@ -242,6 +308,9 @@ class CodeGenerator:
                 self.emit(f"{label}: dw {', '.join(elems)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
+        if self.needs_print_dec:
+            self.emit('%include "print_dec.asm"')
+        self.peephole()
         return "\n".join(self.lines) + "\n"
 
     def generate_call(self, statement: tuple, /) -> None:
@@ -277,13 +346,13 @@ class CodeGenerator:
             if vname not in self.locals:
                 message = f"undefined variable: {vname}"
                 raise SyntaxError(message)
-            self.emit(f"        mov ax, [bp-{self.locals[vname]}]")
+            self.emit(f"        mov ax, [{self.local_address(vname)}]")
         elif kind == "index":
             _, vname, index_expression = expression
             if vname not in self.locals:
                 message = f"undefined variable: {vname}"
                 raise SyntaxError(message)
-            self.emit(f"        mov bx, [bp-{self.locals[vname]}]")
+            self.emit(f"        mov bx, [{self.local_address(vname)}]")
             self.emit("        push bx")
             self.generate_expression(index_expression)
             self.emit("        add ax, ax")
@@ -300,26 +369,29 @@ class CodeGenerator:
             else:
                 size = 2  # all non-array variables are word-sized
             self.emit(f"        mov ax, {size}")
+        elif kind == "call":
+            self.generate_call(expression)
         elif kind == "binary_operator":
             _, operator, left, right = expression
-            self.generate_expression(left)
-            self.emit("        push ax")
-            self.generate_expression(right)
-            self.emit("        pop cx")  # CX = left, AX = right
+            if operator == "%" and self.has_remainder(left, right):
+                self.emit("        mov ax, dx")
+                return
+            self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
                 self.emit("        add ax, cx")
             elif operator == "-":
-                self.emit("        sub cx, ax")
-                self.emit("        mov ax, cx")
+                self.emit("        sub ax, cx")
             elif operator == "*":
                 self.emit("        mul cx")
-            elif operator == "/":
-                # CX=left, AX=right — swap so AX=dividend, CX=divisor
-                self.emit("        xchg ax, cx")
+                self.division_remainder = None
+            elif operator in {"/", "%"}:
                 self.emit("        xor dx, dx")
                 self.emit("        div cx")
+                self.division_remainder = (left, right)
+                if operator == "%":
+                    self.emit("        mov ax, dx")
             elif operator in JUMP_WHEN_FALSE:
-                self.emit("        cmp cx, ax")
+                self.emit("        cmp ax, cx")
                 self.emit("        mov ax, 0")
             else:
                 message = f"unknown operator: {operator}"
@@ -332,6 +404,7 @@ class CodeGenerator:
         """Generate assembly for a single function definition."""
         _, name, parameters, body = function
         self.array_sizes = {}
+        self.elide_frame = name == "main"
         self.frame_size = 0
         self.locals = {}
 
@@ -342,7 +415,7 @@ class CodeGenerator:
         self.scan_locals(body)
 
         self.emit(f"{name}:")
-        if self.frame_size > 0:
+        if not self.elide_frame and self.frame_size > 0:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
             self.emit(f"        sub sp, {self.frame_size}")
@@ -354,13 +427,16 @@ class CodeGenerator:
         for body_statement in body:
             self.generate_statement(body_statement)
 
-        if self.frame_size > 0:
-            self.emit("        mov sp, bp")
-            self.emit("        pop bp")
         if name == "main":
             self.emit("        mov ah, SYS_EXIT")
             self.emit("        int 30h")
+            if self.elide_frame:
+                for vname in sorted(self.locals):
+                    self.emit(f"_l_{vname}: dw 0")
         else:
+            if self.frame_size > 0:
+                self.emit("        mov sp, bp")
+                self.emit("        pop bp")
             self.emit("        ret")
         self.emit()
 
@@ -377,11 +453,8 @@ class CodeGenerator:
             message = f"if condition must be a comparison, got {condition}"
             raise SyntaxError(message)
         _, operator, left, right = condition
-        self.generate_expression(left)
-        self.emit("        push ax")
-        self.generate_expression(right)
-        self.emit("        pop cx")
-        self.emit("        cmp cx, ax")
+        self.emit_binary_operator_operands(left, right)
+        self.emit("        cmp ax, cx")
         self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
         for body_statement in body:
             self.generate_statement(body_statement)
@@ -399,7 +472,7 @@ class CodeGenerator:
             _, vname, init = statement
             if init is not None:
                 self.generate_expression(init)
-                self.emit(f"        mov [bp-{self.locals[vname]}], ax")
+                self.emit(f"        mov [{self.local_address(vname)}], ax")
         elif kind == "array_declaration":
             _, vname, init = statement
             if init is not None and init[0] == "array_init":
@@ -415,11 +488,11 @@ class CodeGenerator:
                 arr_label = f"_arr_{len(self.arrays)}"
                 self.arrays.append((arr_label, elem_labels))
                 self.array_sizes[vname] = len(elem_labels)
-                self.emit(f"        mov word [bp-{self.locals[vname]}], {arr_label}")
+                self.emit(f"        mov word [{self.local_address(vname)}], {arr_label}")
         elif kind == "assignment":
             _, vname, expression = statement
             self.generate_expression(expression)
-            self.emit(f"        mov [bp-{self.locals[vname]}], ax")
+            self.emit(f"        mov [{self.local_address(vname)}], ax")
         elif kind == "if":
             self.generate_if(statement)
         elif kind == "while":
@@ -444,16 +517,50 @@ class CodeGenerator:
             message = f"while condition must be a comparison, got {condition}"
             raise SyntaxError(message)
         _, operator, left, right = condition
-        self.generate_expression(left)
-        self.emit("        push ax")
-        self.generate_expression(right)
-        self.emit("        pop cx")
-        self.emit("        cmp cx, ax")
+        self.emit_binary_operator_operands(left, right)
+        self.emit("        cmp ax, cx")
         self.emit(f"        {JUMP_WHEN_FALSE[operator]} .while_{label_index}_end")
         for body_statement in body:
             self.generate_statement(body_statement)
         self.emit(f"        jmp .while_{label_index}")
         self.emit(f".while_{label_index}_end:")
+
+    def has_remainder(self, left: tuple, right: tuple, /) -> bool:
+        """Check if DX already holds left % right.
+
+        Handles both direct matches and the transitive property:
+        (A % N) % M == A % M when M divides N.
+        """
+        if self.division_remainder is None:
+            return False
+        remainder_left, remainder_right = self.division_remainder
+        # Direct match: same operands.
+        if remainder_left == left and remainder_right == right:
+            return True
+        # Transitive: DX = (A % N) % M, want A % M, and M divides N.
+        return (
+            remainder_right == right
+            and right[0] == "int"
+            and self.is_modulo_of(base=left, expression=remainder_left)
+            and remainder_left[3][1] % right[1] == 0
+        )
+
+    @staticmethod
+    def is_modulo_of(*, base: tuple, expression: tuple) -> bool:
+        """Check if expression is (base % N) for some integer N."""
+        return (
+            len(expression) == 4
+            and expression[0] == "binary_operator"
+            and expression[1] == "%"
+            and expression[2] == base
+            and expression[3][0] == "int"
+        )
+
+    def local_address(self, name: str, /) -> str:
+        """Return the memory operand string for a local variable."""
+        if self.elide_frame:
+            return f"_l_{name}"
+        return f"bp-{self.locals[name]}"
 
     def new_label(self) -> int:
         """Allocate and return a new unique label index.
@@ -466,12 +573,48 @@ class CodeGenerator:
         self.label_id += 1
         return label_index
 
+    def peephole(self) -> None:
+        """Run peephole optimization passes over generated assembly."""
+        self.peephole_store_reload()
+        self.peephole_dead_stores()
+
+    def peephole_dead_stores(self) -> None:
+        """Remove stores to local variables that are never loaded."""
+        # Collect all _l_ labels that appear as load sources.
+        loaded: set[str] = set()
+        for line in self.lines:
+            stripped = line.strip()
+            index = stripped.find(", [_l_")
+            if index >= 0:
+                loaded.add(stripped[index + 3 : stripped.index("]", index)])
+        # Remove stores and declarations for labels never loaded.
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            label = self.extract_local_label(stripped)
+            if label is not None and label not in loaded:
+                continue
+            result.append(line)
+        self.lines = result
+
+    def peephole_store_reload(self) -> None:
+        """Remove redundant store-then-reload sequences."""
+        i = 0
+        while i < len(self.lines) - 1:
+            line = self.lines[i].strip()
+            next_line = self.lines[i + 1].strip()
+            # mov [ADDR], ax  followed by  mov ax, [ADDR]  →  drop the reload
+            if line.startswith("mov [") and line.endswith("], ax") and next_line == f"mov ax, {line[4 : line.index(']') + 1]}":
+                del self.lines[i + 1]
+                continue
+            i += 1
+
     def scan_locals(self, statements: list[tuple], /) -> None:
         """Recursively find all variable declarations to size the frame."""
         for statement in statements:
             if statement[0] in {"variable_declaration", "array_declaration"}:
                 self.allocate_local(statement[1])
-            elif statement[0] == "while":
+            elif statement[0] in {"if", "while"}:
                 self.scan_locals(statement[2])
 
 
@@ -704,6 +847,16 @@ class Parser:
             return ("string", token[1][1:-1])
         if token[0] == "IDENT":
             self.eat()
+            if self.peek()[0] == "LPAREN":
+                self.eat("LPAREN")
+                arguments: list[tuple] = []
+                if self.peek()[0] != "RPAREN":
+                    arguments.append(self.parse_expression())
+                    while self.peek()[0] == "COMMA":
+                        self.eat("COMMA")
+                        arguments.append(self.parse_expression())
+                self.eat("RPAREN")
+                return ("call", token[1], arguments)
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 index = self.parse_expression()

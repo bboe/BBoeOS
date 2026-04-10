@@ -43,7 +43,7 @@ SERIAL_BASENAME = "ser"
 STATIC_DIR = Path("static")
 
 
-def _run_tests(*, arguments: argparse.Namespace, generated: list) -> int:  # noqa: ARG001
+def _run_tests(*, arguments: argparse.Namespace) -> int:
     """Execute the test loop: build OS, discover programs, compare outputs."""
     print("Building OS...")
     subprocess.run(
@@ -155,30 +155,26 @@ def compare_drive_output(
     return False, "output file not found on drive"
 
 
-def compile_c_sources() -> list[tuple[Path, str | None]]:
+def compile_c_sources() -> list[Path]:
     """Compile each src/c/*.c to static/<name>.asm via cc.py.
 
-    If a symlink already exists at the target path, its link target is
-    saved so it can be restored later.  Returns a list of
-    (generated_path, original_link_target_or_None) pairs.
+    Skips C sources whose corresponding .asm already exists in static/
+    (i.e. a hand-written version is the source of truth).  Returns the
+    list of generated paths so they can be cleaned up after testing.
     """
     if not C_DIR.is_dir():
         return []
-    generated: list[tuple[Path, str | None]] = []
+    generated: list[Path] = []
     for c_source in sorted(C_DIR.glob("*.c")):
         name = c_source.stem
         target = STATIC_DIR / f"{name}.asm"
-        old_link: str | None = None
-        if target.is_symlink():
-            old_link = Path(target).readlink()
-            target.unlink()
-        elif target.exists():
-            target.unlink()
+        if target.exists():
+            continue
         subprocess.run(
             ["./cc.py", str(c_source), str(target)],
             check=True,
         )
-        generated.append((target, old_link))
+        generated.append(target)
     return generated
 
 
@@ -222,11 +218,11 @@ def main() -> int:
     # includes them on the disk image alongside hand-written .asm files.
     generated = compile_c_sources()
     if generated:
-        c_names = " ".join(t.stem + ".c" for t, _ in generated)
+        c_names = " ".join(path.stem + ".c" for path in generated)
         print(f"Compiled C sources: {c_names}")
 
     try:
-        return _run_tests(arguments=arguments, generated=generated)
+        return _run_tests(arguments=arguments)
     finally:
         restore_static(generated)
 
@@ -242,12 +238,10 @@ def persist_artifacts(*, temporary_directory: Path) -> Path:
     return persist
 
 
-def restore_static(generated: list[tuple[Path, str | None]], /) -> None:
-    """Undo compile_c_sources(): delete generated files, restore symlinks."""
-    for target, old_link in generated:
+def restore_static(generated: list[Path], /) -> None:
+    """Undo compile_c_sources(): delete generated files."""
+    for target in generated:
         target.unlink(missing_ok=True)
-        if old_link is not None:
-            target.symlink_to(old_link)
 
 
 def run_in_qemu(

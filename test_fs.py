@@ -238,7 +238,7 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
     """Copy a file into a subdirectory and verify the entry shows up there."""
     drive = make_drive(name="copy_subdirectory", temporary_directory=temporary_directory)
     boot_and_run(
-        commands=["mkdir d", "cp src/cat.asm d/h"],
+        commands=["mkdir d", "cp bin/cat d/h"],
         drive=drive,
         temporary_directory=temporary_directory,
     )
@@ -260,34 +260,34 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
     assert file_entry is not None, "d/h not found"
     _, file_sector, file_size = file_entry
 
-    source_entry = find_entry(
+    bin_entry = find_entry(
         directory_sectors=directory_sectors,
         directory_start_sector=directory_sector,
         image=image,
-        name="src",
+        name="bin",
     )
-    hello = find_entry(
+    cat = find_entry(
         directory_sectors=directory_sectors,
-        directory_start_sector=source_entry[1],
+        directory_start_sector=bin_entry[1],
         image=image,
-        name="cat.asm",
+        name="cat",
     )
-    _, hello_sector, hello_size = hello
-    assert file_size == hello_size
+    _, cat_sector, cat_size = cat
+    assert file_size == cat_size
     h_data = image[(file_sector - 1) * SECTOR_SIZE :][:file_size]
-    hello_data = image[(hello_sector - 1) * SECTOR_SIZE :][:hello_size]
-    assert h_data == hello_data, "subdirectory copy data mismatch"
+    cat_data = image[(cat_sector - 1) * SECTOR_SIZE :][:cat_size]
+    assert h_data == cat_data, "subdirectory copy data mismatch"
 
 
 def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
-    """Copy a file into root, then mv it into bin/.
+    """Copy a file from bin/ into root, then mv it back into bin/.
 
-    Verify the source entry is gone, the dest entry exists in bin/, and
-    the data is preserved.
+    Verify the source entry is gone from root, the dest entry exists
+    in bin/, and the data is preserved.
     """
     drive = make_drive(name="cross_move", temporary_directory=temporary_directory)
     boot_and_run(
-        commands=["cp src/cat.asm a.txt", "mv a.txt bin/a.txt"],
+        commands=["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
         drive=drive,
         temporary_directory=temporary_directory,
     )
@@ -320,23 +320,17 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     assert moved is not None, "bin/a.txt not found after mv"
     _, moved_sector, moved_size = moved
 
-    source_entry = find_entry(
+    cat = find_entry(
         directory_sectors=directory_sectors,
-        directory_start_sector=directory_sector,
+        directory_start_sector=bin_entry[1],
         image=image,
-        name="src",
+        name="cat",
     )
-    hello = find_entry(
-        directory_sectors=directory_sectors,
-        directory_start_sector=source_entry[1],
-        image=image,
-        name="cat.asm",
-    )
-    _, hello_sector, hello_size = hello
-    assert moved_size == hello_size
+    _, cat_sector, cat_size = cat
+    assert moved_size == cat_size
     moved_data = image[(moved_sector - 1) * SECTOR_SIZE :][:moved_size]
-    hello_data = image[(hello_sector - 1) * SECTOR_SIZE :][:hello_size]
-    assert moved_data == hello_data, "moved data mismatch"
+    cat_data = image[(cat_sector - 1) * SECTOR_SIZE :][:cat_size]
+    assert moved_data == cat_data, "moved data mismatch"
 
 
 def test_make_directory_high_sector(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
@@ -365,23 +359,23 @@ def test_make_directory_high_sector(*, directory_sector: int, directory_sectors:
 def test_second_directory_sector(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
     """Exercise lookup, copy, and rename of an entry in the second directory sector.
 
-    src/ holds enough programs that uptime.asm is in the second sector;
-    cp it back to src/u, then mv src/u to src/u2.
+    bin/ holds enough programs that shell lands in the second sector;
+    cp it to bin/s, then mv bin/s to bin/s2.
     """
     drive = make_drive(name="second", temporary_directory=temporary_directory)
     image = drive.read_bytes()
-    source_entry = find_entry(
+    bin_entry = find_entry(
         directory_sectors=directory_sectors,
         directory_start_sector=directory_sector,
         image=image,
-        name="src",
+        name="bin",
     )
-    assert source_entry is not None
-    assert source_entry[0] & FLAG_DIRECTORY
-    source_directory_sector = source_entry[1]
-    # Verify uptime.asm is in the SECOND directory sector.
-    first_sector = image[(source_directory_sector - 1) * SECTOR_SIZE : source_directory_sector * SECTOR_SIZE]
-    target = b"uptime.asm"
+    assert bin_entry is not None
+    assert bin_entry[0] & FLAG_DIRECTORY
+    bin_directory_sector = bin_entry[1]
+    # Verify shell is in the SECOND directory sector.
+    first_sector = image[(bin_directory_sector - 1) * SECTOR_SIZE : bin_directory_sector * SECTOR_SIZE]
+    target = b"shell"
     in_first = any(
         bytes(
             first_sector[i * DIRECTORY_ENTRY_SIZE : i * DIRECTORY_ENTRY_SIZE + NAME_FIELD],
@@ -389,40 +383,40 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
         == target
         for i in range(SECTOR_SIZE // DIRECTORY_ENTRY_SIZE)
     )
-    assert not in_first, "uptime.asm unexpectedly in first src sector"
+    assert not in_first, "shell unexpectedly in first bin sector"
 
     boot_and_run(
-        commands=["cp src/uptime.asm src/u", "mv src/u src/u2"],
+        commands=["cp bin/shell bin/s", "mv bin/s bin/s2"],
         drive=drive,
         temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
-    source_entry = find_entry(
+    bin_entry = find_entry(
         directory_sectors=directory_sectors,
         directory_start_sector=directory_sector,
         image=image,
-        name="src",
+        name="bin",
     )
-    u2 = find_entry(
+    s2 = find_entry(
         directory_sectors=directory_sectors,
-        directory_start_sector=source_entry[1],
+        directory_start_sector=bin_entry[1],
         image=image,
-        name="u2",
+        name="s2",
     )
-    assert u2 is not None, "src/u2 not found after rename"
-    u_orig = find_entry(
+    assert s2 is not None, "bin/s2 not found after rename"
+    original = find_entry(
         directory_sectors=directory_sectors,
-        directory_start_sector=source_entry[1],
+        directory_start_sector=bin_entry[1],
         image=image,
-        name="uptime.asm",
+        name="shell",
     )
-    assert u_orig is not None
-    _, u2_sector, u2_size = u2
-    _, original_sector, original_size = u_orig
-    assert u2_size == original_size
-    u2_data = image[(u2_sector - 1) * SECTOR_SIZE :][:u2_size]
+    assert original is not None
+    _, s2_sector, s2_size = s2
+    _, original_sector, original_size = original
+    assert s2_size == original_size
+    s2_data = image[(s2_sector - 1) * SECTOR_SIZE :][:s2_size]
     original_data = image[(original_sector - 1) * SECTOR_SIZE :][:original_size]
-    assert u2_data == original_data, "copy data mismatch"
+    assert s2_data == original_data, "copy data mismatch"
 
 
 if __name__ == "__main__":
