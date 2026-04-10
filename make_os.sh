@@ -16,6 +16,20 @@ for src in src/asm/*.asm; do
     fi
 done
 
+for src in src/c/*.c; do
+    [ -f "$src" ] || continue
+    name=$(basename "$src" .c)
+    python3 cc.py "$src" "$tmpdir/$name.asm"
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    nasm -f bin -i src/include/ -o "$tmpdir/$name" "$tmpdir/$name.asm"
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    rm "$tmpdir/$name.asm"
+done
+
 dd bs=512 count=2880 if=/dev/zero of=drive.img
 dd conv=notrunc if=os.bin of=drive.img
 ./add_file.py --mkdir bin

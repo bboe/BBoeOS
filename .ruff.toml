@@ -1,0 +1,10 @@
+indent-width = 4
+line-length = 140
+lint.ignore = ["COM812", "CPY001", "D203", "D211", "D213", "PLR0913", "S101", "T201"]
+lint.select = ["ALL"]
+preview = true
+target-version = "py312"
+
+[lint.per-file-ignores]
+"cc.py" = ["ARG002", "B007", "C901", "DOC201", "DOC501", "ERA001", "PLR0904", "PLR0911", "PLR0912", "PLR0915", "PLR2004", "PLR6201", "SIM108"]
+"test_*.py" = ["DOC201", "DOC501", "PLR0913", "PLR0914", "PLR2004", "PT018", "S"]
