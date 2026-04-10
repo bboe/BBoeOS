@@ -9,4 +9,5 @@ source is kept here for reference.
 |---------|-------------|-----------|-------|
 | date    | 105         | 103       | -2    |
 | hello   | 25          | 25        | 0     |
+| mkdir   | 115         | 110       | -5    |
 | uptime  | 75          | 74        | -1    |
