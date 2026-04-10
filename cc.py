@@ -29,6 +29,8 @@ Grammar:
                           | '(' expression ')'
 
 Builtins:
+    datetime(array)       -- fill 7-word array with BCD date/time fields
+    print_bcd(expression) -- print BCD byte as two decimal digits
     print_dec(expression) -- print integer as decimal
     putc(expression)      -- print single character
     puts(expression)      -- print string (no auto-newline)
@@ -42,6 +44,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
@@ -103,14 +106,35 @@ TOKEN_PATTERN = re.compile(
 
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
+REGISTER_PARENT = {
+    "ah": "ax",
+    "al": "ax",
+    "bh": "bx",
+    "bl": "bx",
+    "ch": "cx",
+    "cl": "cx",
+    "dh": "dx",
+    "dl": "dx",
+}
+
 TYPE_TOKENS = frozenset({"CHAR", "INT", "VOID"})
 
 
 class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
+    BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "datetime": frozenset({"ax", "bx", "cx", "dx"}),
+        "print_bcd": frozenset({"ax"}),
+        "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
+        "putc": frozenset({"ax"}),
+        "puts": frozenset({"ax"}),
+        "uptime": frozenset({"ax"}),
+    }
+
     def __init__(self) -> None:
         """Initialize code generator state."""
+        self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
         self.division_remainder: tuple | None = None
@@ -120,7 +144,10 @@ class CodeGenerator:
         self.lines: list[str] = []
         self.locals: dict[str, int] = {}
         self.needs_argv_buf: bool = False
+        self.needs_print_bcd: bool = False
         self.needs_print_dec: bool = False
+        self.register_cache: dict[tuple[str, int], str] = {}
+        self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
 
     def allocate_local(self, name: str, /) -> int:
@@ -133,6 +160,85 @@ class CodeGenerator:
         self.frame_size += 2
         self.locals[name] = self.frame_size
         return self.frame_size
+
+    def auto_spill(self, *, clobbers: frozenset[str]) -> None:
+        """Spill cached registers that overlap with the clobber set.
+
+        Pushes values onto the stack. Spills AX-parented entries first
+        so AX is available as scratch for spilling other registers.
+        """
+        to_spill = [(key, register) for key, register in self.register_cache.items() if REGISTER_PARENT[register] in clobbers]
+        if not to_spill:
+            return
+        to_spill.sort(key=lambda entry: REGISTER_PARENT[entry[1]] != "ax")
+        for key, register in to_spill:
+            if register != "al":
+                self.emit(f"        mov al, {register}")
+            self.emit("        push ax")
+            self.spill_stack.append(key)
+            del self.register_cache[key]
+
+    def builtin_datetime(self, arguments: list[tuple], /) -> None:
+        """Generate code for the datetime() builtin.
+
+        Takes a pointer to a 7-word array and fills it with BCD fields:
+        [0]=century, [1]=year, [2]=month, [3]=day,
+        [4]=hours, [5]=minutes, [6]=seconds.
+
+        When the argument is a variable backed by a known array label,
+        fields are cached in registers and spilled lazily.
+
+        Raises:
+            SyntaxError: If the wrong number of arguments is provided.
+
+        """
+        if len(arguments) != 1:
+            message = "datetime() expects exactly one argument"
+            raise SyntaxError(message)
+        registers = ["ch", "cl", "dh", "dl", "bh", "bl", "al"]
+        argument = arguments[0]
+        array_label = self.array_labels.get(argument[1]) if argument[0] == "variable" else None
+        if array_label:
+            self.emit("        mov ah, SYS_RTC_DATETIME")
+            self.emit("        int 30h")
+            for index, register in enumerate(registers):
+                self.register_cache[array_label, index * 2] = register
+        else:
+            self.generate_expression(argument)
+            self.emit("        mov di, ax")
+            self.emit("        mov ah, SYS_RTC_DATETIME")
+            self.emit("        int 30h")
+            self.emit("        mov [di+12], al")
+            self.emit("        xor ah, ah")
+            for index, register in enumerate(registers[:6]):
+                self.emit(f"        mov al, {register}")
+                self.emit(f"        mov [di+{index * 2}], ax")
+            self.emit("        mov al, [di+12]")
+            self.emit("        mov [di+12], ax")
+
+    def builtin_print_bcd(self, arguments: list[tuple], /) -> None:
+        """Generate code for the print_bcd() builtin.
+
+        Raises:
+            SyntaxError: If the wrong number of arguments is provided.
+
+        """
+        if len(arguments) != 1:
+            message = "print_bcd() expects exactly one argument"
+            raise SyntaxError(message)
+        argument = arguments[0]
+        cache_key = self.index_cache_key(argument)
+        if cache_key and cache_key in self.register_cache:
+            register = self.register_cache[cache_key]
+            if register != "al":
+                self.emit(f"        mov al, {register}")
+        elif cache_key and self.spill_stack and self.spill_stack[-1] == cache_key:
+            self.spill_stack.pop()
+            self.emit("        pop ax")
+        else:
+            self.generate_expression(argument)
+        self.emit("        call print_bcd")
+        self.needs_print_bcd = True
 
     def builtin_print_dec(self, arguments: list[tuple], /) -> None:
         """Generate code for the print_dec() builtin.
@@ -298,19 +404,24 @@ class CodeGenerator:
         self.emit()
         for function in ast[1]:
             self.generate_function(function)
+        self.peephole()
         if self.strings:
             self.emit(";; --- string literals ---")
             for label, content in self.strings:
                 self.emit(f"{label}: db `{content}\\0`")
         if self.arrays:
-            self.emit(";; --- array data ---")
-            for label, elems in self.arrays:
-                self.emit(f"{label}: dw {', '.join(elems)}")
+            code = "\n".join(self.lines)
+            live = [(label, elements) for label, elements in self.arrays if label in code]
+            if live:
+                self.emit(";; --- array data ---")
+                for label, elements in live:
+                    self.emit(f"{label}: dw {', '.join(elements)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
+        if self.needs_print_bcd:
+            self.emit('%include "print_bcd.asm"')
         if self.needs_print_dec:
             self.emit('%include "print_dec.asm"')
-        self.peephole()
         return "\n".join(self.lines) + "\n"
 
     def generate_call(self, statement: tuple, /) -> None:
@@ -325,6 +436,9 @@ class CodeGenerator:
         if handler is None:
             message = f"unknown builtin: {name}"
             raise SyntaxError(message)
+        clobbers = self.BUILTIN_CLOBBERS.get(name)
+        if self.register_cache and clobbers:
+            self.auto_spill(clobbers=clobbers)
         handler(arguments)
 
     def generate_expression(self, expression: tuple, /) -> None:
@@ -352,13 +466,36 @@ class CodeGenerator:
             if vname not in self.locals:
                 message = f"undefined variable: {vname}"
                 raise SyntaxError(message)
-            self.emit(f"        mov bx, [{self.local_address(vname)}]")
-            self.emit("        push bx")
-            self.generate_expression(index_expression)
-            self.emit("        add ax, ax")
-            self.emit("        pop bx")
-            self.emit("        add bx, ax")
-            self.emit("        mov ax, [bx]")
+            if index_expression[0] == "int" and vname in self.array_labels:
+                offset = index_expression[1] * 2
+                label = self.array_labels[vname]
+                cache_key = (label, offset)
+                if cache_key in self.register_cache:
+                    register = self.register_cache[cache_key]
+                    if register != "al":
+                        self.emit(f"        mov al, {register}")
+                    self.emit("        xor ah, ah")
+                elif self.spill_stack and self.spill_stack[-1] == cache_key:
+                    self.spill_stack.pop()
+                    self.emit("        pop ax")
+                elif offset:
+                    self.emit(f"        mov ax, [{label}+{offset}]")
+                else:
+                    self.emit(f"        mov ax, [{label}]")
+            elif index_expression[0] == "int":
+                offset = index_expression[1] * 2
+                self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                if offset:
+                    self.emit(f"        mov ax, [bx+{offset}]")
+                else:
+                    self.emit("        mov ax, [bx]")
+            else:
+                self.emit("        push bx")
+                self.generate_expression(index_expression)
+                self.emit("        add ax, ax")
+                self.emit("        pop bx")
+                self.emit("        add bx, ax")
+                self.emit("        mov ax, [bx]")
         elif kind == "sizeof_type":
             type_sizes = {"char": 1, "char*": 2, "int": 2, "void": 0}
             self.emit(f"        mov ax, {type_sizes.get(expression[1], 2)}")
@@ -403,10 +540,13 @@ class CodeGenerator:
     def generate_function(self, function: tuple, /) -> None:
         """Generate assembly for a single function definition."""
         _, name, parameters, body = function
+        self.array_labels = {}
         self.array_sizes = {}
         self.elide_frame = name == "main"
         self.frame_size = 0
         self.locals = {}
+        self.register_cache = {}
+        self.spill_stack = []
 
         # Allocate parameters as locals.
         for _type, pname, _is_array in parameters:
@@ -482,13 +622,16 @@ class CodeGenerator:
                         label = f"_str_{len(self.strings)}"
                         self.strings.append((label, elem[1]))
                         elem_labels.append(label)
+                    elif elem[0] == "int":
+                        elem_labels.append(str(elem[1]))
                     else:
-                        message = "array initializer elements must be strings"
+                        message = "array initializer elements must be constants"
                         raise SyntaxError(message)
-                arr_label = f"_arr_{len(self.arrays)}"
-                self.arrays.append((arr_label, elem_labels))
+                array_label = f"_arr_{len(self.arrays)}"
+                self.arrays.append((array_label, elem_labels))
+                self.array_labels[vname] = array_label
                 self.array_sizes[vname] = len(elem_labels)
-                self.emit(f"        mov word [{self.local_address(vname)}], {arr_label}")
+                self.emit(f"        mov word [{self.local_address(vname)}], {array_label}")
         elif kind == "assignment":
             _, vname, expression = statement
             self.generate_expression(expression)
@@ -544,6 +687,12 @@ class CodeGenerator:
             and self.is_modulo_of(base=left, expression=remainder_left)
             and remainder_left[3][1] % right[1] == 0
         )
+
+    def index_cache_key(self, expression: tuple, /) -> tuple[str, int] | None:
+        """Return the register cache key for an index expression, or None."""
+        if expression[0] == "index" and expression[2][0] == "int" and expression[1] in self.array_labels:
+            return (self.array_labels[expression[1]], expression[2][1] * 2)
+        return None
 
     @staticmethod
     def is_modulo_of(*, base: tuple, expression: tuple) -> bool:
