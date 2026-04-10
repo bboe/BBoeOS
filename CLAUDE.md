@@ -34,12 +34,12 @@ Trivial read-only filesystem on the floppy disk:
 
 - **Sector 1**: MBR (stage 1)
 - **Sectors 2 to dir_sector-1**: Stage 2
-- **Sectors dir_sector to dir_sector+1**: File table / root directory (`DIR_SECTORS` = 2 sectors, 32 entries x 32 bytes)
+- **Sectors dir_sector to dir_sector+2**: File table / root directory (`DIR_SECTORS` = 3 sectors, 48 entries x 32 bytes)
 - **Sectors dir_sector+2 onward**: File data
 
 Directory entry format (32 bytes): 27 bytes filename (null-terminated, max 26 chars), 1 byte flags (`FLAG_EXEC = 0x01`, `FLAG_DIR = 0x02`), 2 bytes start sector, 2 bytes file size. Files span consecutive sectors starting from the start sector.
 
-Subdirectories: one level under root only. A subdirectory occupies `DIR_SECTORS` (= 2) consecutive sectors and holds 32 entries, matching the root layout. File paths in syscalls and programs may contain a single `/` to reference a file inside a subdirectory (e.g., `dir/file`). Executables live in `bin/`; the shell automatically retries `bin/<name>` when an external command is not found in the root directory. Static reference sources (the `.asm` files used by the self-hosted assembler tests) live in `src/`. The assembler resolves `%include` paths relative to the directory of its source argument, so `asm src/cat.asm out` correctly finds `src/constants.asm`.
+Subdirectories: one level under root only. A subdirectory occupies `DIR_SECTORS` (= 3) consecutive sectors and holds 48 entries, matching the root layout. File paths in syscalls and programs may contain a single `/` to reference a file inside a subdirectory (e.g., `dir/file`). Executables live in `bin/`; the shell automatically retries `bin/<name>` when an external command is not found in the root directory. Static reference sources (the `.asm` files used by the self-hosted assembler tests) live in `src/`. The assembler resolves `%include` paths relative to the directory of its source argument, so `asm src/cat.asm out` correctly finds `src/constants.asm`.
 
 Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir> <file>` to add a file inside a subdirectory, and `./add_file.py --mkdir <dirname>` to create a subdirectory.
 
@@ -86,7 +86,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 ## File Structure
 
 - `add_file.py` — Host-side script to add files to the drive image filesystem
-- `make_os.sh` — Build script (assembles kernel, auto-discovers and builds all programs, creates floppy image)
+- `cc.py` — Host-side C subset compiler (translates `src/c/*.c` to NASM-compatible assembly)
+- `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIR_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/include/print_*.asm` — Shared formatters: `print_bcd`, `print_byte_dec`, `print_dec`, `print_hex`, `print_ip`, `print_mac`.
@@ -97,12 +98,12 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_recv`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `cat`, `chmod`, `cp`, `date`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
+- `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `cat`, `chmod`, `cp`, `date`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`.
+- `src/c/` programs written in the C subset: `echo`, `hello`, `loop`, `loop_array`, `uptime`.
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
 - `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
 - `src/asm/draw.asm` — 16-color graphics mode with cursor and background controls.
 - `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUF_BASE` is `%define`d to `program_end` and `BUF_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (110 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
-- `src/asm/hello.asm` — Prints `Hello, world!`; smallest program, useful as a self-host smoke test.
 - `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
 - `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
 - `src/asm/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
