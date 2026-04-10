@@ -1,6 +1,6 @@
 # BBoeOS
 
-A minimal x86 bootloader and OS written in NASM assembly, running in 16-bit real mode.
+A minimal x86 operating system with a two-stage bootloader, shell, filesystem, networking stack, self-hosted assembler, and C compiler — all running in 16-bit real mode on a floppy disk.
 
 ## Dependencies
 
