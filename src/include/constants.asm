@@ -14,12 +14,28 @@
         %assign ERR_NOT_FOUND 04h     ; File not found
         %assign ERR_PROTECTED 05h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 4FEh
+        %assign FD_ENTRY_SIZE 16
+        %assign FD_MAX 8
+        %assign FD_OFF_DIR_OFF 14    ; offset of dir_off field within FD entry
+        %assign FD_OFF_DIR_SEC 12    ; offset of dir_sec field within FD entry
+        %assign FD_OFF_FLAGS 1       ; offset of flags field within FD entry
+        %assign FD_OFF_POS 8         ; offset of pos field within FD entry (32-bit)
+        %assign FD_OFF_SIZE 4        ; offset of size field within FD entry (32-bit)
+        %assign FD_OFF_START 2       ; offset of start_sec field within FD entry
+        %assign FD_OFF_TYPE 0        ; offset of type field within FD entry
+        %assign FD_TYPE_CONSOLE 2
+        %assign FD_TYPE_FILE 1
+        %assign FD_TYPE_FREE 0
         %assign FLAG_DIR  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXEC 01h         ; Directory entry flags: bit 0 = executable
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
-        %assign NET_TX_BUF 0E200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
         %assign NET_RX_BUF 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign NET_TX_BUF 0E200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign O_CREAT  10h
+        %assign O_RDONLY 00h
+        %assign O_TRUNC  20h
+        %assign O_WRONLY 01h
         %assign PROGRAM_BASE 0600h
 
         ;; Syscall numbers (INT 30h, passed in AH)
@@ -32,9 +48,13 @@
         %assign SYS_FS_RENAME 06h
         %assign SYS_FS_WRITE  07h    ; sector in CX (16-bit), CX=0 writes back the loaded directory sector
 
-        %assign SYS_IO_GETC 10h
-        %assign SYS_IO_PUTC 12h
-        %assign SYS_IO_PUTS 13h
+        %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
+        %assign SYS_IO_GETC  11h
+        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags; returns AX=fd, CF on error
+        %assign SYS_IO_PUTC  13h
+        %assign SYS_IO_PUTS  14h
+        %assign SYS_IO_READ  15h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         %assign SYS_NET_ARP 20h
         %assign SYS_NET_INIT 21h

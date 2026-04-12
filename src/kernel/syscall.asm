@@ -16,11 +16,20 @@ syscall_handler:
         cmp ah, SYS_FS_WRITE   ; fs_write
         je .fs_write
 
+        cmp ah, SYS_IO_CLOSE   ; io_close
+        je .io_close
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
+        cmp ah, SYS_IO_OPEN    ; io_open
+        je .io_open
         cmp ah, SYS_IO_PUTC    ; io_putc
         je .io_putc
         cmp ah, SYS_IO_PUTS    ; io_puts
+        je .io_puts
+        cmp ah, SYS_IO_READ    ; io_read
+        je .io_read
+        cmp ah, SYS_IO_WRITE   ; io_write
+        je .io_write
         je .io_puts
 
         cmp ah, SYS_NET_ARP    ; net_arp
@@ -899,6 +908,30 @@ syscall_handler:
         call clear_screen
         iret
 
+        .io_close:
+        ;; Close fd: BX = fd
+        ;; CF on error (stub: always fails)
+        stc
+        jmp .iret_cf
+
+        .io_open:
+        ;; Open file/device: SI = filename, AL = flags
+        ;; Returns AX = fd, CF on error (stub: always fails)
+        stc
+        jmp .iret_cf
+
+        .io_read:
+        ;; Read from fd: BX = fd, DI = buffer, CX = count
+        ;; Returns AX = bytes read, CF on error (stub: always fails)
+        stc
+        jmp .iret_cf
+
+        .io_write:
+        ;; Write to fd: BX = fd, SI = buffer, CX = count
+        ;; Returns AX = bytes written, CF on error (stub: always fails)
+        stc
+        jmp .iret_cf
+
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
@@ -929,6 +962,7 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_run:
+        call fd_init
         jmp PROGRAM_BASE
 
         .sys_exit:

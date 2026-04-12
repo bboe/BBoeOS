@@ -97,6 +97,7 @@ clear_screen:
 
 
 boot_shell:
+        call fd_init
         ;; Load shell program from filesystem
         mov si, SHELL_NAME
         call find_file
@@ -116,6 +117,7 @@ boot_shell:
         hlt
         jmp .shell_halt
 
+%include "fd.asm"
 %include "io.asm"
 %include "net.asm"
 %include "syscall.asm"
@@ -124,6 +126,7 @@ boot_shell:
         ;; Values
         boot_ticks_high  dw 0
         boot_ticks_low   dw 0
+        fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         serial_pb_buf    db 0, 0 ; serial pushback buffer (up to 2 bytes)
         serial_pb_count  db 0    ; number of bytes in pushback buffer
         shell_sp dw 0
