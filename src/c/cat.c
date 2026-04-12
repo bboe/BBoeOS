@@ -2,17 +2,15 @@ void main(char *arg) {
     if (arg == 0) {
         die("Usage: cat <filename>\n");
     }
-    char *buffer = DISK_BUFFER;
-    int sector = fs_find(arg, "Is a directory\n");
-    if (!sector) {
+    int fd = open(arg, O_RDONLY);
+    if (fd < 0) {
         die("File not found\n");
     }
-    while (1) {
-        int bytes = fs_read(sector, buffer);
-        if (!bytes) {
-            break;
-        }
+    char *buffer = DISK_BUFFER;
+    int bytes;
+    do {
+        bytes = read(fd, buffer, 512);
         print_buffer(buffer, bytes);
-        sector += 1;
-    }
+    } while (bytes > 0);
+    close(fd);
 }

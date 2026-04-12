@@ -1062,10 +1062,24 @@ handle_jbe:
         jmp encode_rel8_jump
 
 ;;; -----------------------------------------------------------------------
+;;; handle_jg
+;;; -----------------------------------------------------------------------
+handle_jg:
+        mov al, 7Fh
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
 ;;; handle_jge
 ;;; -----------------------------------------------------------------------
 handle_jge:
         mov al, 7Dh
+        jmp encode_rel8_jump
+
+;;; -----------------------------------------------------------------------
+;;; handle_jl
+;;; -----------------------------------------------------------------------
+handle_jl:
+        mov al, 7Ch
         jmp encode_rel8_jump
 
 ;;; -----------------------------------------------------------------------
@@ -3883,7 +3897,9 @@ mnemonic_table:
         dw STR_JBE, handle_jbe
         dw STR_JC,  handle_jc
         dw STR_JE,  handle_jz
+        dw STR_JG,  handle_jg
         dw STR_JGE, handle_jge
+        dw STR_JL,  handle_jl
         dw STR_JLE, handle_jle
         dw STR_JMP, handle_jmp
         dw STR_JNC, handle_jnc
@@ -3941,7 +3957,9 @@ STR_JB      db 'jb',0
 STR_JBE     db 'jbe',0
 STR_JC      db 'jc',0
 STR_JE      db 'je',0
+STR_JG      db 'jg',0
 STR_JGE     db 'jge',0
+STR_JL      db 'jl',0
 STR_JLE     db 'jle',0
 STR_JMP     db 'jmp',0
 STR_JNC     db 'jnc',0
