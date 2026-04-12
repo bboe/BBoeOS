@@ -10,8 +10,14 @@ Grammar:
     type                 := 'void' | 'int' | 'char' '*'
     statement            := variable_declaration | assign_statement | while_statement
                           | call_statement
-    variable_declaration             := type IDENT ('[' ']')? '=' (expression
+    variable_declaration := type IDENT ('[' ']')? '=' (expression
                           | '{' expression_list '}') ';'
+
+Register allocation:
+    Plain ``int`` locals in main are auto-pinned to a CPU register
+    (DX, CX, BX, DI — in declaration order) unless the initializer is
+    a call, in which case the value would interfere with error fusion
+    and the variable goes into memory instead.
     assign               := IDENT '=' expression ';'
                           |  IDENT '+=' expression ';'
     while                := 'while' '(' expression ')' '{' statement* '}'
@@ -29,15 +35,23 @@ Grammar:
                           | '(' expression ')'
 
 Builtins:
-    datetime(array)       -- fill 7-word array with BCD date/time fields
-    die(message)          -- print message and terminate
-    exit()                -- terminate program
-    mkdir(name)           -- create directory, return 0 or ERR_* code
-    print_bcd(expression) -- print BCD byte as two decimal digits
-    print_dec(expression) -- print integer as decimal
-    putc(expression)      -- print single character
-    puts(expression)      -- print string (no auto-newline)
-    uptime()              -- return seconds since boot
+    datetime(array)          -- fill 7-word array with BCD date/time fields
+    die(message)             -- print message and terminate
+    exit()                   -- terminate program
+    fs_find(name, dir_message)
+                             -- find a regular file; return its
+                                starting sector (0 on not found,
+                                dies with dir_message on directory)
+    fs_read(sector, buffer)  -- read sector into buffer (must be
+                                ``DISK_BUFFER``); return the number
+                                of bytes read, or 0 on error
+    mkdir(name)              -- create directory, return 0 or ERR_* code
+    print_bcd(expression)    -- print BCD byte as two decimal digits
+    print_buffer(addr, count)-- print count bytes starting at addr
+    print_dec(expression)    -- print integer as decimal
+    putc(expression)         -- print single character
+    puts(expression)         -- print string (no auto-newline)
+    uptime()                 -- return seconds since boot
 
 Usage: cc.py <input.c> [output.asm]
 """
@@ -84,7 +98,7 @@ JUMP_WHEN_FALSE = {
     "==": "jne",
 }
 
-KEYWORDS = frozenset({"char", "else", "if", "int", "return", "sizeof", "void", "while"})
+KEYWORDS = frozenset({"break", "char", "else", "if", "int", "return", "sizeof", "void", "while"})
 
 TOKEN_PATTERN = re.compile(
     r"""
@@ -144,15 +158,36 @@ class CodeGenerator:
         "datetime": frozenset({"ax", "bx", "cx", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
+        "fs_find": frozenset({"ax", "bx"}),
+        "fs_read": frozenset({"ax", "cx"}),
         "mkdir": frozenset({"ax"}),
         "print_bcd": frozenset({"ax"}),
+        "print_buffer": frozenset({"ax", "cx", "si"}),
         "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
         "putc": frozenset({"ax"}),
         "puts": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
     }
 
+    #: Builtins whose caller typically dies on error, keyed to the C
+    #: condition shape that triggers the die.  ``fs_find`` returns the
+    #: starting sector (0 on not found), so its caller writes
+    #: ``if (!sector) die(...)``, which is the ``zero`` shape.  The
+    #: fusion lowers to a single ``jc .die`` because SYS_FS_FIND
+    #: signals "not found" via CF.
+    DIE_ON_ERROR_BUILTINS: ClassVar[dict[str, str]] = {
+        "fs_find": "zero",
+    }
+
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"mkdir"})
+
+    #: Identifiers that resolve to NASM kernel constants rather than
+    #: user-defined variables.  Emitted verbatim so NASM can resolve
+    #: them from ``constants.asm``.
+    NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({"DISK_BUFFER"})
+
+    #: Registers available for auto-pinning, in allocation order.
+    REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
         "char": 1,
@@ -166,18 +201,21 @@ class CodeGenerator:
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
+        self.ax_is_byte: bool = False
+        self.ax_local: str | None = None
+        self.die_count: int = 0
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
         self.frame_size: int = 0
         self.label_id: int = 0
         self.lines: list[str] = []
         self.locals: dict[str, int] = {}
-        self.ax_is_byte: bool = False
-        self.ax_local: str | None = None
-        self.die_count: int = 0
+        self.loop_end_labels: list[str] = []
         self.needs_argv_buf: bool = False
+        self.needs_fs_read_bytes: bool = False
         self.needs_print_bcd: bool = False
         self.needs_print_dec: bool = False
+        self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
@@ -195,10 +233,18 @@ class CodeGenerator:
 
     @staticmethod
     def always_exits(body: list[tuple], /) -> bool:
-        """Check if a statement list always exits (die/exit/return)."""
+        """Check if a statement list always exits its enclosing block.
+
+        Recognizes ``die(...)``/``exit()``/``return`` (program exits)
+        and ``break`` (loop exit).  Used to elide dead fall-through
+        code and to keep AX tracking alive across an if whose body
+        never falls through.
+        """
         if not body:
             return False
         last = body[-1]
+        if last[0] == "break":
+            return True
         if last[0] == "call" and last[1] in {"die", "exit"}:
             return True
         # Exhaustive if-else: both branches always exit.
@@ -275,6 +321,90 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp .exit")
 
+    def builtin_fs_find(self, arguments: list[tuple], /, *, fuse_die_message: tuple | None = None) -> None:
+        """Generate code for the fs_find() builtin.
+
+        Call signature: ``fs_find(name, dir_message)``.  Looks up
+        ``name`` in the filesystem and returns the starting sector in
+        AX, or ``0`` when the file is not found.  If the entry is a
+        directory, ``dir_message`` is printed via the shared ``.die``
+        label — cat and friends treat that as an error.
+
+        On success the entry's file-size field is also copied into the
+        compiler-managed ``_fs_remaining`` cell so that the shared
+        ``fs_read_bytes`` helper can clamp the last sector's return
+        value to the actual remaining byte count.
+
+        When ``fuse_die_message`` is supplied, the caller's ``!sector``
+        check is fused in: SI is pre-loaded with the not-found message
+        and ``jc .die`` replaces the ``xor ax, ax`` fail path.  The
+        sector value still lands in AX on the success fall-through so
+        the fusion caller can store it into a pinned register or
+        memory local.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="fs_find")
+        name_argument, directory_message_argument = arguments
+        self.emit_si_from_argument(name_argument)
+        self.emit("        mov ah, SYS_FS_FIND")
+        self.emit("        int 30h")
+        if fuse_die_message is not None:
+            # Pre-load SI with the caller's not-found message (mov
+            # preserves CF), then jump straight to .die on CF set.
+            self.emit_si_from_argument(fuse_die_message)
+            self.emit("        jc .die")
+            self.die_count += 1
+        else:
+            done_label = self.new_label()
+            self.emit(f"        jc .fsfd_fail_{done_label}")
+        # Success path: test FLAG_DIR (pre-load directory message so a
+        # match jumps directly to .die), then seed _fs_remaining from
+        # the entry's size field, and finally materialize the sector
+        # in AX for the caller.
+        self.emit_si_from_argument(directory_message_argument)
+        self.emit("        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR")
+        self.emit("        jnz .die")
+        self.die_count += 1
+        self.emit("        mov ax, [bx+DIR_OFF_SIZE]")
+        self.emit("        mov [_fs_remaining], ax")
+        self.emit("        mov ax, [bx+DIR_OFF_SECTOR]")
+        self.needs_fs_read_bytes = True
+        if fuse_die_message is None:
+            self.emit(f"        jmp .fsfd_done_{done_label}")
+            self.emit(f".fsfd_fail_{done_label}:")
+            self.emit("        xor ax, ax")
+            self.emit(f".fsfd_done_{done_label}:")
+        self.ax_clear()
+
+    def builtin_fs_read(self, arguments: list[tuple], /) -> None:
+        """Generate code for the fs_read() builtin.
+
+        Call signature: ``fs_read(sector, buffer)``.  The ``buffer``
+        argument must evaluate to the kernel-wired ``DISK_BUFFER`` and
+        exists only to make the data destination explicit at the C
+        source level — SYS_FS_READ always writes there.
+
+        Returns the number of bytes read (at most 512, or fewer if the
+        current file ends inside this sector) and ``0`` at end of file
+        or on a disk error.  All of that bookkeeping happens inside
+        the shared ``fs_read_bytes`` helper, which uses the hidden
+        ``_fs_remaining`` cell that ``fs_find`` seeded with the file's
+        byte size.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="fs_read")
+        sector_argument, _buffer_argument = arguments
+        if sector_argument[0] == "variable" and sector_argument[1] in self.pinned_register:
+            register = self.pinned_register[sector_argument[1]]
+            if register != "cx":
+                self.emit(f"        mov cx, {register}")
+        elif sector_argument[0] == "variable" and sector_argument[1] in self.locals:
+            self.emit(f"        mov cx, [{self.local_address(sector_argument[1])}]")
+        else:
+            self.generate_expression(sector_argument)
+            self.emit("        mov cx, ax")
+        self.emit("        call fs_read_bytes")
+        self.needs_fs_read_bytes = True
+        self.ax_clear()
+
     def builtin_mkdir(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
 
@@ -314,6 +444,57 @@ class CodeGenerator:
         self.emit("        call print_bcd")
         self.needs_print_bcd = True
 
+    def builtin_print_buffer(self, arguments: list[tuple], /) -> None:
+        """Generate code for the print_buffer() builtin.
+
+        Emits a tight ``lodsb``/``loop`` sequence that prints ``count``
+        bytes starting at ``addr``.  Arguments are loaded directly into
+        SI and CX when possible to avoid intermediate moves through AX.
+
+        When a pinned register variable lives in CX or SI — registers
+        that ``lodsb`` and ``loop`` destroy — the value is saved on the
+        stack around the print loop and restored afterwards.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="print_buffer")
+        address_argument, count_argument = arguments
+        # Identify pinned register variables that would be clobbered.
+        registers_to_save = [register for register in ("cx", "si") if register in self.pinned_register.values()]
+        for register in registers_to_save:
+            self.emit(f"        push {register}")
+        if address_argument[0] == "int":
+            self.emit(f"        mov si, {address_argument[1]}")
+        elif address_argument[0] == "variable" and address_argument[1] in self.pinned_register:
+            source_register = self.pinned_register[address_argument[1]]
+            if source_register != "si":
+                self.emit(f"        mov si, {source_register}")
+        elif address_argument[0] == "variable" and address_argument[1] in self.locals:
+            self.emit(f"        mov si, [{self.local_address(address_argument[1])}]")
+        else:
+            self.generate_expression(address_argument)
+            self.emit("        mov si, ax")
+        if count_argument[0] == "int":
+            self.emit(f"        mov cx, {count_argument[1]}")
+        elif count_argument[0] == "variable" and count_argument[1] == self.ax_local:
+            self.emit("        mov cx, ax")
+        elif count_argument[0] == "variable" and count_argument[1] in self.pinned_register:
+            source_register = self.pinned_register[count_argument[1]]
+            if source_register != "cx":
+                self.emit(f"        mov cx, {source_register}")
+        elif count_argument[0] == "variable" and count_argument[1] in self.locals:
+            self.emit(f"        mov cx, [{self.local_address(count_argument[1])}]")
+        else:
+            self.generate_expression(count_argument)
+            self.emit("        mov cx, ax")
+        label_index = self.new_label()
+        self.emit(f".pb_{label_index}:")
+        self.emit("        lodsb")
+        self.emit("        mov ah, SYS_IO_PUTC")
+        self.emit("        int 30h")
+        self.emit(f"        loop .pb_{label_index}")
+        for register in reversed(registers_to_save):
+            self.emit(f"        pop {register}")
+        self.ax_clear()
+
     def builtin_print_dec(self, arguments: list[tuple], /) -> None:
         """Generate code for the print_dec() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
@@ -348,6 +529,31 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
 
+    def can_auto_pin(self, *, following_statement: tuple | None, statement: tuple) -> bool:
+        """Decide whether *statement* should be auto-pinned to a register."""
+        if len(self.pinned_register) >= len(self.REGISTER_POOL):
+            return False
+        init = statement[2]
+        if init is None:
+            return True
+        if init[0] != "call":
+            return True
+        # Call initializers generally stay in memory so they can
+        # participate in mkdir-style error-return fusion without
+        # clobbering a pin.  The one exception is ``fs_find``
+        # followed by ``if (!sector) die(...)`` — the die-fusion
+        # post-stores AX into the pinned register, giving the caller
+        # the sector value directly.
+        if init[1] != "fs_find" or following_statement is None:
+            return False
+        return (
+            self.extract_zero_die(
+                statement=following_statement,
+                variable_name=statement[1],
+            )
+            is not None
+        )
+
     @staticmethod
     def check_argument_count(*, arguments: list[tuple], expected: int, name: str) -> None:
         """Raise SyntaxError if the argument count doesn't match expected."""
@@ -360,7 +566,9 @@ class CodeGenerator:
 
     def check_defined(self, name: str, /) -> None:
         """Raise SyntaxError if a variable is not defined."""
-        if name not in self.locals:
+        if name in self.NAMED_CONSTANTS:
+            return
+        if name not in self.locals and name not in self.pinned_register:
             message = f"undefined variable: {name}"
             raise SyntaxError(message)
 
@@ -435,6 +643,9 @@ class CodeGenerator:
         if right[0] == "int":
             self.generate_expression(left)
             self.emit(f"        mov cx, {right[1]}")
+        elif right[0] == "variable" and right[1] in self.pinned_register:
+            self.generate_expression(left)
+            self.emit(f"        mov cx, {self.pinned_register[right[1]]}")
         elif right[0] == "variable" and right[1] in self.locals:
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self.local_address(right[1])}]")
@@ -449,9 +660,18 @@ class CodeGenerator:
         """Generate a comparison, leaving flags set for a conditional jump.
 
         Optimizes comparisons against integer constants by using
-        ``cmp ax, imm`` directly, and ``test ax, ax`` for zero.
+        ``cmp ax, imm`` directly, and ``test ax, ax`` for zero.  Pinned
+        register variables compare against constants in place, skipping
+        the load into AX.
         """
         if right[0] == "int":
+            if left[0] == "variable" and left[1] in self.pinned_register:
+                register = self.pinned_register[left[1]]
+                if right[1] == 0:
+                    self.emit(f"        test {register}, {register}")
+                else:
+                    self.emit(f"        cmp {register}, {right[1]}")
+                return
             self.generate_expression(left)
             if right[1] == 0:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
@@ -485,11 +705,56 @@ class CodeGenerator:
             self.emit("        mov si, ax")
 
     def emit_store_local(self, *, expression: tuple, name: str) -> None:
-        """Generate an expression and store the result in a local variable."""
+        """Generate an expression and store the result in a local variable.
+
+        When ``name`` is pinned to a register, the value is written to
+        that register instead of the memory frame.  Constant
+        initializers — integers, string literals, or named kernel
+        constants — are moved directly into the pinned register
+        without going through AX, so the caller's AX tracking (e.g.
+        ``arg`` left by the argv startup) survives the store.
+        """
+        if name in self.pinned_register:
+            register = self.pinned_register[name]
+            if expression[0] == "int":
+                if expression[1] == 0:
+                    self.emit(f"        xor {register}, {register}")
+                else:
+                    self.emit(f"        mov {register}, {expression[1]}")
+                return
+            if expression[0] == "string":
+                label = self.new_string_label(expression[1])
+                self.emit(f"        mov {register}, {label}")
+                return
+            if expression[0] == "variable" and expression[1] in self.NAMED_CONSTANTS:
+                self.emit(f"        mov {register}, {expression[1]}")
+                return
         self.generate_expression(expression)
-        self.emit(f"        mov [{self.local_address(name)}], ax")
+        if name in self.pinned_register:
+            register = self.pinned_register[name]
+            self.emit(f"        mov {register}, ax")
+        else:
+            self.emit(f"        mov [{self.local_address(name)}], ax")
         self.ax_is_byte = False
         self.ax_local = name
+
+    @staticmethod
+    def extract_conditional_die(*, operator: str, statement: tuple, variable_name: str) -> tuple | None:
+        """Shared helper for ``extract_nonzero_die``/``extract_zero_die``."""
+        if statement[0] != "if":
+            return None
+        condition, body, else_body = statement[1], statement[2], statement[3]
+        if else_body is not None or len(body) != 1:
+            return None
+        call = body[0]
+        if call[0] != "call" or call[1] != "die":
+            return None
+        if condition[0] != "binary_operator" or condition[1] != operator:
+            return None
+        left, right = condition[2], condition[3]
+        if right != ("int", 0) or left != ("variable", variable_name):
+            return None
+        return call[2][0]
 
     @staticmethod
     def extract_local_label(line: str, /) -> str | None:
@@ -501,6 +766,34 @@ class CodeGenerator:
         if line.startswith("_l_") and line.endswith(": dw 0"):
             return line[: line.index(":")]
         return None
+
+    @staticmethod
+    def extract_nonzero_die(*, statement: tuple, variable_name: str) -> tuple | None:
+        """Return the die message node for a matching nonzero-die if.
+
+        Matches ``if (variable_name != 0) { die(message); }`` and
+        returns the die message AST node, or ``None`` otherwise.
+        """
+        return CodeGenerator.extract_conditional_die(
+            operator="!=",
+            statement=statement,
+            variable_name=variable_name,
+        )
+
+    @staticmethod
+    def extract_zero_die(*, statement: tuple, variable_name: str) -> tuple | None:
+        """Return the die message node for a matching zero-die if.
+
+        Matches ``if (variable_name == 0) { die(message); }`` — the
+        ``!variable_name`` form is desugared to this shape by the
+        parser — and returns the die message AST node, or ``None``
+        otherwise.
+        """
+        return CodeGenerator.extract_conditional_die(
+            operator="==",
+            statement=statement,
+            variable_name=variable_name,
+        )
 
     def fuse_trailing_puts(self, body: list[tuple], /) -> list[tuple]:
         """Transform trailing puts() calls into die() for main.
@@ -546,19 +839,27 @@ class CodeGenerator:
                     self.emit(f"{label}: dw {', '.join(elements)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
+        if self.needs_fs_read_bytes:
+            self.emit("_fs_remaining: dw 0")
         if self.needs_print_bcd:
             self.emit('%include "print_bcd.asm"')
         if self.needs_print_dec:
             self.emit('%include "print_dec.asm"')
+        if self.needs_fs_read_bytes:
+            self.emit('%include "fs_read_bytes.asm"')
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[tuple], /) -> None:
         """Generate code for a sequence of statements.
 
-        Applies two fusions:
+        Applies several fusions:
         - ``puts(msg); exit();`` → ``die(msg)``
         - ``int err = syscall(...); if (err == 0) { exit(); }`` →
           syscall with ``jnc .exit`` (skip error-code conversion)
+        - ``int err = syscall(...); if (err != 0) { die(msg); }`` →
+          syscall with pre-loaded SI and ``jc .die`` (skip sbb)
+        - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
+          conditional jump to ``.die``, skipping the if-body dance
         """
         i = 0
         while i < len(statements):
@@ -568,8 +869,48 @@ class CodeGenerator:
                 self.builtin_die(statement[2])
                 i += 2
                 continue
-            # Fuse error-returning syscall + if-zero-exit.
+            # Fuse die-on-error syscall + if-(non)zero-die.
             init = statement[2] if statement[0] == "variable_declaration" else None
+            if init is not None and init[0] == "call" and init[1] in self.DIE_ON_ERROR_BUILTINS and i + 1 < len(statements):
+                pattern = self.DIE_ON_ERROR_BUILTINS[init[1]]
+                extractor = self.extract_zero_die if pattern == "zero" else self.extract_nonzero_die
+                die_message = extractor(statement=statements[i + 1], variable_name=statement[1])
+                if die_message is not None:
+                    call_node = init
+                    handler = getattr(self, f"builtin_{call_node[1]}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
+                    if self.register_cache and clobbers:
+                        self.auto_spill(clobbers=clobbers)
+                    handler(call_node[2], fuse_die_message=die_message)
+                    # fs_find leaves the sector value in AX on the
+                    # success fall-through — commit it to the caller's
+                    # variable.  fs_read has no such value (int 30h
+                    # clobbered AX), so skip the store.
+                    if call_node[1] == "fs_find":
+                        variable_name = statement[1]
+                        if variable_name in self.pinned_register:
+                            self.emit(f"        mov {self.pinned_register[variable_name]}, ax")
+                        elif variable_name in self.locals:
+                            self.emit(f"        mov [{self.local_address(variable_name)}], ax")
+                        self.ax_is_byte = False
+                        self.ax_local = variable_name
+                    i += 2
+                    continue
+            # Fuse `if (cond) { die(msg); }` into pre-load SI + jCC .die.
+            # AX tracking is preserved because the die path doesn't fall
+            # through — the continuation path sees AX unchanged from before.
+            if statement[0] == "if" and statement[3] is None and len(statement[2]) == 1:
+                inner = statement[2][0]
+                if inner[0] == "call" and inner[1] == "die" and statement[1][0] == "binary_operator" and statement[1][1] in JUMP_WHEN_FALSE:
+                    die_message = inner[2][0]
+                    self.emit_si_from_argument(die_message)
+                    operator = self.emit_condition(condition=statement[1], context="if")
+                    true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
+                    self.emit(f"        {true_jump} .die")
+                    self.die_count += 1
+                    i += 1
+                    continue
+            # Fuse error-returning syscall + if-zero-exit.
             if init is not None and init[0] == "call" and init[1] in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
                 next_stmt = statements[i + 1]
                 skip = 0
@@ -627,8 +968,15 @@ class CodeGenerator:
             self.emit(f"        mov ax, {self.new_string_label(expression[1])}")
         elif kind == "variable":
             vname = expression[1]
+            if vname in self.NAMED_CONSTANTS:
+                self.emit(f"        mov ax, {vname}")
+                self.ax_clear()
+                return
             self.check_defined(vname)
-            self.emit(f"        mov ax, [{self.local_address(vname)}]")
+            if vname in self.pinned_register:
+                self.emit(f"        mov ax, {self.pinned_register[vname]}")
+            else:
+                self.emit(f"        mov ax, [{self.local_address(vname)}]")
             self.ax_is_byte = False
             self.ax_local = vname
         elif kind == "index":
@@ -679,10 +1027,10 @@ class CodeGenerator:
         elif kind == "call":
             self.generate_call(expression)
         elif kind == "binary_operator":
-            self.ax_clear()
             _, operator, left, right = expression
             if operator == "%" and self.has_remainder(left, right):
                 self.emit("        mov ax, dx")
+                self.ax_clear()
                 return
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
@@ -704,6 +1052,7 @@ class CodeGenerator:
             else:
                 message = f"unknown operator: {operator}"
                 raise SyntaxError(message)
+            self.ax_clear()
         else:
             message = f"unknown expression: {kind}"
             raise SyntaxError(message)
@@ -718,6 +1067,7 @@ class CodeGenerator:
         self.elide_frame = name == "main"
         self.frame_size = 0
         self.locals = {}
+        self.pinned_register = {}
         self.register_cache = {}
         self.spill_stack = []
 
@@ -786,8 +1136,10 @@ class CodeGenerator:
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
             self.generate_body(body)
             self.emit(f".if_{label_index}_end:")
-            # If the body always exits, AX is unchanged on the fall-through path.
-            if body and body[-1][0] == "call" and body[-1][1] in {"die", "exit"}:
+            # If the body always exits its enclosing block (via die,
+            # exit, return, or break), AX is unchanged on the
+            # fall-through path.
+            if self.always_exits(body):
                 self.ax_local, self.ax_is_byte = saved_ax
             else:
                 self.ax_clear()
@@ -823,6 +1175,11 @@ class CodeGenerator:
                 self.emit(f"        mov word [{self.local_address(vname)}], {array_label}")
         elif kind == "assignment":
             self.emit_store_local(expression=statement[2], name=statement[1])
+        elif kind == "break":
+            if not self.loop_end_labels:
+                message = "break outside of a loop"
+                raise SyntaxError(message)
+            self.emit(f"        jmp {self.loop_end_labels[-1]}")
         elif kind == "if":
             self.generate_if(statement)
         elif kind == "while":
@@ -836,15 +1193,27 @@ class CodeGenerator:
             raise SyntaxError(message)
 
     def generate_while(self, statement: tuple, /) -> None:
-        """Generate assembly for a while loop."""
+        """Generate assembly for a while loop.
+
+        ``while (1)`` and other statically-nonzero conditions skip the
+        header check entirely.  The end label is still emitted so a
+        ``break`` statement inside the body has a target; when no
+        ``break`` is present the label is dead and costs nothing.
+        """
         _, condition, body = statement
         label_index = self.new_label()
+        end_label = f".while_{label_index}_end"
         self.emit(f".while_{label_index}:")
-        operator = self.emit_condition(condition=condition, context="while")
-        self.emit(f"        {JUMP_WHEN_FALSE[operator]} .while_{label_index}_end")
-        self.generate_body(body)
+        self.loop_end_labels.append(end_label)
+        if self.is_constant_true_condition(condition):
+            self.generate_body(body)
+        else:
+            operator = self.emit_condition(condition=condition, context="while")
+            self.emit(f"        {JUMP_WHEN_FALSE[operator]} {end_label}")
+            self.generate_body(body)
         self.emit(f"        jmp .while_{label_index}")
-        self.emit(f".while_{label_index}_end:")
+        self.emit(f"{end_label}:")
+        self.loop_end_labels.pop()
 
     def has_remainder(self, left: tuple, right: tuple, /) -> bool:
         """Check if DX already holds left % right.
@@ -880,6 +1249,20 @@ class CodeGenerator:
                 self.lines.insert(i + 1, "        int 30h")
                 self.lines.insert(i + 2, "        jmp .exit")
                 return
+
+    @staticmethod
+    def is_constant_true_condition(condition: tuple, /) -> bool:
+        """Return True if *condition* is statically nonzero.
+
+        ``parse_condition`` wraps bare expressions as ``expr != 0``,
+        so ``while (1)`` reaches here as
+        ``binary_operator("!=", ("int", 1), ("int", 0))``.
+        """
+        if condition[0] != "binary_operator" or condition[1] != "!=":
+            return False
+        if condition[3] != ("int", 0):
+            return False
+        return condition[2][0] == "int" and condition[2][1] != 0
 
     @staticmethod
     def is_modulo_of(*, base: tuple, expression: tuple) -> bool:
@@ -938,8 +1321,63 @@ class CodeGenerator:
         self.peephole_dead_code()
         self.peephole_double_jump()
         self.peephole_jump_next()
+        self.peephole_label_forwarding()
         self.peephole_store_reload()
+        self.peephole_memory_arithmetic()
+        self.peephole_constant_to_register()
+        self.peephole_dead_ah()
+        self.peephole_unused_cld()
         self.peephole_dead_stores()
+        self.peephole_dead_test_after_sbb()
+
+    def peephole_constant_to_register(self) -> None:
+        """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
+
+        Replaces the two-instruction load with ``mov <reg>, imm`` or,
+        when the constant is zero, ``xor <reg>, <reg>`` (one byte
+        shorter).
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            immediate = a[len("mov ax, ") :]
+            if immediate.startswith("[") or immediate in registers:
+                i += 1
+                continue
+            if not b.startswith("mov "):
+                i += 1
+                continue
+            parts = b[len("mov ") :].split(", ")
+            if len(parts) != 2 or parts[1] != "ax" or parts[0] not in registers:
+                i += 1
+                continue
+            register = parts[0]
+            if immediate == "0":
+                self.lines[i] = f"        xor {register}, {register}"
+            else:
+                self.lines[i] = f"        mov {register}, {immediate}"
+            del self.lines[i + 1]
+            continue
+
+    def peephole_dead_ah(self) -> None:
+        """Drop ``xor ah, ah`` when the next instruction writes AH.
+
+        The zero-extension after ``mov al, [mem]`` is dead when the
+        following statement immediately loads a new value into AH.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "xor ah, ah" and b.startswith("mov ah, "):
+                del self.lines[i]
+                continue
+            i += 1
 
     def peephole_dead_code(self) -> None:
         """Remove unreachable instructions after unconditional jumps."""
@@ -971,6 +1409,21 @@ class CodeGenerator:
             result.append(line)
         self.lines = result
 
+    def peephole_dead_test_after_sbb(self) -> None:
+        """Drop ``test ax, ax`` immediately after ``sbb ax, ax``.
+
+        The sbb produces 0 (CF clear) or -1 (CF set) and already
+        sets ZF correctly, so the compiler's follow-up test is dead.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "sbb ax, ax" and b == "test ax, ax":
+                del self.lines[i + 1]
+                continue
+            i += 1
+
     def peephole_double_jump(self) -> None:
         """Collapse conditional-jump-over-unconditional-jump sequences.
 
@@ -1001,6 +1454,117 @@ class CodeGenerator:
                 continue
             i += 1
 
+    def peephole_label_forwarding(self) -> None:
+        """Retarget jumps through a label that immediately trampolines.
+
+        When an unreachable-by-fall-through label ``.L1:`` is followed
+        by ``jmp .L2``, rewrite every ``jCC .L1`` in the rest of the
+        function to ``jCC .L2`` and drop the label/jmp pair.  "No
+        fall-through" is proven by requiring the previous line to be
+        an unconditional ``jmp`` — that's the shape ``break`` at the
+        end of a ``while (1)`` body produces right before the
+        implicit program exit.
+        """
+        jumps = {
+            "ja",
+            "jae",
+            "jb",
+            "jbe",
+            "jc",
+            "je",
+            "jg",
+            "jge",
+            "jl",
+            "jle",
+            "jmp",
+            "jnc",
+            "jne",
+            "jno",
+            "jnp",
+            "jns",
+            "jnz",
+            "jo",
+            "jp",
+            "js",
+            "jz",
+        }
+        i = 1
+        while i < len(self.lines) - 1:
+            previous_line = self.lines[i - 1].strip()
+            label_line = self.lines[i].strip()
+            next_line = self.lines[i + 1].strip()
+            if not previous_line.startswith("jmp "):
+                i += 1
+                continue
+            if not (label_line.endswith(":") and " " not in label_line):
+                i += 1
+                continue
+            if not next_line.startswith("jmp "):
+                i += 1
+                continue
+            old_label = label_line[:-1]
+            new_target = next_line[len("jmp ") :]
+            if old_label == new_target:
+                i += 1
+                continue
+            for j in range(len(self.lines)):
+                if j == i or j == i + 1:
+                    continue
+                stripped = self.lines[j].strip()
+                parts = stripped.split(None, 1)
+                if len(parts) == 2 and parts[0] in jumps and parts[1] == old_label:
+                    self.lines[j] = self.lines[j].replace(old_label, new_target)
+            del self.lines[i : i + 2]
+            i = max(1, i - 1)
+
+    def peephole_memory_arithmetic(self) -> None:
+        """Fuse load/modify/store sequences into direct arithmetic.
+
+        Handles these patterns where ``D`` is either a memory operand
+        ``[L]`` or a 16-bit general-purpose register:
+        - ``mov ax, D / mov cx, 1 / add ax, cx / mov D, ax`` →
+          ``inc D`` (or ``inc word [L]`` for memory)
+        - ``mov ax, D / mov cx, 1 / sub ax, cx / mov D, ax`` →
+          ``dec D`` (or ``dec word [L]`` for memory)
+        - ``mov ax, D / mov cx, imm / (add|sub) ax, cx /
+          mov D, ax`` → ``(add|sub) D, imm``
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        i = 0
+        while i < len(self.lines) - 3:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            d = self.lines[i + 3].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            is_memory = source.startswith("[") and source.endswith("]")
+            is_register = source in registers
+            if not (is_memory or is_register):
+                i += 1
+                continue
+            if not (b.startswith("mov cx, ") and not b.endswith("]")):
+                i += 1
+                continue
+            if c not in {"add ax, cx", "sub ax, cx"}:
+                i += 1
+                continue
+            if d != f"mov {source}, ax":
+                i += 1
+                continue
+            immediate = b[len("mov cx, ") :]
+            operator = "add" if c == "add ax, cx" else "sub"
+            width = "word " if is_memory else ""
+            if immediate == "1":
+                instruction = "inc" if operator == "add" else "dec"
+                self.lines[i] = f"        {instruction} {width}{source}"
+            else:
+                self.lines[i] = f"        {operator} {width}{source}, {immediate}"
+            del self.lines[i + 1 : i + 4]
+            continue
+
     def peephole_store_reload(self) -> None:
         """Remove redundant store-then-reload sequences."""
         i = 0
@@ -1013,10 +1577,40 @@ class CodeGenerator:
                 continue
             i += 1
 
+    def peephole_unused_cld(self) -> None:
+        """Remove ``cld`` when no string instruction is emitted.
+
+        The argv parser and single-char* startup emit ``cld`` for
+        legacy reasons but never issue ``lodsb``/``stosb``/``rep``.
+        """
+        string_ops = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
+        for line in self.lines:
+            stripped = line.strip()
+            if any(stripped.startswith(op) for op in string_ops):
+                return
+        self.lines = [line for line in self.lines if line.strip() != "cld"]
+
     def scan_locals(self, statements: list[tuple], /) -> None:
-        """Recursively find all variable declarations to size the frame."""
-        for statement in statements:
-            if statement[0] in {"variable_declaration", "array_declaration"}:
+        """Recursively find variable declarations.
+
+        Plain ``int`` declarations are auto-pinned to a CPU register
+        (from :data:`REGISTER_POOL`, in declaration order) when a slot
+        is still available.  A call initializer is normally skipped
+        because it usually participates in the error-fusion optim-
+        izations that reuse AX and would conflict with a pinned
+        destination — the one exception is ``fs_find`` when it is
+        followed by an ``if (!variable) die(...)``, because that
+        fusion leaves the sector value in AX on fall-through and the
+        die-fusion site explicitly stores it into the pin.
+        """
+        for index, statement in enumerate(statements):
+            if statement[0] == "variable_declaration":
+                following = statements[index + 1] if index + 1 < len(statements) else None
+                if self.can_auto_pin(following_statement=following, statement=statement):
+                    self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
+                    continue
+                self.allocate_local(statement[1])
+            elif statement[0] == "array_declaration":
                 self.allocate_local(statement[1])
             elif statement[0] == "if":
                 self.scan_locals(statement[2])
@@ -1186,6 +1780,22 @@ class Parser:
         # Desugar: i += expr  →  i = i + expr
         return ("assignment", name, ("binary_operator", "+", ("variable", name), expression))
 
+    def parse_condition(self) -> tuple:
+        """Parse an if/while condition.
+
+        Wraps a bare expression as ``expr != 0`` so that ``if (error)``
+        is equivalent to ``if (error != 0)``.  Comparisons at the top
+        level are returned unchanged.
+
+        Returns:
+            A binary_operator AST node suitable for conditional jumps.
+
+        """
+        expression = self.parse_expression()
+        if expression[0] == "binary_operator" and expression[1] in JUMP_WHEN_FALSE:
+            return expression
+        return ("binary_operator", "!=", expression, ("int", 0))
+
     def parse_expression(self) -> tuple:
         """Parse an expression.
 
@@ -1219,7 +1829,7 @@ class Parser:
         """
         self.eat("IF")
         self.eat("LPAREN")
-        condition = self.parse_expression()
+        condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("LBRACE")
         body = self.parse_block()
@@ -1367,6 +1977,10 @@ class Parser:
             return self.parse_variable_declaration()
         if token[0] == "IF":
             return self.parse_if()
+        if token[0] == "BREAK":
+            self.eat("BREAK")
+            self.eat("SEMI")
+            return ("break",)
         if token[0] == "RETURN":
             self.eat("RETURN")
             self.eat("SEMI")
@@ -1442,7 +2056,7 @@ class Parser:
         """
         self.eat("WHILE")
         self.eat("LPAREN")
-        condition = self.parse_expression()
+        condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("LBRACE")
         return ("while", condition, self.parse_block())
