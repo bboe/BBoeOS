@@ -234,6 +234,7 @@ class CodeGenerator:
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
+        self.visible_vars: set[str] = set()
 
     def allocate_local(self, name: str, /) -> int:
         """Allocate a 2-byte local variable on the stack frame.
@@ -644,10 +645,10 @@ class CodeGenerator:
             raise SyntaxError(message)
 
     def check_defined(self, name: str, /) -> None:
-        """Raise SyntaxError if a variable is not defined."""
+        """Raise SyntaxError if a variable is not in scope."""
         if name in self.NAMED_CONSTANTS:
             return
-        if name not in self.locals and name not in self.pinned_register:
+        if name not in self.visible_vars:
             message = f"undefined variable: {name}"
             raise SyntaxError(message)
 
@@ -952,8 +953,11 @@ class CodeGenerator:
             self.emit('%include "fs_read_bytes.asm"')
         return "\n".join(self.lines) + "\n"
 
-    def generate_body(self, statements: list[tuple], /) -> None:
+    def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:  # noqa: PLR0914
         """Generate code for a sequence of statements.
+
+        When *scoped* is True, variables declared inside the block are
+        removed from ``visible_vars`` when the block ends.
 
         Applies several fusions:
         - ``puts(msg); exit();`` → ``die(msg)``
@@ -964,6 +968,7 @@ class CodeGenerator:
         - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
           conditional jump to ``.die``, skipping the if-body dance
         """
+        saved = self.visible_vars.copy() if scoped else None
         i = 0
         while i < len(statements):
             statement = statements[i]
@@ -979,6 +984,7 @@ class CodeGenerator:
                 extractor = self.extract_zero_die if pattern == "zero" else self.extract_nonzero_die
                 die_message = extractor(statement=statements[i + 1], variable_name=statement[1])
                 if die_message is not None:
+                    self.visible_vars.add(statement[1])
                     call_node = init
                     handler = getattr(self, f"builtin_{call_node[1]}")
                     clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
@@ -1022,6 +1028,7 @@ class CodeGenerator:
                 elif next_stmt[0] == "if" and not self.is_zero_test(next_stmt[1]):
                     skip = 1  # skip declaration only, process if-else normally
                 if skip:
+                    self.visible_vars.add(statement[1])
                     call_node = statement[2]
                     handler = getattr(self, f"builtin_{call_node[1]}")
                     clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
@@ -1034,6 +1041,8 @@ class CodeGenerator:
                     continue
             self.generate_statement(statement)
             i += 1
+        if saved is not None:
+            self.visible_vars = saved
 
     def generate_call(self, statement: tuple, /) -> None:
         """Generate code for a function call statement.
@@ -1064,7 +1073,7 @@ class CodeGenerator:
         end_label = f".do_{label_index}_end"
         self.emit(f".do_{label_index}:")
         self.loop_end_labels.append(end_label)
-        self.generate_body(body)
+        self.generate_body(body, scoped=True)
         operator = self.emit_condition(condition=condition, context="do_while")
         # Jump back to top when condition is TRUE (invert the false-jump)
         true_jump = {"!=": "jne", "<": "jl", "<=": "jle", ">": "jg", ">=": "jge", "==": "je"}
@@ -1200,6 +1209,13 @@ class CodeGenerator:
 
         self.scan_locals(body)
 
+        # Seed visible_vars with parameters and pinned variables.
+        # Block-scoped locals become visible when their declaration
+        # is reached during code generation.
+        for _type, pname, _is_array in parameters:
+            self.visible_vars.add(pname)
+        self.visible_vars.update(self.pinned_register)
+
         self.emit(f"{name}:")
         if not self.elide_frame and self.frame_size > 0:
             self.emit("        push bp")
@@ -1244,20 +1260,20 @@ class CodeGenerator:
         saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_else")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
                 self.emit(f"        jmp .if_{label_index}_end")
             self.emit(f".if_{label_index}_else:")
             # On the else path, AX is unchanged (comparison doesn't modify it).
             self.ax_local, self.ax_is_byte = saved_ax
-            self.generate_body(else_body)
+            self.generate_body(else_body, scoped=True)
             if not if_exits or not self.always_exits(else_body):
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
             # exit, return, or break), AX is unchanged on the
@@ -1277,10 +1293,12 @@ class CodeGenerator:
         kind = statement[0]
         if kind == "variable_declaration":
             _, vname, init = statement
+            self.visible_vars.add(vname)
             if init is not None:
                 self.emit_store_local(expression=init, name=vname)
         elif kind == "array_declaration":
             _, vname, init = statement
+            self.visible_vars.add(vname)
             if init is not None and init[0] == "array_init":
                 elem_labels = []
                 for elem in init[1]:
@@ -1332,11 +1350,11 @@ class CodeGenerator:
         self.emit(f".while_{label_index}:")
         self.loop_end_labels.append(end_label)
         if self.is_constant_true_condition(condition):
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
         else:
             operator = self.emit_condition(condition=condition, context="while")
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} {end_label}")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
         self.emit(f"        jmp .while_{label_index}")
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
@@ -1716,7 +1734,7 @@ class CodeGenerator:
                 return
         self.lines = [line for line in self.lines if line.strip() != "cld"]
 
-    def scan_locals(self, statements: list[tuple], /) -> None:
+    def scan_locals(self, statements: list[tuple], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
 
         Plain ``int`` declarations are auto-pinned to a CPU register
@@ -1731,19 +1749,20 @@ class CodeGenerator:
         """
         for index, statement in enumerate(statements):
             if statement[0] == "variable_declaration":
-                following = statements[index + 1] if index + 1 < len(statements) else None
-                if self.can_auto_pin(following_statement=following, statement=statement):
-                    self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
-                    continue
+                if top_level:
+                    following = statements[index + 1] if index + 1 < len(statements) else None
+                    if self.can_auto_pin(following_statement=following, statement=statement):
+                        self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
+                        continue
                 self.allocate_local(statement[1])
             elif statement[0] == "array_declaration":
                 self.allocate_local(statement[1])
             elif statement[0] == "if":
-                self.scan_locals(statement[2])
+                self.scan_locals(statement[2], top_level=False)
                 if statement[3] is not None:
-                    self.scan_locals(statement[3])
+                    self.scan_locals(statement[3], top_level=False)
             elif statement[0] in ("do_while", "while"):
-                self.scan_locals(statement[2])
+                self.scan_locals(statement[2], top_level=False)
 
     @staticmethod
     def transform_branch_puts(body: list[tuple], /) -> list[tuple]:
