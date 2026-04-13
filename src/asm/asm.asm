@@ -1972,8 +1972,11 @@ handle_test:
         call skip_comma
         cmp byte [op1_type], 0
         jne .test_mem
-        ;; test r, r: second operand is register
-        call parse_register
+        ;; First operand is a register — check if second is register or immediate
+        call skip_ws
+        call parse_register    ; CF set if not a register (= immediate)
+        jc .test_r_imm
+        ;; test r, r
         mov bl, [op1_reg]      ; BL = dst reg
         push ax
         cmp byte [op1_size], 8
@@ -1987,6 +1990,47 @@ handle_test:
         pop ax
         call make_modrm_reg_reg
         call emit_byte_al
+        ret
+        .test_r_imm:
+        ;; test r, imm
+        call resolve_value     ; AX = immediate
+        push ax
+        cmp byte [op1_size], 8
+        jne .test_r16_imm
+        ;; test r8, imm8: short form for AL (A8), general form (F6 /0)
+        cmp byte [op1_reg], 0  ; AL?
+        jne .test_r8_general
+        mov al, 0A8h
+        call emit_byte_al
+        pop ax
+        call emit_byte_al
+        ret
+        .test_r8_general:
+        mov al, 0F6h
+        call emit_byte_al
+        mov al, [op1_reg]
+        or al, 0C0h            ; modrm: mod=11, /0, rm=reg
+        call emit_byte_al
+        pop ax
+        call emit_byte_al
+        ret
+        .test_r16_imm:
+        ;; test r16, imm16: short form for AX (A9), general form (F7 /0)
+        cmp byte [op1_reg], 0  ; AX?
+        jne .test_r16_general
+        mov al, 0A9h
+        call emit_byte_al
+        pop ax
+        call emit_word_ax
+        ret
+        .test_r16_general:
+        mov al, 0F7h
+        call emit_byte_al
+        mov al, [op1_reg]
+        or al, 0C0h
+        call emit_byte_al
+        pop ax
+        call emit_word_ax
         ret
         .test_mem:
         ;; test byte [reg+disp], imm8: F6 modrm [disp] imm8

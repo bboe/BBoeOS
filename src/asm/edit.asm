@@ -31,71 +31,62 @@ main:
         jz .usage
         mov [filename], bx
 
-        ;; Try to find the file in the directory
+        ;; Try to open the file for reading
         mov si, bx
-        mov ah, SYS_FS_FIND
+        mov al, O_RDONLY
+        mov ah, SYS_IO_OPEN
         int 30h
-        jc .new_file            ; file not found -- create it
+        jc .new_file            ; file not found -- create on first save
 
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
-        jnz .is_dir
-
-        ;; Record original on-disk size and start sector. DIR_OFF_SIZE is
-        ;; 32-bit; the gap buffer tops out at BUF_SIZE so anything larger
-        ;; (including sizes with a nonzero high word) cannot be edited.
-        mov ax, [bx+DIR_OFF_SIZE+2]
-        test ax, ax
-        jnz .too_big
-        mov ax, [bx+DIR_OFF_SIZE]
-        cmp ax, BUF_SIZE
-        ja .too_big
-        mov [orig_size], ax
-        mov ax, [bx+DIR_OFF_SECTOR]
-        mov [file_sector], ax
+        ;; Get file size via fstat
+        mov bx, ax             ; BX = fd
+        mov ah, SYS_IO_FSTAT
+        int 30h
+        ;; AL = mode, CX:DX = size (32-bit)
+        ;; The gap buffer tops out at BUF_SIZE so anything larger cannot
+        ;; be edited (including sizes with a nonzero high word).
+        test cx, cx
+        jnz .too_big_close
+        cmp dx, BUF_SIZE
+        ja .too_big_close
+        test al, FLAG_DIR
+        jnz .is_dir_close
 
         ;; Load file content into gap buffer: text goes AFTER the gap so
         ;; gap_start=0 and cursor_line/col=0 are consistent (cursor at start).
-        ;; gap_start = 0, gap_end = BUF_SIZE - orig_size
+        ;; gap_start = 0, gap_end = BUF_SIZE - file_size
         mov word [gap_start], 0
         mov ax, BUF_SIZE
-        sub ax, [orig_size]
+        sub ax, dx              ; AX = BUF_SIZE - file_size
         mov [gap_end], ax
 
-        ;; Read sectors into BUF_BASE + gap_end
-        mov cx, [file_sector]
+        ;; Read entire file into BUF_BASE + gap_end
         mov di, BUF_BASE
-        add di, [gap_end]      ; DI = first byte of content area
-        xor dx, dx             ; DX = bytes loaded so far
-        .load_loop:
-        push cx
-        mov ah, SYS_FS_READ
+        add di, [gap_end]       ; DI = destination
+        mov cx, dx              ; CX = file size (bytes to read)
+        mov ah, SYS_IO_READ
         int 30h
-        pop cx
-        jc .load_err
-        ;; Copy only the valid bytes for this sector (avoid overrunning buffer)
-        push si
-        push cx
-        cld
-        mov si, DISK_BUFFER
-        mov cx, [orig_size]
-        sub cx, dx             ; CX = bytes remaining
-        cmp cx, 512
-        jbe .copy_sector
-        mov cx, 512
-        .copy_sector:
-        rep movsb
-        pop cx
-        pop si
-        inc cx
-        add dx, 512
-        cmp dx, [orig_size]
-        jb .load_loop
+        push ax                 ; save bytes-read result
+        ;; Close the file
+        mov ah, SYS_IO_CLOSE
+        int 30h
+        pop ax
+        cmp ax, -1
+        je .load_err
         jmp .init_cursor
 
+        .too_big_close:
+        mov ah, SYS_IO_CLOSE
+        int 30h
+        jmp .too_big
+
+        .is_dir_close:
+        mov ah, SYS_IO_CLOSE
+        int 30h
+        jmp .is_dir
+
         .new_file:
-        ;; Defer file creation until first save (file_sector=0 signals new file)
-        mov word [file_sector], 0
-        mov word [orig_size], 0
+        ;; Defer file creation until first save
         mov word [gap_start], 0
         mov word [gap_end], BUF_SIZE
         .init_cursor:
@@ -976,59 +967,18 @@ save_file:
         push dx
         push di
 
-        ;; Compute new content length
-        call buf_length        ; AX = new size in bytes
-
-        ;; New file: create on disk before first save
-        cmp word [file_sector], 0
-        jne .check_size
-        push ax
+        ;; Open file for writing (create if new, truncate if existing)
         mov si, [filename]
-        mov ah, SYS_FS_CREATE
+        mov al, O_WRONLY + O_CREAT + O_TRUNC
+        xor dl, dl             ; mode = 0 (no exec flag)
+        mov ah, SYS_IO_OPEN
         int 30h
-        mov [file_sector], ax  ; save start sector BEFORE pop
-        pop ax
         jc .create_err
-        jmp .write_sectors
+        mov [save_fd], ax
 
-        .check_size:
-        ;; New files (orig_size=0) can grow freely
-        cmp word [orig_size], 0
-        je .write_sectors
-
-        ;; Compute orig_sectors = ceil(orig_size / 512)
-        mov cx, [orig_size]
-        add cx, 511
-        push ax
-        xor dx, dx
-        mov ax, cx
-        mov bx, 512
-        div bx                 ; AX = orig_sectors
-        mov cx, ax
-        pop ax
-
-        ;; Compute new_sectors = ceil(new_size / 512)
-        push cx
-        push ax
-        add ax, 511
-        xor dx, dx
-        mov bx, 512
-        div bx                 ; AX = new_sectors
-        mov dx, ax
-        pop ax
-        pop cx
-
-        cmp dx, cx
-        ja .too_big
-
-        .write_sectors:
-
-        ;; Write data sectors
-        mov cx, [file_sector]  ; CX = current sector
+        ;; Write content in 512-byte chunks via buf_char_at
         xor bx, bx             ; BX = logical offset into content
         .write_loop:
-        ;; Fill DISK_BUFFER with up to 512 bytes of content
-        push cx
         push bx
         mov di, DISK_BUFFER
         mov cx, 512
@@ -1041,43 +991,39 @@ save_file:
         dec cx
         jnz .fill
         .fill_done:
-        test cx, cx
-        jz .do_write
-        xor al, al
-        rep stosb              ; zero-pad remainder
-        .do_write:
+        ;; Compute chunk size: 512 - remaining
+        mov ax, 512
+        sub ax, cx             ; AX = bytes filled
         pop bx
-        pop cx                 ; CX = sector
-        push cx
+        test ax, ax
+        jz .write_done          ; nothing left to write
+
+        ;; Write the chunk
         push bx
-        mov ah, SYS_FS_WRITE
+        mov cx, ax              ; CX = bytes to write
+        mov bx, [save_fd]
+        mov si, DISK_BUFFER
+        mov ah, SYS_IO_WRITE
         int 30h
         pop bx
-        pop cx
-        jc .write_err
-        inc cx                 ; next sector
+        cmp ax, -1
+        je .write_err
+
         add bx, 512
         ;; Check if all content written
-        push cx
+        push bx
         call buf_length
-        cmp bx, ax
-        pop cx
+        mov cx, ax
+        pop bx
+        cmp bx, cx
         jb .write_loop
 
-        ;; Re-read directory and update size in entry
-        mov si, [filename]
-        mov ah, SYS_FS_FIND
+        .write_done:
+        ;; Close — kernel writes back the directory size automatically
+        mov bx, [save_fd]
+        mov ah, SYS_IO_CLOSE
         int 30h
-        jc .dir_err
-        call buf_length
-        mov [bx+DIR_OFF_SIZE], ax        ; update size field in DISK_BUFFER (directory)
-        xor cx, cx                       ; CX=0 = write back directory sector
-        mov ah, SYS_FS_WRITE
-        int 30h
-        jc .write_err
 
-        call buf_length
-        mov [orig_size], ax    ; update so future saves know the sector limit
         mov byte [dirty], 0
         mov word [status_msg], MSG_SAVED
         jmp .done
@@ -1086,15 +1032,10 @@ save_file:
         mov word [status_msg], MSG_CREATE_ERR
         jmp .done
 
-        .too_big:
-        mov word [status_msg], MSG_TOO_BIG
-        jmp .done
-
         .write_err:
-        mov word [status_msg], MSG_WRITE_ERR
-        jmp .done
-
-        .dir_err:
+        mov bx, [save_fd]
+        mov ah, SYS_IO_CLOSE
+        int 30h
         mov word [status_msg], MSG_WRITE_ERR
 
         .done:
@@ -1112,12 +1053,11 @@ save_file:
         cursor_col    dw 0
         cursor_line   dw 0
         dirty         db 0
-        file_sector   dw 0
         filename      dw 0
         gap_end       dw BUF_SIZE
         gap_start     dw 0
         kill_len      dw 0
-        orig_size     dw 0
+        save_fd       dw 0
         status_msg    dw 0
         view_col      dw 0
         view_line     dw 0
@@ -1133,7 +1073,6 @@ save_file:
         MSG_LOAD_ERR     db `Load error\n\0`
         MSG_MODIFIED     db ` [modified]\0`
         MSG_SAVED        db `Saved.\0`
-        MSG_TOO_BIG      db `File too large to save (exceeds original size)\0`
         MSG_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
         MSG_USAGE        db `Usage: edit <filename>\n\0`
         MSG_WRITE_ERR    db `Write error\0`
