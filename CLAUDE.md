@@ -65,9 +65,13 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 05h   | fs_read      | Read sector CX (16-bit) into disk_buffer, CF on error |
 | 06h   | fs_rename    | Rename or move file, SI = old name, DI = new name, CF on err |
 | 07h   | fs_write     | Write disk_buffer to sector CX (16-bit; CX=0: write back directory), CF on error |
-| 10h   | io_getc      | Read one char, AL = char, AH = scan code              |
-| 12h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
-| 13h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
+| 10h   | io_close     | Close fd, BX = fd, CF on error                        |
+| 11h   | io_getc      | Read one char, AL = char, AH = scan code              |
+| 12h   | io_open      | Open file, SI = filename, AL = flags; AX = fd, CF on err |
+| 13h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
+| 14h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
+| 15h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
+| 16h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
 | 21h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
 | 22h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |

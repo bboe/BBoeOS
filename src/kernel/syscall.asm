@@ -87,6 +87,7 @@ syscall_handler:
         call dir_write_back
         jmp .iret_cf
 
+
         .fs_copy:
         ;; Copy file: SI = source filename, DI = dest filename
         ;; Both names may contain one '/' for subdirectories.
@@ -186,7 +187,7 @@ syscall_handler:
         ;; Scan subdirectory for a free entry
         push cx
         mov ax, [bx+DIR_OFF_SECTOR]
-        call .subdir_find_free
+        call subdir_find_free
         pop cx
         jc .copy_subdir_err
         ;; BX = entry pointer in DISK_BUFFER, dir_loaded_sec = current sector
@@ -254,7 +255,7 @@ syscall_handler:
         mov si, [bp+14]                ; SI = basename ptr
         ;; Copy name (null-padded to DIR_NAME_LEN)
         push bx                        ; save entry base
-        call .write_dir_name
+        call write_dir_name
         pop bx                         ; BX = entry base
         ;; Write metadata at fixed offsets
         mov al, [bp+12]
@@ -327,7 +328,7 @@ syscall_handler:
         jz .create_subdir_err
         ;; Scan subdirectory for a free entry
         mov ax, [bx+DIR_OFF_SECTOR]
-        call .subdir_find_free
+        call subdir_find_free
         jc .create_subdir_pop
         ;; BX = free entry ptr in subdir DISK_BUFFER (current sector)
         pop di                 ; restore '/' position
@@ -351,7 +352,7 @@ syscall_handler:
         push dx
         push bx
         mov si, di
-        call .write_dir_name
+        call write_dir_name
         pop bx                 ; BX = entry base
         pop dx                 ; DX = next free sector (16-bit)
         mov byte [bx+DIR_OFF_FLAGS], 0
@@ -395,7 +396,7 @@ syscall_handler:
         push dx
         push bx
         mov si, di
-        call .write_dir_name
+        call write_dir_name
         pop bx                 ; BX = entry base
         pop dx                 ; DX = next free sector (16-bit)
         mov byte [bx+DIR_OFF_FLAGS], FLAG_DIR
@@ -569,7 +570,7 @@ syscall_handler:
         push cx
         push si
         mov si, di
-        call .write_dir_name
+        call write_dir_name
         pop si
         pop cx
         call dir_write_back
@@ -650,7 +651,7 @@ syscall_handler:
         stc
         jmp .iret_cf
         .frc_alloc:
-        call .subdir_find_free ; BX = entry ptr; dir_loaded_sec set
+        call subdir_find_free ; BX = entry ptr; dir_loaded_sec set
         jnc .frc_write
         add sp, 14
         stc
@@ -658,7 +659,7 @@ syscall_handler:
         .frc_write:
         push bx
         mov si, [bp+12]
-        call .write_dir_name
+        call write_dir_name
         pop bx
         mov al, [bp+4]
         mov [bx+DIR_OFF_FLAGS], al
@@ -816,9 +817,8 @@ syscall_handler:
 
         .io_write:
         ;; Write to fd: BX = fd, SI = buffer, CX = count
-        ;; Returns AX = bytes written, or -1 on error (stub: not yet implemented)
-        mov ax, -1
-        stc
+        ;; Returns AX = bytes written, or -1 on error
+        call fd_write
         jmp .iret_cf
 
         .sys_exec:
@@ -898,7 +898,7 @@ syscall_handler:
         pop si
         ret
 
-        .subdir_find_free:
+        subdir_find_free:
         ;; Scan a subdirectory's DIR_SECTORS data sectors for the first
         ;; empty entry.
         ;; Input: AX = subdirectory's first data sector (16-bit)
@@ -937,27 +937,27 @@ syscall_handler:
         clc
         ret
 
-        .write_dir_name:
+        write_dir_name:
         ;; Copy null-terminated name from SI into entry at BX, padding with
         ;; zeros up to DIR_NAME_LEN - 1 bytes total. SI is advanced past the
         ;; null terminator and BX is advanced DIR_NAME_LEN - 1 bytes.
         ;; Clobbers: AX, BX (advanced), CX, SI (advanced)
         mov cx, DIR_NAME_LEN - 1
-        .wdn_copy:
+        .copy:
         mov al, [si]
         test al, al
-        jz .wdn_pad
+        jz .pad
         inc si
         mov [bx], al
         inc bx
         dec cx
-        jnz .wdn_copy
+        jnz .copy
         ret
-        .wdn_pad:
+        .pad:
         mov byte [bx], 0
         inc bx
         dec cx
-        jnz .wdn_pad
+        jnz .pad
         ret
 
 ;;; -----------------------------------------------------------------------
