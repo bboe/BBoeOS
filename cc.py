@@ -1139,6 +1139,7 @@ class CodeGenerator:
                 else:
                     self.emit("        mov ax, [bx]")
             else:
+                self.emit(f"        mov bx, [{self.local_address(vname)}]")
                 self.emit("        push bx")
                 self.generate_expression(index_expression)
                 self.emit("        add ax, ax")
