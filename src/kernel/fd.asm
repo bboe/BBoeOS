@@ -179,13 +179,17 @@ fd_open:
         ;; Save flags and filename before subsequent calls clobber them
         mov [fd_open_flags], al
         mov [fd_open_name], si
+        ;; Check for "." (root directory)
+        cmp byte [si], '.'
+        jne .open_find
+        cmp byte [si+1], 0
+        jne .open_find
+        jmp .open_root_dir
+        .open_find:
         ;; Look up the file
         call find_file
         jc .open_not_found
-        ;; Check if it is a directory
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
-        jnz .open_err
-        ;; File found — if O_CREAT without O_TRUNC, that's fine (open existing)
+        ;; Found — open as DIR or FILE depending on entry flags
         jmp .open_populate
 
         .open_not_found:
@@ -256,7 +260,14 @@ fd_open:
         jc .open_err            ; table full
         ;; SI = FD entry pointer from fd_alloc, AX = fd number
         mov [fd_open_fd], ax
+        ;; Set FD type: DIR if directory entry, FILE otherwise
+        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        jnz .open_set_dir
         mov byte [si+FD_OFF_TYPE], FD_TYPE_FILE
+        jmp .open_set_flags
+        .open_set_dir:
+        mov byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        .open_set_flags:
         mov cl, [fd_open_flags]
         mov [si+FD_OFF_FLAGS], cl
         ;; mode (file permission flags from directory entry)
@@ -291,6 +302,24 @@ fd_open:
         pop cx
         clc
         ret
+
+        .open_root_dir:
+        ;; Synthesize a DIR fd for the root directory
+        call fd_alloc
+        jc .open_err
+        mov [fd_open_fd], ax
+        mov byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        mov cl, [fd_open_flags]
+        mov [si+FD_OFF_FLAGS], cl
+        mov byte [si+FD_OFF_MODE], FLAG_DIR
+        mov word [si+FD_OFF_START], DIR_SECTOR
+        mov word [si+FD_OFF_SIZE], DIR_SECTORS * 512
+        mov word [si+FD_OFF_SIZE+2], 0
+        mov word [si+FD_OFF_POS], 0
+        mov word [si+FD_OFF_POS+2], 0
+        mov word [si+FD_OFF_DIR_SEC], 0
+        mov word [si+FD_OFF_DIR_OFF], 0
+        jmp .open_done
 
         .open_err:
         pop di
@@ -334,6 +363,8 @@ fd_read:
         ;; SI = entry pointer
         cmp byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
         je .read_console
+        cmp byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        je .read_dir
         cmp byte [si+FD_OFF_TYPE], FD_TYPE_FILE
         je .read_file
         .read_err:
@@ -362,6 +393,64 @@ fd_read:
         pop cx
         pop bx
         clc
+        ret
+
+        .read_dir:
+        ;; Read the next non-empty directory entry into [DI]
+        ;; SI = FD entry pointer
+        ;; Returns 32 bytes (one entry) or 0 at end of directory
+        push bx
+        push cx
+        push dx
+        push di
+        .rd_next:
+        ;; Check if past end of directory
+        mov ax, [si+FD_OFF_POS]
+        cmp ax, DIR_SECTORS * 512
+        jae .rd_eof
+        ;; Compute sector = start_sec + (pos / 512)
+        call fd_pos_to_sector   ; AX = sector, BX = offset
+        call read_sector
+        jc .rd_disk_err
+        ;; Check if entry at offset BX is non-empty
+        cmp byte [DISK_BUFFER+bx], 0
+        jne .rd_found
+        ;; Empty slot — advance pos by DIR_ENTRY_SIZE and try again
+        add word [si+FD_OFF_POS], DIR_ENTRY_SIZE
+        jmp .rd_next
+        .rd_found:
+        ;; Copy DIR_ENTRY_SIZE bytes from DISK_BUFFER+BX to [DI]
+        push si
+        mov si, DISK_BUFFER
+        add si, bx
+        mov cx, DIR_ENTRY_SIZE
+        cld
+        rep movsb
+        pop si
+        ;; Advance pos
+        add word [si+FD_OFF_POS], DIR_ENTRY_SIZE
+        mov ax, DIR_ENTRY_SIZE
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .rd_eof:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        xor ax, ax
+        clc
+        ret
+        .rd_disk_err:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        mov ax, -1
+        stc
         ret
 
         .read_file:

@@ -25,6 +25,7 @@
         %assign FD_OFF_START 2       ; offset of start_sec field within FD entry
         %assign FD_OFF_TYPE 0        ; offset of type field within FD entry
         %assign FD_TYPE_CONSOLE 2
+        %assign FD_TYPE_DIR 3
         %assign FD_TYPE_FILE 1
         %assign FD_TYPE_FREE 0
         %assign FLAG_DIR  02h         ; Directory entry flags: bit 1 = subdirectory
