@@ -8,56 +8,48 @@ main:
         test si, si
         jz .usage
 
-        mov ah, SYS_FS_FIND
+        ;; Open file for reading
+        mov al, O_RDONLY
+        mov ah, SYS_IO_OPEN
         int 30h
         jc .not_found
 
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
-        jnz .is_dir
+        mov bx, ax             ; BX = fd
 
-        mov dx, [bx+DIR_OFF_SIZE]        ; File size in DX
-        test dx, dx
-        jz .empty
-        mov cx, [bx+DIR_OFF_SECTOR]      ; Start sector in CX
-
-.read_sector:
-        mov ah, SYS_FS_READ              ; reads sector CX into DISK_BUFFER
+.read_loop:
+        mov di, DISK_BUFFER
+        mov cx, 512
+        mov ah, SYS_IO_READ
         int 30h
         jc .disk_err
+        test ax, ax
+        jz .done                ; EOF
 
-        ;; Print up to 512 bytes or remaining bytes
-        push cx                 ; Save sector across print loop
-        mov cx, 512
-        cmp dx, 512
-        jae .print_sector
-        mov cx, dx
-.print_sector:
+        ;; Print AX bytes from DISK_BUFFER
+        push bx                 ; Save fd
+        mov cx, ax
         mov si, DISK_BUFFER
 .print:
         lodsb
         mov ah, SYS_IO_PUTC
         int 30h
         loop .print
-        pop cx                  ; Restore sector
+        pop bx                  ; Restore fd
+        jmp .read_loop
 
-        sub dx, 512
-        jbe .empty
-        inc cx                  ; Next sector
-        jmp .read_sector
-
-.empty:
+.done:
+        mov ah, SYS_IO_CLOSE
+        int 30h
         mov ah, SYS_EXIT
         int 30h
-
-.is_dir:
-        mov si, MSG_IS_DIR
-        jmp .output
 
 .not_found:
         mov si, FILE_NOT_FOUND
         jmp .output
 
 .disk_err:
+        mov ah, SYS_IO_CLOSE
+        int 30h
         mov si, DISK_ERROR
         jmp .output
 
@@ -71,7 +63,6 @@ main:
         int 30h
 
 ;; Strings
-MSG_IS_DIR db `Is a directory\n\0`
 USAGE      db `Usage: cat <filename>\n\0`
 
 %include "str_disk_error.asm"

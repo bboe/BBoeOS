@@ -16,12 +16,20 @@ syscall_handler:
         cmp ah, SYS_FS_WRITE   ; fs_write
         je .fs_write
 
+        cmp ah, SYS_IO_CLOSE   ; io_close
+        je .io_close
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
+        cmp ah, SYS_IO_OPEN    ; io_open
+        je .io_open
         cmp ah, SYS_IO_PUTC    ; io_putc
         je .io_putc
         cmp ah, SYS_IO_PUTS    ; io_puts
         je .io_puts
+        cmp ah, SYS_IO_READ    ; io_read
+        je .io_read
+        cmp ah, SYS_IO_WRITE   ; io_write
+        je .io_write
 
         cmp ah, SYS_NET_ARP    ; net_arp
         je .net_arp
@@ -690,118 +698,7 @@ syscall_handler:
         jmp .iret_cf
 
         .io_getc:
-        ;; Poll both keyboard and serial, return char in AL, scan code in AH
-        .getc_poll:
-        ;; Drain pushback buffer first (used when ESC sequence detection reads ahead)
-        cmp byte [serial_pb_count], 0
-        je .getc_poll_hw
-        mov al, [serial_pb_buf]    ; return first buffered byte
-        mov ah, [serial_pb_buf+1]
-        mov [serial_pb_buf], ah    ; shift second byte down
-        xor ah, ah
-        dec byte [serial_pb_count]
-        iret
-        .getc_poll_hw:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h            ; Serial data ready?
-        jnz .getc_serial
-        mov ah, 01h
-        int 16h
-        jz .getc_poll           ; Neither ready, keep polling
-        mov ah, 00h
-        int 16h                 ; Consume the key
-        iret
-        .getc_serial:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read the byte
-        pop dx
-        cmp al, 1Bh             ; ESC? May be start of arrow key sequence
-        jne .getc_serial_done
-        ;; Poll for '[' with timeout
-        push cx
-        mov cx, 0FFFFh
-        .getc_esc_bracket:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h
-        jnz .getc_read_bracket
-        loop .getc_esc_bracket
-        pop cx
-        jmp .getc_serial_esc    ; Timeout: standalone ESC
-        .getc_read_bracket:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read second byte
-        pop dx
-        cmp al, '['
-        je .getc_esc_final
-        ;; Not '[': push it back and return ESC
-        mov [serial_pb_buf], al
-        mov byte [serial_pb_count], 1
-        pop cx
-        jmp .getc_serial_esc
-        .getc_esc_final:
-        ;; Poll for final byte (A/B/C/D) with timeout
-        mov cx, 0FFFFh
-        .getc_esc_final_poll:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h
-        jnz .getc_read_final
-        loop .getc_esc_final_poll
-        pop cx
-        mov byte [serial_pb_buf], '['
-        mov byte [serial_pb_count], 1
-        jmp .getc_serial_esc    ; Timeout: return ESC, push back '['
-        .getc_read_final:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read third byte
-        pop dx
-        pop cx
-        cmp al, 'A'
-        je .getc_arrow_up
-        cmp al, 'B'
-        je .getc_arrow_down
-        cmp al, 'C'
-        je .getc_arrow_right
-        cmp al, 'D'
-        je .getc_arrow_left
-        ;; Unknown third byte: push back '[' and the byte, return ESC
-        mov byte [serial_pb_buf], '['
-        mov [serial_pb_buf+1], al
-        mov byte [serial_pb_count], 2
-        jmp .getc_serial_esc
-        .getc_arrow_up:
-        xor al, al
-        mov ah, 48h
-        iret
-        .getc_arrow_down:
-        xor al, al
-        mov ah, 50h
-        iret
-        .getc_arrow_right:
-        xor al, al
-        mov ah, 4Dh
-        iret
-        .getc_arrow_left:
-        xor al, al
-        mov ah, 4Bh
-        iret
-        .getc_serial_esc:
-        xor ah, ah
-        mov al, 1Bh
-        iret
-        .getc_serial_done:
-        xor ah, ah
+        call getc_internal
         iret
 
         .io_putc:
@@ -899,6 +796,31 @@ syscall_handler:
         call clear_screen
         iret
 
+        .io_close:
+        ;; Close fd: BX = fd
+        ;; CF on error
+        call fd_close
+        jmp .iret_cf
+
+        .io_open:
+        ;; Open file/device: SI = filename, AL = flags
+        ;; Returns AX = fd, CF on error
+        call fd_open
+        jmp .iret_cf
+
+        .io_read:
+        ;; Read from fd: BX = fd, DI = buffer, CX = count
+        ;; Returns AX = bytes read (0 = EOF), CF on error
+        call fd_read
+        jmp .iret_cf
+
+        .io_write:
+        ;; Write to fd: BX = fd, SI = buffer, CX = count
+        ;; Returns AX = bytes written, or -1 on error (stub: not yet implemented)
+        mov ax, -1
+        stc
+        jmp .iret_cf
+
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
@@ -929,6 +851,7 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_run:
+        call fd_init
         jmp PROGRAM_BASE
 
         .sys_exit:
@@ -1035,6 +958,124 @@ syscall_handler:
         inc bx
         dec cx
         jnz .wdn_pad
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; getc_internal: Callable version of io_getc (returns via ret, not iret)
+;;; Output: AL = char, AH = scan code (0 for serial input)
+;;; -----------------------------------------------------------------------
+getc_internal:
+        .poll:
+        ;; Drain pushback buffer first (used when ESC sequence detection reads ahead)
+        cmp byte [serial_pb_count], 0
+        je .poll_hw
+        mov al, [serial_pb_buf]    ; return first buffered byte
+        mov ah, [serial_pb_buf+1]
+        mov [serial_pb_buf], ah    ; shift second byte down
+        xor ah, ah
+        dec byte [serial_pb_count]
+        ret
+        .poll_hw:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h            ; Serial data ready?
+        jnz .serial
+        mov ah, 01h
+        int 16h
+        jz .poll                ; Neither ready, keep polling
+        mov ah, 00h
+        int 16h                 ; Consume the key
+        ret
+        .serial:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read the byte
+        pop dx
+        cmp al, 1Bh             ; ESC? May be start of arrow key sequence
+        jne .serial_done
+        ;; Poll for '[' with timeout
+        push cx
+        mov cx, 0FFFFh
+        .esc_bracket:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h
+        jnz .read_bracket
+        loop .esc_bracket
+        pop cx
+        jmp .serial_esc         ; Timeout: standalone ESC
+        .read_bracket:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read second byte
+        pop dx
+        cmp al, '['
+        je .esc_final
+        ;; Not '[': push it back and return ESC
+        mov [serial_pb_buf], al
+        mov byte [serial_pb_count], 1
+        pop cx
+        jmp .serial_esc
+        .esc_final:
+        ;; Poll for final byte (A/B/C/D) with timeout
+        mov cx, 0FFFFh
+        .esc_final_poll:
+        push dx
+        mov dx, 3FDh
+        in al, dx
+        pop dx
+        test al, 01h
+        jnz .read_final
+        loop .esc_final_poll
+        pop cx
+        mov byte [serial_pb_buf], '['
+        mov byte [serial_pb_count], 1
+        jmp .serial_esc         ; Timeout: return ESC, push back '['
+        .read_final:
+        push dx
+        mov dx, 3F8h
+        in al, dx               ; Read third byte
+        pop dx
+        pop cx
+        cmp al, 'A'
+        je .arrow_up
+        cmp al, 'B'
+        je .arrow_down
+        cmp al, 'C'
+        je .arrow_right
+        cmp al, 'D'
+        je .arrow_left
+        ;; Unknown third byte: push back '[' and the byte, return ESC
+        mov byte [serial_pb_buf], '['
+        mov [serial_pb_buf+1], al
+        mov byte [serial_pb_count], 2
+        jmp .serial_esc
+        .arrow_up:
+        xor al, al
+        mov ah, 48h
+        ret
+        .arrow_down:
+        xor al, al
+        mov ah, 50h
+        ret
+        .arrow_right:
+        xor al, al
+        mov ah, 4Dh
+        ret
+        .arrow_left:
+        xor al, al
+        mov ah, 4Bh
+        ret
+        .serial_esc:
+        xor ah, ah
+        mov al, 1Bh
+        ret
+        .serial_done:
+        xor ah, ah
         ret
 
 install_syscalls:

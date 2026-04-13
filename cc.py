@@ -8,8 +8,8 @@ Grammar:
     program              := function_declaration*
     function_declaration := type IDENT '(' ')' '{' statement* '}'
     type                 := 'void' | 'int' | 'char' '*'
-    statement            := variable_declaration | assign_statement | while_statement
-                          | call_statement
+    statement            := variable_declaration | assign_statement | do_while_statement
+                          | while_statement | call_statement
     variable_declaration := type IDENT ('[' ']')? '=' (expression
                           | '{' expression_list '}') ';'
 
@@ -20,6 +20,7 @@ Register allocation:
     and the variable goes into memory instead.
     assign               := IDENT '=' expression ';'
                           |  IDENT '+=' expression ';'
+    do_while             := 'do' '{' statement* '}' 'while' '(' expression ')' ';'
     while                := 'while' '(' expression ')' '{' statement* '}'
     call_statement       := IDENT '(' arguments ')' ';'
     arguments            := expression (',' expression)*
@@ -45,7 +46,11 @@ Builtins:
     fs_read(sector, buffer)  -- read sector into buffer (must be
                                 ``DISK_BUFFER``); return the number
                                 of bytes read, or 0 on error
+    close(fd)                -- close a file descriptor
     mkdir(name)              -- create directory, return 0 or ERR_* code
+    open(name, flags)        -- open file, return fd or -1 on error
+    read(fd, buffer, count)  -- read bytes from fd, return count or -1
+    write(fd, buffer, count) -- write bytes to fd, return count or -1
     print_bcd(expression)    -- print BCD byte as two decimal digits
     print_buffer(addr, count)-- print count bytes starting at addr
     print_dec(expression)    -- print integer as decimal
@@ -98,7 +103,7 @@ JUMP_WHEN_FALSE = {
     "==": "jne",
 }
 
-KEYWORDS = frozenset({"break", "char", "else", "if", "int", "return", "sizeof", "void", "while"})
+KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "return", "sizeof", "void", "while"})
 
 TOKEN_PATTERN = re.compile(
     r"""
@@ -155,18 +160,22 @@ class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "close": frozenset({"ax"}),
         "datetime": frozenset({"ax", "bx", "cx", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
         "fs_find": frozenset({"ax", "bx"}),
         "fs_read": frozenset({"ax", "cx"}),
         "mkdir": frozenset({"ax"}),
+        "open": frozenset({"ax"}),
+        "read": frozenset({"ax", "cx", "di"}),
         "print_bcd": frozenset({"ax"}),
         "print_buffer": frozenset({"ax", "cx", "si"}),
         "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
         "putc": frozenset({"ax"}),
         "puts": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
+        "write": frozenset({"ax", "cx", "si"}),
     }
 
     #: Builtins whose caller typically dies on error, keyed to the C
@@ -184,7 +193,13 @@ class CodeGenerator:
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
-    NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({"DISK_BUFFER"})
+    NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "DISK_BUFFER",
+        "O_CREAT",
+        "O_RDONLY",
+        "O_TRUNC",
+        "O_WRONLY",
+    })
 
     #: Registers available for auto-pinning, in allocation order.
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
@@ -219,6 +234,7 @@ class CodeGenerator:
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
+        self.visible_vars: set[str] = set()
 
     def allocate_local(self, name: str, /) -> int:
         """Allocate a 2-byte local variable on the stack frame.
@@ -273,6 +289,17 @@ class CodeGenerator:
         """Clear AX tracking state."""
         self.ax_is_byte = False
         self.ax_local = None
+
+    def builtin_close(self, arguments: list[tuple], /) -> None:
+        """Generate code for the close() builtin.
+
+        Closes a file descriptor.  ``close(fd)`` emits
+        ``mov bx, <fd> / mov ah, SYS_IO_CLOSE / int 30h``.
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="close")
+        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit("        mov ah, SYS_IO_CLOSE")
+        self.emit("        int 30h")
 
     def builtin_datetime(self, arguments: list[tuple], /) -> None:
         """Generate code for the datetime() builtin.
@@ -427,6 +454,24 @@ class CodeGenerator:
             self.emit("        xor ax, ax")
             self.emit(f".done_{label_index}:")
 
+    def builtin_open(self, arguments: list[tuple], /) -> None:
+        """Generate code for the open() builtin.
+
+        ``open(name, flags)`` emits ``mov si, <name> / mov al, <flags>
+        / mov ah, SYS_IO_OPEN / int 30h``.  Returns the fd number in
+        AX, or -1 on error (CF set).
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="open")
+        name_argument, flags_argument = arguments
+        self.emit_si_from_argument(name_argument)
+        if flags_argument[0] == "int" or (flags_argument[0] == "variable" and flags_argument[1] in self.NAMED_CONSTANTS):
+            self.emit(f"        mov al, {flags_argument[1]}")
+        else:
+            self.generate_expression(flags_argument)
+        self.emit("        mov ah, SYS_IO_OPEN")
+        self.emit("        int 30h")
+        self.ax_clear()
+
     def builtin_print_bcd(self, arguments: list[tuple], /) -> None:
         """Generate code for the print_bcd() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_bcd")
@@ -486,11 +531,14 @@ class CodeGenerator:
             self.generate_expression(count_argument)
             self.emit("        mov cx, ax")
         label_index = self.new_label()
+        self.emit("        test cx, cx")
+        self.emit(f"        jz .pb_{label_index}_end")
         self.emit(f".pb_{label_index}:")
         self.emit("        lodsb")
         self.emit("        mov ah, SYS_IO_PUTC")
         self.emit("        int 30h")
         self.emit(f"        loop .pb_{label_index}")
+        self.emit(f".pb_{label_index}_end:")
         for register in reversed(registers_to_save):
             self.emit(f"        pop {register}")
         self.ax_clear()
@@ -523,11 +571,43 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_IO_PUTS")
         self.emit("        int 30h")
 
+    def builtin_read(self, arguments: list[tuple], /) -> None:
+        """Generate code for the read() builtin.
+
+        ``read(fd, buffer, count)`` emits ``mov bx, <fd> /
+        mov di, <buffer> / mov cx, <count> / mov ah, SYS_IO_READ /
+        int 30h``.  Returns bytes read in AX (0 = EOF, -1 = error).
+        """
+        self.check_argument_count(arguments=arguments, expected=3, name="read")
+        fd_argument, buffer_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=buffer_argument, register="di")
+        self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit("        mov ah, SYS_IO_READ")
+        self.emit("        int 30h")
+        self.ax_clear()
+
     def builtin_uptime(self, arguments: list[tuple], /) -> None:
         """Generate code for the uptime() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="uptime")
         self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
+
+    def builtin_write(self, arguments: list[tuple], /) -> None:
+        """Generate code for the write() builtin.
+
+        ``write(fd, buffer, count)`` emits ``mov bx, <fd> /
+        mov si, <buffer> / mov cx, <count> / mov ah, SYS_IO_WRITE /
+        int 30h``.  Returns bytes written in AX (-1 on error).
+        """
+        self.check_argument_count(arguments=arguments, expected=3, name="write")
+        fd_argument, buffer_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=buffer_argument, register="si")
+        self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit("        mov ah, SYS_IO_WRITE")
+        self.emit("        int 30h")
+        self.ax_clear()
 
     def can_auto_pin(self, *, following_statement: tuple | None, statement: tuple) -> bool:
         """Decide whether *statement* should be auto-pinned to a register."""
@@ -565,10 +645,10 @@ class CodeGenerator:
             raise SyntaxError(message)
 
     def check_defined(self, name: str, /) -> None:
-        """Raise SyntaxError if a variable is not defined."""
+        """Raise SyntaxError if a variable is not in scope."""
         if name in self.NAMED_CONSTANTS:
             return
-        if name not in self.locals and name not in self.pinned_register:
+        if name not in self.visible_vars:
             message = f"undefined variable: {name}"
             raise SyntaxError(message)
 
@@ -695,6 +775,30 @@ class CodeGenerator:
         _, operator, left, right = condition
         self.emit_comparison(left, right)
         return operator
+
+    def emit_register_from_argument(self, *, argument: tuple, register: str) -> None:
+        """Load an argument into a specific 16-bit register.
+
+        Handles pinned variables, memory locals, named constants,
+        integer literals, and general expressions (evaluated via AX).
+        """
+        if argument[0] == "int" or (argument[0] == "variable" and argument[1] in self.NAMED_CONSTANTS):
+            self.emit(f"        mov {register}, {argument[1]}")
+        elif argument[0] == "variable" and argument[1] in self.pinned_register:
+            source = self.pinned_register[argument[1]]
+            if source != register:
+                self.emit(f"        mov {register}, {source}")
+        elif argument[0] == "variable" and argument[1] == self.ax_local:
+            if register != "ax":
+                self.emit(f"        mov {register}, ax")
+        elif argument[0] == "variable" and argument[1] in self.locals:
+            self.emit(f"        mov {register}, [{self.local_address(argument[1])}]")
+        elif argument[0] == "string":
+            self.emit(f"        mov {register}, {self.new_string_label(argument[1])}")
+        else:
+            self.generate_expression(argument)
+            if register != "ax":
+                self.emit(f"        mov {register}, ax")
 
     def emit_si_from_argument(self, argument: tuple, /) -> None:
         """Load a string or expression argument into SI."""
@@ -849,8 +953,11 @@ class CodeGenerator:
             self.emit('%include "fs_read_bytes.asm"')
         return "\n".join(self.lines) + "\n"
 
-    def generate_body(self, statements: list[tuple], /) -> None:
+    def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:  # noqa: PLR0914
         """Generate code for a sequence of statements.
+
+        When *scoped* is True, variables declared inside the block are
+        removed from ``visible_vars`` when the block ends.
 
         Applies several fusions:
         - ``puts(msg); exit();`` → ``die(msg)``
@@ -861,6 +968,7 @@ class CodeGenerator:
         - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
           conditional jump to ``.die``, skipping the if-body dance
         """
+        saved = self.visible_vars.copy() if scoped else None
         i = 0
         while i < len(statements):
             statement = statements[i]
@@ -876,6 +984,7 @@ class CodeGenerator:
                 extractor = self.extract_zero_die if pattern == "zero" else self.extract_nonzero_die
                 die_message = extractor(statement=statements[i + 1], variable_name=statement[1])
                 if die_message is not None:
+                    self.visible_vars.add(statement[1])
                     call_node = init
                     handler = getattr(self, f"builtin_{call_node[1]}")
                     clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
@@ -919,6 +1028,7 @@ class CodeGenerator:
                 elif next_stmt[0] == "if" and not self.is_zero_test(next_stmt[1]):
                     skip = 1  # skip declaration only, process if-else normally
                 if skip:
+                    self.visible_vars.add(statement[1])
                     call_node = statement[2]
                     handler = getattr(self, f"builtin_{call_node[1]}")
                     clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
@@ -931,6 +1041,8 @@ class CodeGenerator:
                     continue
             self.generate_statement(statement)
             i += 1
+        if saved is not None:
+            self.visible_vars = saved
 
     def generate_call(self, statement: tuple, /) -> None:
         """Generate code for a function call statement.
@@ -948,6 +1060,26 @@ class CodeGenerator:
         if self.register_cache and clobbers:
             self.auto_spill(clobbers=clobbers)
         handler(arguments)
+
+    def generate_do_while(self, statement: tuple, /) -> None:
+        """Generate assembly for a do...while loop.
+
+        The body executes unconditionally once, then the condition is
+        tested at the bottom.  ``break`` inside the body jumps to the
+        end label, same as in a ``while`` loop.
+        """
+        _, condition, body = statement
+        label_index = self.new_label()
+        end_label = f".do_{label_index}_end"
+        self.emit(f".do_{label_index}:")
+        self.loop_end_labels.append(end_label)
+        self.generate_body(body, scoped=True)
+        operator = self.emit_condition(condition=condition, context="do_while")
+        # Jump back to top when condition is TRUE (invert the false-jump)
+        true_jump = {"!=": "jne", "<": "jl", "<=": "jle", ">": "jg", ">=": "jge", "==": "je"}
+        self.emit(f"        {true_jump[operator]} .do_{label_index}")
+        self.emit(f"{end_label}:")
+        self.loop_end_labels.pop()
 
     def generate_expression(self, expression: tuple, /) -> None:
         """Generate code for an expression, leaving the result in AX.
@@ -1077,6 +1209,13 @@ class CodeGenerator:
 
         self.scan_locals(body)
 
+        # Seed visible_vars with parameters and pinned variables.
+        # Block-scoped locals become visible when their declaration
+        # is reached during code generation.
+        for _type, pname, _is_array in parameters:
+            self.visible_vars.add(pname)
+        self.visible_vars.update(self.pinned_register)
+
         self.emit(f"{name}:")
         if not self.elide_frame and self.frame_size > 0:
             self.emit("        push bp")
@@ -1121,20 +1260,20 @@ class CodeGenerator:
         saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_else")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
                 self.emit(f"        jmp .if_{label_index}_end")
             self.emit(f".if_{label_index}_else:")
             # On the else path, AX is unchanged (comparison doesn't modify it).
             self.ax_local, self.ax_is_byte = saved_ax
-            self.generate_body(else_body)
+            self.generate_body(else_body, scoped=True)
             if not if_exits or not self.always_exits(else_body):
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
             # exit, return, or break), AX is unchanged on the
@@ -1154,10 +1293,12 @@ class CodeGenerator:
         kind = statement[0]
         if kind == "variable_declaration":
             _, vname, init = statement
+            self.visible_vars.add(vname)
             if init is not None:
                 self.emit_store_local(expression=init, name=vname)
         elif kind == "array_declaration":
             _, vname, init = statement
+            self.visible_vars.add(vname)
             if init is not None and init[0] == "array_init":
                 elem_labels = []
                 for elem in init[1]:
@@ -1180,6 +1321,9 @@ class CodeGenerator:
                 message = "break outside of a loop"
                 raise SyntaxError(message)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
+        elif kind == "do_while":
+            self.ax_clear()
+            self.generate_do_while(statement)
         elif kind == "if":
             self.generate_if(statement)
         elif kind == "while":
@@ -1206,11 +1350,11 @@ class CodeGenerator:
         self.emit(f".while_{label_index}:")
         self.loop_end_labels.append(end_label)
         if self.is_constant_true_condition(condition):
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
         else:
             operator = self.emit_condition(condition=condition, context="while")
             self.emit(f"        {JUMP_WHEN_FALSE[operator]} {end_label}")
-            self.generate_body(body)
+            self.generate_body(body, scoped=True)
         self.emit(f"        jmp .while_{label_index}")
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
@@ -1590,7 +1734,7 @@ class CodeGenerator:
                 return
         self.lines = [line for line in self.lines if line.strip() != "cld"]
 
-    def scan_locals(self, statements: list[tuple], /) -> None:
+    def scan_locals(self, statements: list[tuple], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
 
         Plain ``int`` declarations are auto-pinned to a CPU register
@@ -1605,19 +1749,20 @@ class CodeGenerator:
         """
         for index, statement in enumerate(statements):
             if statement[0] == "variable_declaration":
-                following = statements[index + 1] if index + 1 < len(statements) else None
-                if self.can_auto_pin(following_statement=following, statement=statement):
-                    self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
-                    continue
+                if top_level:
+                    following = statements[index + 1] if index + 1 < len(statements) else None
+                    if self.can_auto_pin(following_statement=following, statement=statement):
+                        self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
+                        continue
                 self.allocate_local(statement[1])
             elif statement[0] == "array_declaration":
                 self.allocate_local(statement[1])
             elif statement[0] == "if":
-                self.scan_locals(statement[2])
+                self.scan_locals(statement[2], top_level=False)
                 if statement[3] is not None:
-                    self.scan_locals(statement[3])
-            elif statement[0] == "while":
-                self.scan_locals(statement[2])
+                    self.scan_locals(statement[3], top_level=False)
+            elif statement[0] in ("do_while", "while"):
+                self.scan_locals(statement[2], top_level=False)
 
     @staticmethod
     def transform_branch_puts(body: list[tuple], /) -> list[tuple]:
@@ -1795,6 +1940,23 @@ class Parser:
         if expression[0] == "binary_operator" and expression[1] in JUMP_WHEN_FALSE:
             return expression
         return ("binary_operator", "!=", expression, ("int", 0))
+
+    def parse_do_while(self) -> tuple:
+        """Parse a do...while loop statement.
+
+        Returns:
+            An AST node ``("do_while", condition, body)``.
+
+        """
+        self.eat("DO")
+        self.eat("LBRACE")
+        body = self.parse_block()
+        self.eat("WHILE")
+        self.eat("LPAREN")
+        condition = self.parse_condition()
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return ("do_while", condition, body)
 
     def parse_expression(self) -> tuple:
         """Parse an expression.
@@ -1981,6 +2143,8 @@ class Parser:
             self.eat("BREAK")
             self.eat("SEMI")
             return ("break",)
+        if token[0] == "DO":
+            return self.parse_do_while()
         if token[0] == "RETURN":
             self.eat("RETURN")
             self.eat("SEMI")
