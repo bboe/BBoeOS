@@ -39,13 +39,6 @@ Builtins:
     datetime(array)          -- fill 7-word array with BCD date/time fields
     die(message)             -- print message and terminate
     exit()                   -- terminate program
-    fs_find(name, dir_message)
-                             -- find a regular file; return its
-                                starting sector (0 on not found,
-                                dies with dir_message on directory)
-    fs_read(sector, buffer)  -- read sector into buffer (must be
-                                ``DISK_BUFFER``); return the number
-                                of bytes read, or 0 on error
     close(fd)                -- close a file descriptor
     mkdir(name)              -- create directory, return 0 or ERR_* code
     open(name, flags)        -- open file, return fd or -1 on error
@@ -164,8 +157,6 @@ class CodeGenerator:
         "datetime": frozenset({"ax", "bx", "cx", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
-        "fs_find": frozenset({"ax", "bx"}),
-        "fs_read": frozenset({"ax", "cx"}),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
         "read": frozenset({"ax", "cx", "di"}),
@@ -176,16 +167,6 @@ class CodeGenerator:
         "puts": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
-    }
-
-    #: Builtins whose caller typically dies on error, keyed to the C
-    #: condition shape that triggers the die.  ``fs_find`` returns the
-    #: starting sector (0 on not found), so its caller writes
-    #: ``if (!sector) die(...)``, which is the ``zero`` shape.  The
-    #: fusion lowers to a single ``jc .die`` because SYS_FS_FIND
-    #: signals "not found" via CF.
-    DIE_ON_ERROR_BUILTINS: ClassVar[dict[str, str]] = {
-        "fs_find": "zero",
     }
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"mkdir"})
@@ -228,7 +209,6 @@ class CodeGenerator:
         self.locals: dict[str, int] = {}
         self.loop_end_labels: list[str] = []
         self.needs_argv_buf: bool = False
-        self.needs_fs_read_bytes: bool = False
         self.needs_print_bcd: bool = False
         self.needs_print_dec: bool = False
         self.pinned_register: dict[str, str] = {}
@@ -348,90 +328,6 @@ class CodeGenerator:
         """Generate code for the exit() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp .exit")
-
-    def builtin_fs_find(self, arguments: list[tuple], /, *, fuse_die_message: tuple | None = None) -> None:
-        """Generate code for the fs_find() builtin.
-
-        Call signature: ``fs_find(name, dir_message)``.  Looks up
-        ``name`` in the filesystem and returns the starting sector in
-        AX, or ``0`` when the file is not found.  If the entry is a
-        directory, ``dir_message`` is printed via the shared ``.die``
-        label — cat and friends treat that as an error.
-
-        On success the entry's file-size field is also copied into the
-        compiler-managed ``_fs_remaining`` cell so that the shared
-        ``fs_read_bytes`` helper can clamp the last sector's return
-        value to the actual remaining byte count.
-
-        When ``fuse_die_message`` is supplied, the caller's ``!sector``
-        check is fused in: SI is pre-loaded with the not-found message
-        and ``jc .die`` replaces the ``xor ax, ax`` fail path.  The
-        sector value still lands in AX on the success fall-through so
-        the fusion caller can store it into a pinned register or
-        memory local.
-        """
-        self.check_argument_count(arguments=arguments, expected=2, name="fs_find")
-        name_argument, directory_message_argument = arguments
-        self.emit_si_from_argument(name_argument)
-        self.emit("        mov ah, SYS_FS_FIND")
-        self.emit("        int 30h")
-        if fuse_die_message is not None:
-            # Pre-load SI with the caller's not-found message (mov
-            # preserves CF), then jump straight to .die on CF set.
-            self.emit_si_from_argument(fuse_die_message)
-            self.emit("        jc .die")
-            self.die_count += 1
-        else:
-            done_label = self.new_label()
-            self.emit(f"        jc .fsfd_fail_{done_label}")
-        # Success path: test FLAG_DIR (pre-load directory message so a
-        # match jumps directly to .die), then seed _fs_remaining from
-        # the entry's size field, and finally materialize the sector
-        # in AX for the caller.
-        self.emit_si_from_argument(directory_message_argument)
-        self.emit("        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR")
-        self.emit("        jnz .die")
-        self.die_count += 1
-        self.emit("        mov ax, [bx+DIR_OFF_SIZE]")
-        self.emit("        mov [_fs_remaining], ax")
-        self.emit("        mov ax, [bx+DIR_OFF_SECTOR]")
-        self.needs_fs_read_bytes = True
-        if fuse_die_message is None:
-            self.emit(f"        jmp .fsfd_done_{done_label}")
-            self.emit(f".fsfd_fail_{done_label}:")
-            self.emit("        xor ax, ax")
-            self.emit(f".fsfd_done_{done_label}:")
-        self.ax_clear()
-
-    def builtin_fs_read(self, arguments: list[tuple], /) -> None:
-        """Generate code for the fs_read() builtin.
-
-        Call signature: ``fs_read(sector, buffer)``.  The ``buffer``
-        argument must evaluate to the kernel-wired ``DISK_BUFFER`` and
-        exists only to make the data destination explicit at the C
-        source level — SYS_FS_READ always writes there.
-
-        Returns the number of bytes read (at most 512, or fewer if the
-        current file ends inside this sector) and ``0`` at end of file
-        or on a disk error.  All of that bookkeeping happens inside
-        the shared ``fs_read_bytes`` helper, which uses the hidden
-        ``_fs_remaining`` cell that ``fs_find`` seeded with the file's
-        byte size.
-        """
-        self.check_argument_count(arguments=arguments, expected=2, name="fs_read")
-        sector_argument, _buffer_argument = arguments
-        if sector_argument[0] == "variable" and sector_argument[1] in self.pinned_register:
-            register = self.pinned_register[sector_argument[1]]
-            if register != "cx":
-                self.emit(f"        mov cx, {register}")
-        elif sector_argument[0] == "variable" and sector_argument[1] in self.locals:
-            self.emit(f"        mov cx, [{self.local_address(sector_argument[1])}]")
-        else:
-            self.generate_expression(sector_argument)
-            self.emit("        mov cx, ax")
-        self.emit("        call fs_read_bytes")
-        self.needs_fs_read_bytes = True
-        self.ax_clear()
 
     def builtin_mkdir(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
@@ -625,23 +521,9 @@ class CodeGenerator:
         init = statement[2]
         if init is None:
             return True
-        if init[0] != "call":
-            return True
-        # Call initializers generally stay in memory so they can
-        # participate in mkdir-style error-return fusion without
-        # clobbering a pin.  The one exception is ``fs_find``
-        # followed by ``if (!sector) die(...)`` — the die-fusion
-        # post-stores AX into the pinned register, giving the caller
-        # the sector value directly.
-        if init[1] != "fs_find" or following_statement is None:
-            return False
-        return (
-            self.extract_zero_die(
-                statement=following_statement,
-                variable_name=statement[1],
-            )
-            is not None
-        )
+        # Call initializers stay in memory so they can participate in
+        # error-return fusion without clobbering a pin.
+        return init[0] != "call"
 
     @staticmethod
     def check_argument_count(*, arguments: list[tuple], expected: int, name: str) -> None:
@@ -852,24 +734,6 @@ class CodeGenerator:
         self.ax_local = name
 
     @staticmethod
-    def extract_conditional_die(*, operator: str, statement: tuple, variable_name: str) -> tuple | None:
-        """Shared helper for ``extract_nonzero_die``/``extract_zero_die``."""
-        if statement[0] != "if":
-            return None
-        condition, body, else_body = statement[1], statement[2], statement[3]
-        if else_body is not None or len(body) != 1:
-            return None
-        call = body[0]
-        if call[0] != "call" or call[1] != "die":
-            return None
-        if condition[0] != "binary_operator" or condition[1] != operator:
-            return None
-        left, right = condition[2], condition[3]
-        if right != ("int", 0) or left != ("variable", variable_name):
-            return None
-        return call[2][0]
-
-    @staticmethod
     def extract_local_label(line: str, /) -> str | None:
         """Return the _l_ label from a store or declaration, or None."""
         # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
@@ -879,34 +743,6 @@ class CodeGenerator:
         if line.startswith("_l_") and line.endswith(": dw 0"):
             return line[: line.index(":")]
         return None
-
-    @staticmethod
-    def extract_nonzero_die(*, statement: tuple, variable_name: str) -> tuple | None:
-        """Return the die message node for a matching nonzero-die if.
-
-        Matches ``if (variable_name != 0) { die(message); }`` and
-        returns the die message AST node, or ``None`` otherwise.
-        """
-        return CodeGenerator.extract_conditional_die(
-            operator="!=",
-            statement=statement,
-            variable_name=variable_name,
-        )
-
-    @staticmethod
-    def extract_zero_die(*, statement: tuple, variable_name: str) -> tuple | None:
-        """Return the die message node for a matching zero-die if.
-
-        Matches ``if (variable_name == 0) { die(message); }`` — the
-        ``!variable_name`` form is desugared to this shape by the
-        parser — and returns the die message AST node, or ``None``
-        otherwise.
-        """
-        return CodeGenerator.extract_conditional_die(
-            operator="==",
-            statement=statement,
-            variable_name=variable_name,
-        )
 
     def fuse_trailing_puts(self, body: list[tuple], /) -> list[tuple]:
         """Transform trailing puts() calls into die() for main.
@@ -952,17 +788,13 @@ class CodeGenerator:
                     self.emit(f"{label}: dw {', '.join(elements)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
-        if self.needs_fs_read_bytes:
-            self.emit("_fs_remaining: dw 0")
         if self.needs_print_bcd:
             self.emit('%include "print_bcd.asm"')
         if self.needs_print_dec:
             self.emit('%include "print_dec.asm"')
-        if self.needs_fs_read_bytes:
-            self.emit('%include "fs_read_bytes.asm"')
         return "\n".join(self.lines) + "\n"
 
-    def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:  # noqa: PLR0914
+    def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:
         """Generate code for a sequence of statements.
 
         When *scoped* is True, variables declared inside the block are
@@ -988,32 +820,6 @@ class CodeGenerator:
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
             init = statement[2] if statement[0] == "variable_declaration" else None
-            if init is not None and init[0] == "call" and init[1] in self.DIE_ON_ERROR_BUILTINS and i + 1 < len(statements):
-                pattern = self.DIE_ON_ERROR_BUILTINS[init[1]]
-                extractor = self.extract_zero_die if pattern == "zero" else self.extract_nonzero_die
-                die_message = extractor(statement=statements[i + 1], variable_name=statement[1])
-                if die_message is not None:
-                    self.visible_vars.add(statement[1])
-                    call_node = init
-                    handler = getattr(self, f"builtin_{call_node[1]}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
-                    if self.register_cache and clobbers:
-                        self.auto_spill(clobbers=clobbers)
-                    handler(call_node[2], fuse_die_message=die_message)
-                    # fs_find leaves the sector value in AX on the
-                    # success fall-through — commit it to the caller's
-                    # variable.  fs_read has no such value (int 30h
-                    # clobbered AX), so skip the store.
-                    if call_node[1] == "fs_find":
-                        variable_name = statement[1]
-                        if variable_name in self.pinned_register:
-                            self.emit(f"        mov {self.pinned_register[variable_name]}, ax")
-                        elif variable_name in self.locals:
-                            self.emit(f"        mov [{self.local_address(variable_name)}], ax")
-                        self.ax_is_byte = False
-                        self.ax_local = variable_name
-                    i += 2
-                    continue
             # Fuse `if (cond) { die(msg); }` into pre-load SI + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
@@ -1749,13 +1555,9 @@ class CodeGenerator:
 
         Plain ``int`` declarations are auto-pinned to a CPU register
         (from :data:`REGISTER_POOL`, in declaration order) when a slot
-        is still available.  A call initializer is normally skipped
-        because it usually participates in the error-fusion optim-
-        izations that reuse AX and would conflict with a pinned
-        destination — the one exception is ``fs_find`` when it is
-        followed by an ``if (!variable) die(...)``, because that
-        fusion leaves the sector value in AX on fall-through and the
-        die-fusion site explicitly stores it into the pin.
+        is still available.  Call initializers stay in memory so they
+        can participate in error-fusion optimizations without
+        clobbering a pin.
         """
         for index, statement in enumerate(statements):
             if statement[0] == "variable_declaration":
