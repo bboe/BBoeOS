@@ -25,15 +25,11 @@ main:
         test ax, ax
         jz .done                ; EOF
 
-        ;; Print AX bytes from DISK_BUFFER
+        ;; Write AX bytes from DISK_BUFFER
         push bx                 ; Save fd
         mov cx, ax
         mov si, DISK_BUFFER
-.print:
-        lodsb
-        mov ah, SYS_IO_PUTC
-        int 30h
-        loop .print
+        call write_stdout
         pop bx                  ; Restore fd
         jmp .read_loop
 
@@ -45,25 +41,29 @@ main:
 
 .not_found:
         mov si, FILE_NOT_FOUND
+        mov cx, FILE_NOT_FOUND_LEN
         jmp .output
 
 .disk_err:
         mov ah, SYS_IO_CLOSE
         int 30h
         mov si, DISK_ERROR
+        mov cx, DISK_ERROR_LEN
         jmp .output
 
 .usage:
         mov si, USAGE
+        mov cx, USAGE_LEN
 
 .output:
-        mov ah, SYS_IO_PUTS
-        int 30h
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
 ;; Strings
-USAGE      db `Usage: cat <filename>\n\0`
+USAGE      db `Usage: cat <filename>\n`
+USAGE_LEN  equ $ - USAGE
 
 %include "str_disk_error.asm"
 %include "str_file_not_found.asm"
+%include "write_stdout.asm"

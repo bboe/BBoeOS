@@ -17,15 +17,17 @@ main:
         cmp al, ERR_DIR_FULL
         je .dir_full
         mov si, MSG_ERROR
+        mov cx, MSG_ERROR_LEN
         jmp .print
         .exists:
         mov si, MSG_EXISTS
+        mov cx, MSG_EXISTS_LEN
         jmp .print
         .dir_full:
         mov si, MSG_DIR_FULL
+        mov cx, MSG_DIR_FULL_LEN
         .print:
-        mov ah, SYS_IO_PUTS
-        int 30h
+        call write_stdout
 
         .done:
         mov ah, SYS_EXIT
@@ -33,12 +35,17 @@ main:
 
         .usage:
         mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
-        int 30h
+        mov cx, MSG_USAGE_LEN
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
-MSG_DIR_FULL  db `Directory full\n\0`
-MSG_ERROR     db `Error\n\0`
-MSG_EXISTS    db `Already exists\n\0`
-MSG_USAGE     db `Usage: mkdir <name>\n\0`
+MSG_DIR_FULL  db `Directory full\n`
+MSG_DIR_FULL_LEN equ $ - MSG_DIR_FULL
+MSG_ERROR     db `Error\n`
+MSG_ERROR_LEN equ $ - MSG_ERROR
+MSG_EXISTS    db `Already exists\n`
+MSG_EXISTS_LEN equ $ - MSG_EXISTS
+MSG_USAGE     db `Usage: mkdir <name>\n`
+MSG_USAGE_LEN equ $ - MSG_USAGE
+%include "write_stdout.asm"

@@ -1687,6 +1687,16 @@ handle_rep:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_repne: repne prefix — emits 0xF2 then parses the next mnemonic
+;;; -----------------------------------------------------------------------
+handle_repne:
+        mov al, 0F2h
+        call emit_byte_al
+        call skip_ws
+        call parse_mnemonic
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_ret
 ;;; -----------------------------------------------------------------------
 handle_ret:
@@ -1729,6 +1739,14 @@ handle_sbb:
         pop si
         .sbb_bad2:
         jmp abort_unknown
+
+;;; -----------------------------------------------------------------------
+;;; handle_scasb
+;;; -----------------------------------------------------------------------
+handle_scasb:
+        mov al, 0AEh
+        call emit_byte_al
+        ret
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_shl: shl r8, imm8 / shl r16, imm8
@@ -3889,8 +3907,10 @@ mnemonic_table:
         dw STR_POP, handle_pop
         dw STR_PUSH, handle_push
         dw STR_REP, handle_rep
+        dw STR_REPNE, handle_repne
         dw STR_RET, handle_ret
         dw STR_SBB, handle_sbb
+        dw STR_SCASB, handle_scasb
         dw STR_SHL, handle_shl
         dw STR_SHR, handle_shr
         dw STR_STC, handle_stc
@@ -3951,8 +3971,10 @@ STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
 STR_PUSH    db 'push',0
 STR_REP     db 'rep',0
+STR_REPNE   db 'repne',0
 STR_RET     db 'ret',0
 STR_SBB     db 'sbb',0
+STR_SCASB   db 'scasb',0
 STR_SHL     db 'shl',0
 STR_SHR     db 'shr',0
 STR_STC     db 'stc',0

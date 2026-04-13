@@ -160,6 +160,7 @@ class CodeGenerator:
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
         "read": frozenset({"ax", "cx", "di"}),
+        "strlen": frozenset({"ax", "cx", "di"}),
         "print_bcd": frozenset({"ax"}),
         "print_buffer": frozenset({"ax", "bx", "cx", "si"}),
         "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
@@ -321,12 +322,21 @@ class CodeGenerator:
     def builtin_die(self, arguments: list[tuple], /) -> None:
         """Generate code for the die() builtin.
 
-        Prints a message and terminates via a shared label.
+        Pre-loads SI and CX (string + length) and jumps to a shared
+        ``.die`` label that calls ``write_stdout`` then exits.
         """
         self.check_argument_count(arguments=arguments, expected=1, name="die")
-        self.emit_si_from_argument(arguments[0])
+        argument = arguments[0]
+        if argument[0] != "string":
+            message = "die() requires a string literal"
+            raise SyntaxError(message)
+        label = self.new_string_label(argument[1])
+        length = string_byte_length(argument[1])
+        self.emit(f"        mov si, {label}")
+        self.emit(f"        mov cx, {length}")
         self.emit("        jmp .die")
         self.die_count += 1
+        self.needs_write_stdout = True
 
     def builtin_exit(self, arguments: list[tuple], /) -> None:
         """Generate code for the exit() builtin."""
@@ -440,38 +450,53 @@ class CodeGenerator:
     def builtin_puts(self, arguments: list[tuple], /) -> None:
         """Generate code for the puts() builtin.
 
-        For string literals, emits ``call write_stdout`` with the
-        compile-time length.  For variable arguments, falls back to
-        SYS_IO_PUTS since the length is not known.
+        Emits ``call write_stdout`` with the compile-time string length.
+        Only string literals are supported; use write() for variables.
         """
         self.check_argument_count(arguments=arguments, expected=1, name="puts")
         argument = arguments[0]
-        if argument[0] == "string":
-            label = self.new_string_label(argument[1])
-            length = string_byte_length(argument[1])
-            self.emit(f"        mov si, {label}")
-            self.emit(f"        mov cx, {length}")
-            self.emit("        call write_stdout")
-            self.needs_write_stdout = True
-        else:
-            self.emit_si_from_argument(argument)
-            self.emit("        mov ah, SYS_IO_PUTS")
-            self.emit("        int 30h")
+        if argument[0] != "string":
+            message = "puts() requires a string literal; use write() for variables"
+            raise SyntaxError(message)
+        label = self.new_string_label(argument[1])
+        length = string_byte_length(argument[1])
+        self.emit(f"        mov si, {label}")
+        self.emit(f"        mov cx, {length}")
+        self.emit("        call write_stdout")
+        self.needs_write_stdout = True
 
     def builtin_read(self, arguments: list[tuple], /) -> None:
         """Generate code for the read() builtin.
 
-        ``read(fd, buffer, count)`` emits ``mov bx, <fd> /
-        mov di, <buffer> / mov cx, <count> / mov ah, SYS_IO_READ /
-        int 30h``.  Returns bytes read in AX (0 = EOF, -1 = error).
+        ``read(fd, buffer, count)`` emits ``mov di, <buffer> /
+        mov cx, <count> / mov bx, <fd> / mov ah, SYS_IO_READ /
+        int 30h``.  BX is loaded last so that complex buffer
+        expressions (subscripts) can use BX as scratch.
+        Returns bytes read in AX (0 = EOF, -1 = error).
         """
         self.check_argument_count(arguments=arguments, expected=3, name="read")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit_register_from_argument(argument=buffer_argument, register="di")
         self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit("        mov ah, SYS_IO_READ")
         self.emit("        int 30h")
+        self.ax_clear()
+
+    def builtin_strlen(self, arguments: list[tuple], /) -> None:
+        """Generate code for the strlen() builtin.
+
+        ``strlen(ptr)`` scans for a null terminator and returns the
+        string length in AX.  Uses ``repne scasb`` (clobbers CX, DI).
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="strlen")
+        self.emit_register_from_argument(argument=arguments[0], register="di")
+        self.emit("        xor al, al")
+        self.emit("        mov cx, 0FFFFh")
+        self.emit("        cld")
+        self.emit("        repne scasb")
+        self.emit("        mov ax, 0FFFEh")
+        self.emit("        sub ax, cx")
         self.ax_clear()
 
     def builtin_uptime(self, arguments: list[tuple], /) -> None:
@@ -483,15 +508,17 @@ class CodeGenerator:
     def builtin_write(self, arguments: list[tuple], /) -> None:
         """Generate code for the write() builtin.
 
-        ``write(fd, buffer, count)`` emits ``mov bx, <fd> /
-        mov si, <buffer> / mov cx, <count> / mov ah, SYS_IO_WRITE /
-        int 30h``.  Returns bytes written in AX (-1 on error).
+        ``write(fd, buffer, count)`` emits ``mov si, <buffer> /
+        mov cx, <count> / mov bx, <fd> / mov ah, SYS_IO_WRITE /
+        int 30h``.  BX is loaded last so that complex buffer
+        expressions (subscripts) can use BX as scratch.
+        Returns bytes written in AX (-1 on error).
         """
         self.check_argument_count(arguments=arguments, expected=3, name="write")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit_register_from_argument(argument=buffer_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit("        mov ah, SYS_IO_WRITE")
         self.emit("        int 30h")
         self.ax_clear()
@@ -804,18 +831,22 @@ class CodeGenerator:
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
             init = statement[2] if statement[0] == "variable_declaration" else None
-            # Fuse `if (cond) { die(msg); }` into pre-load SI + jCC .die.
+            # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
             if statement[0] == "if" and statement[3] is None and len(statement[2]) == 1:
                 inner = statement[2][0]
                 if inner[0] == "call" and inner[1] == "die" and statement[1][0] == "binary_operator" and statement[1][1] in JUMP_WHEN_FALSE:
                     die_message = inner[2][0]
-                    self.emit_si_from_argument(die_message)
+                    die_label = self.new_string_label(die_message[1])
+                    die_length = string_byte_length(die_message[1])
+                    self.emit(f"        mov si, {die_label}")
+                    self.emit(f"        mov cx, {die_length}")
                     operator = self.emit_condition(condition=statement[1], context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
                     self.emit(f"        {true_jump} .die")
                     self.die_count += 1
+                    self.needs_write_stdout = True
                     i += 1
                     continue
             # Fuse error-returning syscall + if-zero-exit.
@@ -1037,8 +1068,7 @@ class CodeGenerator:
             elif self.die_count >= 2:
                 self.emit("        jmp .exit")
                 self.emit(".die:")
-                self.emit("        mov ah, SYS_IO_PUTS")
-                self.emit("        int 30h")
+                self.emit("        call write_stdout")
             self.emit(".exit:")
             self.emit("        mov ah, SYS_EXIT")
             self.emit("        int 30h")
@@ -1186,12 +1216,11 @@ class CodeGenerator:
         return None
 
     def inline_single_die(self) -> None:
-        """Replace a lone ``jmp .die`` with inline puts + ``jmp .exit``."""
+        """Replace a lone ``jmp .die`` with inline write_stdout + ``jmp .exit``."""
         for i, line in enumerate(self.lines):
             if line.strip() == "jmp .die":
-                self.lines[i] = "        mov ah, SYS_IO_PUTS"
-                self.lines.insert(i + 1, "        int 30h")
-                self.lines.insert(i + 2, "        jmp .exit")
+                self.lines[i] = "        call write_stdout"
+                self.lines.insert(i + 1, "        jmp .exit")
                 return
 
     @staticmethod
