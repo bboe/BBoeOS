@@ -50,7 +50,7 @@
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_GETC  11h
-        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags; returns AX=fd, CF on error
+        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
         %assign SYS_IO_PUTC  13h
         %assign SYS_IO_PUTS  14h
         %assign SYS_IO_READ  15h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error

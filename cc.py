@@ -195,6 +195,7 @@ class CodeGenerator:
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
         "DISK_BUFFER",
+        "FLAG_EXEC",
         "O_CREAT",
         "O_RDONLY",
         "O_TRUNC",
@@ -457,17 +458,25 @@ class CodeGenerator:
     def builtin_open(self, arguments: list[tuple], /) -> None:
         """Generate code for the open() builtin.
 
-        ``open(name, flags)`` emits ``mov si, <name> / mov al, <flags>
-        / mov ah, SYS_IO_OPEN / int 30h``.  Returns the fd number in
-        AX, or -1 on error (CF set).
+        ``open(name, flags)`` or ``open(name, flags, mode)`` emits
+        ``mov si, <name> / mov al, <flags> / [mov dl, <mode>] /
+        mov ah, SYS_IO_OPEN / int 30h``.  The optional *mode*
+        parameter sets the file permission flags (e.g. ``FLAG_EXEC``)
+        when ``O_CREAT`` creates a new file.  Returns the fd number
+        in AX, or -1 on error (CF set).
         """
-        self.check_argument_count(arguments=arguments, expected=2, name="open")
-        name_argument, flags_argument = arguments
+        if len(arguments) < 2 or len(arguments) > 3:
+            message = "open() expects 2 or 3 arguments"
+            raise SyntaxError(message)
+        name_argument = arguments[0]
+        flags_argument = arguments[1]
         self.emit_si_from_argument(name_argument)
         if flags_argument[0] == "int" or (flags_argument[0] == "variable" and flags_argument[1] in self.NAMED_CONSTANTS):
             self.emit(f"        mov al, {flags_argument[1]}")
         else:
             self.generate_expression(flags_argument)
+        if len(arguments) == 3:
+            self.emit_register_from_argument(argument=arguments[2], register="dl")
         self.emit("        mov ah, SYS_IO_OPEN")
         self.emit("        int 30h")
         self.ax_clear()
