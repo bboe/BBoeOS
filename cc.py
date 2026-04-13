@@ -167,7 +167,7 @@ class CodeGenerator:
         "fs_find": frozenset({"ax", "bx"}),
         "fs_read": frozenset({"ax", "cx"}),
         "mkdir": frozenset({"ax"}),
-        "open": frozenset({"ax"}),
+        "open": frozenset({"ax", "dx"}),
         "read": frozenset({"ax", "cx", "di"}),
         "print_bcd": frozenset({"ax"}),
         "print_buffer": frozenset({"ax", "cx", "si"}),

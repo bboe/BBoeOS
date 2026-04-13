@@ -14,11 +14,12 @@
         %assign ERR_NOT_FOUND 04h     ; File not found
         %assign ERR_PROTECTED 05h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 4FEh
-        %assign FD_ENTRY_SIZE 16
+        %assign FD_ENTRY_SIZE 32
         %assign FD_MAX 8
         %assign FD_OFF_DIR_OFF 14    ; offset of dir_off field within FD entry
         %assign FD_OFF_DIR_SEC 12    ; offset of dir_sec field within FD entry
         %assign FD_OFF_FLAGS 1       ; offset of flags field within FD entry
+        %assign FD_OFF_MODE 16       ; offset of mode field (file permission flags)
         %assign FD_OFF_POS 8         ; offset of pos field within FD entry (32-bit)
         %assign FD_OFF_SIZE 4        ; offset of size field within FD entry (32-bit)
         %assign FD_OFF_START 2       ; offset of start_sec field within FD entry
@@ -49,12 +50,13 @@
         %assign SYS_FS_WRITE  07h    ; sector in CX (16-bit), CX=0 writes back the loaded directory sector
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
-        %assign SYS_IO_GETC  11h
-        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
-        %assign SYS_IO_PUTC  13h
-        %assign SYS_IO_PUTS  14h
-        %assign SYS_IO_READ  15h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
+        %assign SYS_IO_GETC  12h
+        %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
+        %assign SYS_IO_PUTC  14h
+        %assign SYS_IO_PUTS  15h
+        %assign SYS_IO_READ  16h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_WRITE 17h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         %assign SYS_NET_ARP 20h
         %assign SYS_NET_INIT 21h

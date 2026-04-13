@@ -2,9 +2,10 @@
 ;;;
 ;;; fd_alloc:         Find the first free FD slot (AX = fd number, CF if full)
 ;;; fd_close:         SYS_IO_CLOSE -- BX=fd; flushes writable files
+;;; fd_fstat:         SYS_IO_FSTAT -- BX=fd; returns AL=mode, CX:DX=size
 ;;; fd_init:          Zero the FD table, pre-open fds 0/1/2 as console
 ;;; fd_lookup:        Validate fd in BX, return SI = entry pointer (CF if invalid)
-;;; fd_open:          SYS_IO_OPEN  -- SI=filename, AL=flags; returns AX=fd
+;;; fd_open:          SYS_IO_OPEN  -- SI=filename, AL=flags, DL=mode; returns AX=fd
 ;;; fd_pos_to_sector: Convert fd_pos to sector + offset (internal helper)
 ;;; fd_read:          SYS_IO_READ  -- BX=fd, DI=buffer, CX=count; returns AX=bytes
 ;;; fd_write:         SYS_IO_WRITE -- BX=fd, SI=buffer, CX=count; returns AX=bytes
@@ -101,6 +102,25 @@ fd_close:
         stc
         ret
 
+;;; -----------------------------------------------------------------------
+;;; fd_fstat: Get file status from a file descriptor
+;;; Input:  BX = fd number
+;;; Output: AL = mode (file permission flags), CX:DX = size (32-bit)
+;;;         CF set on error
+;;; -----------------------------------------------------------------------
+fd_fstat:
+        call fd_lookup
+        jc .fstat_err
+        ;; SI = entry pointer
+        mov al, [si+FD_OFF_MODE]
+        mov dx, [si+FD_OFF_SIZE]
+        mov cx, [si+FD_OFF_SIZE+2]
+        clc
+        ret
+        .fstat_err:
+        stc
+        ret
+
 fd_init:
         ;; Zero the entire FD table
         push ax
@@ -133,7 +153,7 @@ fd_lookup:
         jae .invalid
         push ax
         mov ax, bx
-        shl ax, 4              ; ax = bx * FD_ENTRY_SIZE (16)
+        shl ax, 5              ; ax = bx * FD_ENTRY_SIZE (32)
         mov si, fd_table
         add si, ax
         cmp byte [si+FD_OFF_TYPE], FD_TYPE_FREE
@@ -239,6 +259,9 @@ fd_open:
         mov byte [si+FD_OFF_TYPE], FD_TYPE_FILE
         mov cl, [fd_open_flags]
         mov [si+FD_OFF_FLAGS], cl
+        ;; mode (file permission flags from directory entry)
+        mov cl, [bx+DIR_OFF_FLAGS]
+        mov [si+FD_OFF_MODE], cl
         ;; start_sec
         mov cx, [bx+DIR_OFF_SECTOR]
         mov [si+FD_OFF_START], cx
@@ -557,6 +580,7 @@ fd_write:
         ;; Local variables (all fd.asm variables consolidated here)
         fd_open_fd    dw 0
         fd_open_flags db 0
+        fd_open_mode  db 0
         fd_open_name  dw 0
         fd_open_sec   dw 0
         fd_rw_done    dw 0

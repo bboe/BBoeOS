@@ -18,6 +18,8 @@ syscall_handler:
 
         cmp ah, SYS_IO_CLOSE   ; io_close
         je .io_close
+        cmp ah, SYS_IO_FSTAT   ; io_fstat
+        je .io_fstat
         cmp ah, SYS_IO_GETC    ; io_getc
         je .io_getc
         cmp ah, SYS_IO_OPEN    ; io_open
@@ -801,6 +803,13 @@ syscall_handler:
         ;; Close fd: BX = fd
         ;; CF on error
         call fd_close
+        jmp .iret_cf
+
+        .io_fstat:
+        ;; Get file status: BX = fd
+        ;; Returns AL = mode (permission flags), CX:DX = size (32-bit)
+        ;; CF on error
+        call fd_fstat
         jmp .iret_cf
 
         .io_open:

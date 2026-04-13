@@ -28,24 +28,23 @@ main:
         jz .usage
         mov [dest_name], di
 
-        ;; Look up source file to get its permission flags
-        mov ah, SYS_FS_FIND
-        int 30h
-        jc .not_found
-        mov al, [bx+DIR_OFF_FLAGS]
-        mov [src_flags], al
-
-        ;; Open source file for reading (SI still points to srcname)
+        ;; Open source file for reading
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h
         jc .not_found
         mov [src_fd], ax
 
+        ;; Get source file's permission flags via fstat
+        mov bx, ax
+        mov ah, SYS_IO_FSTAT
+        int 30h
+        mov [src_mode], al
+
         ;; Open dest file for writing (create new, with source permissions)
         mov si, [dest_name]
         mov al, O_WRONLY + O_CREAT
-        mov dl, [src_flags]
+        mov dl, [src_mode]
         mov ah, SYS_IO_OPEN
         int 30h
         jc .dest_err
@@ -118,7 +117,7 @@ main:
 dest_fd   dw 0
 dest_name dw 0
 src_fd    dw 0
-src_flags db 0
+src_mode db 0
 
 ;; Strings
 MSG_DISK_ERR  db `Disk error\n\0`
