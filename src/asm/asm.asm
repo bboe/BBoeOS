@@ -7,7 +7,7 @@
         ;; binary at PROGRAM_BASE=0x0600, stage 1's live code at
         ;; 0x7C00-0x7DFF, and stage 2 at 0x7E00-0x8DFF:
         ;;   - small buffers at 0x3000-0x3FFF (asm.asm ends well below 0x3000)
-        ;;   - SYM_TABLE at 0x9400+ (past stage 2 + kernel vars, below 0xE000)
+        ;;   - SYM_TABLE at 0x9800+ (past stage 2 + kernel vars, below 0xE000)
         ;; Fixed addresses are used (rather than labels) because the
         ;; LINE_BUF/OUT_BUF/SRC_BUF/INC_SAVE/INC_SRC_SAVE float on top of
         ;; program_end (defined at the end of this file) so they grow with
@@ -23,9 +23,9 @@
         %define INC_SAVE      SRC_BUF + 512   ; include stack (12 bytes per level)
         %define INC_SRC_SAVE  INC_SAVE + 64   ; saved source buffer (512 bytes per level)
         %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
-        %assign SYM_MAX       694       ; 694 * 28 = 19432 bytes (0x9400-0xDBD8)
+        %assign SYM_MAX       658       ; 658 * 28 = 18424 bytes (0x9800-0xDFF8)
         %assign SYM_NAME_LEN  24        ; 23 chars + null
-        %assign SYM_TABLE     9400h
+        %assign SYM_TABLE     9800h
 
 ;;; -----------------------------------------------------------------------
 ;;; Main entry point
