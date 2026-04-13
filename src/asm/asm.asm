@@ -20,7 +20,7 @@
         %define LINE_BUF      program_end
         %define OUT_BUF       LINE_BUF + 256
         %define SRC_BUF       OUT_BUF + 512
-        %define INC_SAVE      SRC_BUF + 512   ; include stack (12 bytes per level)
+        %define INC_SAVE      SRC_BUF + 512   ; include stack (6 bytes: src_fd, src_buf_pos, src_buf_valid)
         %define INC_SRC_SAVE  INC_SAVE + 64   ; saved source buffer (512 bytes per level)
         %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
         %assign SYM_MAX       658       ; 658 * 28 = 18424 bytes (0x9800-0xDFF8)
@@ -118,12 +118,14 @@ main:
         cmp word [iter_count], 100
         jae .err_pass1_iter
 
-        ;; -- Create output file --
+        ;; -- Open output file for writing --
         mov si, [out_name]
-        mov ah, SYS_FS_CREATE
+        mov al, O_WRONLY + O_CREAT + O_TRUNC
+        mov dl, FLAG_EXEC
+        mov ah, SYS_IO_OPEN
         int 30h
         jc .err_create
-        mov [out_start_sec], ax
+        mov [out_fd], ax
 
         ;; -- Pass 2: emit bytes --
         mov byte [pass], 2
@@ -131,8 +133,6 @@ main:
         mov [cur_addr], ax
         mov word [global_scope], 0FFFFh
         mov word [jump_index], 0
-        mov ax, [out_start_sec]
-        mov [out_sector], ax
         mov word [out_pos], 0
         mov word [out_total], 0
         call do_pass
@@ -140,16 +140,9 @@ main:
         ;; Flush remaining output
         call flush_output
 
-        ;; Update directory entry with file size and mark executable
-        mov si, [out_name]
-        mov ah, SYS_FS_FIND
-        int 30h
-        jc .err_find_out
-        mov ax, [out_total]
-        mov [bx+DIR_OFF_SIZE], ax
-        mov byte [bx+DIR_OFF_FLAGS], FLAG_EXEC
-        xor cx, cx                     ; CX=0 = write back directory
-        mov ah, SYS_FS_WRITE
+        ;; Close output — kernel writes back directory size from fd_pos
+        mov bx, [out_fd]
+        mov ah, SYS_IO_CLOSE
         int 30h
         jc .err_write_dir
 
@@ -237,17 +230,11 @@ do_pass:
 
         ;; Open source file
         mov si, [src_name]
-        mov ah, SYS_FS_FIND
+        mov al, O_RDONLY
+        mov ah, SYS_IO_OPEN
         int 30h
         jc .pass_err
-        ;; Read source size (32-bit) and start sector (16-bit) into our state
-        mov ax, [bx+DIR_OFF_SIZE]
-        mov [file_remaining], ax
-        mov ax, [bx+DIR_OFF_SIZE+2]
-        mov [file_remaining+2], ax
-        mov ax, [bx+DIR_OFF_SECTOR]
-        mov [file_start], ax
-        mov [file_cur_sec], ax
+        mov [src_fd], ax
         mov word [src_buf_pos], 0
         mov word [src_buf_valid], 0
         mov byte [inc_depth], 0
@@ -267,6 +254,10 @@ do_pass:
         jmp .line_loop
 
         .pass_done:
+        ;; Close source fd
+        mov bx, [src_fd]
+        mov ah, SYS_IO_CLOSE
+        int 30h
         pop di
         pop si
         pop dx
@@ -395,26 +386,12 @@ flush_output:
         ;; Don't flush if nothing to write
         cmp word [out_pos], 0
         je .fl_done
-        ;; Zero-pad remainder
-        mov di, OUT_BUF
-        add di, [out_pos]
-        mov cx, 512
-        sub cx, [out_pos]
-        jz .fl_write
-        xor al, al
-        rep stosb
-        .fl_write:
-        ;; Copy OUT_BUF to DISK_BUFFER
+        ;; Write out_pos bytes from OUT_BUF via fd
+        mov bx, [out_fd]
         mov si, OUT_BUF
-        mov di, DISK_BUFFER
-        mov cx, 256
-        cld
-        rep movsw
-        ;; Write sector (CX = 16-bit sector)
-        mov cx, [out_sector]
-        mov ah, SYS_FS_WRITE
+        mov cx, [out_pos]
+        mov ah, SYS_IO_WRITE
         int 30h
-        inc word [out_sector]
         mov word [out_pos], 0
         .fl_done:
         pop di
@@ -2230,19 +2207,17 @@ include_pop:
         push cx
         push si
         push di
+        ;; Close the include file's fd
+        mov bx, [src_fd]
+        mov ah, SYS_IO_CLOSE
+        int 30h
         ;; Restore from INC_SAVE (parent file state)
         mov bx, INC_SAVE
-        mov ax, [bx+0]                 ; file_start
-        mov [file_start], ax
-        mov ax, [bx+2]                 ; file_cur_sec
-        mov [file_cur_sec], ax
-        mov ax, [bx+4]                 ; file_remaining low
-        mov [file_remaining], ax
-        mov ax, [bx+6]                 ; file_remaining high
-        mov [file_remaining+2], ax
-        mov ax, [bx+8]                 ; src_buf_pos
+        mov ax, [bx+0]                 ; src_fd
+        mov [src_fd], ax
+        mov ax, [bx+2]                 ; src_buf_pos
         mov [src_buf_pos], ax
-        mov ax, [bx+10]                ; src_buf_valid
+        mov ax, [bx+4]                 ; src_buf_valid
         mov [src_buf_valid], ax
         ;; Restore SRC_BUF
         mov si, INC_SRC_SAVE
@@ -2265,20 +2240,14 @@ include_pop:
 include_push:
         push ax
         push bx
-        ;; Save current file state to INC_SAVE (12 bytes)
+        ;; Save current file state to INC_SAVE (6 bytes)
         mov bx, INC_SAVE
-        mov ax, [file_start]
+        mov ax, [src_fd]
         mov [bx+0], ax
-        mov ax, [file_cur_sec]
-        mov [bx+2], ax
-        mov ax, [file_remaining]
-        mov [bx+4], ax
-        mov ax, [file_remaining+2]
-        mov [bx+6], ax
         mov ax, [src_buf_pos]
-        mov [bx+8], ax
+        mov [bx+2], ax
         mov ax, [src_buf_valid]
-        mov [bx+10], ax
+        mov [bx+4], ax
         ;; Save SRC_BUF content
         push si
         push di
@@ -2311,18 +2280,13 @@ include_push:
         inc si
         jmp .ip_name
         .ip_done:
-        mov si, include_path
         ;; Open included file
-        mov ah, SYS_FS_FIND
+        mov si, include_path
+        mov al, O_RDONLY
+        mov ah, SYS_IO_OPEN
         int 30h
         jc .inc_err
-        mov ax, [bx+DIR_OFF_SIZE]
-        mov [file_remaining], ax
-        mov ax, [bx+DIR_OFF_SIZE+2]
-        mov [file_remaining+2], ax
-        mov ax, [bx+DIR_OFF_SECTOR]
-        mov [file_start], ax
-        mov [file_cur_sec], ax
+        mov [src_fd], ax
         mov word [src_buf_pos], 0
         mov word [src_buf_valid], 0
         inc byte [inc_depth]
@@ -2336,72 +2300,34 @@ include_push:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; load_src_sector: read next sector of source file into SRC_BUF
-;;; Returns CF if no more data
+;;; load_src_sector: read next chunk of source file into SRC_BUF via fd
+;;; Returns CF if no more data (EOF)
 ;;; -----------------------------------------------------------------------
 load_src_sector:
-        push ax
         push bx
         push cx
-        push dx
-        push si
         push di
-        ;; If file_remaining is 32-bit zero, no more data.
-        mov ax, [file_remaining]
-        mov bx, [file_remaining+2]
-        mov cx, ax
-        or cx, bx
-        jz .no_more
-        ;; valid = min(file_remaining, 512). BX (high 16) > 0 -> at least 64K.
-        test bx, bx
-        jne .full_sector
-        cmp ax, 512
-        jb .partial
-        .full_sector:
-        mov bx, 512
-        sub word [file_remaining], 512
-        sbb word [file_remaining+2], 0
-        jmp .do_read
-        .partial:
-        mov bx, ax
-        mov word [file_remaining], 0
-        mov word [file_remaining+2], 0
-        .do_read:
-        ;; Read sector (CX = 16-bit sector).
-        push bx
-        mov cx, [file_cur_sec]
-        mov ah, SYS_FS_READ
-        int 30h
-        pop bx
-        jc .no_more
-        ;; Copy DISK_BUFFER to SRC_BUF (always 256 words = 512 bytes;
-        ;; src_buf_valid records how many of those bytes are real).
-        push bx
-        mov si, DISK_BUFFER
+        mov bx, [src_fd]
         mov di, SRC_BUF
-        mov cx, 256
-        cld
-        rep movsw
-        pop bx
-        mov [src_buf_valid], bx
+        mov cx, 512
+        mov ah, SYS_IO_READ
+        int 30h
+        cmp ax, -1
+        je .no_more
+        test ax, ax
+        jz .no_more
+        mov [src_buf_valid], ax
         mov word [src_buf_pos], 0
-        inc word [file_cur_sec]
         clc
         pop di
-        pop si
-        pop dx
         pop cx
         pop bx
-        pop ax
         ret
         .no_more:
         stc
         pop di
-        pop si
-        pop dx
         pop cx
         pop bx
-        pop ax
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -4081,9 +4007,6 @@ MSG_USAGE   db `Usage: asm <source> <output>\n\0`
 cmp_op1_size  db 0
 cur_addr      dw 0
 err_flag      db 0
-file_cur_sec  dw 0
-file_remaining dd 0      ; bytes left to read in current source file (32-bit)
-file_start    dw 0
 global_scope  dw 0FFFFh
 growth_flag   db 0
 inc_depth     db 0
@@ -4100,14 +4023,14 @@ op2_reg       db 0
 op2_type      db 0
 op2_val       dw 0
 org_value     dw 0
+out_fd        dw 0
 out_name      dw 0
 out_pos       dw 0
-out_sector    dw 0
-out_start_sec dw 0
 out_total     dw 0
 pass          db 0
 src_buf_pos   dw 0
 src_buf_valid dw 0
+src_fd        dw 0
 src_name      dw 0
 src_prefix    times 32 db 0
 ss_scope      dw 0
