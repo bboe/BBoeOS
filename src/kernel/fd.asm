@@ -644,6 +644,7 @@ fd_write:
         ;; Write CX bytes from user buffer to console via put_char
         push bx
         push cx
+        push dx
         push si
         mov si, [fd_write_buf]
         mov bx, cx             ; BX = count
@@ -659,8 +660,10 @@ fd_write:
         .wcon_done:
         mov ax, dx
         pop si
+        pop dx
         pop cx
         pop bx
+
         clc
         ret
 
