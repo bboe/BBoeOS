@@ -4,7 +4,8 @@ void main(int argc, char *argv[]) {
 	if (i > 0) {
 	    putc(' ');
 	}
-        puts(argv[i]);
+        int len = strlen(argv[i]);
+        write(STDOUT, argv[i], len);
         i = i + 1;
     }
     putc('\n');

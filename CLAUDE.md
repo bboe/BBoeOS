@@ -65,9 +65,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 12h   | io_get_character | Read one char, AL = char, AH = scan code          |
 | 13h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
 | 14h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
-| 15h   | io_puts      | Print string at SI (screen + serial, ANSI-aware)      |
-| 16h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
-| 17h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
+| 15h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
+| 16h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
 | 21h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
 | 22h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |

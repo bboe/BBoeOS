@@ -5,8 +5,8 @@
 main:
         cld
         mov si, PROMPT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, PROMPT_LENGTH
+        call write_stdout
 
         call read_line
         test cx, cx
@@ -73,16 +73,15 @@ main:
         int 30h                 ; Does not return on success
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
-        mov si, INVALID_CMD
+        mov si, INVALID_COMMAND
         jmp .output
         .not_exec:
-        mov si, NOT_EXEC
+        mov si, NOT_EXECUTABLE
 
 .output:
         test si, si
         jz main
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         jmp main
 
 ;; Command handlers
@@ -91,15 +90,14 @@ main:
 cmd_help:
         push bx
         mov si, HELP_PREFIX
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, HELP_PREFIX_LENGTH
+        call write_stdout
         mov bx, cmd_table
 .help_loop:
         mov si, [bx]
         test si, si
         jz .help_end
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov al, ' '
         mov ah, SYS_IO_PUT_CHARACTER
         int 30h
@@ -456,6 +454,24 @@ putc:
         int 30h
         ret
 
+puts_strlen:
+        ;; Print null-terminated string at SI (variable-length)
+        ;; Computes length, then calls write_stdout
+        push di
+        push cx
+        mov di, si
+        xor cx, cx
+        .loop:
+        cmp byte [di], 0
+        je .done
+        inc di
+        inc cx
+        jmp .loop
+        .done:
+        pop ax                  ; discard saved CX
+        pop di
+        jmp write_stdout        ; tail call
+
 syscall_null:
         int 30h
         xor si, si
@@ -493,10 +509,12 @@ cmd_table:
         .shutdown db `shutdown\0`
 
 ;; Strings
-HELP_PREFIX   db `Commands: \0`
-INVALID_CMD   db `unknown command\n\0`
-NOT_EXEC      db `not executable\n\0`
-PROMPT        db `$ \0`
+HELP_PREFIX   db `Commands: `
+HELP_PREFIX_LENGTH equ $ - HELP_PREFIX
+INVALID_COMMAND   db `unknown command\n\0`
+NOT_EXECUTABLE      db `not executable\n\0`
+PROMPT        db `$ `
+PROMPT_LENGTH equ $ - PROMPT
 SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 
 ;; Variables
@@ -504,3 +522,5 @@ exec_path     db `bin/`              ; 4 bytes prefix
               times DIRECTORY_NAME_LENGTH+1 db 0 ; name (up to 26 chars) + null + safety byte
 kill_buffer   times MAX_INPUT db 0
 kill_length   dw 0
+
+%include "write_stdout.asm"

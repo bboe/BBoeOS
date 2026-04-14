@@ -20,14 +20,13 @@ main:
 
         ;; Print "Querying <domain>...\n"
         mov si, MESSAGE_QUERY
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_QUERY_LENGTH
+        call write_stdout
         mov si, bx
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov si, MESSAGE_ELLIPSIS
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_ELLIPSIS_LENGTH
+        call write_stdout
 
         ;; Send DNS A query and position DI at first answer record
         mov si, [domain_arg]
@@ -96,14 +95,12 @@ main:
         call decode_domain
         ;; Print "<rr_name> is a CNAME for <target>\n"
         mov si, rr_name_buf
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov si, MESSAGE_CNAME
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_CNAME_LENGTH
+        call write_stdout
         mov si, cname_buf
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov al, `\n`
         mov ah, SYS_IO_PUT_CHARACTER
         int 30h
@@ -125,11 +122,10 @@ main:
         pop di
         add di, 10             ; Skip TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2) to rdata
         mov si, rr_name_buf
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov si, MESSAGE_IS_AT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_IS_AT_LENGTH
+        call write_stdout
         mov si, di
         call print_ip
         mov al, `\n`
@@ -144,31 +140,45 @@ main:
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_NO_NIC_LENGTH
+        jmp .print_exit
 
         .no_arg:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_USAGE_LENGTH
+        jmp .print_exit
 
         .dns_err:
         mov si, MESSAGE_DNS_ERROR
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_DNS_ERROR_LENGTH
+        jmp .print_exit
 
         .no_answer:
         mov si, MESSAGE_NO_ANSWER
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_NO_ANSWER_LENGTH
+
+        .print_exit:
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
+
+puts_strlen:
+        ;; Print null-terminated string at SI (variable-length)
+        ;; Computes length, then calls write_stdout
+        push di
+        push cx
+        mov di, si
+        xor cx, cx
+        .loop:
+        cmp byte [di], 0
+        je .done
+        inc di
+        inc cx
+        jmp .loop
+        .done:
+        pop ax                  ; discard saved CX
+        pop di
+        jmp write_stdout        ; tail call
 
 decode_domain:
         ;; Decode DNS wire-format name to null-terminated dotted string
@@ -220,16 +230,25 @@ decode_domain:
         rr_name_buf times 256 db 0
         rr_name_ptr dw 0
 
-        MESSAGE_CNAME db ` is a CNAME for \0`
-        MESSAGE_DNS_ERROR db `DNS query failed\n\0`
-        MESSAGE_ELLIPSIS db `...\n\0`
-        MESSAGE_IS_AT db ` is at \0`
-        MESSAGE_NO_ANSWER db `No answer in DNS response\n\0`
-        MESSAGE_NO_NIC db `No NIC found\n\0`
-        MESSAGE_QUERY db `Querying \0`
-        MESSAGE_USAGE db `Usage: dns <domain>\n\0`
+        MESSAGE_CNAME db ` is a CNAME for `
+        MESSAGE_CNAME_LENGTH equ $ - MESSAGE_CNAME
+        MESSAGE_DNS_ERROR db `DNS query failed\n`
+        MESSAGE_DNS_ERROR_LENGTH equ $ - MESSAGE_DNS_ERROR
+        MESSAGE_ELLIPSIS db `...\n`
+        MESSAGE_ELLIPSIS_LENGTH equ $ - MESSAGE_ELLIPSIS
+        MESSAGE_IS_AT db ` is at `
+        MESSAGE_IS_AT_LENGTH equ $ - MESSAGE_IS_AT
+        MESSAGE_NO_ANSWER db `No answer in DNS response\n`
+        MESSAGE_NO_ANSWER_LENGTH equ $ - MESSAGE_NO_ANSWER
+        MESSAGE_NO_NIC db `No NIC found\n`
+        MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
+        MESSAGE_QUERY db `Querying `
+        MESSAGE_QUERY_LENGTH equ $ - MESSAGE_QUERY
+        MESSAGE_USAGE db `Usage: dns <domain>\n`
+        MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
 %include "dns_query.asm"
 %include "encode_domain.asm"
 %include "print_byte_dec.asm"
 %include "print_ip.asm"
+%include "write_stdout.asm"

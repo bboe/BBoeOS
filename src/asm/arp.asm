@@ -20,8 +20,8 @@ main:
         ;; Print result: "10.0.2.2 is at XX:XX:XX:XX:XX:XX"
         push di                ; Save MAC pointer
         mov si, MESSAGE_IP
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_IP_LENGTH
+        call write_stdout
         pop si                 ; SI = MAC pointer
 
         call print_mac
@@ -34,15 +34,15 @@ main:
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_NO_NIC_LENGTH
+        jmp .print_exit
 
         .timeout:
         mov si, MESSAGE_TIMEOUT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_TIMEOUT_LENGTH
+
+        .print_exit:
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
@@ -50,9 +50,13 @@ main:
         my_mac times 6 db 0
         target_ip db 10, 0, 2, 2
 
-        MESSAGE_IP db `10.0.2.2 is at \0`
-        MESSAGE_NO_NIC db `No NIC found\n\0`
-        MESSAGE_TIMEOUT db `ARP timeout\n\0`
+        MESSAGE_IP db `10.0.2.2 is at `
+        MESSAGE_IP_LENGTH equ $ - MESSAGE_IP
+        MESSAGE_NO_NIC db `No NIC found\n`
+        MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
+        MESSAGE_TIMEOUT db `ARP timeout\n`
+        MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
 
 %include "print_hex.asm"
 %include "print_mac.asm"
+%include "write_stdout.asm"

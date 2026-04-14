@@ -7,8 +7,8 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 140         | 125       | -15   |
+| cat     | 151         | 127       | -24   |
 | date    | 105         | 103       | -2    |
-| hello   | 25          | 25        | 0     |
-| mkdir   | 115         | 109       | -6    |
+| hello   | 34          | 35        | +1    |
+| mkdir   | 129         | 128       | -1    |
 | uptime  | 75          | 74        | -1    |

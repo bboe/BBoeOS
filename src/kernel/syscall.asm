@@ -16,8 +16,6 @@ syscall_handler:
         je .io_open
         cmp ah, SYS_IO_PUT_CHARACTER    ; io_putc
         je .io_putc
-        cmp ah, SYS_IO_PUT_STRING    ; io_puts
-        je .io_puts
         cmp ah, SYS_IO_READ    ; io_read
         je .io_read
         cmp ah, SYS_IO_WRITE   ; io_write
@@ -397,10 +395,6 @@ syscall_handler:
 
         .io_putc:
         call put_character
-        iret
-
-        .io_puts:
-        call put_string
         iret
 
         .net_arp:
