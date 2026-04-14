@@ -204,7 +204,7 @@ class CodeGenerator:
         self.arrays: list[tuple[str, list[str]]] = []
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
-        self.die_count: int = 0
+
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
         self.frame_size: int = 0
@@ -331,19 +331,18 @@ class CodeGenerator:
         length = string_byte_length(argument[1])
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
-        self.emit("        jmp .die")
-        self.die_count += 1
+        self.emit("        jmp FUNCTION_DIE")
 
     def builtin_exit(self, arguments: list[tuple], /) -> None:
         """Generate code for the exit() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
-        self.emit("        jmp .exit")
+        self.emit("        jmp FUNCTION_EXIT")
 
     def builtin_mkdir(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
 
         Returns 0 on success or an ERR_* code on failure.  When
-        *fuse_exit* is True, emits ``jnc .exit`` instead of converting
+        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of converting
         the carry flag to a 0-or-error integer.
         """
         self.check_argument_count(arguments=arguments, expected=1, name="mkdir")
@@ -351,7 +350,7 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_FS_MKDIR")
         self.emit("        int 30h")
         if fuse_exit:
-            self.emit("        jnc .exit")
+            self.emit("        jnc FUNCTION_EXIT")
         else:
             label_index = self.new_label()
             self.emit(f"        jnc .ok_{label_index}")
@@ -792,11 +791,11 @@ class CodeGenerator:
         Applies several fusions:
         - ``puts(msg); exit();`` → ``die(msg)``
         - ``int err = syscall(...); if (err == 0) { exit(); }`` →
-          syscall with ``jnc .exit`` (skip error-code conversion)
+          syscall with ``jnc FUNCTION_EXIT`` (skip error-code conversion)
         - ``int err = syscall(...); if (err != 0) { die(msg); }`` →
-          syscall with pre-loaded SI and ``jc .die`` (skip sbb)
+          syscall with pre-loaded SI and ``jc FUNCTION_DIE`` (skip sbb)
         - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
-          conditional jump to ``.die``, skipping the if-body dance
+          conditional jump to ``FUNCTION_DIE``, skipping the if-body dance
         """
         saved = self.visible_vars.copy() if scoped else None
         i = 0
@@ -822,8 +821,7 @@ class CodeGenerator:
                     self.emit(f"        mov cx, {die_length}")
                     operator = self.emit_condition(condition=statement[1], context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
-                    self.emit(f"        {true_jump} .die")
-                    self.die_count += 1
+                    self.emit(f"        {true_jump} FUNCTION_DIE")
                     i += 1
                     continue
             # Fuse error-returning syscall + if-zero-exit.
@@ -1003,7 +1001,6 @@ class CodeGenerator:
         self.array_labels = {}
         self.array_sizes = {}
         self.ax_clear()
-        self.die_count = 0
         self.elide_frame = name == "main"
         self.frame_size = 0
         self.locals = {}
@@ -1040,13 +1037,6 @@ class CodeGenerator:
         self.generate_body(body)
 
         if name == "main":
-            if self.die_count == 1:
-                self.inline_single_die()
-            elif self.die_count >= 2:
-                self.emit("        jmp .exit")
-                self.emit(".die:")
-                self.emit("        jmp FUNCTION_DIE")
-            self.emit(".exit:")
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 for vname in sorted(self.locals):
@@ -1190,13 +1180,6 @@ class CodeGenerator:
         if expression[0] == "index" and expression[2][0] == "int" and expression[1] in self.array_labels:
             return (self.array_labels[expression[1]], expression[2][1] * 2)
         return None
-
-    def inline_single_die(self) -> None:
-        """Replace a lone ``jmp .die`` with inline ``jmp FUNCTION_DIE``."""
-        for i, line in enumerate(self.lines):
-            if line.strip() == "jmp .die":
-                self.lines[i] = "        jmp FUNCTION_DIE"
-                return
 
     @staticmethod
     def is_constant_true_condition(condition: tuple, /) -> bool:
