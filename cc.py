@@ -45,7 +45,6 @@ Builtins:
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     write(fd, buffer, count) -- write bytes to fd, return count or -1
     print_bcd(expression)    -- print BCD byte as two decimal digits
-    print_dec(expression)    -- print integer as decimal
     putc(expression)         -- print single character
     uptime()                 -- return seconds since boot
 
@@ -280,7 +279,6 @@ class CodeGenerator:
         "strlen": frozenset({"ax", "cx", "di"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "print_bcd": frozenset({"ax"}),
-        "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
         "putc": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
@@ -543,12 +541,6 @@ class CodeGenerator:
         else:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_BCD")
-
-    def builtin_print_dec(self, arguments: list[Node], /) -> None:
-        """Generate code for the print_dec() builtin."""
-        self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
-        self.generate_expression(arguments[0])
-        self.emit("        call FUNCTION_PRINT_DECIMAL")
 
     def builtin_printf(self, arguments: list[Node], /) -> None:
         """Generate code for the printf() builtin.
