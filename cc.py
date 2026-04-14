@@ -153,6 +153,7 @@ class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax"}),
         "datetime": frozenset({"ax", "bx", "cx", "dx"}),
         "die": frozenset(),
@@ -170,18 +171,19 @@ class CodeGenerator:
         "write": frozenset({"ax", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"mkdir"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mkdir"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
-        "SECTOR_BUFFER",
+        "ERROR_PROTECTED",
         "FLAG_EXECUTE",
         "O_CREAT",
         "O_RDONLY",
         "O_TRUNC",
         "O_WRONLY",
+        "SECTOR_BUFFER",
         "STDERR",
         "STDIN",
         "STDOUT",
@@ -217,6 +219,8 @@ class CodeGenerator:
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
+        self.variable_arrays: set[str] = set()
+        self.variable_types: dict[str, str] = {}
         self.visible_vars: set[str] = set()
 
     def allocate_local(self, name: str, /) -> int:
@@ -272,6 +276,29 @@ class CodeGenerator:
         """Clear AX tracking state."""
         self.ax_is_byte = False
         self.ax_local = None
+
+    def builtin_chmod(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
+        """Generate code for the chmod() builtin.
+
+        Returns 0 on success or an ERR_* code on failure.  When
+        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of
+        converting the carry flag to a 0-or-error integer.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="chmod")
+        self.emit_si_from_argument(arguments[0])
+        self.generate_expression(arguments[1])
+        self.emit("        mov ah, SYS_FS_CHMOD")
+        self.emit("        int 30h")
+        if fuse_exit:
+            self.emit("        jnc FUNCTION_EXIT")
+        else:
+            label_index = self.new_label()
+            self.emit(f"        jnc .ok_{label_index}")
+            self.emit("        xor ah, ah")
+            self.emit(f"        jmp .done_{label_index}")
+            self.emit(f".ok_{label_index}:")
+            self.emit("        xor ax, ax")
+            self.emit(f".done_{label_index}:")
 
     def builtin_close(self, arguments: list[tuple], /) -> None:
         """Generate code for the close() builtin.
@@ -510,7 +537,7 @@ class CodeGenerator:
         """Decide whether *statement* should be auto-pinned to a register."""
         if len(self.pinned_register) >= len(self.REGISTER_POOL):
             return False
-        init = statement[2]
+        init = statement[3]
         if init is None:
             return True
         # Call initializers stay in memory so they can participate in
@@ -562,37 +589,9 @@ class CodeGenerator:
             return
 
         self.needs_argv_buf = True
-        label_index = self.new_label()
-
         self.emit("        cld")
-        self.emit("        xor cx, cx")
-        self.emit("        mov si, [EXEC_ARG]")
-        self.emit("        test si, si")
-        self.emit(f"        jz .args_done_{label_index}")
         self.emit("        mov di, _argv")
-        self.emit(f".scan_{label_index}:")
-        self.emit("        cmp byte [si], ' '")
-        self.emit(f"        jne .check_{label_index}")
-        self.emit("        inc si")
-        self.emit(f"        jmp .scan_{label_index}")
-        self.emit(f".check_{label_index}:")
-        self.emit("        cmp byte [si], 0")
-        self.emit(f"        je .args_done_{label_index}")
-        self.emit("        mov [di], si")
-        self.emit("        add di, 2")
-        self.emit("        inc cx")
-        self.emit(f".end_{label_index}:")
-        self.emit("        cmp byte [si], 0")
-        self.emit(f"        je .args_done_{label_index}")
-        self.emit("        cmp byte [si], ' '")
-        self.emit(f"        je .term_{label_index}")
-        self.emit("        inc si")
-        self.emit(f"        jmp .end_{label_index}")
-        self.emit(f".term_{label_index}:")
-        self.emit("        mov byte [si], 0")
-        self.emit("        inc si")
-        self.emit(f"        jmp .scan_{label_index}")
-        self.emit(f".args_done_{label_index}:")
+        self.emit("        call FUNCTION_PARSE_ARGV")
         if argc_name:
             self.emit(f"        mov [{self.local_address(argc_name)}], cx")
         self.emit(f"        mov word [{self.local_address(argv_name)}], _argv")
@@ -807,7 +806,7 @@ class CodeGenerator:
                 i += 2
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
-            init = statement[2] if statement[0] == "variable_declaration" else None
+            init = statement[3] if statement[0] == "variable_declaration" else None
             # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
@@ -834,7 +833,7 @@ class CodeGenerator:
                     skip = 1  # skip declaration only, process if-else normally
                 if skip:
                     self.visible_vars.add(statement[1])
-                    call_node = statement[2]
+                    call_node = statement[3]
                     handler = getattr(self, f"builtin_{call_node[1]}")
                     clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
                     if self.register_cache and clobbers:
@@ -937,20 +936,39 @@ class CodeGenerator:
                 else:
                     self.emit(f"        mov ax, [{label}]")
             elif index_expression[0] == "int":
-                offset = index_expression[1] * 2
-                self.emit(f"        mov bx, [{self.local_address(vname)}]")
-                if offset:
+                is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
+                offset = index_expression[1] * (1 if is_byte else 2)
+                if vname in self.pinned_register:
+                    self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                else:
+                    self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                if is_byte:
+                    if offset:
+                        self.emit(f"        mov al, [bx+{offset}]")
+                    else:
+                        self.emit("        mov al, [bx]")
+                    self.emit("        xor ah, ah")
+                elif offset:
                     self.emit(f"        mov ax, [bx+{offset}]")
                 else:
                     self.emit("        mov ax, [bx]")
             else:
-                self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
+                if vname in self.pinned_register:
+                    self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                else:
+                    self.emit(f"        mov bx, [{self.local_address(vname)}]")
                 self.emit("        push bx")
                 self.generate_expression(index_expression)
-                self.emit("        add ax, ax")
+                if not is_byte:
+                    self.emit("        add ax, ax")
                 self.emit("        pop bx")
                 self.emit("        add bx, ax")
-                self.emit("        mov ax, [bx]")
+                if is_byte:
+                    self.emit("        mov al, [bx]")
+                    self.emit("        xor ah, ah")
+                else:
+                    self.emit("        mov ax, [bx]")
         elif kind == "sizeof_type":
             self.ax_clear()
             self.emit(f"        mov ax, {self.TYPE_SIZES.get(expression[1], 2)}")
@@ -1007,10 +1025,15 @@ class CodeGenerator:
         self.pinned_register = {}
         self.register_cache = {}
         self.spill_stack = []
+        self.variable_arrays = set()
+        self.variable_types = {}
 
-        # Allocate parameters as locals.
-        for _type, pname, _is_array in parameters:
+        # Allocate parameters as locals and record their types.
+        for type_string, pname, is_array in parameters:
             self.allocate_local(pname)
+            self.variable_types[pname] = type_string
+            if is_array:
+                self.variable_arrays.add(pname)
 
         self.scan_locals(body)
 
@@ -1088,13 +1111,15 @@ class CodeGenerator:
         """
         kind = statement[0]
         if kind == "variable_declaration":
-            _, vname, init = statement
+            _, vname, type_string, init = statement
             self.visible_vars.add(vname)
+            self.variable_types[vname] = type_string
             if init is not None:
                 self.emit_store_local(expression=init, name=vname)
         elif kind == "array_declaration":
-            _, vname, init = statement
+            _, vname, type_string, init = statement
             self.visible_vars.add(vname)
+            self.variable_types[vname] = type_string
             if init is not None and init[0] == "array_init":
                 elem_labels = []
                 for elem in init[1]:
@@ -1242,7 +1267,14 @@ class CodeGenerator:
         return label_index
 
     def new_string_label(self, content: str, /) -> str:
-        """Allocate a string literal and return its label name."""
+        """Allocate a string literal and return its label name.
+
+        Identical strings are deduplicated — subsequent calls with the
+        same *content* return the existing label.
+        """
+        for label, existing in self.strings:
+            if existing == content:
+                return label
         label = f"_str_{len(self.strings)}"
         self.strings.append((label, content))
         return label
@@ -1532,6 +1564,7 @@ class CodeGenerator:
         """
         for index, statement in enumerate(statements):
             if statement[0] == "variable_declaration":
+                self.variable_types[statement[1]] = statement[2]
                 if top_level:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
@@ -1539,6 +1572,7 @@ class CodeGenerator:
                         continue
                 self.allocate_local(statement[1])
             elif statement[0] == "array_declaration":
+                self.variable_types[statement[1]] = statement[2]
                 self.allocate_local(statement[1])
             elif statement[0] == "if":
                 self.scan_locals(statement[2], top_level=False)
@@ -1977,7 +2011,7 @@ class Parser:
             An AST node for the declaration.
 
         """
-        self.parse_type()
+        type_string = self.parse_type()
         name = self.eat("IDENT")[1]
         # Optional [] for array declarations
         is_array = False
@@ -1991,8 +2025,8 @@ class Parser:
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
-            return ("array_declaration", name, init)
-        return ("variable_declaration", name, init)
+            return ("array_declaration", name, type_string, init)
+        return ("variable_declaration", name, type_string, init)
 
     def parse_while(self) -> tuple:
         """Parse a while loop statement.

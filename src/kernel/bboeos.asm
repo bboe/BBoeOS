@@ -105,6 +105,7 @@ clear_screen:
         jmp near shared_die
         jmp near shared_exit
         jmp near shared_get_character
+        jmp near shared_parse_argv
         jmp near shared_print_bcd
         jmp near shared_print_byte_decimal
         jmp near shared_print_character
@@ -169,6 +170,40 @@ shared_get_character:
         pop cx
         pop bx
         mov al, [SECTOR_BUFFER]
+        ret
+
+shared_parse_argv:
+        ;; Split [EXEC_ARG] at spaces into an argv-style pointer array.
+        ;; Input:  DI = buffer for argv pointers (caller-provided)
+        ;; Output: CX = argc (number of arguments)
+        ;; Clobbers: AX, SI
+        xor cx, cx
+        mov si, [EXEC_ARG]
+        test si, si
+        jz .parse_argv_done
+        .parse_argv_scan:
+        cmp byte [si], ' '
+        jne .parse_argv_check
+        inc si
+        jmp .parse_argv_scan
+        .parse_argv_check:
+        cmp byte [si], 0
+        je .parse_argv_done
+        mov [di], si
+        add di, 2
+        inc cx
+        .parse_argv_end:
+        cmp byte [si], 0
+        je .parse_argv_done
+        cmp byte [si], ' '
+        je .parse_argv_term
+        inc si
+        jmp .parse_argv_end
+        .parse_argv_term:
+        mov byte [si], 0
+        inc si
+        jmp .parse_argv_scan
+        .parse_argv_done:
         ret
 
 shared_print_bcd:
