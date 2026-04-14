@@ -440,14 +440,14 @@ class CodeGenerator:
         argument = arguments[0]
         array_label = self.array_labels.get(argument.name) if isinstance(argument, Var) else None
         if array_label:
-            self.emit("        mov ah, SYS_RTC_DATETIME")
+            self.emit("        mov ah, SYS_RTC_DATETIME_LEGACY")
             self.emit("        int 30h")
             for index, register in enumerate(registers):
                 self.register_cache[array_label, index * 2] = register
         else:
             self.generate_expression(argument)
             self.emit("        mov di, ax")
-            self.emit("        mov ah, SYS_RTC_DATETIME")
+            self.emit("        mov ah, SYS_RTC_DATETIME_LEGACY")
             self.emit("        int 30h")
             self.emit("        mov [di+12], al")
             self.emit("        xor ah, ah")

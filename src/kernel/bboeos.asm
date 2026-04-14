@@ -109,6 +109,7 @@ clear_screen:
         jmp near shared_print_bcd
         jmp near shared_print_byte_decimal
         jmp near shared_print_character
+        jmp near shared_print_datetime
         jmp near shared_print_decimal
         jmp near shared_print_hex
         jmp near shared_print_ip
@@ -267,6 +268,191 @@ shared_print_character:
         pop bx
         pop ax
         ret
+
+shared_print_datetime:
+        ;; Input: DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
+        ;; Prints: YYYY-MM-DD HH:MM:SS (no trailing newline).
+        ;; Full Gregorian leap rule. Valid through year 2106.
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push si
+
+        ;; Combine DX:AX into EAX (zero-extend AX, shift DX into high 16).
+        movzx ebx, ax
+        movzx edx, dx
+        shl edx, 16
+        or ebx, edx
+        mov eax, ebx
+
+        mov ecx, 86400
+        xor edx, edx
+        div ecx                 ; EAX = day count, EDX = seconds within day
+        mov [.pd_days], eax
+        mov eax, edx
+
+        mov ecx, 3600
+        xor edx, edx
+        div ecx                 ; EAX = hours, EDX = seconds within hour
+        mov [.pd_hours], al
+        mov eax, edx
+
+        mov ecx, 60
+        xor edx, edx
+        div ecx                 ; EAX = minutes, EDX = seconds
+        mov [.pd_minutes], al
+        mov [.pd_seconds], dl
+
+        ;; Walk years from 1970, peeling off 365 or 366 days each time.
+        mov bx, 1970
+        .pd_year_loop:
+        mov ax, bx
+        call .pd_is_leap
+        jz .pd_year_leap
+        mov ecx, 365
+        jmp .pd_year_have_len
+        .pd_year_leap:
+        mov ecx, 366
+        .pd_year_have_len:
+        cmp [.pd_days], ecx
+        jb .pd_year_done
+        sub [.pd_days], ecx
+        inc bx
+        jmp .pd_year_loop
+        .pd_year_done:
+        mov [.pd_year], bx
+
+        ;; Walk months within the year.
+        mov cx, 1               ; CX = candidate month (1..12)
+        .pd_month_loop:
+        mov bx, cx
+        dec bx
+        shl bx, 1
+        movzx eax, word [.pd_month_lengths + bx]
+        cmp cx, 2
+        jne .pd_month_len_ready
+        push ax
+        mov ax, [.pd_year]
+        call .pd_is_leap
+        pop ax
+        jnz .pd_month_len_ready
+        movzx eax, ax
+        inc eax                 ; February in leap year = 29
+        .pd_month_len_ready:
+        cmp [.pd_days], eax
+        jb .pd_month_done
+        sub [.pd_days], eax
+        inc cx
+        jmp .pd_month_loop
+        .pd_month_done:
+        mov [.pd_month], cl
+        mov eax, [.pd_days]
+        inc eax
+        mov [.pd_day], al
+
+        ;; Emit YYYY-MM-DD HH:MM:SS
+        mov ax, [.pd_year]
+        call .pd_print_4digit
+        mov al, '-'
+        call shared_print_character
+        mov al, [.pd_month]
+        call shared_print_decimal
+        mov al, '-'
+        call shared_print_character
+        mov al, [.pd_day]
+        call shared_print_decimal
+        mov al, ' '
+        call shared_print_character
+        mov al, [.pd_hours]
+        call shared_print_decimal
+        mov al, ':'
+        call shared_print_character
+        mov al, [.pd_minutes]
+        call shared_print_decimal
+        mov al, ':'
+        call shared_print_character
+        mov al, [.pd_seconds]
+        call shared_print_decimal
+
+        pop si
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
+        ret
+
+        .pd_print_4digit:
+        ;; AX = value 0..9999. Print 4 zero-padded decimal digits.
+        push bx
+        push dx
+        xor dx, dx
+        mov bx, 1000
+        div bx
+        add al, '0'
+        call shared_print_character
+        mov ax, dx
+        xor dx, dx
+        mov bx, 100
+        div bx
+        add al, '0'
+        call shared_print_character
+        mov ax, dx
+        xor dx, dx
+        mov bx, 10
+        div bx
+        add al, '0'
+        call shared_print_character
+        mov ax, dx
+        add al, '0'
+        call shared_print_character
+        pop dx
+        pop bx
+        ret
+
+        .pd_is_leap:
+        ;; AX = year. Returns ZF=1 if leap, ZF=0 otherwise. Clobbers AX, DX.
+        push cx
+        push ax
+        xor dx, dx
+        mov cx, 4
+        div cx
+        test dx, dx
+        jnz .pd_leap_no
+        pop ax
+        push ax
+        xor dx, dx
+        mov cx, 100
+        div cx
+        test dx, dx
+        jnz .pd_leap_yes
+        pop ax
+        push ax
+        xor dx, dx
+        mov cx, 400
+        div cx
+        test dx, dx
+        jnz .pd_leap_no
+        .pd_leap_yes:
+        pop ax
+        pop cx
+        xor ax, ax              ; ZF=1
+        ret
+        .pd_leap_no:
+        pop ax
+        pop cx
+        or ax, 1                ; ZF=0
+        ret
+
+        .pd_month_lengths:
+        dw 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+        .pd_days:    dd 0
+        .pd_year:    dw 0
+        .pd_month:   db 0
+        .pd_day:     db 0
+        .pd_hours:   db 0
+        .pd_minutes: db 0
+        .pd_seconds: db 0
 
 shared_print_decimal:
         ;; Print AL as 2 zero-padded decimal digits
@@ -520,6 +706,12 @@ shared_write_stdout:
         ;; Values
         boot_ticks_high  dw 0
         boot_ticks_low   dw 0
+        epoch_year       dw 0
+        epoch_month      db 0
+        epoch_day        db 0
+        epoch_hours      db 0
+        epoch_minutes    db 0
+        epoch_seconds    db 0
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         printf_pad    db 0         ; printf pad character (' ' or '0')
         printf_width  db 0         ; printf minimum field width
