@@ -58,8 +58,126 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
+
+
+@dataclass(slots=True)
+class Node:
+    pass
+
+
+@dataclass(slots=True)
+class Param:
+    type: str
+    name: str
+    is_array: bool
+
+
+@dataclass(slots=True)
+class ArrayDecl(Node):
+    name: str
+    type_name: str
+    init: Node | None
+
+
+@dataclass(slots=True)
+class ArrayInit(Node):
+    elements: list[Node]
+
+
+@dataclass(slots=True)
+class Assign(Node):
+    name: str
+    expr: Node
+
+
+@dataclass(slots=True)
+class BinOp(Node):
+    op: str
+    left: Node
+    right: Node
+
+
+@dataclass(slots=True)
+class Break(Node):
+    pass
+
+
+@dataclass(slots=True)
+class Call(Node):
+    name: str
+    args: list[Node]
+
+
+@dataclass(slots=True)
+class DoWhile(Node):
+    cond: Node
+    body: list[Node]
+
+
+@dataclass(slots=True)
+class Function(Node):
+    name: str
+    params: list[Param]
+    body: list[Node]
+
+
+@dataclass(slots=True)
+class If(Node):
+    cond: Node
+    body: list[Node]
+    else_body: list[Node] | None
+
+
+@dataclass(slots=True)
+class Index(Node):
+    name: str
+    index: Node
+
+
+@dataclass(slots=True)
+class Int(Node):
+    value: int
+
+
+@dataclass(slots=True)
+class Program(Node):
+    functions: list[Node]
+
+
+@dataclass(slots=True)
+class SizeofType(Node):
+    type_name: str
+
+
+@dataclass(slots=True)
+class SizeofVar(Node):
+    name: str
+
+
+@dataclass(slots=True)
+class String(Node):
+    content: str
+
+
+@dataclass(slots=True)
+class Var(Node):
+    name: str
+
+
+@dataclass(slots=True)
+class VarDecl(Node):
+    name: str
+    type_name: str
+    init: Node | None
+
+
+@dataclass(slots=True)
+class While(Node):
+    cond: Node
+    body: list[Node]
 
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
@@ -235,7 +353,7 @@ class CodeGenerator:
         return self.frame_size
 
     @staticmethod
-    def always_exits(body: list[tuple], /) -> bool:
+    def always_exits(body: list[Node], /) -> bool:
         """Check if a statement list always exits its enclosing block.
 
         Recognizes ``die(...)``/``exit()``/``return`` (program exits)
@@ -246,13 +364,13 @@ class CodeGenerator:
         if not body:
             return False
         last = body[-1]
-        if last[0] == "break":
+        if isinstance(last, Break):
             return True
-        if last[0] == "call" and last[1] in {"die", "exit"}:
+        if isinstance(last, Call) and last.name in {"die", "exit"}:
             return True
         # Exhaustive if-else: both branches always exit.
-        if last[0] == "if" and last[3] is not None:
-            return CodeGenerator.always_exits(last[2]) and CodeGenerator.always_exits(last[3])
+        if isinstance(last, If) and last.else_body is not None:
+            return CodeGenerator.always_exits(last.body) and CodeGenerator.always_exits(last.else_body)
         return False
 
     def auto_spill(self, *, clobbers: frozenset[str]) -> None:
@@ -277,7 +395,7 @@ class CodeGenerator:
         self.ax_is_byte = False
         self.ax_local = None
 
-    def builtin_chmod(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
+    def builtin_chmod(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the chmod() builtin.
 
         Returns 0 on success or an ERR_* code on failure.  When
@@ -300,7 +418,7 @@ class CodeGenerator:
             self.emit("        xor ax, ax")
             self.emit(f".done_{label_index}:")
 
-    def builtin_close(self, arguments: list[tuple], /) -> None:
+    def builtin_close(self, arguments: list[Node], /) -> None:
         """Generate code for the close() builtin.
 
         Closes a file descriptor.  ``close(fd)`` emits
@@ -311,7 +429,7 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_IO_CLOSE")
         self.emit("        int 30h")
 
-    def builtin_datetime(self, arguments: list[tuple], /) -> None:
+    def builtin_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the datetime() builtin.
 
         Takes a pointer to a 7-word array and fills it with BCD fields:
@@ -324,7 +442,7 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=1, name="datetime")
         registers = ["ch", "cl", "dh", "dl", "bh", "bl", "al"]
         argument = arguments[0]
-        array_label = self.array_labels.get(argument[1]) if argument[0] == "variable" else None
+        array_label = self.array_labels.get(argument.name) if isinstance(argument, Var) else None
         if array_label:
             self.emit("        mov ah, SYS_RTC_DATETIME")
             self.emit("        int 30h")
@@ -343,7 +461,7 @@ class CodeGenerator:
             self.emit("        mov al, [di+12]")
             self.emit("        mov [di+12], ax")
 
-    def builtin_die(self, arguments: list[tuple], /) -> None:
+    def builtin_die(self, arguments: list[Node], /) -> None:
         """Generate code for the die() builtin.
 
         Pre-loads SI and CX (string + length) and jumps to a shared
@@ -351,21 +469,21 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="die")
         argument = arguments[0]
-        if argument[0] != "string":
+        if not isinstance(argument, String):
             message = "die() requires a string literal"
             raise SyntaxError(message)
-        label = self.new_string_label(argument[1])
-        length = string_byte_length(argument[1])
+        label = self.new_string_label(argument.content)
+        length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
         self.emit("        jmp FUNCTION_DIE")
 
-    def builtin_exit(self, arguments: list[tuple], /) -> None:
+    def builtin_exit(self, arguments: list[Node], /) -> None:
         """Generate code for the exit() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp FUNCTION_EXIT")
 
-    def builtin_mkdir(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
+    def builtin_mkdir(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
 
         Returns 0 on success or an ERR_* code on failure.  When
@@ -387,7 +505,7 @@ class CodeGenerator:
             self.emit("        xor ax, ax")
             self.emit(f".done_{label_index}:")
 
-    def builtin_open(self, arguments: list[tuple], /) -> None:
+    def builtin_open(self, arguments: list[Node], /) -> None:
         """Generate code for the open() builtin.
 
         ``open(name, flags)`` or ``open(name, flags, mode)`` emits
@@ -403,8 +521,8 @@ class CodeGenerator:
         name_argument = arguments[0]
         flags_argument = arguments[1]
         self.emit_si_from_argument(name_argument)
-        if flags_argument[0] == "int" or (flags_argument[0] == "variable" and flags_argument[1] in self.NAMED_CONSTANTS):
-            self.emit(f"        mov al, {flags_argument[1]}")
+        if isinstance(flags_argument, Int) or (isinstance(flags_argument, Var) and flags_argument.name in self.NAMED_CONSTANTS):
+            self.emit(f"        mov al, {flags_argument.value if isinstance(flags_argument, Int) else flags_argument.name}")
         else:
             self.generate_expression(flags_argument)
         if len(arguments) == 3:
@@ -413,7 +531,7 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
-    def builtin_print_bcd(self, arguments: list[tuple], /) -> None:
+    def builtin_print_bcd(self, arguments: list[Node], /) -> None:
         """Generate code for the print_bcd() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_bcd")
         argument = arguments[0]
@@ -429,7 +547,7 @@ class CodeGenerator:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_BCD")
 
-    def builtin_print_buffer(self, arguments: list[tuple], /) -> None:
+    def builtin_print_buffer(self, arguments: list[Node], /) -> None:
         """Generate code for the print_buffer() builtin.
 
         Emits ``call write_stdout`` — a single syscall instead of a
@@ -443,26 +561,26 @@ class CodeGenerator:
 
         self.ax_clear()
 
-    def builtin_print_dec(self, arguments: list[tuple], /) -> None:
+    def builtin_print_dec(self, arguments: list[Node], /) -> None:
         """Generate code for the print_dec() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
         self.generate_expression(arguments[0])
         self.emit("        call FUNCTION_PRINT_DECIMAL")
 
-    def builtin_putc(self, arguments: list[tuple], /) -> None:
+    def builtin_putc(self, arguments: list[Node], /) -> None:
         """Generate code for the putc() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="putc")
         argument = arguments[0]
-        if argument[0] == "string":
-            byte_val = decode_first_character(argument[1])
+        if isinstance(argument, String):
+            byte_val = decode_first_character(argument.content)
             self.emit(f"        mov al, {byte_val}")
-        elif argument[0] == "int":
-            self.emit(f"        mov al, {argument[1]}")
+        elif isinstance(argument, Int):
+            self.emit(f"        mov al, {argument.value}")
         else:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_CHARACTER")
 
-    def builtin_puts(self, arguments: list[tuple], /) -> None:
+    def builtin_puts(self, arguments: list[Node], /) -> None:
         """Generate code for the puts() builtin.
 
         Emits ``call write_stdout`` with the compile-time string length.
@@ -470,16 +588,16 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="puts")
         argument = arguments[0]
-        if argument[0] != "string":
+        if not isinstance(argument, String):
             message = "puts() requires a string literal; use write() for variables"
             raise SyntaxError(message)
-        label = self.new_string_label(argument[1])
-        length = string_byte_length(argument[1])
+        label = self.new_string_label(argument.content)
+        length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
         self.emit("        call FUNCTION_WRITE_STDOUT")
 
-    def builtin_read(self, arguments: list[tuple], /) -> None:
+    def builtin_read(self, arguments: list[Node], /) -> None:
         """Generate code for the read() builtin.
 
         ``read(fd, buffer, count)`` emits ``mov bx, <fd> /
@@ -495,7 +613,7 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
-    def builtin_strlen(self, arguments: list[tuple], /) -> None:
+    def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.
 
         ``strlen(ptr)`` scans for a null terminator and returns the
@@ -511,13 +629,13 @@ class CodeGenerator:
         self.emit("        sub ax, cx")
         self.ax_clear()
 
-    def builtin_uptime(self, arguments: list[tuple], /) -> None:
+    def builtin_uptime(self, arguments: list[Node], /) -> None:
         """Generate code for the uptime() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="uptime")
         self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
 
-    def builtin_write(self, arguments: list[tuple], /) -> None:
+    def builtin_write(self, arguments: list[Node], /) -> None:
         """Generate code for the write() builtin.
 
         ``write(fd, buffer, count)`` emits ``mov bx, <fd> /
@@ -533,19 +651,19 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
-    def can_auto_pin(self, *, following_statement: tuple | None, statement: tuple) -> bool:
+    def can_auto_pin(self, *, following_statement: Node | None, statement: VarDecl) -> bool:
         """Decide whether *statement* should be auto-pinned to a register."""
         if len(self.pinned_register) >= len(self.REGISTER_POOL):
             return False
-        init = statement[3]
+        init = statement.init
         if init is None:
             return True
         # Call initializers stay in memory so they can participate in
         # error-return fusion without clobbering a pin.
-        return init[0] != "call"
+        return not isinstance(init, Call)
 
     @staticmethod
-    def check_argument_count(*, arguments: list[tuple], expected: int, name: str) -> None:
+    def check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
         """Raise SyntaxError if the argument count doesn't match expected."""
         if expected == 0 and arguments:
             message = f"{name}() takes no arguments"
@@ -566,11 +684,11 @@ class CodeGenerator:
         """Append a line of assembly to the output buffer."""
         self.lines.append(line)
 
-    def emit_argument_vector_startup(self, parameters: list[tuple], /) -> None:
+    def emit_argument_vector_startup(self, parameters: list[Param], /) -> None:
         """Emit inline startup code that parses EXEC_ARG into argc/argv."""
         # Single char* parameter: just load EXEC_ARG directly.
-        if len(parameters) == 1 and parameters[0][0] == "char*" and not parameters[0][2]:
-            pname = parameters[0][1]
+        if len(parameters) == 1 and parameters[0].type == "char*" and not parameters[0].is_array:
+            pname = parameters[0].name
             self.emit("        cld")
             self.emit("        mov ax, [EXEC_ARG]")
             self.emit(f"        mov [{self.local_address(pname)}], ax")
@@ -580,11 +698,11 @@ class CodeGenerator:
 
         argc_name = None
         argv_name = None
-        for type_string, pname, is_array in parameters:
-            if is_array:
-                argv_name = pname
+        for param in parameters:
+            if param.is_array:
+                argv_name = param.name
             elif argc_name is None:
-                argc_name = pname
+                argc_name = param.name
         if not argv_name:
             return
 
@@ -596,21 +714,21 @@ class CodeGenerator:
             self.emit(f"        mov [{self.local_address(argc_name)}], cx")
         self.emit(f"        mov word [{self.local_address(argv_name)}], _argv")
 
-    def emit_binary_operator_operands(self, left: tuple, right: tuple, /) -> None:
+    def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
         """Generate left into AX and right into CX.
 
         When the right operand is a constant or variable, loads it
         directly into CX without a push/pop round-trip.
         """
-        if right[0] == "int":
+        if isinstance(right, Int):
             self.generate_expression(left)
-            self.emit(f"        mov cx, {right[1]}")
-        elif right[0] == "variable" and right[1] in self.pinned_register:
+            self.emit(f"        mov cx, {right.value}")
+        elif isinstance(right, Var) and right.name in self.pinned_register:
             self.generate_expression(left)
-            self.emit(f"        mov cx, {self.pinned_register[right[1]]}")
-        elif right[0] == "variable" and right[1] in self.locals:
+            self.emit(f"        mov cx, {self.pinned_register[right.name]}")
+        elif isinstance(right, Var) and right.name in self.locals:
             self.generate_expression(left)
-            self.emit(f"        mov cx, [{self.local_address(right[1])}]")
+            self.emit(f"        mov cx, [{self.local_address(right.name)}]")
         else:
             self.generate_expression(left)
             self.emit("        push ax")
@@ -618,7 +736,7 @@ class CodeGenerator:
             self.emit("        mov cx, ax")
             self.emit("        pop ax")
 
-    def emit_comparison(self, left: tuple, right: tuple, /) -> None:
+    def emit_comparison(self, left: Node, right: Node, /) -> None:
         """Generate a comparison, leaving flags set for a conditional jump.
 
         Optimizes comparisons against integer constants by using
@@ -626,71 +744,70 @@ class CodeGenerator:
         register variables compare against constants in place, skipping
         the load into AX.
         """
-        if right[0] == "int":
-            if left[0] == "variable" and left[1] in self.pinned_register:
-                register = self.pinned_register[left[1]]
-                if right[1] == 0:
+        if isinstance(right, Int):
+            if isinstance(left, Var) and left.name in self.pinned_register:
+                register = self.pinned_register[left.name]
+                if right.value == 0:
                     self.emit(f"        test {register}, {register}")
                 else:
-                    self.emit(f"        cmp {register}, {right[1]}")
+                    self.emit(f"        cmp {register}, {right.value}")
                 return
             self.generate_expression(left)
-            if right[1] == 0:
+            if right.value == 0:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
             else:
                 register = "al" if self.ax_is_byte else "ax"
-                self.emit(f"        cmp {register}, {right[1]}")
+                self.emit(f"        cmp {register}, {right.value}")
         else:
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")
 
-    def emit_condition(self, *, condition: tuple, context: str) -> str:
+    def emit_condition(self, *, condition: Node, context: str) -> str:
         """Validate a condition, emit a comparison, and return the operator.
 
         Raises:
             SyntaxError: If the condition is not a comparison.
 
         """
-        if condition[0] != "binary_operator" or condition[1] not in JUMP_WHEN_FALSE:
+        if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise SyntaxError(message)
-        _, operator, left, right = condition
-        self.emit_comparison(left, right)
-        return operator
+        self.emit_comparison(condition.left, condition.right)
+        return condition.op
 
-    def emit_register_from_argument(self, *, argument: tuple, register: str) -> None:
+    def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
 
         Handles pinned variables, memory locals, named constants,
         integer literals, and general expressions (evaluated via AX).
         """
-        if argument[0] == "int" or (argument[0] == "variable" and argument[1] in self.NAMED_CONSTANTS):
-            self.emit(f"        mov {register}, {argument[1]}")
-        elif argument[0] == "variable" and argument[1] in self.pinned_register:
-            source = self.pinned_register[argument[1]]
+        if isinstance(argument, Int) or (isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS):
+            self.emit(f"        mov {register}, {argument.value if isinstance(argument, Int) else argument.name}")
+        elif isinstance(argument, Var) and argument.name in self.pinned_register:
+            source = self.pinned_register[argument.name]
             if source != register:
                 self.emit(f"        mov {register}, {source}")
-        elif argument[0] == "variable" and argument[1] == self.ax_local:
+        elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != "ax":
                 self.emit(f"        mov {register}, ax")
-        elif argument[0] == "variable" and argument[1] in self.locals:
-            self.emit(f"        mov {register}, [{self.local_address(argument[1])}]")
-        elif argument[0] == "string":
-            self.emit(f"        mov {register}, {self.new_string_label(argument[1])}")
+        elif isinstance(argument, Var) and argument.name in self.locals:
+            self.emit(f"        mov {register}, [{self.local_address(argument.name)}]")
+        elif isinstance(argument, String):
+            self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
         else:
             self.generate_expression(argument)
             if register != "ax":
                 self.emit(f"        mov {register}, ax")
 
-    def emit_si_from_argument(self, argument: tuple, /) -> None:
+    def emit_si_from_argument(self, argument: Node, /) -> None:
         """Load a string or expression argument into SI."""
-        if argument[0] == "string":
-            self.emit(f"        mov si, {self.new_string_label(argument[1])}")
+        if isinstance(argument, String):
+            self.emit(f"        mov si, {self.new_string_label(argument.content)}")
         else:
             self.generate_expression(argument)
             self.emit("        mov si, ax")
 
-    def emit_store_local(self, *, expression: tuple, name: str) -> None:
+    def emit_store_local(self, *, expression: Node, name: str) -> None:
         """Generate an expression and store the result in a local variable.
 
         When ``name`` is pinned to a register, the value is written to
@@ -702,18 +819,18 @@ class CodeGenerator:
         """
         if name in self.pinned_register:
             register = self.pinned_register[name]
-            if expression[0] == "int":
-                if expression[1] == 0:
+            if isinstance(expression, Int):
+                if expression.value == 0:
                     self.emit(f"        xor {register}, {register}")
                 else:
-                    self.emit(f"        mov {register}, {expression[1]}")
+                    self.emit(f"        mov {register}, {expression.value}")
                 return
-            if expression[0] == "string":
-                label = self.new_string_label(expression[1])
+            if isinstance(expression, String):
+                label = self.new_string_label(expression.content)
                 self.emit(f"        mov {register}, {label}")
                 return
-            if expression[0] == "variable" and expression[1] in self.NAMED_CONSTANTS:
-                self.emit(f"        mov {register}, {expression[1]}")
+            if isinstance(expression, Var) and expression.name in self.NAMED_CONSTANTS:
+                self.emit(f"        mov {register}, {expression.name}")
                 return
         self.generate_expression(expression)
         if name in self.pinned_register:
@@ -735,7 +852,7 @@ class CodeGenerator:
             return line[: line.index(":")]
         return None
 
-    def fuse_trailing_puts(self, body: list[tuple], /) -> list[tuple]:
+    def fuse_trailing_puts(self, body: list[Node], /) -> list[Node]:
         """Transform trailing puts() calls into die() for main.
 
         Handles both a direct trailing ``puts(msg)`` and ``puts(msg)``
@@ -744,15 +861,15 @@ class CodeGenerator:
         if not body:
             return body
         last = body[-1]
-        if last[0] == "call" and last[1] == "puts":
-            return [*body[:-1], ("call", "die", last[2])]
-        if last[0] == "if":
+        if isinstance(last, Call) and last.name == "puts":
+            return [*body[:-1], Call("die", last.args)]
+        if isinstance(last, If):
             transformed = self.transform_if_puts(last)
             if transformed is not last:
                 return [*body[:-1], transformed]
         return body
 
-    def generate(self, ast: tuple, /) -> str:
+    def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
 
         Returns:
@@ -763,7 +880,7 @@ class CodeGenerator:
         self.emit()
         self.emit('%include "constants.asm"')
         self.emit()
-        for function in ast[1]:
+        for function in ast.functions:
             self.generate_function(function)
         self.peephole()
         if self.strings:
@@ -781,7 +898,7 @@ class CodeGenerator:
             self.emit("_argv: times 32 db 0")
         return "\n".join(self.lines) + "\n"
 
-    def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:
+    def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
         """Generate code for a sequence of statements.
 
         When *scoped* is True, variables declared inside the block are
@@ -801,46 +918,46 @@ class CodeGenerator:
         while i < len(statements):
             statement = statements[i]
             # Fuse puts() + exit() into die().
-            if statement[0] == "call" and statement[1] == "puts" and i + 1 < len(statements) and statements[i + 1] == ("call", "exit", []):
-                self.builtin_die(statement[2])
+            if isinstance(statement, Call) and statement.name == "puts" and i + 1 < len(statements) and statements[i + 1] == Call("exit", []):
+                self.builtin_die(statement.args)
                 i += 2
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
-            init = statement[3] if statement[0] == "variable_declaration" else None
+            init = statement.init if isinstance(statement, VarDecl) else None
             # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
-            if statement[0] == "if" and statement[3] is None and len(statement[2]) == 1:
-                inner = statement[2][0]
-                if inner[0] == "call" and inner[1] == "die" and statement[1][0] == "binary_operator" and statement[1][1] in JUMP_WHEN_FALSE:
-                    die_message = inner[2][0]
-                    die_label = self.new_string_label(die_message[1])
-                    die_length = string_byte_length(die_message[1])
+            if isinstance(statement, If) and statement.else_body is None and len(statement.body) == 1:
+                inner = statement.body[0]
+                if isinstance(inner, Call) and inner.name == "die" and isinstance(statement.cond, BinOp) and statement.cond.op in JUMP_WHEN_FALSE:
+                    die_message = inner.args[0]
+                    die_label = self.new_string_label(die_message.content)
+                    die_length = string_byte_length(die_message.content)
                     self.emit(f"        mov si, {die_label}")
                     self.emit(f"        mov cx, {die_length}")
-                    operator = self.emit_condition(condition=statement[1], context="if")
+                    operator = self.emit_condition(condition=statement.cond, context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
                     self.emit(f"        {true_jump} FUNCTION_DIE")
                     i += 1
                     continue
             # Fuse error-returning syscall + if-zero-exit.
-            if init is not None and init[0] == "call" and init[1] in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
+            if init is not None and isinstance(init, Call) and init.name in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
                 next_stmt = statements[i + 1]
                 skip = 0
                 if self.is_zero_exit_if(next_stmt):
                     skip = 2  # skip declaration + if-zero-exit
-                elif next_stmt[0] == "if" and not self.is_zero_test(next_stmt[1]):
+                elif isinstance(next_stmt, If) and not self.is_zero_test(next_stmt.cond):
                     skip = 1  # skip declaration only, process if-else normally
                 if skip:
-                    self.visible_vars.add(statement[1])
-                    call_node = statement[3]
-                    handler = getattr(self, f"builtin_{call_node[1]}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node[1])
+                    self.visible_vars.add(statement.name)
+                    call_node = statement.init
+                    handler = getattr(self, f"builtin_{call_node.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
-                    handler(call_node[2], fuse_exit=True)
+                    handler(call_node.args, fuse_exit=True)
                     self.ax_is_byte = True
-                    self.ax_local = statement[1]
+                    self.ax_local = statement.name
                     i += skip
                     continue
             self.generate_statement(statement)
@@ -848,14 +965,15 @@ class CodeGenerator:
         if saved is not None:
             self.visible_vars = saved
 
-    def generate_call(self, statement: tuple, /) -> None:
+    def generate_call(self, statement: Call, /) -> None:
         """Generate code for a function call statement.
 
         Raises:
             SyntaxError: If the called function is not a known builtin.
 
         """
-        _, name, arguments = statement
+        name = statement.name
+        arguments = statement.args
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
             message = f"unknown builtin: {name}"
@@ -865,14 +983,14 @@ class CodeGenerator:
             self.auto_spill(clobbers=clobbers)
         handler(arguments)
 
-    def generate_do_while(self, statement: tuple, /) -> None:
+    def generate_do_while(self, statement: DoWhile, /) -> None:
         """Generate assembly for a do...while loop.
 
         The body executes unconditionally once, then the condition is
         tested at the bottom.  ``break`` inside the body jumps to the
         end label, same as in a ``while`` loop.
         """
-        _, condition, body = statement
+        condition, body = statement.cond, statement.body
         label_index = self.new_label()
         end_label = f".do_{label_index}_end"
         self.emit(f".do_{label_index}:")
@@ -885,25 +1003,24 @@ class CodeGenerator:
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
 
-    def generate_expression(self, expression: tuple, /) -> None:
+    def generate_expression(self, expression: Node, /) -> None:
         """Generate code for an expression, leaving the result in AX.
 
         Raises:
             SyntaxError: If an unknown expression kind or operator is encountered.
 
         """
-        kind = expression[0]
         # Skip load if AX already holds this variable's value.
-        if kind == "variable" and expression[1] == self.ax_local:
+        if isinstance(expression, Var) and expression.name == self.ax_local:
             return
-        if kind == "int":
+        if isinstance(expression, Int):
             self.ax_clear()
-            self.emit(f"        mov ax, {expression[1]}")
-        elif kind == "string":
+            self.emit(f"        mov ax, {expression.value}")
+        elif isinstance(expression, String):
             self.ax_clear()
-            self.emit(f"        mov ax, {self.new_string_label(expression[1])}")
-        elif kind == "variable":
-            vname = expression[1]
+            self.emit(f"        mov ax, {self.new_string_label(expression.content)}")
+        elif isinstance(expression, Var):
+            vname = expression.name
             if vname in self.NAMED_CONSTANTS:
                 self.emit(f"        mov ax, {vname}")
                 self.ax_clear()
@@ -915,12 +1032,13 @@ class CodeGenerator:
                 self.emit(f"        mov ax, [{self.local_address(vname)}]")
             self.ax_is_byte = False
             self.ax_local = vname
-        elif kind == "index":
+        elif isinstance(expression, Index):
             self.ax_clear()
-            _, vname, index_expression = expression
+            vname = expression.name
+            index_expression = expression.index
             self.check_defined(vname)
-            if index_expression[0] == "int" and vname in self.array_labels:
-                offset = index_expression[1] * 2
+            if isinstance(index_expression, Int) and vname in self.array_labels:
+                offset = index_expression.value * 2
                 label = self.array_labels[vname]
                 cache_key = (label, offset)
                 if cache_key in self.register_cache:
@@ -935,9 +1053,9 @@ class CodeGenerator:
                     self.emit(f"        mov ax, [{label}+{offset}]")
                 else:
                     self.emit(f"        mov ax, [{label}]")
-            elif index_expression[0] == "int":
+            elif isinstance(index_expression, Int):
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
-                offset = index_expression[1] * (1 if is_byte else 2)
+                offset = index_expression.value * (1 if is_byte else 2)
                 if vname in self.pinned_register:
                     self.emit(f"        mov bx, {self.pinned_register[vname]}")
                 else:
@@ -969,21 +1087,21 @@ class CodeGenerator:
                     self.emit("        xor ah, ah")
                 else:
                     self.emit("        mov ax, [bx]")
-        elif kind == "sizeof_type":
+        elif isinstance(expression, SizeofType):
             self.ax_clear()
-            self.emit(f"        mov ax, {self.TYPE_SIZES.get(expression[1], 2)}")
-        elif kind == "sizeof_variable":
+            self.emit(f"        mov ax, {self.TYPE_SIZES.get(expression.type_name, 2)}")
+        elif isinstance(expression, SizeofVar):
             self.ax_clear()
-            vname = expression[1]
+            vname = expression.name
             if vname in self.array_sizes:
                 size = self.array_sizes[vname] * 2  # word-sized elements
             else:
                 size = 2  # all non-array variables are word-sized
             self.emit(f"        mov ax, {size}")
-        elif kind == "call":
+        elif isinstance(expression, Call):
             self.generate_call(expression)
-        elif kind == "binary_operator":
-            _, operator, left, right = expression
+        elif isinstance(expression, BinOp):
+            operator, left, right = expression.op, expression.left, expression.right
             if operator == "%" and self.has_remainder(left, right):
                 self.emit("        mov ax, dx")
                 self.ax_clear()
@@ -1010,12 +1128,14 @@ class CodeGenerator:
                 raise SyntaxError(message)
             self.ax_clear()
         else:
-            message = f"unknown expression: {kind}"
+            message = f"unknown expression: {type(expression).__name__}"
             raise SyntaxError(message)
 
-    def generate_function(self, function: tuple, /) -> None:
+    def generate_function(self, function: Function, /) -> None:
         """Generate assembly for a single function definition."""
-        _, name, parameters, body = function
+        name = function.name
+        parameters = function.params
+        body = function.body
         self.array_labels = {}
         self.array_sizes = {}
         self.ax_clear()
@@ -1029,19 +1149,19 @@ class CodeGenerator:
         self.variable_types = {}
 
         # Allocate parameters as locals and record their types.
-        for type_string, pname, is_array in parameters:
-            self.allocate_local(pname)
-            self.variable_types[pname] = type_string
-            if is_array:
-                self.variable_arrays.add(pname)
+        for param in parameters:
+            self.allocate_local(param.name)
+            self.variable_types[param.name] = param.type
+            if param.is_array:
+                self.variable_arrays.add(param.name)
 
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
         # is reached during code generation.
-        for _type, pname, _is_array in parameters:
-            self.visible_vars.add(pname)
+        for param in parameters:
+            self.visible_vars.add(param.name)
         self.visible_vars.update(self.pinned_register)
 
         self.emit(f"{name}:")
@@ -1071,9 +1191,9 @@ class CodeGenerator:
             self.emit("        ret")
         self.emit()
 
-    def generate_if(self, statement: tuple, /) -> None:
+    def generate_if(self, statement: If, /) -> None:
         """Generate assembly for an if statement."""
-        _, condition, body, else_body = statement
+        condition, body, else_body = statement.cond, statement.body, statement.else_body
         label_index = self.new_label()
         operator = self.emit_condition(condition=condition, context="if")
         saved_ax = (self.ax_local, self.ax_is_byte)
@@ -1102,62 +1222,59 @@ class CodeGenerator:
             else:
                 self.ax_clear()
 
-    def generate_statement(self, statement: tuple, /) -> None:
+    def generate_statement(self, statement: Node, /) -> None:
         """Generate assembly for a single statement.
 
         Raises:
             SyntaxError: If an unknown statement kind is encountered.
 
         """
-        kind = statement[0]
-        if kind == "variable_declaration":
-            _, vname, type_string, init = statement
-            self.visible_vars.add(vname)
-            self.variable_types[vname] = type_string
-            if init is not None:
-                self.emit_store_local(expression=init, name=vname)
-        elif kind == "array_declaration":
-            _, vname, type_string, init = statement
-            self.visible_vars.add(vname)
-            self.variable_types[vname] = type_string
-            if init is not None and init[0] == "array_init":
+        if isinstance(statement, VarDecl):
+            self.visible_vars.add(statement.name)
+            self.variable_types[statement.name] = statement.type_name
+            if statement.init is not None:
+                self.emit_store_local(expression=statement.init, name=statement.name)
+        elif isinstance(statement, ArrayDecl):
+            self.visible_vars.add(statement.name)
+            self.variable_types[statement.name] = statement.type_name
+            if statement.init is not None and isinstance(statement.init, ArrayInit):
                 elem_labels = []
-                for elem in init[1]:
-                    if elem[0] == "string":
-                        elem_labels.append(self.new_string_label(elem[1]))
-                    elif elem[0] == "int":
-                        elem_labels.append(str(elem[1]))
+                for elem in statement.init.elements:
+                    if isinstance(elem, String):
+                        elem_labels.append(self.new_string_label(elem.content))
+                    elif isinstance(elem, Int):
+                        elem_labels.append(str(elem.value))
                     else:
                         message = "array initializer elements must be constants"
                         raise SyntaxError(message)
                 array_label = f"_arr_{len(self.arrays)}"
                 self.arrays.append((array_label, elem_labels))
-                self.array_labels[vname] = array_label
-                self.array_sizes[vname] = len(elem_labels)
-                self.emit(f"        mov word [{self.local_address(vname)}], {array_label}")
-        elif kind == "assignment":
-            self.emit_store_local(expression=statement[2], name=statement[1])
-        elif kind == "break":
+                self.array_labels[statement.name] = array_label
+                self.array_sizes[statement.name] = len(elem_labels)
+                self.emit(f"        mov word [{self.local_address(statement.name)}], {array_label}")
+        elif isinstance(statement, Assign):
+            self.emit_store_local(expression=statement.expr, name=statement.name)
+        elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
                 raise SyntaxError(message)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
-        elif kind == "do_while":
+        elif isinstance(statement, DoWhile):
             self.ax_clear()
             self.generate_do_while(statement)
-        elif kind == "if":
+        elif isinstance(statement, If):
             self.generate_if(statement)
-        elif kind == "while":
+        elif isinstance(statement, While):
             self.ax_clear()
             self.generate_while(statement)
-        elif kind == "call":
+        elif isinstance(statement, Call):
             self.generate_call(statement)
             self.ax_clear()
         else:
-            message = f"unknown statement: {kind}"
+            message = f"unknown statement: {type(statement).__name__}"
             raise SyntaxError(message)
 
-    def generate_while(self, statement: tuple, /) -> None:
+    def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.
 
         ``while (1)`` and other statically-nonzero conditions skip the
@@ -1165,7 +1282,7 @@ class CodeGenerator:
         ``break`` statement inside the body has a target; when no
         ``break`` is present the label is dead and costs nothing.
         """
-        _, condition, body = statement
+        condition, body = statement.cond, statement.body
         label_index = self.new_label()
         end_label = f".while_{label_index}_end"
         self.emit(f".while_{label_index}:")
@@ -1180,7 +1297,7 @@ class CodeGenerator:
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
 
-    def has_remainder(self, left: tuple, right: tuple, /) -> bool:
+    def has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.
 
         Handles both direct matches and the transitive property:
@@ -1195,59 +1312,58 @@ class CodeGenerator:
         # Transitive: DX = (A % N) % M, want A % M, and M divides N.
         return (
             remainder_right == right
-            and right[0] == "int"
+            and isinstance(right, Int)
             and self.is_modulo_of(base=left, expression=remainder_left)
-            and remainder_left[3][1] % right[1] == 0
+            and remainder_left.right.value % right.value == 0
         )
 
-    def index_cache_key(self, expression: tuple, /) -> tuple[str, int] | None:
+    def index_cache_key(self, expression: Node, /) -> tuple[str, int] | None:
         """Return the register cache key for an index expression, or None."""
-        if expression[0] == "index" and expression[2][0] == "int" and expression[1] in self.array_labels:
-            return (self.array_labels[expression[1]], expression[2][1] * 2)
+        if isinstance(expression, Index) and isinstance(expression.index, Int) and expression.name in self.array_labels:
+            return (self.array_labels[expression.name], expression.index.value * 2)
         return None
 
     @staticmethod
-    def is_constant_true_condition(condition: tuple, /) -> bool:
+    def is_constant_true_condition(condition: Node, /) -> bool:
         """Return True if *condition* is statically nonzero.
 
         ``parse_condition`` wraps bare expressions as ``expr != 0``,
         so ``while (1)`` reaches here as
-        ``binary_operator("!=", ("int", 1), ("int", 0))``.
+        ``BinOp("!=", Int(1), Int(0))``.
         """
-        if condition[0] != "binary_operator" or condition[1] != "!=":
+        if not isinstance(condition, BinOp) or condition.op != "!=":
             return False
-        if condition[3] != ("int", 0):
+        if condition.right != Int(0):
             return False
-        return condition[2][0] == "int" and condition[2][1] != 0
+        return isinstance(condition.left, Int) and condition.left.value != 0
 
     @staticmethod
-    def is_modulo_of(*, base: tuple, expression: tuple) -> bool:
+    def is_modulo_of(*, base: Node, expression: Node) -> bool:
         """Check if expression is (base % N) for some integer N."""
         return (
-            len(expression) == 4
-            and expression[0] == "binary_operator"
-            and expression[1] == "%"
-            and expression[2] == base
-            and expression[3][0] == "int"
+            isinstance(expression, BinOp)
+            and expression.op == "%"
+            and expression.left == base
+            and isinstance(expression.right, Int)
         )
 
     @staticmethod
-    def is_zero_exit_if(statement: tuple, /) -> bool:
+    def is_zero_exit_if(statement: Node, /) -> bool:
         """Check if a statement is ``if (VAR == 0) { exit(); }``."""
         return (
-            statement[0] == "if"
-            and statement[1][0] == "binary_operator"
-            and statement[1][1] == "=="
-            and statement[1][3] == ("int", 0)
-            and len(statement[2]) == 1
-            and statement[2][0] == ("call", "exit", [])
-            and statement[3] is None
+            isinstance(statement, If)
+            and isinstance(statement.cond, BinOp)
+            and statement.cond.op == "=="
+            and statement.cond.right == Int(0)
+            and len(statement.body) == 1
+            and statement.body[0] == Call("exit", [])
+            and statement.else_body is None
         )
 
     @staticmethod
-    def is_zero_test(condition: tuple, /) -> bool:
+    def is_zero_test(condition: Node, /) -> bool:
         """Check if a condition tests ``VAR == 0``."""
-        return condition[0] == "binary_operator" and condition[1] == "==" and condition[3] == ("int", 0)
+        return isinstance(condition, BinOp) and condition.op == "==" and condition.right == Int(0)
 
     def local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local variable."""
@@ -1553,7 +1669,7 @@ class CodeGenerator:
                 return
         self.lines = [line for line in self.lines if line.strip() != "cld"]
 
-    def scan_locals(self, statements: list[tuple], /, *, top_level: bool = True) -> None:
+    def scan_locals(self, statements: list[Node], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
 
         Plain ``int`` declarations are auto-pinned to a CPU register
@@ -1563,38 +1679,38 @@ class CodeGenerator:
         clobbering a pin.
         """
         for index, statement in enumerate(statements):
-            if statement[0] == "variable_declaration":
-                self.variable_types[statement[1]] = statement[2]
+            if isinstance(statement, VarDecl):
+                self.variable_types[statement.name] = statement.type_name
                 if top_level:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
-                        self.pinned_register[statement[1]] = self.REGISTER_POOL[len(self.pinned_register)]
+                        self.pinned_register[statement.name] = self.REGISTER_POOL[len(self.pinned_register)]
                         continue
-                self.allocate_local(statement[1])
-            elif statement[0] == "array_declaration":
-                self.variable_types[statement[1]] = statement[2]
-                self.allocate_local(statement[1])
-            elif statement[0] == "if":
-                self.scan_locals(statement[2], top_level=False)
-                if statement[3] is not None:
-                    self.scan_locals(statement[3], top_level=False)
-            elif statement[0] in ("do_while", "while"):
-                self.scan_locals(statement[2], top_level=False)
+                self.allocate_local(statement.name)
+            elif isinstance(statement, ArrayDecl):
+                self.variable_types[statement.name] = statement.type_name
+                self.allocate_local(statement.name)
+            elif isinstance(statement, If):
+                self.scan_locals(statement.body, top_level=False)
+                if statement.else_body is not None:
+                    self.scan_locals(statement.else_body, top_level=False)
+            elif isinstance(statement, (DoWhile, While)):
+                self.scan_locals(statement.body, top_level=False)
 
     @staticmethod
-    def transform_branch_puts(body: list[tuple], /) -> list[tuple]:
+    def transform_branch_puts(body: list[Node], /) -> list[Node]:
         """Replace trailing puts(msg) with die(msg) in a branch body."""
-        if body and body[-1][0] == "call" and body[-1][1] == "puts":
-            return [*body[:-1], ("call", "die", body[-1][2])]
+        if body and isinstance(body[-1], Call) and body[-1].name == "puts":
+            return [*body[:-1], Call("die", body[-1].args)]
         return body
 
-    def transform_if_puts(self, statement: tuple, /) -> tuple:
+    def transform_if_puts(self, statement: If, /) -> If:
         """Transform puts() at end of if-else branches into die()."""
-        _, condition, if_body, else_body = statement
+        condition, if_body, else_body = statement.cond, statement.body, statement.else_body
         new_if = self.transform_branch_puts(if_body)
         new_else = else_body
         if else_body is not None:
-            if len(else_body) == 1 and else_body[0][0] == "if":
+            if len(else_body) == 1 and isinstance(else_body[0], If):
                 transformed = self.transform_if_puts(else_body[0])
                 if transformed is not else_body[0]:
                     new_else = [transformed]
@@ -1602,7 +1718,7 @@ class CodeGenerator:
                 new_else = self.transform_branch_puts(else_body)
         if new_if is if_body and new_else is else_body:
             return statement
-        return ("if", condition, new_if, new_else)
+        return If(condition, new_if, new_else)
 
 
 class Parser:
@@ -1630,7 +1746,7 @@ class Parser:
         self.position += 1
         return token
 
-    def parse_additive(self) -> tuple:
+    def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
 
         Returns:
@@ -1641,17 +1757,17 @@ class Parser:
         while self.peek()[0] in ADDITIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_multiplicative()
-            node = ("binary_operator", operator_token[1], node, right)
+            node = BinOp(operator_token[1], node, right)
         return node
 
-    def parse_arguments(self) -> list[tuple]:
+    def parse_arguments(self) -> list[Node]:
         """Parse a comma-separated argument list through the closing paren.
 
         Returns:
             A list of AST expression nodes.
 
         """
-        arguments: list[tuple] = []
+        arguments: list[Node] = []
         if self.peek()[0] != "RPAREN":
             arguments.append(self.parse_expression())
             while self.peek()[0] == "COMMA":
@@ -1660,7 +1776,7 @@ class Parser:
         self.eat("RPAREN")
         return arguments
 
-    def parse_array_init(self) -> tuple:
+    def parse_array_init(self) -> Node:
         """Parse a brace-enclosed array initializer.
 
         Returns:
@@ -1673,9 +1789,9 @@ class Parser:
             self.eat("COMMA")
             elems.append(self.parse_expression())
         self.eat("RBRACE")
-        return ("array_init", elems)
+        return ArrayInit(elems)
 
-    def parse_assignment(self) -> tuple:
+    def parse_assignment(self) -> Node:
         """Parse a simple assignment statement.
 
         Returns:
@@ -1686,22 +1802,22 @@ class Parser:
         self.eat("ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
-        return ("assignment", name, expression)
+        return Assign(name, expression)
 
-    def parse_block(self) -> list[tuple]:
+    def parse_block(self) -> list[Node]:
         """Parse statements until a closing brace and consume it.
 
         Returns:
             A list of AST statement nodes.
 
         """
-        body: list[tuple] = []
+        body: list[Node] = []
         while self.peek()[0] != "RBRACE":
             body.append(self.parse_statement())
         self.eat("RBRACE")
         return body
 
-    def parse_call_statement(self) -> tuple:
+    def parse_call_statement(self) -> Node:
         """Parse a function call statement.
 
         Returns:
@@ -1712,9 +1828,9 @@ class Parser:
         self.eat("LPAREN")
         arguments = self.parse_arguments()
         self.eat("SEMI")
-        return ("call", name, arguments)
+        return Call(name, arguments)
 
-    def parse_comparison(self) -> tuple:
+    def parse_comparison(self) -> Node:
         """Parse a comparison expression.
 
         Returns:
@@ -1725,10 +1841,10 @@ class Parser:
         if self.peek()[0] in COMPARISON_OPERATORS:
             operator_token = self.eat()
             right = self.parse_additive()
-            return ("binary_operator", operator_token[1], left, right)
+            return BinOp(operator_token[1], left, right)
         return left
 
-    def parse_compound_assignment(self) -> tuple:
+    def parse_compound_assignment(self) -> Node:
         """Parse a compound assignment (+=) statement.
 
         Returns:
@@ -1740,9 +1856,9 @@ class Parser:
         expression = self.parse_expression()
         self.eat("SEMI")
         # Desugar: i += expr  →  i = i + expr
-        return ("assignment", name, ("binary_operator", "+", ("variable", name), expression))
+        return Assign(name, BinOp("+", Var(name), expression))
 
-    def parse_condition(self) -> tuple:
+    def parse_condition(self) -> Node:
         """Parse an if/while condition.
 
         Wraps a bare expression as ``expr != 0`` so that ``if (error)``
@@ -1750,19 +1866,19 @@ class Parser:
         level are returned unchanged.
 
         Returns:
-            A binary_operator AST node suitable for conditional jumps.
+            A BinOp AST node suitable for conditional jumps.
 
         """
         expression = self.parse_expression()
-        if expression[0] == "binary_operator" and expression[1] in JUMP_WHEN_FALSE:
+        if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
-        return ("binary_operator", "!=", expression, ("int", 0))
+        return BinOp("!=", expression, Int(0))
 
-    def parse_do_while(self) -> tuple:
+    def parse_do_while(self) -> Node:
         """Parse a do...while loop statement.
 
         Returns:
-            An AST node ``("do_while", condition, body)``.
+            A ``DoWhile`` AST node.
 
         """
         self.eat("DO")
@@ -1773,9 +1889,9 @@ class Parser:
         condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("SEMI")
-        return ("do_while", condition, body)
+        return DoWhile(condition, body)
 
-    def parse_expression(self) -> tuple:
+    def parse_expression(self) -> Node:
         """Parse an expression.
 
         Returns:
@@ -1784,7 +1900,7 @@ class Parser:
         """
         return self.parse_comparison()
 
-    def parse_function(self) -> tuple:
+    def parse_function(self) -> Node:
         """Parse a function declaration.
 
         Returns:
@@ -1797,9 +1913,9 @@ class Parser:
         parameters = self.parse_parameters()
         self.eat("RPAREN")
         self.eat("LBRACE")
-        return ("function", name, parameters, self.parse_block())
+        return Function(name, parameters, self.parse_block())
 
-    def parse_if(self) -> tuple:
+    def parse_if(self) -> Node:
         """Parse an if statement.
 
         Returns:
@@ -1812,7 +1928,7 @@ class Parser:
         self.eat("RPAREN")
         self.eat("LBRACE")
         body = self.parse_block()
-        else_body: list[tuple] | None = None
+        else_body: list[Node] | None = None
         if self.peek()[0] == "ELSE":
             self.eat("ELSE")
             if self.peek()[0] == "IF":
@@ -1820,9 +1936,9 @@ class Parser:
             else:
                 self.eat("LBRACE")
                 else_body = self.parse_block()
-        return ("if", condition, body, else_body)
+        return If(condition, body, else_body)
 
-    def parse_multiplicative(self) -> tuple:
+    def parse_multiplicative(self) -> Node:
         """Parse a multiplicative expression (multiplication and division).
 
         Returns:
@@ -1833,14 +1949,14 @@ class Parser:
         while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_primary()
-            node = ("binary_operator", operator_token[1], node, right)
+            node = BinOp(operator_token[1], node, right)
         return node
 
-    def parse_parameter(self) -> tuple:
+    def parse_parameter(self) -> Param:
         """Parse a single function parameter.
 
         Returns:
-            A (type, name, is_array) triple.
+            A Param dataclass.
 
         """
         type_string = self.parse_type()
@@ -1850,13 +1966,13 @@ class Parser:
             self.eat("LBRACKET")
             self.eat("RBRACKET")
             is_array = True
-        return (type_string, name, is_array)
+        return Param(type_string, name, is_array)
 
-    def parse_parameters(self) -> list[tuple]:
+    def parse_parameters(self) -> list[Param]:
         """Parse a function parameter list.
 
         Returns:
-            A list of (type, name, is_array) triples.
+            A list of Param dataclasses.
 
         """
         if self.peek()[0] == "RPAREN":
@@ -1867,7 +1983,7 @@ class Parser:
             parameters.append(self.parse_parameter())
         return parameters
 
-    def parse_primary(self) -> tuple:
+    def parse_primary(self) -> Node:
         """Parse a primary expression (literals, variables, indexing, parens).
 
         Returns:
@@ -1882,27 +1998,27 @@ class Parser:
             return self.parse_sizeof()
         if token[0] == "NUMBER":
             self.eat()
-            return ("int", int(token[1], 0))
+            return Int(int(token[1], 0))
         if token[0] == "CHAR_LIT":
             self.eat()
-            return ("int", decode_first_character(token[1][1:-1]))
+            return Int(decode_first_character(token[1][1:-1]))
         if token[0] == "STRING":
             self.eat()
-            return ("string", token[1][1:-1])
+            return String(token[1][1:-1])
         if token[0] == "IDENT":
             self.eat()
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
-                return ("call", token[1], self.parse_arguments())
+                return Call(token[1], self.parse_arguments())
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
-                return ("index", token[1], index)
-            return ("variable", token[1])
+                return Index(token[1], index)
+            return Var(token[1])
         if token[0] == "NOT":
             self.eat()
-            return ("binary_operator", "==", self.parse_primary(), ("int", 0))
+            return BinOp("==", self.parse_primary(), Int(0))
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
@@ -1911,7 +2027,7 @@ class Parser:
         message = f"line {token[2]}: expected expression, got {token[0]} ({token[1]!r})"
         raise SyntaxError(message)
 
-    def parse_program(self) -> tuple:
+    def parse_program(self) -> Node:
         """Parse the entire program as a sequence of function declarations.
 
         Returns:
@@ -1921,9 +2037,9 @@ class Parser:
         functions = []
         while self.peek()[0] != "EOF":
             functions.append(self.parse_function())
-        return ("program", functions)
+        return Program(functions)
 
-    def parse_sizeof(self) -> tuple:
+    def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
 
         Returns:
@@ -1936,12 +2052,12 @@ class Parser:
         if self.peek()[0] in TYPE_TOKENS:
             type_string = self.parse_type()
             self.eat("RPAREN")
-            return ("sizeof_type", type_string)
+            return SizeofType(type_string)
         name = self.eat("IDENT")[1]
         self.eat("RPAREN")
-        return ("sizeof_variable", name)
+        return SizeofVar(name)
 
-    def parse_statement(self) -> tuple:
+    def parse_statement(self) -> Node:
         """Parse a single statement.
 
         Returns:
@@ -1959,13 +2075,13 @@ class Parser:
         if token[0] == "BREAK":
             self.eat("BREAK")
             self.eat("SEMI")
-            return ("break",)
+            return Break()
         if token[0] == "DO":
             return self.parse_do_while()
         if token[0] == "RETURN":
             self.eat("RETURN")
             self.eat("SEMI")
-            return ("call", "exit", [])
+            return Call("exit", [])
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":
@@ -2004,7 +2120,7 @@ class Parser:
         message = f"line {token[2]}: expected type, got {token[0]} ({token[1]!r})"
         raise SyntaxError(message)
 
-    def parse_variable_declaration(self) -> tuple:
+    def parse_variable_declaration(self) -> Node:
         """Parse a variable or array declaration.
 
         Returns:
@@ -2025,10 +2141,10 @@ class Parser:
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
-            return ("array_declaration", name, type_string, init)
-        return ("variable_declaration", name, type_string, init)
+            return ArrayDecl(name, type_string, init)
+        return VarDecl(name, type_string, init)
 
-    def parse_while(self) -> tuple:
+    def parse_while(self) -> Node:
         """Parse a while loop statement.
 
         Returns:
@@ -2040,7 +2156,7 @@ class Parser:
         condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("LBRACE")
-        return ("while", condition, self.parse_block())
+        return While(condition, self.parse_block())
 
     def peek(self, offset: int = 0) -> tuple[str, str, int]:
         """Return the token at the current position plus an optional offset.
