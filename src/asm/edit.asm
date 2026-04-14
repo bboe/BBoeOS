@@ -103,29 +103,25 @@ main:
 
         .too_big:
         mov si, MESSAGE_FILE_TOO_BIG
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_FILE_TOO_BIG_LENGTH
+        jmp .print_exit
 
         .is_dir:
         mov si, MESSAGE_IS_DIR
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_IS_DIR_LENGTH
+        jmp .print_exit
 
         .load_err:
         mov si, MESSAGE_LOAD_ERROR
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_LOAD_ERROR_LENGTH
+        jmp .print_exit
 
         .usage:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_USAGE_LENGTH
+
+        .print_exit:
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
@@ -872,38 +868,36 @@ render:
         cmp word [status_message], 0
         je .status_normal
         mov si, [status_message]
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         mov word [status_message], 0
         jmp .reposition
         .status_normal:
         ;; Normal status: "filename [modified]  line N"
         mov si, [filename]
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call puts_strlen
         cmp byte [dirty], 0
         je .status_line_num
         mov si, MESSAGE_MODIFIED
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_MODIFIED_LENGTH
+        call write_stdout
         .status_line_num:
         mov si, MESSAGE_LINE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_LINE_LENGTH
+        call write_stdout
         mov ax, [cursor_line]
         inc ax
         call emit_decimal
         mov si, MESSAGE_COLUMN
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_COLUMN_LENGTH
+        call write_stdout
         mov ax, [cursor_column]
         inc ax
         call emit_decimal
         jmp .reposition
         .status_confirm:
         mov si, MESSAGE_UNSAVED
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_UNSAVED_LENGTH
+        call write_stdout
 
         ;; Reposition cursor: we're at end of status bar on row 24.
         ;; Emit \r to go to col 0 of row 24.
@@ -1046,6 +1040,24 @@ save_file:
         pop ax
         ret
 
+puts_strlen:
+        ;; Print null-terminated string at SI (variable-length)
+        ;; Computes length, then calls write_stdout
+        push di
+        push cx
+        mov di, si
+        xor cx, cx
+        .loop:
+        cmp byte [di], 0
+        je .done
+        inc di
+        inc cx
+        jmp .loop
+        .done:
+        pop ax                  ; discard saved CX
+        pop di
+        jmp write_stdout        ; tail call
+
 ;;; -----------------------------------------------------------------------
 ;;; Variables (sorted)
 ;;; -----------------------------------------------------------------------
@@ -1065,17 +1077,27 @@ save_file:
 ;;; -----------------------------------------------------------------------
 ;;; Strings (sorted)
 ;;; -----------------------------------------------------------------------
-        MESSAGE_COLUMN          db `  col \0`
+        MESSAGE_COLUMN          db `  col `
+        MESSAGE_COLUMN_LENGTH   equ $ - MESSAGE_COLUMN
         MESSAGE_CREATE_ERROR   db `Cannot create file (directory full?)\0`
-        MESSAGE_FILE_TOO_BIG db `File too large for edit buffer\n\0`
-        MESSAGE_IS_DIR       db `Is a directory\n\0`
-        MESSAGE_LINE         db `  line \0`
-        MESSAGE_LOAD_ERROR     db `Load error\n\0`
-        MESSAGE_MODIFIED     db ` [modified]\0`
+        MESSAGE_FILE_TOO_BIG db `File too large for edit buffer\n`
+        MESSAGE_FILE_TOO_BIG_LENGTH equ $ - MESSAGE_FILE_TOO_BIG
+        MESSAGE_IS_DIR       db `Is a directory\n`
+        MESSAGE_IS_DIR_LENGTH equ $ - MESSAGE_IS_DIR
+        MESSAGE_LINE         db `  line `
+        MESSAGE_LINE_LENGTH  equ $ - MESSAGE_LINE
+        MESSAGE_LOAD_ERROR     db `Load error\n`
+        MESSAGE_LOAD_ERROR_LENGTH equ $ - MESSAGE_LOAD_ERROR
+        MESSAGE_MODIFIED     db ` [modified]`
+        MESSAGE_MODIFIED_LENGTH equ $ - MESSAGE_MODIFIED
         MESSAGE_SAVED        db `Saved.\0`
-        MESSAGE_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
-        MESSAGE_USAGE        db `Usage: edit <filename>\n\0`
+        MESSAGE_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.`
+        MESSAGE_UNSAVED_LENGTH equ $ - MESSAGE_UNSAVED
+        MESSAGE_USAGE        db `Usage: edit <filename>\n`
+        MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
         MESSAGE_WRITE_ERROR    db `Write error\0`
+
+%include "write_stdout.asm"
 
 ;;; -----------------------------------------------------------------------
 ;;; program_end: BUFFER_BASE floats on this label so the gap buffer always

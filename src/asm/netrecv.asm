@@ -29,8 +29,8 @@ main:
         jc .error
 
         mov si, MESSAGE_SENT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_SENT_LENGTH
+        call write_stdout
 
         ;; Poll for reply
         mov bx, 0FFFFh
@@ -42,8 +42,8 @@ main:
         jnz .poll
 
         mov si, MESSAGE_TIMEOUT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_TIMEOUT_LENGTH
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
@@ -51,8 +51,8 @@ main:
         ;; DI = packet buffer, CX = length
         push cx
         mov si, MESSAGE_RECEIVE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_RECEIVE_LENGTH
+        call write_stdout
         pop cx
 
         ;; Print first 32 bytes as hex
@@ -77,26 +77,32 @@ main:
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_NO_NIC_LENGTH
+        jmp .print_exit
 
         .error:
         mov si, MESSAGE_ERROR
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_ERROR_LENGTH
+
+        .print_exit:
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
         ;; Data
         my_mac times 6 db 0
 
-        MESSAGE_ERROR db `Send failed\n\0`
-        MESSAGE_NO_NIC db `No NIC found\n\0`
-        MESSAGE_RECEIVE db `Received: \0`
-        MESSAGE_SENT db `ARP sent, waiting for reply...\n\0`
-        MESSAGE_TIMEOUT db `No reply (timeout)\n\0`
+        MESSAGE_ERROR db `Send failed\n`
+        MESSAGE_ERROR_LENGTH equ $ - MESSAGE_ERROR
+        MESSAGE_NO_NIC db `No NIC found\n`
+        MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
+        MESSAGE_RECEIVE db `Received: `
+        MESSAGE_RECEIVE_LENGTH equ $ - MESSAGE_RECEIVE
+        MESSAGE_SENT db `ARP sent, waiting for reply...\n`
+        MESSAGE_SENT_LENGTH equ $ - MESSAGE_SENT
+        MESSAGE_TIMEOUT db `No reply (timeout)\n`
+        MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
 
 %include "arp_frame.asm"
 %include "print_hex.asm"
+%include "write_stdout.asm"

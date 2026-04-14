@@ -88,6 +88,7 @@ main:
         mov ah, SYS_IO_CLOSE
         int 30h
         mov si, MESSAGE_EXISTS
+        mov cx, MESSAGE_EXISTS_LENGTH
         jmp .die
 
 .disk_err:
@@ -98,18 +99,20 @@ main:
         mov ah, SYS_IO_CLOSE
         int 30h
         mov si, MESSAGE_DISK_ERROR
+        mov cx, MESSAGE_DISK_ERROR_LENGTH
         jmp .die
 
 .not_found:
         mov si, MESSAGE_NOT_FOUND
+        mov cx, MESSAGE_NOT_FOUND_LENGTH
         jmp .die
 
 .usage:
         mov si, MESSAGE_USAGE
+        mov cx, MESSAGE_USAGE_LENGTH
 
 .die:
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
@@ -120,10 +123,16 @@ src_fd    dw 0
 src_mode db 0
 
 ;; Strings
-MESSAGE_DISK_ERROR  db `Disk error\n\0`
-MESSAGE_EXISTS    db `File already exists\n\0`
-MESSAGE_NOT_FOUND db `File not found\n\0`
-MESSAGE_USAGE     db `Usage: cp <srcname> <destname>\n\0`
+MESSAGE_DISK_ERROR  db `Disk error\n`
+MESSAGE_DISK_ERROR_LENGTH equ $ - MESSAGE_DISK_ERROR
+MESSAGE_EXISTS    db `File already exists\n`
+MESSAGE_EXISTS_LENGTH equ $ - MESSAGE_EXISTS
+MESSAGE_NOT_FOUND db `File not found\n`
+MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
+MESSAGE_USAGE     db `Usage: cp <srcname> <destname>\n`
+MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
+
+%include "write_stdout.asm"
 
 ;; Copy buffer (512 bytes, right after code+data)
 copy_buf:

@@ -31,10 +31,16 @@ main:
         test ax, ax
         jz .done                ; EOF
 
-        ;; Print the entry name (null-terminated at offset 0)
+        ;; Print the entry name (find length, then write)
+        mov di, entry_buf
+        xor al, al
+        mov cx, DIRECTORY_NAME_LENGTH
+        repne scasb
+        sub di, entry_buf
+        dec di                 ; DI = string length
+        mov cx, di
         mov si, entry_buf
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call write_stdout
 
         ;; Check flags for suffix
         test byte [entry_buf+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
@@ -65,14 +71,17 @@ main:
 
 .not_found:
         mov si, MESSAGE_NOT_FOUND
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_NOT_FOUND_LENGTH
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
 ;; Strings
 DOT           db '.',0
-MESSAGE_NOT_FOUND db `Not found\n\0`
+MESSAGE_NOT_FOUND db `Not found\n`
+MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
+
+%include "write_stdout.asm"
 
 ;; Buffer for one directory entry (32 bytes)
 entry_buf:

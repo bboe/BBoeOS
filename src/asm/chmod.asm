@@ -42,11 +42,14 @@ main:
         je .protected
         ;; ERROR_NOT_FOUND (or unknown)
         mov si, MESSAGE_NOT_FOUND
+        mov cx, MESSAGE_NOT_FOUND_LENGTH
         jmp .error
         .protected:
         mov si, MESSAGE_PROTECTED
+        mov cx, MESSAGE_PROTECTED_LENGTH
         .error:
-        mov ah, SYS_IO_PUT_STRING
+        call write_stdout
+        mov ah, SYS_EXIT
         int 30h
 
         .done:
@@ -55,11 +58,16 @@ main:
 
         .usage:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_USAGE_LENGTH
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
-        MESSAGE_NOT_FOUND db `File not found\n\0`
-        MESSAGE_PROTECTED db `File is protected\n\0`
-        MESSAGE_USAGE     db `Usage: chmod [+x|-x] <file>\n\0`
+        MESSAGE_NOT_FOUND db `File not found\n`
+        MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
+        MESSAGE_PROTECTED db `File is protected\n`
+        MESSAGE_PROTECTED_LENGTH equ $ - MESSAGE_PROTECTED
+        MESSAGE_USAGE     db `Usage: chmod [+x|-x] <file>\n`
+        MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
+
+%include "write_stdout.asm"

@@ -28,13 +28,13 @@ main:
         .have_ip:
         ;; Print "Pinging X.X.X.X...\n"
         mov si, MESSAGE_PINGING
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_PINGING_LENGTH
+        call write_stdout
         mov si, target_ip
         call print_ip
         mov si, MESSAGE_ELLIPSIS
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_ELLIPSIS_LENGTH
+        call write_stdout
 
         mov byte [count], 4
         .loop:
@@ -46,24 +46,24 @@ main:
         ;; Print "Reply from X.X.X.X: time=N ticks\n"
         push ax
         mov si, MESSAGE_REPLY
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_REPLY_LENGTH
+        call write_stdout
         mov si, target_ip
         call print_ip
         mov si, MESSAGE_TIME
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_TIME_LENGTH
+        call write_stdout
         pop ax
         call print_dec
         mov si, MESSAGE_TICKS
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_TICKS_LENGTH
+        call write_stdout
         jmp .next
 
         .timeout:
         mov si, MESSAGE_TIMEOUT
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_TIMEOUT_LENGTH
+        call write_stdout
 
         .next:
         call delay_1s
@@ -75,22 +75,20 @@ main:
 
         .no_arg:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_USAGE_LENGTH
+        jmp .print_exit
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        mov cx, MESSAGE_NO_NIC_LENGTH
+        jmp .print_exit
 
         .resolve_err:
         mov si, MESSAGE_RESOLVE_ERROR
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_RESOLVE_ERROR_LENGTH
+
+        .print_exit:
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
@@ -179,15 +177,24 @@ resolve_dns:
         my_mac times 6 db 0
         target_ip times 4 db 0
 
-        MESSAGE_ELLIPSIS db `...\n\0`
-        MESSAGE_NO_NIC db `No NIC found\n\0`
-        MESSAGE_PINGING db `Pinging \0`
-        MESSAGE_REPLY db `Reply from \0`
-        MESSAGE_RESOLVE_ERROR db `Could not resolve hostname\n\0`
-        MESSAGE_TICKS db ` ticks\n\0`
-        MESSAGE_TIME db `: time=\0`
-        MESSAGE_TIMEOUT db `Request timed out\n\0`
-        MESSAGE_USAGE db `Usage: ping <ip|hostname>\n\0`
+        MESSAGE_ELLIPSIS db `...\n`
+        MESSAGE_ELLIPSIS_LENGTH equ $ - MESSAGE_ELLIPSIS
+        MESSAGE_NO_NIC db `No NIC found\n`
+        MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
+        MESSAGE_PINGING db `Pinging `
+        MESSAGE_PINGING_LENGTH equ $ - MESSAGE_PINGING
+        MESSAGE_REPLY db `Reply from `
+        MESSAGE_REPLY_LENGTH equ $ - MESSAGE_REPLY
+        MESSAGE_RESOLVE_ERROR db `Could not resolve hostname\n`
+        MESSAGE_RESOLVE_ERROR_LENGTH equ $ - MESSAGE_RESOLVE_ERROR
+        MESSAGE_TICKS db ` ticks\n`
+        MESSAGE_TICKS_LENGTH equ $ - MESSAGE_TICKS
+        MESSAGE_TIME db `: time=`
+        MESSAGE_TIME_LENGTH equ $ - MESSAGE_TIME
+        MESSAGE_TIMEOUT db `Request timed out\n`
+        MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
+        MESSAGE_USAGE db `Usage: ping <ip|hostname>\n`
+        MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
 %include "dns_query.asm"
 %include "encode_domain.asm"
@@ -195,3 +202,4 @@ resolve_dns:
 %include "print_byte_dec.asm"
 %include "print_dec.asm"
 %include "print_ip.asm"
+%include "write_stdout.asm"
