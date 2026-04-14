@@ -508,9 +508,9 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=3, name="write")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit_register_from_argument(argument=buffer_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit("        mov ah, SYS_IO_WRITE")
         self.emit("        int 30h")
         self.ax_clear()
