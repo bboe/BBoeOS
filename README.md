@@ -37,14 +37,15 @@ A minimal x86 operating system with a two-stage bootloader, shell, filesystem, n
 src/include/          Shared includes
   constants.asm       Shared constants (memory addresses, filesystem params)
 src/kernel/           Kernel assembly source
+  ansi.asm            ANSI escape sequence parser, serial output
   bboeos.asm          Stage 1 boot code, shell loader, shared functions
+  fd.asm              File descriptor table management (open, read, write, close)
   io.asm              Filesystem I/O (find_file, read_sector), visual_bell
-  readline.asm        Line editor with cursor movement, kill/yank
+  net.asm             NE2000 NIC driver: ARP, IP, ICMP, UDP
   syscall.asm         INT 30h syscall handler
   system.asm          Graphics mode, reboot, shutdown
 src/asm/              User-space programs (assembly sources)
 src/c/                User-space programs (C sources, compiled by cc.py)
-  shell.asm           Shell: CLI loop, command dispatch, built-in commands
 add_file.py           Host-side script to add files to drive image
 make_os.sh            Build script
 ```
@@ -58,7 +59,7 @@ make_os.sh            Build script
   contiguous gap buffer in segment 0 is ~27 KB (the gap from just past the
   edit binary up to `0x7C00`); a separate ~4.5 KB of slack exists above the
   NIC buffers at `0xEE00`–`0xFFFF` and could host the kill buffer, but
-  `static/asm.asm` is ~96 KB so neither rearrangement helps. The real fix is
+  `static/asm.asm` is ~118 KB so neither rearrangement helps. The real fix is
   to relocate the gap buffer into its own segment(s): one segment at e.g.
   `1000h:0000` gets 64 KB; splitting across two segments gets 128 KB and
   clears `asm.asm` with headroom. Requires widening `gap_start`/`gap_end` to

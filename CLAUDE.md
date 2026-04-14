@@ -89,6 +89,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
+- `src/kernel/fd.asm` — File descriptor table management: `fd_open`, `fd_read`, `fd_write`, `fd_close`, `fd_fstat`
 - `src/kernel/io.asm` — `find_file`, `load_file`, `read_sector`, `write_sector`
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_receive`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
@@ -98,7 +99,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
 - `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
 - `src/asm/draw.asm` — 16-color graphics mode with cursor and background controls.
-- `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (110 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
+- `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
 - `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
 - `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
 - `src/asm/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
