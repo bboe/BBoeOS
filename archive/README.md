@@ -8,16 +8,15 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | cat     | 138         | 117       | -21   |
-| chmod   | 140         | 291       | +151  |
+| chmod   | 140         | 246       | +106  |
 | date    | 74          | 72        | -2    |
 | hello   | 22          | 23        | +1    |
 | mkdir   | 116         | 121       | +5    |
 | uptime  | 50          | 49        | -1    |
 
-**chmod (+151):** The argv parsing preamble (~80 bytes) splits the raw
-argument string into an array of pointers. The assembly version walks
-the argument with `lodsb` (1 byte per character read); the C version
-reloads the base pointer and indexes for each character check.
+**chmod (+106):** The assembly version walks the argument with `lodsb`
+(1 byte per character read); the C version reloads the base pointer
+and indexes for each character check.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
