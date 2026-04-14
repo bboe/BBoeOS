@@ -53,9 +53,8 @@
         %assign SYS_IO_GET_CHARACTER  12h
         %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
         %assign SYS_IO_PUT_CHARACTER  14h
-        %assign SYS_IO_PUT_STRING  15h
-        %assign SYS_IO_READ  16h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_WRITE 17h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_READ  15h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         %assign SYS_NET_ARP 20h
         %assign SYS_NET_INIT 21h
