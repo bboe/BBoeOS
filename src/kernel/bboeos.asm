@@ -11,7 +11,7 @@ start:
 
         ;; Dedicated stack segment: SS=0x9000, SP=0xFFF0 puts the stack in
         ;; the top 64 KB of conventional memory (linear 0x90000-0x9FFF0),
-        ;; physically isolated from DISK_BUFFER, NET_RECEIVE_BUFFER, the kernel,
+        ;; physically isolated from SECTOR_BUFFER, NET_RECEIVE_BUFFER, the kernel,
         ;; and every program buffer in segment 0.  The stack owns its
         ;; entire segment and can never collide with data memory.
         cli                     ; Disable interrupts while adjusting stack
@@ -161,14 +161,14 @@ shared_get_character:
         push cx
         push di
         mov bx, STDIN
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 1
         mov ah, SYS_IO_READ
         int 30h
         pop di
         pop cx
         pop bx
-        mov al, [DISK_BUFFER]
+        mov al, [SECTOR_BUFFER]
         ret
 
 shared_print_bcd:
@@ -220,8 +220,8 @@ shared_print_character:
         push bx
         push cx
         push si
-        mov [DISK_BUFFER], al
-        mov si, DISK_BUFFER
+        mov [SECTOR_BUFFER], al
+        mov si, SECTOR_BUFFER
         mov cx, 1
         mov bx, STDOUT
         mov ah, SYS_IO_WRITE

@@ -7,7 +7,7 @@
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTOR 13
         %assign DIRECTORY_SECTORS 3
-        %assign DISK_BUFFER 0E000h    ; 512 bytes (one sector)
+        %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable

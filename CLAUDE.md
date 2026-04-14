@@ -85,7 +85,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `add_file.py` — Host-side script to add files to the drive image filesystem
 - `cc.py` — Host-side C subset compiler (translates `src/c/*.c` to NASM-compatible assembly)
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings

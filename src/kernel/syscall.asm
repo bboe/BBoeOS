@@ -111,10 +111,10 @@ syscall_handler:
         ;; Write root directory sector back
         call directory_write_back
         jc .iret_cf
-        ;; Zero-fill DISK_BUFFER once and write it to each subdir sector
+        ;; Zero-fill SECTOR_BUFFER once and write it to each subdir sector
         push dx
         push di
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 256
         xor ax, ax
         cld
@@ -233,7 +233,7 @@ syscall_handler:
         jmp .iret_cf
         .fs_rename_find_old:
         ;; find_file preserves SI/DI, so DI still holds new name after the call
-        call find_file         ; BX = entry pointer in DISK_BUFFER
+        call find_file         ; BX = entry pointer in SECTOR_BUFFER
         jc .fs_rename_not_found
         jmp .fs_rename_do
         .fs_rename_not_found:
@@ -279,7 +279,7 @@ syscall_handler:
         stc
         jmp .iret_cf
         .frc_find_old:
-        call find_file         ; BX = src entry pointer in DISK_BUFFER
+        call find_file         ; BX = src entry pointer in SECTOR_BUFFER
         jnc .frc_got_src
         mov al, ERROR_NOT_FOUND
         stc
@@ -302,7 +302,7 @@ syscall_handler:
         mov ax, [directory_loaded_sector]
         push ax                ; [bp+2]
         mov ax, bx
-        sub ax, DISK_BUFFER
+        sub ax, SECTOR_BUFFER
         push ax                ; [bp+0]
         mov bp, sp
         ;; Resolve destination directory by scanning new path for '/'
@@ -322,7 +322,7 @@ syscall_handler:
         mov byte [di], 0
         push di
         mov si, [bp+12]
-        call find_file         ; BX = subdir entry in DISK_BUFFER
+        call find_file         ; BX = subdir entry in SECTOR_BUFFER
         pop di
         mov byte [di], '/'
         jc .frc_bad_dir
@@ -363,7 +363,7 @@ syscall_handler:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .frc_disk_err
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         add bx, [bp+0]
         push di
         push cx
@@ -584,7 +584,7 @@ syscall_handler:
         ;; Scan a subdirectory's DIRECTORY_SECTORS data sectors for the first
         ;; empty entry.
         ;; Input: AX = subdirectory's first data sector (16-bit)
-        ;; Output: CF clear, BX = entry pointer in DISK_BUFFER on success.
+        ;; Output: CF clear, BX = entry pointer in SECTOR_BUFFER on success.
         ;;         directory_loaded_sector set to the sector containing the entry.
         ;;         CF set on failure with AL = ERROR_NOT_FOUND (read error)
         ;;         or ERROR_DIRECTORY_FULL (no empty entry).
@@ -602,7 +602,7 @@ syscall_handler:
         stc
         ret
         .sff_scan_init:
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sff_scan:
         cmp byte [bx], 0

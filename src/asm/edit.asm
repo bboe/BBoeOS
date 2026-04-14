@@ -958,7 +958,7 @@ save_file:
         xor bx, bx             ; BX = logical offset into content
         .write_loop:
         push bx
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 512
         .fill:
         call buf_char_at       ; AL = char at BX, CF if end
@@ -980,7 +980,7 @@ save_file:
         push bx
         mov cx, ax              ; CX = bytes to write
         mov bx, [save_fd]
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         mov ah, SYS_IO_WRITE
         int 30h
         pop bx

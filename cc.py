@@ -176,7 +176,7 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
-        "DISK_BUFFER",
+        "SECTOR_BUFFER",
         "FLAG_EXECUTE",
         "O_CREAT",
         "O_RDONLY",

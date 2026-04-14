@@ -1,7 +1,7 @@
 directory_load_entry:
-        ;; Load directory entry by index into DISK_BUFFER
+        ;; Load directory entry by index into SECTOR_BUFFER
         ;; Input: BX = entry index (0 to DIRECTORY_MAX_ENTRIES-1)
-        ;; Output: BX = pointer to entry in DISK_BUFFER
+        ;; Output: BX = pointer to entry in SECTOR_BUFFER
         ;; Use directory_write_back to write the sector after modifications
         push ax
         push cx
@@ -17,7 +17,7 @@ directory_load_entry:
         mov cl, 5               ; DIRECTORY_ENTRY_SIZE = 32 = 2^5
         shl ax, cl              ; * 32
         mov bx, ax
-        add bx, DISK_BUFFER
+        add bx, SECTOR_BUFFER
         ;; Read the sector
         mov ax, [directory_loaded_sector]
         call read_sector
@@ -40,7 +40,7 @@ directory_write_back:
 find_file:
         ;; Search directory for a filename, with optional path support
         ;; Input: SI = pointer to null-terminated filename (may contain one '/')
-        ;; Output: BX = pointer to entry in DISK_BUFFER
+        ;; Output: BX = pointer to entry in SECTOR_BUFFER
         ;;         directory_loaded_sector set to the sector containing the found entry
         ;;         CF set if not found or disk error
         push ax
@@ -79,7 +79,7 @@ find_file:
         mov byte [di], '/'     ; restore the slash
         jc .ff_done             ; directory not found
         ;; Verify it's a directory (FLAG_DIRECTORY set)
-        ;; BX = pointer to entry in DISK_BUFFER (from root search)
+        ;; BX = pointer to entry in SECTOR_BUFFER (from root search)
         test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .ff_not_found        ; not a directory
         ;; Read the subdirectory's first data sector (16-bit)
@@ -99,7 +99,7 @@ find_file:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .ff_done
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
 
         .ff_search:
@@ -149,7 +149,7 @@ find_file:
         ret
 
         .ff_found:
-        pop bx                  ; BX = entry pointer in DISK_BUFFER
+        pop bx                  ; BX = entry pointer in SECTOR_BUFFER
         clc
         jmp .ff_done
 
@@ -162,7 +162,7 @@ find_file:
         xor ah, ah
         call read_sector
         jc .fdr_done
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .fdr_search:
         cmp byte [di], 0       ; Empty slot — skip (holes are allowed)
@@ -225,7 +225,7 @@ lba_to_chs:
 
 load_file:
         ;; Load file sectors into memory
-        ;; Input: BX = pointer to directory entry in DISK_BUFFER
+        ;; Input: BX = pointer to directory entry in SECTOR_BUFFER
         ;;        DI = destination address
         ;; Output: Carry set on disk error
         ;; Clobbers: SI, CX, DI
@@ -245,7 +245,7 @@ load_file:
         shr cx, 1
         .lf_copy:
         cld
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         rep movsw
         pop cx
         sub cx, 512
@@ -258,7 +258,7 @@ load_file:
         ret
 
 read_sector:
-        ;; Read one sector into DISK_BUFFER
+        ;; Read one sector into SECTOR_BUFFER
         ;; Input: AX = logical sector number (1-based, 16-bit)
         ;; Sets carry flag on error
         push bx
@@ -266,7 +266,7 @@ read_sector:
         push dx
         call lba_to_chs         ; CH/CL/DH set; AX clobbered
         mov dl, [boot_disk]
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         mov ax, 0201h
         int 13h
         pop dx
@@ -290,7 +290,7 @@ scan_directory_entries:
         xor ah, ah
         call read_sector
         jc .sd_done
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
 
         .sd_entry:
@@ -344,7 +344,7 @@ scan_directory_entries:
         call read_sector
         pop ax
         jc .sd_subdir_err
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sd_sub_entry:
         cmp byte [si], 0
@@ -402,7 +402,7 @@ scan_directory_entries:
         and al, 0Fh
         mov cl, 5
         shl ax, cl
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         add si, ax
         pop cx
         pop ax
@@ -428,7 +428,7 @@ scan_directory_entries:
         ret
 
 write_sector:
-        ;; Write DISK_BUFFER to one sector on disk
+        ;; Write SECTOR_BUFFER to one sector on disk
         ;; Input: AX = logical sector number (1-based, 16-bit)
         ;; Sets carry flag on error
         push bx
@@ -436,7 +436,7 @@ write_sector:
         push dx
         call lba_to_chs
         mov dl, [boot_disk]
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         mov ax, 0301h
         int 13h
         pop dx

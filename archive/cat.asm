@@ -17,7 +17,7 @@ main:
         mov bx, ax             ; BX = fd
 
 .read_loop:
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 512
         mov ah, SYS_IO_READ
         int 30h
@@ -25,10 +25,10 @@ main:
         test ax, ax
         jz .done                ; EOF
 
-        ;; Write AX bytes from DISK_BUFFER
+        ;; Write AX bytes from SECTOR_BUFFER
         push bx                 ; Save fd
         mov cx, ax
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         call FUNCTION_WRITE_STDOUT
         pop bx                  ; Restore fd
         jmp .read_loop
