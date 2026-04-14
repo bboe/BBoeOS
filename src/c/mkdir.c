@@ -1,6 +1,6 @@
 void main(char *arg) {
     if (arg == 0) {
-        puts("Usage: mkdir <name>\n");
+        printf("Usage: mkdir <name>\n");
         return;
     }
     int error = mkdir(arg);
@@ -8,10 +8,10 @@ void main(char *arg) {
         return;
     }
     if (error == 1) {
-        puts("Directory full\n");
+        printf("Directory full\n");
     } else if (error == 2) {
-        puts("Already exists\n");
+        printf("Already exists\n");
     } else {
-        puts("Error\n");
+        printf("Error\n");
     }
 }
