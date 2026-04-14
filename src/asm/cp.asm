@@ -79,8 +79,7 @@ main:
         mov bx, [src_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
 .dest_err:
         ;; Close src before reporting error
@@ -112,9 +111,7 @@ main:
         mov cx, MESSAGE_USAGE_LENGTH
 
 .die:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 ;; Variables
 dest_fd   dw 0
@@ -132,7 +129,6 @@ MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
 MESSAGE_USAGE     db `Usage: cp <srcname> <destname>\n`
 MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
-%include "write_stdout.asm"
 
 ;; Copy buffer (512 bytes, right after code+data)
 copy_buf:

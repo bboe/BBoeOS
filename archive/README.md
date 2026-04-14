@@ -7,8 +7,16 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 151         | 127       | -24   |
-| date    | 105         | 103       | -2    |
-| hello   | 34          | 35        | +1    |
-| mkdir   | 129         | 128       | -1    |
-| uptime  | 75          | 74        | -1    |
+| cat     | 138         | 114       | -24   |
+| date    | 74          | 69        | -5    |
+| hello   | 22          | 23        | +1    |
+| mkdir   | 116         | 121       | +5    |
+| uptime  | 50          | 46        | -4    |
+
+**hello (+1):** The C compiler emits a null terminator on every string
+literal. The assembly version omits it since `FUNCTION_DIE` uses an
+explicit length.
+
+**mkdir (+5):** Same null-terminator overhead across 4 string literals
+(+4 bytes), plus the compiler loads `argv` into AX before moving to
+SI (+1 byte) rather than loading SI directly.

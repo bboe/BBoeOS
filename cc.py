@@ -176,7 +176,7 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
-        "DISK_BUFFER",
+        "SECTOR_BUFFER",
         "FLAG_EXECUTE",
         "O_CREAT",
         "O_RDONLY",
@@ -204,7 +204,7 @@ class CodeGenerator:
         self.arrays: list[tuple[str, list[str]]] = []
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
-        self.die_count: int = 0
+
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
         self.frame_size: int = 0
@@ -213,9 +213,6 @@ class CodeGenerator:
         self.locals: dict[str, int] = {}
         self.loop_end_labels: list[str] = []
         self.needs_argv_buf: bool = False
-        self.needs_print_bcd: bool = False
-        self.needs_print_dec: bool = False
-        self.needs_write_stdout: bool = False
         self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
@@ -334,19 +331,18 @@ class CodeGenerator:
         length = string_byte_length(argument[1])
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
-        self.emit("        jmp .die")
-        self.die_count += 1
+        self.emit("        jmp FUNCTION_DIE")
 
     def builtin_exit(self, arguments: list[tuple], /) -> None:
         """Generate code for the exit() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
-        self.emit("        jmp .exit")
+        self.emit("        jmp FUNCTION_EXIT")
 
     def builtin_mkdir(self, arguments: list[tuple], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
 
         Returns 0 on success or an ERR_* code on failure.  When
-        *fuse_exit* is True, emits ``jnc .exit`` instead of converting
+        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of converting
         the carry flag to a 0-or-error integer.
         """
         self.check_argument_count(arguments=arguments, expected=1, name="mkdir")
@@ -354,7 +350,7 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_FS_MKDIR")
         self.emit("        int 30h")
         if fuse_exit:
-            self.emit("        jnc .exit")
+            self.emit("        jnc FUNCTION_EXIT")
         else:
             label_index = self.new_label()
             self.emit(f"        jnc .ok_{label_index}")
@@ -404,8 +400,7 @@ class CodeGenerator:
             self.emit("        pop ax")
         else:
             self.generate_expression(argument)
-        self.emit("        call print_bcd")
-        self.needs_print_bcd = True
+        self.emit("        call FUNCTION_PRINT_BCD")
 
     def builtin_print_buffer(self, arguments: list[tuple], /) -> None:
         """Generate code for the print_buffer() builtin.
@@ -417,8 +412,7 @@ class CodeGenerator:
         address_argument, count_argument = arguments
         self.emit_register_from_argument(argument=address_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit("        call write_stdout")
-        self.needs_write_stdout = True
+        self.emit("        call FUNCTION_WRITE_STDOUT")
 
         self.ax_clear()
 
@@ -426,8 +420,7 @@ class CodeGenerator:
         """Generate code for the print_dec() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
         self.generate_expression(arguments[0])
-        self.emit("        call print_dec")
-        self.needs_print_dec = True
+        self.emit("        call FUNCTION_PRINT_DECIMAL")
 
     def builtin_putc(self, arguments: list[tuple], /) -> None:
         """Generate code for the putc() builtin."""
@@ -440,8 +433,7 @@ class CodeGenerator:
             self.emit(f"        mov al, {argument[1]}")
         else:
             self.generate_expression(argument)
-        self.emit("        mov ah, SYS_IO_PUT_CHARACTER")
-        self.emit("        int 30h")
+        self.emit("        call FUNCTION_PRINT_CHARACTER")
 
     def builtin_puts(self, arguments: list[tuple], /) -> None:
         """Generate code for the puts() builtin.
@@ -458,8 +450,7 @@ class CodeGenerator:
         length = string_byte_length(argument[1])
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
-        self.emit("        call write_stdout")
-        self.needs_write_stdout = True
+        self.emit("        call FUNCTION_WRITE_STDOUT")
 
     def builtin_read(self, arguments: list[tuple], /) -> None:
         """Generate code for the read() builtin.
@@ -508,9 +499,9 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=3, name="write")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit_register_from_argument(argument=buffer_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit("        mov ah, SYS_IO_WRITE")
         self.emit("        int 30h")
         self.ax_clear()
@@ -789,12 +780,6 @@ class CodeGenerator:
                     self.emit(f"{label}: dw {', '.join(elements)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
-        if self.needs_print_bcd:
-            self.emit('%include "print_bcd.asm"')
-        if self.needs_print_dec:
-            self.emit('%include "print_dec.asm"')
-        if self.needs_write_stdout:
-            self.emit('%include "write_stdout.asm"')
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:
@@ -806,11 +791,11 @@ class CodeGenerator:
         Applies several fusions:
         - ``puts(msg); exit();`` → ``die(msg)``
         - ``int err = syscall(...); if (err == 0) { exit(); }`` →
-          syscall with ``jnc .exit`` (skip error-code conversion)
+          syscall with ``jnc FUNCTION_EXIT`` (skip error-code conversion)
         - ``int err = syscall(...); if (err != 0) { die(msg); }`` →
-          syscall with pre-loaded SI and ``jc .die`` (skip sbb)
+          syscall with pre-loaded SI and ``jc FUNCTION_DIE`` (skip sbb)
         - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
-          conditional jump to ``.die``, skipping the if-body dance
+          conditional jump to ``FUNCTION_DIE``, skipping the if-body dance
         """
         saved = self.visible_vars.copy() if scoped else None
         i = 0
@@ -836,8 +821,7 @@ class CodeGenerator:
                     self.emit(f"        mov cx, {die_length}")
                     operator = self.emit_condition(condition=statement[1], context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
-                    self.emit(f"        {true_jump} .die")
-                    self.die_count += 1
+                    self.emit(f"        {true_jump} FUNCTION_DIE")
                     i += 1
                     continue
             # Fuse error-returning syscall + if-zero-exit.
@@ -1017,7 +1001,6 @@ class CodeGenerator:
         self.array_labels = {}
         self.array_sizes = {}
         self.ax_clear()
-        self.die_count = 0
         self.elide_frame = name == "main"
         self.frame_size = 0
         self.locals = {}
@@ -1054,16 +1037,7 @@ class CodeGenerator:
         self.generate_body(body)
 
         if name == "main":
-            if self.die_count == 1:
-                self.inline_single_die()
-            elif self.die_count >= 2:
-                self.emit("        jmp .exit")
-                self.emit(".die:")
-                self.emit("        call write_stdout")
-                self.needs_write_stdout = True
-            self.emit(".exit:")
-            self.emit("        mov ah, SYS_EXIT")
-            self.emit("        int 30h")
+            self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 for vname in sorted(self.locals):
                     self.emit(f"_l_{vname}: dw 0")
@@ -1207,15 +1181,6 @@ class CodeGenerator:
             return (self.array_labels[expression[1]], expression[2][1] * 2)
         return None
 
-    def inline_single_die(self) -> None:
-        """Replace a lone ``jmp .die`` with inline write_stdout + ``jmp .exit``."""
-        for i, line in enumerate(self.lines):
-            if line.strip() == "jmp .die":
-                self.lines[i] = "        call write_stdout"
-                self.lines.insert(i + 1, "        jmp .exit")
-                self.needs_write_stdout = True
-                return
-
     @staticmethod
     def is_constant_true_condition(condition: tuple, /) -> bool:
         """Return True if *condition* is statically nonzero.
@@ -1351,7 +1316,7 @@ class CodeGenerator:
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a.startswith("jmp ") and not b.endswith(":"):
+            if a.startswith("jmp ") and not b.endswith(":") and ":" not in b:
                 del self.lines[i + 1]
                 continue
             i += 1

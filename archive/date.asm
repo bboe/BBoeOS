@@ -11,42 +11,33 @@ main:
         push bx                 ; Save hours/minutes
 
         mov al, ch
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, cl
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, '-'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov al, dh
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, '-'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov al, dl
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, ' '
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
         pop bx                  ; Restore hours/minutes
         mov al, bh
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, ':'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov al, bl
-        call print_bcd
+        call FUNCTION_PRINT_BCD
         mov al, ':'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         pop ax                  ; Restore seconds
-        call print_bcd
+        call FUNCTION_PRINT_BCD
 
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
-        mov ah, SYS_EXIT
-        int 30h
-
-%include "print_bcd.asm"
+        jmp FUNCTION_EXIT

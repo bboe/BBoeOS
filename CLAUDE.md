@@ -62,11 +62,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 02h   | fs_rename    | Rename or move file, SI = old name, DI = new name, CF on err |
 | 10h   | io_close     | Close fd, BX = fd, CF on error                        |
 | 11h   | io_fstat     | Get file status, BX = fd; AL = mode, CX:DX = size     |
-| 12h   | io_get_character | Read one char, AL = char, AH = scan code          |
-| 13h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
-| 14h   | io_putc      | Print char in AL (screen + serial, ANSI-aware)        |
-| 15h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
-| 16h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
+| 12h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
+| 13h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
+| 14h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
 | 21h   | net_init     | Probe NE2000 NIC, DI = 6-byte MAC buffer, CF on err    |
 | 22h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |
@@ -87,10 +85,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `add_file.py` — Host-side script to add files to the drive image filesystem
 - `cc.py` — Host-side C subset compiler (translates `src/c/*.c` to NASM-compatible assembly)
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `DISK_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
+- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
-- `src/include/print_*.asm` — Shared formatters: `print_bcd`, `print_byte_dec`, `print_dec`, `print_hex`, `print_ip`, `print_mac`.
-- `src/include/str_*.asm` — Shared strings: `DISK_ERROR`, `FILE_NOT_FOUND`.
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/io.asm` — `find_file`, `load_file`, `read_sector`, `write_sector`
@@ -113,11 +109,11 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Preserve existing comments when editing code.
 - Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
 - The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
-- Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs `%include` only the granular shared files they need (e.g., `print_bcd.asm`, `str_newline.asm`) at the end of the source.
+- Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs call kernel-provided functions at fixed addresses (e.g., `FUNCTION_PRINT_BCD`, `FUNCTION_WRITE_STDOUT`) instead of `%include`ing shared helpers. Only program-specific logic files (e.g., `dns_query.asm`, `parse_ip.asm`) are still `%include`d.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIRECTORY_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
-- All output goes through `put_character` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `SYS_IO_PUT_CHARACTER` for all output.
+- All output goes through `put_character` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `FUNCTION_PRINT_CHARACTER` for all output.
 
 ## 16-bit Real Mode Constraints
 

@@ -10,12 +10,8 @@ syscall_handler:
         je .io_close
         cmp ah, SYS_IO_FSTAT   ; io_fstat
         je .io_fstat
-        cmp ah, SYS_IO_GET_CHARACTER    ; io_get_character
-        je .io_get_character
         cmp ah, SYS_IO_OPEN    ; io_open
         je .io_open
-        cmp ah, SYS_IO_PUT_CHARACTER    ; io_putc
-        je .io_putc
         cmp ah, SYS_IO_READ    ; io_read
         je .io_read
         cmp ah, SYS_IO_WRITE   ; io_write
@@ -115,10 +111,10 @@ syscall_handler:
         ;; Write root directory sector back
         call directory_write_back
         jc .iret_cf
-        ;; Zero-fill DISK_BUFFER once and write it to each subdir sector
+        ;; Zero-fill SECTOR_BUFFER once and write it to each subdir sector
         push dx
         push di
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 256
         xor ax, ax
         cld
@@ -237,7 +233,7 @@ syscall_handler:
         jmp .iret_cf
         .fs_rename_find_old:
         ;; find_file preserves SI/DI, so DI still holds new name after the call
-        call find_file         ; BX = entry pointer in DISK_BUFFER
+        call find_file         ; BX = entry pointer in SECTOR_BUFFER
         jc .fs_rename_not_found
         jmp .fs_rename_do
         .fs_rename_not_found:
@@ -283,7 +279,7 @@ syscall_handler:
         stc
         jmp .iret_cf
         .frc_find_old:
-        call find_file         ; BX = src entry pointer in DISK_BUFFER
+        call find_file         ; BX = src entry pointer in SECTOR_BUFFER
         jnc .frc_got_src
         mov al, ERROR_NOT_FOUND
         stc
@@ -306,7 +302,7 @@ syscall_handler:
         mov ax, [directory_loaded_sector]
         push ax                ; [bp+2]
         mov ax, bx
-        sub ax, DISK_BUFFER
+        sub ax, SECTOR_BUFFER
         push ax                ; [bp+0]
         mov bp, sp
         ;; Resolve destination directory by scanning new path for '/'
@@ -326,7 +322,7 @@ syscall_handler:
         mov byte [di], 0
         push di
         mov si, [bp+12]
-        call find_file         ; BX = subdir entry in DISK_BUFFER
+        call find_file         ; BX = subdir entry in SECTOR_BUFFER
         pop di
         mov byte [di], '/'
         jc .frc_bad_dir
@@ -367,7 +363,7 @@ syscall_handler:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .frc_disk_err
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         add bx, [bp+0]
         push di
         push cx
@@ -388,14 +384,6 @@ syscall_handler:
         mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
-
-        .io_get_character:
-        call getc_internal
-        iret
-
-        .io_putc:
-        call put_character
-        iret
 
         .net_arp:
         call arp_resolve
@@ -596,7 +584,7 @@ syscall_handler:
         ;; Scan a subdirectory's DIRECTORY_SECTORS data sectors for the first
         ;; empty entry.
         ;; Input: AX = subdirectory's first data sector (16-bit)
-        ;; Output: CF clear, BX = entry pointer in DISK_BUFFER on success.
+        ;; Output: CF clear, BX = entry pointer in SECTOR_BUFFER on success.
         ;;         directory_loaded_sector set to the sector containing the entry.
         ;;         CF set on failure with AL = ERROR_NOT_FOUND (read error)
         ;;         or ERROR_DIRECTORY_FULL (no empty entry).
@@ -614,7 +602,7 @@ syscall_handler:
         stc
         ret
         .sff_scan_init:
-        mov bx, DISK_BUFFER
+        mov bx, SECTOR_BUFFER
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sff_scan:
         cmp byte [bx], 0
@@ -652,124 +640,6 @@ syscall_handler:
         inc bx
         dec cx
         jnz .pad
-        ret
-
-;;; -----------------------------------------------------------------------
-;;; getc_internal: Callable version of io_getc (returns via ret, not iret)
-;;; Output: AL = char, AH = scan code (0 for serial input)
-;;; -----------------------------------------------------------------------
-getc_internal:
-        .poll:
-        ;; Drain pushback buffer first (used when ESC sequence detection reads ahead)
-        cmp byte [serial_pushback_count], 0
-        je .poll_hw
-        mov al, [serial_pushback_buffer]    ; return first buffered byte
-        mov ah, [serial_pushback_buffer+1]
-        mov [serial_pushback_buffer], ah    ; shift second byte down
-        xor ah, ah
-        dec byte [serial_pushback_count]
-        ret
-        .poll_hw:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h            ; Serial data ready?
-        jnz .serial
-        mov ah, 01h
-        int 16h
-        jz .poll                ; Neither ready, keep polling
-        mov ah, 00h
-        int 16h                 ; Consume the key
-        ret
-        .serial:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read the byte
-        pop dx
-        cmp al, 1Bh             ; ESC? May be start of arrow key sequence
-        jne .serial_done
-        ;; Poll for '[' with timeout
-        push cx
-        mov cx, 0FFFFh
-        .esc_bracket:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h
-        jnz .read_bracket
-        loop .esc_bracket
-        pop cx
-        jmp .serial_esc         ; Timeout: standalone ESC
-        .read_bracket:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read second byte
-        pop dx
-        cmp al, '['
-        je .esc_final
-        ;; Not '[': push it back and return ESC
-        mov [serial_pushback_buffer], al
-        mov byte [serial_pushback_count], 1
-        pop cx
-        jmp .serial_esc
-        .esc_final:
-        ;; Poll for final byte (A/B/C/D) with timeout
-        mov cx, 0FFFFh
-        .esc_final_poll:
-        push dx
-        mov dx, 3FDh
-        in al, dx
-        pop dx
-        test al, 01h
-        jnz .read_final
-        loop .esc_final_poll
-        pop cx
-        mov byte [serial_pushback_buffer], '['
-        mov byte [serial_pushback_count], 1
-        jmp .serial_esc         ; Timeout: return ESC, push back '['
-        .read_final:
-        push dx
-        mov dx, 3F8h
-        in al, dx               ; Read third byte
-        pop dx
-        pop cx
-        cmp al, 'A'
-        je .arrow_up
-        cmp al, 'B'
-        je .arrow_down
-        cmp al, 'C'
-        je .arrow_right
-        cmp al, 'D'
-        je .arrow_left
-        ;; Unknown third byte: push back '[' and the byte, return ESC
-        mov byte [serial_pushback_buffer], '['
-        mov [serial_pushback_buffer+1], al
-        mov byte [serial_pushback_count], 2
-        jmp .serial_esc
-        .arrow_up:
-        xor al, al
-        mov ah, 48h
-        ret
-        .arrow_down:
-        xor al, al
-        mov ah, 50h
-        ret
-        .arrow_right:
-        xor al, al
-        mov ah, 4Dh
-        ret
-        .arrow_left:
-        xor al, al
-        mov ah, 4Bh
-        ret
-        .serial_esc:
-        xor ah, ah
-        mov al, 1Bh
-        ret
-        .serial_done:
-        xor ah, ah
         ret
 
 install_syscalls:

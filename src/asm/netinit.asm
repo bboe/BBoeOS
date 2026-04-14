@@ -14,28 +14,22 @@ main:
         ;; Print MAC address
         mov si, MESSAGE_MAC
         mov cx, MESSAGE_MAC_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         mov si, my_mac
-        call print_mac
+        call FUNCTION_PRINT_MAC
 
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
         mov si, MESSAGE_INIT
         mov cx, MESSAGE_INIT_LENGTH
-        call write_stdout
-
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         ;; Data
         my_mac times 6 db 0
@@ -46,6 +40,3 @@ main:
         MESSAGE_NO_NIC db `No NIC found\n`
         MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
 
-%include "print_hex.asm"
-%include "print_mac.asm"
-%include "write_stdout.asm"

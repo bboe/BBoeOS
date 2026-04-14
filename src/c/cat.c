@@ -6,7 +6,7 @@ void main(char *arg) {
     if (fd < 0) {
         die("File not found\n");
     }
-    char *buffer = DISK_BUFFER;
+    char *buffer = SECTOR_BUFFER;
     int bytes;
     do {
         bytes = read(fd, buffer, 512);

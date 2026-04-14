@@ -17,7 +17,7 @@ main:
         mov bx, ax             ; BX = fd
 
 .read_loop:
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         mov cx, 512
         mov ah, SYS_IO_READ
         int 30h
@@ -25,19 +25,18 @@ main:
         test ax, ax
         jz .done                ; EOF
 
-        ;; Write AX bytes from DISK_BUFFER
+        ;; Write AX bytes from SECTOR_BUFFER
         push bx                 ; Save fd
         mov cx, ax
-        mov si, DISK_BUFFER
-        call write_stdout
+        mov si, SECTOR_BUFFER
+        call FUNCTION_WRITE_STDOUT
         pop bx                  ; Restore fd
         jmp .read_loop
 
 .done:
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
 .not_found:
         mov si, FILE_NOT_FOUND
@@ -56,14 +55,13 @@ main:
         mov cx, USAGE_LENGTH
 
 .output:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 ;; Strings
 USAGE        db `Usage: cat <filename>\n`
 USAGE_LENGTH equ $ - USAGE
 
-%include "str_disk_error.asm"
-%include "str_file_not_found.asm"
-%include "write_stdout.asm"
+DISK_ERROR db `Disk read error\n\0`
+DISK_ERROR_LENGTH equ $ - DISK_ERROR - 1
+FILE_NOT_FOUND db `File not found\n\0`
+FILE_NOT_FOUND_LENGTH equ $ - FILE_NOT_FOUND - 1

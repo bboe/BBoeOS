@@ -144,41 +144,36 @@ main:
         ;; Print success message
         mov si, MESSAGE_OK
         mov cx, MESSAGE_OK_LENGTH
-        jmp .print_exit
+        jmp call_die
 
         .error_create:
         mov si, MESSAGE_ERROR_CREATE
         mov cx, MESSAGE_ERROR_CREATE_LENGTH
-        jmp .print_exit
+        jmp call_die
         .error_find_out:
         mov si, MESSAGE_ERROR_FIND_OUT
         mov cx, MESSAGE_ERROR_FIND_OUT_LENGTH
-        jmp .print_exit
+        jmp call_die
         .error_pass1:
         mov si, MESSAGE_ERROR_PASS1
         mov cx, MESSAGE_ERROR_PASS1_LENGTH
-        jmp .print_exit
+        jmp call_die
         .error_pass1_io:
         mov si, MESSAGE_ERROR_PASS1_IO
         mov cx, MESSAGE_ERROR_PASS1_IO_LENGTH
-        jmp .print_exit
+        jmp call_die
         .error_pass1_iter:
         mov si, MESSAGE_ERROR_PASS1_ITER
         mov cx, MESSAGE_ERROR_PASS1_ITER_LENGTH
-        jmp .print_exit
+        jmp call_die
         .error_write_dir:
         mov si, MESSAGE_ERROR_WRITE_DIR
         mov cx, MESSAGE_ERROR_WRITE_DIR_LENGTH
-        jmp .print_exit
+        jmp call_die
         .usage:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        jmp .print_exit
-
-        .print_exit:
-        call write_stdout_safe
-        mov ah, SYS_EXIT
-        call syscall
+        jmp call_die
 
 ;;; -----------------------------------------------------------------------
 ;;; abort_unknown: print the offending line and exit
@@ -189,22 +184,19 @@ abort_unknown:
         push si                ; save SI for second print
         mov si, MESSAGE_ERROR_UNKNOWN
         mov cx, MESSAGE_ERROR_UNKNOWN_LENGTH
-        call write_stdout_safe
-        mov si, LINE_BUFFER
-        call puts_strlen_safe
+        call call_write_stdout
+        mov di, LINE_BUFFER
+        call call_print_string
         mov al, 0Ah
-        mov ah, SYS_IO_PUT_CHARACTER
-        call syscall
+        call call_print_character
         mov si, MESSAGE_ERROR_AT
         mov cx, MESSAGE_ERROR_AT_LENGTH
-        call write_stdout_safe
-        pop si
-        call puts_strlen_safe
+        call call_write_stdout
+        pop di
+        call call_print_string
         mov al, 0Ah
-        mov ah, SYS_IO_PUT_CHARACTER
-        call syscall
-        mov ah, SYS_EXIT
-        call syscall
+        call call_print_character
+        jmp call_exit
 
 ;;; -----------------------------------------------------------------------
 ;;; do_pass: run one pass over the source file
@@ -3353,7 +3345,7 @@ parse_register:
         push bx
         push cx
         push di
-        mov bx, reg_table
+        mov bx, register_table
         .try_reg:
         mov di, bx
         cmp byte [di], 0
@@ -3513,8 +3505,7 @@ print_hex_word:
         jbe .nib_ok
         add al, 7
         .nib_ok:
-        mov ah, SYS_IO_PUT_CHARACTER
-        call syscall
+        call call_print_character
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -3861,9 +3852,7 @@ symbol_add:
         .symbol_overflow:
         mov si, MESSAGE_SYMBOL_OVERFLOW
         mov cx, MESSAGE_SYMBOL_OVERFLOW_LENGTH
-        call write_stdout_safe
-        mov ah, SYS_EXIT
-        call syscall
+        jmp call_die
 
 ;;; -----------------------------------------------------------------------
 ;;; symbol_add_constant: add constant (%assign) to symbol table
@@ -4135,7 +4124,7 @@ STR_XCHG    db 'xchg',0
 STR_XOR     db 'xor',0
 
 ;;; Register table: 2-char name, reg number, size (8 or 16)
-reg_table:
+register_table:
         db 'al', 0, 8
         db 'cl', 1, 8
         db 'dl', 2, 8
@@ -4155,29 +4144,39 @@ reg_table:
         db 0                   ; terminator
 
 ;;; -----------------------------------------------------------------------
-;;; puts_strlen_safe: print null-terminated string at SI (variable-length)
-;;; ES-safe wrapper: computes strlen, then writes to stdout.
+;;; ES-safe kernel jump table wrappers
 ;;; -----------------------------------------------------------------------
-puts_strlen_safe:
+call_die:
+        push ds
+        pop es
+        jmp FUNCTION_DIE
+
+call_exit:
+        push ds
+        pop es
+        jmp FUNCTION_EXIT
+
+call_print_character:
         push es
         push ds
         pop es
-        push di
-        push cx
-        mov di, si
-        xor cx, cx
-        .loop:
-        cmp byte [di], 0
-        je .done
-        inc di
-        inc cx
-        jmp .loop
-        .done:
-        pop ax                  ; discard saved CX
-        pop di
-        mov bx, STDOUT
-        mov ah, SYS_IO_WRITE
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
+        pop es
+        ret
+
+call_print_string:
+        push es
+        push ds
+        pop es
+        call FUNCTION_PRINT_STRING
+        pop es
+        ret
+
+call_write_stdout:
+        push es
+        push ds
+        pop es
+        call FUNCTION_WRITE_STDOUT
         pop es
         ret
 
@@ -4189,20 +4188,6 @@ syscall:
         push es
         push ds
         pop es                  ; ES=0 (kernel expects ES=0)
-        int 30h
-        pop es
-        ret
-
-;;; -----------------------------------------------------------------------
-;;; write_stdout_safe: write CX bytes from SI to stdout
-;;; ES-safe wrapper: saves/restores ES around the syscall.
-;;; -----------------------------------------------------------------------
-write_stdout_safe:
-        push es
-        push ds
-        pop es
-        mov bx, STDOUT
-        mov ah, SYS_IO_WRITE
         int 30h
         pop es
         ret

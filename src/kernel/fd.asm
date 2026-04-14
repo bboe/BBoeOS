@@ -61,8 +61,8 @@ fd_close:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .close_write_err
-        ;; Point BX at the entry within DISK_BUFFER
-        mov bx, DISK_BUFFER
+        ;; Point BX at the entry within SECTOR_BUFFER
+        mov bx, SECTOR_BUFFER
         add bx, [si+FD_OFFSET_DIRECTORY_OFFSET]
         ;; Update size from fd_pos (32-bit)
         mov ax, [si+FD_OFFSET_POSITION]
@@ -215,7 +215,7 @@ fd_open:
         ;; Create in root directory
         cmp bx, 0FFFFh
         je .open_err            ; directory full
-        call directory_load_entry     ; BX = entry ptr in DISK_BUFFER
+        call directory_load_entry     ; BX = entry ptr in SECTOR_BUFFER
         mov si, [fd_open_name]
         jmp .open_write_entry
 
@@ -234,13 +234,13 @@ fd_open:
         mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
         call subdir_find_free
         jc .open_err
-        ;; BX = free entry ptr in DISK_BUFFER, directory_loaded_sector set
+        ;; BX = free entry ptr in SECTOR_BUFFER, directory_loaded_sector set
         inc di                  ; skip past '/'
         mov si, di              ; SI = basename
         jmp .open_write_entry
 
         .open_write_entry:
-        ;; BX = entry ptr in DISK_BUFFER, SI = filename to write
+        ;; BX = entry ptr in SECTOR_BUFFER, SI = filename to write
         push bx
         call write_directory_name
         pop bx
@@ -251,11 +251,11 @@ fd_open:
         mov word [bx+DIRECTORY_OFFSET_SIZE+2], 0
         call directory_write_back
         jc .open_err
-        ;; Now BX points to the new entry in DISK_BUFFER — fall through
+        ;; Now BX points to the new entry in SECTOR_BUFFER — fall through
         ;; to populate the FD
 
         .open_populate:
-        ;; BX = dir entry in DISK_BUFFER
+        ;; BX = dir entry in SECTOR_BUFFER
         call fd_alloc
         jc .open_err            ; table full
         ;; SI = FD entry pointer from fd_alloc, AX = fd number
@@ -288,7 +288,7 @@ fd_open:
         mov cx, [directory_loaded_sector]
         mov [si+FD_OFFSET_DIRECTORY_SECTOR], cx
         mov cx, bx
-        sub cx, DISK_BUFFER
+        sub cx, SECTOR_BUFFER
         mov [si+FD_OFFSET_DIRECTORY_OFFSET], cx
         ;; If O_TRUNC, reset size to 0
         test byte [fd_open_flags], O_TRUNC
@@ -493,15 +493,15 @@ fd_read:
         call read_sector
         jc .rd_disk_err
         ;; Check if entry at offset BX is non-empty
-        cmp byte [DISK_BUFFER+bx], 0
+        cmp byte [SECTOR_BUFFER+bx], 0
         jne .rd_found
         ;; Empty slot — advance pos by DIRECTORY_ENTRY_SIZE and try again
         add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
         jmp .rd_next
         .rd_found:
-        ;; Copy DIRECTORY_ENTRY_SIZE bytes from DISK_BUFFER+BX to [DI]
+        ;; Copy DIRECTORY_ENTRY_SIZE bytes from SECTOR_BUFFER+BX to [DI]
         push si
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         add si, bx
         mov cx, DIRECTORY_ENTRY_SIZE
         cld
@@ -564,7 +564,7 @@ fd_read:
         ;; Compute sector = start_sec + (pos >> 9)
         mov si, [fd_rw_descriptor_pointer]
         call fd_pos_to_sector   ; AX = sector, BX = offset within sector
-        ;; Read this sector into DISK_BUFFER
+        ;; Read this sector into SECTOR_BUFFER
         call read_sector
         jc .rf_disk_err
         ;; Chunk size = min(512 - offset, bytes_left)
@@ -574,9 +574,9 @@ fd_read:
         jbe .rf_chunk_ok
         mov cx, [fd_rw_left]
         .rf_chunk_ok:
-        ;; Copy CX bytes from DISK_BUFFER+BX to [DI]
+        ;; Copy CX bytes from SECTOR_BUFFER+BX to [DI]
         push si
-        mov si, DISK_BUFFER
+        mov si, SECTOR_BUFFER
         add si, bx
         cld
         push cx                 ; save chunk size
@@ -624,7 +624,7 @@ fd_read:
 ;;; Output: AX = bytes actually written, or -1 on error (CF set)
 ;;;
 ;;; For console FDs, calls put_character for each byte.
-;;; For file FDs, writes sectors via DISK_BUFFER.
+;;; For file FDs, writes sectors via SECTOR_BUFFER.
 ;;; -----------------------------------------------------------------------
 fd_write:
         mov [fd_write_buffer], si  ; save user buffer before fd_lookup clobbers SI
@@ -705,9 +705,9 @@ fd_write:
         jbe .wf_chunk_ok
         mov cx, [fd_rw_left]
         .wf_chunk_ok:
-        ;; Copy CX bytes from user buffer to DISK_BUFFER+BX
+        ;; Copy CX bytes from user buffer to SECTOR_BUFFER+BX
         push si
-        mov di, DISK_BUFFER
+        mov di, SECTOR_BUFFER
         add di, bx
         mov si, [fd_write_buffer]
         add si, [fd_rw_done]    ; advance past already-written bytes

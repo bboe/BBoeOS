@@ -10,29 +10,23 @@ main:
         mov cx, 3600
         div cx                  ; AX = hours, DX = remaining seconds
         push dx
-        call print_dec
+        call FUNCTION_PRINT_DECIMAL
         mov al, ':'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
         pop ax                  ; Remaining seconds
         xor ah, ah
         mov cl, 60
         div cl                  ; AL = minutes, AH = seconds
         push ax
-        call print_dec
+        call FUNCTION_PRINT_DECIMAL
         mov al, ':'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
         pop ax
         mov al, ah              ; Seconds
-        call print_dec
+        call FUNCTION_PRINT_DECIMAL
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
-        mov ah, SYS_EXIT
-        int 30h
-
-%include "print_dec.asm"
+        jmp FUNCTION_EXIT

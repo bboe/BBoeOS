@@ -48,20 +48,15 @@ main:
         mov si, MESSAGE_PROTECTED
         mov cx, MESSAGE_PROTECTED_LENGTH
         .error:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         .done:
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .usage:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         MESSAGE_NOT_FOUND db `File not found\n`
         MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
@@ -70,4 +65,3 @@ main:
         MESSAGE_USAGE     db `Usage: chmod [+x|-x] <file>\n`
         MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
-%include "write_stdout.asm"
