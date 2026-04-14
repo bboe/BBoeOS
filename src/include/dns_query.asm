@@ -38,7 +38,7 @@ dns_query:
         ;; Poll for response
         mov bx, 0FFFFh
         .poll:
-        mov ah, SYS_NET_UDP_RECV
+        mov ah, SYS_NET_UDP_RECEIVE
         int 30h
         jnc .got_response
         dec bx

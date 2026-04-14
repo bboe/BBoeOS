@@ -17,6 +17,6 @@ print_hex:
         .digit:
         add al, '0'
         .print:
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         ret

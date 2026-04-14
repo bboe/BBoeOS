@@ -39,7 +39,7 @@ main:
         test al, al
         jz .count_done
         inc cx
-        cmp cx, DIR_NAME_LEN - 1
+        cmp cx, DIRECTORY_NAME_LENGTH - 1
         ja .name_too_long
         jmp .count_new
         .name_too_long:
@@ -55,20 +55,20 @@ main:
         int 30h
         jnc .done
 
-        cmp al, ERR_EXISTS
+        cmp al, ERROR_EXISTS
         je .exists
-        cmp al, ERR_PROTECTED
+        cmp al, ERROR_PROTECTED
         je .protected
-        ;; ERR_NOT_FOUND (or unknown)
-        mov si, MSG_NOT_FOUND
+        ;; ERROR_NOT_FOUND (or unknown)
+        mov si, MESSAGE_NOT_FOUND
         jmp .error
         .exists:
-        mov si, MSG_EXISTS
+        mov si, MESSAGE_EXISTS
         jmp .error
         .protected:
-        mov si, MSG_PROTECTED
+        mov si, MESSAGE_PROTECTED
         .error:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         .done:
@@ -76,21 +76,21 @@ main:
         int 30h
 
         .toolong:
-        mov si, MSG_TOO_LONG
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_TOO_LONG
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .usage:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
-        MSG_EXISTS    db `File already exists\n\0`
-        MSG_NOT_FOUND db `File not found\n\0`
-        MSG_PROTECTED db `File is protected\n\0`
-        MSG_TOO_LONG  db `Name too long (max 26 chars)\n\0`
-        MSG_USAGE     db `Usage: mv <oldname> <newname>\n\0`
+        MESSAGE_EXISTS    db `File already exists\n\0`
+        MESSAGE_NOT_FOUND db `File not found\n\0`
+        MESSAGE_PROTECTED db `File is protected\n\0`
+        MESSAGE_TOO_LONG  db `Name too long (max 26 chars)\n\0`
+        MESSAGE_USAGE     db `Usage: mv <oldname> <newname>\n\0`

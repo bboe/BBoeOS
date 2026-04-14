@@ -31,7 +31,7 @@ main:
         mov si, DISK_BUFFER
 .print:
         lodsb
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         loop .print
         pop bx                  ; Restore fd
@@ -57,7 +57,7 @@ main:
         mov si, USAGE
 
 .output:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h

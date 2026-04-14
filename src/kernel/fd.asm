@@ -19,7 +19,7 @@ fd_alloc:
         xor ax, ax
         mov cx, FD_MAX
         .scan:
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_FREE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FREE
         je .found
         add si, FD_ENTRY_SIZE
         inc ax
@@ -47,9 +47,9 @@ fd_close:
         call fd_lookup
         jc .close_err
         ;; SI = entry pointer
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_FILE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
         jne .close_free
-        test byte [si+FD_OFF_FLAGS], O_WRONLY
+        test byte [si+FD_OFFSET_FLAGS], O_WRONLY
         jz .close_free
         ;; Writable file — update directory entry size from fd_pos
         push ax
@@ -57,20 +57,20 @@ fd_close:
         push cx
         push dx
         ;; Read the directory sector containing this file's entry
-        mov ax, [si+FD_OFF_DIR_SEC]
-        mov [dir_loaded_sec], ax
+        mov ax, [si+FD_OFFSET_DIRECTORY_SECTOR]
+        mov [directory_loaded_sector], ax
         call read_sector
         jc .close_write_err
         ;; Point BX at the entry within DISK_BUFFER
         mov bx, DISK_BUFFER
-        add bx, [si+FD_OFF_DIR_OFF]
+        add bx, [si+FD_OFFSET_DIRECTORY_OFFSET]
         ;; Update size from fd_pos (32-bit)
-        mov ax, [si+FD_OFF_POS]
-        mov [bx+DIR_OFF_SIZE], ax
-        mov ax, [si+FD_OFF_POS+2]
-        mov [bx+DIR_OFF_SIZE+2], ax
+        mov ax, [si+FD_OFFSET_POSITION]
+        mov [bx+DIRECTORY_OFFSET_SIZE], ax
+        mov ax, [si+FD_OFFSET_POSITION+2]
+        mov [bx+DIRECTORY_OFFSET_SIZE+2], ax
         ;; Write back the directory sector
-        call dir_write_back
+        call directory_write_back
         jc .close_write_err
         pop dx
         pop cx
@@ -112,9 +112,9 @@ fd_fstat:
         call fd_lookup
         jc .fstat_err
         ;; SI = entry pointer
-        mov al, [si+FD_OFF_MODE]
-        mov dx, [si+FD_OFF_SIZE]
-        mov cx, [si+FD_OFF_SIZE+2]
+        mov al, [si+FD_OFFSET_MODE]
+        mov dx, [si+FD_OFFSET_SIZE]
+        mov cx, [si+FD_OFFSET_SIZE+2]
         clc
         ret
         .fstat_err:
@@ -133,14 +133,14 @@ fd_init:
         rep stosw
         ;; Pre-open fd 0 (stdin), fd 1 (stdout), fd 2 (stderr) as console
         mov si, fd_table
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFF_FLAGS], O_RDONLY
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [si+FD_OFFSET_FLAGS], O_RDONLY
         add si, FD_ENTRY_SIZE
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFF_FLAGS], O_WRONLY
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [si+FD_OFFSET_FLAGS], O_WRONLY
         add si, FD_ENTRY_SIZE
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFF_FLAGS], O_WRONLY
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [si+FD_OFFSET_FLAGS], O_WRONLY
         pop di
         pop cx
         pop ax
@@ -156,7 +156,7 @@ fd_lookup:
         shl ax, 5              ; ax = bx * FD_ENTRY_SIZE (32)
         mov si, fd_table
         add si, ax
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_FREE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FREE
         je .invalid_pop
         pop ax
         clc
@@ -198,8 +198,8 @@ fd_open:
         jz .open_err
         ;; Create: scan for free entry + next data sector
         mov si, [fd_open_name]
-        call scan_dir_entries   ; BX = free root entry index, DX = next data sector
-        mov [fd_open_sec], dx   ; save start sector for new file
+        call scan_directory_entries   ; BX = free root entry index, DX = next data sector
+        mov [fd_open_sector], dx   ; save start sector for new file
         ;; Check for '/' in filename to handle subdirectory paths
         mov di, [fd_open_name]
         .open_find_slash:
@@ -215,7 +215,7 @@ fd_open:
         ;; Create in root directory
         cmp bx, 0FFFFh
         je .open_err            ; directory full
-        call dir_load_entry     ; BX = entry ptr in DISK_BUFFER
+        call directory_load_entry     ; BX = entry ptr in DISK_BUFFER
         mov si, [fd_open_name]
         jmp .open_write_entry
 
@@ -228,13 +228,13 @@ fd_open:
         pop di
         mov byte [di], '/'
         jc .open_err
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .open_err
         ;; Scan subdirectory for free entry
-        mov ax, [bx+DIR_OFF_SECTOR]
+        mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
         call subdir_find_free
         jc .open_err
-        ;; BX = free entry ptr in DISK_BUFFER, dir_loaded_sec set
+        ;; BX = free entry ptr in DISK_BUFFER, directory_loaded_sector set
         inc di                  ; skip past '/'
         mov si, di              ; SI = basename
         jmp .open_write_entry
@@ -242,14 +242,14 @@ fd_open:
         .open_write_entry:
         ;; BX = entry ptr in DISK_BUFFER, SI = filename to write
         push bx
-        call write_dir_name
+        call write_directory_name
         pop bx
-        mov byte [bx+DIR_OFF_FLAGS], 0
-        mov ax, [fd_open_sec]
-        mov [bx+DIR_OFF_SECTOR], ax
-        mov word [bx+DIR_OFF_SIZE], 0
-        mov word [bx+DIR_OFF_SIZE+2], 0
-        call dir_write_back
+        mov byte [bx+DIRECTORY_OFFSET_FLAGS], 0
+        mov ax, [fd_open_sector]
+        mov [bx+DIRECTORY_OFFSET_SECTOR], ax
+        mov word [bx+DIRECTORY_OFFSET_SIZE], 0
+        mov word [bx+DIRECTORY_OFFSET_SIZE+2], 0
+        call directory_write_back
         jc .open_err
         ;; Now BX points to the new entry in DISK_BUFFER — fall through
         ;; to populate the FD
@@ -261,40 +261,40 @@ fd_open:
         ;; SI = FD entry pointer from fd_alloc, AX = fd number
         mov [fd_open_fd], ax
         ;; Set FD type: DIR if directory entry, FILE otherwise
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jnz .open_set_dir
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_FILE
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
         jmp .open_set_flags
         .open_set_dir:
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
         .open_set_flags:
         mov cl, [fd_open_flags]
-        mov [si+FD_OFF_FLAGS], cl
+        mov [si+FD_OFFSET_FLAGS], cl
         ;; mode (file permission flags from directory entry)
-        mov cl, [bx+DIR_OFF_FLAGS]
-        mov [si+FD_OFF_MODE], cl
+        mov cl, [bx+DIRECTORY_OFFSET_FLAGS]
+        mov [si+FD_OFFSET_MODE], cl
         ;; start_sec
-        mov cx, [bx+DIR_OFF_SECTOR]
-        mov [si+FD_OFF_START], cx
+        mov cx, [bx+DIRECTORY_OFFSET_SECTOR]
+        mov [si+FD_OFFSET_START], cx
         ;; size (32-bit)
-        mov cx, [bx+DIR_OFF_SIZE]
-        mov [si+FD_OFF_SIZE], cx
-        mov cx, [bx+DIR_OFF_SIZE+2]
-        mov [si+FD_OFF_SIZE+2], cx
+        mov cx, [bx+DIRECTORY_OFFSET_SIZE]
+        mov [si+FD_OFFSET_SIZE], cx
+        mov cx, [bx+DIRECTORY_OFFSET_SIZE+2]
+        mov [si+FD_OFFSET_SIZE+2], cx
         ;; pos = 0
-        mov word [si+FD_OFF_POS], 0
-        mov word [si+FD_OFF_POS+2], 0
+        mov word [si+FD_OFFSET_POSITION], 0
+        mov word [si+FD_OFFSET_POSITION+2], 0
         ;; dir_sec and dir_off (for writeback on close)
-        mov cx, [dir_loaded_sec]
-        mov [si+FD_OFF_DIR_SEC], cx
+        mov cx, [directory_loaded_sector]
+        mov [si+FD_OFFSET_DIRECTORY_SECTOR], cx
         mov cx, bx
         sub cx, DISK_BUFFER
-        mov [si+FD_OFF_DIR_OFF], cx
+        mov [si+FD_OFFSET_DIRECTORY_OFFSET], cx
         ;; If O_TRUNC, reset size to 0
         test byte [fd_open_flags], O_TRUNC
         jz .open_done
-        mov word [si+FD_OFF_SIZE], 0
-        mov word [si+FD_OFF_SIZE+2], 0
+        mov word [si+FD_OFFSET_SIZE], 0
+        mov word [si+FD_OFFSET_SIZE+2], 0
         .open_done:
         mov ax, [fd_open_fd]
         pop di
@@ -308,17 +308,17 @@ fd_open:
         call fd_alloc
         jc .open_err
         mov [fd_open_fd], ax
-        mov byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
         mov cl, [fd_open_flags]
-        mov [si+FD_OFF_FLAGS], cl
-        mov byte [si+FD_OFF_MODE], FLAG_DIR
-        mov word [si+FD_OFF_START], DIR_SECTOR
-        mov word [si+FD_OFF_SIZE], DIR_SECTORS * 512
-        mov word [si+FD_OFF_SIZE+2], 0
-        mov word [si+FD_OFF_POS], 0
-        mov word [si+FD_OFF_POS+2], 0
-        mov word [si+FD_OFF_DIR_SEC], 0
-        mov word [si+FD_OFF_DIR_OFF], 0
+        mov [si+FD_OFFSET_FLAGS], cl
+        mov byte [si+FD_OFFSET_MODE], FLAG_DIRECTORY
+        mov word [si+FD_OFFSET_START], DIRECTORY_SECTOR
+        mov word [si+FD_OFFSET_SIZE], DIRECTORY_SECTORS * 512
+        mov word [si+FD_OFFSET_SIZE+2], 0
+        mov word [si+FD_OFFSET_POSITION], 0
+        mov word [si+FD_OFFSET_POSITION+2], 0
+        mov word [si+FD_OFFSET_DIRECTORY_SECTOR], 0
+        mov word [si+FD_OFFSET_DIRECTORY_OFFSET], 0
         jmp .open_done
 
         .open_err:
@@ -335,8 +335,8 @@ fd_open:
 ;;; Output: AX = absolute sector number, BX = byte offset within sector
 ;;; -----------------------------------------------------------------------
 fd_pos_to_sector:
-        mov ax, [si+FD_OFF_POS+2]
-        mov bx, [si+FD_OFF_POS]
+        mov ax, [si+FD_OFFSET_POSITION+2]
+        mov bx, [si+FD_OFFSET_POSITION]
         ;; AX:BX >> 9 = sector offset
         shl ax, 7
         push cx
@@ -344,7 +344,7 @@ fd_pos_to_sector:
         shr cx, 9
         or ax, cx
         pop cx
-        add ax, [si+FD_OFF_START]
+        add ax, [si+FD_OFFSET_START]
         ;; BX = pos & 0x1FF
         and bx, 01FFh
         ret
@@ -361,11 +361,11 @@ fd_read:
         call fd_lookup
         jc .read_err
         ;; SI = entry pointer
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
         je .read_console
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_DIR
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
         je .read_dir
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_FILE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
         je .read_file
         .read_err:
         mov ax, -1
@@ -405,8 +405,8 @@ fd_read:
         push di
         .rd_next:
         ;; Check if past end of directory
-        mov ax, [si+FD_OFF_POS]
-        cmp ax, DIR_SECTORS * 512
+        mov ax, [si+FD_OFFSET_POSITION]
+        cmp ax, DIRECTORY_SECTORS * 512
         jae .rd_eof
         ;; Compute sector = start_sec + (pos / 512)
         call fd_pos_to_sector   ; AX = sector, BX = offset
@@ -415,21 +415,21 @@ fd_read:
         ;; Check if entry at offset BX is non-empty
         cmp byte [DISK_BUFFER+bx], 0
         jne .rd_found
-        ;; Empty slot — advance pos by DIR_ENTRY_SIZE and try again
-        add word [si+FD_OFF_POS], DIR_ENTRY_SIZE
+        ;; Empty slot — advance pos by DIRECTORY_ENTRY_SIZE and try again
+        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
         jmp .rd_next
         .rd_found:
-        ;; Copy DIR_ENTRY_SIZE bytes from DISK_BUFFER+BX to [DI]
+        ;; Copy DIRECTORY_ENTRY_SIZE bytes from DISK_BUFFER+BX to [DI]
         push si
         mov si, DISK_BUFFER
         add si, bx
-        mov cx, DIR_ENTRY_SIZE
+        mov cx, DIRECTORY_ENTRY_SIZE
         cld
         rep movsb
         pop si
         ;; Advance pos
-        add word [si+FD_OFF_POS], DIR_ENTRY_SIZE
-        mov ax, DIR_ENTRY_SIZE
+        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
+        mov ax, DIRECTORY_ENTRY_SIZE
         pop di
         pop dx
         pop cx
@@ -455,16 +455,16 @@ fd_read:
 
         .read_file:
         ;; SI = FD entry pointer
-        mov [fd_rw_fdp], si
+        mov [fd_rw_descriptor_pointer], si
         push bx
         push cx
         push dx
         push di
         ;; Clamp CX to remaining file bytes
-        mov ax, [si+FD_OFF_SIZE]
-        sub ax, [si+FD_OFF_POS]
-        mov dx, [si+FD_OFF_SIZE+2]
-        sbb dx, [si+FD_OFF_POS+2]
+        mov ax, [si+FD_OFFSET_SIZE]
+        sub ax, [si+FD_OFFSET_POSITION]
+        mov dx, [si+FD_OFFSET_SIZE+2]
+        sbb dx, [si+FD_OFFSET_POSITION+2]
         ;; DX:AX = remaining
         js .rf_eof
         or dx, dx
@@ -482,7 +482,7 @@ fd_read:
         cmp word [fd_rw_left], 0
         je .rf_done
         ;; Compute sector = start_sec + (pos >> 9)
-        mov si, [fd_rw_fdp]
+        mov si, [fd_rw_descriptor_pointer]
         call fd_pos_to_sector   ; AX = sector, BX = offset within sector
         ;; Read this sector into DISK_BUFFER
         call read_sector
@@ -506,9 +506,9 @@ fd_read:
         ;; Update bookkeeping
         add [fd_rw_done], cx
         sub [fd_rw_left], cx
-        mov si, [fd_rw_fdp]
-        add [si+FD_OFF_POS], cx
-        adc word [si+FD_OFF_POS+2], 0
+        mov si, [fd_rw_descriptor_pointer]
+        add [si+FD_OFFSET_POSITION], cx
+        adc word [si+FD_OFFSET_POSITION+2], 0
         jmp .rf_loop
 
         .rf_eof:
@@ -543,17 +543,17 @@ fd_read:
 ;;; Input:  BX = fd, SI = user buffer, CX = byte count
 ;;; Output: AX = bytes actually written, or -1 on error (CF set)
 ;;;
-;;; For console FDs, calls put_char for each byte.
+;;; For console FDs, calls put_character for each byte.
 ;;; For file FDs, writes sectors via DISK_BUFFER.
 ;;; -----------------------------------------------------------------------
 fd_write:
-        mov [fd_write_buf], si  ; save user buffer before fd_lookup clobbers SI
+        mov [fd_write_buffer], si  ; save user buffer before fd_lookup clobbers SI
         call fd_lookup
         jc .wr_err
         ;; SI = entry pointer
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_CONSOLE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
         je .wr_console
-        cmp byte [si+FD_OFF_TYPE], FD_TYPE_FILE
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
         je .wr_file
         .wr_err:
         mov ax, -1
@@ -561,18 +561,18 @@ fd_write:
         ret
 
         .wr_console:
-        ;; Write CX bytes from user buffer to console via put_char
+        ;; Write CX bytes from user buffer to console via put_character
         push bx
         push cx
         push si
-        mov si, [fd_write_buf]
+        mov si, [fd_write_buffer]
         mov bx, cx             ; BX = count
         xor dx, dx             ; DX = bytes written
         test bx, bx
         jz .wcon_done
         .wcon_loop:
         lodsb
-        call put_char
+        call put_character
         inc dx
         cmp dx, bx
         jb .wcon_loop
@@ -586,7 +586,7 @@ fd_write:
 
         .wr_file:
         ;; SI = FD entry pointer
-        mov [fd_rw_fdp], si
+        mov [fd_rw_descriptor_pointer], si
         push bx
         push cx
         push dx
@@ -597,7 +597,7 @@ fd_write:
         cmp word [fd_rw_left], 0
         je .wf_done
         ;; Compute sector and offset from fd_pos
-        mov si, [fd_rw_fdp]
+        mov si, [fd_rw_descriptor_pointer]
         call fd_pos_to_sector   ; AX = sector, BX = offset within sector
         ;; If offset != 0, need read-modify-write (partial sector start)
         test bx, bx
@@ -627,7 +627,7 @@ fd_write:
         push si
         mov di, DISK_BUFFER
         add di, bx
-        mov si, [fd_write_buf]
+        mov si, [fd_write_buffer]
         add si, [fd_rw_done]    ; advance past already-written bytes
         cld
         push cx
@@ -635,7 +635,7 @@ fd_write:
         pop cx
         pop si
         ;; Recompute sector number (read_sector may have clobbered AX)
-        mov si, [fd_rw_fdp]
+        mov si, [fd_rw_descriptor_pointer]
         call fd_pos_to_sector   ; AX = sector
         ;; Write the sector
         call write_sector
@@ -643,9 +643,9 @@ fd_write:
         ;; Update bookkeeping
         add [fd_rw_done], cx
         sub [fd_rw_left], cx
-        mov si, [fd_rw_fdp]
-        add [si+FD_OFF_POS], cx
-        adc word [si+FD_OFF_POS+2], 0
+        mov si, [fd_rw_descriptor_pointer]
+        add [si+FD_OFFSET_POSITION], cx
+        adc word [si+FD_OFFSET_POSITION+2], 0
         jmp .wf_loop
 
         .wf_disk_err:
@@ -671,8 +671,8 @@ fd_write:
         fd_open_flags db 0
         fd_open_mode  db 0
         fd_open_name  dw 0
-        fd_open_sec   dw 0
+        fd_open_sector dw 0
+        fd_rw_descriptor_pointer dw 0
         fd_rw_done    dw 0
-        fd_rw_fdp     dw 0
         fd_rw_left    dw 0
-        fd_write_buf  dw 0
+        fd_write_buffer dw 0

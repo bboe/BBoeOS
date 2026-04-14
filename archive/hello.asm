@@ -4,7 +4,7 @@
 
 main:
         mov si, _str_0
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h

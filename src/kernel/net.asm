@@ -6,7 +6,7 @@
         %assign NE2K_TX_PAGE 40h   ; TX buffer start page
 
 ne2k_probe:
-        ;; Probe and reset NE2000 NIC, read MAC address into mac_addr
+        ;; Probe and reset NE2000 NIC, read MAC address into mac_address
         ;; Output: CF clear on success, CF set on failure (no NIC or timeout)
         push ax
         push cx
@@ -90,7 +90,7 @@ ne2k_probe:
         out dx, al
 
         ;; Read 6 MAC bytes (word mode: low byte of each word is the MAC byte)
-        mov di, mac_addr
+        mov di, mac_address
         mov cx, 6
         mov dx, NE2K_BASE + 10h ; Data port
         cld
@@ -128,7 +128,7 @@ ne2k_probe:
         ret
 
         ;; Variables
-        mac_addr times 6 db 0
+        mac_address times 6 db 0
 
 ne2k_init:
         ;; Fully initialize the NE2000 for sending and receiving packets
@@ -171,7 +171,7 @@ ne2k_init:
 
         ;; Program physical address registers PAR0-PAR5 (page 1, regs 01h-06h)
         cld
-        mov si, mac_addr
+        mov si, mac_address
         mov dx, NE2K_BASE + 01h
         mov cx, 6
         .set_mac:
@@ -333,9 +333,9 @@ ne2k_send:
         pop ax
         ret
 
-ne2k_recv:
+ne2k_receive:
         ;; Receive a packet from the NE2000 RX ring buffer (polled)
-        ;; Output: DI = NET_RX_BUF (packet data), CX = packet length
+        ;; Output: DI = NET_RECEIVE_BUFFER (packet data), CX = packet length
         ;;         CF clear if packet received, CF set if no packet available
         push ax
         push bx
@@ -433,9 +433,9 @@ ne2k_recv:
         mov al, 0Ah             ; Start, remote read DMA
         out dx, al
 
-        ;; Read packet data into NET_RX_BUF
+        ;; Read packet data into NET_RECEIVE_BUFFER
         shr cx, 1              ; Word count
-        mov di, NET_RX_BUF
+        mov di, NET_RECEIVE_BUFFER
         mov dx, NE2K_BASE + 10h ; Data port
         cld
         rep insw
@@ -460,7 +460,7 @@ ne2k_recv:
         out dx, al
 
         pop cx                 ; Restore packet length
-        mov di, NET_RX_BUF
+        mov di, NET_RECEIVE_BUFFER
         clc
         jmp .recv_done
 
@@ -476,7 +476,7 @@ ne2k_recv:
 
 arp_handle_packet:
         ;; Process a received Ethernet frame for ARP
-        ;; Input: SI = pointer to received frame (NET_RX_BUF)
+        ;; Input: SI = pointer to received frame (NET_RECEIVE_BUFFER)
         ;; Updates ARP table on reply, sends reply to requests for our IP
         push ax
         push cx
@@ -521,8 +521,8 @@ arp_handle_packet:
         call arp_table_add
         pop si
 
-        ;; Build ARP reply at NET_TX_BUF
-        mov di, NET_TX_BUF
+        ;; Build ARP reply at NET_TRANSMIT_BUFFER
+        mov di, NET_TRANSMIT_BUFFER
         cld
 
         ;; Ethernet dest = requester's MAC (from offset +6 in received frame)
@@ -535,7 +535,7 @@ arp_handle_packet:
 
         ;; Ethernet src = our MAC
         push si
-        mov si, mac_addr
+        mov si, mac_address
         movsw
         movsw
         movsw
@@ -557,7 +557,7 @@ arp_handle_packet:
 
         ;; Sender = us (MAC + IP)
         push si
-        mov si, mac_addr
+        mov si, mac_address
         movsw
         movsw
         movsw
@@ -584,7 +584,7 @@ arp_handle_packet:
 
         ;; Send reply
         push si
-        mov si, NET_TX_BUF
+        mov si, NET_TRANSMIT_BUFFER
         mov cx, 60
         call ne2k_send
         pop si
@@ -615,7 +615,7 @@ arp_resolve:
 
         mov bx, 0FFFFh         ; Timeout counter
         .resolve_poll:
-        call ne2k_recv
+        call ne2k_receive
         jc .resolve_next       ; No packet available
 
         ;; Got a packet — check if it's ARP
@@ -651,8 +651,8 @@ arp_send_request:
         push si
         push di
 
-        ;; Build Ethernet + ARP frame at NET_TX_BUF
-        mov di, NET_TX_BUF
+        ;; Build Ethernet + ARP frame at NET_TRANSMIT_BUFFER
+        mov di, NET_TRANSMIT_BUFFER
         cld
 
         ;; Ethernet dest: broadcast
@@ -662,7 +662,7 @@ arp_send_request:
 
         ;; Ethernet src: our MAC
         push si
-        mov si, mac_addr
+        mov si, mac_address
         movsw
         movsw
         movsw
@@ -688,7 +688,7 @@ arp_send_request:
 
         ;; Sender MAC
         push si
-        mov si, mac_addr
+        mov si, mac_address
         movsw
         movsw
         movsw
@@ -717,7 +717,7 @@ arp_send_request:
         rep stosw
 
         ;; Send the frame
-        mov si, NET_TX_BUF
+        mov si, NET_TRANSMIT_BUFFER
         mov cx, 60
         call ne2k_send
 
@@ -828,8 +828,8 @@ icmp_ping:
 
         mov [.ip_target], si
 
-        ;; Build ICMP echo request in icmp_buf (16 bytes: 8 header + 8 data)
-        mov di, icmp_buf
+        ;; Build ICMP echo request in icmp_buffer (16 bytes: 8 header + 8 data)
+        mov di, icmp_buffer
         cld
         mov al, 8              ; Type: Echo Request
         stosb
@@ -839,10 +839,10 @@ icmp_ping:
         stosw
         mov ax, 0100h          ; Identifier: 1 (big-endian)
         stosw
-        mov ax, [ping_seq]
+        mov ax, [ping_sequence]
         xchg al, ah            ; Big-endian
         stosw
-        inc word [ping_seq]
+        inc word [ping_sequence]
         xor ax, ax             ; 8 bytes of payload data (zeros)
         stosw
         stosw
@@ -850,10 +850,10 @@ icmp_ping:
         stosw
 
         ;; Compute ICMP checksum
-        mov si, icmp_buf
+        mov si, icmp_buffer
         mov cx, 16
         call ip_checksum
-        mov [icmp_buf + 2], ax
+        mov [icmp_buffer + 2], ax
 
         ;; Record start time
         xor ah, ah
@@ -863,7 +863,7 @@ icmp_ping:
         ;; Send via IP
         mov bx, [.ip_target]
         mov al, 1              ; Protocol: ICMP
-        mov si, icmp_buf
+        mov si, icmp_buffer
         mov cx, 16
         call ip_send
         jc .ping_timeout
@@ -871,7 +871,7 @@ icmp_ping:
         ;; Poll for ICMP echo reply
         mov bx, 0FFFFh
         .ping_poll:
-        call ne2k_recv
+        call ne2k_receive
         jc .ping_next
 
         ;; Check: EtherType=IP (offset 12-13), Protocol=ICMP (offset 23),
@@ -963,7 +963,7 @@ ip_send:
         mov [.is_payload], si
         mov [.is_destip], bx
 
-        ;; 1. Resolve destination MAC via ARP (may use NET_TX_BUF)
+        ;; 1. Resolve destination MAC via ARP (may use NET_TRANSMIT_BUFFER)
         ;;    If dest is not on local subnet (10.0.2.0/24), use gateway
         mov si, bx
         mov eax, [si]
@@ -977,21 +977,21 @@ ip_send:
         call arp_resolve
         jc .ip_send_done
 
-        ;; 2. Build Ethernet header at NET_TX_BUF
+        ;; 2. Build Ethernet header at NET_TRANSMIT_BUFFER
         mov si, di             ; SI = resolved dest MAC
-        mov di, NET_TX_BUF
+        mov di, NET_TRANSMIT_BUFFER
         cld
         movsw                  ; Dest MAC
         movsw
         movsw
-        mov si, mac_addr       ; Src MAC
+        mov si, mac_address       ; Src MAC
         movsw
         movsw
         movsw
         mov ax, 0008h          ; EtherType: IPv4 (0x0800 big-endian)
         stosw
 
-        ;; 3. Build IP header at NET_TX_BUF + 14 (DI is already there)
+        ;; 3. Build IP header at NET_TRANSMIT_BUFFER + 14 (DI is already there)
         mov al, 45h            ; Version 4, IHL 5 (20 bytes)
         stosb
         xor al, al             ; DSCP/ECN = 0
@@ -1021,19 +1021,19 @@ ip_send:
         movsd
         pop si
 
-        ;; 4. Copy payload to NET_TX_BUF + 34 (DI is already there)
+        ;; 4. Copy payload to NET_TRANSMIT_BUFFER + 34 (DI is already there)
         mov si, [.is_payload]
         mov cx, [.is_plen]
         rep movsb
 
         ;; 5. Compute and store IP header checksum
-        mov si, NET_TX_BUF + 14
+        mov si, NET_TRANSMIT_BUFFER + 14
         mov cx, 20
         call ip_checksum
-        mov [NET_TX_BUF + 24], ax ; Offset 14 + 10
+        mov [NET_TRANSMIT_BUFFER + 24], ax ; Offset 14 + 10
 
         ;; 6. Send the frame
-        mov si, NET_TX_BUF
+        mov si, NET_TRANSMIT_BUFFER
         mov cx, [.is_plen]
         add cx, 34             ; 14 (Eth) + 20 (IP) + payload
         call ne2k_send
@@ -1052,16 +1052,16 @@ ip_send:
         .is_plen dw 0
         .is_proto db 0
 
-udp_recv:
+udp_receive:
         ;; Receive a UDP datagram (polls once, handles ARP transparently)
-        ;; Output: DI = payload pointer (within NET_RX_BUF)
+        ;; Output: DI = payload pointer (within NET_RECEIVE_BUFFER)
         ;;         CX = payload length
         ;;         BX = source port
-        ;;         SI = pointer to 4-byte source IP (within NET_RX_BUF)
+        ;;         SI = pointer to 4-byte source IP (within NET_RECEIVE_BUFFER)
         ;;         CF set if no UDP packet available
         push ax
 
-        call ne2k_recv
+        call ne2k_receive
         jc .ur_none
 
         ;; Handle ARP packets transparently
@@ -1123,8 +1123,8 @@ udp_send:
         mov [.ud_destip], bx
         mov [.ud_plen], cx
 
-        ;; Build UDP header + payload in udp_buf
-        mov di, udp_buf
+        ;; Build UDP header + payload in udp_buffer
+        mov di, udp_buffer
         cld
 
         mov ax, [.ud_srcport]
@@ -1147,7 +1147,7 @@ udp_send:
         ;; Send via ip_send: protocol 17 (UDP)
         mov bx, [.ud_destip]
         mov al, 17
-        mov si, udp_buf
+        mov si, udp_buffer
         mov cx, [.ud_plen]
         add cx, 8              ; UDP header + payload
         call ip_send
@@ -1168,8 +1168,8 @@ udp_send:
         arp_evict dw 0
         arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
         gateway_ip db 10, 0, 2, 2
-        icmp_buf times 16 db 0
+        icmp_buffer times 16 db 0
         ip_id dw 1
         our_ip db 10, 0, 2, 15
-        ping_seq dw 1
-        udp_buf times 256 db 0
+        ping_sequence dw 1
+        udp_buffer times 256 db 0

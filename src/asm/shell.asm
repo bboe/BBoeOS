@@ -5,7 +5,7 @@
 main:
         cld
         mov si, PROMPT
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         call read_line
@@ -54,12 +54,12 @@ main:
         mov si, BUFFER
         mov ah, SYS_EXEC
         int 30h                 ; Does not return on success
-        cmp al, ERR_NOT_EXEC
+        cmp al, ERROR_NOT_EXECUTE
         je .not_exec
         ;; Not found in root: retry inside bin/
         mov si, BUFFER
         mov di, exec_path + 4   ; just past "bin/"
-        mov cx, DIR_NAME_LEN    ; name + null
+        mov cx, DIRECTORY_NAME_LENGTH    ; name + null
         .copy_name:
         lodsb
         stosb
@@ -71,7 +71,7 @@ main:
         mov si, exec_path
         mov ah, SYS_EXEC
         int 30h                 ; Does not return on success
-        cmp al, ERR_NOT_EXEC
+        cmp al, ERROR_NOT_EXECUTE
         je .not_exec
         mov si, INVALID_CMD
         jmp .output
@@ -81,7 +81,7 @@ main:
 .output:
         test si, si
         jz main
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         jmp main
 
@@ -91,24 +91,24 @@ main:
 cmd_help:
         push bx
         mov si, HELP_PREFIX
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov bx, cmd_table
 .help_loop:
         mov si, [bx]
         test si, si
         jz .help_end
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov al, ' '
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         add bx, 4
         jmp .help_loop
 .help_end:
         pop bx
         mov al, `\n`
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         xor si, si
         ret
@@ -133,7 +133,7 @@ read_line:
         mov dx, BUFFER          ; End of buffer
 
         .read_char:
-        mov ah, SYS_IO_GETC
+        mov ah, SYS_IO_GET_CHARACTER
         int 30h
 
         cmp al, 0               ; Extended key
@@ -308,7 +308,7 @@ read_line:
         jmp .read_char
 
         .ctrl_l:
-        mov ah, SYS_SCR_CLEAR
+        mov ah, SYS_SCREEN_CLEAR
         int 30h
         mov cx, BUFFER
         mov dx, BUFFER
@@ -451,8 +451,8 @@ emit_cursor_back:
         ret
 
 putc:
-        ;; Print char in AL via SYS_IO_PUTC
-        mov ah, SYS_IO_PUTC
+        ;; Print char in AL via SYS_IO_PUT_CHARACTER
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         ret
 
@@ -501,6 +501,6 @@ SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 
 ;; Variables
 exec_path     db `bin/`              ; 4 bytes prefix
-              times DIR_NAME_LEN+1 db 0 ; name (up to 26 chars) + null + safety byte
+              times DIRECTORY_NAME_LENGTH+1 db 0 ; name (up to 26 chars) + null + safety byte
 kill_buffer   times MAX_INPUT db 0
 kill_length   dw 0

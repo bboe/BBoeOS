@@ -12,18 +12,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+CONSTANTS_PATH = "src/include/constants.asm"
 ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
-FLAG_DIRECTORY = 0x02
-FLAG_EXEC = 0x01
 FILENAME_MAX = 24
+FLAG_DIRECTORY = 0x02
+FLAG_EXECUTE = 0x01
 NAME_FIELD = 25
 OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
-
-CONSTANTS_PATH = "src/include/constants.asm"
 
 
 def add_file(
@@ -53,8 +52,8 @@ def add_file(
         raise SystemExit(message)
     file_size = len(file_data)
 
-    directory_sector = read_assign("DIR_SECTOR")
-    directory_sectors = read_assign("DIR_SECTORS")
+    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
     if subdirectory is None:
@@ -80,7 +79,7 @@ def add_file(
 
     next_data_sector = compute_next_data_sector(directory_sector=directory_sector, directory_sectors=directory_sectors, image=image)
 
-    flags = FLAG_EXEC if executable else 0
+    flags = FLAG_EXECUTE if executable else 0
     write_entry(entry_offset=entry_offset, flags=flags, image=image, name=filename, size=file_size, start_sector=next_data_sector)
     write_data(data=file_data, image=image, start_sector=next_data_sector)
     save_image(image=image, image_path=image_path)
@@ -229,7 +228,7 @@ def main() -> None:
         "-x",
         "--executable",
         action="store_true",
-        help="mark the file as executable (sets FLAG_EXEC)",
+        help="mark the file as executable (sets FLAG_EXECUTE)",
     )
     parser.add_argument(
         "file",
@@ -276,8 +275,8 @@ def make_directory(*, dirname: str, image_path: str) -> None:
             message,
         )
 
-    directory_sector = read_assign("DIR_SECTOR")
-    directory_sectors = read_assign("DIR_SECTORS")
+    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
     parent_offset = (directory_sector - 1) * SECTOR_SIZE

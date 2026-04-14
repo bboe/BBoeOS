@@ -9,15 +9,15 @@
         %assign JUMP_MAX      4096      ; max jcc/jmp instructions per source
         %assign JUMP_TABLE    0F000h    ; jump_table offset within ES segment (4096 bytes)
         %assign LINE_MAX      255
-        %define LINE_BUF      program_end
-        %define OUT_BUF       LINE_BUF + 256
-        %define SRC_BUF       OUT_BUF + 512
-        %define INC_SAVE      SRC_BUF + 512   ; include stack (6 bytes: src_fd, src_buf_pos, src_buf_valid)
-        %define INC_SRC_SAVE  INC_SAVE + 64   ; saved source buffer (512 bytes per level)
-        %assign SYM_ENTRY     36        ; bytes per symbol entry (32 name + 2 val + 1 type + 1 scope)
-        %assign SYM_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)
-        %assign SYM_NAME_LEN  32        ; 31 chars + null
-        %assign SYM_SEGMENT   2000h     ; ES segment for symbol table (linear 0x20000)
+        %assign SYMBOL_ENTRY     36        ; bytes per symbol entry (32 name + 2 val + 1 type + 1 scope)
+        %assign SYMBOL_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)
+        %assign SYMBOL_NAME_LENGTH  32        ; 31 chars + null
+        %assign SYMBOL_SEGMENT   2000h     ; ES segment for symbol table (linear 0x20000)
+        %define LINE_BUFFER      program_end
+        %define OUTPUT_BUFFER       LINE_BUFFER + 256
+        %define SOURCE_BUFFER       OUTPUT_BUFFER + 512
+        %define INCLUDE_SAVE      SOURCE_BUFFER + 512   ; include stack (6 bytes: source_fd, source_buffer_position, source_buffer_valid)
+        %define INCLUDE_SOURCE_SAVE  INCLUDE_SAVE + 64   ; saved source buffer (512 bytes per level)
 
 ;;; -----------------------------------------------------------------------
 ;;; Main entry point
@@ -25,13 +25,13 @@
 main:
         cld
         ;; Set ES to symbol table segment
-        mov ax, SYM_SEGMENT
+        mov ax, SYMBOL_SEGMENT
         mov es, ax
         ;; Parse arguments: "source output"
         mov si, [EXEC_ARG]
         test si, si
         jz .usage
-        mov [src_name], si
+        mov [source_name], si
         ;; Find space separator, null-terminate source name
         .find_space:
         mov al, [si]
@@ -47,12 +47,12 @@ main:
         call skip_ws
         cmp byte [si], 0
         je .usage              ; empty second arg
-        mov [out_name], si
+        mov [output_name], si
 
-        ;; Compute src_prefix = directory portion of src_name (incl. trailing '/')
-        ;; Walk src_name and remember position just past the last '/'
-        mov si, [src_name]
-        mov di, src_prefix     ; di tracks length of valid prefix
+        ;; Compute source_prefix = directory portion of source_name (incl. trailing '/')
+        ;; Walk source_name and remember position just past the last '/'
+        mov si, [source_name]
+        mov di, source_prefix     ; di tracks length of valid prefix
         .pfx_scan:
         mov al, [si]
         test al, al
@@ -60,9 +60,9 @@ main:
         inc si
         cmp al, '/'
         jne .pfx_scan
-        ;; Found a '/'; copy src_name[0..si) to src_prefix
-        mov bx, [src_name]
-        mov di, src_prefix
+        ;; Found a '/'; copy source_name[0..si) to source_prefix
+        mov bx, [source_name]
+        mov di, source_prefix
         .pfx_copy:
         mov al, [bx]
         mov [di], al
@@ -80,7 +80,7 @@ main:
         ;; shrinking only makes targets closer, so convergence is
         ;; monotonic with no oscillation.
         mov byte [pass], 1
-        mov word [sym_count], 0
+        mov word [symbol_count], 0
         mov word [org_value], 0
         ;; Fill jump_table with 1 (all jumps start near, in ES segment)
         push di
@@ -92,90 +92,88 @@ main:
         rep stosb
         pop cx
         pop di
-        mov word [iter_count], 0
+        mov word [iteration_count], 0
         .pass1_loop:
         mov byte [changed_flag], 0
-        mov word [cur_addr], 0
+        mov word [current_address], 0
         mov word [global_scope], 0FFFFh
         mov word [jump_index], 0
         call do_pass
-        test byte [err_flag], 0FFh
+        test byte [error_flag], 0FFh
         jnz .err_pass1_io
-        inc word [iter_count]
+        inc word [iteration_count]
         ;; Safety bound to catch oscillation.
-        cmp word [iter_count], 100
+        cmp word [iteration_count], 100
         jae .err_pass1_iter
         ;; Always run at least 2 iterations: iter 1 builds the symbol
         ;; table; iter 2 is the first one that can verify forward refs.
-        cmp word [iter_count], 2
+        cmp word [iteration_count], 2
         jb .pass1_loop
         ;; Loop while any jump changed size this iteration.
         test byte [changed_flag], 0FFh
         jnz .pass1_loop
 
         ;; -- Open output file for writing --
-        mov si, [out_name]
+        mov si, [output_name]
         mov al, O_WRONLY + O_CREAT + O_TRUNC
-        mov dl, FLAG_EXEC
+        mov dl, FLAG_EXECUTE
         mov ah, SYS_IO_OPEN
         call syscall
         jc .err_create
-        mov [out_fd], ax
+        mov [output_fd], ax
 
         ;; -- Pass 2: emit bytes --
         mov byte [pass], 2
         mov ax, [org_value]
-        mov [cur_addr], ax
+        mov [current_address], ax
         mov word [global_scope], 0FFFFh
         mov word [jump_index], 0
-        mov word [out_pos], 0
-        mov word [out_total], 0
+        mov word [output_position], 0
+        mov word [output_total], 0
         call do_pass
 
         ;; Flush remaining output
         call flush_output
 
         ;; Close output — kernel writes back directory size from fd_pos
-        mov bx, [out_fd]
+        mov bx, [output_fd]
         mov ah, SYS_IO_CLOSE
         call syscall
         jc .err_write_dir
 
         ;; Print success message
-        mov si, MSG_OK
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_OK
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov ah, SYS_EXIT
         call syscall
 
         .usage:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov ah, SYS_EXIT
         call syscall
         .err_create:
-        mov si, MSG_E_CREATE
+        mov si, MESSAGE_ERROR_CREATE
         jmp .die
         .err_find_out:
-        mov si, MSG_E_FIND_OUT
+        mov si, MESSAGE_ERROR_FIND_OUT
         jmp .die
         .err_pass1_io:
-        mov si, MSG_E_PASS1_IO
+        mov si, MESSAGE_ERROR_PASS1_IO
         jmp .die
         .err_pass1_iter:
-        mov si, MSG_E_PASS1_ITER
+        mov si, MESSAGE_ERROR_PASS1_ITER
         jmp .die
         .err_pass1:
-        mov si, MSG_E_PASS1
+        mov si, MESSAGE_ERROR_PASS1
         jmp .die
         .err_write_dir:
-        mov si, MSG_E_WRITE_DIR
+        mov si, MESSAGE_ERROR_WRITE_DIR
         jmp .die
-        .error:
-        mov si, MSG_ERROR
         .die:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov ah, SYS_EXIT
         call syscall
@@ -187,23 +185,23 @@ main:
 ;;; -----------------------------------------------------------------------
 abort_unknown:
         push si                ; save SI for second print
-        mov si, MSG_E_UNKNOWN
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_ERROR_UNKNOWN
+        mov ah, SYS_IO_PUT_STRING
         call syscall
-        mov si, LINE_BUF
-        mov ah, SYS_IO_PUTS
+        mov si, LINE_BUFFER
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov al, 0Ah
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         call syscall
-        mov si, MSG_E_AT
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_ERROR_AT
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         pop si
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov al, 0Ah
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         call syscall
         mov ah, SYS_EXIT
         call syscall
@@ -221,18 +219,18 @@ do_pass:
 
         ;; Reset origin for pass
         mov ax, [org_value]
-        mov [cur_addr], ax
+        mov [current_address], ax
 
         ;; Open source file
-        mov si, [src_name]
+        mov si, [source_name]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         call syscall
         jc .pass_err
-        mov [src_fd], ax
-        mov word [src_buf_pos], 0
-        mov word [src_buf_valid], 0
-        mov byte [inc_depth], 0
+        mov [source_fd], ax
+        mov word [source_buffer_position], 0
+        mov word [source_buffer_valid], 0
+        mov byte [include_depth], 0
         mov word [global_scope], 0FFFFh
 
         .line_loop:
@@ -243,14 +241,14 @@ do_pass:
 
         .eof:
         ;; Check if we're in an include -- if so, pop and continue
-        cmp byte [inc_depth], 0
+        cmp byte [include_depth], 0
         je .pass_done
         call include_pop
         jmp .line_loop
 
         .pass_done:
         ;; Close source fd
-        mov bx, [src_fd]
+        mov bx, [source_fd]
         mov ah, SYS_IO_CLOSE
         call syscall
         pop di
@@ -262,7 +260,7 @@ do_pass:
         ret
 
         .pass_err:
-        mov byte [err_flag], 1
+        mov byte [error_flag], 1
         jmp .pass_done
 
 ;;; -----------------------------------------------------------------------
@@ -272,18 +270,18 @@ emit_byte_al:
         cmp byte [pass], 2
         jne .count_only
         push bx
-        mov bx, [out_pos]
-        mov [OUT_BUF + bx], al
+        mov bx, [output_position]
+        mov [OUTPUT_BUFFER + bx], al
         inc bx
-        mov [out_pos], bx
+        mov [output_position], bx
         cmp bx, 512
         jb .no_flush
         call flush_output
         .no_flush:
         pop bx
         .count_only:
-        inc word [cur_addr]
-        inc word [out_total]
+        inc word [current_address]
+        inc word [output_total]
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -324,8 +322,8 @@ encode_rel8_jump:
         call peek_label_target         ; CF clear -> AX = target addr
         pop bx
         jc .emit_short                 ; unknown target -> stay short for now
-        ;; Compute displacement vs (cur_addr + 2)
-        mov dx, [cur_addr]
+        ;; Compute displacement vs (current_address + 2)
+        mov dx, [current_address]
         add dx, 2
         sub ax, dx                     ; AX = signed displacement
         ;; In rel8 range iff AX + 128 in [0, 255]
@@ -349,7 +347,7 @@ encode_rel8_jump:
 
         ;; Compute displacement using near instruction size.
         ;; Near jcc = 4 bytes (0F 8x rel16), near jmp = 3 bytes (E9 rel16).
-        mov dx, [cur_addr]
+        mov dx, [current_address]
         add dx, 4                      ; assume jcc
         push bp
         mov bp, sp
@@ -384,7 +382,7 @@ encode_rel8_jump:
         call emit_byte_al
         .long_emit_disp:
         call resolve_label             ; advances SI; AX = target (or placeholder)
-        mov bx, [cur_addr]
+        mov bx, [current_address]
         add bx, 2
         sub ax, bx
         call emit_word_ax
@@ -394,14 +392,14 @@ encode_rel8_jump:
         pop ax                         ; restore opcode
         call emit_byte_al
         call resolve_label             ; advances SI; AX = target (or placeholder)
-        mov bx, [cur_addr]
+        mov bx, [current_address]
         inc bx
         sub ax, bx
         call emit_byte_al
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; flush_output: write OUT_BUF to disk
+;;; flush_output: write OUTPUT_BUFFER to disk
 ;;; -----------------------------------------------------------------------
 flush_output:
         push ax
@@ -409,15 +407,15 @@ flush_output:
         push si
         push di
         ;; Don't flush if nothing to write
-        cmp word [out_pos], 0
+        cmp word [output_position], 0
         je .fl_done
-        ;; Write out_pos bytes from OUT_BUF via fd
-        mov bx, [out_fd]
-        mov si, OUT_BUF
-        mov cx, [out_pos]
+        ;; Write output_position bytes from OUTPUT_BUFFER via fd
+        mov bx, [output_fd]
+        mov si, OUTPUT_BUFFER
+        mov cx, [output_position]
         mov ah, SYS_IO_WRITE
         call syscall
-        mov word [out_pos], 0
+        mov word [output_position], 0
         .fl_done:
         pop di
         pop si
@@ -446,8 +444,8 @@ handle_add:
         ;; Use parse_operand so we get reg / mem_direct / imm uniformly
         call parse_operand
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
         cmp byte [op2_type], 0
         je .add_rr
         cmp byte [op2_type], 2
@@ -469,7 +467,7 @@ handle_add:
         mov al, 00h
         .add_rr_emit:
         call emit_byte_al
-        mov al, [op2_reg]      ; src reg goes in reg field
+        mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
         call emit_byte_al
         ret
@@ -488,7 +486,7 @@ handle_add:
         shl al, 3
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         ret
         .add_r16_imm:
@@ -596,8 +594,8 @@ handle_call:
         mov al, 0E8h
         call emit_byte_al
         call resolve_label     ; AX = target address
-        ;; rel16 = target - (cur_addr + 2) (2 bytes for the rel16 itself)
-        mov bx, [cur_addr]
+        ;; rel16 = target - (current_address + 2) (2 bytes for the rel16 itself)
+        mov bx, [current_address]
         add bx, 2
         sub ax, bx
         call emit_word_ax
@@ -650,8 +648,8 @@ handle_cmp:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
         mov [op1_type], ah
-        mov [op1_reg], al
-        mov [op1_val], dx
+        mov [op1_register], al
+        mov [op1_value], dx
         mov al, [op1_size]
         mov [cmp_op1_size], al
         call skip_comma
@@ -663,7 +661,7 @@ handle_cmp:
         jc .cmp_not_rr
         add sp, 2
         ;; cmp reg, reg: opcode 38 (8) / 39 (16), modrm reg=src, rm=dst
-        mov bl, [op1_reg]
+        mov bl, [op1_register]
         push ax                ; save src reg+size
         cmp byte [cmp_op1_size], 8
         je .cmp_rr8
@@ -684,8 +682,8 @@ handle_cmp:
         jne .cmp_imm_only
         call parse_operand     ; AH=type, AL=reg, DX=disp; clobbers op1_size
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
         cmp ah, 2
         je .cmp_rm_direct
         cmp ah, 3
@@ -699,13 +697,13 @@ handle_cmp:
         mov al, 3Ah
         .cmp_rmbx_emit:
         call emit_byte_al
-        mov al, [op2_reg]
+        mov al, [op2_register]
         call reg_to_rm         ; AL = rm bits
         mov bl, al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
         or al, bl              ; modrm with mod=00 base
-        mov dx, [op2_val]
+        mov dx, [op2_value]
         test dx, dx
         jz .cmp_rmbx_no_disp
         mov bx, dx
@@ -720,7 +718,7 @@ handle_cmp:
         .cmp_rmbx_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax      ; disp16
         ret
         .cmp_rmbx_no_disp:
@@ -737,7 +735,7 @@ handle_cmp:
         mov al, 3Ah
         .cmp_rm_emit:
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
         or al, 06h             ; modrm: mod=00, reg=op1, rm=110 (disp16)
         call emit_byte_al
@@ -755,7 +753,7 @@ handle_cmp:
         cmp byte [op1_type], 0
         jne .cmp_done
         ;; cmp reg, imm
-        mov bl, [op1_reg]
+        mov bl, [op1_register]
         cmp byte [op1_size], 8
         je .cmp_r8
         ;; cmp r16, imm: use 83h if fits in signed byte
@@ -818,12 +816,12 @@ handle_cmp:
         .cmp_mem_modrm:
         call emit_byte_al
         ;; Build modrm: /7 with memory addressing
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm
         or al, 38h             ; /7 = 38h in reg field
         ;; Choose displacement size: 0 -> mod=00, signed byte -> mod=01,
         ;; otherwise mod=10 disp16.
-        mov dx, [op1_val]
+        mov dx, [op1_value]
         test dx, dx
         jz .cmp_mem_no_disp
         mov bx, dx
@@ -838,7 +836,7 @@ handle_cmp:
         .cmp_mem_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax      ; disp16
         jmp .cmp_mem_imm
         .cmp_mem_no_disp:
@@ -866,7 +864,7 @@ handle_cmp:
         call emit_byte_al
         mov al, 3Eh            ; modrm: mod=00, /7, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         mov al, cl
         call emit_byte_al
@@ -876,7 +874,7 @@ handle_cmp:
         call emit_byte_al
         mov al, 3Eh            ; modrm: mod=00, /7, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         mov ax, cx
         call emit_word_ax
@@ -886,7 +884,7 @@ handle_cmp:
         call emit_byte_al
         mov al, 3Eh
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         mov al, cl
         call emit_byte_al
@@ -929,7 +927,7 @@ handle_dec:
         je .dec_mem_direct
         ;; [reg] or [reg+disp]
         push dx
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm
         or al, 08h             ; /1
         cmp dx, 0
@@ -1007,7 +1005,7 @@ handle_inc:
         je .inc_mem_direct
         ;; [reg] or [reg+disp]
         push dx
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm
         cmp dx, 0
         jne .inc_mem_reg_disp
@@ -1170,7 +1168,7 @@ handle_mov:
         add si, 2
         call skip_ws
         cmp byte [si], ','
-        jne .not_seg
+        jne .not_segment
         inc si
         call skip_ws
         ;; Parse source register
@@ -1185,22 +1183,22 @@ handle_mov:
         or al, 0C0h            ; mod=11, reg=000 (ES)
         call emit_byte_al
         ret
-        .not_seg:
+        .not_segment:
         pop si                 ; restore SI to before 'es'
         .mov_normal:
         ;; Parse destination
         call parse_operand     ; Returns: type in AH, value in DX, reg in AL
         mov [op1_type], ah
-        mov [op1_reg], al
-        mov [op1_val], dx
+        mov [op1_register], al
+        mov [op1_value], dx
 
         call skip_comma
 
         ;; Parse source
         call parse_operand
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
 
         ;; Dispatch based on operand types
         ;; OP_REG=0, OP_IMM=1, OP_MEM_DIRECT=2, OP_MEM_BX_DISP=3
@@ -1226,9 +1224,9 @@ handle_mov:
         .mov_rr:
         ;; mov r, r -- use opcode 88 (8-bit) or 89 (16-bit)
         ;; NASM encodes as: opcode modrm where reg=src, rm=dst
-        mov al, [op1_reg]      ; dst reg
+        mov al, [op1_register]      ; dst reg
         mov bl, al
-        mov al, [op2_reg]      ; src reg
+        mov al, [op2_register]      ; src reg
         ;; Check size: use op1's size (both should match)
         cmp byte [op1_size], 8
         je .mov_rr8
@@ -1256,20 +1254,20 @@ handle_mov:
 
         .mov_ri:
         ;; mov r, imm -- short form: B0+r (8-bit) or B8+r (16-bit)
-        mov al, [op1_reg]
+        mov al, [op1_register]
         cmp byte [op1_size], 8
         je .mov_ri8
         ;; 16-bit: B8+reg, imm16
         add al, 0B8h
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
         .mov_ri8:
         ;; 8-bit: B0+reg, imm8
         add al, 0B0h
         call emit_byte_al
-        mov al, [op2_val]
+        mov al, [op2_value]
         call emit_byte_al
         jmp .mov_done
 
@@ -1278,11 +1276,11 @@ handle_mov:
         cmp byte [op1_size], 8
         je .mov_rm_d8
         ;; 16-bit: short form A1 for AX
-        cmp byte [op1_reg], 0
+        cmp byte [op1_register], 0
         jne .mov_rm_d16_general
         mov al, 0A1h
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
         .mov_rm_d16_general:
@@ -1290,11 +1288,11 @@ handle_mov:
         jmp .mov_rm_d_emit
         .mov_rm_d8:
         ;; 8-bit: short form A0 for AL
-        cmp byte [op1_reg], 0
+        cmp byte [op1_register], 0
         jne .mov_rm_d8_general
         mov al, 0A0h
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
         .mov_rm_d8_general:
@@ -1302,11 +1300,11 @@ handle_mov:
         .mov_rm_d_emit:
         call emit_byte_al
         ;; modrm = (0 << 6) | (reg << 3) | 6 = (reg << 3) | 6
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
         or al, 06h
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
 
@@ -1322,21 +1320,21 @@ handle_mov:
         .mov_rm_bx_emit:
         call emit_byte_al
         ;; Get rm field from addressing register
-        mov al, [op2_reg]
+        mov al, [op2_register]
         call reg_to_rm
         mov bl, al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
         or al, bl
         ;; mod=00 if no displacement, mod=01 if disp8
-        cmp word [op2_val], 0
+        cmp word [op2_value], 0
         jne .mov_rm_with_disp
         call emit_byte_al
         jmp .mov_done
         .mov_rm_with_disp:
         ;; Choose disp8 (mod=01) when value fits in signed byte, else disp16
         ;; (mod=10).
-        mov dx, [op2_val]
+        mov dx, [op2_value]
         mov bx, dx
         add bx, 80h
         cmp bx, 0FFh
@@ -1349,7 +1347,7 @@ handle_mov:
         .mov_rm_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax      ; disp16
         jmp .mov_done
 
@@ -1366,9 +1364,9 @@ handle_mov:
         je .mov_mdi8
         mov al, 0C7h
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm         ; AL = rm field, mod=00
-        mov dx, [op1_val]
+        mov dx, [op1_value]
         test dx, dx
         jz .mov_mdi16_emit_modrm
         mov bx, dx
@@ -1383,21 +1381,21 @@ handle_mov:
         .mov_mdi16_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax      ; disp16
         jmp .mov_mdi16_imm
         .mov_mdi16_emit_modrm:
         call emit_byte_al
         .mov_mdi16_imm:
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
         .mov_mdi8:
         mov al, 0C6h
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm         ; AL = rm field, mod=00
-        mov dx, [op1_val]
+        mov dx, [op1_value]
         test dx, dx
         jz .mov_mdi8_emit_modrm
         mov bx, dx
@@ -1412,13 +1410,13 @@ handle_mov:
         .mov_mdi8_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax      ; disp16
         jmp .mov_mdi8_imm
         .mov_mdi8_emit_modrm:
         call emit_byte_al
         .mov_mdi8_imm:
-        mov al, [op2_val]
+        mov al, [op2_value]
         call emit_byte_al
         jmp .mov_done
         .mov_mem_dst_reg:
@@ -1432,15 +1430,15 @@ handle_mov:
         mov al, 88h
         .mov_mem_dst_reg_emit:
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm         ; AL = rm field
         mov bl, al
-        mov al, [op2_reg]
+        mov al, [op2_register]
         shl al, 3
         or al, bl              ; modrm with mod=00 base
         ;; Choose displacement size: 0 -> mod=00, signed byte -> mod=01,
         ;; otherwise mod=10 disp16.
-        mov dx, [op1_val]
+        mov dx, [op1_value]
         test dx, dx
         jz .mov_mds_emit_modrm
         mov bx, dx
@@ -1455,7 +1453,7 @@ handle_mov:
         .mov_mds_disp16:
         or al, 80h             ; mod=10
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax      ; disp16
         jmp .mov_done
         .mov_mds_emit_modrm:
@@ -1475,9 +1473,9 @@ handle_mov:
         call emit_byte_al
         mov al, 06h
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         jmp .mov_done
         .mov_dd8:
@@ -1485,9 +1483,9 @@ handle_mov:
         call emit_byte_al
         mov al, 06h
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
-        mov al, [op2_val]
+        mov al, [op2_value]
         call emit_byte_al
         jmp .mov_done
         .mov_dd_reg:
@@ -1495,39 +1493,39 @@ handle_mov:
         cmp byte [op1_size], 8
         je .mov_dd_reg8
         ;; 16-bit
-        cmp byte [op2_reg], 0
+        cmp byte [op2_register], 0
         jne .mov_dd_reg16_general
         mov al, 0A3h
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         jmp .mov_done
         .mov_dd_reg16_general:
         mov al, 89h
         call emit_byte_al
-        mov al, [op2_reg]
+        mov al, [op2_register]
         shl al, 3
         or al, 06h             ; modrm: mod=00, reg=src, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         jmp .mov_done
         .mov_dd_reg8:
-        cmp byte [op2_reg], 0
+        cmp byte [op2_register], 0
         jne .mov_dd_reg8_general
         mov al, 0A2h
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         jmp .mov_done
         .mov_dd_reg8_general:
         mov al, 88h
         call emit_byte_al
-        mov al, [op2_reg]
+        mov al, [op2_register]
         shl al, 3
         or al, 06h
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         jmp .mov_done
 
@@ -1556,12 +1554,12 @@ handle_movsw:
 handle_movzx:
         call skip_ws
         call parse_register    ; AL = dst reg, AH = size (16)
-        mov [op1_reg], al
+        mov [op1_register], al
         call skip_comma
         call parse_operand     ; AH = type, AL = reg, DX = disp
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
         ;; 0F B6 prefix
         mov al, 0Fh
         call emit_byte_al
@@ -1570,27 +1568,27 @@ handle_movzx:
         cmp byte [op2_type], 0
         je .movzx_rr
         ;; mem (reg + disp form): modrm reg=dst, rm=reg_to_rm(mem reg)
-        mov al, [op2_reg]
+        mov al, [op2_register]
         call reg_to_rm
         mov bl, al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
         or al, bl
-        cmp word [op2_val], 0
+        cmp word [op2_value], 0
         jne .movzx_disp
         call emit_byte_al
         ret
         .movzx_disp:
         or al, 40h             ; mod = 01 (disp8)
         call emit_byte_al
-        mov al, [op2_val]
+        mov al, [op2_value]
         call emit_byte_al
         ret
         .movzx_rr:
         ;; reg-reg: modrm = 11 dst src
-        mov al, [op1_reg]
+        mov al, [op1_register]
         shl al, 3
-        or al, [op2_reg]
+        or al, [op2_register]
         or al, 0C0h
         call emit_byte_al
         ret
@@ -1645,8 +1643,8 @@ handle_or:
         call skip_comma
         call parse_operand
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
         cmp byte [op2_type], 0
         je .or_rr
         cmp byte [op2_type], 2
@@ -1684,7 +1682,7 @@ handle_or:
         mov al, 08h
         .or_rr_emit:
         call emit_byte_al
-        mov al, [op2_reg]      ; src reg goes in reg field
+        mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg
         call emit_byte_al
         ret
@@ -1703,7 +1701,7 @@ handle_or:
         shl al, 3
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         ret
         .or_unsupported:
@@ -1941,8 +1939,8 @@ handle_sub:
         ;; Use parse_operand so we get reg / mem_direct / imm uniformly.
         call parse_operand
         mov [op2_type], ah
-        mov [op2_reg], al
-        mov [op2_val], dx
+        mov [op2_register], al
+        mov [op2_value], dx
         cmp byte [op2_type], 0
         je .sub_rr
         cmp byte [op2_type], 2
@@ -1976,7 +1974,7 @@ handle_sub:
         mov al, 28h
         .sub_rr_emit:
         call emit_byte_al
-        mov al, [op2_reg]      ; src reg goes in reg field
+        mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg
         call emit_byte_al
         ret
@@ -1995,7 +1993,7 @@ handle_sub:
         shl al, 3
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op2_val]
+        mov ax, [op2_value]
         call emit_word_ax
         ret
         .sub_r16_full:
@@ -2033,8 +2031,8 @@ handle_test:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
         mov [op1_type], ah
-        mov [op1_reg], al
-        mov [op1_val], dx
+        mov [op1_register], al
+        mov [op1_value], dx
         call skip_comma
         cmp byte [op1_type], 0
         jne .test_mem
@@ -2043,7 +2041,7 @@ handle_test:
         call parse_register    ; CF set if not a register (= immediate)
         jc .test_r_imm
         ;; test r, r
-        mov bl, [op1_reg]      ; BL = dst reg
+        mov bl, [op1_register]      ; BL = dst reg
         push ax
         cmp byte [op1_size], 8
         je .test_rr8
@@ -2064,7 +2062,7 @@ handle_test:
         cmp byte [op1_size], 8
         jne .test_r16_imm
         ;; test r8, imm8: short form for AL (A8), general form (F6 /0)
-        cmp byte [op1_reg], 0  ; AL?
+        cmp byte [op1_register], 0  ; AL?
         jne .test_r8_general
         mov al, 0A8h
         call emit_byte_al
@@ -2074,7 +2072,7 @@ handle_test:
         .test_r8_general:
         mov al, 0F6h
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         or al, 0C0h            ; modrm: mod=11, /0, rm=reg
         call emit_byte_al
         pop ax
@@ -2082,7 +2080,7 @@ handle_test:
         ret
         .test_r16_imm:
         ;; test r16, imm16: short form for AX (A9), general form (F7 /0)
-        cmp byte [op1_reg], 0  ; AX?
+        cmp byte [op1_register], 0  ; AX?
         jne .test_r16_general
         mov al, 0A9h
         call emit_byte_al
@@ -2092,7 +2090,7 @@ handle_test:
         .test_r16_general:
         mov al, 0F7h
         call emit_byte_al
-        mov al, [op1_reg]
+        mov al, [op1_register]
         or al, 0C0h
         call emit_byte_al
         pop ax
@@ -2108,22 +2106,22 @@ handle_test:
         cmp byte [op1_type], 2  ; OP_MEM_DIRECT
         je .test_mem_direct
         ;; modrm: /0 with memory addressing
-        mov al, [op1_reg]
+        mov al, [op1_register]
         call reg_to_rm         ; AL = rm
-        cmp word [op1_val], 0
+        cmp word [op1_value], 0
         jne .test_mem_disp
         call emit_byte_al      ; mod=00, /0, rm
         jmp .test_mem_imm
         .test_mem_disp:
         or al, 40h             ; mod=01
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_byte_al      ; disp8
         jmp .test_mem_imm
         .test_mem_direct:
         mov al, 06h            ; mod=00, /0, rm=110 (disp16)
         call emit_byte_al
-        mov ax, [op1_val]
+        mov ax, [op1_value]
         call emit_word_ax
         .test_mem_imm:
         pop ax
@@ -2219,17 +2217,17 @@ handle_unknown_word:
         jne .bare_pass2
         push si
         mov si, di
-        mov ax, [cur_addr]
+        mov ax, [current_address]
         cmp byte [di], '.'
         je .bare_local
         mov bx, 0FFFFh
-        call sym_set
-        mov ax, [last_sym_idx]
+        call symbol_set
+        mov ax, [last_symbol_index]
         mov [global_scope], ax
         jmp .bare_added
         .bare_local:
         mov bx, [global_scope]
-        call sym_set
+        call symbol_set
         .bare_added:
         pop si
         jmp .bare_continue
@@ -2239,9 +2237,9 @@ handle_unknown_word:
         push si
         mov si, di
         mov bx, 0FFFFh
-        call sym_lookup
+        call symbol_lookup
         jc .bare_no_scope
-        mov ax, [last_sym_idx]
+        mov ax, [last_symbol_index]
         mov [global_scope], ax
         .bare_no_scope:
         pop si
@@ -2297,28 +2295,28 @@ include_pop:
         push si
         push di
         ;; Close the include file's fd
-        mov bx, [src_fd]
+        mov bx, [source_fd]
         mov ah, SYS_IO_CLOSE
         call syscall
-        ;; Restore from INC_SAVE (parent file state)
-        mov bx, INC_SAVE
-        mov ax, [bx+0]                 ; src_fd
-        mov [src_fd], ax
-        mov ax, [bx+2]                 ; src_buf_pos
-        mov [src_buf_pos], ax
-        mov ax, [bx+4]                 ; src_buf_valid
-        mov [src_buf_valid], ax
-        ;; Restore SRC_BUF
+        ;; Restore from INCLUDE_SAVE (parent file state)
+        mov bx, INCLUDE_SAVE
+        mov ax, [bx+0]                 ; source_fd
+        mov [source_fd], ax
+        mov ax, [bx+2]                 ; source_buffer_position
+        mov [source_buffer_position], ax
+        mov ax, [bx+4]                 ; source_buffer_valid
+        mov [source_buffer_valid], ax
+        ;; Restore SOURCE_BUFFER
         push es
         push ds
         pop es                  ; ES=0 for rep movsw
-        mov si, INC_SRC_SAVE
-        mov di, SRC_BUF
+        mov si, INCLUDE_SOURCE_SAVE
+        mov di, SOURCE_BUFFER
         mov cx, 256
         cld
         rep movsw
         pop es
-        dec byte [inc_depth]
+        dec byte [include_depth]
         pop di
         pop si
         pop cx
@@ -2333,23 +2331,23 @@ include_pop:
 include_push:
         push ax
         push bx
-        ;; Save current file state to INC_SAVE (6 bytes)
-        mov bx, INC_SAVE
-        mov ax, [src_fd]
+        ;; Save current file state to INCLUDE_SAVE (6 bytes)
+        mov bx, INCLUDE_SAVE
+        mov ax, [source_fd]
         mov [bx+0], ax
-        mov ax, [src_buf_pos]
+        mov ax, [source_buffer_position]
         mov [bx+2], ax
-        mov ax, [src_buf_valid]
+        mov ax, [source_buffer_valid]
         mov [bx+4], ax
-        ;; Save SRC_BUF content
+        ;; Save SOURCE_BUFFER content
         push si
         push di
         push cx
         push es
         push ds
         pop es                  ; ES=0 for rep movsw
-        mov si, SRC_BUF
-        mov di, INC_SRC_SAVE
+        mov si, SOURCE_BUFFER
+        mov di, INCLUDE_SOURCE_SAVE
         mov cx, 256
         cld
         rep movsw
@@ -2357,8 +2355,8 @@ include_push:
         pop cx
         pop di
         pop si
-        ;; Construct include_path = src_prefix + (include name at SI)
-        mov bx, src_prefix
+        ;; Construct include_path = source_prefix + (include name at SI)
+        mov bx, source_prefix
         mov di, include_path
         .ip_pfx:
         mov al, [bx]
@@ -2383,29 +2381,29 @@ include_push:
         mov ah, SYS_IO_OPEN
         call syscall
         jc .inc_err
-        mov [src_fd], ax
-        mov word [src_buf_pos], 0
-        mov word [src_buf_valid], 0
-        inc byte [inc_depth]
+        mov [source_fd], ax
+        mov word [source_buffer_position], 0
+        mov word [source_buffer_valid], 0
+        inc byte [include_depth]
         pop bx
         pop ax
         ret
         .inc_err:
-        mov byte [err_flag], 1
+        mov byte [error_flag], 1
         pop bx
         pop ax
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; load_src_sector: read next chunk of source file into SRC_BUF via fd
+;;; load_src_sector: read next chunk of source file into SOURCE_BUFFER via fd
 ;;; Returns CF if no more data (EOF)
 ;;; -----------------------------------------------------------------------
 load_src_sector:
         push bx
         push cx
         push di
-        mov bx, [src_fd]
-        mov di, SRC_BUF
+        mov bx, [source_fd]
+        mov di, SOURCE_BUFFER
         mov cx, 512
         mov ah, SYS_IO_READ
         call syscall
@@ -2413,8 +2411,8 @@ load_src_sector:
         je .no_more
         test ax, ax
         jz .no_more
-        mov [src_buf_valid], ax
-        mov word [src_buf_pos], 0
+        mov [source_buffer_valid], ax
+        mov word [source_buffer_position], 0
         clc
         pop di
         pop cx
@@ -2693,7 +2691,7 @@ parse_directive:
         push si
         mov si, di
         mov bx, 0FFFFh         ; constants are global scope
-        call sym_add_const
+        call symbol_add_constant
         pop si
         jmp .pd_done
 
@@ -2731,7 +2729,7 @@ parse_directive:
         call skip_ws
         call resolve_value     ; AX = value
         mov [org_value], ax
-        mov [cur_addr], ax
+        mov [current_address], ax
         jmp .pd_done
 
         .try_times:
@@ -2819,7 +2817,7 @@ parse_directive:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; parse_line: parse one source line from LINE_BUF
+;;; parse_line: parse one source line from LINE_BUFFER
 ;;; -----------------------------------------------------------------------
 parse_line:
         push ax
@@ -2829,7 +2827,7 @@ parse_line:
         push si
         push di
 
-        mov si, LINE_BUF
+        mov si, LINE_BUFFER
         call skip_ws
 
         ;; Empty line or comment?
@@ -2872,19 +2870,19 @@ parse_line:
         ;; Global label
         push di
         mov si, di
-        mov ax, [cur_addr]
+        mov ax, [current_address]
         mov bx, 0FFFFh         ; scope = global
-        call sym_set
+        call symbol_set
         ;; Update global_scope to this symbol's index
-        mov ax, [last_sym_idx]
+        mov ax, [last_symbol_index]
         mov [global_scope], ax
         pop di
         jmp .skip_add_label
         .local_label:
         mov si, di
-        mov ax, [cur_addr]
+        mov ax, [current_address]
         mov bx, [global_scope]
-        call sym_set
+        call symbol_set
         .skip_add_label:
         ;; If pass 2, update global_scope for global labels
         cmp byte [pass], 2
@@ -2894,9 +2892,9 @@ parse_line:
         ;; Find this global label in symbol table to get its index
         mov si, di
         mov bx, 0FFFFh
-        call sym_lookup
+        call symbol_lookup
         jc .after_label
-        mov ax, [last_sym_idx]
+        mov ax, [last_symbol_index]
         mov [global_scope], ax
         .after_label:
         pop si                 ; SI = position where ':' was (now null)
@@ -3137,18 +3135,18 @@ parse_operand:
         call skip_ws
         ;; Check for segment override prefix 'es:'
         cmp byte [si], 'e'
-        jne .mem_no_seg
+        jne .memory_no_segment
         cmp byte [si+1], 's'
-        jne .mem_no_seg
+        jne .memory_no_segment
         cmp byte [si+2], ':'
-        jne .mem_no_seg
+        jne .memory_no_segment
         push ax
         mov al, 26h            ; ES segment override prefix
         call emit_byte_al
         pop ax
         add si, 3              ; skip 'es:'
         call skip_ws
-        .mem_no_seg:
+        .memory_no_segment:
         ;; Case 1: bracket starts with a register name -> [reg(+disp)?]
         push si
         call parse_register
@@ -3420,11 +3418,11 @@ peek_label_target:
         .pl_global:
         mov bx, 0FFFFh
         .pl_lookup:
-        mov word [last_sym_idx], 0FFFFh
-        call sym_lookup                ; sets last_sym_idx only when found
+        mov word [last_symbol_index], 0FFFFh
+        call symbol_lookup                ; sets last_symbol_index only when found
         pop di
         mov [di], cl                   ; restore delim
-        cmp word [last_sym_idx], 0FFFFh
+        cmp word [last_symbol_index], 0FFFFh
         je .pl_not_found
         clc
         pop di
@@ -3466,25 +3464,25 @@ print_hex_word:
         jbe .nib_ok
         add al, 7
         .nib_ok:
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         call syscall
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; read_line: read one line from source into LINE_BUF
+;;; read_line: read one line from source into LINE_BUFFER
 ;;; Returns CF set on EOF
 ;;; -----------------------------------------------------------------------
 read_line:
         push bx
         push cx
         push dx
-        mov di, LINE_BUF
+        mov di, LINE_BUFFER
         xor cx, cx             ; CX = chars in line
 
         .next_byte:
         ;; Check if source buffer needs refill
-        mov ax, [src_buf_pos]
-        cmp ax, [src_buf_valid]
+        mov ax, [source_buffer_position]
+        cmp ax, [source_buffer_valid]
         jb .have_byte
 
         ;; Need more data -- is file exhausted?
@@ -3492,9 +3490,9 @@ read_line:
         jc .check_eof
 
         .have_byte:
-        mov bx, [src_buf_pos]
-        mov al, [SRC_BUF + bx]
-        inc word [src_buf_pos]
+        mov bx, [source_buffer_position]
+        mov al, [SOURCE_BUFFER + bx]
+        inc word [source_buffer_position]
 
         cmp al, 0Ah            ; newline
         je .got_line
@@ -3528,7 +3526,7 @@ read_line:
 
 ;;; -----------------------------------------------------------------------
 ;;; resolve_label: like resolve_value but for jump targets
-;;; On pass 1, returns cur_addr (placeholder)
+;;; On pass 1, returns current_address (placeholder)
 ;;; -----------------------------------------------------------------------
 resolve_label:
         cmp byte [pass], 1
@@ -3536,7 +3534,7 @@ resolve_label:
         call resolve_value
         ret
         .pass1:
-        ;; Skip past label name, return cur_addr as placeholder
+        ;; Skip past label name, return current_address as placeholder
         .skip_label:
         mov al, [si]
         cmp al, 'a'
@@ -3559,7 +3557,7 @@ resolve_label:
         cmp al, '.'
         je .skip_more
         .skip_done:
-        mov ax, [cur_addr]
+        mov ax, [current_address]
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -3683,7 +3681,7 @@ resolve_value:
         .global_lookup:
         mov bx, 0FFFFh
         .do_lookup:
-        call sym_lookup        ; AX = value
+        call symbol_lookup        ; AX = value
         pop si
         pop cx
         mov [si], cl           ; restore delimiter
@@ -3757,25 +3755,25 @@ skip_ws:
         jmp .loop
 
 ;;; -----------------------------------------------------------------------
-;;; sym_add: add label to symbol table
+;;; symbol_add: add label to symbol table
 ;;; SI = name, AX = value, BX = scope (0xFFFF = global)
 ;;; -----------------------------------------------------------------------
-sym_add:
+symbol_add:
         ;; SI = name, AX = value, BX = scope
         ;; Refuse to overflow the symbol table -- doing so silently corrupts
-        ;; LINE_BUF (which sits immediately after) and produces wrong output.
-        cmp word [sym_count], SYM_MAX
-        jae .sym_overflow
+        ;; LINE_BUFFER (which sits immediately after) and produces wrong output.
+        cmp word [symbol_count], SYMBOL_MAX
+        jae .symbol_overflow
         push cx
         push di
         push si
-        ;; Compute entry offset: sym_count * SYM_ENTRY (in ES segment)
+        ;; Compute entry offset: symbol_count * SYMBOL_ENTRY (in ES segment)
         push ax                ; save value
         push bx                ; save scope
-        mov ax, [sym_count]
-        call sym_entry_addr    ; DI = entry offset in ES
-        ;; Copy name (up to SYM_NAME_LEN-1 chars + null)
-        mov cx, SYM_NAME_LEN - 1
+        mov ax, [symbol_count]
+        call symbol_entry_address    ; DI = entry offset in ES
+        ;; Copy name (up to SYMBOL_NAME_LENGTH-1 chars + null)
+        mov cx, SYMBOL_NAME_LENGTH - 1
         .copy_sym_name:
         mov al, [si]
         test al, al
@@ -3791,79 +3789,79 @@ sym_add:
         dec cx
         jns .pad_name
         ;; Re-derive entry base for metadata
-        mov ax, [sym_count]
-        call sym_entry_addr    ; DI = entry offset in ES
-        ;; Write metadata at offset SYM_NAME_LEN
+        mov ax, [symbol_count]
+        call symbol_entry_address    ; DI = entry offset in ES
+        ;; Write metadata at offset SYMBOL_NAME_LENGTH
         pop bx                 ; restore scope
         pop ax                 ; restore value
-        mov [es:di+SYM_NAME_LEN], ax     ; value
-        mov byte [es:di+SYM_NAME_LEN+2], 0 ; type = label
-        mov [es:di+SYM_NAME_LEN+3], bl   ; scope
-        inc word [sym_count]
+        mov [es:di+SYMBOL_NAME_LENGTH], ax     ; value
+        mov byte [es:di+SYMBOL_NAME_LENGTH+2], 0 ; type = label
+        mov [es:di+SYMBOL_NAME_LENGTH+3], bl   ; scope
+        inc word [symbol_count]
         pop si
         pop di
         pop cx
         ret
-        .sym_overflow:
-        mov si, MSG_E_SYM_OVERFLOW
-        mov ah, SYS_IO_PUTS
+        .symbol_overflow:
+        mov si, MESSAGE_ERROR_SYM_OVERFLOW
+        mov ah, SYS_IO_PUT_STRING
         call syscall
         mov ah, SYS_EXIT
         call syscall
 
 ;;; -----------------------------------------------------------------------
-;;; sym_add_const: add constant (%assign) to symbol table
+;;; symbol_add_constant: add constant (%assign) to symbol table
 ;;; SI = name, AX = value
 ;;; -----------------------------------------------------------------------
-sym_add_const:
+symbol_add_constant:
         push bx
         mov bx, 0FFFFh
-        call sym_set
+        call symbol_set
         ;; Fix type to 1 (constant)
         push ax
-        mov ax, [last_sym_idx]
-        call sym_entry_addr    ; DI = entry address
-        mov byte [es:di+SYM_NAME_LEN+2], 1
+        mov ax, [last_symbol_index]
+        call symbol_entry_address    ; DI = entry address
+        mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1
         pop ax
         pop bx
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; sym_entry_addr: compute symbol table entry offset within ES segment
-;;; AX = index, returns DI = index * SYM_ENTRY (ES-relative)
+;;; symbol_entry_address: compute symbol table entry offset within ES segment
+;;; AX = index, returns DI = index * SYMBOL_ENTRY (ES-relative)
 ;;; Clobbers AX, DX
 ;;; -----------------------------------------------------------------------
-sym_entry_addr:
+symbol_entry_address:
         push bx
-        mov bx, SYM_ENTRY
-        mul bx                 ; AX = index * SYM_ENTRY (DX clobbered)
+        mov bx, SYMBOL_ENTRY
+        mul bx                 ; AX = index * SYMBOL_ENTRY (DX clobbered)
         mov di, ax
         pop bx
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; sym_lookup: find symbol by name
+;;; symbol_lookup: find symbol by name
 ;;; SI = name (null-terminated), BX = scope (0xFFFF for global search)
 ;;; Returns: AX = value, CF clear if found; CF set if not found
 ;;; -----------------------------------------------------------------------
-sym_lookup:
+symbol_lookup:
         push cx
         push dx
         push di
-        mov cx, [sym_count]
+        mov cx, [symbol_count]
         test cx, cx
-        jz .sym_not_found
+        jz .symbol_not_found
         xor di, di             ; DI = offset 0 within ES segment
         xor dx, dx             ; DX = index
-        .sym_search:
-        ;; Filter by scope: BL = wanted scope; entry's scope at di+SYM_NAME_LEN+3.
+        .symbol_search:
+        ;; Filter by scope: BL = wanted scope; entry's scope at di+SYMBOL_NAME_LENGTH+3.
         ;; Wanted 0xFF means global; only match entries whose scope is 0xFF.
         ;; Wanted other means local; only match entries whose scope == BL.
         push ax
-        mov al, [es:di+SYM_NAME_LEN+3]
+        mov al, [es:di+SYMBOL_NAME_LENGTH+3]
         cmp al, bl
         pop ax
-        jne .sym_next
+        jne .symbol_next
         ;; Compare names
         push si
         push di
@@ -3871,44 +3869,44 @@ sym_lookup:
         .cmp_name:
         mov al, [si]
         cmp al, [es:di]
-        jne .sym_no_match
+        jne .symbol_no_match
         test al, al
-        jz .sym_name_match
+        jz .symbol_name_match
         inc si
         inc di
         jmp .cmp_name
-        .sym_name_match:
+        .symbol_name_match:
         pop cx
         pop di
         pop si
         ;; Name matches -- found
-        .sym_found:
-        mov ax, [es:di+SYM_NAME_LEN]
-        mov [last_sym_idx], dx
+        .symbol_found:
+        mov ax, [es:di+SYMBOL_NAME_LENGTH]
+        mov [last_symbol_index], dx
         clc
         pop di
         pop dx
         pop cx
         ret
-        .sym_no_match:
+        .symbol_no_match:
         pop cx
         pop di
         pop si
-        .sym_next:
-        add di, SYM_ENTRY
+        .symbol_next:
+        add di, SYMBOL_ENTRY
         inc dx
-        loop .sym_search
-        .sym_not_found:
+        loop .symbol_search
+        .symbol_not_found:
         ;; Return 0 on pass 1 (symbol not yet defined)
         xor ax, ax
         cmp byte [pass], 1
-        je .sym_pass1_ok
+        je .symbol_pass1_ok
         stc
         pop di
         pop dx
         pop cx
         ret
-        .sym_pass1_ok:
+        .symbol_pass1_ok:
         clc
         pop di
         pop dx
@@ -3916,27 +3914,27 @@ sym_lookup:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; sym_set: update existing entry's value, or add a new entry.
+;;; symbol_set: update existing entry's value, or add a new entry.
 ;;; SI = name (null-terminated), AX = value, BX = scope.
-;;; On return: last_sym_idx = the entry's index.
+;;; On return: last_symbol_index = the entry's index.
 ;;; Used by pass 1, which iterates -- the first iteration adds entries
-;;; and subsequent iterations update them as cur_addr shifts.
+;;; and subsequent iterations update them as current_address shifts.
 ;;; -----------------------------------------------------------------------
-sym_set:
-        mov [ss_value], ax
-        mov [ss_scope], bx
+symbol_set:
+        mov [symbol_set_value], ax
+        mov [symbol_set_scope], bx
         push di
         push cx
         push dx
-        mov word [last_sym_idx], 0FFFFh
-        call sym_lookup
-        cmp word [last_sym_idx], 0FFFFh
+        mov word [last_symbol_index], 0FFFFh
+        call symbol_lookup
+        cmp word [last_symbol_index], 0FFFFh
         je .ss_add
         ;; Found -- update value in place
-        mov ax, [last_sym_idx]
-        call sym_entry_addr    ; DI = entry offset in ES
-        mov ax, [ss_value]
-        mov [es:di+SYM_NAME_LEN], ax
+        mov ax, [last_symbol_index]
+        call symbol_entry_address    ; DI = entry offset in ES
+        mov ax, [symbol_set_value]
+        mov [es:di+SYMBOL_NAME_LENGTH], ax
         pop dx
         pop cx
         pop di
@@ -3945,14 +3943,14 @@ sym_set:
         pop dx
         pop cx
         pop di
-        mov ax, [ss_value]
-        mov bx, [ss_scope]
-        call sym_add
-        ;; Record the new entry's index in last_sym_idx for callers.
+        mov ax, [symbol_set_value]
+        mov bx, [symbol_set_scope]
+        call symbol_add
+        ;; Record the new entry's index in last_symbol_index for callers.
         push ax
-        mov ax, [sym_count]
+        mov ax, [symbol_count]
         dec ax
-        mov [last_sym_idx], ax
+        mov [last_symbol_index], ax
         pop ax
         ret
 
@@ -4110,57 +4108,56 @@ syscall:
 ;;; -----------------------------------------------------------------------
 ;;; Strings
 ;;; -----------------------------------------------------------------------
-MSG_E_CREATE    db `Error: cannot create output\n\0`
-MSG_E_FIND_OUT  db `Error: cannot find output file\n\0`
-MSG_E_PASS1     db `Error: pass 1 failed\n\0`
-MSG_E_PASS1_IO  db `Error: pass 1 io\n\0`
-MSG_E_AT        db `  at: \0`
-MSG_E_PASS1_ITER db `Error: pass 1 iter\n\0`
-MSG_E_SYM_OVERFLOW db `Error: symbol table overflow (raise SYM_MAX)\n\0`
-MSG_E_UNKNOWN   db `Error: unknown mnemonic or directive at line:\n  \0`
-MSG_E_WRITE_DIR db `Error: directory write failed\n\0`
-MSG_ERROR       db `Error\n\0`
-MSG_OK      db `OK\n\0`
-MSG_USAGE   db `Usage: asm <source> <output>\n\0`
+MESSAGE_ERROR_AT        db `  at: \0`
+MESSAGE_ERROR_CREATE    db `Error: cannot create output\n\0`
+MESSAGE_ERROR_FIND_OUT  db `Error: cannot find output file\n\0`
+MESSAGE_ERROR_PASS1     db `Error: pass 1 failed\n\0`
+MESSAGE_ERROR_PASS1_IO  db `Error: pass 1 io\n\0`
+MESSAGE_ERROR_PASS1_ITER db `Error: pass 1 iter\n\0`
+MESSAGE_ERROR_SYM_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\n\0`
+MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\n  \0`
+MESSAGE_ERROR_WRITE_DIR db `Error: directory write failed\n\0`
+MESSAGE_OK      db `OK\n\0`
+MESSAGE_USAGE   db `Usage: asm <source> <output>\n\0`
 
 ;;; -----------------------------------------------------------------------
 ;;; Variables
 ;;; -----------------------------------------------------------------------
+changed_flag  db 0
 cmp_op1_size  db 0
-cur_addr      dw 0
-err_flag      db 0
+current_address      dw 0
+error_flag      db 0
 global_scope  dw 0FFFFh
-changed_flag   db 0
-inc_depth     db 0
+include_depth     db 0
 include_path  times 32 db 0
-iter_count    dw 0
+iteration_count    dw 0
 jump_index    dw 0
-last_sym_idx  dw 0
-op1_reg       db 0
+last_symbol_index  dw 0
+op1_register  db 0
 op1_size      db 0
 op1_type      db 0
-op1_val       dw 0
-op2_reg       db 0
+op1_value     dw 0
+op2_register  db 0
 op2_type      db 0
-op2_val       dw 0
+op2_value     dw 0
 org_value     dw 0
-out_fd        dw 0
-out_name      dw 0
-out_pos       dw 0
-out_total     dw 0
+output_fd        dw 0
+output_name      dw 0
+output_position  dw 0
+output_total     dw 0
 pass          db 0
-src_buf_pos   dw 0
-src_buf_valid dw 0
-src_fd        dw 0
-src_name      dw 0
-src_prefix    times 32 db 0
-ss_scope      dw 0
-ss_value      dw 0
-sym_count     dw 0
+source_buffer_position  dw 0
+source_buffer_valid     dw 0
+source_fd     dw 0
+source_name   dw 0
+source_prefix times 32 db 0
+symbol_count  dw 0
+symbol_set_scope  dw 0
+symbol_set_value  dw 0
 
 ;;; -----------------------------------------------------------------------
 ;;; program_end: marks the end of the loaded image. Floating buffers
-;;; (LINE_BUF, OUT_BUF, SRC_BUF, INC_SAVE, INC_SRC_SAVE) are %defined
+;;; (LINE_BUFFER, OUTPUT_BUFFER, SOURCE_BUFFER, INCLUDE_SAVE, INCLUDE_SOURCE_SAVE) are %defined
 ;;; relative to this label so they always sit immediately after the
 ;;; program in memory.
 ;;; -----------------------------------------------------------------------

@@ -1,6 +1,6 @@
         org 7C00h               ; offset where bios loads our first stage
         %include "constants.asm"
-        %assign STAGE2_SECTORS (DIR_SECTOR - 2)
+        %assign STAGE2_SECTORS (DIRECTORY_SECTOR - 2)
 
 start:
         ;; Set initial state
@@ -11,7 +11,7 @@ start:
 
         ;; Dedicated stack segment: SS=0x9000, SP=0xFFF0 puts the stack in
         ;; the top 64 KB of conventional memory (linear 0x90000-0x9FFF0),
-        ;; physically isolated from DISK_BUFFER, NET_RX_BUF, the kernel,
+        ;; physically isolated from DISK_BUFFER, NET_RECEIVE_BUFFER, the kernel,
         ;; and every program buffer in segment 0.  The stack owns its
         ;; entire segment and can never collide with data memory.
         cli                     ; Disable interrupts while adjusting stack
@@ -40,11 +40,11 @@ start:
         and al, 3Fh             ; sectors per track (bits 0-5 of CL)
         mov [sectors_per_track], al
         inc dh                  ; max head is 0-based, convert to count
-        mov [heads_per_cyl], dh
+        mov [heads_per_cylinder], dh
         jmp .geo_done
         .default_geo:
         mov byte [sectors_per_track], 63
-        mov byte [heads_per_cyl], 16
+        mov byte [heads_per_cylinder], 16
         .geo_done:
 
         mov ax, 0200h | STAGE2_SECTORS
@@ -84,7 +84,7 @@ clear_screen:
 
         ;; Variables
         boot_disk db 0
-        heads_per_cyl db 16
+        heads_per_cylinder db 16
         sectors_per_track db 63
 
         ;; Strings
@@ -127,8 +127,8 @@ boot_shell:
         boot_ticks_high  dw 0
         boot_ticks_low   dw 0
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
-        serial_pb_buf    db 0, 0 ; serial pushback buffer (up to 2 bytes)
-        serial_pb_count  db 0    ; number of bytes in pushback buffer
+        serial_pushback_buffer    db 0, 0 ; serial pushback buffer (up to 2 bytes)
+        serial_pushback_count  db 0    ; number of bytes in pushback buffer
         shell_sp dw 0
 
         ;; Strings
