@@ -100,11 +100,11 @@ main:
         mov word [jump_index], 0
         call do_pass
         test byte [error_flag], 0FFh
-        jnz .err_pass1_io
+        jnz .error_pass1_io
         inc word [iteration_count]
         ;; Safety bound to catch oscillation.
         cmp word [iteration_count], 100
-        jae .err_pass1_iter
+        jae .error_pass1_iter
         ;; Always run at least 2 iterations: iter 1 builds the symbol
         ;; table; iter 2 is the first one that can verify forward refs.
         cmp word [iteration_count], 2
@@ -119,7 +119,7 @@ main:
         mov dl, FLAG_EXECUTE
         mov ah, SYS_IO_OPEN
         call syscall
-        jc .err_create
+        jc .error_create
         mov [output_fd], ax
 
         ;; -- Pass 2: emit bytes --
@@ -139,42 +139,44 @@ main:
         mov bx, [output_fd]
         mov ah, SYS_IO_CLOSE
         call syscall
-        jc .err_write_dir
+        jc .error_write_dir
 
         ;; Print success message
         mov si, MESSAGE_OK
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
-        mov ah, SYS_EXIT
-        call syscall
+        mov cx, MESSAGE_OK_LENGTH
+        jmp .print_exit
 
+        .error_create:
+        mov si, MESSAGE_ERROR_CREATE
+        mov cx, MESSAGE_ERROR_CREATE_LENGTH
+        jmp .print_exit
+        .error_find_out:
+        mov si, MESSAGE_ERROR_FIND_OUT
+        mov cx, MESSAGE_ERROR_FIND_OUT_LENGTH
+        jmp .print_exit
+        .error_pass1:
+        mov si, MESSAGE_ERROR_PASS1
+        mov cx, MESSAGE_ERROR_PASS1_LENGTH
+        jmp .print_exit
+        .error_pass1_io:
+        mov si, MESSAGE_ERROR_PASS1_IO
+        mov cx, MESSAGE_ERROR_PASS1_IO_LENGTH
+        jmp .print_exit
+        .error_pass1_iter:
+        mov si, MESSAGE_ERROR_PASS1_ITER
+        mov cx, MESSAGE_ERROR_PASS1_ITER_LENGTH
+        jmp .print_exit
+        .error_write_dir:
+        mov si, MESSAGE_ERROR_WRITE_DIR
+        mov cx, MESSAGE_ERROR_WRITE_DIR_LENGTH
+        jmp .print_exit
         .usage:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
-        mov ah, SYS_EXIT
-        call syscall
-        .err_create:
-        mov si, MESSAGE_ERROR_CREATE
-        jmp .die
-        .err_find_out:
-        mov si, MESSAGE_ERROR_FIND_OUT
-        jmp .die
-        .err_pass1_io:
-        mov si, MESSAGE_ERROR_PASS1_IO
-        jmp .die
-        .err_pass1_iter:
-        mov si, MESSAGE_ERROR_PASS1_ITER
-        jmp .die
-        .err_pass1:
-        mov si, MESSAGE_ERROR_PASS1
-        jmp .die
-        .err_write_dir:
-        mov si, MESSAGE_ERROR_WRITE_DIR
-        jmp .die
-        .die:
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        mov cx, MESSAGE_USAGE_LENGTH
+        jmp .print_exit
+
+        .print_exit:
+        call write_stdout_safe
         mov ah, SYS_EXIT
         call syscall
 
@@ -186,20 +188,18 @@ main:
 abort_unknown:
         push si                ; save SI for second print
         mov si, MESSAGE_ERROR_UNKNOWN
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        mov cx, MESSAGE_ERROR_UNKNOWN_LENGTH
+        call write_stdout_safe
         mov si, LINE_BUFFER
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        call puts_strlen_safe
         mov al, 0Ah
         mov ah, SYS_IO_PUT_CHARACTER
         call syscall
         mov si, MESSAGE_ERROR_AT
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        mov cx, MESSAGE_ERROR_AT_LENGTH
+        call write_stdout_safe
         pop si
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        call puts_strlen_safe
         mov al, 0Ah
         mov ah, SYS_IO_PUT_CHARACTER
         call syscall
@@ -3859,9 +3859,9 @@ symbol_add:
         pop cx
         ret
         .symbol_overflow:
-        mov si, MESSAGE_ERROR_SYM_OVERFLOW
-        mov ah, SYS_IO_PUT_STRING
-        call syscall
+        mov si, MESSAGE_SYMBOL_OVERFLOW
+        mov cx, MESSAGE_SYMBOL_OVERFLOW_LENGTH
+        call write_stdout_safe
         mov ah, SYS_EXIT
         call syscall
 
@@ -4155,6 +4155,33 @@ reg_table:
         db 0                   ; terminator
 
 ;;; -----------------------------------------------------------------------
+;;; puts_strlen_safe: print null-terminated string at SI (variable-length)
+;;; ES-safe wrapper: computes strlen, then writes to stdout.
+;;; -----------------------------------------------------------------------
+puts_strlen_safe:
+        push es
+        push ds
+        pop es
+        push di
+        push cx
+        mov di, si
+        xor cx, cx
+        .loop:
+        cmp byte [di], 0
+        je .done
+        inc di
+        inc cx
+        jmp .loop
+        .done:
+        pop ax                  ; discard saved CX
+        pop di
+        mov bx, STDOUT
+        mov ah, SYS_IO_WRITE
+        int 30h
+        pop es
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0
 ;;; for kernel calls, then restore ES before returning.
 ;;; -----------------------------------------------------------------------
@@ -4167,19 +4194,44 @@ syscall:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; write_stdout_safe: write CX bytes from SI to stdout
+;;; ES-safe wrapper: saves/restores ES around the syscall.
+;;; -----------------------------------------------------------------------
+write_stdout_safe:
+        push es
+        push ds
+        pop es
+        mov bx, STDOUT
+        mov ah, SYS_IO_WRITE
+        int 30h
+        pop es
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; Strings
 ;;; -----------------------------------------------------------------------
-MESSAGE_ERROR_AT        db `  at: \0`
-MESSAGE_ERROR_CREATE    db `Error: cannot create output\n\0`
-MESSAGE_ERROR_FIND_OUT  db `Error: cannot find output file\n\0`
-MESSAGE_ERROR_PASS1     db `Error: pass 1 failed\n\0`
-MESSAGE_ERROR_PASS1_IO  db `Error: pass 1 io\n\0`
-MESSAGE_ERROR_PASS1_ITER db `Error: pass 1 iter\n\0`
-MESSAGE_ERROR_SYM_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\n\0`
-MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\n  \0`
-MESSAGE_ERROR_WRITE_DIR db `Error: directory write failed\n\0`
-MESSAGE_OK      db `OK\n\0`
-MESSAGE_USAGE   db `Usage: asm <source> <output>\n\0`
+MESSAGE_ERROR_AT        db `  at: `
+MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT
+MESSAGE_ERROR_CREATE    db `Error: cannot create output\n`
+MESSAGE_ERROR_CREATE_LENGTH equ $ - MESSAGE_ERROR_CREATE
+MESSAGE_ERROR_FIND_OUT  db `Error: cannot find output file\n`
+MESSAGE_ERROR_FIND_OUT_LENGTH equ $ - MESSAGE_ERROR_FIND_OUT
+MESSAGE_ERROR_PASS1     db `Error: pass 1 failed\n`
+MESSAGE_ERROR_PASS1_LENGTH equ $ - MESSAGE_ERROR_PASS1
+MESSAGE_ERROR_PASS1_IO  db `Error: pass 1 io\n`
+MESSAGE_ERROR_PASS1_IO_LENGTH equ $ - MESSAGE_ERROR_PASS1_IO
+MESSAGE_ERROR_PASS1_ITER db `Error: pass 1 iter\n`
+MESSAGE_ERROR_PASS1_ITER_LENGTH equ $ - MESSAGE_ERROR_PASS1_ITER
+MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\n  `
+MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN
+MESSAGE_ERROR_WRITE_DIR db `Error: directory write failed\n`
+MESSAGE_ERROR_WRITE_DIR_LENGTH equ $ - MESSAGE_ERROR_WRITE_DIR
+MESSAGE_OK      db `OK\n`
+MESSAGE_OK_LENGTH equ $ - MESSAGE_OK
+MESSAGE_SYMBOL_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\n`
+MESSAGE_SYMBOL_OVERFLOW_LENGTH equ $ - MESSAGE_SYMBOL_OVERFLOW
+MESSAGE_USAGE   db `Usage: asm <source> <output>\n`
+MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
 ;;; -----------------------------------------------------------------------
 ;;; Variables

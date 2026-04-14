@@ -17,15 +17,17 @@ main:
         cmp al, ERROR_DIRECTORY_FULL
         je .dir_full
         mov si, MESSAGE_ERROR
+        mov cx, MESSAGE_ERROR_LENGTH
         jmp .print
         .exists:
         mov si, MESSAGE_EXISTS
+        mov cx, MESSAGE_EXISTS_LENGTH
         jmp .print
         .dir_full:
         mov si, MESSAGE_DIRECTORY_FULL
+        mov cx, MESSAGE_DIRECTORY_FULL_LENGTH
         .print:
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        call write_stdout
 
         .done:
         mov ah, SYS_EXIT
@@ -33,12 +35,18 @@ main:
 
         .usage:
         mov si, MESSAGE_USAGE
-        mov ah, SYS_IO_PUT_STRING
-        int 30h
+        mov cx, MESSAGE_USAGE_LENGTH
+        call write_stdout
         mov ah, SYS_EXIT
         int 30h
 
-MESSAGE_DIRECTORY_FULL  db `Directory full\n\0`
-MESSAGE_ERROR     db `Error\n\0`
-MESSAGE_EXISTS    db `Already exists\n\0`
-MESSAGE_USAGE     db `Usage: mkdir <name>\n\0`
+MESSAGE_DIRECTORY_FULL         db `Directory full\n`
+MESSAGE_DIRECTORY_FULL_LENGTH  equ $ - MESSAGE_DIRECTORY_FULL
+MESSAGE_ERROR         db `Error\n`
+MESSAGE_ERROR_LENGTH  equ $ - MESSAGE_ERROR
+MESSAGE_EXISTS        db `Already exists\n`
+MESSAGE_EXISTS_LENGTH equ $ - MESSAGE_EXISTS
+MESSAGE_USAGE         db `Usage: mkdir <name>\n`
+MESSAGE_USAGE_LENGTH  equ $ - MESSAGE_USAGE
+
+%include "write_stdout.asm"
