@@ -280,6 +280,7 @@ class CodeGenerator:
         "open": frozenset({"ax", "dx"}),
         "read": frozenset({"ax", "cx", "di"}),
         "strlen": frozenset({"ax", "cx", "di"}),
+        "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "print_bcd": frozenset({"ax"}),
         "print_buffer": frozenset({"ax", "bx", "cx", "si"}),
         "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
@@ -566,6 +567,42 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
         self.generate_expression(arguments[0])
         self.emit("        call FUNCTION_PRINT_DECIMAL")
+
+    def builtin_printf(self, arguments: list[Node], /) -> None:
+        """Generate code for the printf() builtin.
+
+        First argument must be a string literal.  Remaining arguments
+        are pushed right-to-left onto the stack, followed by the format
+        string pointer.  Uses cdecl calling convention (caller cleans).
+        """
+        if not arguments or not isinstance(arguments[0], String):
+            message = "printf() requires a string literal as the first argument"
+            raise SyntaxError(message)
+        # Count format specifiers (excluding %%) to validate argument count.
+        fmt = arguments[0].content
+        expected_args = 0
+        i = 0
+        while i < len(fmt):
+            if fmt[i] == "%" and i + 1 < len(fmt):
+                if fmt[i + 1] != "%":
+                    expected_args += 1
+                i += 2
+            else:
+                i += 1
+        if len(arguments) - 1 != expected_args:
+            message = f"printf() format expects {expected_args} argument{'s' if expected_args != 1 else ''}, got {len(arguments) - 1}"
+            raise SyntaxError(message)
+        # Push arguments right-to-left.
+        for arg in reversed(arguments[1:]):
+            self.generate_expression(arg)
+            self.emit("        push ax")
+        # Push format string pointer.
+        label = self.new_string_label(fmt)
+        self.emit(f"        mov ax, {label}")
+        self.emit("        push ax")
+        self.emit("        call FUNCTION_PRINTF")
+        stack_size = len(arguments) * 2
+        self.emit(f"        add sp, {stack_size}")
 
     def builtin_putc(self, arguments: list[Node], /) -> None:
         """Generate code for the putc() builtin."""

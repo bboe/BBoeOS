@@ -114,6 +114,7 @@ clear_screen:
         jmp near shared_print_ip
         jmp near shared_print_mac
         jmp near shared_print_string
+        jmp near shared_printf
         jmp near shared_write_stdout
 
 boot_shell:
@@ -351,6 +352,108 @@ shared_print_string:
         sub cx, si
         dec cx
         call shared_write_stdout
+        ret
+
+shared_printf:
+        ;; Minimal printf: cdecl calling convention.
+        ;; Stack: [bp+4] = format string, [bp+6] = first arg, ...
+        ;; Supports: %c %d %u %x %s %%
+        push bp
+        mov bp, sp
+        push si
+        push di
+        mov si, [bp+4]          ; SI = format string
+        lea di, [bp+6]          ; DI = pointer to first arg on stack
+        cld
+        .loop:
+        lodsb
+        test al, al
+        jz .done
+        cmp al, '%'
+        je .format
+        call shared_print_character
+        jmp .loop
+        .format:
+        lodsb
+        cmp al, 'c'
+        je .fmt_c
+        cmp al, 'd'
+        je .fmt_d
+        cmp al, 'u'
+        je .fmt_u
+        cmp al, 'x'
+        je .fmt_x
+        cmp al, 's'
+        je .fmt_s
+        cmp al, '%'
+        je .fmt_percent
+        ;; Unknown specifier: print literal
+        call shared_print_character
+        jmp .loop
+        .fmt_c:
+        mov ax, [di]
+        add di, 2
+        call shared_print_character
+        jmp .loop
+        .fmt_d:
+        .fmt_u:
+        mov ax, [di]
+        add di, 2
+        call .print_uint16
+        jmp .loop
+        .fmt_x:
+        mov ax, [di]
+        add di, 2
+        call shared_print_hex
+        jmp .loop
+        .fmt_s:
+        push si
+        mov si, [di]
+        add di, 2
+        ;; Find length of null-terminated string
+        push di
+        mov di, si
+        xor al, al
+        mov cx, 0FFFFh
+        repne scasb
+        mov cx, di
+        sub cx, si
+        dec cx
+        pop di
+        call shared_write_stdout
+        pop si
+        jmp .loop
+        .fmt_percent:
+        mov al, '%'
+        call shared_print_character
+        jmp .loop
+        .done:
+        pop di
+        pop si
+        pop bp
+        ret
+
+        .print_uint16:
+        ;; Print AX as unsigned decimal (no leading zeros)
+        ;; Clobbers: AX, BX, CX, DX
+        push bp
+        mov bp, sp
+        xor cx, cx              ; Digit count
+        mov bx, 10
+        .udiv:
+        xor dx, dx
+        div bx                  ; AX = quotient, DX = remainder
+        push dx                 ; Push digit
+        inc cx
+        test ax, ax
+        jnz .udiv
+        .uprint:
+        pop ax
+        add al, '0'
+        call shared_print_character
+        dec cx
+        jnz .uprint
+        pop bp
         ret
 
 shared_write_stdout:
