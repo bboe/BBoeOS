@@ -13,10 +13,6 @@ source is kept here for reference.
 | mkdir   | 116         | 121       | +5    |
 | uptime  | 50          | 49        | -1    |
 
-**date (-2):** The C compiler tracks register liveness and knows
-`FUNCTION_PRINT_BCD` preserves BX, so it skips the `push bx`/`pop bx`
-the hand-written version uses to save hours/minutes.
-
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
