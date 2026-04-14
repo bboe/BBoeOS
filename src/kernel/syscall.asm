@@ -34,8 +34,6 @@ syscall_handler:
 
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
-        cmp ah, SYS_RTC_DATETIME_LEGACY ; rtc_datetime_legacy
-        je .rtc_datetime_legacy
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
@@ -612,24 +610,6 @@ syscall_handler:
 
         .month_days:
         dw 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
-
-        .rtc_datetime_legacy:
-        ;; Returns date+time in BCD:
-        ;;   CH=century, CL=year, DH=month, DL=day
-        ;;   BH=hours, BL=minutes, AL=seconds
-        ;; Transient shim for cc.py until `unsigned long` support lands.
-        mov ah, 04h
-        int 1Ah                 ; CH=century, CL=year, DH=month, DL=day
-        push cx
-        push dx
-        mov ah, 02h
-        int 1Ah                 ; CH=hours, CL=minutes, DH=seconds
-        mov bh, ch              ; BH = hours
-        mov bl, cl              ; BL = minutes
-        mov al, dh              ; AL = seconds
-        pop dx
-        pop cx
-        iret
 
         .rtc_uptime:
         ;; Return elapsed seconds in AX

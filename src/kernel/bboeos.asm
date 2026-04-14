@@ -106,7 +106,6 @@ clear_screen:
         jmp near shared_exit
         jmp near shared_get_character
         jmp near shared_parse_argv
-        jmp near shared_print_bcd
         jmp near shared_print_byte_decimal
         jmp near shared_print_character
         jmp near shared_print_datetime
@@ -206,20 +205,6 @@ shared_parse_argv:
         inc si
         jmp .parse_argv_scan
         .parse_argv_done:
-        ret
-
-shared_print_bcd:
-        ;; Print AL as two BCD digits
-        push cx
-        mov cl, al
-        shr al, 4               ; High nibble
-        add al, '0'
-        call shared_print_character
-        mov al, cl
-        and al, 0Fh             ; Low nibble
-        add al, '0'
-        call shared_print_character
-        pop cx
         ret
 
 shared_print_byte_decimal:
