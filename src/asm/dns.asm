@@ -19,14 +19,14 @@ main:
         mov byte [found_a], 0
 
         ;; Print "Querying <domain>...\n"
-        mov si, MSG_QUERY
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_QUERY
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov si, bx
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
-        mov si, MSG_ELLIPSIS
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_ELLIPSIS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         ;; Send DNS A query and position DI at first answer record
@@ -96,16 +96,16 @@ main:
         call decode_domain
         ;; Print "<rr_name> is a CNAME for <target>\n"
         mov si, rr_name_buf
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
-        mov si, MSG_CNAME
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_CNAME
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov si, cname_buf
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov al, `\n`
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         pop di                 ; Restore DI to next RR position
         dec byte [ans_count]
@@ -125,15 +125,15 @@ main:
         pop di
         add di, 10             ; Skip TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2) to rdata
         mov si, rr_name_buf
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
-        mov si, MSG_IS_AT
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_IS_AT
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov si, di
         call print_ip
         mov al, `\n`
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov byte [found_a], 1
         add di, 4              ; Advance past 4-byte IP to next RR
@@ -143,29 +143,29 @@ main:
         int 30h
 
         .no_nic:
-        mov si, MSG_NO_NIC
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_NO_NIC
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .no_arg:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .dns_err:
-        mov si, MSG_DNS_ERR
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_DNS_ERROR
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .no_answer:
-        mov si, MSG_NO_ANS
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_NO_ANSWER
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -220,14 +220,14 @@ decode_domain:
         rr_name_buf times 256 db 0
         rr_name_ptr dw 0
 
-        MSG_CNAME db ` is a CNAME for \0`
-        MSG_DNS_ERR db `DNS query failed\n\0`
-        MSG_ELLIPSIS db `...\n\0`
-        MSG_IS_AT db ` is at \0`
-        MSG_NO_ANS db `No answer in DNS response\n\0`
-        MSG_NO_NIC db `No NIC found\n\0`
-        MSG_QUERY db `Querying \0`
-        MSG_USAGE db `Usage: dns <domain>\n\0`
+        MESSAGE_CNAME db ` is a CNAME for \0`
+        MESSAGE_DNS_ERROR db `DNS query failed\n\0`
+        MESSAGE_ELLIPSIS db `...\n\0`
+        MESSAGE_IS_AT db ` is at \0`
+        MESSAGE_NO_ANSWER db `No answer in DNS response\n\0`
+        MESSAGE_NO_NIC db `No NIC found\n\0`
+        MESSAGE_QUERY db `Querying \0`
+        MESSAGE_USAGE db `Usage: dns <domain>\n\0`
 
 %include "dns_query.asm"
 %include "encode_domain.asm"

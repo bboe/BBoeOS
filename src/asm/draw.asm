@@ -9,7 +9,7 @@ main:
         mov byte [bg_color], 0
 
 .loop:
-        mov ah, SYS_IO_GETC
+        mov ah, SYS_IO_GET_CHARACTER
         int 30h
 
         cmp al, 'a'
@@ -87,7 +87,7 @@ main:
         jmp .loop
 
         .end:
-        mov ah, SYS_SCR_CLEAR
+        mov ah, SYS_SCREEN_CLEAR
         int 30h
         mov ah, SYS_EXIT
         int 30h

@@ -19,7 +19,7 @@ main:
         jmp .usage
 
         .set_exec:
-        mov dl, FLAG_EXEC
+        mov dl, FLAG_EXECUTE
         jmp .check_x
         .clear_exec:
         xor dl, dl
@@ -38,15 +38,15 @@ main:
         int 30h
         jnc .done
 
-        cmp al, ERR_PROTECTED
+        cmp al, ERROR_PROTECTED
         je .protected
-        ;; ERR_NOT_FOUND (or unknown)
-        mov si, MSG_NOT_FOUND
+        ;; ERROR_NOT_FOUND (or unknown)
+        mov si, MESSAGE_NOT_FOUND
         jmp .error
         .protected:
-        mov si, MSG_PROTECTED
+        mov si, MESSAGE_PROTECTED
         .error:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         .done:
@@ -54,12 +54,12 @@ main:
         int 30h
 
         .usage:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
-        MSG_NOT_FOUND db `File not found\n\0`
-        MSG_PROTECTED db `File is protected\n\0`
-        MSG_USAGE     db `Usage: chmod [+x|-x] <file>\n\0`
+        MESSAGE_NOT_FOUND db `File not found\n\0`
+        MESSAGE_PROTECTED db `File is protected\n\0`
+        MESSAGE_USAGE     db `Usage: chmod [+x|-x] <file>\n\0`

@@ -19,7 +19,7 @@ print_byte_dec:
         pop ax
         mov al, ah
         add al, '0'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         dec bx
         jnz .print_digits

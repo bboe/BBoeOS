@@ -1,8 +1,8 @@
         ;; ANSI escape sequence parser
-        ;; put_char: unified output to screen (with ANSI parsing) and serial
-        ;; put_string: print null-terminated string via put_char
+        ;; put_character: unified output to screen (with ANSI parsing) and serial
+        ;; put_string: print null-terminated string via put_character
 
-put_char:
+put_character:
         push ax
         push bx
         push cx
@@ -13,7 +13,7 @@ put_char:
         jne .serial
         push ax
         mov al, 0Dh
-        call serial_char        ; Send \r to serial
+        call serial_character        ; Send \r to serial
         mov ah, 0Eh
         xor bx, bx
         int 10h                 ; Send \r to screen
@@ -21,7 +21,7 @@ put_char:
 
 .serial:
         ;; Always send raw byte to serial
-        call serial_char
+        call serial_character
 
         ;; State machine dispatch
         cmp byte [ansi_state], 2
@@ -60,7 +60,7 @@ put_char:
 
 .enter_csi:
         mov byte [ansi_state], 2
-        mov word [ansi_param], 0
+        mov word [ansi_parameter], 0
         jmp .done
 
 .state_csi:
@@ -72,16 +72,16 @@ put_char:
         ;; Accumulate digit: param = param * 10 + (al - '0')
         sub al, '0'
         movzx cx, al
-        mov ax, [ansi_param]
+        mov ax, [ansi_parameter]
         mov bx, 10
         mul bx                  ; DX:AX = param * 10 (clobbers DX)
         add ax, cx
-        mov [ansi_param], ax
+        mov [ansi_parameter], ax
         jmp .done
 
 .csi_command:
         mov byte [ansi_state], 0
-        mov bx, [ansi_param]
+        mov bx, [ansi_parameter]
         test bx, bx
         jnz .has_param
         mov bx, 1              ; Default parameter is 1
@@ -161,7 +161,7 @@ put_string:
         lodsb
         cmp al, 0
         je .end
-        call put_char
+        call put_character
         jmp .repeat
 .end:
         pop ax
@@ -169,9 +169,9 @@ put_string:
 
         ;; Parser state
         ansi_state db 0
-        ansi_param dw 0
+        ansi_parameter dw 0
 
-serial_char:
+serial_character:
         ;; Write AL to COM1 (preserves all registers)
         push ax
         push dx

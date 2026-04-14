@@ -4,12 +4,12 @@ print_bcd:
         mov cl, al
         shr al, 4               ; High nibble
         add al, '0'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, cl
         and al, 0Fh             ; Low nibble
         add al, '0'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         pop cx
         ret

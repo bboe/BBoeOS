@@ -12,19 +12,19 @@ main:
         int 30h
         jnc .done
 
-        cmp al, ERR_EXISTS
+        cmp al, ERROR_EXISTS
         je .exists
-        cmp al, ERR_DIR_FULL
+        cmp al, ERROR_DIRECTORY_FULL
         je .dir_full
-        mov si, MSG_ERROR
+        mov si, MESSAGE_ERROR
         jmp .print
         .exists:
-        mov si, MSG_EXISTS
+        mov si, MESSAGE_EXISTS
         jmp .print
         .dir_full:
-        mov si, MSG_DIR_FULL
+        mov si, MESSAGE_DIRECTORY_FULL
         .print:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         .done:
@@ -32,13 +32,13 @@ main:
         int 30h
 
         .usage:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
-MSG_DIR_FULL  db `Directory full\n\0`
-MSG_ERROR     db `Error\n\0`
-MSG_EXISTS    db `Already exists\n\0`
-MSG_USAGE     db `Usage: mkdir <name>\n\0`
+MESSAGE_DIRECTORY_FULL  db `Directory full\n\0`
+MESSAGE_ERROR     db `Error\n\0`
+MESSAGE_EXISTS    db `Already exists\n\0`
+MESSAGE_USAGE     db `Usage: mkdir <name>\n\0`

@@ -28,22 +28,22 @@ main:
         int 30h
         jc .error
 
-        mov si, MSG_SENT
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_SENT
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .no_nic:
-        mov si, MSG_NO_NIC
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_NO_NIC
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .error:
-        mov si, MSG_ERROR
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_ERROR
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -51,8 +51,8 @@ main:
         ;; Data
         my_mac times 6 db 0
 
-        MSG_ERROR db `Send failed\n\0`
-        MSG_NO_NIC db `No NIC found\n\0`
-        MSG_SENT db `ARP request sent\n\0`
+        MESSAGE_ERROR db `Send failed\n\0`
+        MESSAGE_NO_NIC db `No NIC found\n\0`
+        MESSAGE_SENT db `ARP request sent\n\0`
 
 %include "arp_frame.asm"

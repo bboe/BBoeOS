@@ -87,7 +87,7 @@ main:
         mov bx, [src_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov si, MSG_EXISTS
+        mov si, MESSAGE_EXISTS
         jmp .die
 
 .disk_err:
@@ -97,18 +97,18 @@ main:
         mov bx, [src_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov si, MSG_DISK_ERR
+        mov si, MESSAGE_DISK_ERROR
         jmp .die
 
 .not_found:
-        mov si, MSG_NOT_FOUND
+        mov si, MESSAGE_NOT_FOUND
         jmp .die
 
 .usage:
-        mov si, MSG_USAGE
+        mov si, MESSAGE_USAGE
 
 .die:
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -120,10 +120,10 @@ src_fd    dw 0
 src_mode db 0
 
 ;; Strings
-MSG_DISK_ERR  db `Disk error\n\0`
-MSG_EXISTS    db `File already exists\n\0`
-MSG_NOT_FOUND db `File not found\n\0`
-MSG_USAGE     db `Usage: cp <srcname> <destname>\n\0`
+MESSAGE_DISK_ERROR  db `Disk error\n\0`
+MESSAGE_EXISTS    db `File already exists\n\0`
+MESSAGE_NOT_FOUND db `File not found\n\0`
+MESSAGE_USAGE     db `Usage: cp <srcname> <destname>\n\0`
 
 ;; Copy buffer (512 bytes, right after code+data)
 copy_buf:

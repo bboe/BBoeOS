@@ -10,7 +10,7 @@ print_mac:
         dec cx
         jz .done
         mov al, ':'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         jmp .loop
         .done:

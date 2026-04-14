@@ -2,21 +2,21 @@
 
 %include "constants.asm"
 
-        ;; Gap buffer in memory [BUF_BASE .. BUF_BASE+BUF_SIZE):
+        ;; Gap buffer in memory [BUFFER_BASE .. BUFFER_BASE+BUFFER_SIZE):
         ;;   [0 .. gap_start)        text before cursor  (logical offsets 0..gap_start-1)
         ;;   [gap_start .. gap_end)  gap (free space)
-        ;;   [gap_end .. BUF_SIZE)   text after cursor   (logical offsets gap_start..len-1)
+        ;;   [gap_end .. BUFFER_SIZE)   text after cursor   (logical offsets gap_start..len-1)
         ;; Memory layout in segment 0 (must avoid edit code at 0x0600 and
         ;; the resident kernel at 0x7C00+):
-        ;;   program_end                  .. KILL_BUF             gap buffer
-        ;;   KILL_BUF (7C00h-KILL_BUF_SIZE) .. 7C00h               kill buffer
+        ;;   program_end                  .. KILL_BUFFER             gap buffer
+        ;;   KILL_BUFFER (7C00h-KILL_BUF_SIZE) .. 7C00h               kill buffer
         ;; The gap buffer floats on program_end, so it expands automatically
         ;; as the program shrinks/grows and reclaims the previously-wasted
         ;; gap between program_end and the old fixed 0x2000 base.
         %assign KILL_BUF_SIZE 0A00h   ; 2560 bytes
-        %define BUF_BASE      program_end
-        %define KILL_BUF      (7C00h - KILL_BUF_SIZE)
-        %define BUF_SIZE      (KILL_BUF - BUF_BASE)
+        %define BUFFER_BASE      program_end
+        %define KILL_BUFFER      (7C00h - KILL_BUF_SIZE)
+        %define BUFFER_SIZE      (KILL_BUFFER - BUFFER_BASE)
 
         ;; Screen layout: rows 0–23 for text, row 24 for status bar
         %assign EDIT_ROWS 24
@@ -43,25 +43,25 @@ main:
         mov ah, SYS_IO_FSTAT
         int 30h
         ;; AL = mode, CX:DX = size (32-bit)
-        ;; The gap buffer tops out at BUF_SIZE so anything larger cannot
+        ;; The gap buffer tops out at BUFFER_SIZE so anything larger cannot
         ;; be edited (including sizes with a nonzero high word).
         test cx, cx
         jnz .too_big_close
-        cmp dx, BUF_SIZE
+        cmp dx, BUFFER_SIZE
         ja .too_big_close
-        test al, FLAG_DIR
+        test al, FLAG_DIRECTORY
         jnz .is_dir_close
 
         ;; Load file content into gap buffer: text goes AFTER the gap so
         ;; gap_start=0 and cursor_line/col=0 are consistent (cursor at start).
-        ;; gap_start = 0, gap_end = BUF_SIZE - file_size
+        ;; gap_start = 0, gap_end = BUFFER_SIZE - file_size
         mov word [gap_start], 0
-        mov ax, BUF_SIZE
-        sub ax, dx              ; AX = BUF_SIZE - file_size
+        mov ax, BUFFER_SIZE
+        sub ax, dx              ; AX = BUFFER_SIZE - file_size
         mov [gap_end], ax
 
-        ;; Read entire file into BUF_BASE + gap_end
-        mov di, BUF_BASE
+        ;; Read entire file into BUFFER_BASE + gap_end
+        mov di, BUFFER_BASE
         add di, [gap_end]       ; DI = destination
         mov cx, dx              ; CX = file size (bytes to read)
         mov ah, SYS_IO_READ
@@ -88,13 +88,13 @@ main:
         .new_file:
         ;; Defer file creation until first save
         mov word [gap_start], 0
-        mov word [gap_end], BUF_SIZE
+        mov word [gap_end], BUFFER_SIZE
         .init_cursor:
         ;; Set cursor to start of file
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         mov word [cursor_line], 0
         mov word [view_line], 0
-        mov word [view_col], 0
+        mov word [view_column], 0
 
         .editor_loop:
         call render
@@ -102,29 +102,29 @@ main:
         jmp .editor_loop
 
         .too_big:
-        mov si, MSG_FILE_TOO_BIG
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_FILE_TOO_BIG
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .is_dir:
-        mov si, MSG_IS_DIR
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_IS_DIR
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .load_err:
-        mov si, MSG_LOAD_ERR
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_LOAD_ERROR
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .usage:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -141,7 +141,7 @@ buf_char_at:
         mov si, [gap_end]
         sub si, [gap_start]    ; SI = gap size
         neg si
-        add si, BUF_SIZE       ; SI = logical length
+        add si, BUFFER_SIZE       ; SI = logical length
         cmp bx, si
         jae .past_end
         ;; Map logical offset BX to raw index
@@ -151,7 +151,7 @@ buf_char_at:
         sub si, [gap_start]
         add bx, si             ; raw index = BX + gap_size
         .before_gap:
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         clc
         pop si
         pop bx
@@ -168,7 +168,7 @@ buf_char_at:
 buf_delete_after:
         push bx
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done              ; nothing after cursor
         inc word [gap_end]
         mov byte [dirty], 1
@@ -186,20 +186,20 @@ buf_delete_before:
         je .done
         mov bx, [gap_start]
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         dec word [gap_start]
         mov byte [dirty], 1
         cmp al, 0Ah
         je .was_newline
-        cmp word [cursor_col], 0
+        cmp word [cursor_column], 0
         je .done
-        dec word [cursor_col]
+        dec word [cursor_column]
         jmp .done
         .was_newline:
         cmp word [cursor_line], 0
         je .done
         dec word [cursor_line]
-        call recompute_col
+        call recompute_column
         call check_scroll_up
         .done:
         pop bx
@@ -215,16 +215,16 @@ buf_insert:
         mov bx, [gap_start]
         cmp bx, [gap_end]
         je .full               ; buffer full
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         mov byte [dirty], 1
         cmp al, 0Ah
         je .newline
-        inc word [cursor_col]
+        inc word [cursor_column]
         jmp .done
         .newline:
         inc word [cursor_line]
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         call check_scroll
         .done:
         pop bx
@@ -240,7 +240,7 @@ buf_insert:
 ;;; -----------------------------------------------------------------------
 buf_length:
         push bx
-        mov ax, BUF_SIZE
+        mov ax, BUFFER_SIZE
         mov bx, [gap_end]
         sub bx, [gap_start]
         sub ax, bx
@@ -248,26 +248,26 @@ buf_length:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; check_hscroll: adjust view_col so cursor_col stays in view
+;;; check_hscroll: adjust view_column so cursor_column stays in view
 ;;; -----------------------------------------------------------------------
 check_hscroll:
         push ax
-        mov ax, [cursor_col]
-        cmp ax, [view_col]
+        mov ax, [cursor_column]
+        cmp ax, [view_column]
         jb .scroll_left
-        ;; If cursor_col >= view_col + EDIT_COLS: scroll right
+        ;; If cursor_column >= view_column + EDIT_COLS: scroll right
         push bx
-        mov bx, [view_col]
+        mov bx, [view_column]
         add bx, EDIT_COLS
         cmp ax, bx
         pop bx
         jb .done
-        mov ax, [cursor_col]
+        mov ax, [cursor_column]
         sub ax, EDIT_COLS - 1
-        mov [view_col], ax
+        mov [view_column], ax
         jmp .done
         .scroll_left:
-        mov [view_col], ax
+        mov [view_column], ax
         .done:
         pop ax
         ret
@@ -304,31 +304,31 @@ check_scroll_up:
 ;;; -----------------------------------------------------------------------
 ;;; do_kill: kill from cursor to end of line (Ctrl+K)
 ;;; If cursor is at a \n, kills the \n (joining lines).
-;;; Killed text is stored in kill_buf / kill_len.
+;;; Killed text is stored in kill_buf / kill_length.
 ;;; -----------------------------------------------------------------------
 do_kill:
         push ax
         push bx
         push di
-        mov word [kill_len], 0
+        mov word [kill_length], 0
         xor di, di             ; DI = index into kill buffer
         ;; Kill chars through end of line (including the \n)
         .kill_chars:
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done              ; nothing after cursor
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         inc word [gap_end]
         mov byte [dirty], 1
         cmp di, KILL_BUF_SIZE
         jae .next              ; kill buffer full: keep deleting, stop storing
-        mov [KILL_BUF + di], al
+        mov [KILL_BUFFER + di], al
         inc di
         .next:
         cmp al, 0Ah
         jne .kill_chars        ; stop after consuming the \n
         .done:
-        mov [kill_len], di
+        mov [kill_length], di
         pop di
         pop bx
         pop ax
@@ -341,12 +341,12 @@ do_yank:
         push ax
         push cx
         push si
-        mov cx, [kill_len]
+        mov cx, [kill_length]
         test cx, cx
         jz .done
         xor si, si             ; SI = index into kill buffer
         .yank_loop:
-        mov al, [KILL_BUF + si]
+        mov al, [KILL_BUFFER + si]
         call buf_insert
         inc si
         loop .yank_loop
@@ -377,7 +377,7 @@ emit_decimal:
         pop dx
         add dl, '0'
         mov al, dl
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         loop .emit
         pop dx
@@ -394,7 +394,7 @@ get_input:
         push bx
         push cx
 
-        mov ah, SYS_IO_GETC
+        mov ah, SYS_IO_GET_CHARACTER
         int 30h
 
         ;; If quit-confirmation is pending: Ctrl+Q confirms, anything else cancels
@@ -501,7 +501,7 @@ get_input:
         pop cx
         pop bx
         pop ax
-        mov ah, SYS_SCR_CLEAR
+        mov ah, SYS_SCREEN_CLEAR
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -540,17 +540,17 @@ move_bol:
         je .done
         mov bx, [gap_start]
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .done               ; char before cursor is \n: already at line start
         mov bx, [gap_end]
         dec bx
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         dec word [gap_start]
         dec word [gap_end]
         jmp .loop
         .done:
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         pop bx
         pop ax
         ret
@@ -562,15 +562,15 @@ move_down:
         push ax
         push bx
         push cx
-        mov cx, [cursor_col]   ; target column
+        mov cx, [cursor_column]   ; target column
         ;; Advance past chars until we hit a newline (or end of buffer)
         .to_newline:
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done              ; at end of buffer
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         mov bx, [gap_start]
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         inc word [gap_end]
         cmp al, 0Ah
@@ -578,23 +578,23 @@ move_down:
         jmp .to_newline
         .found_newline:
         inc word [cursor_line]
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         call check_scroll
         ;; Advance min(cx, line_length) columns
         .forward:
         test cx, cx
         jz .done
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .done
         mov bx, [gap_start]
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         inc word [gap_end]
-        inc word [cursor_col]
+        inc word [cursor_column]
         dec cx
         jmp .forward
         .done:
@@ -612,16 +612,16 @@ move_eol:
         push bx
         .loop:
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done              ; at end of buffer
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .done               ; at \n: cursor is at end of line
         mov bx, [gap_start]
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         inc word [gap_end]
-        inc word [cursor_col]
+        inc word [cursor_column]
         jmp .loop
         .done:
         pop bx
@@ -638,23 +638,23 @@ move_left:
         je .done
         mov bx, [gap_start]
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         mov bx, [gap_end]
         dec bx
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         dec word [gap_start]
         dec word [gap_end]
         cmp al, 0Ah
         je .crossed_newline
-        cmp word [cursor_col], 0
+        cmp word [cursor_column], 0
         je .done
-        dec word [cursor_col]
+        dec word [cursor_column]
         jmp .done
         .crossed_newline:
         cmp word [cursor_line], 0
         je .done
         dec word [cursor_line]
-        call recompute_col
+        call recompute_column
         call check_scroll_up
         .done:
         pop bx
@@ -668,20 +668,20 @@ move_right:
         push ax
         push bx
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         mov bx, [gap_start]
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         inc word [gap_end]
         cmp al, 0Ah
         je .crossed_newline
-        inc word [cursor_col]
+        inc word [cursor_column]
         jmp .done
         .crossed_newline:
         inc word [cursor_line]
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         call check_scroll
         .done:
         pop bx
@@ -697,17 +697,17 @@ move_up:
         push cx
         cmp word [cursor_line], 0
         je .done
-        mov cx, [cursor_col]   ; target column
+        mov cx, [cursor_column]   ; target column
         ;; Move left until we cross the newline ending the previous line
         .back_past_newline:
         cmp word [gap_start], 0
         je .done
         mov bx, [gap_start]
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         mov bx, [gap_end]
         dec bx
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         dec word [gap_start]
         dec word [gap_end]
         cmp al, 0Ah
@@ -720,34 +720,34 @@ move_up:
         je .at_start
         mov bx, [gap_start]
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .at_start           ; hit newline ending the line before, stop here
         mov bx, [gap_end]
         dec bx
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         dec word [gap_start]
         dec word [gap_end]
         jmp .back_to_line_start
         .at_start:
         dec word [cursor_line]
-        mov word [cursor_col], 0
+        mov word [cursor_column], 0
         call check_scroll_up
         ;; Advance min(cx, line_length) columns
         .forward:
         test cx, cx
         jz .done
         mov bx, [gap_end]
-        cmp bx, BUF_SIZE
+        cmp bx, BUFFER_SIZE
         jae .done
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .done
         mov bx, [gap_start]
-        mov [BUF_BASE + bx], al
+        mov [BUFFER_BASE + bx], al
         inc word [gap_start]
         inc word [gap_end]
-        inc word [cursor_col]
+        inc word [cursor_column]
         dec cx
         jmp .forward
         .done:
@@ -757,10 +757,10 @@ move_up:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; recompute_col: set cursor_col by counting chars back to previous newline
+;;; recompute_column: set cursor_column by counting chars back to previous newline
 ;;; Call after cursor_line has been decremented (e.g. after backspace over \n)
 ;;; -----------------------------------------------------------------------
-recompute_col:
+recompute_column:
         push ax
         push bx
         push cx
@@ -770,13 +770,13 @@ recompute_col:
         test bx, bx
         jz .done
         dec bx
-        mov al, [BUF_BASE + bx]
+        mov al, [BUFFER_BASE + bx]
         cmp al, 0Ah
         je .done
         inc cx
         jmp .scan
         .done:
-        mov [cursor_col], cx
+        mov [cursor_column], cx
         pop cx
         pop bx
         pop ax
@@ -794,7 +794,7 @@ render:
         push dx
         push si
 
-        mov ah, SYS_SCR_CLEAR
+        mov ah, SYS_SCREEN_CLEAR
         int 30h
 
         ;; Walk to start of view_line: count newlines from offset 0
@@ -815,8 +815,8 @@ render:
         call check_hscroll
         mov dx, EDIT_ROWS      ; DX = rows remaining
         .row_loop:
-        ;; Print one row: skip view_col chars, print up to EDIT_COLS, scan to \n
-        mov cx, [view_col]     ; CX = chars to skip (horizontal scroll)
+        ;; Print one row: skip view_column chars, print up to EDIT_COLS, scan to \n
+        mov cx, [view_column]     ; CX = chars to skip (horizontal scroll)
         mov si, EDIT_COLS      ; SI = visible cols remaining
         .char_loop:
         call buf_char_at
@@ -828,7 +828,7 @@ render:
         jnz .hscroll_skip
         test si, si
         jz .char_loop          ; past right edge, keep scanning to \n
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         dec si
         jmp .char_loop
@@ -839,7 +839,7 @@ render:
         test si, si
         jz .row_no_nl          ; printed full row, cursor already wrapped
         mov al, 0Ah
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         .row_no_nl:
         dec dx
@@ -853,13 +853,13 @@ render:
         test si, si
         jz .row_pad            ; full row: cursor already wrapped, skip \n
         mov al, 0Ah            ; partial row: \n to finish it
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         .row_pad:
         test dx, dx
         jz .status_bar
         mov al, 0Ah
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         dec dx
         jnz .row_pad
@@ -869,47 +869,47 @@ render:
         cmp byte [confirm_quit], 0
         jne .status_confirm
         ;; Check for a one-shot status message
-        cmp word [status_msg], 0
+        cmp word [status_message], 0
         je .status_normal
-        mov si, [status_msg]
-        mov ah, SYS_IO_PUTS
+        mov si, [status_message]
+        mov ah, SYS_IO_PUT_STRING
         int 30h
-        mov word [status_msg], 0
+        mov word [status_message], 0
         jmp .reposition
         .status_normal:
         ;; Normal status: "filename [modified]  line N"
         mov si, [filename]
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         cmp byte [dirty], 0
         je .status_line_num
-        mov si, MSG_MODIFIED
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_MODIFIED
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         .status_line_num:
-        mov si, MSG_LINE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_LINE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ax, [cursor_line]
         inc ax
         call emit_decimal
-        mov si, MSG_COL
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_COLUMN
+        mov ah, SYS_IO_PUT_STRING
         int 30h
-        mov ax, [cursor_col]
+        mov ax, [cursor_column]
         inc ax
         call emit_decimal
         jmp .reposition
         .status_confirm:
-        mov si, MSG_UNSAVED
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_UNSAVED
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         ;; Reposition cursor: we're at end of status bar on row 24.
         ;; Emit \r to go to col 0 of row 24.
         .reposition:
         mov al, 0Dh
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         ;; Compute cursor screen row = cursor_line - view_line
         mov ax, [cursor_line]
@@ -920,32 +920,32 @@ render:
         test bx, bx
         jz .no_up
         mov al, 1Bh
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, '['
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov ax, bx
         call emit_decimal
         mov al, 'A'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         .no_up:
-        ;; Emit ESC[nC to move to cursor screen col = cursor_col - view_col
-        mov bx, [cursor_col]
-        sub bx, [view_col]
+        ;; Emit ESC[nC to move to cursor screen col = cursor_column - view_column
+        mov bx, [cursor_column]
+        sub bx, [view_column]
         test bx, bx
         jz .render_done
         mov al, 1Bh
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, '['
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov ax, bx
         call emit_decimal
         mov al, 'C'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         .render_done:
@@ -1025,18 +1025,18 @@ save_file:
         int 30h
 
         mov byte [dirty], 0
-        mov word [status_msg], MSG_SAVED
+        mov word [status_message], MESSAGE_SAVED
         jmp .done
 
         .create_err:
-        mov word [status_msg], MSG_CREATE_ERR
+        mov word [status_message], MESSAGE_CREATE_ERROR
         jmp .done
 
         .write_err:
         mov bx, [save_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov word [status_msg], MSG_WRITE_ERR
+        mov word [status_message], MESSAGE_WRITE_ERROR
 
         .done:
         pop di
@@ -1050,35 +1050,35 @@ save_file:
 ;;; Variables (sorted)
 ;;; -----------------------------------------------------------------------
         confirm_quit  db 0
-        cursor_col    dw 0
+        cursor_column    dw 0
         cursor_line   dw 0
         dirty         db 0
         filename      dw 0
-        gap_end       dw BUF_SIZE
+        gap_end       dw BUFFER_SIZE
         gap_start     dw 0
-        kill_len      dw 0
+        kill_length      dw 0
         save_fd       dw 0
-        status_msg    dw 0
-        view_col      dw 0
+        status_message    dw 0
+        view_column      dw 0
         view_line     dw 0
 
 ;;; -----------------------------------------------------------------------
 ;;; Strings (sorted)
 ;;; -----------------------------------------------------------------------
-        MSG_COL          db `  col \0`
-        MSG_CREATE_ERR   db `Cannot create file (directory full?)\0`
-        MSG_FILE_TOO_BIG db `File too large for edit buffer\n\0`
-        MSG_IS_DIR       db `Is a directory\n\0`
-        MSG_LINE         db `  line \0`
-        MSG_LOAD_ERR     db `Load error\n\0`
-        MSG_MODIFIED     db ` [modified]\0`
-        MSG_SAVED        db `Saved.\0`
-        MSG_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
-        MSG_USAGE        db `Usage: edit <filename>\n\0`
-        MSG_WRITE_ERR    db `Write error\0`
+        MESSAGE_COLUMN          db `  col \0`
+        MESSAGE_CREATE_ERROR   db `Cannot create file (directory full?)\0`
+        MESSAGE_FILE_TOO_BIG db `File too large for edit buffer\n\0`
+        MESSAGE_IS_DIR       db `Is a directory\n\0`
+        MESSAGE_LINE         db `  line \0`
+        MESSAGE_LOAD_ERROR     db `Load error\n\0`
+        MESSAGE_MODIFIED     db ` [modified]\0`
+        MESSAGE_SAVED        db `Saved.\0`
+        MESSAGE_UNSAVED      db `Unsaved changes. Ctrl+Q again to quit.\0`
+        MESSAGE_USAGE        db `Usage: edit <filename>\n\0`
+        MESSAGE_WRITE_ERROR    db `Write error\0`
 
 ;;; -----------------------------------------------------------------------
-;;; program_end: BUF_BASE floats on this label so the gap buffer always
+;;; program_end: BUFFER_BASE floats on this label so the gap buffer always
 ;;; sits immediately after the program image.
 ;;; -----------------------------------------------------------------------
 program_end:

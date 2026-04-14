@@ -4,11 +4,11 @@ print_dec:
         xchg al, ah             ; AL = tens, AH = ones
         add al, '0'
         push ax
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         pop ax
         mov al, ah
         add al, '0'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         ret

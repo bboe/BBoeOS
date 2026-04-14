@@ -133,8 +133,8 @@ def main() -> int:
         stderr=subprocess.DEVNULL,
     )
 
-    directory_sector = read_assign("DIR_SECTOR")
-    directory_sectors = read_assign("DIR_SECTORS")
+    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
 
     tests = [
         ("copy_large", test_copy_large),

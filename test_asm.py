@@ -64,8 +64,8 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
     print("Programs to test:", " ".join(p.name for p in programs))
     print()
 
-    directory_sector = read_assign("DIR_SECTOR")
-    directory_sectors = read_assign("DIR_SECTORS")
+    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
     keep_artifacts = arguments.program is not None
 
     with tempfile.TemporaryDirectory(prefix="test_asm_") as temporary_path:

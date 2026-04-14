@@ -15,35 +15,35 @@ main:
         mov al, cl
         call print_bcd
         mov al, '-'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, dh
         call print_bcd
         mov al, '-'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, dl
         call print_bcd
         mov al, ' '
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         pop bx                  ; Restore hours/minutes
         mov al, bh
         call print_bcd
         mov al, ':'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         mov al, bl
         call print_bcd
         mov al, ':'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         pop ax                  ; Restore seconds
         call print_bcd
 
         mov al, `\n`
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         mov ah, SYS_EXIT

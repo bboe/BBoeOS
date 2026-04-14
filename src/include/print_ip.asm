@@ -12,7 +12,7 @@ print_ip:
         jz .ip_done
         push cx
         mov al, '.'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         pop cx
         jmp .ip_loop

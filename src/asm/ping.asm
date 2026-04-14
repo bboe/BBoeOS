@@ -27,13 +27,13 @@ main:
 
         .have_ip:
         ;; Print "Pinging X.X.X.X...\n"
-        mov si, MSG_PINGING
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_PINGING
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov si, target_ip
         call print_ip
-        mov si, MSG_ELLIPSIS
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_ELLIPSIS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         mov byte [count], 4
@@ -45,24 +45,24 @@ main:
 
         ;; Print "Reply from X.X.X.X: time=N ticks\n"
         push ax
-        mov si, MSG_REPLY
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_REPLY
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov si, target_ip
         call print_ip
-        mov si, MSG_TIME
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_TIME
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         pop ax
         call print_dec
-        mov si, MSG_TICKS
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_TICKS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         jmp .next
 
         .timeout:
-        mov si, MSG_TIMEOUT
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_TIMEOUT
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         .next:
@@ -74,22 +74,22 @@ main:
         int 30h
 
         .no_arg:
-        mov si, MSG_USAGE
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_USAGE
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .no_nic:
-        mov si, MSG_NO_NIC
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_NO_NIC
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
         .resolve_err:
-        mov si, MSG_RESOLVE_ERR
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_RESOLVE_ERROR
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
@@ -179,15 +179,15 @@ resolve_dns:
         my_mac times 6 db 0
         target_ip times 4 db 0
 
-        MSG_ELLIPSIS db `...\n\0`
-        MSG_NO_NIC db `No NIC found\n\0`
-        MSG_PINGING db `Pinging \0`
-        MSG_REPLY db `Reply from \0`
-        MSG_RESOLVE_ERR db `Could not resolve hostname\n\0`
-        MSG_TICKS db ` ticks\n\0`
-        MSG_TIME db `: time=\0`
-        MSG_TIMEOUT db `Request timed out\n\0`
-        MSG_USAGE db `Usage: ping <ip|hostname>\n\0`
+        MESSAGE_ELLIPSIS db `...\n\0`
+        MESSAGE_NO_NIC db `No NIC found\n\0`
+        MESSAGE_PINGING db `Pinging \0`
+        MESSAGE_REPLY db `Reply from \0`
+        MESSAGE_RESOLVE_ERROR db `Could not resolve hostname\n\0`
+        MESSAGE_TICKS db ` ticks\n\0`
+        MESSAGE_TIME db `: time=\0`
+        MESSAGE_TIMEOUT db `Request timed out\n\0`
+        MESSAGE_USAGE db `Usage: ping <ip|hostname>\n\0`
 
 %include "dns_query.asm"
 %include "encode_domain.asm"

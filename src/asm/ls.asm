@@ -25,7 +25,7 @@ main:
 .read_loop:
         mov bx, bp
         mov di, entry_buf
-        mov cx, DIR_ENTRY_SIZE
+        mov cx, DIRECTORY_ENTRY_SIZE
         mov ah, SYS_IO_READ
         int 30h
         test ax, ax
@@ -33,26 +33,26 @@ main:
 
         ;; Print the entry name (null-terminated at offset 0)
         mov si, entry_buf
-        mov ah, SYS_IO_PUTS
+        mov ah, SYS_IO_PUT_STRING
         int 30h
 
         ;; Check flags for suffix
-        test byte [entry_buf+DIR_OFF_FLAGS], FLAG_DIR
+        test byte [entry_buf+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .check_exec
         mov al, '/'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         jmp .newline
         .check_exec:
-        test byte [entry_buf+DIR_OFF_FLAGS], FLAG_EXEC
+        test byte [entry_buf+DIRECTORY_OFFSET_FLAGS], FLAG_EXECUTE
         jz .newline
         mov al, '*'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
 .newline:
         mov al, 10
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
         jmp .read_loop
 
@@ -64,15 +64,15 @@ main:
         int 30h
 
 .not_found:
-        mov si, MSG_NOT_FOUND
-        mov ah, SYS_IO_PUTS
+        mov si, MESSAGE_NOT_FOUND
+        mov ah, SYS_IO_PUT_STRING
         int 30h
         mov ah, SYS_EXIT
         int 30h
 
 ;; Strings
 DOT           db '.',0
-MSG_NOT_FOUND db `Not found\n\0`
+MESSAGE_NOT_FOUND db `Not found\n\0`
 
 ;; Buffer for one directory entry (32 bytes)
 entry_buf:

@@ -12,7 +12,7 @@ main:
         push dx
         call print_dec
         mov al, ':'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         pop ax                  ; Remaining seconds
@@ -22,14 +22,14 @@ main:
         push ax
         call print_dec
         mov al, ':'
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         pop ax
         mov al, ah              ; Seconds
         call print_dec
         mov al, `\n`
-        mov ah, SYS_IO_PUTC
+        mov ah, SYS_IO_PUT_CHARACTER
         int 30h
 
         mov ah, SYS_EXIT

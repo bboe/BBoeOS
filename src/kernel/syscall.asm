@@ -10,13 +10,13 @@ syscall_handler:
         je .io_close
         cmp ah, SYS_IO_FSTAT   ; io_fstat
         je .io_fstat
-        cmp ah, SYS_IO_GETC    ; io_getc
-        je .io_getc
+        cmp ah, SYS_IO_GET_CHARACTER    ; io_get_character
+        je .io_get_character
         cmp ah, SYS_IO_OPEN    ; io_open
         je .io_open
-        cmp ah, SYS_IO_PUTC    ; io_putc
+        cmp ah, SYS_IO_PUT_CHARACTER    ; io_putc
         je .io_putc
-        cmp ah, SYS_IO_PUTS    ; io_puts
+        cmp ah, SYS_IO_PUT_STRING    ; io_puts
         je .io_puts
         cmp ah, SYS_IO_READ    ; io_read
         je .io_read
@@ -29,12 +29,12 @@ syscall_handler:
         je .net_init
         cmp ah, SYS_NET_PING   ; net_ping
         je .net_ping
-        cmp ah, SYS_NET_RECV   ; net_recv
-        je .net_recv
+        cmp ah, SYS_NET_RECEIVE   ; net_receive
+        je .net_receive
         cmp ah, SYS_NET_SEND   ; net_send
         je .net_send
-        cmp ah, SYS_NET_UDP_RECV ; net_udp_recv
-        je .net_udp_recv
+        cmp ah, SYS_NET_UDP_RECEIVE ; net_udp_receive
+        je .net_udp_receive
         cmp ah, SYS_NET_UDP_SEND ; net_udp_send
         je .net_udp_send
 
@@ -43,7 +43,7 @@ syscall_handler:
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
-        cmp ah, SYS_SCR_CLEAR  ; scr_clear
+        cmp ah, SYS_SCREEN_CLEAR  ; scr_clear
         je .scr_clear
 
         cmp ah, SYS_EXEC       ; sys_exec
@@ -58,11 +58,11 @@ syscall_handler:
 
         .fs_chmod:
         ;; Update flags byte for a file: SI = filename, AL = new flags value
-        ;; On error: CF set, AL = ERR_PROTECTED/ERR_NOT_FOUND
+        ;; On error: CF set, AL = ERROR_PROTECTED/ERROR_NOT_FOUND
         ;; Protect shell: cannot be chmod'd
         call .check_shell
         jne .fs_chmod_find
-        mov al, ERR_PROTECTED
+        mov al, ERROR_PROTECTED
         stc
         jmp .iret_cf
         .fs_chmod_find:
@@ -70,52 +70,52 @@ syscall_handler:
         call find_file         ; BX = entry index
         jnc .fs_chmod_do
         pop ax
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .fs_chmod_do:
         pop ax                 ; AL = new flags value
-        mov [bx+DIR_OFF_FLAGS], al
-        call dir_write_back
+        mov [bx+DIRECTORY_OFFSET_FLAGS], al
+        call directory_write_back
         jmp .iret_cf
 
 
         .fs_mkdir:
         ;; Create subdirectory: SI = name (no slashes)
         ;; On success: CF clear, AX = allocated sector (16-bit)
-        ;; On error: CF set, AL = ERR_EXISTS/ERR_DIR_FULL
+        ;; On error: CF set, AL = ERROR_EXISTS/ERROR_DIRECTORY_FULL
         ;; Check name doesn't already exist
         call find_file
         jc .mkdir_scan
-        mov al, ERR_EXISTS
+        mov al, ERROR_EXISTS
         stc
         jmp .iret_cf
         .mkdir_scan:
         mov di, si             ; DI = dirname for later
-        call scan_dir_entries  ; BX = free entry index, DX = next data sector (16)
+        call scan_directory_entries  ; BX = free entry index, DX = next data sector (16)
         cmp bx, 0FFFFh
         jne .mkdir_write_entry
-        mov al, ERR_DIR_FULL
+        mov al, ERROR_DIRECTORY_FULL
         stc
         jmp .iret_cf
         .mkdir_write_entry:
         ;; Load the root sector containing the free entry
         push dx
-        call dir_load_entry    ; BX = entry ptr (uses root index from scan)
+        call directory_load_entry    ; BX = entry ptr (uses root index from scan)
         pop dx
         ;; Write directory name, null-padded
         push dx
         push bx
         mov si, di
-        call write_dir_name
+        call write_directory_name
         pop bx                 ; BX = entry base
         pop dx                 ; DX = next free sector (16-bit)
-        mov byte [bx+DIR_OFF_FLAGS], FLAG_DIR
-        mov [bx+DIR_OFF_SECTOR], dx
-        mov word [bx+DIR_OFF_SIZE], DIR_SECTORS * 512
-        mov word [bx+DIR_OFF_SIZE+2], 0
+        mov byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
+        mov [bx+DIRECTORY_OFFSET_SECTOR], dx
+        mov word [bx+DIRECTORY_OFFSET_SIZE], DIRECTORY_SECTORS * 512
+        mov word [bx+DIRECTORY_OFFSET_SIZE+2], 0
         ;; Write root directory sector back
-        call dir_write_back
+        call directory_write_back
         jc .iret_cf
         ;; Zero-fill DISK_BUFFER once and write it to each subdir sector
         push dx
@@ -128,7 +128,7 @@ syscall_handler:
         pop di
         pop dx
         push dx
-        mov cx, DIR_SECTORS
+        mov cx, DIRECTORY_SECTORS
         mov ax, dx             ; AX = first subdir sector
         .mkdir_zero_loop:
         push ax
@@ -151,11 +151,11 @@ syscall_handler:
         .fs_rename:
         ;; Rename file: SI = old name, DI = new name (max 26 chars)
         ;; Both names may contain one '/' but must refer to the same directory.
-        ;; On error: CF set, AL = ERR_PROTECTED/ERR_EXISTS/ERR_NOT_FOUND
+        ;; On error: CF set, AL = ERROR_PROTECTED/ERROR_EXISTS/ERROR_NOT_FOUND
         ;; Protect shell: cannot be renamed
         call .check_shell
         jne .fs_rename_check_prefix
-        mov al, ERR_PROTECTED
+        mov al, ERROR_PROTECTED
         stc
         jmp .iret_cf
         .fs_rename_check_prefix:
@@ -234,7 +234,7 @@ syscall_handler:
         call find_file
         pop si
         jc .fs_rename_find_old ; New name not found: proceed
-        mov al, ERR_EXISTS
+        mov al, ERROR_EXISTS
         stc
         jmp .iret_cf
         .fs_rename_find_old:
@@ -243,7 +243,7 @@ syscall_handler:
         jc .fs_rename_not_found
         jmp .fs_rename_do
         .fs_rename_not_found:
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .fs_rename_do:
@@ -263,10 +263,10 @@ syscall_handler:
         push cx
         push si
         mov si, di
-        call write_dir_name
+        call write_directory_name
         pop si
         pop cx
-        call dir_write_back
+        call directory_write_back
         jmp .iret_cf
 
         .fs_rename_cross:
@@ -281,13 +281,13 @@ syscall_handler:
         call find_file
         pop si
         jc .frc_find_old
-        mov al, ERR_EXISTS
+        mov al, ERROR_EXISTS
         stc
         jmp .iret_cf
         .frc_find_old:
         call find_file         ; BX = src entry pointer in DISK_BUFFER
         jnc .frc_got_src
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .frc_got_src:
@@ -296,16 +296,16 @@ syscall_handler:
         ;;   [bp+10] src_sec      [bp+8]  size_lo  [bp+6]  size_hi
         ;;   [bp+4]  flags        [bp+2]  src_dir_sec  [bp+0] src_entry_off
         push di                ; [bp+12]
-        mov ax, [bx+DIR_OFF_SECTOR]
+        mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
         push ax                ; [bp+10]
-        mov ax, [bx+DIR_OFF_SIZE]
+        mov ax, [bx+DIRECTORY_OFFSET_SIZE]
         push ax                ; [bp+8]
-        mov ax, [bx+DIR_OFF_SIZE+2]
+        mov ax, [bx+DIRECTORY_OFFSET_SIZE+2]
         push ax                ; [bp+6]
         xor ax, ax
-        mov al, [bx+DIR_OFF_FLAGS]
+        mov al, [bx+DIRECTORY_OFFSET_FLAGS]
         push ax                ; [bp+4]
-        mov ax, [dir_loaded_sec]
+        mov ax, [directory_loaded_sector]
         push ax                ; [bp+2]
         mov ax, bx
         sub ax, DISK_BUFFER
@@ -322,7 +322,7 @@ syscall_handler:
         inc di
         jmp .frc_scan
         .frc_dst_root:
-        mov ax, DIR_SECTOR
+        mov ax, DIRECTORY_SECTOR
         jmp .frc_alloc
         .frc_dst_subdir:
         mov byte [di], 0
@@ -332,19 +332,19 @@ syscall_handler:
         pop di
         mov byte [di], '/'
         jc .frc_bad_dir
-        test byte [bx+DIR_OFF_FLAGS], FLAG_DIR
+        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .frc_bad_dir
-        mov ax, [bx+DIR_OFF_SECTOR]
+        mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
         inc di                 ; basename = char after '/'
         mov [bp+12], di
         jmp .frc_alloc
         .frc_bad_dir:
         add sp, 14
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .frc_alloc:
-        call subdir_find_free ; BX = entry ptr; dir_loaded_sec set
+        call subdir_find_free ; BX = entry ptr; directory_loaded_sector set
         jnc .frc_write
         add sp, 14
         stc
@@ -352,21 +352,21 @@ syscall_handler:
         .frc_write:
         push bx
         mov si, [bp+12]
-        call write_dir_name
+        call write_directory_name
         pop bx
         mov al, [bp+4]
-        mov [bx+DIR_OFF_FLAGS], al
+        mov [bx+DIRECTORY_OFFSET_FLAGS], al
         mov ax, [bp+10]
-        mov [bx+DIR_OFF_SECTOR], ax
+        mov [bx+DIRECTORY_OFFSET_SECTOR], ax
         mov ax, [bp+8]
-        mov [bx+DIR_OFF_SIZE], ax
+        mov [bx+DIRECTORY_OFFSET_SIZE], ax
         mov ax, [bp+6]
-        mov [bx+DIR_OFF_SIZE+2], ax
-        call dir_write_back
+        mov [bx+DIRECTORY_OFFSET_SIZE+2], ax
+        call directory_write_back
         jc .frc_disk_err
         ;; Re-read src directory sector and zero the source entry
         mov ax, [bp+2]
-        mov [dir_loaded_sec], ax
+        mov [directory_loaded_sector], ax
         call read_sector
         jc .frc_disk_err
         mov bx, DISK_BUFFER
@@ -374,29 +374,29 @@ syscall_handler:
         push di
         push cx
         mov di, bx
-        mov cx, DIR_ENTRY_SIZE / 2
+        mov cx, DIRECTORY_ENTRY_SIZE / 2
         xor ax, ax
         cld
         rep stosw
         pop cx
         pop di
-        call dir_write_back
+        call directory_write_back
         jc .frc_disk_err
         add sp, 14
         clc
         jmp .iret_cf
         .frc_disk_err:
         add sp, 14
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
 
-        .io_getc:
+        .io_get_character:
         call getc_internal
         iret
 
         .io_putc:
-        call put_char
+        call put_character
         iret
 
         .io_puts:
@@ -415,7 +415,7 @@ syscall_handler:
         push si
         push cx
         cld
-        mov si, mac_addr
+        mov si, mac_address
         mov cx, 3              ; 6 bytes = 3 words
         rep movsw
         pop cx
@@ -427,16 +427,16 @@ syscall_handler:
         call icmp_ping
         jmp .iret_cf
 
-        .net_recv:
-        call ne2k_recv
+        .net_receive:
+        call ne2k_receive
         jmp .iret_cf
 
         .net_send:
         call ne2k_send
         jmp .iret_cf
 
-        .net_udp_recv:
-        call udp_recv
+        .net_udp_receive:
+        call udp_receive
         jmp .iret_cf
 
         .net_udp_send:
@@ -483,9 +483,9 @@ syscall_handler:
         .scr_clear:
         ;; Clear serial terminal
         mov al, `\r`
-        call serial_char
+        call serial_character
         mov al, 0Ch             ; Form feed
-        call serial_char
+        call serial_character
         ;; Clear screen
         call clear_screen
         iret
@@ -524,18 +524,18 @@ syscall_handler:
         .sys_exec:
         ;; Execute program: SI = filename
         ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
-        ;; On error: CF set, AL = ERR_NOT_FOUND or ERR_NOT_EXEC
+        ;; On error: CF set, AL = ERROR_NOT_FOUND or ERROR_NOT_EXECUTE
         call find_file
         jc .exec_not_found
         jmp .exec_check_flag
         .exec_not_found:
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .exec_check_flag:
-        test byte [bx+DIR_OFF_FLAGS], FLAG_EXEC
+        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_EXECUTE
         jnz .exec_load
-        mov al, ERR_NOT_EXEC
+        mov al, ERROR_NOT_EXECUTE
         stc
         jmp .iret_cf
         .exec_load:
@@ -547,7 +547,7 @@ syscall_handler:
         mov di, PROGRAM_BASE
         call load_file
         jnc .exec_run
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .exec_run:
@@ -599,50 +599,50 @@ syscall_handler:
         ret
 
         subdir_find_free:
-        ;; Scan a subdirectory's DIR_SECTORS data sectors for the first
+        ;; Scan a subdirectory's DIRECTORY_SECTORS data sectors for the first
         ;; empty entry.
         ;; Input: AX = subdirectory's first data sector (16-bit)
         ;; Output: CF clear, BX = entry pointer in DISK_BUFFER on success.
-        ;;         dir_loaded_sec set to the sector containing the entry.
-        ;;         CF set on failure with AL = ERR_NOT_FOUND (read error)
-        ;;         or ERR_DIR_FULL (no empty entry).
+        ;;         directory_loaded_sector set to the sector containing the entry.
+        ;;         CF set on failure with AL = ERROR_NOT_FOUND (read error)
+        ;;         or ERROR_DIRECTORY_FULL (no empty entry).
         ;; Clobbers: AX, BX, CX, DX
-        mov dx, DIR_SECTORS
+        mov dx, DIRECTORY_SECTORS
         .sff_loop:
         push ax
         push dx
-        mov [dir_loaded_sec], ax
+        mov [directory_loaded_sector], ax
         call read_sector
         pop dx
         pop ax
         jnc .sff_scan_init
-        mov al, ERR_NOT_FOUND
+        mov al, ERROR_NOT_FOUND
         stc
         ret
         .sff_scan_init:
         mov bx, DISK_BUFFER
-        mov cx, DIR_MAX_ENTRIES / DIR_SECTORS
+        mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sff_scan:
         cmp byte [bx], 0
         je .sff_found
-        add bx, DIR_ENTRY_SIZE
+        add bx, DIRECTORY_ENTRY_SIZE
         loop .sff_scan
         inc ax
         dec dx
         jnz .sff_loop
-        mov al, ERR_DIR_FULL
+        mov al, ERROR_DIRECTORY_FULL
         stc
         ret
         .sff_found:
         clc
         ret
 
-        write_dir_name:
+        write_directory_name:
         ;; Copy null-terminated name from SI into entry at BX, padding with
-        ;; zeros up to DIR_NAME_LEN - 1 bytes total. SI is advanced past the
-        ;; null terminator and BX is advanced DIR_NAME_LEN - 1 bytes.
+        ;; zeros up to DIRECTORY_NAME_LENGTH - 1 bytes total. SI is advanced past the
+        ;; null terminator and BX is advanced DIRECTORY_NAME_LENGTH - 1 bytes.
         ;; Clobbers: AX, BX (advanced), CX, SI (advanced)
-        mov cx, DIR_NAME_LEN - 1
+        mov cx, DIRECTORY_NAME_LENGTH - 1
         .copy:
         mov al, [si]
         test al, al
@@ -667,13 +667,13 @@ syscall_handler:
 getc_internal:
         .poll:
         ;; Drain pushback buffer first (used when ESC sequence detection reads ahead)
-        cmp byte [serial_pb_count], 0
+        cmp byte [serial_pushback_count], 0
         je .poll_hw
-        mov al, [serial_pb_buf]    ; return first buffered byte
-        mov ah, [serial_pb_buf+1]
-        mov [serial_pb_buf], ah    ; shift second byte down
+        mov al, [serial_pushback_buffer]    ; return first buffered byte
+        mov ah, [serial_pushback_buffer+1]
+        mov [serial_pushback_buffer], ah    ; shift second byte down
         xor ah, ah
-        dec byte [serial_pb_count]
+        dec byte [serial_pushback_count]
         ret
         .poll_hw:
         push dx
@@ -716,8 +716,8 @@ getc_internal:
         cmp al, '['
         je .esc_final
         ;; Not '[': push it back and return ESC
-        mov [serial_pb_buf], al
-        mov byte [serial_pb_count], 1
+        mov [serial_pushback_buffer], al
+        mov byte [serial_pushback_count], 1
         pop cx
         jmp .serial_esc
         .esc_final:
@@ -732,8 +732,8 @@ getc_internal:
         jnz .read_final
         loop .esc_final_poll
         pop cx
-        mov byte [serial_pb_buf], '['
-        mov byte [serial_pb_count], 1
+        mov byte [serial_pushback_buffer], '['
+        mov byte [serial_pushback_count], 1
         jmp .serial_esc         ; Timeout: return ESC, push back '['
         .read_final:
         push dx
@@ -750,9 +750,9 @@ getc_internal:
         cmp al, 'D'
         je .arrow_left
         ;; Unknown third byte: push back '[' and the byte, return ESC
-        mov byte [serial_pb_buf], '['
-        mov [serial_pb_buf+1], al
-        mov byte [serial_pb_count], 2
+        mov byte [serial_pushback_buffer], '['
+        mov [serial_pushback_buffer+1], al
+        mov byte [serial_pushback_count], 2
         jmp .serial_esc
         .arrow_up:
         xor al, al

@@ -176,7 +176,7 @@ class CodeGenerator:
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
         "DISK_BUFFER",
-        "FLAG_EXEC",
+        "FLAG_EXECUTE",
         "O_CREAT",
         "O_RDONLY",
         "O_TRUNC",
@@ -357,7 +357,7 @@ class CodeGenerator:
         ``open(name, flags)`` or ``open(name, flags, mode)`` emits
         ``mov si, <name> / mov al, <flags> / [mov dl, <mode>] /
         mov ah, SYS_IO_OPEN / int 30h``.  The optional *mode*
-        parameter sets the file permission flags (e.g. ``FLAG_EXEC``)
+        parameter sets the file permission flags (e.g. ``FLAG_EXECUTE``)
         when ``O_CREAT`` creates a new file.  Returns the fd number
         in AX, or -1 on error (CF set).
         """
@@ -440,7 +440,7 @@ class CodeGenerator:
         self.emit(f"        jz .pb_{label_index}_end")
         self.emit(f".pb_{label_index}:")
         self.emit("        lodsb")
-        self.emit("        mov ah, SYS_IO_PUTC")
+        self.emit("        mov ah, SYS_IO_PUT_CHARACTER")
         self.emit("        int 30h")
         self.emit(f"        loop .pb_{label_index}")
         self.emit(f".pb_{label_index}_end:")
@@ -466,14 +466,14 @@ class CodeGenerator:
             self.emit(f"        mov al, {argument[1]}")
         else:
             self.generate_expression(argument)
-        self.emit("        mov ah, SYS_IO_PUTC")
+        self.emit("        mov ah, SYS_IO_PUT_CHARACTER")
         self.emit("        int 30h")
 
     def builtin_puts(self, arguments: list[tuple], /) -> None:
         """Generate code for the puts() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="puts")
         self.emit_si_from_argument(arguments[0])
-        self.emit("        mov ah, SYS_IO_PUTS")
+        self.emit("        mov ah, SYS_IO_PUT_STRING")
         self.emit("        int 30h")
 
     def builtin_read(self, arguments: list[tuple], /) -> None:
@@ -1053,7 +1053,7 @@ class CodeGenerator:
             elif self.die_count >= 2:
                 self.emit("        jmp .exit")
                 self.emit(".die:")
-                self.emit("        mov ah, SYS_IO_PUTS")
+                self.emit("        mov ah, SYS_IO_PUT_STRING")
                 self.emit("        int 30h")
             self.emit(".exit:")
             self.emit("        mov ah, SYS_EXIT")
@@ -1205,7 +1205,7 @@ class CodeGenerator:
         """Replace a lone ``jmp .die`` with inline puts + ``jmp .exit``."""
         for i, line in enumerate(self.lines):
             if line.strip() == "jmp .die":
-                self.lines[i] = "        mov ah, SYS_IO_PUTS"
+                self.lines[i] = "        mov ah, SYS_IO_PUT_STRING"
                 self.lines.insert(i + 1, "        int 30h")
                 self.lines.insert(i + 2, "        jmp .exit")
                 return
