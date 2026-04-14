@@ -1774,6 +1774,16 @@ handle_rep:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; handle_repne: repne prefix — emits 0xF2 then parses the next mnemonic
+;;; -----------------------------------------------------------------------
+handle_repne:
+        mov al, 0F2h
+        call emit_byte_al
+        call skip_ws
+        call parse_mnemonic
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; handle_ret
 ;;; -----------------------------------------------------------------------
 handle_ret:
@@ -1816,6 +1826,14 @@ handle_sbb:
         pop si
         .sbb_bad2:
         jmp abort_unknown
+
+;;; -----------------------------------------------------------------------
+;;; handle_scasb
+;;; -----------------------------------------------------------------------
+handle_scasb:
+        mov al, 0AEh
+        call emit_byte_al
+        ret
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_shl: shl r8, imm8 / shl r16, imm8
@@ -2850,11 +2868,42 @@ parse_line:
         cmp al, ':'
         je .found_label
         cmp al, ' '
-        je .no_label
+        je .check_equ
         cmp al, 9
-        je .no_label
+        je .check_equ
         inc si
         jmp .scan_colon
+
+        .check_equ:
+        ;; SI points to space after identifier; stack has name start
+        mov [equ_space], si    ; save space position
+        call skip_ws
+        mov di, STR_EQU
+        call match_word
+        jc .not_equ
+        ;; "NAME equ VALUE" — null-terminate name at the space
+        pop di                 ; DI = start of name
+        mov bx, [equ_space]
+        mov byte [bx], 0
+        call skip_ws
+        call resolve_value     ; AX = value
+        ;; Add as constant (pass 1 only)
+        cmp byte [pass], 1
+        jne .equ_done
+        push si
+        mov si, di
+        mov bx, 0FFFFh         ; global scope
+        call symbol_add_constant
+        pop si
+        .equ_done:
+        ;; Restore null-terminated byte
+        mov bx, [equ_space]
+        mov byte [bx], ' '
+        jmp .done
+
+        .not_equ:
+        mov si, [equ_space]    ; restore SI to space position
+        jmp .no_label
 
         .found_label:
         ;; SI points to ':', stack has start of label name
@@ -3577,6 +3626,13 @@ resolve_value:
         je .char_literal
         cmp byte [si], '`'
         je .backtick_literal
+        ;; Check for $ (current address)
+        cmp byte [si], '$'
+        jne .not_dollar
+        inc si
+        mov ax, [current_address]
+        jmp .check_expr
+        .not_dollar:
         ;; Check if starts with digit -- it's a number
         mov al, [si]
         cmp al, '0'
@@ -3997,8 +4053,10 @@ mnemonic_table:
         dw STR_POP, handle_pop
         dw STR_PUSH, handle_push
         dw STR_REP, handle_rep
+        dw STR_REPNE, handle_repne
         dw STR_RET, handle_ret
         dw STR_SBB, handle_sbb
+        dw STR_SCASB, handle_scasb
         dw STR_SHL, handle_shl
         dw STR_SHR, handle_shr
         dw STR_STC, handle_stc
@@ -4023,6 +4081,7 @@ STR_CMP     db 'cmp',0
 STR_DEC     db 'dec',0
 STR_DIV     db 'div',0
 STR_DB      db 'db',0
+STR_EQU     db 'equ',0
 STR_DD      db 'dd',0
 STR_DEFINE  db 'define',0
 STR_DW      db 'dw',0
@@ -4059,8 +4118,10 @@ STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
 STR_PUSH    db 'push',0
 STR_REP     db 'rep',0
+STR_REPNE   db 'repne',0
 STR_RET     db 'ret',0
 STR_SBB     db 'sbb',0
+STR_SCASB   db 'scasb',0
 STR_SHL     db 'shl',0
 STR_SHR     db 'shr',0
 STR_STC     db 'stc',0
@@ -4126,7 +4187,8 @@ MESSAGE_USAGE   db `Usage: asm <source> <output>\n\0`
 changed_flag  db 0
 cmp_op1_size  db 0
 current_address      dw 0
-error_flag      db 0
+equ_space     dw 0
+error_flag    db 0
 global_scope  dw 0FFFFh
 include_depth     db 0
 include_path  times 32 db 0

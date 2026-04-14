@@ -39,6 +39,9 @@
         %assign O_TRUNC  20h
         %assign O_WRONLY 01h
         %assign PROGRAM_BASE 0600h
+        %assign STDERR 2
+        %assign STDIN 0
+        %assign STDOUT 1
 
         ;; Syscall numbers (INT 30h, passed in AH)
         %assign SYS_FS_CHMOD  00h
