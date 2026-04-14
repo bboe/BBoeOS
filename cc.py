@@ -36,17 +36,17 @@ Register allocation:
                           | '(' expression ')'
 
 Builtins:
+    close(fd)                -- close a file descriptor
     datetime(array)          -- fill 7-word array with BCD date/time fields
     die(message)             -- print message and terminate
     exit()                   -- terminate program
-    close(fd)                -- close a file descriptor
     mkdir(name)              -- create directory, return 0 or ERR_* code
     open(name, flags)        -- open file, return fd or -1 on error
-    read(fd, buffer, count)  -- read bytes from fd, return count or -1
-    write(fd, buffer, count) -- write bytes to fd, return count or -1
     print_bcd(expression)    -- print BCD byte as two decimal digits
     putc(expression)         -- print single character
+    read(fd, buffer, count)  -- read bytes from fd, return count or -1
     uptime()                 -- return seconds since boot
+    write(fd, buffer, count) -- write bytes to fd, return count or -1
 
 Usage: cc.py <input.c> [output.asm]
 """
@@ -275,11 +275,11 @@ class CodeGenerator:
         "exit": frozenset(),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
+        "print_bcd": frozenset({"ax"}),
+        "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
+        "putc": frozenset({"ax"}),
         "read": frozenset({"ax", "cx", "di"}),
         "strlen": frozenset({"ax", "cx", "di"}),
-        "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
-        "print_bcd": frozenset({"ax"}),
-        "putc": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
     }
