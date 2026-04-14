@@ -2,36 +2,31 @@
 
 %include "constants.asm"
 
-        ;; Memory layout. The assembler's scratch buffers are split across
-        ;; two free regions of conventional memory to avoid the loaded
-        ;; binary at PROGRAM_BASE=0x0600, stage 1's live code at
-        ;; 0x7C00-0x7DFF, and stage 2 at 0x7E00-0x8DFF:
-        ;;   - small buffers at 0x3000-0x3FFF (asm.asm ends well below 0x3000)
-        ;;   - SYM_TABLE at 0x9800+ (past stage 2 + kernel vars, below 0xE000)
-        ;; Fixed addresses are used (rather than labels) because the
-        ;; LINE_BUF/OUT_BUF/SRC_BUF/INC_SAVE/INC_SRC_SAVE float on top of
-        ;; program_end (defined at the end of this file) so they grow with
-        ;; the binary instead of sitting at fixed addresses. The pass 1
-        ;; iteration loop re-evaluates these every pass, and they're only
-        ;; ever used as 16-bit immediates / displacements, so the encoding
-        ;; size is fixed and the binary stabilizes after iter 2.
-        %assign JUMP_MAX      512       ; max jcc/jmp instructions per source
+        ;; Memory layout. The assembler's scratch buffers live after the
+        ;; binary at program_end. The symbol table and jump table live in
+        ;; a dedicated ES segment (0x2000, linear 0x20000) so they don't
+        ;; compete with segment-0 memory.
+        %assign JUMP_MAX      4096      ; max jcc/jmp instructions per source
+        %assign JUMP_TABLE    0F000h    ; jump_table offset within ES segment (4096 bytes)
         %assign LINE_MAX      255
         %define LINE_BUF      program_end
         %define OUT_BUF       LINE_BUF + 256
         %define SRC_BUF       OUT_BUF + 512
         %define INC_SAVE      SRC_BUF + 512   ; include stack (6 bytes: src_fd, src_buf_pos, src_buf_valid)
         %define INC_SRC_SAVE  INC_SAVE + 64   ; saved source buffer (512 bytes per level)
-        %assign SYM_ENTRY     28        ; bytes per symbol entry (24 name + 2 val + 1 type + 1 scope)
-        %assign SYM_MAX       658       ; 658 * 28 = 18424 bytes (0x9800-0xDFF8)
-        %assign SYM_NAME_LEN  24        ; 23 chars + null
-        %assign SYM_TABLE     9800h
+        %assign SYM_ENTRY     36        ; bytes per symbol entry (32 name + 2 val + 1 type + 1 scope)
+        %assign SYM_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)
+        %assign SYM_NAME_LEN  32        ; 31 chars + null
+        %assign SYM_SEGMENT   2000h     ; ES segment for symbol table (linear 0x20000)
 
 ;;; -----------------------------------------------------------------------
 ;;; Main entry point
 ;;; -----------------------------------------------------------------------
 main:
         cld
+        ;; Set ES to symbol table segment
+        mov ax, SYM_SEGMENT
+        mov es, ax
         ;; Parse arguments: "source output"
         mov si, [EXEC_ARG]
         test si, si
@@ -80,26 +75,26 @@ main:
         mov byte [di], 0       ; null-terminate prefix
 
         ;; -- Pass 1: collect labels and converge jump sizes --
-        ;; Iterate sizing passes optimistically: jumps start short, and
-        ;; any forward jcc/jmp whose target turns out to be out of rel8
-        ;; range is promoted to the near (rel16) form. Each jump can grow
-        ;; at most once, so this loop terminates in O(number of jumps).
+        ;; Iterative pass 1: jumps start near (pessimistic) and are
+        ;; shrunk to short where they fit. Matches NASM's optimizer:
+        ;; shrinking only makes targets closer, so convergence is
+        ;; monotonic with no oscillation.
         mov byte [pass], 1
         mov word [sym_count], 0
         mov word [org_value], 0
-        ;; Clear jump_table (all jumps start short)
+        ;; Fill jump_table with 1 (all jumps start near, in ES segment)
         push di
         push cx
-        mov di, jump_table
+        mov di, JUMP_TABLE
         mov cx, JUMP_MAX
-        xor al, al
+        mov al, 1
         cld
         rep stosb
         pop cx
         pop di
         mov word [iter_count], 0
         .pass1_loop:
-        mov byte [growth_flag], 0
+        mov byte [changed_flag], 0
         mov word [cur_addr], 0
         mov word [global_scope], 0FFFFh
         mov word [jump_index], 0
@@ -107,23 +102,23 @@ main:
         test byte [err_flag], 0FFh
         jnz .err_pass1_io
         inc word [iter_count]
+        ;; Safety bound to catch oscillation.
+        cmp word [iter_count], 100
+        jae .err_pass1_iter
         ;; Always run at least 2 iterations: iter 1 builds the symbol
         ;; table; iter 2 is the first one that can verify forward refs.
         cmp word [iter_count], 2
         jb .pass1_loop
-        ;; Loop while any jump grew this iteration.
-        test byte [growth_flag], 0FFh
+        ;; Loop while any jump changed size this iteration.
+        test byte [changed_flag], 0FFh
         jnz .pass1_loop
-        ;; Safety bound to catch bugs.
-        cmp word [iter_count], 100
-        jae .err_pass1_iter
 
         ;; -- Open output file for writing --
         mov si, [out_name]
         mov al, O_WRONLY + O_CREAT + O_TRUNC
         mov dl, FLAG_EXEC
         mov ah, SYS_IO_OPEN
-        int 30h
+        call syscall
         jc .err_create
         mov [out_fd], ax
 
@@ -143,22 +138,22 @@ main:
         ;; Close output — kernel writes back directory size from fd_pos
         mov bx, [out_fd]
         mov ah, SYS_IO_CLOSE
-        int 30h
+        call syscall
         jc .err_write_dir
 
         ;; Print success message
         mov si, MSG_OK
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov ah, SYS_EXIT
-        int 30h
+        call syscall
 
         .usage:
         mov si, MSG_USAGE
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov ah, SYS_EXIT
-        int 30h
+        call syscall
         .err_create:
         mov si, MSG_E_CREATE
         jmp .die
@@ -181,9 +176,9 @@ main:
         mov si, MSG_ERROR
         .die:
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov ah, SYS_EXIT
-        int 30h
+        call syscall
 
 ;;; -----------------------------------------------------------------------
 ;;; abort_unknown: print the offending line and exit
@@ -194,24 +189,24 @@ abort_unknown:
         push si                ; save SI for second print
         mov si, MSG_E_UNKNOWN
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov si, LINE_BUF
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov al, 0Ah
         mov ah, SYS_IO_PUTC
-        int 30h
+        call syscall
         mov si, MSG_E_AT
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         pop si
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov al, 0Ah
         mov ah, SYS_IO_PUTC
-        int 30h
+        call syscall
         mov ah, SYS_EXIT
-        int 30h
+        call syscall
 
 ;;; -----------------------------------------------------------------------
 ;;; do_pass: run one pass over the source file
@@ -232,7 +227,7 @@ do_pass:
         mov si, [src_name]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
-        int 30h
+        call syscall
         jc .pass_err
         mov [src_fd], ax
         mov word [src_buf_pos], 0
@@ -257,7 +252,7 @@ do_pass:
         ;; Close source fd
         mov bx, [src_fd]
         mov ah, SYS_IO_CLOSE
-        int 30h
+        call syscall
         pop di
         pop si
         pop dx
@@ -316,9 +311,9 @@ encode_rel8_jump:
         mov bx, [jump_index]
         inc word [jump_index]
 
-        ;; If already marked near, skip the short-form path entirely.
-        cmp byte [jump_table + bx], 0
-        jne .long_form
+        ;; If already marked near, try to shrink (pass 1 only).
+        cmp byte [es:JUMP_TABLE + bx], 0
+        jne .try_shrink
 
         ;; Currently short. In pass 2 we trust it and emit; in pass 1 we
         ;; check whether the target (if known) still fits in rel8.
@@ -337,10 +332,40 @@ encode_rel8_jump:
         add ax, 128
         cmp ax, 256
         jb .emit_short
-        ;; Out of range -- promote to near and signal growth
-        mov byte [jump_table + bx], 1
-        mov byte [growth_flag], 1
-        ;; Fall through to .long_form
+        ;; Out of range -- promote to near
+        mov byte [es:JUMP_TABLE + bx], 1
+        mov byte [changed_flag], 1
+        jmp .long_form
+
+        .try_shrink:
+        ;; Currently near. On pass 2, just emit near.
+        cmp byte [pass], 1
+        jne .long_form
+
+        push bx
+        call peek_label_target
+        pop bx
+        jc .long_form                  ; unknown target -> stay near
+
+        ;; Compute displacement using near instruction size.
+        ;; Near jcc = 4 bytes (0F 8x rel16), near jmp = 3 bytes (E9 rel16).
+        mov dx, [cur_addr]
+        add dx, 4                      ; assume jcc
+        push bp
+        mov bp, sp
+        cmp byte [bp+2], 0EBh          ; saved opcode: [bp]=old_bp, [bp+2]=opcode
+        pop bp
+        jne .shrink_check
+        dec dx                         ; jmp: 3 bytes, not 4
+        .shrink_check:
+        sub ax, dx
+        add ax, 128
+        cmp ax, 256
+        jae .long_form                 ; doesn't fit, stay near
+        ;; Fits in rel8 -- shrink to short
+        mov byte [es:JUMP_TABLE + bx], 0
+        mov byte [changed_flag], 1
+        jmp .emit_short
 
         .long_form:
         pop ax                         ; restore opcode
@@ -391,7 +416,7 @@ flush_output:
         mov si, OUT_BUF
         mov cx, [out_pos]
         mov ah, SYS_IO_WRITE
-        int 30h
+        call syscall
         mov word [out_pos], 0
         .fl_done:
         pop di
@@ -1135,6 +1160,34 @@ handle_loop:
 ;;; -----------------------------------------------------------------------
 handle_mov:
         call skip_ws
+        ;; Check for 'mov es, <r16>' — segment register move
+        cmp byte [si], 'e'
+        jne .mov_normal
+        cmp byte [si+1], 's'
+        jne .mov_normal
+        ;; Peek ahead: next non-space after 'es' must be ','
+        push si
+        add si, 2
+        call skip_ws
+        cmp byte [si], ','
+        jne .not_seg
+        inc si
+        call skip_ws
+        ;; Parse source register
+        call parse_operand
+        pop bx                 ; discard saved SI
+        ;; Emit 8E /r: 8E ModR/M where reg=0 (ES), r/m=source reg
+        push ax
+        mov al, 8Eh
+        call emit_byte_al
+        pop ax
+        ;; AL = source register number, ModR/M = 11 000 rrr
+        or al, 0C0h            ; mod=11, reg=000 (ES)
+        call emit_byte_al
+        ret
+        .not_seg:
+        pop si                 ; restore SI to before 'es'
+        .mov_normal:
         ;; Parse destination
         call parse_operand     ; Returns: type in AH, value in DX, reg in AL
         mov [op1_type], ah
@@ -1657,20 +1710,56 @@ handle_or:
         jmp abort_unknown
 
 ;;; -----------------------------------------------------------------------
-;;; handle_pop: pop r16
+;;; handle_pop: pop r16 / pop ds / pop es
 ;;; -----------------------------------------------------------------------
 handle_pop:
         call skip_ws
+        cmp byte [si], 'd'
+        jne .pop_not_ds
+        cmp byte [si+1], 's'
+        jne .pop_reg
+        add si, 2
+        mov al, 1Fh            ; pop ds
+        call emit_byte_al
+        ret
+        .pop_not_ds:
+        cmp byte [si], 'e'
+        jne .pop_reg
+        cmp byte [si+1], 's'
+        jne .pop_reg
+        add si, 2
+        mov al, 07h            ; pop es
+        call emit_byte_al
+        ret
+        .pop_reg:
         call parse_register    ; AL = reg
         add al, 58h            ; 58+reg
         call emit_byte_al
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; handle_push: push r16
+;;; handle_push: push r16 / push ds / push es
 ;;; -----------------------------------------------------------------------
 handle_push:
         call skip_ws
+        cmp byte [si], 'd'
+        jne .push_not_ds
+        cmp byte [si+1], 's'
+        jne .push_reg
+        add si, 2
+        mov al, 1Eh            ; push ds
+        call emit_byte_al
+        ret
+        .push_not_ds:
+        cmp byte [si], 'e'
+        jne .push_reg
+        cmp byte [si+1], 's'
+        jne .push_reg
+        add si, 2
+        mov al, 06h            ; push es
+        call emit_byte_al
+        ret
+        .push_reg:
         call parse_register    ; AL = reg
         add al, 50h            ; 50+reg
         call emit_byte_al
@@ -2210,7 +2299,7 @@ include_pop:
         ;; Close the include file's fd
         mov bx, [src_fd]
         mov ah, SYS_IO_CLOSE
-        int 30h
+        call syscall
         ;; Restore from INC_SAVE (parent file state)
         mov bx, INC_SAVE
         mov ax, [bx+0]                 ; src_fd
@@ -2220,11 +2309,15 @@ include_pop:
         mov ax, [bx+4]                 ; src_buf_valid
         mov [src_buf_valid], ax
         ;; Restore SRC_BUF
+        push es
+        push ds
+        pop es                  ; ES=0 for rep movsw
         mov si, INC_SRC_SAVE
         mov di, SRC_BUF
         mov cx, 256
         cld
         rep movsw
+        pop es
         dec byte [inc_depth]
         pop di
         pop si
@@ -2252,11 +2345,15 @@ include_push:
         push si
         push di
         push cx
+        push es
+        push ds
+        pop es                  ; ES=0 for rep movsw
         mov si, SRC_BUF
         mov di, INC_SRC_SAVE
         mov cx, 256
         cld
         rep movsw
+        pop es
         pop cx
         pop di
         pop si
@@ -2284,7 +2381,7 @@ include_push:
         mov si, include_path
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
-        int 30h
+        call syscall
         jc .inc_err
         mov [src_fd], ax
         mov word [src_buf_pos], 0
@@ -2311,7 +2408,7 @@ load_src_sector:
         mov di, SRC_BUF
         mov cx, 512
         mov ah, SYS_IO_READ
-        int 30h
+        call syscall
         cmp ax, -1
         je .no_more
         test ax, ax
@@ -3038,6 +3135,20 @@ parse_operand:
         .mem_operand:
         inc si                 ; skip '['
         call skip_ws
+        ;; Check for segment override prefix 'es:'
+        cmp byte [si], 'e'
+        jne .mem_no_seg
+        cmp byte [si+1], 's'
+        jne .mem_no_seg
+        cmp byte [si+2], ':'
+        jne .mem_no_seg
+        push ax
+        mov al, 26h            ; ES segment override prefix
+        call emit_byte_al
+        pop ax
+        add si, 3              ; skip 'es:'
+        call skip_ws
+        .mem_no_seg:
         ;; Case 1: bracket starts with a register name -> [reg(+disp)?]
         push si
         call parse_register
@@ -3356,7 +3467,7 @@ print_hex_word:
         add al, 7
         .nib_ok:
         mov ah, SYS_IO_PUTC
-        int 30h
+        call syscall
         ret
 
 ;;; -----------------------------------------------------------------------
@@ -3658,36 +3769,36 @@ sym_add:
         push cx
         push di
         push si
-        ;; Compute entry address: SYM_TABLE + sym_count * SYM_ENTRY
+        ;; Compute entry offset: sym_count * SYM_ENTRY (in ES segment)
         push ax                ; save value
         push bx                ; save scope
         mov ax, [sym_count]
-        call sym_entry_addr    ; DI = entry address
+        call sym_entry_addr    ; DI = entry offset in ES
         ;; Copy name (up to SYM_NAME_LEN-1 chars + null)
         mov cx, SYM_NAME_LEN - 1
         .copy_sym_name:
         mov al, [si]
         test al, al
         jz .pad_name
-        mov [di], al
+        mov [es:di], al
         inc si
         inc di
         dec cx
         jnz .copy_sym_name
         .pad_name:
-        mov byte [di], 0
+        mov byte [es:di], 0
         inc di
         dec cx
         jns .pad_name
         ;; Re-derive entry base for metadata
         mov ax, [sym_count]
-        call sym_entry_addr    ; DI = entry address
+        call sym_entry_addr    ; DI = entry offset in ES
         ;; Write metadata at offset SYM_NAME_LEN
         pop bx                 ; restore scope
         pop ax                 ; restore value
-        mov [di+SYM_NAME_LEN], ax     ; value
-        mov byte [di+SYM_NAME_LEN+2], 0 ; type = label
-        mov [di+SYM_NAME_LEN+3], bl   ; scope
+        mov [es:di+SYM_NAME_LEN], ax     ; value
+        mov byte [es:di+SYM_NAME_LEN+2], 0 ; type = label
+        mov [es:di+SYM_NAME_LEN+3], bl   ; scope
         inc word [sym_count]
         pop si
         pop di
@@ -3696,9 +3807,9 @@ sym_add:
         .sym_overflow:
         mov si, MSG_E_SYM_OVERFLOW
         mov ah, SYS_IO_PUTS
-        int 30h
+        call syscall
         mov ah, SYS_EXIT
-        int 30h
+        call syscall
 
 ;;; -----------------------------------------------------------------------
 ;;; sym_add_const: add constant (%assign) to symbol table
@@ -3712,14 +3823,14 @@ sym_add_const:
         push ax
         mov ax, [last_sym_idx]
         call sym_entry_addr    ; DI = entry address
-        mov byte [di+SYM_NAME_LEN+2], 1
+        mov byte [es:di+SYM_NAME_LEN+2], 1
         pop ax
         pop bx
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; sym_entry_addr: compute symbol table entry address
-;;; AX = index, returns DI = SYM_TABLE + index * SYM_ENTRY
+;;; sym_entry_addr: compute symbol table entry offset within ES segment
+;;; AX = index, returns DI = index * SYM_ENTRY (ES-relative)
 ;;; Clobbers AX, DX
 ;;; -----------------------------------------------------------------------
 sym_entry_addr:
@@ -3727,7 +3838,6 @@ sym_entry_addr:
         mov bx, SYM_ENTRY
         mul bx                 ; AX = index * SYM_ENTRY (DX clobbered)
         mov di, ax
-        add di, SYM_TABLE
         pop bx
         ret
 
@@ -3743,14 +3853,14 @@ sym_lookup:
         mov cx, [sym_count]
         test cx, cx
         jz .sym_not_found
-        mov di, SYM_TABLE
+        xor di, di             ; DI = offset 0 within ES segment
         xor dx, dx             ; DX = index
         .sym_search:
         ;; Filter by scope: BL = wanted scope; entry's scope at di+SYM_NAME_LEN+3.
         ;; Wanted 0xFF means global; only match entries whose scope is 0xFF.
         ;; Wanted other means local; only match entries whose scope == BL.
         push ax
-        mov al, [di+SYM_NAME_LEN+3]
+        mov al, [es:di+SYM_NAME_LEN+3]
         cmp al, bl
         pop ax
         jne .sym_next
@@ -3760,7 +3870,7 @@ sym_lookup:
         push cx
         .cmp_name:
         mov al, [si]
-        cmp al, [di]
+        cmp al, [es:di]
         jne .sym_no_match
         test al, al
         jz .sym_name_match
@@ -3773,7 +3883,7 @@ sym_lookup:
         pop si
         ;; Name matches -- found
         .sym_found:
-        mov ax, [di+SYM_NAME_LEN]
+        mov ax, [es:di+SYM_NAME_LEN]
         mov [last_sym_idx], dx
         clc
         pop di
@@ -3824,9 +3934,9 @@ sym_set:
         je .ss_add
         ;; Found -- update value in place
         mov ax, [last_sym_idx]
-        call sym_entry_addr    ; DI = entry address
+        call sym_entry_addr    ; DI = entry offset in ES
         mov ax, [ss_value]
-        mov [di+SYM_NAME_LEN], ax
+        mov [es:di+SYM_NAME_LEN], ax
         pop dx
         pop cx
         pop di
@@ -3986,6 +4096,18 @@ reg_table:
         db 0                   ; terminator
 
 ;;; -----------------------------------------------------------------------
+;;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0
+;;; for kernel calls, then restore ES before returning.
+;;; -----------------------------------------------------------------------
+syscall:
+        push es
+        push ds
+        pop es                  ; ES=0 (kernel expects ES=0)
+        int 30h
+        pop es
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; Strings
 ;;; -----------------------------------------------------------------------
 MSG_E_CREATE    db `Error: cannot create output\n\0`
@@ -4008,12 +4130,11 @@ cmp_op1_size  db 0
 cur_addr      dw 0
 err_flag      db 0
 global_scope  dw 0FFFFh
-growth_flag   db 0
+changed_flag   db 0
 inc_depth     db 0
 include_path  times 32 db 0
 iter_count    dw 0
 jump_index    dw 0
-jump_table    times JUMP_MAX db 0
 last_sym_idx  dw 0
 op1_reg       db 0
 op1_size      db 0
