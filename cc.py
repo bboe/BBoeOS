@@ -45,7 +45,6 @@ Builtins:
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     write(fd, buffer, count) -- write bytes to fd, return count or -1
     print_bcd(expression)    -- print BCD byte as two decimal digits
-    print_buffer(addr, count)-- print count bytes starting at addr
     print_dec(expression)    -- print integer as decimal
     putc(expression)         -- print single character
     uptime()                 -- return seconds since boot
@@ -281,7 +280,6 @@ class CodeGenerator:
         "strlen": frozenset({"ax", "cx", "di"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "print_bcd": frozenset({"ax"}),
-        "print_buffer": frozenset({"ax", "bx", "cx", "si"}),
         "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
         "putc": frozenset({"ax"}),
         "uptime": frozenset({"ax"}),
@@ -545,20 +543,6 @@ class CodeGenerator:
         else:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_BCD")
-
-    def builtin_print_buffer(self, arguments: list[Node], /) -> None:
-        """Generate code for the print_buffer() builtin.
-
-        Emits ``call write_stdout`` — a single syscall instead of a
-        per-byte lodsb/loop.
-        """
-        self.check_argument_count(arguments=arguments, expected=2, name="print_buffer")
-        address_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=address_argument, register="si")
-        self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit("        call FUNCTION_WRITE_STDOUT")
-
-        self.ax_clear()
 
     def builtin_print_dec(self, arguments: list[Node], /) -> None:
         """Generate code for the print_dec() builtin."""

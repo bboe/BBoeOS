@@ -10,7 +10,7 @@ void main(char *arg) {
     int bytes;
     do {
         bytes = read(fd, buffer, 512);
-        print_buffer(buffer, bytes);
+        write(STDOUT, buffer, bytes);
     } while (bytes > 0);
     close(fd);
 }

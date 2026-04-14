@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 138         | 117       | -21   |
+| cat     | 138         | 121       | -17   |
 | chmod   | 140         | 246       | +106  |
 | date    | 74          | 72        | -2    |
 | hello   | 22          | 23        | +1    |
