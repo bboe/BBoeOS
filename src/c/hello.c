@@ -1,3 +1,3 @@
 void main() {
-    puts("Hello world!\n");
+    printf("Hello world!\n");
 }

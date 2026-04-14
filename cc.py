@@ -45,10 +45,7 @@ Builtins:
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     write(fd, buffer, count) -- write bytes to fd, return count or -1
     print_bcd(expression)    -- print BCD byte as two decimal digits
-    print_buffer(addr, count)-- print count bytes starting at addr
-    print_dec(expression)    -- print integer as decimal
     putc(expression)         -- print single character
-    puts(expression)         -- print string (no auto-newline)
     uptime()                 -- return seconds since boot
 
 Usage: cc.py <input.c> [output.asm]
@@ -280,11 +277,9 @@ class CodeGenerator:
         "open": frozenset({"ax", "dx"}),
         "read": frozenset({"ax", "cx", "di"}),
         "strlen": frozenset({"ax", "cx", "di"}),
+        "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "print_bcd": frozenset({"ax"}),
-        "print_buffer": frozenset({"ax", "bx", "cx", "si"}),
-        "print_dec": frozenset({"ax", "bx", "cx", "dx"}),
         "putc": frozenset({"ax"}),
-        "puts": frozenset({"ax", "bx", "cx", "si"}),
         "uptime": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
     }
@@ -547,25 +542,51 @@ class CodeGenerator:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_BCD")
 
-    def builtin_print_buffer(self, arguments: list[Node], /) -> None:
-        """Generate code for the print_buffer() builtin.
+    def builtin_printf(self, arguments: list[Node], /) -> None:
+        """Generate code for the printf() builtin.
 
-        Emits ``call write_stdout`` — a single syscall instead of a
-        per-byte lodsb/loop.
+        First argument must be a string literal.  Remaining arguments
+        are pushed right-to-left onto the stack, followed by the format
+        string pointer.  Uses cdecl calling convention (caller cleans).
+
+        Optimization: when the format string contains no ``%`` at all
+        (no format specifiers, no ``%%`` escapes), emits a direct
+        ``call FUNCTION_PRINT_STRING`` instead of the full printf
+        machinery.
         """
-        self.check_argument_count(arguments=arguments, expected=2, name="print_buffer")
-        address_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=address_argument, register="si")
-        self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit("        call FUNCTION_WRITE_STDOUT")
-
-        self.ax_clear()
-
-    def builtin_print_dec(self, arguments: list[Node], /) -> None:
-        """Generate code for the print_dec() builtin."""
-        self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
-        self.generate_expression(arguments[0])
-        self.emit("        call FUNCTION_PRINT_DECIMAL")
+        if not arguments or not isinstance(arguments[0], String):
+            message = "printf() requires a string literal as the first argument"
+            raise SyntaxError(message)
+        fmt = arguments[0].content
+        # Fast path: no '%' at all → emit print_string directly.
+        if "%" not in fmt and len(arguments) == 1:
+            label = self.new_string_label(fmt)
+            self.emit(f"        mov di, {label}")
+            self.emit("        call FUNCTION_PRINT_STRING")
+            return
+        # Count format specifiers (excluding %%) to validate argument count.
+        expected_args = 0
+        i = 0
+        while i < len(fmt):
+            if fmt[i] == "%" and i + 1 < len(fmt):
+                if fmt[i + 1] != "%":
+                    expected_args += 1
+                i += 2
+            else:
+                i += 1
+        if len(arguments) - 1 != expected_args:
+            message = f"printf() format expects {expected_args} argument{'s' if expected_args != 1 else ''}, got {len(arguments) - 1}"
+            raise SyntaxError(message)
+        # Push arguments right-to-left.
+        for arg in reversed(arguments[1:]):
+            self.generate_expression(arg)
+            self.emit("        push ax")
+        # Push format string pointer.
+        label = self.new_string_label(fmt)
+        self.emit(f"        push {label}")
+        self.emit("        call FUNCTION_PRINTF")
+        stack_size = len(arguments) * 2
+        self.emit(f"        add sp, {stack_size}")
 
     def builtin_putc(self, arguments: list[Node], /) -> None:
         """Generate code for the putc() builtin."""
@@ -579,23 +600,6 @@ class CodeGenerator:
         else:
             self.generate_expression(argument)
         self.emit("        call FUNCTION_PRINT_CHARACTER")
-
-    def builtin_puts(self, arguments: list[Node], /) -> None:
-        """Generate code for the puts() builtin.
-
-        Emits ``call write_stdout`` with the compile-time string length.
-        Only string literals are supported; use write() for variables.
-        """
-        self.check_argument_count(arguments=arguments, expected=1, name="puts")
-        argument = arguments[0]
-        if not isinstance(argument, String):
-            message = "puts() requires a string literal; use write() for variables"
-            raise SyntaxError(message)
-        label = self.new_string_label(argument.content)
-        length = string_byte_length(argument.content)
-        self.emit(f"        mov si, {label}")
-        self.emit(f"        mov cx, {length}")
-        self.emit("        call FUNCTION_WRITE_STDOUT")
 
     def builtin_read(self, arguments: list[Node], /) -> None:
         """Generate code for the read() builtin.
@@ -852,19 +856,19 @@ class CodeGenerator:
             return line[: line.index(":")]
         return None
 
-    def fuse_trailing_puts(self, body: list[Node], /) -> list[Node]:
-        """Transform trailing puts() calls into die() for main.
+    def fuse_trailing_printf(self, body: list[Node], /) -> list[Node]:
+        """Transform trailing simple printf() calls into die() for main.
 
-        Handles both a direct trailing ``puts(msg)`` and ``puts(msg)``
+        Handles both a direct trailing ``printf(msg)`` and ``printf(msg)``
         at the end of branches in a trailing if-else chain.
         """
         if not body:
             return body
         last = body[-1]
-        if isinstance(last, Call) and last.name == "puts":
+        if self.is_simple_printf(last):
             return [*body[:-1], Call("die", last.args)]
         if isinstance(last, If):
-            transformed = self.transform_if_puts(last)
+            transformed = self.transform_if_printf(last)
             if transformed is not last:
                 return [*body[:-1], transformed]
         return body
@@ -905,7 +909,7 @@ class CodeGenerator:
         removed from ``visible_vars`` when the block ends.
 
         Applies several fusions:
-        - ``puts(msg); exit();`` → ``die(msg)``
+        - ``printf(msg); exit();`` → ``die(msg)`` (when msg has no ``%``)
         - ``int err = syscall(...); if (err == 0) { exit(); }`` →
           syscall with ``jnc FUNCTION_EXIT`` (skip error-code conversion)
         - ``int err = syscall(...); if (err != 0) { die(msg); }`` →
@@ -917,8 +921,8 @@ class CodeGenerator:
         i = 0
         while i < len(statements):
             statement = statements[i]
-            # Fuse puts() + exit() into die().
-            if isinstance(statement, Call) and statement.name == "puts" and i + 1 < len(statements) and statements[i + 1] == Call("exit", []):
+            # Fuse simple printf() + exit() into die().
+            if self.is_simple_printf(statement) and i + 1 < len(statements) and statements[i + 1] == Call("exit", []):
                 self.builtin_die(statement.args)
                 i += 2
                 continue
@@ -1174,9 +1178,9 @@ class CodeGenerator:
         if name == "main" and parameters:
             self.emit_argument_vector_startup(parameters)
 
-        # Fuse trailing puts() calls into die() since main exits implicitly.
+        # Fuse trailing printf() calls into die() since main exits implicitly.
         if name == "main":
-            body = self.fuse_trailing_puts(body)
+            body = self.fuse_trailing_printf(body)
         self.generate_body(body)
 
         if name == "main":
@@ -1345,6 +1349,21 @@ class CodeGenerator:
             and expression.op == "%"
             and expression.left == base
             and isinstance(expression.right, Int)
+        )
+
+    @staticmethod
+    def is_simple_printf(node: Node, /) -> bool:
+        """Return True if *node* is ``printf(<literal with no '%'>)``.
+
+        Such calls are semantically equivalent to a plain string print and
+        can be folded into ``die()`` at end-of-main / end-of-branch.
+        """
+        return (
+            isinstance(node, Call)
+            and node.name == "printf"
+            and len(node.args) == 1
+            and isinstance(node.args[0], String)
+            and "%" not in node.args[0].content
         )
 
     @staticmethod
@@ -1697,25 +1716,24 @@ class CodeGenerator:
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
 
-    @staticmethod
-    def transform_branch_puts(body: list[Node], /) -> list[Node]:
-        """Replace trailing puts(msg) with die(msg) in a branch body."""
-        if body and isinstance(body[-1], Call) and body[-1].name == "puts":
+    def transform_branch_printf(self, body: list[Node], /) -> list[Node]:
+        """Replace trailing simple printf(msg) with die(msg) in a branch body."""
+        if body and self.is_simple_printf(body[-1]):
             return [*body[:-1], Call("die", body[-1].args)]
         return body
 
-    def transform_if_puts(self, statement: If, /) -> If:
-        """Transform puts() at end of if-else branches into die()."""
+    def transform_if_printf(self, statement: If, /) -> If:
+        """Transform simple printf() at end of if-else branches into die()."""
         condition, if_body, else_body = statement.cond, statement.body, statement.else_body
-        new_if = self.transform_branch_puts(if_body)
+        new_if = self.transform_branch_printf(if_body)
         new_else = else_body
         if else_body is not None:
             if len(else_body) == 1 and isinstance(else_body[0], If):
-                transformed = self.transform_if_puts(else_body[0])
+                transformed = self.transform_if_printf(else_body[0])
                 if transformed is not else_body[0]:
                     new_else = [transformed]
             else:
-                new_else = self.transform_branch_puts(else_body)
+                new_else = self.transform_branch_printf(else_body)
         if new_if is if_body and new_else is else_body:
             return statement
         return If(condition, new_if, new_else)

@@ -1,9 +1,4 @@
 void main() {
     int seconds = uptime();
-    print_dec(seconds / 3600);
-    putc(':');
-    print_dec(seconds % 3600 / 60);
-    putc(':');
-    print_dec(seconds % 60);
-    putc('\n');
+    printf("%02d:%02d:%02d\n", seconds / 3600, seconds % 3600 / 60, seconds % 60);
 }
