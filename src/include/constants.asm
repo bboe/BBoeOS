@@ -30,6 +30,19 @@
         %assign FD_TYPE_FREE 0
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
+        %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (3 bytes per entry)
+        %assign FUNCTION_DIE            FUNCTION_TABLE      ; SI=msg, CX=len: write to stdout then exit
+        %assign FUNCTION_EXIT           FUNCTION_DIE + 3    ; Exit program (reload shell)
+        %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 3   ; Read one byte from stdin; returns AL
+        %assign FUNCTION_PRINT_BCD     FUNCTION_GET_CHARACTER + 3 ; AL=BCD byte: print two BCD digits
+        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PRINT_BCD + 3 ; AL=byte: print 1-3 decimal digits
+        %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 3 ; AL=char: print to stdout
+        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_CHARACTER + 3 ; AL=byte: print 2 zero-padded decimal digits
+        %assign FUNCTION_PRINT_HEX    FUNCTION_PRINT_DECIMAL + 3 ; AL=byte: print 2 hex digits
+        %assign FUNCTION_PRINT_IP      FUNCTION_PRINT_HEX + 3 ; SI=4-byte IP: print dotted decimal
+        %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
+        %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
+        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINT_STRING + 3 ; SI=buf, CX=len: write to stdout
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
         %assign NET_RECEIVE_BUFFER 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
@@ -50,11 +63,9 @@
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
-        %assign SYS_IO_GET_CHARACTER  12h
-        %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
-        %assign SYS_IO_PUT_CHARACTER  14h
-        %assign SYS_IO_READ  15h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
+        %assign SYS_IO_READ  13h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_WRITE 14h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         %assign SYS_NET_ARP 20h
         %assign SYS_NET_INIT 21h

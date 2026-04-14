@@ -27,18 +27,15 @@ main:
         mov si, MESSAGE_DIRECTORY_FULL
         mov cx, MESSAGE_DIRECTORY_FULL_LENGTH
         .print:
-        call write_stdout
+        jmp FUNCTION_DIE
 
         .done:
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .usage:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 MESSAGE_DIRECTORY_FULL         db `Directory full\n`
 MESSAGE_DIRECTORY_FULL_LENGTH  equ $ - MESSAGE_DIRECTORY_FULL
@@ -49,4 +46,3 @@ MESSAGE_EXISTS_LENGTH equ $ - MESSAGE_EXISTS
 MESSAGE_USAGE         db `Usage: mkdir <name>\n`
 MESSAGE_USAGE_LENGTH  equ $ - MESSAGE_USAGE
 
-%include "write_stdout.asm"

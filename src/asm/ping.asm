@@ -29,12 +29,12 @@ main:
         ;; Print "Pinging X.X.X.X...\n"
         mov si, MESSAGE_PINGING
         mov cx, MESSAGE_PINGING_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         mov si, target_ip
-        call print_ip
+        call FUNCTION_PRINT_IP
         mov si, MESSAGE_ELLIPSIS
         mov cx, MESSAGE_ELLIPSIS_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         mov byte [count], 4
         .loop:
@@ -47,50 +47,45 @@ main:
         push ax
         mov si, MESSAGE_REPLY
         mov cx, MESSAGE_REPLY_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         mov si, target_ip
-        call print_ip
+        call FUNCTION_PRINT_IP
         mov si, MESSAGE_TIME
         mov cx, MESSAGE_TIME_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         pop ax
-        call print_dec
+        call FUNCTION_PRINT_DECIMAL
         mov si, MESSAGE_TICKS
         mov cx, MESSAGE_TICKS_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         jmp .next
 
         .timeout:
         mov si, MESSAGE_TIMEOUT
         mov cx, MESSAGE_TIMEOUT_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         .next:
         call delay_1s
         dec byte [count]
         jnz .loop
 
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .no_arg:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .resolve_err:
         mov si, MESSAGE_RESOLVE_ERROR
         mov cx, MESSAGE_RESOLVE_ERROR_LENGTH
-
-        .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 delay_1s:
         ;; Wait approximately 1 second using BIOS timer ticks
@@ -199,7 +194,3 @@ resolve_dns:
 %include "dns_query.asm"
 %include "encode_domain.asm"
 %include "parse_ip.asm"
-%include "print_byte_dec.asm"
-%include "print_dec.asm"
-%include "print_ip.asm"
-%include "write_stdout.asm"

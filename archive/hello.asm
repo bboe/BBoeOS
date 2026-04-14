@@ -5,12 +5,9 @@
 main:
         mov si, MESSAGE
         mov cx, MESSAGE_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 ;; --- string literals ---
 MESSAGE        db `Hello world!\n`
 MESSAGE_LENGTH equ $ - MESSAGE
 
-%include "write_stdout.asm"

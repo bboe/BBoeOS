@@ -71,27 +71,20 @@ main:
         mov si, MESSAGE_PROTECTED
         mov cx, MESSAGE_PROTECTED_LENGTH
         .error:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         .done:
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .toolong:
         mov si, MESSAGE_TOO_LONG
         mov cx, MESSAGE_TOO_LONG_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         .usage:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         MESSAGE_EXISTS    db `File already exists\n`
         MESSAGE_EXISTS_LENGTH equ $ - MESSAGE_EXISTS
@@ -104,4 +97,3 @@ main:
         MESSAGE_USAGE     db `Usage: mv <oldname> <newname>\n`
         MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 
-%include "write_stdout.asm"

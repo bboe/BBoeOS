@@ -1,1 +1,0 @@
-../src/include/write_stdout.asm

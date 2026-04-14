@@ -30,7 +30,7 @@ main:
 
         mov si, MESSAGE_SENT
         mov cx, MESSAGE_SENT_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         ;; Poll for reply
         mov bx, 0FFFFh
@@ -43,16 +43,14 @@ main:
 
         mov si, MESSAGE_TIMEOUT
         mov cx, MESSAGE_TIMEOUT_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         .got_packet:
         ;; DI = packet buffer, CX = length
         push cx
         mov si, MESSAGE_RECEIVE
         mov cx, MESSAGE_RECEIVE_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         pop cx
 
         ;; Print first 32 bytes as hex
@@ -63,31 +61,24 @@ main:
         .use_length:
         .hex_loop:
         lodsb
-        call print_hex
+        call FUNCTION_PRINT_HEX
         mov al, ' '
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         loop .hex_loop
 
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
+        jmp FUNCTION_EXIT
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .error:
         mov si, MESSAGE_ERROR
         mov cx, MESSAGE_ERROR_LENGTH
-
-        .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         ;; Data
         my_mac times 6 db 0
@@ -104,5 +95,3 @@ main:
         MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
 
 %include "arp_frame.asm"
-%include "print_hex.asm"
-%include "write_stdout.asm"

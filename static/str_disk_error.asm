@@ -1,1 +1,0 @@
-../src/include/str_disk_error.asm

@@ -121,9 +121,7 @@ main:
         mov cx, MESSAGE_USAGE_LENGTH
 
         .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 ;;; -----------------------------------------------------------------------
 ;;; buf_char_at: get logical char at offset BX
@@ -373,8 +371,7 @@ emit_decimal:
         pop dx
         add dl, '0'
         mov al, dl
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         loop .emit
         pop dx
         pop cx
@@ -390,8 +387,7 @@ get_input:
         push bx
         push cx
 
-        mov ah, SYS_IO_GET_CHARACTER
-        int 30h
+        call FUNCTION_GET_CHARACTER
 
         ;; If quit-confirmation is pending: Ctrl+Q confirms, anything else cancels
         cmp byte [confirm_quit], 0
@@ -499,8 +495,7 @@ get_input:
         pop ax
         mov ah, SYS_SCREEN_CLEAR
         int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .do_right:
         call move_right
@@ -824,8 +819,7 @@ render:
         jnz .hscroll_skip
         test si, si
         jz .char_loop          ; past right edge, keep scanning to \n
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         dec si
         jmp .char_loop
         .hscroll_skip:
@@ -835,8 +829,7 @@ render:
         test si, si
         jz .row_no_nl          ; printed full row, cursor already wrapped
         mov al, 0Ah
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         .row_no_nl:
         dec dx
         jnz .row_loop
@@ -849,14 +842,12 @@ render:
         test si, si
         jz .row_pad            ; full row: cursor already wrapped, skip \n
         mov al, 0Ah            ; partial row: \n to finish it
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         .row_pad:
         test dx, dx
         jz .status_bar
         mov al, 0Ah
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         dec dx
         jnz .row_pad
 
@@ -867,29 +858,29 @@ render:
         ;; Check for a one-shot status message
         cmp word [status_message], 0
         je .status_normal
-        mov si, [status_message]
-        call puts_strlen
+        mov di, [status_message]
+        call FUNCTION_PRINT_STRING
         mov word [status_message], 0
         jmp .reposition
         .status_normal:
         ;; Normal status: "filename [modified]  line N"
-        mov si, [filename]
-        call puts_strlen
+        mov di, [filename]
+        call FUNCTION_PRINT_STRING
         cmp byte [dirty], 0
         je .status_line_num
         mov si, MESSAGE_MODIFIED
         mov cx, MESSAGE_MODIFIED_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         .status_line_num:
         mov si, MESSAGE_LINE
         mov cx, MESSAGE_LINE_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         mov ax, [cursor_line]
         inc ax
         call emit_decimal
         mov si, MESSAGE_COLUMN
         mov cx, MESSAGE_COLUMN_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         mov ax, [cursor_column]
         inc ax
         call emit_decimal
@@ -897,14 +888,13 @@ render:
         .status_confirm:
         mov si, MESSAGE_UNSAVED
         mov cx, MESSAGE_UNSAVED_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         ;; Reposition cursor: we're at end of status bar on row 24.
         ;; Emit \r to go to col 0 of row 24.
         .reposition:
         mov al, 0Dh
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         ;; Compute cursor screen row = cursor_line - view_line
         mov ax, [cursor_line]
         sub ax, [view_line]    ; AX = cursor_screen_row (0-based)
@@ -914,16 +904,13 @@ render:
         test bx, bx
         jz .no_up
         mov al, 1Bh
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov al, '['
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov ax, bx
         call emit_decimal
         mov al, 'A'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         .no_up:
         ;; Emit ESC[nC to move to cursor screen col = cursor_column - view_column
         mov bx, [cursor_column]
@@ -931,16 +918,13 @@ render:
         test bx, bx
         jz .render_done
         mov al, 1Bh
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov al, '['
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov ax, bx
         call emit_decimal
         mov al, 'C'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
         .render_done:
         pop si
@@ -1040,24 +1024,6 @@ save_file:
         pop ax
         ret
 
-puts_strlen:
-        ;; Print null-terminated string at SI (variable-length)
-        ;; Computes length, then calls write_stdout
-        push di
-        push cx
-        mov di, si
-        xor cx, cx
-        .loop:
-        cmp byte [di], 0
-        je .done
-        inc di
-        inc cx
-        jmp .loop
-        .done:
-        pop ax                  ; discard saved CX
-        pop di
-        jmp write_stdout        ; tail call
-
 ;;; -----------------------------------------------------------------------
 ;;; Variables (sorted)
 ;;; -----------------------------------------------------------------------
@@ -1096,8 +1062,6 @@ puts_strlen:
         MESSAGE_USAGE        db `Usage: edit <filename>\n`
         MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
         MESSAGE_WRITE_ERROR    db `Write error\0`
-
-%include "write_stdout.asm"
 
 ;;; -----------------------------------------------------------------------
 ;;; program_end: BUFFER_BASE floats on this label so the gap buffer always

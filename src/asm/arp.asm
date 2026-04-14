@@ -21,30 +21,24 @@ main:
         push di                ; Save MAC pointer
         mov si, MESSAGE_IP
         mov cx, MESSAGE_IP_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         pop si                 ; SI = MAC pointer
 
-        call print_mac
+        call FUNCTION_PRINT_MAC
 
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
+        jmp FUNCTION_EXIT
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .timeout:
         mov si, MESSAGE_TIMEOUT
         mov cx, MESSAGE_TIMEOUT_LENGTH
-
-        .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         ;; Data
         my_mac times 6 db 0
@@ -57,6 +51,3 @@ main:
         MESSAGE_TIMEOUT db `ARP timeout\n`
         MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
 
-%include "print_hex.asm"
-%include "print_mac.asm"
-%include "write_stdout.asm"

@@ -9,8 +9,7 @@ main:
         mov byte [bg_color], 0
 
 .loop:
-        mov ah, SYS_IO_GET_CHARACTER
-        int 30h
+        call FUNCTION_GET_CHARACTER
 
         cmp al, 'a'
         je .cursor_left
@@ -89,8 +88,7 @@ main:
         .end:
         mov ah, SYS_SCREEN_CLEAR
         int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
 ;; Variables
 bg_color db 0

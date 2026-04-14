@@ -213,9 +213,6 @@ class CodeGenerator:
         self.locals: dict[str, int] = {}
         self.loop_end_labels: list[str] = []
         self.needs_argv_buf: bool = False
-        self.needs_print_bcd: bool = False
-        self.needs_print_dec: bool = False
-        self.needs_write_stdout: bool = False
         self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
         self.spill_stack: list[tuple[str, int]] = []
@@ -404,8 +401,7 @@ class CodeGenerator:
             self.emit("        pop ax")
         else:
             self.generate_expression(argument)
-        self.emit("        call print_bcd")
-        self.needs_print_bcd = True
+        self.emit("        call FUNCTION_PRINT_BCD")
 
     def builtin_print_buffer(self, arguments: list[tuple], /) -> None:
         """Generate code for the print_buffer() builtin.
@@ -417,8 +413,7 @@ class CodeGenerator:
         address_argument, count_argument = arguments
         self.emit_register_from_argument(argument=address_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit("        call write_stdout")
-        self.needs_write_stdout = True
+        self.emit("        call FUNCTION_WRITE_STDOUT")
 
         self.ax_clear()
 
@@ -426,8 +421,7 @@ class CodeGenerator:
         """Generate code for the print_dec() builtin."""
         self.check_argument_count(arguments=arguments, expected=1, name="print_dec")
         self.generate_expression(arguments[0])
-        self.emit("        call print_dec")
-        self.needs_print_dec = True
+        self.emit("        call FUNCTION_PRINT_DECIMAL")
 
     def builtin_putc(self, arguments: list[tuple], /) -> None:
         """Generate code for the putc() builtin."""
@@ -440,8 +434,7 @@ class CodeGenerator:
             self.emit(f"        mov al, {argument[1]}")
         else:
             self.generate_expression(argument)
-        self.emit("        mov ah, SYS_IO_PUT_CHARACTER")
-        self.emit("        int 30h")
+        self.emit("        call FUNCTION_PRINT_CHARACTER")
 
     def builtin_puts(self, arguments: list[tuple], /) -> None:
         """Generate code for the puts() builtin.
@@ -458,8 +451,7 @@ class CodeGenerator:
         length = string_byte_length(argument[1])
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
-        self.emit("        call write_stdout")
-        self.needs_write_stdout = True
+        self.emit("        call FUNCTION_WRITE_STDOUT")
 
     def builtin_read(self, arguments: list[tuple], /) -> None:
         """Generate code for the read() builtin.
@@ -789,12 +781,6 @@ class CodeGenerator:
                     self.emit(f"{label}: dw {', '.join(elements)}")
         if self.needs_argv_buf:
             self.emit("_argv: times 32 db 0")
-        if self.needs_print_bcd:
-            self.emit('%include "print_bcd.asm"')
-        if self.needs_print_dec:
-            self.emit('%include "print_dec.asm"')
-        if self.needs_write_stdout:
-            self.emit('%include "write_stdout.asm"')
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[tuple], /, *, scoped: bool = False) -> None:
@@ -1059,11 +1045,9 @@ class CodeGenerator:
             elif self.die_count >= 2:
                 self.emit("        jmp .exit")
                 self.emit(".die:")
-                self.emit("        call write_stdout")
-                self.needs_write_stdout = True
+                self.emit("        jmp FUNCTION_DIE")
             self.emit(".exit:")
-            self.emit("        mov ah, SYS_EXIT")
-            self.emit("        int 30h")
+            self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 for vname in sorted(self.locals):
                     self.emit(f"_l_{vname}: dw 0")
@@ -1208,12 +1192,10 @@ class CodeGenerator:
         return None
 
     def inline_single_die(self) -> None:
-        """Replace a lone ``jmp .die`` with inline write_stdout + ``jmp .exit``."""
+        """Replace a lone ``jmp .die`` with inline ``jmp FUNCTION_DIE``."""
         for i, line in enumerate(self.lines):
             if line.strip() == "jmp .die":
-                self.lines[i] = "        call write_stdout"
-                self.lines.insert(i + 1, "        jmp .exit")
-                self.needs_write_stdout = True
+                self.lines[i] = "        jmp FUNCTION_DIE"
                 return
 
     @staticmethod
@@ -1351,7 +1333,7 @@ class CodeGenerator:
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a.startswith("jmp ") and not b.endswith(":"):
+            if a.startswith("jmp ") and not b.endswith(":") and ":" not in b:
                 del self.lines[i + 1]
                 continue
             i += 1

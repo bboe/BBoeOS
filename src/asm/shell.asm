@@ -6,7 +6,7 @@ main:
         cld
         mov si, PROMPT
         mov cx, PROMPT_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         call read_line
         test cx, cx
@@ -81,7 +81,8 @@ main:
 .output:
         test si, si
         jz main
-        call puts_strlen
+        mov di, si
+        call FUNCTION_PRINT_STRING
         jmp main
 
 ;; Command handlers
@@ -91,23 +92,23 @@ cmd_help:
         push bx
         mov si, HELP_PREFIX
         mov cx, HELP_PREFIX_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
         mov bx, cmd_table
 .help_loop:
-        mov si, [bx]
-        test si, si
+        mov di, [bx]
+        test di, di
         jz .help_end
-        call puts_strlen
+        push bx
+        call FUNCTION_PRINT_STRING
         mov al, ' '
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
+        pop bx
         add bx, 4
         jmp .help_loop
 .help_end:
         pop bx
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         xor si, si
         ret
 
@@ -131,8 +132,7 @@ read_line:
         mov dx, BUFFER          ; End of buffer
 
         .read_char:
-        mov ah, SYS_IO_GET_CHARACTER
-        int 30h
+        call FUNCTION_GET_CHARACTER
 
         cmp al, 0               ; Extended key
         je .extended_key
@@ -449,28 +449,8 @@ emit_cursor_back:
         ret
 
 putc:
-        ;; Print char in AL via SYS_IO_PUT_CHARACTER
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
-        ret
-
-puts_strlen:
-        ;; Print null-terminated string at SI (variable-length)
-        ;; Computes length, then calls write_stdout
-        push di
-        push cx
-        mov di, si
-        xor cx, cx
-        .loop:
-        cmp byte [di], 0
-        je .done
-        inc di
-        inc cx
-        jmp .loop
-        .done:
-        pop ax                  ; discard saved CX
-        pop di
-        jmp write_stdout        ; tail call
+        ;; Print char in AL via kernel jump table
+        jmp FUNCTION_PRINT_CHARACTER
 
 syscall_null:
         int 30h
@@ -523,4 +503,3 @@ exec_path     db `bin/`              ; 4 bytes prefix
 kill_buffer   times MAX_INPUT db 0
 kill_length   dw 0
 
-%include "write_stdout.asm"

@@ -30,21 +30,17 @@ main:
 
         mov si, MESSAGE_SENT
         mov cx, MESSAGE_SENT_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .error:
         mov si, MESSAGE_ERROR
         mov cx, MESSAGE_ERROR_LENGTH
-
-        .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
         ;; Data
         my_mac times 6 db 0
@@ -57,4 +53,3 @@ main:
         MESSAGE_SENT_LENGTH equ $ - MESSAGE_SENT
 
 %include "arp_frame.asm"
-%include "write_stdout.asm"

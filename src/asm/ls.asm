@@ -40,48 +40,41 @@ main:
         dec di                 ; DI = string length
         mov cx, di
         mov si, entry_buf
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         ;; Check flags for suffix
         test byte [entry_buf+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .check_exec
         mov al, '/'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         jmp .newline
         .check_exec:
         test byte [entry_buf+DIRECTORY_OFFSET_FLAGS], FLAG_EXECUTE
         jz .newline
         mov al, '*'
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
 
 .newline:
         mov al, 10
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         jmp .read_loop
 
 .done:
         mov bx, bp
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
 .not_found:
         mov si, MESSAGE_NOT_FOUND
         mov cx, MESSAGE_NOT_FOUND_LENGTH
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_DIE
 
 ;; Strings
 DOT           db '.',0
 MESSAGE_NOT_FOUND db `Not found\n`
 MESSAGE_NOT_FOUND_LENGTH equ $ - MESSAGE_NOT_FOUND
 
-%include "write_stdout.asm"
 
 ;; Buffer for one directory entry (32 bytes)
 entry_buf:

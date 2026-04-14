@@ -21,12 +21,12 @@ main:
         ;; Print "Querying <domain>...\n"
         mov si, MESSAGE_QUERY
         mov cx, MESSAGE_QUERY_LENGTH
-        call write_stdout
-        mov si, bx
-        call puts_strlen
+        call FUNCTION_WRITE_STDOUT
+        mov di, bx
+        call FUNCTION_PRINT_STRING
         mov si, MESSAGE_ELLIPSIS
         mov cx, MESSAGE_ELLIPSIS_LENGTH
-        call write_stdout
+        call FUNCTION_WRITE_STDOUT
 
         ;; Send DNS A query and position DI at first answer record
         mov si, [domain_arg]
@@ -71,8 +71,7 @@ main:
         jnz .answer_loop
         cmp byte [found_a], 0
         je .no_answer
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .found_cname:
         ;; Print "<rr_name> is a CNAME for <target>\n"
@@ -94,23 +93,21 @@ main:
         mov di, cname_buf
         call decode_domain
         ;; Print "<rr_name> is a CNAME for <target>\n"
-        mov si, rr_name_buf
-        call puts_strlen
+        mov di, rr_name_buf
+        call FUNCTION_PRINT_STRING
         mov si, MESSAGE_CNAME
         mov cx, MESSAGE_CNAME_LENGTH
-        call write_stdout
-        mov si, cname_buf
-        call puts_strlen
+        call FUNCTION_WRITE_STDOUT
+        mov di, cname_buf
+        call FUNCTION_PRINT_STRING
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         pop di                 ; Restore DI to next RR position
         dec byte [ans_count]
         jnz .answer_loop
         cmp byte [found_a], 0
         je .no_answer
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .found_a:
         ;; Print "<rr_name> is at <ip>\n"
@@ -121,64 +118,43 @@ main:
         call decode_domain
         pop di
         add di, 10             ; Skip TYPE(2)+CLASS(2)+TTL(4)+RDLENGTH(2) to rdata
-        mov si, rr_name_buf
-        call puts_strlen
+        push di                ; Save rdata pointer (IP address)
+        mov di, rr_name_buf
+        call FUNCTION_PRINT_STRING
         mov si, MESSAGE_IS_AT
         mov cx, MESSAGE_IS_AT_LENGTH
-        call write_stdout
-        mov si, di
-        call print_ip
+        call FUNCTION_WRITE_STDOUT
+        pop si                 ; SI = IP address pointer
+        push si
+        call FUNCTION_PRINT_IP
         mov al, `\n`
-        mov ah, SYS_IO_PUT_CHARACTER
-        int 30h
+        call FUNCTION_PRINT_CHARACTER
         mov byte [found_a], 1
+        pop di
         add di, 4              ; Advance past 4-byte IP to next RR
         dec byte [ans_count]
         jnz .answer_loop
-        mov ah, SYS_EXIT
-        int 30h
+        jmp FUNCTION_EXIT
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
         mov cx, MESSAGE_NO_NIC_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .no_arg:
         mov si, MESSAGE_USAGE
         mov cx, MESSAGE_USAGE_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .dns_err:
         mov si, MESSAGE_DNS_ERROR
         mov cx, MESSAGE_DNS_ERROR_LENGTH
-        jmp .print_exit
+        jmp FUNCTION_DIE
 
         .no_answer:
         mov si, MESSAGE_NO_ANSWER
         mov cx, MESSAGE_NO_ANSWER_LENGTH
-
-        .print_exit:
-        call write_stdout
-        mov ah, SYS_EXIT
-        int 30h
-
-puts_strlen:
-        ;; Print null-terminated string at SI (variable-length)
-        ;; Computes length, then calls write_stdout
-        push di
-        push cx
-        mov di, si
-        xor cx, cx
-        .loop:
-        cmp byte [di], 0
-        je .done
-        inc di
-        inc cx
-        jmp .loop
-        .done:
-        pop ax                  ; discard saved CX
-        pop di
-        jmp write_stdout        ; tail call
+        jmp FUNCTION_DIE
 
 decode_domain:
         ;; Decode DNS wire-format name to null-terminated dotted string
@@ -249,6 +225,3 @@ decode_domain:
 
 %include "dns_query.asm"
 %include "encode_domain.asm"
-%include "print_byte_dec.asm"
-%include "print_ip.asm"
-%include "write_stdout.asm"
