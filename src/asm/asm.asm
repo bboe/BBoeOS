@@ -284,8 +284,7 @@ emit_word_ax:
         call emit_byte_al
         pop ax
         xchg al, ah
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; encode_rel8_jump: AL = opcode, SI points to operand (label name).
@@ -377,8 +376,7 @@ encode_rel8_jump:
         mov bx, [current_address]
         add bx, 2
         sub ax, bx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
 
         .emit_short:
         pop ax                         ; restore opcode
@@ -387,8 +385,7 @@ encode_rel8_jump:
         mov bx, [current_address]
         inc bx
         sub ax, bx
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; flush_output: write OUTPUT_BUFFER to disk
@@ -422,8 +419,7 @@ handle_aam:
         mov al, 0D4h
         call emit_byte_al
         mov al, 0Ah
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_add: add r, imm
@@ -461,8 +457,7 @@ handle_add:
         call emit_byte_al
         mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .add_rm_direct:
         ;; add r16, [disp16]: 03 modrm disp16 (or 02 for r8)
         pop bx                 ; BL = dst reg, BH = dst size
@@ -479,8 +474,7 @@ handle_add:
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
         mov ax, [op2_value]
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .add_r16_imm:
         ;; add r16, imm: prefer the 83 sign-extended-imm8 form (works for
         ;; any reg) when the immediate fits, else fall back to 05 imm16
@@ -495,8 +489,7 @@ handle_add:
         or al, 0C0h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .add_r16_ax_check:
         test bl, bl
         jnz .add_r16_full
@@ -504,8 +497,7 @@ handle_add:
         mov al, 05h
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .add_r16_full:
         mov al, 81h
         call emit_byte_al
@@ -513,8 +505,7 @@ handle_add:
         or al, 0C0h
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .add_r8:
         ;; add r8, imm8. Short form for AL: 04 imm8
         test bl, bl
@@ -522,8 +513,7 @@ handle_add:
         mov al, 04h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .add_r8_general:
         mov al, 80h
         call emit_byte_al
@@ -531,8 +521,7 @@ handle_add:
         or al, 0C0h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_and: and r, imm
@@ -554,8 +543,7 @@ handle_and:
         or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .and_r8:
         ;; and r8, imm8. Short form for AL: 24 imm8
         test bl, bl
@@ -563,8 +551,7 @@ handle_and:
         mov al, 24h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .and_r8_general:
         mov al, 80h
         call emit_byte_al
@@ -572,8 +559,7 @@ handle_and:
         or al, 0E0h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_call: call near label
@@ -590,8 +576,7 @@ handle_call:
         mov bx, [current_address]
         add bx, 2
         sub ax, bx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .call_indirect:
         ;; call [reg+disp8]: FF /2 modrm disp8. Only the disp8 form is
         ;; needed (asm.asm's sole indirect call is `call [bx+2]`); any
@@ -622,16 +607,14 @@ handle_call:
 ;;; -----------------------------------------------------------------------
 handle_clc:
         mov al, 0F8h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_cld
 ;;; -----------------------------------------------------------------------
 handle_cld:
         mov al, 0FCh
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_cmp
@@ -665,8 +648,7 @@ handle_cmp:
         call emit_byte_al
         pop ax                 ; AL = src reg
         call make_modrm_reg_reg ; AL=src(reg), BL=dst(rm)
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_not_rr:
         pop si
         ;; Op1 is a register but op2 isn't a register. Try [mem] form.
@@ -732,8 +714,7 @@ handle_cmp:
         or al, 06h             ; modrm: mod=00, reg=op1, rm=110 (disp16)
         call emit_byte_al
         pop ax                 ; AX = disp16
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .cmp_imm_only:
         call resolve_value
         mov cx, ax             ; CX = immediate
@@ -759,8 +740,7 @@ handle_cmp:
         or al, 0F8h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_r16_full:
         ;; cmp AX, imm16 has a short form: 3D imm16
         test bl, bl
@@ -768,8 +748,7 @@ handle_cmp:
         mov al, 3Dh
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .cmp_r16_general:
         mov al, 81h
         call emit_byte_al
@@ -777,8 +756,7 @@ handle_cmp:
         or al, 0F8h
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .cmp_r8:
         ;; Short form for AL: 3C imm8
         test bl, bl
@@ -786,8 +764,7 @@ handle_cmp:
         mov al, 3Ch
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_r8_general:
         mov al, 80h
         call emit_byte_al
@@ -795,8 +772,7 @@ handle_cmp:
         or al, 0F8h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_mem:
         ;; cmp byte [reg+disp], imm8 or cmp word [reg+disp], imm16
         cmp byte [op1_size], 8
@@ -837,12 +813,10 @@ handle_cmp:
         cmp byte [op1_size], 8
         je .cmp_mem_imm8
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .cmp_mem_imm8:
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_mem_direct:
         ;; cmp byte [disp16], imm8 or cmp word [disp16], imm
         cmp byte [op1_size], 8
@@ -859,8 +833,7 @@ handle_cmp:
         mov ax, [op1_value]
         call emit_word_ax
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .cmp_md_full:
         mov al, 81h
         call emit_byte_al
@@ -869,8 +842,7 @@ handle_cmp:
         mov ax, [op1_value]
         call emit_word_ax
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .cmp_md8:
         mov al, 80h
         call emit_byte_al
@@ -896,8 +868,7 @@ handle_dec:
         je .dec_r8
         ;; dec r16: 48+reg
         add al, 48h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .dec_r8:
         ;; dec r8: FE /1 modrm(mod=11, /1, rm=reg)
         push ax
@@ -905,8 +876,7 @@ handle_dec:
         call emit_byte_al
         pop ax
         or al, 0C8h            ; modrm = C0 | 08 | reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .dec_mem:
         ;; dec byte [...] -> FE /1; dec word [...] -> FF /1
         mov al, 0FEh
@@ -932,14 +902,12 @@ handle_dec:
         call emit_byte_al
         pop dx
         mov al, dl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .dec_mem_direct:
         mov al, 0Eh            ; modrm: mod=00, /1, rm=110
         call emit_byte_al
         mov ax, dx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_div: div r8 or div r16
@@ -958,8 +926,7 @@ handle_div:
         call emit_byte_al
         pop ax
         or al, 0F0h            ; modrm = C0 | (6<<3) | rm = F0 | rm
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_inc
@@ -974,8 +941,7 @@ handle_inc:
         je .inc_r8
         ;; inc r16: 40+reg
         add al, 40h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .inc_r8:
         ;; inc r8: FE /0 modrm(mod=11, /0, rm=reg)
         push ax
@@ -983,8 +949,7 @@ handle_inc:
         call emit_byte_al
         pop ax
         or al, 0C0h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .inc_mem:
         ;; inc byte [...] -> FE /0; inc word [...] -> FF /0
         mov al, 0FEh
@@ -1009,14 +974,12 @@ handle_inc:
         call emit_byte_al
         pop dx
         mov al, dl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .inc_mem_direct:
         mov al, 06h            ; modrm: mod=00, /0, rm=110
         call emit_byte_al
         mov ax, dx             ; DX = disp16 from parse_operand
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_int
@@ -1028,8 +991,7 @@ handle_int:
         mov al, 0CDh
         call emit_byte_al
         pop ax
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_ja
@@ -1135,8 +1097,7 @@ handle_jz:
 ;;; -----------------------------------------------------------------------
 handle_lodsb:
         mov al, 0ACh
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_loop
@@ -1173,8 +1134,7 @@ handle_mov:
         pop ax
         ;; AL = source register number, ModR/M = 11 000 rrr
         or al, 0C0h            ; mod=11, reg=000 (ES)
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .not_segment:
         pop si                 ; restore SI to before 'es'
         .mov_normal:
@@ -1529,16 +1489,14 @@ handle_mov:
 ;;; -----------------------------------------------------------------------
 handle_movsb:
         mov al, 0A4h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_movsw: movsw (no operands)
 ;;; -----------------------------------------------------------------------
 handle_movsw:
         mov al, 0A5h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_movzx: movzx r16, byte [reg+disp]
@@ -1568,22 +1526,19 @@ handle_movzx:
         or al, bl
         cmp word [op2_value], 0
         jne .movzx_disp
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .movzx_disp:
         or al, 40h             ; mod = 01 (disp8)
         call emit_byte_al
         mov al, [op2_value]
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .movzx_rr:
         ;; reg-reg: modrm = 11 dst src
         mov al, [op1_register]
         shl al, 3
         or al, [op2_register]
         or al, 0C0h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_mul: mul r16
@@ -1602,8 +1557,7 @@ handle_mul:
         call emit_byte_al
         pop ax
         or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_neg: neg r16 / neg r8 (F7 /3 modrm or F6 /3 modrm)
@@ -1622,8 +1576,7 @@ handle_neg:
         call emit_byte_al
         pop ax
         or al, 0D8h            ; modrm = C0 | (3<<3) | rm = D8 | rm
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_or
@@ -1652,8 +1605,7 @@ handle_or:
         mov al, 0Ch
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .or_r8_general:
         mov al, 80h
         call emit_byte_al
@@ -1661,8 +1613,7 @@ handle_or:
         or al, 0C8h            ; modrm = C0 | (1<<3) | rm = C8 | rm
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .or_rr:
         ;; reg-reg: opcode 08 (8-bit) / 09 (16-bit), modrm reg=src, rm=dst
         pop bx                 ; BL = dst reg, BH = dst size
@@ -1676,8 +1627,7 @@ handle_or:
         call emit_byte_al
         mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .or_rm_direct:
         ;; or r8, [disp16]: 0A modrm disp16 (or 0B for r16)
         pop bx                 ; BL = dst reg, BH = dst size
@@ -1694,8 +1644,7 @@ handle_or:
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
         mov ax, [op2_value]
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .or_unsupported:
         jmp abort_unknown
 
@@ -1710,8 +1659,7 @@ handle_pop:
         jne .pop_reg
         add si, 2
         mov al, 1Fh            ; pop ds
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .pop_not_ds:
         cmp byte [si], 'e'
         jne .pop_reg
@@ -1719,13 +1667,11 @@ handle_pop:
         jne .pop_reg
         add si, 2
         mov al, 07h            ; pop es
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .pop_reg:
         call parse_register    ; AL = reg
         add al, 58h            ; 58+reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_push: push r16 / push ds / push es
@@ -1738,8 +1684,7 @@ handle_push:
         jne .push_reg
         add si, 2
         mov al, 1Eh            ; push ds
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .push_not_ds:
         cmp byte [si], 'e'
         jne .push_reg
@@ -1747,13 +1692,11 @@ handle_push:
         jne .push_reg
         add si, 2
         mov al, 06h            ; push es
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .push_reg:
         call parse_register    ; AL = reg
         add al, 50h            ; 50+reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_rep: rep prefix — emits 0xF3 then parses the next mnemonic
@@ -1780,8 +1723,7 @@ handle_repne:
 ;;; -----------------------------------------------------------------------
 handle_ret:
         mov al, 0C3h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_sbb: only `sbb word [disp16], imm8` is supported
@@ -1824,8 +1766,7 @@ handle_sbb:
 ;;; -----------------------------------------------------------------------
 handle_scasb:
         mov al, 0AEh
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_shl: shl r8, imm8 / shl r16, imm8
@@ -1852,8 +1793,7 @@ handle_shl:
         or al, 0E0h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_shr: shr r8, imm8
@@ -1880,32 +1820,28 @@ handle_shr:
         or al, 0E8h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_stc
 ;;; -----------------------------------------------------------------------
 handle_stc:
         mov al, 0F9h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_stosb
 ;;; -----------------------------------------------------------------------
 handle_stosb:
         mov al, 0AAh
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_stosw
 ;;; -----------------------------------------------------------------------
 handle_stosw:
         mov al, 0ABh
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_sub
@@ -1971,8 +1907,7 @@ handle_sub:
         or al, 0E8h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .sub_rr:
         ;; reg-reg: opcode 28 (8-bit) / 29 (16-bit), modrm reg=src, rm=dst
         pop bx                 ; BL = dst reg, BH = dst size
@@ -1986,8 +1921,7 @@ handle_sub:
         call emit_byte_al
         mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .sub_rm_direct:
         ;; sub r16, [disp16]: 2B modrm disp16 (or 2A for r8)
         pop bx                 ; BL = dst reg, BH = dst size
@@ -2004,8 +1938,7 @@ handle_sub:
         or al, 06h             ; modrm: mod=00, reg=dst, rm=110 (disp16)
         call emit_byte_al
         mov ax, [op2_value]
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .sub_r16_full:
         mov al, 81h
         call emit_byte_al
@@ -2013,8 +1946,7 @@ handle_sub:
         or al, 0E8h
         call emit_byte_al
         mov ax, cx
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .sub_r8:
         ;; sub r8, imm8. Short form for AL: 2C imm8
         test bl, bl
@@ -2022,8 +1954,7 @@ handle_sub:
         mov al, 2Ch
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .sub_r8_general:
         mov al, 80h
         call emit_byte_al
@@ -2031,8 +1962,7 @@ handle_sub:
         or al, 0E8h
         call emit_byte_al
         mov al, cl
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_test: test r/mem, r/imm
@@ -2063,8 +1993,7 @@ handle_test:
         call emit_byte_al
         pop ax
         call make_modrm_reg_reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .test_r_imm:
         ;; test r, imm
         call resolve_value     ; AX = immediate
@@ -2077,8 +2006,7 @@ handle_test:
         mov al, 0A8h
         call emit_byte_al
         pop ax
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .test_r8_general:
         mov al, 0F6h
         call emit_byte_al
@@ -2086,8 +2014,7 @@ handle_test:
         or al, 0C0h            ; modrm: mod=11, /0, rm=reg
         call emit_byte_al
         pop ax
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .test_r16_imm:
         ;; test r16, imm16: short form for AX (A9), general form (F7 /0)
         cmp byte [op1_register], 0  ; AX?
@@ -2095,8 +2022,7 @@ handle_test:
         mov al, 0A9h
         call emit_byte_al
         pop ax
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .test_r16_general:
         mov al, 0F7h
         call emit_byte_al
@@ -2104,8 +2030,7 @@ handle_test:
         or al, 0C0h
         call emit_byte_al
         pop ax
-        call emit_word_ax
-        ret
+        jmp emit_word_ax
         .test_mem:
         ;; test byte [reg+disp], imm8: F6 modrm [disp] imm8
         ;; test byte [disp16],     imm8: F6 06 disp16 imm8
@@ -2158,8 +2083,7 @@ handle_xchg:
         mov al, bl              ; second=AX: emit 90h + first
         .xchg_short:
         add al, 90h
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
         .xchg_long:
         push ax
         cmp bh, 8
@@ -2174,8 +2098,7 @@ handle_xchg:
         ;; Swap: NASM puts first operand in reg, second in rm
         xchg al, bl
         call make_modrm_reg_reg ; AL=first(reg), BL=second(rm)
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_xor: xor r, r
@@ -2200,8 +2123,7 @@ handle_xor:
         pop ax
         ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
         call make_modrm_reg_reg
-        call emit_byte_al
-        ret
+        jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_unknown_word: treat unrecognized first word as bare label
