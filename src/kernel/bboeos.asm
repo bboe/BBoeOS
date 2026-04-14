@@ -357,13 +357,14 @@ shared_print_string:
 shared_printf:
         ;; Minimal printf: cdecl calling convention.
         ;; Stack: [bp+4] = format string, [bp+6] = first arg, ...
-        ;; Supports: %c %d %u %x %s %%
+        ;; Supports: %c %d %u %x %s %%, optional zero-pad flag and width.
+        ;; Format: %[0][width]<type>
         push bp
         mov bp, sp
         push si
         push di
         mov si, [bp+4]          ; SI = format string
-        lea di, [bp+6]          ; DI = pointer to first arg on stack
+        mov di, 6               ; DI = stack offset from BP for next arg
         cld
         .loop:
         lodsb
@@ -374,7 +375,32 @@ shared_printf:
         call shared_print_character
         jmp .loop
         .format:
+        ;; [printf_width] = minimum width, [printf_pad] = pad character
+        mov byte [printf_width], 0
+        mov byte [printf_pad], ' '
         lodsb
+        cmp al, '0'
+        jne .after_flag
+        mov byte [printf_pad], '0'
+        lodsb
+        .after_flag:
+        .width_loop:
+        cmp al, '0'
+        jb .spec
+        cmp al, '9'
+        ja .spec
+        ;; width = width * 10 + (al - '0')
+        sub al, '0'
+        push ax
+        mov al, [printf_width]
+        mov ah, 10
+        mul ah                  ; AX = width * 10
+        mov [printf_width], al
+        pop ax
+        add [printf_width], al
+        lodsb
+        jmp .width_loop
+        .spec:
         cmp al, 'c'
         je .fmt_c
         cmp al, 'd'
@@ -391,24 +417,24 @@ shared_printf:
         call shared_print_character
         jmp .loop
         .fmt_c:
-        mov ax, [di]
+        mov ax, [bp+di]
         add di, 2
         call shared_print_character
         jmp .loop
         .fmt_d:
         .fmt_u:
-        mov ax, [di]
+        mov ax, [bp+di]
         add di, 2
         call .print_uint16
         jmp .loop
         .fmt_x:
-        mov ax, [di]
+        mov ax, [bp+di]
         add di, 2
-        call shared_print_hex
+        call .print_hex_padded
         jmp .loop
         .fmt_s:
         push si
-        mov si, [di]
+        mov si, [bp+di]
         add di, 2
         ;; Find length of null-terminated string
         push di
@@ -434,10 +460,8 @@ shared_printf:
         ret
 
         .print_uint16:
-        ;; Print AX as unsigned decimal (no leading zeros)
+        ;; Print AX as unsigned decimal, padded to [printf_width] with [printf_pad].
         ;; Clobbers: AX, BX, CX, DX
-        push bp
-        mov bp, sp
         xor cx, cx              ; Digit count
         mov bx, 10
         .udiv:
@@ -447,14 +471,44 @@ shared_printf:
         inc cx
         test ax, ax
         jnz .udiv
+        ;; Pad: print (width - digit_count) pad characters using CL as scratch.
+        push cx                 ; Save digit count
+        .upad:
+        cmp cl, [printf_width]
+        jae .pad_done
+        mov al, [printf_pad]
+        call shared_print_character
+        inc cl
+        jmp .upad
+        .pad_done:
+        pop cx                  ; Restore digit count
         .uprint:
         pop ax
         add al, '0'
         call shared_print_character
         dec cx
         jnz .uprint
-        pop bp
         ret
+
+        .print_hex_padded:
+        ;; Print AL as hex, padded to [printf_width] with [printf_pad].
+        ;; Default width for %x is 2. Clobbers: AX, CX
+        cmp byte [printf_width], 2
+        jae .hskip_default
+        mov byte [printf_width], 2
+        .hskip_default:
+        mov cl, 2               ; %x always prints 2 digits from AL
+        .hpad:
+        cmp cl, [printf_width]
+        jae .hprint
+        push ax
+        mov al, [printf_pad]
+        call shared_print_character
+        pop ax
+        inc cl
+        jmp .hpad
+        .hprint:
+        jmp shared_print_hex
 
 shared_write_stdout:
         ;; Write CX bytes from SI to stdout (fd 1)
@@ -467,6 +521,8 @@ shared_write_stdout:
         boot_ticks_high  dw 0
         boot_ticks_low   dw 0
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
+        printf_pad    db 0         ; printf pad character (' ' or '0')
+        printf_width  db 0         ; printf minimum field width
         serial_pushback_buffer    db 0, 0 ; serial pushback buffer (up to 2 bytes)
         serial_pushback_count  db 0    ; number of bytes in pushback buffer
         shell_sp dw 0

@@ -598,8 +598,7 @@ class CodeGenerator:
             self.emit("        push ax")
         # Push format string pointer.
         label = self.new_string_label(fmt)
-        self.emit(f"        mov ax, {label}")
-        self.emit("        push ax")
+        self.emit(f"        push {label}")
         self.emit("        call FUNCTION_PRINTF")
         stack_size = len(arguments) * 2
         self.emit(f"        add sp, {stack_size}")

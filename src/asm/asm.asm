@@ -1681,22 +1681,34 @@ handle_push:
         cmp byte [si], 'd'
         jne .push_not_ds
         cmp byte [si+1], 's'
-        jne .push_reg
+        jne .push_operand
         add si, 2
         mov al, 1Eh            ; push ds
         jmp emit_byte_al
         .push_not_ds:
         cmp byte [si], 'e'
-        jne .push_reg
+        jne .push_operand
         cmp byte [si+1], 's'
-        jne .push_reg
+        jne .push_operand
         add si, 2
         mov al, 06h            ; push es
         jmp emit_byte_al
-        .push_reg:
-        call parse_register    ; AL = reg
-        add al, 50h            ; 50+reg
+        .push_operand:
+        ;; Try register first, fall through to immediate.
+        push si
+        call parse_register
+        jc .push_imm16
+        add sp, 2              ; discard saved SI
+        add al, 50h            ; 50+reg: push r16
         jmp emit_byte_al
+        .push_imm16:
+        pop si
+        call resolve_value     ; AX = imm16
+        push ax
+        mov al, 68h            ; push imm16 opcode
+        call emit_byte_al
+        pop ax
+        jmp emit_word_ax
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_rep: rep prefix — emits 0xF3 then parses the next mnemonic
