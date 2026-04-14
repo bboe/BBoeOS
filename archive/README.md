@@ -10,7 +10,7 @@ source is kept here for reference.
 | cat     | 138         | 121       | -17   |
 | chmod   | 140         | 246       | +106  |
 | cp      | 287         | 285       | -2    |
-| date    | 15          | 33        | +18   |
+| date    | 15          | 15        |  0    |
 | hello   | 22          | 23        | +1    |
 | mkdir   | 116         | 121       | +5    |
 | uptime  | 50          | 78        | +28   |
@@ -18,12 +18,6 @@ source is kept here for reference.
 **chmod (+106):** The assembly version walks the argument with `lodsb`
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
-
-**date (+18):** C declares `unsigned long now = datetime();` and then
-passes `now` to `print_datetime`; the compiler stores DX:AX to the
-`_l_now` slot and reloads it (14 bytes) plus reserves a 4-byte dword.
-The assembly version keeps the epoch live in DX:AX between `int 30h`
-and the print call.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
