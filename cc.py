@@ -297,6 +297,7 @@ class CodeGenerator:
         "ERROR_PROTECTED",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
+        "NULL",
         "O_CREAT",
         "O_RDONLY",
         "O_TRUNC",
@@ -831,6 +832,8 @@ class CodeGenerator:
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise SyntaxError(message)
+        if condition.op in ("==", "!="):
+            self.validate_equality_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
         return condition.op
 
@@ -1872,6 +1875,45 @@ class CodeGenerator:
         if new_if is if_body and new_else is else_body:
             return statement
         return If(condition, new_if, new_else)
+
+    def type_of_operand(self, node: Node, /) -> str:
+        """Classify an operand for equality type-checking.
+
+        Returns one of: ``"pointer"``, ``"null"``, ``"integer"``, or
+        ``"unknown"`` (expressions whose type we cannot statically
+        determine — treated as integers for the purposes of the check).
+        """
+        if isinstance(node, Var):
+            if node.name == "NULL":
+                return "null"
+            if self.variable_types.get(node.name) == "char*":
+                return "pointer"
+            if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
+                return "integer"
+        return "unknown"
+
+    def validate_equality_types(self, left: Node, right: Node, /) -> None:
+        """Ensure ``==``/``!=`` operands have compatible types.
+
+        Pointers may only be compared to other pointers or ``NULL``;
+        ``NULL`` may only appear opposite a pointer.  Comparing a
+        pointer to a non-``NULL`` integer (``if (p == 0)``) is a common
+        C bug, so the compiler requires the explicit ``NULL`` spelling.
+        """
+        left_type = self.type_of_operand(left)
+        right_type = self.type_of_operand(right)
+        if left_type == "pointer" and right_type not in ("pointer", "null"):
+            message = f"pointer compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "pointer" and left_type not in ("pointer", "null"):
+            message = f"pointer compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if left_type == "null" and right_type not in ("pointer", "null"):
+            message = f"NULL compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "null" and left_type not in ("pointer", "null"):
+            message = f"NULL compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
 
 
 class Parser:

@@ -1,6 +1,6 @@
 void main(char *arg) {
     char *name = ".";
-    if (arg != 0) {
+    if (arg != NULL) {
         if (arg[0] != 0) {
             name = arg;
         }
