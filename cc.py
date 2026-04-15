@@ -315,7 +315,9 @@ class CodeGenerator:
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getc": frozenset({"ax"}),
         "mac": frozenset({"ax", "di"}),
+        "memcpy": frozenset({"ax", "cx", "di", "si"}),
         "mkdir": frozenset({"ax", "si"}),
+        "net_open": frozenset({"ax"}),
         "open": frozenset({"ax", "dx", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),
@@ -335,6 +337,7 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "arp_frame",
         "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_OFFSET_FLAGS",
@@ -362,6 +365,12 @@ class CodeGenerator:
         "VIDEO_MODE_VGA_320x200_256",
         "VIDEO_MODE_VGA_640x480_16",
     })
+
+    #: Named constants that, when referenced, require a NASM %include
+    #: directive in the generated output to provide their symbol.
+    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
+        "arp_frame": "arp_frame.asm",
+    }
 
     #: Registers available for auto-pinning, in allocation order.
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
@@ -394,6 +403,7 @@ class CodeGenerator:
         self.needs_argv_buf: bool = False
         self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
+        self.required_includes: set[str] = set()
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
         self.variable_arrays: set[str] = set()
@@ -569,6 +579,22 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
+    def builtin_memcpy(self, arguments: list[Node], /) -> None:
+        """Generate code for the memcpy(destination, source, n) builtin.
+
+        Emits ``mov di, <destination> / mov si, <source> / mov cx, <n>
+        / cld / rep movsb``.  Byte-wise copy; caller's DI, SI, CX are
+        clobbered.
+        """
+        self.check_argument_count(arguments=arguments, expected=3, name="memcpy")
+        destination_argument, source_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=destination_argument, register="di")
+        self.emit_register_from_argument(argument=source_argument, register="si")
+        self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit("        cld")
+        self.emit("        rep movsb")
+        self.ax_clear()
+
     def builtin_mkdir(
         self,
         arguments: list[Node],
@@ -586,6 +612,21 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_FS_MKDIR")
         self.emit("        int 30h")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
+
+    def builtin_net_open(self, arguments: list[Node], /) -> None:
+        """Generate code for the net_open() builtin.
+
+        Allocates a raw Ethernet socket fd via SYS_NET_OPEN.
+        Returns fd in AX on success, or -1 if no NIC is present.
+        """
+        self.check_argument_count(arguments=arguments, expected=0, name="net_open")
+        self.emit("        mov ah, SYS_NET_OPEN")
+        self.emit("        int 30h")
+        label_index = self.new_label()
+        self.emit(f"        jnc .ok_{label_index}")
+        self.emit("        mov ax, -1")
+        self.emit(f".ok_{label_index}:")
+        self.ax_clear()
 
     def builtin_open(self, arguments: list[Node], /) -> None:
         """Generate code for the open() builtin.
@@ -1031,6 +1072,17 @@ class CodeGenerator:
         operator = self.emit_condition(condition=condition, context=context)
         self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
 
+    def emit_constant_reference(self, name: str) -> None:
+        """Record a reference to a NAMED_CONSTANT.
+
+        If the constant requires an extra NASM %include to provide its
+        symbol (see :attr:`NAMED_CONSTANT_INCLUDES`), queue the include
+        for emission at output time.
+        """
+        include = self.NAMED_CONSTANT_INCLUDES.get(name)
+        if include is not None:
+            self.required_includes.add(include)
+
     def emit_error_syscall_tail(
         self,
         *,
@@ -1077,6 +1129,7 @@ class CodeGenerator:
         if isinstance(argument, Int):
             self.emit(f"        mov {register}, {argument.value}")
         elif isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS:
+            self.emit_constant_reference(argument.name)
             self.emit(f"        mov {register}, {argument.name}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov {register}, {self.constant_aliases[argument.name]}")
@@ -1199,6 +1252,8 @@ class CodeGenerator:
         for function in ast.functions:
             self.generate_function(function)
         self.peephole()
+        for include in sorted(self.required_includes):
+            self.emit(f'%include "{include}"')
         if self.strings:
             self.emit(";; --- string literals ---")
             for label, content in self.strings:
@@ -1390,6 +1445,7 @@ class CodeGenerator:
         elif isinstance(expression, Var):
             vname = expression.name
             if vname in self.NAMED_CONSTANTS:
+                self.emit_constant_reference(vname)
                 self.emit(f"        mov ax, {vname}")
                 self.ax_clear()
                 return

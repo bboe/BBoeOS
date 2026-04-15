@@ -5,18 +5,18 @@
 main:
         cld
 
-        ;; Read our MAC
-        mov di, my_mac
+        ;; Read our MAC into the shell's idle input buffer (no embedded cell).
+        mov di, BUFFER
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
         ;; Copy our MAC into ARP frame (src MAC at offset 6, sender MAC at offset 22)
-        mov si, my_mac
+        mov si, BUFFER
         mov di, arp_frame + 6
         mov cx, 3
         rep movsw
-        mov si, my_mac
+        mov si, BUFFER
         mov di, arp_frame + 22
         mov cx, 3
         rep movsw
@@ -53,8 +53,6 @@ main:
         jmp FUNCTION_DIE
 
         ;; Data
-        my_mac times 6 db 0
-
         MESSAGE_ERROR db `Send failed\n`
         MESSAGE_ERROR_LENGTH equ $ - MESSAGE_ERROR
         MESSAGE_NO_NIC db `No NIC found\n`

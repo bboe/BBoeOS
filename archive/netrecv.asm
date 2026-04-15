@@ -2,23 +2,23 @@
 
 %include "constants.asm"
 
-        %assign RECV_BUFFER_SIZE 1536
+        %assign RECEIVE_BUFFER_SIZE 128
 
 main:
         cld
 
-        ;; Read our MAC
-        mov di, my_mac
+        ;; Read our MAC into the shell's idle input buffer (no embedded cell).
+        mov di, BUFFER
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
         ;; Build ARP request (copy our MAC into frame)
-        mov si, my_mac
+        mov si, BUFFER
         mov di, arp_frame + 6
         mov cx, 3
         rep movsw
-        mov si, my_mac
+        mov si, BUFFER
         mov di, arp_frame + 22
         mov cx, 3
         rep movsw
@@ -41,12 +41,12 @@ main:
         mov cx, MESSAGE_SENT_LENGTH
         call FUNCTION_WRITE_STDOUT
 
-        ;; Poll for reply
-        mov word [poll_remaining], 0FFFFh
+        ;; Poll for reply, reading into BUFFER + 128 (leaves room below for MAC)
+        mov word [poll_remaining], 30000
         .poll:
         mov bx, [net_fd]
-        mov di, recv_buffer
-        mov cx, RECV_BUFFER_SIZE
+        mov di, BUFFER + 128
+        mov cx, RECEIVE_BUFFER_SIZE
         mov ah, SYS_IO_READ
         int 30h
         jc .error
@@ -60,7 +60,7 @@ main:
         jmp FUNCTION_DIE
 
         .got_packet:
-        ;; AX = bytes read, [recv_buffer] = packet
+        ;; AX = bytes read, [BUFFER + 128] = packet
         mov [packet_length], ax
         mov bx, [net_fd]
         mov ah, SYS_IO_CLOSE
@@ -71,7 +71,7 @@ main:
         call FUNCTION_WRITE_STDOUT
 
         ;; Print first 32 bytes as hex
-        mov si, recv_buffer
+        mov si, BUFFER + 128
         mov cx, [packet_length]
         cmp cx, 32
         jbe .use_length
@@ -99,11 +99,9 @@ main:
         jmp FUNCTION_DIE
 
         ;; Data
-        my_mac times 6 db 0
         net_fd dw 0
         packet_length dw 0
         poll_remaining dw 0
-        recv_buffer times RECV_BUFFER_SIZE db 0
 
         MESSAGE_ERROR db `Send failed\n`
         MESSAGE_ERROR_LENGTH equ $ - MESSAGE_ERROR
