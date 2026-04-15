@@ -139,6 +139,21 @@ class Int(Node):
     value: int
 
 
+class Char(Int):
+    """A ``char`` literal (``'x'``).
+
+    Subclasses :class:`Int` so existing ``isinstance(..., Int)`` checks
+    continue to treat char literals as integer constants for codegen,
+    while type-checking (e.g., equality operand validation) can still
+    distinguish char literals from plain integers.
+
+    Placed directly after :class:`Int` because the subclass relationship
+    requires its base to be defined first.
+    """
+
+    __slots__ = ()
+
+
 @dataclass(slots=True)
 class Program(Node):
     functions: list[Node]
@@ -1879,15 +1894,25 @@ class CodeGenerator:
     def type_of_operand(self, node: Node, /) -> str:
         """Classify an operand for equality type-checking.
 
-        Returns one of: ``"pointer"``, ``"null"``, ``"integer"``, or
-        ``"unknown"`` (expressions whose type we cannot statically
-        determine — treated as integers for the purposes of the check).
+        Returns one of: ``"pointer"``, ``"null"``, ``"char"``,
+        ``"integer"``, or ``"unknown"`` (expressions whose type we
+        cannot statically determine — treated as integers for the
+        purposes of the check).
         """
+        if isinstance(node, Char):
+            return "char"
+        if isinstance(node, Index):
+            if self.variable_types.get(node.name) in ("char", "char*"):
+                return "char"
+            return "unknown"
         if isinstance(node, Var):
             if node.name == "NULL":
                 return "null"
-            if self.variable_types.get(node.name) == "char*":
+            variable_type = self.variable_types.get(node.name)
+            if variable_type == "char*":
                 return "pointer"
+            if variable_type == "char":
+                return "char"
             if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
                 return "integer"
         return "unknown"
@@ -1896,9 +1921,12 @@ class CodeGenerator:
         """Ensure ``==``/``!=`` operands have compatible types.
 
         Pointers may only be compared to other pointers or ``NULL``;
-        ``NULL`` may only appear opposite a pointer.  Comparing a
-        pointer to a non-``NULL`` integer (``if (p == 0)``) is a common
-        C bug, so the compiler requires the explicit ``NULL`` spelling.
+        ``NULL`` may only appear opposite a pointer; ``char`` values
+        must be compared against other ``char`` values or character
+        literals (so ``c != 0`` is rejected — use ``c != '\\0'``).
+        Comparing a pointer to a non-``NULL`` integer (``if (p == 0)``)
+        is a common C bug, so the compiler requires the explicit
+        ``NULL`` spelling.
         """
         left_type = self.type_of_operand(left)
         right_type = self.type_of_operand(right)
@@ -1913,6 +1941,12 @@ class CodeGenerator:
             raise SyntaxError(message)
         if right_type == "null" and left_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if left_type == "char" and right_type not in ("char", "unknown"):
+            message = f"char compared to non-char: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "char" and left_type not in ("char", "unknown"):
+            message = f"char compared to non-char: {left} vs {right}"
             raise SyntaxError(message)
 
 
@@ -2196,7 +2230,7 @@ class Parser:
             return Int(int(token[1], 0))
         if token[0] == "CHAR_LIT":
             self.eat()
-            return Int(decode_first_character(token[1][1:-1]))
+            return Char(decode_first_character(token[1][1:-1]))
         if token[0] == "STRING":
             self.eat()
             return String(token[1][1:-1])

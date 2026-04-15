@@ -1,7 +1,7 @@
 void main(char *arg) {
     char *name = ".";
     if (arg != NULL) {
-        if (arg[0] != 0) {
+        if (arg[0] != '\0') {
             name = arg;
         }
     }
