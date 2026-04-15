@@ -7,13 +7,13 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 138         | 121       | -17   |
+| cat     | 138         | 138       |  0    |
 | chmod   | 140         | 241       | +101  |
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 129         | 170       | +41   |
+| ls      | 129         | 193       | +64   |
 | mkdir   | 116         | 121       | +5    |
 | mv      | 232         | 277       | +45   |
 | uptime  | 50          | 78        | +28   |
@@ -36,10 +36,12 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+41):** The assembly version uses inline `repne scasb` with a
+**ls (+64):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
-setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
+setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).  The
+BUILTIN_CLOBBERS correction also forces the C version to spill the
+entry pointer across `read`/`write` instead of pinning it to BX.
 
 **mkdir (+5):** Same null-terminator overhead across 4 string literals
 (+4 bytes), plus the compiler loads `argv` into AX before moving to
