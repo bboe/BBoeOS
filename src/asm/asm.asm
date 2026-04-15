@@ -542,11 +542,24 @@ handle_and:
         pop bx                 ; BL = reg, BH = size
         cmp bh, 8
         je .and_r8
-        ;; and r16, imm16: 81 modrm(/4) imm16
+        ;; and r16, imm: prefer 83 /4 sign-extended-imm8 when the value
+        ;; fits in -128..127, else fall back to 81 /4 imm16.
+        mov ax, cx
+        add ax, 80h
+        cmp ax, 0FFh
+        ja .and_r16_imm16
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0E0h            ; modrm = C0 | (4<<3) | rm
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .and_r16_imm16:
         mov al, 81h
         call emit_byte_al
         mov al, bl
-        or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
+        or al, 0E0h
         call emit_byte_al
         mov ax, cx
         jmp emit_word_ax

@@ -1344,6 +1344,14 @@ class CodeGenerator:
                 self.emit("        mov ax, dx")
                 self.ax_clear()
                 return
+            if operator in ("+", "-", "&") and isinstance(right, Int):
+                # Fast path: reg op imm16 uses the immediate form, skipping
+                # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
+                self.generate_expression(left)
+                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                self.emit(f"        {mnemonic} ax, {right.value}")
+                self.ax_clear()
+                return
             cx_pinned_var = next(
                 (name for name, register in self.pinned_register.items() if register == "cx"),
                 None,
