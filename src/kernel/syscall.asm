@@ -21,6 +21,8 @@ syscall_handler:
         je .net_arp
         cmp ah, SYS_NET_MAC    ; net_mac
         je .net_mac
+        cmp ah, SYS_NET_OPEN   ; net_open
+        je .net_open
         cmp ah, SYS_NET_PING   ; net_ping
         je .net_ping
         cmp ah, SYS_NET_RECEIVE   ; net_receive
@@ -437,6 +439,20 @@ syscall_handler:
         clc
         jmp .iret_cf
         .net_mac_absent:
+        stc
+        jmp .iret_cf
+
+        .net_open:
+        ;; Allocate a raw Ethernet socket fd. CF set if no NIC or table full.
+        cmp byte [net_present], 0
+        je .net_open_err
+        call fd_alloc
+        jc .net_open_err
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_NET
+        mov byte [si+FD_OFFSET_FLAGS], 0
+        clc
+        jmp .iret_cf
+        .net_open_err:
         stc
         jmp .iret_cf
 
