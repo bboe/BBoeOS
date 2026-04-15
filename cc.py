@@ -314,6 +314,8 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "DIRECTORY_ENTRY_SIZE",
+        "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",

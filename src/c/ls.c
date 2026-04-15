@@ -9,13 +9,13 @@ void main(char *arg) {
     }
     char *entry = SECTOR_BUFFER;
     while (1) {
-        int bytes = read(fd, entry, 32);
+        int bytes = read(fd, entry, DIRECTORY_ENTRY_SIZE);
         if (bytes == 0) {
             break;
         }
         int len = strlen(entry);
         write(STDOUT, entry, len);
-        int flags = entry[25];
+        int flags = entry[DIRECTORY_OFFSET_FLAGS];
         if (flags == FLAG_DIRECTORY) {
             putc('/');
         } else if (flags == FLAG_EXECUTE) {
