@@ -2071,6 +2071,7 @@ class CodeGenerator:
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
+                self.variable_arrays.add(statement.name)
                 self.allocate_local(statement.name)
             elif isinstance(statement, If):
                 self.scan_locals(statement.body, top_level=False)
