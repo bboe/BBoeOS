@@ -11,7 +11,7 @@ source is kept here for reference.
 | chmod   | 140         | 241       | +101  |
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
-| draw    | 241         | 278       | +37   |
+| draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
 | ls      | 129         | 170       | +41   |
 | mkdir   | 116         | 121       | +5    |

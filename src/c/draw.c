@@ -11,7 +11,7 @@ void main() {
     char character = 0;
     while (character != 'q') {
         if (changed) {
-            printf("\e[38;5;3m\e[48;5;%dm\e[%d;%dH*", background, row + 1, column + 1);
+            printf("\e[38;5;3m\e[48;5;%dm\e[%d;%dH\e[42@", background, row + 1, column + 1);
         }
         character = getc();
         changed = 1;

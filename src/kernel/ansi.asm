@@ -9,6 +9,7 @@
         ;;   ESC[0m        reset foreground to 7, background to 0
         ;;   ESC[38;5;Nm   256-color foreground (stored in ansi_fg)
         ;;   ESC[48;5;Nm   256-color background (palette via INT 10h AH=0B)
+        ;;   ESC[<N>@      write char code N at cursor, no advance or scroll
 
 put_character:
         push ax
@@ -52,6 +53,8 @@ put_character:
         jnz .have_p1
         mov bx, 1              ; Default parameter is 1
 .have_p1:
+        cmp al, '@'
+        je .write_char
         cmp al, 'A'
         je .cursor_up
         cmp al, 'C'
@@ -225,6 +228,17 @@ put_character:
         xor bx, bx
         int 10h
         mov byte [ansi_state], 0
+        jmp .done
+
+.write_char:
+        ;; ESC[<N>@ — write char code N at cursor with ansi_fg color,
+        ;; no cursor advance and no scroll.  BX holds the decoded N.
+        mov al, bl
+        xor bh, bh
+        mov bl, [ansi_fg]
+        mov ah, 09h
+        mov cx, 1
+        int 10h
         jmp .done
 
         ;; Parser state (stage 2)

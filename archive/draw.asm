@@ -111,7 +111,7 @@ main:
         inc al
         call FUNCTION_PRINT_BYTE_DECIMAL
         mov si, CURSOR_SUFFIX
-        mov cx, 2
+        mov cx, CURSOR_SUFFIX_LEN
         call FUNCTION_WRITE_STDOUT
         pop dx
         jmp .loop
@@ -125,7 +125,8 @@ main:
 ;; Strings
 BG_PREFIX       db `\e[48;5;`
 BG_PREFIX_LEN   equ $ - BG_PREFIX
-CURSOR_SUFFIX   db `H*`
+CURSOR_SUFFIX   db `H\e[42@`
+CURSOR_SUFFIX_LEN equ $ - CURSOR_SUFFIX
 ESC_CSI         db `\e[`
 INIT_COLOR      db `\e[38;5;3m\e[48;5;0m`
 INIT_COLOR_LEN  equ $ - INIT_COLOR
