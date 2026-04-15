@@ -296,6 +296,7 @@ class CodeGenerator:
         "die": frozenset(),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
+        "getc": frozenset({"ax"}),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
@@ -305,6 +306,7 @@ class CodeGenerator:
         "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
+        "video_mode": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
     }
 
@@ -330,6 +332,15 @@ class CodeGenerator:
         "STDERR",
         "STDIN",
         "STDOUT",
+        "VIDEO_MODE_CGA_320x200",
+        "VIDEO_MODE_CGA_640x200",
+        "VIDEO_MODE_EGA_320x200_16",
+        "VIDEO_MODE_EGA_640x200_16",
+        "VIDEO_MODE_EGA_640x350_16",
+        "VIDEO_MODE_TEXT_40x25",
+        "VIDEO_MODE_TEXT_80x25",
+        "VIDEO_MODE_VGA_320x200_256",
+        "VIDEO_MODE_VGA_640x480_16",
     })
 
     #: Registers available for auto-pinning, in allocation order.
@@ -506,6 +517,17 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_IO_FSTAT")
         self.emit("        int 30h")
         self.emit("        xor ah, ah")
+
+    def builtin_getc(self, arguments: list[Node], /) -> None:
+        """Generate code for the getc() builtin.
+
+        Reads a single byte from stdin (blocking) via
+        FUNCTION_GET_CHARACTER.  Returns the byte zero-extended in AX.
+        """
+        self.check_argument_count(arguments=arguments, expected=0, name="getc")
+        self.emit("        call FUNCTION_GET_CHARACTER")
+        self.emit("        xor ah, ah")
+        self.ax_clear()
 
     def builtin_mkdir(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
@@ -686,6 +708,18 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
 
+    def builtin_video_mode(self, arguments: list[Node], /) -> None:
+        """Generate code for the video_mode(mode) builtin.
+
+        Invokes SYS_VIDEO_MODE to switch video mode; also clears the
+        screen and serial terminal.  AL = mode.
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="video_mode")
+        self.emit_register_from_argument(argument=arguments[0], register="ax")
+        self.emit("        mov ah, SYS_VIDEO_MODE")
+        self.emit("        int 30h")
+        self.ax_clear()
+
     def builtin_write(self, arguments: list[Node], /) -> None:
         """Generate code for the write() builtin.
 
@@ -704,7 +738,7 @@ class CodeGenerator:
 
     def can_auto_pin(self, *, following_statement: Node | None, statement: VarDecl) -> bool:
         """Decide whether *statement* should be auto-pinned to a register."""
-        if len(self.pinned_register) >= len(self.REGISTER_POOL):
+        if len(self.pinned_register) >= len(self.safe_pin_registers):
             return False
         init = statement.init
         if init is None:
@@ -712,6 +746,34 @@ class CodeGenerator:
         # Call initializers stay in memory so they can participate in
         # error-return fusion without clobbering a pin.
         return not isinstance(init, Call)
+
+    def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
+        """Return the subset of REGISTER_POOL that no builtin call in *body* clobbers.
+
+        A pinned variable held in a register that a later builtin call
+        overwrites would be stale when next read, since the compiler
+        doesn't spill pinned vars across builtin calls.  Limiting pins
+        to registers that survive every call avoids that hazard.
+        """
+        clobbered: set[str] = set()
+
+        def visit(node: Node) -> None:
+            if isinstance(node, Call):
+                call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
+                if call_clobbers is not None:
+                    clobbered.update(call_clobbers)
+            for slot in getattr(type(node), "__slots__", ()):
+                child = getattr(node, slot, None)
+                if isinstance(child, Node):
+                    visit(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, Node):
+                            visit(item)
+
+        for statement in body:
+            visit(statement)
+        return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
 
     @staticmethod
     def check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
@@ -1238,26 +1300,46 @@ class CodeGenerator:
                 self.emit("        mov ax, dx")
                 self.ax_clear()
                 return
+            cx_pinned_var = next(
+                (name for name, register in self.pinned_register.items() if register == "cx"),
+                None,
+            )
+            if cx_pinned_var is not None:
+                self.emit("        push cx")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
                 self.emit("        add ax, cx")
             elif operator == "-":
                 self.emit("        sub ax, cx")
             elif operator == "*":
+                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
+                if dx_pinned:
+                    self.emit("        push dx")
                 self.emit("        mul cx")
+                if dx_pinned:
+                    self.emit("        pop dx")
                 self.division_remainder = None
             elif operator in {"/", "%"}:
+                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
+                if dx_pinned:
+                    self.emit("        push dx")
                 self.emit("        xor dx, dx")
                 self.emit("        div cx")
-                self.division_remainder = (left, right)
                 if operator == "%":
                     self.emit("        mov ax, dx")
+                if dx_pinned:
+                    self.emit("        pop dx")
+                    self.division_remainder = None
+                else:
+                    self.division_remainder = (left, right)
             elif operator in JUMP_WHEN_FALSE:
                 self.emit("        cmp ax, cx")
                 self.emit("        mov ax, 0")
             else:
                 message = f"unknown operator: {operator}"
                 raise SyntaxError(message)
+            if cx_pinned_var is not None:
+                self.emit("        pop cx")
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
@@ -1326,6 +1408,7 @@ class CodeGenerator:
                 self.variable_arrays.add(param.name)
 
         self.discover_virtual_long_locals(body)
+        self.safe_pin_registers = self.compute_safe_pin_registers(body)
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
@@ -1869,7 +1952,7 @@ class CodeGenerator:
                 if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
-                        self.pinned_register[statement.name] = self.REGISTER_POOL[len(self.pinned_register)]
+                        self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue

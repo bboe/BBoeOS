@@ -96,10 +96,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `chmod`, `cp`, `mv`, `netinit`, `netrecv`, `netsend`.
-- `src/c/` programs written in the C subset: `cat`, `date`, `echo`, `hello`, `loop`, `loop_array`, `mkdir`, `uptime`.
+- `src/c/` programs written in the C subset: `cat`, `date`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `mkdir`, `uptime`.
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
 - `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
-- `src/asm/draw.asm` — 16-color graphics mode with cursor and background controls.
 - `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
 - `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
 - `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
