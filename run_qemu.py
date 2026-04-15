@@ -40,6 +40,7 @@ def run_commands(
     command_timeout: float = COMMAND_TIMEOUT,
     drive: Path = DEFAULT_IMAGE,
     pcap: Path | None = None,
+    snapshot: bool = False,
     with_net: bool = False,
 ) -> str:
     """Boot QEMU, run each command, return the captured serial output as text.
@@ -54,6 +55,9 @@ def run_commands(
         os.mkfifo(f"{serial_base}.in")
         os.mkfifo(f"{serial_base}.out")
 
+        drive_spec = f"file={drive},format=raw"
+        if snapshot:
+            drive_spec += ",snapshot=on"
         qemu_args = [
             "qemu-system-i386",
             "-chardev",
@@ -61,7 +65,7 @@ def run_commands(
             "-display",
             "none",
             "-drive",
-            f"file={drive},format=raw",
+            drive_spec,
             "-monitor",
             "none",
             "-serial",
@@ -179,6 +183,11 @@ def main() -> int:
         help="capture NIC traffic to this pcap file (requires --net)",
     )
     parser.add_argument(
+        "--snapshot",
+        action="store_true",
+        help="discard drive writes on exit (no persistence across runs)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=COMMAND_TIMEOUT,
@@ -191,6 +200,7 @@ def main() -> int:
         command_timeout=arguments.timeout,
         drive=arguments.drive,
         pcap=arguments.pcap,
+        snapshot=arguments.snapshot,
         with_net=arguments.net,
     )
     sys.stdout.write(output)
