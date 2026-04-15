@@ -387,7 +387,18 @@ get_input:
         push bx
         push cx
 
-        call FUNCTION_GET_CHARACTER
+        push bx
+        push cx
+        push di
+        mov bx, STDIN
+        mov di, SECTOR_BUFFER
+        mov cx, 1
+        mov ah, SYS_IO_READ
+        int 30h
+        pop di
+        pop cx
+        pop bx
+        mov al, [SECTOR_BUFFER]
 
         ;; If quit-confirmation is pending: Ctrl+Q confirms, anything else cancels
         cmp byte [confirm_quit], 0

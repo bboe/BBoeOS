@@ -32,8 +32,7 @@
         %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (3 bytes per entry)
         %assign FUNCTION_DIE            FUNCTION_TABLE      ; SI=msg, CX=len: write to stdout then exit
         %assign FUNCTION_EXIT           FUNCTION_DIE + 3    ; Exit program (reload shell)
-        %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 3   ; Read one byte from stdin; returns AL
-        %assign FUNCTION_PARSE_ARGV   FUNCTION_GET_CHARACTER + 3 ; DI=argv buf: split EXEC_ARG, CX=argc
+        %assign FUNCTION_PARSE_ARGV   FUNCTION_EXIT + 3 ; DI=argv buf: split EXEC_ARG, CX=argc
         %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PARSE_ARGV + 3 ; AL=byte: print 1-3 decimal digits
         %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 3 ; AL=char: print to stdout
         %assign FUNCTION_PRINT_DATETIME FUNCTION_PRINT_CHARACTER + 3 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS

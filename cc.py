@@ -538,11 +538,22 @@ class CodeGenerator:
     def builtin_getc(self, arguments: list[Node], /) -> None:
         """Generate code for the getc() builtin.
 
-        Reads a single byte from stdin (blocking) via
-        FUNCTION_GET_CHARACTER.  Returns the byte zero-extended in AX.
+        Reads a single byte from stdin (blocking) via SYS_IO_READ
+        through SECTOR_BUFFER.  Returns the byte zero-extended in AX.
         """
         self.check_argument_count(arguments=arguments, expected=0, name="getc")
-        self.emit("        call FUNCTION_GET_CHARACTER")
+        self.emit("        push bx")
+        self.emit("        push cx")
+        self.emit("        push di")
+        self.emit("        mov bx, STDIN")
+        self.emit("        mov di, SECTOR_BUFFER")
+        self.emit("        mov cx, 1")
+        self.emit("        mov ah, SYS_IO_READ")
+        self.emit("        int 30h")
+        self.emit("        pop di")
+        self.emit("        pop cx")
+        self.emit("        pop bx")
+        self.emit("        mov al, [SECTOR_BUFFER]")
         self.emit("        xor ah, ah")
         self.ax_clear()
 

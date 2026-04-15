@@ -132,7 +132,18 @@ read_line:
         mov dx, BUFFER          ; End of buffer
 
         .read_char:
-        call FUNCTION_GET_CHARACTER
+        push bx
+        push cx
+        push di
+        mov bx, STDIN
+        mov di, SECTOR_BUFFER
+        mov cx, 1
+        mov ah, SYS_IO_READ
+        int 30h
+        pop di
+        pop cx
+        pop bx
+        mov al, [SECTOR_BUFFER]
 
         cmp al, 0               ; Extended key
         je .extended_key

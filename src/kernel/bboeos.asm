@@ -104,7 +104,6 @@ clear_screen:
 ;;; -----------------------------------------------------------------------
         jmp near shared_die
         jmp near shared_exit
-        jmp near shared_get_character
         jmp near shared_parse_argv
         jmp near shared_print_byte_decimal
         jmp near shared_print_character
@@ -156,23 +155,6 @@ shared_exit:
         ;; Exit program (reload shell)
         mov ah, SYS_EXIT
         int 30h
-
-shared_get_character:
-        ;; Read one byte from stdin via read syscall
-        ;; Returns: AL = byte read
-        push bx
-        push cx
-        push di
-        mov bx, STDIN
-        mov di, SECTOR_BUFFER
-        mov cx, 1
-        mov ah, SYS_IO_READ
-        int 30h
-        pop di
-        pop cx
-        pop bx
-        mov al, [SECTOR_BUFFER]
-        ret
 
 shared_parse_argv:
         ;; Split [EXEC_ARG] at spaces into an argv-style pointer array.
