@@ -924,6 +924,23 @@ class CodeGenerator:
                 else:
                     self.emit(f"        cmp {register}, {literal}")
                 return
+            # Memory-backed local compared to a constant: fuse into a
+            # direct ``cmp word [L], imm`` so we skip the ``mov ax, [L]``
+            # load.  Safe because the flags are consumed by the next
+            # conditional jump and AX's prior value was not promised.
+            if (
+                isinstance(left, Var)
+                and left.name in self.locals
+                and left.name not in self.variable_arrays
+                and left.name != self.ax_local
+                and self.variable_types.get(left.name) != "unsigned long"
+            ):
+                address = self.local_address(left.name)
+                if is_zero:
+                    self.emit(f"        cmp word [{address}], 0")
+                else:
+                    self.emit(f"        cmp word [{address}], {literal}")
+                return
             self.generate_expression(left)
             if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
@@ -1798,13 +1815,22 @@ class CodeGenerator:
 
     def peephole_dead_stores(self) -> None:
         """Remove stores to local variables that are never loaded."""
-        # Collect all _l_ labels that appear as load sources.
+        # Collect all _l_ labels referenced anywhere except as a store
+        # destination.  Stores are "mov ... [_l_X], <src>"; reads include
+        # "mov <dst>, [_l_X]", "cmp word [_l_X], ...", etc.
         loaded: set[str] = set()
         for line in self.lines:
             stripped = line.strip()
-            index = stripped.find(", [_l_")
-            if index >= 0:
-                loaded.add(stripped[index + 3 : stripped.index("]", index)])
+            if self.extract_local_label(stripped) is not None:
+                continue
+            cursor = 0
+            while True:
+                start = stripped.find("[_l_", cursor)
+                if start < 0:
+                    break
+                end = stripped.index("]", start)
+                loaded.add(stripped[start + 1 : end])
+                cursor = end + 1
         # Remove stores and declarations for labels never loaded.
         result: list[str] = []
         for line in self.lines:
