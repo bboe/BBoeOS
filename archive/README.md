@@ -13,6 +13,7 @@ source is kept here for reference.
 | date    | 15          | 15        |  0    |
 | hello   | 22          | 23        | +1    |
 | mkdir   | 116         | 121       | +5    |
+| mv      | 232         | 292       | +60   |
 | uptime  | 50          | 78        | +28   |
 
 **chmod (+106):** The assembly version walks the argument with `lodsb`
@@ -26,6 +27,12 @@ explicit length.
 **mkdir (+5):** Same null-terminator overhead across 4 string literals
 (+4 bytes), plus the compiler loads `argv` into AX before moving to
 SI (+1 byte) rather than loading SI directly.
+
+**mv (+60):** The assembly version walks the argument string once with
+`lodsb` to both find the space separator and count newname length.
+The C version calls `strlen(argv[1])` (which scans with `repne scasb`
+plus setup/teardown), and reloads `argv` through BX for each indexed
+access. Null terminators on 5 string literals add another +5.
 
 **uptime (+28):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
