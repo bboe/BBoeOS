@@ -14,6 +14,7 @@ main:
 
         xor dx, dx              ; DH = row, DL = col
         mov byte [bg_color], 0
+        jmp .emit_cursor        ; paint initial star at (0, 0)
 
 .loop:
         ;; read(STDIN, input_buffer, 1)
