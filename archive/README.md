@@ -16,6 +16,7 @@ source is kept here for reference.
 | ls      | 129         | 193       | +64   |
 | mkdir   | 116         | 121       | +5    |
 | mv      | 232         | 276       | +44   |
+| netinit | 72          | 72        |  0    |
 | uptime  | 50          | 78        | +28   |
 
 **chmod (+100):** The assembly version walks the argument with `lodsb`

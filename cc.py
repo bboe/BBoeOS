@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar
 
@@ -314,9 +314,11 @@ class CodeGenerator:
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getc": frozenset({"ax"}),
+        "mac": frozenset({"ax", "di"}),
         "mkdir": frozenset({"ax", "si"}),
         "open": frozenset({"ax", "dx", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
+        "print_mac": frozenset({"ax", "cx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putc": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
@@ -327,12 +329,13 @@ class CodeGenerator:
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mkdir", "rename"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "rename"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
@@ -455,28 +458,28 @@ class CodeGenerator:
         self.ax_is_byte = False
         self.ax_local = None
 
-    def builtin_chmod(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
+    def builtin_chmod(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
         """Generate code for the chmod() builtin.
 
         Returns 0 on success or an ERR_* code on failure.  When
         *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of
-        converting the carry flag to a 0-or-error integer.
+        converting the carry flag to a 0-or-error integer.  When
+        *fuse_die* is set, emits a direct ``jc FUNCTION_DIE`` with the
+        given message preloaded in SI/CX.
         """
         self.check_argument_count(arguments=arguments, expected=2, name="chmod")
         self.emit_si_from_argument(arguments[0])
         self.generate_expression(arguments[1])
         self.emit("        mov ah, SYS_FS_CHMOD")
         self.emit("        int 30h")
-        if fuse_exit:
-            self.emit("        jnc FUNCTION_EXIT")
-        else:
-            label_index = self.new_label()
-            self.emit(f"        jnc .ok_{label_index}")
-            self.emit("        xor ah, ah")
-            self.emit(f"        jmp .done_{label_index}")
-            self.emit(f".ok_{label_index}:")
-            self.emit("        xor ax, ax")
-            self.emit(f".done_{label_index}:")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_close(self, arguments: list[Node], /) -> None:
         """Generate code for the close() builtin.
@@ -546,27 +549,42 @@ class CodeGenerator:
         self.emit("        xor ah, ah")
         self.ax_clear()
 
-    def builtin_mkdir(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
+    def builtin_mac(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
+        """Generate code for the mac(buffer) builtin.
+
+        Reads the cached NIC MAC address (6 bytes) into ``buffer``.
+        Returns 0 on success, 1 if no NIC is present.
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="mac")
+        self.emit_register_from_argument(argument=arguments[0], register="di")
+        self.emit("        mov ah, SYS_NET_MAC")
+        self.emit("        int 30h")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
+
+    def builtin_mkdir(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
         """Generate code for the mkdir() builtin.
 
-        Returns 0 on success or an ERR_* code on failure.  When
-        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of converting
-        the carry flag to a 0-or-error integer.
+        Returns 0 on success or an ERR_* code on failure.
         """
         self.check_argument_count(arguments=arguments, expected=1, name="mkdir")
         self.emit_si_from_argument(arguments[0])
         self.emit("        mov ah, SYS_FS_MKDIR")
         self.emit("        int 30h")
-        if fuse_exit:
-            self.emit("        jnc FUNCTION_EXIT")
-        else:
-            label_index = self.new_label()
-            self.emit(f"        jnc .ok_{label_index}")
-            self.emit("        xor ah, ah")
-            self.emit(f"        jmp .done_{label_index}")
-            self.emit(f".ok_{label_index}:")
-            self.emit("        xor ax, ax")
-            self.emit(f".done_{label_index}:")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_open(self, arguments: list[Node], /) -> None:
         """Generate code for the open() builtin.
@@ -602,6 +620,15 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
         self.emit("        call FUNCTION_PRINT_DATETIME")
+
+    def builtin_print_mac(self, arguments: list[Node], /) -> None:
+        """Generate code for the print_mac(buffer) builtin.
+
+        Prints a 6-byte MAC address as ``XX:XX:XX:XX:XX:XX`` (no newline).
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="print_mac")
+        self.emit_si_from_argument(arguments[0])
+        self.emit("        call FUNCTION_PRINT_MAC")
 
     def builtin_printf(self, arguments: list[Node], /) -> None:
         """Generate code for the printf() builtin.
@@ -678,30 +705,26 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
-    def builtin_rename(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
+    def builtin_rename(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
         """Generate code for the rename() builtin.
 
         ``rename(oldname, newname)`` emits ``mov si, <oldname> /
         mov di, <newname> / mov ah, SYS_FS_RENAME / int 30h``.
-        Returns 0 on success or an ERROR_* code on failure.  When
-        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of
-        converting the carry flag to a 0-or-error integer.
+        Returns 0 on success or an ERROR_* code on failure.
         """
         self.check_argument_count(arguments=arguments, expected=2, name="rename")
         self.emit_si_from_argument(arguments[0])
         self.emit_register_from_argument(argument=arguments[1], register="di")
         self.emit("        mov ah, SYS_FS_RENAME")
         self.emit("        int 30h")
-        if fuse_exit:
-            self.emit("        jnc FUNCTION_EXIT")
-        else:
-            label_index = self.new_label()
-            self.emit(f"        jnc .ok_{label_index}")
-            self.emit("        xor ah, ah")
-            self.emit(f"        jmp .done_{label_index}")
-            self.emit(f".ok_{label_index}:")
-            self.emit("        xor ax, ax")
-            self.emit(f".done_{label_index}:")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.
@@ -1007,6 +1030,43 @@ class CodeGenerator:
         operator = self.emit_condition(condition=condition, context=context)
         self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
 
+    def emit_error_syscall_tail(
+        self,
+        *,
+        fuse_die: tuple[str, int] | None,
+        fuse_exit: bool,
+        preserve_al: bool,
+    ) -> None:
+        """Emit the shared tail for an error-returning syscall.
+
+        - ``fuse_die=(label, length)`` → preload SI/CX and
+          ``jc FUNCTION_DIE`` so the if-error-die block disappears.
+        - ``fuse_exit`` → ``jnc FUNCTION_EXIT`` (for
+          ``if (!err) return;`` fusion).
+        - Otherwise, convert the carry flag into a 0-or-error integer
+          in AX.  ``preserve_al`` keeps AL on the error path (syscalls
+          that return an ERROR_* code); False hard-codes 1.
+        """
+        if fuse_die is not None:
+            die_label, die_length = fuse_die
+            self.emit(f"        mov si, {die_label}")
+            self.emit(f"        mov cx, {die_length}")
+            self.emit("        jc FUNCTION_DIE")
+            return
+        if fuse_exit:
+            self.emit("        jnc FUNCTION_EXIT")
+            return
+        label_index = self.new_label()
+        self.emit(f"        jnc .ok_{label_index}")
+        if preserve_al:
+            self.emit("        xor ah, ah")
+        else:
+            self.emit("        mov ax, 1")
+        self.emit(f"        jmp .done_{label_index}")
+        self.emit(f".ok_{label_index}:")
+        self.emit("        xor ax, ax")
+        self.emit(f".done_{label_index}:")
+
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
 
@@ -1189,15 +1249,61 @@ class CodeGenerator:
                     self.emit(f"        {true_jump} FUNCTION_DIE")
                     i += 1
                     continue
-            # Fuse error-returning syscall + if-zero-exit.
+            # Fuse error-returning syscall + if-truthy-die:
+            #     int err = syscall(...);
+            #     if (err) { die(msg); }
+            # Emit the syscall, then preload SI/CX with the die
+            # message and a single `jc FUNCTION_DIE` — no memory
+            # round-trip for err, no CF->integer normalization.  Only
+            # fires when `err` is never read after the if.
+            if (init is not None and isinstance(init, Call)
+                    and init.name in self.ERROR_RETURNING_BUILTINS
+                    and i + 1 < len(statements)):
+                next_stmt = statements[i + 1]
+                die_call = None
+                # Match cond: `err` (BinOp != 0) or `!err` (BinOp == 0)
+                cond = next_stmt.cond if isinstance(next_stmt, If) else None
+                is_truthy_cond = (
+                    isinstance(cond, BinOp)
+                    and cond.op == "!="
+                    and isinstance(cond.left, Var)
+                    and cond.left.name == statement.name
+                    and cond.right == Int(0)
+                )
+                if (is_truthy_cond
+                        and next_stmt.else_body is None
+                        and len(next_stmt.body) == 1
+                        and isinstance(next_stmt.body[0], Call)
+                        and next_stmt.body[0].name == "die"
+                        and len(next_stmt.body[0].args) == 1
+                        and isinstance(next_stmt.body[0].args[0], String)):
+                    die_call = next_stmt.body[0]
+                if die_call is not None and not any(
+                    self.node_references_var(name=statement.name, node=later)
+                    for later in statements[i + 2:]
+                ):
+                    die_message = die_call.args[0]
+                    die_label = self.new_string_label(die_message.content)
+                    die_length = string_byte_length(die_message.content)
+                    self.visible_vars.add(statement.name)
+                    call_node = statement.init
+                    handler = getattr(self, f"builtin_{call_node.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
+                    if self.register_cache and clobbers:
+                        self.auto_spill(clobbers=clobbers)
+                    handler(call_node.args, fuse_die=(die_label, die_length))
+                    self.ax_clear()
+                    i += 2
+                    continue
+            # Fuse error-returning syscall + if-zero-exit:
+            #     int err = syscall(...);
+            #     if (err == 0) return;
+            # becomes a single `jnc FUNCTION_EXIT` after the syscall,
+            # leaving AL = error code on the CF=1 fall-through so any
+            # subsequent `if (err == N)` chain reads the right byte.
             if init is not None and isinstance(init, Call) and init.name in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
                 next_stmt = statements[i + 1]
-                skip = 0
                 if self.is_zero_exit_if(next_stmt):
-                    skip = 2  # skip declaration + if-zero-exit
-                elif isinstance(next_stmt, If) and not self.is_zero_test(next_stmt.cond):
-                    skip = 1  # skip declaration only, process if-else normally
-                if skip:
                     self.visible_vars.add(statement.name)
                     call_node = statement.init
                     handler = getattr(self, f"builtin_{call_node.name}")
@@ -1207,7 +1313,7 @@ class CodeGenerator:
                     handler(call_node.args, fuse_exit=True)
                     self.ax_is_byte = True
                     self.ax_local = statement.name
-                    i += skip
+                    i += 2
                     continue
             self.generate_statement(statement)
             i += 1
@@ -1740,6 +1846,22 @@ class CodeGenerator:
         label = f"_str_{len(self.strings)}"
         self.strings.append((label, content))
         return label
+
+    @staticmethod
+    def node_references_var(*, name: str, node: Node) -> bool:
+        """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
+        if isinstance(node, Var) and node.name == name:
+            return True
+        for field in fields(node):
+            value = getattr(node, field.name)
+            if isinstance(value, Node):
+                if CodeGenerator.node_references_var(name=name, node=value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and CodeGenerator.node_references_var(name=name, node=item):
+                        return True
+        return False
 
     def peephole(self) -> None:
         """Run peephole optimization passes over generated assembly."""
