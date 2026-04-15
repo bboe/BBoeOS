@@ -3,8 +3,9 @@
 %include "constants.asm"
 
 main:
-        mov ax, 0Dh
-        int 10h                 ; Change to 16-color graphics mode
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_EGA_320x200_16
+        int 30h
         xor dx, dx
         mov byte [bg_color], 0
 
@@ -86,7 +87,8 @@ main:
         jmp .loop
 
         .end:
-        mov ah, SYS_SCREEN_CLEAR
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_TEXT_80x25
         int 30h
         jmp FUNCTION_EXIT
 

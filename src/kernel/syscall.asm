@@ -37,8 +37,8 @@ syscall_handler:
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
-        cmp ah, SYS_SCREEN_CLEAR  ; scr_clear
-        je .scr_clear
+        cmp ah, SYS_VIDEO_MODE    ; video_mode
+        je .video_mode
 
         cmp ah, SYS_EXEC       ; sys_exec
         je .sys_exec
@@ -631,14 +631,16 @@ syscall_handler:
         pop ecx
         iret
 
-        .scr_clear:
-        ;; Clear serial terminal
+        .video_mode:
+        ;; Set video mode: AL = mode; clears serial and screen
+        push ax
         mov al, `\r`
         call serial_character
         mov al, 0Ch             ; Form feed
         call serial_character
-        ;; Clear screen
-        call clear_screen
+        pop ax
+        xor ah, ah              ; INT 10h AH=00h set mode (AL), clears screen
+        int 10h
         iret
 
         .sys_exec:

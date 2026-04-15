@@ -306,7 +306,8 @@ read_line:
         jmp .read_char
 
         .ctrl_l:
-        mov ah, SYS_SCREEN_CLEAR
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_TEXT_80x25
         int 30h
         mov cx, BUFFER
         mov dx, BUFFER

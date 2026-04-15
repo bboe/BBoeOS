@@ -493,7 +493,8 @@ get_input:
         pop cx
         pop bx
         pop ax
-        mov ah, SYS_SCREEN_CLEAR
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_TEXT_80x25
         int 30h
         jmp FUNCTION_EXIT
 
@@ -785,7 +786,8 @@ render:
         push dx
         push si
 
-        mov ah, SYS_SCREEN_CLEAR
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_TEXT_80x25
         int 30h
 
         ;; Walk to start of view_line: count newlines from offset 0

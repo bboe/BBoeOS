@@ -7,7 +7,6 @@
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTOR 15
         %assign DIRECTORY_SECTORS 3
-        %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
@@ -55,6 +54,7 @@
         %assign O_TRUNC  20h
         %assign O_WRONLY 01h
         %assign PROGRAM_BASE 0600h
+        %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign STDERR 2
         %assign STDIN 0
         %assign STDOUT 1
@@ -81,9 +81,20 @@
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_UPTIME 31h
 
-        %assign SYS_SCREEN_CLEAR 40h
+        %assign SYS_VIDEO_MODE 40h      ; AL=video mode; clears screen and serial
 
         %assign SYS_EXEC 0F0h
         %assign SYS_EXIT 0F1h
         %assign SYS_REBOOT 0F2h
         %assign SYS_SHUTDOWN 0F3h
+
+        ;; Video modes (argument to SYS_VIDEO_MODE; INT 10h AH=00h AL)
+        %assign VIDEO_MODE_TEXT_40x25      01h  ; 40x25 color text
+        %assign VIDEO_MODE_TEXT_80x25      03h  ; 80x25 color text (default)
+        %assign VIDEO_MODE_CGA_320x200     04h  ; CGA 4-color 320x200
+        %assign VIDEO_MODE_CGA_640x200     06h  ; CGA 2-color 640x200
+        %assign VIDEO_MODE_EGA_320x200_16  0Dh  ; EGA 16-color 320x200
+        %assign VIDEO_MODE_EGA_640x200_16  0Eh  ; EGA 16-color 640x200
+        %assign VIDEO_MODE_EGA_640x350_16  10h  ; EGA 16-color 640x350
+        %assign VIDEO_MODE_VGA_640x480_16  12h  ; VGA 16-color 640x480
+        %assign VIDEO_MODE_VGA_320x200_256 13h  ; VGA 256-color 320x200
