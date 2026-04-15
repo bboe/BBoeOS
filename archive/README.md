@@ -11,7 +11,7 @@ source is kept here for reference.
 | chmod   | 140         | 241       | +101  |
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
-| draw    | 238         | 384       | +146  |
+| draw    | 238         | 399       | +161  |
 | hello   | 22          | 23        | +1    |
 | ls      | 129         | 170       | +41   |
 | mkdir   | 116         | 121       | +5    |
@@ -22,7 +22,7 @@ source is kept here for reference.
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
 
-**draw (+146):** The assembly version keeps row/col packed in a single
+**draw (+161):** The assembly version keeps row/col packed in a single
 DX register and edits it in place with `inc dh` / `dec dl`, then pokes
 INT 10h for cursor moves, character output, and background palette.
 The C version tracks each coordinate as a word-sized local, recomputes

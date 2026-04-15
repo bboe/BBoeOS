@@ -1,3 +1,7 @@
+#define COLORS 16
+#define COLUMNS 40
+#define ROWS 25
+
 void main() {
     video_mode(VIDEO_MODE_EGA_320x200_16);
     int background = 0;
@@ -8,22 +12,22 @@ void main() {
     while (character != 'q') {
         int moved = 0;
         if (character == 'a') {
-            column = (column + 39) % 40;
+            column = (column + COLUMNS - 1) % COLUMNS;
             moved = 1;
         } else if (character == 'd') {
-            column = (column + 1) % 40;
+            column = (column + 1) % COLUMNS;
             moved = 1;
         } else if (character == 's') {
-            row = (row + 1) % 25;
+            row = (row + 1) % ROWS;
             moved = 1;
         } else if (character == 'w') {
-            row = (row + 24) % 25;
+            row = (row + ROWS - 1) % ROWS;
             moved = 1;
         } else if (character == 'j') {
-            background = (background + 15) % 16;
+            background = (background + COLORS - 1) % COLORS;
             printf("\e[48;5;%dm", background);
         } else if (character == 'k') {
-            background = (background + 1) % 16;
+            background = (background + 1) % COLORS;
             printf("\e[48;5;%dm", background);
         }
         if (moved) {

@@ -2541,6 +2541,32 @@ class Parser:
         return self.tokens[self.position + offset]
 
 
+def apply_defines(
+    *,
+    defines: dict[str, str],
+    tokens: list[tuple[str, str, int]],
+) -> list[tuple[str, str, int]]:
+    """Substitute IDENT tokens matching a ``#define`` with the macro's tokens.
+
+    Each macro value is retokenized on every occurrence so the caller
+    can use any token sequence (numbers, char literals, parenthesized
+    expressions).  The substituted tokens inherit the line number of
+    the original IDENT so diagnostics point at the use site, not the
+    define site.  No recursive expansion or function-like macros.
+    """
+    if not defines:
+        return tokens
+    result: list[tuple[str, str, int]] = []
+    for kind, text, line in tokens:
+        if kind == "IDENT" and text in defines:
+            value_tokens = tokenize(defines[text])
+            for value_kind, value_text, _ in value_tokens[:-1]:  # drop trailing EOF
+                result.append((value_kind, value_text, line))
+        else:
+            result.append((kind, text, line))
+    return result
+
+
 def decode_first_character(text: str) -> int:
     """Return the byte value of the first character in a C string literal.
 
@@ -2551,6 +2577,66 @@ def decode_first_character(text: str) -> int:
     if text[0] == "\\" and len(text) >= 2:
         return CHARACTER_ESCAPES.get(text[1], ord(text[1]))
     return ord(text[0])
+
+
+def main() -> int:
+    """Compile a C source file to NASM assembly.
+
+    Returns:
+        Exit code (0 for success, 1 for usage error).
+
+    """
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
+        return 1
+
+    source = Path(sys.argv[1]).read_text(encoding="utf-8")
+    source, defines = preprocess(source)
+    tokens = tokenize(source)
+    tokens = apply_defines(defines=defines, tokens=tokens)
+    ast = Parser(tokens).parse_program()
+    output = CodeGenerator().generate(ast)
+
+    if len(sys.argv) == 3:
+        Path(sys.argv[2]).write_text(output, encoding="utf-8")
+    else:
+        sys.stdout.write(output)
+    return 0
+
+
+def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
+    """Strip ``#define`` directives and collect them into a symbol table.
+
+    Only object-like macros with a non-empty value are supported:
+    ``#define NAME VALUE`` where VALUE is whatever remains on the line
+    after the name (typically an integer or character literal).  Each
+    directive line is replaced with a blank line so downstream line
+    numbers stay correct.
+
+    Returns:
+        (processed_source, defines).  ``defines`` maps each macro name
+        to the raw value text, which is retokenized at substitution
+        time so the tokens inherit the current position's line number.
+    """
+    defines: dict[str, str] = {}
+    output_lines: list[str] = []
+    for line in source.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not stripped.startswith("#define"):
+            output_lines.append(line)
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            message = f"malformed #define: {line.rstrip()!r}"
+            raise SyntaxError(message)
+        name = parts[1]
+        value = parts[2].rstrip()
+        if not value:
+            message = f"empty #define value for {name!r}"
+            raise SyntaxError(message)
+        defines[name] = value
+        output_lines.append("\n")  # Preserve line numbering.
+    return "".join(output_lines), defines
 
 
 def string_byte_length(text: str) -> int:
@@ -2573,29 +2659,6 @@ def string_byte_length(text: str) -> int:
     if text.endswith("\\0"):
         length -= 1
     return length
-
-
-def main() -> int:
-    """Compile a C source file to NASM assembly.
-
-    Returns:
-        Exit code (0 for success, 1 for usage error).
-
-    """
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
-        return 1
-
-    source = Path(sys.argv[1]).read_text(encoding="utf-8")
-    tokens = tokenize(source)
-    ast = Parser(tokens).parse_program()
-    output = CodeGenerator().generate(ast)
-
-    if len(sys.argv) == 3:
-        Path(sys.argv[2]).write_text(output, encoding="utf-8")
-    else:
-        sys.stdout.write(output)
-    return 0
 
 
 def tokenize(source: str, /) -> list[tuple[str, str, int]]:
