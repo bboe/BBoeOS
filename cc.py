@@ -273,6 +273,7 @@ class CodeGenerator:
         "datetime": frozenset({"ax", "bx", "cx", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
+        "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
         "print_bcd": frozenset({"ax"}),
@@ -477,6 +478,20 @@ class CodeGenerator:
         """Generate code for the exit() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp FUNCTION_EXIT")
+
+    def builtin_fstat(self, arguments: list[Node], /) -> None:
+        """Generate code for the fstat() builtin.
+
+        ``fstat(fd)`` emits ``mov bx, <fd> / mov ah, SYS_IO_FSTAT /
+        int 30h``.  Returns the file mode (flags byte) in AX.
+        The syscall also returns CX:DX = file size, but those are
+        discarded here.
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="fstat")
+        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit("        mov ah, SYS_IO_FSTAT")
+        self.emit("        int 30h")
+        self.emit("        xor ah, ah")
 
     def builtin_mkdir(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
