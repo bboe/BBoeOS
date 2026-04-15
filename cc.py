@@ -1267,7 +1267,10 @@ class CodeGenerator:
             return
         if isinstance(expression, Int):
             self.ax_clear()
-            self.emit(f"        mov ax, {expression.value}")
+            if expression.value == 0:
+                self.emit("        xor ax, ax")
+            else:
+                self.emit(f"        mov ax, {expression.value}")
         elif isinstance(expression, String):
             self.ax_clear()
             self.emit(f"        mov ax, {self.new_string_label(expression.content)}")
