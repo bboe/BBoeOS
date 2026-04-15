@@ -11,6 +11,7 @@ source is kept here for reference.
 | chmod   | 140         | 241       | +101  |
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
+| draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
 | ls      | 129         | 170       | +41   |
 | mkdir   | 116         | 121       | +5    |
@@ -20,6 +21,16 @@ source is kept here for reference.
 **chmod (+101):** The assembly version walks the argument with `lodsb`
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
+
+**draw (+37):** The assembly version keeps row/col packed in a single
+DX register and edits it in place with `inc dh` / `dec dl`, then pokes
+INT 10h for cursor moves, character output, and background palette.
+The C version tracks each coordinate as a word-sized local and emits
+state changes as a single `printf` of the full ANSI burst —
+`\e[38;5;3m\e[48;5;%dm\e[%d;%dH*` — gated by a `changed` flag so
+unmapped keypresses don't redraw.  Remaining overhead is the printf
+call (push/call/cleanup around three args), the flag's store/test,
+and the `dw 0` cells for each coordinate.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an

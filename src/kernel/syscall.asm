@@ -34,11 +34,13 @@ syscall_handler:
 
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
+        cmp ah, SYS_RTC_SLEEP  ; rtc_sleep
+        je .rtc_sleep
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
-        cmp ah, SYS_SCREEN_CLEAR  ; scr_clear
-        je .scr_clear
+        cmp ah, SYS_VIDEO_MODE    ; video_mode
+        je .video_mode
 
         cmp ah, SYS_EXEC       ; sys_exec
         je .sys_exec
@@ -611,6 +613,24 @@ syscall_handler:
         .month_days:
         dw 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
 
+        .rtc_sleep:
+        ;; Busy-wait for CX milliseconds via BIOS INT 15h AH=86h
+        ;; which takes CX:DX = microseconds.  CX ms * 1000 = us.
+        push ax
+        push cx
+        push dx
+        mov ax, cx
+        mov cx, 1000
+        mul cx                  ; DX:AX = ms * 1000 (microseconds)
+        mov cx, dx
+        mov dx, ax
+        mov ah, 86h
+        int 15h
+        pop dx
+        pop cx
+        pop ax
+        iret
+
         .rtc_uptime:
         ;; Return elapsed seconds in AX
         push ecx
@@ -631,14 +651,16 @@ syscall_handler:
         pop ecx
         iret
 
-        .scr_clear:
-        ;; Clear serial terminal
+        .video_mode:
+        ;; Set video mode: AL = mode; clears serial and screen
+        push ax
         mov al, `\r`
         call serial_character
         mov al, 0Ch             ; Form feed
         call serial_character
-        ;; Clear screen
-        call clear_screen
+        pop ax
+        xor ah, ah              ; INT 10h AH=00h set mode (AL), clears screen
+        int 10h
         iret
 
         .sys_exec:

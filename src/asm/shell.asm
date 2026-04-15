@@ -306,7 +306,8 @@ read_line:
         jmp .read_char
 
         .ctrl_l:
-        mov ah, SYS_SCREEN_CLEAR
+        mov ah, SYS_VIDEO_MODE
+        mov al, VIDEO_MODE_TEXT_80x25
         int 30h
         mov cx, BUFFER
         mov dx, BUFFER
@@ -462,21 +463,28 @@ visual_bell:
         push bx
         push cx
         push dx
-        mov ax, 0B00h
-        mov bx, 0004h          ; Border color = red
-        int 10h
-        mov ah, 86h
-        xor cx, cx
-        mov dx, 0C350h         ; 50,000 µs = 50ms
-        int 15h
-        mov ax, 0B00h
-        xor bx, bx             ; Border color = black
-        int 10h
+        push si
+        ;; Flash background red via SGR: \e[48;5;4m
+        mov si, BELL_RED
+        mov cx, BELL_SGR_LEN
+        call FUNCTION_WRITE_STDOUT
+        mov cx, 50              ; 50 ms
+        mov ah, SYS_RTC_SLEEP
+        int 30h
+        ;; Restore background black: \e[48;5;0m
+        mov si, BELL_BLACK
+        mov cx, BELL_SGR_LEN
+        call FUNCTION_WRITE_STDOUT
+        pop si
         pop dx
         pop cx
         pop bx
         pop ax
         ret
+
+BELL_BLACK   db `\e[48;5;0m`
+BELL_RED     db `\e[48;5;4m`
+BELL_SGR_LEN equ $ - BELL_RED
 
 ;; Command table
 cmd_table:

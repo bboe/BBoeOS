@@ -161,6 +161,12 @@ class LogicalAnd(Node):
 
 
 @dataclass(slots=True)
+class LogicalOr(Node):
+    left: Node
+    right: Node
+
+
+@dataclass(slots=True)
 class Program(Node):
     functions: list[Node]
 
@@ -232,6 +238,15 @@ JUMP_WHEN_FALSE = {
     "==": "jne",
 }
 
+JUMP_WHEN_TRUE = {
+    "!=": "jne",
+    "<": "jl",
+    "<=": "jle",
+    ">": "jg",
+    ">=": "jge",
+    "==": "je",
+}
+
 KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
 
 TOKEN_PATTERN = re.compile(
@@ -253,6 +268,8 @@ TOKEN_PATTERN = re.compile(
   | (?P<LT><)
   | (?P<MINUS>-)
   | (?P<AND_AND>&&)
+  | (?P<OR_OR>\|\|)
+  | (?P<AMP>&)
   | (?P<NOT>!)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
@@ -296,6 +313,7 @@ class CodeGenerator:
         "die": frozenset(),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
+        "getc": frozenset({"ax"}),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
@@ -305,6 +323,7 @@ class CodeGenerator:
         "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
+        "video_mode": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
     }
 
@@ -330,6 +349,15 @@ class CodeGenerator:
         "STDERR",
         "STDIN",
         "STDOUT",
+        "VIDEO_MODE_CGA_320x200",
+        "VIDEO_MODE_CGA_640x200",
+        "VIDEO_MODE_EGA_320x200_16",
+        "VIDEO_MODE_EGA_640x200_16",
+        "VIDEO_MODE_EGA_640x350_16",
+        "VIDEO_MODE_TEXT_40x25",
+        "VIDEO_MODE_TEXT_80x25",
+        "VIDEO_MODE_VGA_320x200_256",
+        "VIDEO_MODE_VGA_640x480_16",
     })
 
     #: Registers available for auto-pinning, in allocation order.
@@ -506,6 +534,17 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_IO_FSTAT")
         self.emit("        int 30h")
         self.emit("        xor ah, ah")
+
+    def builtin_getc(self, arguments: list[Node], /) -> None:
+        """Generate code for the getc() builtin.
+
+        Reads a single byte from stdin (blocking) via
+        FUNCTION_GET_CHARACTER.  Returns the byte zero-extended in AX.
+        """
+        self.check_argument_count(arguments=arguments, expected=0, name="getc")
+        self.emit("        call FUNCTION_GET_CHARACTER")
+        self.emit("        xor ah, ah")
+        self.ax_clear()
 
     def builtin_mkdir(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
         """Generate code for the mkdir() builtin.
@@ -686,6 +725,18 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_RTC_UPTIME")
         self.emit("        int 30h")
 
+    def builtin_video_mode(self, arguments: list[Node], /) -> None:
+        """Generate code for the video_mode(mode) builtin.
+
+        Invokes SYS_VIDEO_MODE to switch video mode; also clears the
+        screen and serial terminal.  AL = mode.
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="video_mode")
+        self.emit_register_from_argument(argument=arguments[0], register="ax")
+        self.emit("        mov ah, SYS_VIDEO_MODE")
+        self.emit("        int 30h")
+        self.ax_clear()
+
     def builtin_write(self, arguments: list[Node], /) -> None:
         """Generate code for the write() builtin.
 
@@ -704,7 +755,7 @@ class CodeGenerator:
 
     def can_auto_pin(self, *, following_statement: Node | None, statement: VarDecl) -> bool:
         """Decide whether *statement* should be auto-pinned to a register."""
-        if len(self.pinned_register) >= len(self.REGISTER_POOL):
+        if len(self.pinned_register) >= len(self.safe_pin_registers):
             return False
         init = statement.init
         if init is None:
@@ -712,6 +763,34 @@ class CodeGenerator:
         # Call initializers stay in memory so they can participate in
         # error-return fusion without clobbering a pin.
         return not isinstance(init, Call)
+
+    def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
+        """Return the subset of REGISTER_POOL that no builtin call in *body* clobbers.
+
+        A pinned variable held in a register that a later builtin call
+        overwrites would be stale when next read, since the compiler
+        doesn't spill pinned vars across builtin calls.  Limiting pins
+        to registers that survive every call avoids that hazard.
+        """
+        clobbered: set[str] = set()
+
+        def visit(node: Node) -> None:
+            if isinstance(node, Call):
+                call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
+                if call_clobbers is not None:
+                    clobbered.update(call_clobbers)
+            for slot in getattr(type(node), "__slots__", ()):
+                child = getattr(node, slot, None)
+                if isinstance(child, Node):
+                    visit(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, Node):
+                            visit(item)
+
+        for statement in body:
+            visit(statement)
+        return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
 
     @staticmethod
     def check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
@@ -845,6 +924,23 @@ class CodeGenerator:
                 else:
                     self.emit(f"        cmp {register}, {literal}")
                 return
+            # Memory-backed local compared to a constant: fuse into a
+            # direct ``cmp word [L], imm`` so we skip the ``mov ax, [L]``
+            # load.  Safe because the flags are consumed by the next
+            # conditional jump and AX's prior value was not promised.
+            if (
+                isinstance(left, Var)
+                and left.name in self.locals
+                and left.name not in self.variable_arrays
+                and left.name != self.ax_local
+                and self.variable_types.get(left.name) != "unsigned long"
+            ):
+                address = self.local_address(left.name)
+                if is_zero:
+                    self.emit(f"        cmp word [{address}], 0")
+                else:
+                    self.emit(f"        cmp word [{address}], {literal}")
+                return
             self.generate_expression(left)
             if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
@@ -875,14 +971,41 @@ class CodeGenerator:
 
         For ``&&``, short-circuits by recursing on each operand with
         the same fail label — any false leg jumps directly to the
-        failure target.
+        failure target.  For ``||``, jumps past the right leg as soon
+        as the left leg is true, otherwise re-enters the false-jump on
+        the right leg.
         """
         if isinstance(condition, LogicalAnd):
             self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
             self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
             return
+        if isinstance(condition, LogicalOr):
+            pass_label = f".lor_{self.new_label()}"
+            self.emit_condition_true_jump(condition=condition.left, success_label=pass_label, context=context)
+            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            self.emit(f"{pass_label}:")
+            return
         operator = self.emit_condition(condition=condition, context=context)
         self.emit(f"        {JUMP_WHEN_FALSE[operator]} {fail_label}")
+
+    def emit_condition_true_jump(self, *, condition: Node, success_label: str, context: str) -> None:
+        """Emit a condition that jumps to ``success_label`` when true.
+
+        Dual of :meth:`emit_condition_false_jump`; used for the ``||``
+        short-circuit so that a truthy left leg can skip the right.
+        """
+        if isinstance(condition, LogicalOr):
+            self.emit_condition_true_jump(condition=condition.left, success_label=success_label, context=context)
+            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            return
+        if isinstance(condition, LogicalAnd):
+            skip_label = f".land_{self.new_label()}"
+            self.emit_condition_false_jump(condition=condition.left, fail_label=skip_label, context=context)
+            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            self.emit(f"{skip_label}:")
+            return
+        operator = self.emit_condition(condition=condition, context=context)
+        self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
 
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
@@ -1144,7 +1267,10 @@ class CodeGenerator:
             return
         if isinstance(expression, Int):
             self.ax_clear()
-            self.emit(f"        mov ax, {expression.value}")
+            if expression.value == 0:
+                self.emit("        xor ax, ax")
+            else:
+                self.emit(f"        mov ax, {expression.value}")
         elif isinstance(expression, String):
             self.ax_clear()
             self.emit(f"        mov ax, {self.new_string_label(expression.content)}")
@@ -1238,26 +1364,56 @@ class CodeGenerator:
                 self.emit("        mov ax, dx")
                 self.ax_clear()
                 return
+            if operator in ("+", "-", "&") and isinstance(right, Int):
+                # Fast path: reg op imm16 uses the immediate form, skipping
+                # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
+                self.generate_expression(left)
+                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                self.emit(f"        {mnemonic} ax, {right.value}")
+                self.ax_clear()
+                return
+            cx_pinned_var = next(
+                (name for name, register in self.pinned_register.items() if register == "cx"),
+                None,
+            )
+            if cx_pinned_var is not None:
+                self.emit("        push cx")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
                 self.emit("        add ax, cx")
             elif operator == "-":
                 self.emit("        sub ax, cx")
+            elif operator == "&":
+                self.emit("        and ax, cx")
             elif operator == "*":
+                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
+                if dx_pinned:
+                    self.emit("        push dx")
                 self.emit("        mul cx")
+                if dx_pinned:
+                    self.emit("        pop dx")
                 self.division_remainder = None
             elif operator in {"/", "%"}:
+                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
+                if dx_pinned:
+                    self.emit("        push dx")
                 self.emit("        xor dx, dx")
                 self.emit("        div cx")
-                self.division_remainder = (left, right)
                 if operator == "%":
                     self.emit("        mov ax, dx")
+                if dx_pinned:
+                    self.emit("        pop dx")
+                    self.division_remainder = None
+                else:
+                    self.division_remainder = (left, right)
             elif operator in JUMP_WHEN_FALSE:
                 self.emit("        cmp ax, cx")
                 self.emit("        mov ax, 0")
             else:
                 message = f"unknown operator: {operator}"
                 raise SyntaxError(message)
+            if cx_pinned_var is not None:
+                self.emit("        pop cx")
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
@@ -1317,6 +1473,7 @@ class CodeGenerator:
         self.variable_arrays = set()
         self.variable_types = {}
         self.virtual_long_locals = set()
+        self.zero_init_skippable: set[str] = set()
 
         # Allocate parameters as locals and record their types.
         for param in parameters:
@@ -1326,6 +1483,7 @@ class CodeGenerator:
                 self.variable_arrays.add(param.name)
 
         self.discover_virtual_long_locals(body)
+        self.safe_pin_registers = self.compute_safe_pin_registers(body)
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
@@ -1404,7 +1562,10 @@ class CodeGenerator:
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
             if statement.init is not None:
-                self.emit_store_local(expression=statement.init, name=statement.name)
+                if statement.name in self.zero_init_skippable:
+                    self.zero_init_skippable.discard(statement.name)
+                else:
+                    self.emit_store_local(expression=statement.init, name=statement.name)
         elif isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
@@ -1588,6 +1749,7 @@ class CodeGenerator:
         self.peephole_label_forwarding()
         self.peephole_store_reload()
         self.peephole_memory_arithmetic()
+        self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
         self.peephole_dead_ah()
         self.peephole_unused_cld()
@@ -1656,13 +1818,22 @@ class CodeGenerator:
 
     def peephole_dead_stores(self) -> None:
         """Remove stores to local variables that are never loaded."""
-        # Collect all _l_ labels that appear as load sources.
+        # Collect all _l_ labels referenced anywhere except as a store
+        # destination.  Stores are "mov ... [_l_X], <src>"; reads include
+        # "mov <dst>, [_l_X]", "cmp word [_l_X], ...", etc.
         loaded: set[str] = set()
         for line in self.lines:
             stripped = line.strip()
-            index = stripped.find(", [_l_")
-            if index >= 0:
-                loaded.add(stripped[index + 3 : stripped.index("]", index)])
+            if self.extract_local_label(stripped) is not None:
+                continue
+            cursor = 0
+            while True:
+                start = stripped.find("[_l_", cursor)
+                if start < 0:
+                    break
+                end = stripped.index("]", start)
+                loaded.add(stripped[start + 1 : end])
+                cursor = end + 1
         # Remove stores and declarations for labels never loaded.
         result: list[str] = []
         for line in self.lines:
@@ -1781,6 +1952,24 @@ class CodeGenerator:
             del self.lines[i : i + 2]
             i = max(1, i - 1)
 
+    def peephole_dx_to_memory(self) -> None:
+        """Fold ``mov ax, dx / mov [X], ax`` into ``mov [X], dx``.
+
+        The pair arises after a ``%`` expression whose remainder the
+        ``%`` handler stages into AX just so the standard store path
+        can flush it to the local — but the intermediate AX hop is
+        dead if the next instruction writes that memory anyway.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "mov ax, dx" and b.startswith("mov [") and b.endswith("], ax"):
+                self.lines[i + 1] = f"{self.lines[i + 1][:-3]}dx"
+                del self.lines[i]
+                continue
+            i += 1
+
     def peephole_memory_arithmetic(self) -> None:
         """Fuse load/modify/store sequences into direct arithmetic.
 
@@ -1869,12 +2058,17 @@ class CodeGenerator:
                 if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
-                        self.pinned_register[statement.name] = self.REGISTER_POOL[len(self.pinned_register)]
+                        self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
                 size = self.TYPE_SIZES.get(statement.type_name, 2)
                 self.allocate_local(statement.name, size=size)
+                # Skip the init store for top-level main locals with an Int(0)
+                # initializer: the `dw 0` declaration already zeros the cell,
+                # and main re-runs from a fresh image each exec.
+                if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size == 2:
+                    self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.allocate_local(statement.name)
@@ -2008,6 +2202,48 @@ class Parser:
         self.position += 1
         return token
 
+    def fold_binop(self, operator: str, left: Node, right: Node, /) -> Node:
+        """Return a folded node when operands (or a left-subtree tail) are constant.
+
+        Handles two shapes:
+
+        1. ``Int op Int`` collapses to a single ``Int`` — lets
+           ``COLUMNS - 1`` become ``39`` at parse time.
+        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
+           folds the trailing constants through so
+           ``(column + 40) - 1`` becomes ``column + 39`` and
+           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
+           addition is already a tight pair.
+        """
+        if isinstance(left, Int) and isinstance(right, Int):
+            a, b = left.value, right.value
+            if operator == "+":
+                return Int(a + b)
+            if operator == "-":
+                return Int(a - b)
+            if operator == "*":
+                return Int(a * b)
+            if operator == "&":
+                return Int(a & b)
+            if operator == "/" and b != 0:
+                return Int(a // b)
+            if operator == "%" and b != 0:
+                return Int(a % b)
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Int)
+            and isinstance(left, BinOp)
+            and left.op in ("+", "-")
+            and isinstance(left.right, Int)
+        ):
+            inner_sign = 1 if left.op == "+" else -1
+            outer_sign = 1 if operator == "+" else -1
+            combined = inner_sign * left.right.value + outer_sign * right.value
+            if combined >= 0:
+                return BinOp("+", left.left, Int(combined))
+            return BinOp("-", left.left, Int(-combined))
+        return BinOp(operator, left, right)
+
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
 
@@ -2019,7 +2255,7 @@ class Parser:
         while self.peek()[0] in ADDITIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_multiplicative()
-            node = BinOp(operator_token[1], node, right)
+            node = self.fold_binop(operator_token[1], node, right)
         return node
 
     def parse_arguments(self) -> list[Node]:
@@ -2132,7 +2368,7 @@ class Parser:
 
         """
         expression = self.parse_expression()
-        if isinstance(expression, LogicalAnd):
+        if isinstance(expression, (LogicalAnd, LogicalOr)):
             return expression
         if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
@@ -2155,6 +2391,20 @@ class Parser:
         self.eat("SEMI")
         return DoWhile(condition, body)
 
+    def parse_bitwise_and(self) -> Node:
+        """Parse a left-associative bitwise ``&`` expression.
+
+        Returns:
+            A ``BinOp`` chain or the underlying comparison.
+
+        """
+        left = self.parse_comparison()
+        while self.peek()[0] == "AMP":
+            self.eat()
+            right = self.parse_comparison()
+            left = self.fold_binop("&", left, right)
+        return left
+
     def parse_expression(self) -> Node:
         """Parse an expression.
 
@@ -2162,7 +2412,7 @@ class Parser:
             An AST node for the expression.
 
         """
-        return self.parse_logical_and()
+        return self.parse_logical_or()
 
     def parse_function(self) -> Node:
         """Parse a function declaration.
@@ -2206,14 +2456,28 @@ class Parser:
         """Parse a left-associative ``&&`` expression.
 
         Returns:
-            A ``LogicalAnd`` tree or the underlying comparison.
+            A ``LogicalAnd`` tree or the underlying bitwise-AND node.
 
         """
-        left = self.parse_comparison()
+        left = self.parse_bitwise_and()
         while self.peek()[0] == "AND_AND":
             self.eat()
-            right = self.parse_comparison()
+            right = self.parse_bitwise_and()
             left = LogicalAnd(left, right)
+        return left
+
+    def parse_logical_or(self) -> Node:
+        """Parse a left-associative ``||`` expression.
+
+        Returns:
+            A ``LogicalOr`` tree or the underlying ``&&`` node.
+
+        """
+        left = self.parse_logical_and()
+        while self.peek()[0] == "OR_OR":
+            self.eat()
+            right = self.parse_logical_and()
+            left = LogicalOr(left, right)
         return left
 
     def parse_multiplicative(self) -> Node:
@@ -2227,7 +2491,7 @@ class Parser:
         while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_primary()
-            node = BinOp(operator_token[1], node, right)
+            node = self.fold_binop(operator_token[1], node, right)
         return node
 
     def parse_parameter(self) -> Param:
@@ -2458,6 +2722,32 @@ class Parser:
         return self.tokens[self.position + offset]
 
 
+def apply_defines(
+    *,
+    defines: dict[str, str],
+    tokens: list[tuple[str, str, int]],
+) -> list[tuple[str, str, int]]:
+    """Substitute IDENT tokens matching a ``#define`` with the macro's tokens.
+
+    Each macro value is retokenized on every occurrence so the caller
+    can use any token sequence (numbers, char literals, parenthesized
+    expressions).  The substituted tokens inherit the line number of
+    the original IDENT so diagnostics point at the use site, not the
+    define site.  No recursive expansion or function-like macros.
+    """
+    if not defines:
+        return tokens
+    result: list[tuple[str, str, int]] = []
+    for kind, text, line in tokens:
+        if kind == "IDENT" and text in defines:
+            value_tokens = tokenize(defines[text])
+            for value_kind, value_text, _ in value_tokens[:-1]:  # drop trailing EOF
+                result.append((value_kind, value_text, line))
+        else:
+            result.append((kind, text, line))
+    return result
+
+
 def decode_first_character(text: str) -> int:
     """Return the byte value of the first character in a C string literal.
 
@@ -2468,6 +2758,66 @@ def decode_first_character(text: str) -> int:
     if text[0] == "\\" and len(text) >= 2:
         return CHARACTER_ESCAPES.get(text[1], ord(text[1]))
     return ord(text[0])
+
+
+def main() -> int:
+    """Compile a C source file to NASM assembly.
+
+    Returns:
+        Exit code (0 for success, 1 for usage error).
+
+    """
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
+        return 1
+
+    source = Path(sys.argv[1]).read_text(encoding="utf-8")
+    source, defines = preprocess(source)
+    tokens = tokenize(source)
+    tokens = apply_defines(defines=defines, tokens=tokens)
+    ast = Parser(tokens).parse_program()
+    output = CodeGenerator().generate(ast)
+
+    if len(sys.argv) == 3:
+        Path(sys.argv[2]).write_text(output, encoding="utf-8")
+    else:
+        sys.stdout.write(output)
+    return 0
+
+
+def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
+    """Strip ``#define`` directives and collect them into a symbol table.
+
+    Only object-like macros with a non-empty value are supported:
+    ``#define NAME VALUE`` where VALUE is whatever remains on the line
+    after the name (typically an integer or character literal).  Each
+    directive line is replaced with a blank line so downstream line
+    numbers stay correct.
+
+    Returns:
+        (processed_source, defines).  ``defines`` maps each macro name
+        to the raw value text, which is retokenized at substitution
+        time so the tokens inherit the current position's line number.
+    """
+    defines: dict[str, str] = {}
+    output_lines: list[str] = []
+    for line in source.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not stripped.startswith("#define"):
+            output_lines.append(line)
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            message = f"malformed #define: {line.rstrip()!r}"
+            raise SyntaxError(message)
+        name = parts[1]
+        value = parts[2].rstrip()
+        if not value:
+            message = f"empty #define value for {name!r}"
+            raise SyntaxError(message)
+        defines[name] = value
+        output_lines.append("\n")  # Preserve line numbering.
+    return "".join(output_lines), defines
 
 
 def string_byte_length(text: str) -> int:
@@ -2490,29 +2840,6 @@ def string_byte_length(text: str) -> int:
     if text.endswith("\\0"):
         length -= 1
     return length
-
-
-def main() -> int:
-    """Compile a C source file to NASM assembly.
-
-    Returns:
-        Exit code (0 for success, 1 for usage error).
-
-    """
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
-        return 1
-
-    source = Path(sys.argv[1]).read_text(encoding="utf-8")
-    tokens = tokenize(source)
-    ast = Parser(tokens).parse_program()
-    output = CodeGenerator().generate(ast)
-
-    if len(sys.argv) == 3:
-        Path(sys.argv[2]).write_text(output, encoding="utf-8")
-    else:
-        sys.stdout.write(output)
-    return 0
 
 
 def tokenize(source: str, /) -> list[tuple[str, str, int]]:

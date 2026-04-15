@@ -19,7 +19,7 @@ Requires `nasm` (`brew install nasm`).
 
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
-- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, ANSI parser (`put_character`, `put_string`), `serial_character`.
+- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, minimal output (`put_string`, `put_character_raw`), `serial_character`.  The full ANSI parser lives in stage 2.
 - **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
 - **Shell** (`src/asm/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
@@ -49,7 +49,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_character` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back) are translated to INT 10h calls for the screen. `serial_character` writes to COM1 only (used internally by `put_character` and `scr_clear`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_character` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to INT 10h calls for the screen. The parser lives in stage 2; stage 1 includes a minimal variant (`ansi_minimal.asm`) used only for boot messages. `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -73,8 +73,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 25h   | net_udp_receive | UDP receive, DI = data, CX = len, BX = src port, CF none |
 | 26h   | net_udp_send | UDP send, BX = IP, DI = src port, DX = dst port, SI = data, CX = len |
 | 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |
-| 31h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
-| 40h   | scr_clear    | Clear screen                                          |
+| 31h   | rtc_sleep    | Busy-wait for CX milliseconds                           |
+| 32h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
+| 40h   | video_mode   | Set video mode, AL = mode; clears serial and screen   |
 | F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F1h   | sys_exit     | Reload and return to shell                             |
 | F2h   | sys_reboot   | Reboot                                                |
@@ -95,10 +96,9 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `chmod`, `cp`, `mv`, `netinit`, `netrecv`, `netsend`.
-- `src/c/` programs written in the C subset: `cat`, `date`, `echo`, `hello`, `loop`, `loop_array`, `mkdir`, `uptime`.
+- `src/c/` programs written in the C subset: `cat`, `date`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `mkdir`, `uptime`.
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
 - `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
-- `src/asm/draw.asm` — 16-color graphics mode with cursor and background controls.
 - `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
 - `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
 - `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).

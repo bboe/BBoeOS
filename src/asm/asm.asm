@@ -524,23 +524,42 @@ handle_add:
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
-;;; handle_and: and r, imm
+;;; handle_and: and r, r / and r, imm
 ;;; -----------------------------------------------------------------------
 handle_and:
         call skip_ws
         call parse_register    ; AL = reg, AH = size
-        push ax
+        push ax                ; save dst reg+size
         call skip_comma
-        call resolve_value     ; AX = immediate
-        mov cx, ax
+        call parse_operand
+        mov [op2_type], ah
+        mov [op2_register], al
+        mov [op2_value], dx
+        cmp byte [op2_type], 0
+        je .and_rr
+        ;; immediate
+        mov cx, [op2_value]
         pop bx                 ; BL = reg, BH = size
         cmp bh, 8
         je .and_r8
-        ;; and r16, imm16: 81 modrm(/4) imm16
+        ;; and r16, imm: prefer 83 /4 sign-extended-imm8 when the value
+        ;; fits in -128..127, else fall back to 81 /4 imm16.
+        mov ax, cx
+        add ax, 80h
+        cmp ax, 0FFh
+        ja .and_r16_imm16
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0E0h            ; modrm = C0 | (4<<3) | rm
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .and_r16_imm16:
         mov al, 81h
         call emit_byte_al
         mov al, bl
-        or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm
+        or al, 0E0h
         call emit_byte_al
         mov ax, cx
         jmp emit_word_ax
@@ -559,6 +578,20 @@ handle_and:
         or al, 0E0h
         call emit_byte_al
         mov al, cl
+        jmp emit_byte_al
+        .and_rr:
+        ;; reg-reg: opcode 20 (8-bit) / 21 (16-bit), modrm reg=src, rm=dst
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .and_rr8
+        mov al, 21h
+        jmp .and_rr_emit
+        .and_rr8:
+        mov al, 20h
+        .and_rr_emit:
+        call emit_byte_al
+        mov al, [op2_register]
+        call make_modrm_reg_reg
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
@@ -2549,6 +2582,8 @@ parse_db:
         je .esc_bs
         cmp al, 'r'
         je .esc_r
+        cmp al, 'e'
+        je .esc_e
         ;; Unknown escape, emit backslash and char
         push ax
         mov al, '\'
@@ -2568,6 +2603,9 @@ parse_db:
         jmp .esc_emit
         .esc_r:
         mov al, 0Dh
+        jmp .esc_emit
+        .esc_e:
+        mov al, 1Bh
         jmp .esc_emit
         .esc_bs:
         mov al, '\'

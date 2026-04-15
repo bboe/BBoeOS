@@ -1,6 +1,15 @@
-        ;; ANSI escape sequence parser
+        ;; Full ANSI escape sequence parser (stage 2)
         ;; put_character: unified output to screen (with ANSI parsing) and serial
-        ;; put_string: print null-terminated string via put_character
+        ;;
+        ;; Supported escapes:
+        ;;   ESC[nA        cursor up
+        ;;   ESC[nC        cursor forward
+        ;;   ESC[nD        cursor back
+        ;;   ESC[r;cH      cursor position (1-indexed)
+        ;;   ESC[0m        reset foreground to 7, background to 0
+        ;;   ESC[38;5;Nm   256-color foreground (stored in ansi_fg)
+        ;;   ESC[48;5;Nm   256-color background (palette via INT 10h AH=0B)
+        ;;   ESC[<N>@      write char code N at cursor, no advance or scroll
 
 put_character:
         push ax
@@ -8,141 +17,126 @@ put_character:
         push cx
         push dx
 
-        ;; Convert \n to \r\n for both serial and screen
+        ;; Convert \n to \r\n
         cmp al, 0Ah
         jne .serial
         push ax
         mov al, 0Dh
-        call serial_character        ; Send \r to serial
+        call serial_character
         mov ah, 0Eh
         xor bx, bx
-        int 10h                 ; Send \r to screen
+        int 10h
         pop ax
 
 .serial:
-        ;; Always send raw byte to serial
         call serial_character
 
-        ;; State machine dispatch
+        ;; State dispatch
         cmp byte [ansi_state], 2
         je .state_csi
         cmp byte [ansi_state], 1
         je .state_esc
 
         ;; STATE_NORMAL
-        cmp al, 1Bh            ; ESC?
+        cmp al, 1Bh
         je .enter_esc
-        ;; Regular character — teletype output
         mov ah, 0Eh
-        xor bx, bx
+        xor bh, bh
+        mov bl, [ansi_fg]
         int 10h
-        jmp .done
-
-.enter_esc:
-        mov byte [ansi_state], 1
-        jmp .done
-
-.state_esc:
-        cmp al, '['
-        je .enter_csi
-        ;; Not a CSI sequence, output ESC and this char to screen
-        push ax
-        mov al, 1Bh
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
-        pop ax
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
-        mov byte [ansi_state], 0
-        jmp .done
-
-.enter_csi:
-        mov byte [ansi_state], 2
-        mov word [ansi_parameter], 0
-        jmp .done
-
-.state_csi:
-        ;; Check if digit
-        cmp al, '0'
-        jb .csi_command
-        cmp al, '9'
-        ja .csi_command
-        ;; Accumulate digit: param = param * 10 + (al - '0')
-        sub al, '0'
-        movzx cx, al
-        mov ax, [ansi_parameter]
-        mov bx, 10
-        mul bx                  ; DX:AX = param * 10 (clobbers DX)
-        add ax, cx
-        mov [ansi_parameter], ax
         jmp .done
 
 .csi_command:
         mov byte [ansi_state], 0
-        mov bx, [ansi_parameter]
+        mov bx, [ansi_params]
         test bx, bx
-        jnz .has_param
+        jnz .have_p1
         mov bx, 1              ; Default parameter is 1
-.has_param:
-        cmp al, 'A'            ; Cursor up
+.have_p1:
+        cmp al, '@'
+        je .write_char
+        cmp al, 'A'
         je .cursor_up
-        cmp al, 'C'            ; Cursor forward
+        cmp al, 'C'
         je .cursor_forward
-        cmp al, 'D'            ; Cursor back
+        cmp al, 'D'
         je .cursor_back
-        ;; Unknown command — ignore
+        cmp al, 'H'
+        je .cursor_position
+        cmp al, 'm'
+        je .sgr
         jmp .done
 
-.cursor_up:
-        ;; Move cursor up by BX rows
-        push bx                 ; Save count
+.csi_next_param:
+        ;; Advance to next param slot, clamped at +4 (3rd slot)
+        mov ax, [ansi_param_index]
+        cmp ax, 4
+        jae .done
+        add ax, 2
+        mov [ansi_param_index], ax
+        jmp .done
+
+.cursor_back:
+        push bx
         mov ah, 03h
         xor bx, bx
-        int 10h                 ; DH=row, DL=col (clobbers CX)
-        pop cx                  ; CX = count
-        sub dh, cl
-        jnb .cursor_up_set
-        xor dh, dh
-.cursor_up_set:
+        int 10h
+        pop cx
+        movzx ax, dh
+        push dx
+        mov bx, 80
+        mul bx
+        pop dx
+        movzx bx, dl
+        add ax, bx
+        sub ax, cx
+        xor dx, dx
+        mov bx, 80
+        div bx
+        mov dh, al
         mov ah, 02h
         xor bx, bx
         int 10h
         jmp .done
 
-.cursor_back:
-        ;; Move cursor back by BX positions (handles line wrapping)
-        push bx                 ; Save count
+.cursor_forward:
+        push bx
         mov ah, 03h
         xor bx, bx
-        int 10h                 ; DH=row, DL=col (clobbers CX)
-        pop cx                  ; Restore count
-        movzx ax, dh
-        push dx
-        mov bx, 80
-        mul bx                  ; AX = row * 80 (clobbers DX)
-        pop dx
-        movzx bx, dl
-        add ax, bx              ; AX = linear position
-        sub ax, cx              ; AX = new linear position
-        xor dx, dx
-        mov bx, 80
-        div bx                  ; AX = new row, DX = new col
-        mov dh, al              ; DL already has new col from remainder
+        int 10h
+        pop cx
+        add dl, cl
         mov ah, 02h
         xor bx, bx
-        int 10h                 ; Set cursor position
+        int 10h
         jmp .done
 
-.cursor_forward:
-        ;; Move cursor forward by BX positions
-        push bx                 ; Save count
+.cursor_position:
+        ;; BX = row (default 1, 1-indexed)
+        dec bx
+        mov dh, bl
+        mov bx, [ansi_params+2]
+        test bx, bx
+        jnz .cp_have_col
+        mov bx, 1
+.cp_have_col:
+        dec bx
+        mov dl, bl
+        mov ah, 02h
+        xor bx, bx
+        int 10h
+        jmp .done
+
+.cursor_up:
+        push bx
         mov ah, 03h
         xor bx, bx
-        int 10h                 ; DH=row, DL=col (clobbers CX)
-        pop cx                  ; Restore count
-        add dl, cl              ; New column
+        int 10h                 ; DH=row, DL=col
+        pop cx
+        sub dh, cl
+        jnb .cursor_up_set
+        xor dh, dh
+.cursor_up_set:
         mov ah, 02h
         xor bx, bx
         int 10h
@@ -155,35 +149,100 @@ put_character:
         pop ax
         ret
 
-put_string:
-        push ax
-.repeat:
-        lodsb
-        cmp al, 0
-        je .end
-        call put_character
-        jmp .repeat
-.end:
-        pop ax
-        ret
+.enter_csi:
+        mov byte [ansi_state], 2
+        mov word [ansi_params], 0
+        mov word [ansi_params+2], 0
+        mov word [ansi_params+4], 0
+        mov word [ansi_param_index], 0
+        jmp .done
 
-        ;; Parser state
+.enter_esc:
+        mov byte [ansi_state], 1
+        jmp .done
+
+.sgr:
+        ;; ESC[0m          reset: fg=7, bg=0
+        ;; ESC[38;5;Nm     256-color fg (N stored in ansi_fg)
+        ;; ESC[48;5;Nm     256-color bg (palette via INT 10h AH=0Bh BH=0)
+        mov ax, [ansi_params]
+        test ax, ax
+        jnz .sgr_fg_check
+        ;; Reset
+        mov byte [ansi_fg], 7
+        mov ah, 0Bh
+        mov bh, 0
+        mov bl, 0
+        int 10h
+        jmp .done
+.sgr_fg_check:
+        cmp ax, 38
+        jne .sgr_bg_check
+        cmp word [ansi_params+2], 5
+        jne .done
+        mov ax, [ansi_params+4]
+        mov [ansi_fg], al
+        jmp .done
+.sgr_bg_check:
+        cmp ax, 48
+        jne .done
+        cmp word [ansi_params+2], 5
+        jne .done
+        mov ax, [ansi_params+4]
+        mov ah, 0Bh
+        mov bh, 0
+        mov bl, al
+        int 10h
+        jmp .done
+
+.state_csi:
+        cmp al, ';'
+        je .csi_next_param
+        cmp al, '0'
+        jb .csi_command
+        cmp al, '9'
+        ja .csi_command
+        ;; Accumulate digit into current slot
+        sub al, '0'
+        movzx cx, al
+        mov bx, [ansi_param_index]
+        add bx, ansi_params
+        mov ax, [bx]
+        mov dx, 10
+        mul dx
+        add ax, cx
+        mov [bx], ax
+        jmp .done
+
+.state_esc:
+        cmp al, '['
+        je .enter_csi
+        ;; Not CSI: emit ESC then char
+        push ax
+        mov al, 1Bh
+        mov ah, 0Eh
+        xor bx, bx
+        int 10h
+        pop ax
+        mov ah, 0Eh
+        xor bx, bx
+        int 10h
+        mov byte [ansi_state], 0
+        jmp .done
+
+.write_char:
+        ;; ESC[<N>@ — write char code N at cursor with ansi_fg color,
+        ;; no cursor advance and no scroll.  BX holds the decoded N.
+        mov al, bl
+        xor bh, bh
+        mov bl, [ansi_fg]
+        mov ah, 09h
+        mov cx, 1
+        int 10h
+        jmp .done
+
+        ;; Parser state (stage 2)
         ansi_state db 0
-        ansi_parameter dw 0
-
-serial_character:
-        ;; Write AL to COM1 (preserves all registers)
-        push ax
-        push dx
-        push ax                 ; Save char
-        mov dx, 3FDh           ; Line status register
-        .wait:
-        in al, dx
-        test al, 20h           ; Transmit holding register empty?
-        jz .wait
-        pop ax                  ; Restore char
-        mov dx, 3F8h           ; COM1 data register
-        out dx, al
-        pop dx
-        pop ax
-        ret
+        ansi_fg db 7
+        ansi_params dw 0, 0, 0
+        ansi_param_index dw 0

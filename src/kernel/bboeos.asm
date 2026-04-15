@@ -80,7 +80,7 @@ clear_screen:
         pop ax
         ret
 
-%include "ansi.asm"
+%include "ansi_minimal.asm"
 
         ;; Variables
         boot_disk db 0
@@ -138,6 +138,7 @@ boot_shell:
         hlt
         jmp .shell_halt
 
+%include "ansi.asm"
 %include "fd.asm"
 %include "io.asm"
 %include "net.asm"
