@@ -34,6 +34,8 @@ syscall_handler:
 
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
+        cmp ah, SYS_RTC_SLEEP  ; rtc_sleep
+        je .rtc_sleep
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
@@ -610,6 +612,24 @@ syscall_handler:
 
         .month_days:
         dw 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+
+        .rtc_sleep:
+        ;; Busy-wait for CX milliseconds via BIOS INT 15h AH=86h
+        ;; which takes CX:DX = microseconds.  CX ms * 1000 = us.
+        push ax
+        push cx
+        push dx
+        mov ax, cx
+        mov cx, 1000
+        mul cx                  ; DX:AX = ms * 1000 (microseconds)
+        mov cx, dx
+        mov dx, ax
+        mov ah, 86h
+        int 15h
+        pop dx
+        pop cx
+        pop ax
+        iret
 
         .rtc_uptime:
         ;; Return elapsed seconds in AX

@@ -468,10 +468,9 @@ visual_bell:
         mov si, BELL_RED
         mov cx, BELL_SGR_LEN
         call FUNCTION_WRITE_STDOUT
-        mov ah, 86h
-        xor cx, cx
-        mov dx, 0C350h         ; 50,000 µs = 50ms
-        int 15h
+        mov cx, 50              ; 50 ms
+        mov ah, SYS_RTC_SLEEP
+        int 30h
         ;; Restore background black: \e[48;5;0m
         mov si, BELL_BLACK
         mov cx, BELL_SGR_LEN

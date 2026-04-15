@@ -79,7 +79,8 @@
         %assign SYS_NET_UDP_SEND 26h
 
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
-        %assign SYS_RTC_UPTIME 31h
+        %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
+        %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot
 
         %assign SYS_VIDEO_MODE 40h      ; AL=video mode; clears screen and serial
 
