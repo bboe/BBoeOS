@@ -7,25 +7,27 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 138         | 138       |  0    |
+| cat     | 138         | 128       | -10   |
 | chmod   | 140         | 240       | +100  |
-| cp      | 287         | 301       | +14   |
+| cp      | 287         | 291       | +4    |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 129         | 193       | +64   |
+| ls      | 129         | 181       | +52   |
 | mkdir   | 116         | 121       | +5    |
 | mv      | 232         | 276       | +44   |
-| netinit | 72          | 72        |  0    |
+| netinit | 72          | 63        | -9    |
 | uptime  | 50          | 78        | +28   |
 
 **chmod (+100):** The assembly version walks the argument with `lodsb`
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
 
-**cp (+14):** The BUILTIN_CLOBBERS correction forces the C version to
-store the buffer pointer in memory and reload it across every
-`read`/`write` call instead of pinning it to a register.
+**cp (+4):** The BUILTIN_CLOBBERS correction forces the C version to
+reload the buffer pointer across every `read`/`write` call instead
+of pinning it to a register; the alias optimization shaves that
+cost back down by emitting `mov di/si, SECTOR_BUFFER` directly in
+place of the reloads.
 
 **draw (+37):** The assembly version keeps row/col packed in a single
 DX register and edits it in place with `inc dh` / `dec dl`, then pokes
@@ -41,7 +43,7 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+64):** The assembly version uses inline `repne scasb` with a
+**ls (+52):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).  The

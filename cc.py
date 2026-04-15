@@ -381,6 +381,7 @@ class CodeGenerator:
         self.arrays: list[tuple[str, list[str]]] = []
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
+        self.constant_aliases: dict[str, str] = {}
 
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
@@ -1073,8 +1074,12 @@ class CodeGenerator:
         Handles pinned variables, memory locals, named constants,
         integer literals, and general expressions (evaluated via AX).
         """
-        if isinstance(argument, Int) or (isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS):
-            self.emit(f"        mov {register}, {argument.value if isinstance(argument, Int) else argument.name}")
+        if isinstance(argument, Int):
+            self.emit(f"        mov {register}, {argument.value}")
+        elif isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS:
+            self.emit(f"        mov {register}, {argument.name}")
+        elif isinstance(argument, Var) and argument.name in self.constant_aliases:
+            self.emit(f"        mov {register}, {self.constant_aliases[argument.name]}")
         elif isinstance(argument, Var) and argument.name in self.pinned_register:
             source = self.pinned_register[argument.name]
             if source != register:
@@ -1095,6 +1100,8 @@ class CodeGenerator:
         """Load a string or expression argument into SI."""
         if isinstance(argument, String):
             self.emit(f"        mov si, {self.new_string_label(argument.content)}")
+        elif isinstance(argument, Var) and argument.name in self.constant_aliases:
+            self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
         else:
             self.generate_expression(argument)
             self.emit("        mov si, ax")
@@ -1386,6 +1393,10 @@ class CodeGenerator:
                 self.emit(f"        mov ax, {vname}")
                 self.ax_clear()
                 return
+            if vname in self.constant_aliases:
+                self.emit(f"        mov ax, {self.constant_aliases[vname]}")
+                self.ax_clear()
+                return
             self.check_defined(vname)
             if self.variable_types.get(vname) == "unsigned long":
                 message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
@@ -1422,6 +1433,8 @@ class CodeGenerator:
                 offset = index_expression.value * (1 if is_byte else 2)
                 if vname in self.pinned_register:
                     self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                elif vname in self.constant_aliases:
+                    self.emit(f"        mov bx, {self.constant_aliases[vname]}")
                 else:
                     self.emit(f"        mov bx, [{self.local_address(vname)}]")
                 if is_byte:
@@ -1438,6 +1451,8 @@ class CodeGenerator:
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
                 if vname in self.pinned_register:
                     self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                elif vname in self.constant_aliases:
+                    self.emit(f"        mov bx, {self.constant_aliases[vname]}")
                 else:
                     self.emit(f"        mov bx, [{self.local_address(vname)}]")
                 self.emit("        push bx")
@@ -1569,6 +1584,7 @@ class CodeGenerator:
         self.array_labels = {}
         self.array_sizes = {}
         self.ax_clear()
+        self.constant_aliases = {}
         self.elide_frame = name == "main"
         self.frame_size = 0
         self.live_long_local = None
@@ -1667,6 +1683,8 @@ class CodeGenerator:
         if isinstance(statement, VarDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
+            if statement.name in self.constant_aliases:
+                return
             if statement.init is not None:
                 if statement.name in self.zero_init_skippable:
                     self.zero_init_skippable.discard(statement.name)
@@ -1799,6 +1817,21 @@ class CodeGenerator:
             and "%" not in node.args[0].content
         )
 
+    def is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
+        """Check if ``statement`` is a NAMED_CONSTANT alias.
+
+        True when the local is initialized from a ``NAMED_CONSTANT`` and
+        never reassigned in ``body``.  Such locals can be replaced with
+        the underlying constant directly, skipping the memory slot, the
+        initial store, and every reload.
+        """
+        if statement.type_name == "unsigned long":
+            return False
+        init = statement.init
+        if not (isinstance(init, Var) and init.name in self.NAMED_CONSTANTS):
+            return False
+        return not any(self.name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
+
     @staticmethod
     def is_zero_exit_if(statement: Node, /) -> bool:
         """Check if a statement is ``if (VAR == 0) { exit(); }``."""
@@ -1822,6 +1855,22 @@ class CodeGenerator:
         if self.elide_frame:
             return f"_l_{name}"
         return f"bp-{self.locals[name]}"
+
+    @staticmethod
+    def name_is_reassigned(*, name: str, node: Node) -> bool:
+        """Return True if an ``Assign(name=name, ...)`` occurs inside ``node``."""
+        if isinstance(node, Assign) and node.name == name:
+            return True
+        for field in fields(node):
+            value = getattr(node, field.name)
+            if isinstance(value, Node):
+                if CodeGenerator.name_is_reassigned(name=name, node=value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and CodeGenerator.name_is_reassigned(name=name, node=item):
+                        return True
+        return False
 
     def new_label(self) -> int:
         """Allocate and return a new unique label index.
@@ -2177,6 +2226,9 @@ class CodeGenerator:
         for index, statement in enumerate(statements):
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
+                if top_level and self.is_constant_alias(body=statements, statement=statement):
+                    self.constant_aliases[statement.name] = statement.init.name
+                    continue
                 if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
