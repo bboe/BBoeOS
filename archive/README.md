@@ -10,7 +10,7 @@ source is kept here for reference.
 | cat     | 138         | 121       | -17   |
 | chmod   | 140         | 246       | +106  |
 | cp      | 287         | 285       | -2    |
-| date    | 74          | 72        | -2    |
+| date    | 15          | 15        |  0    |
 | hello   | 22          | 23        | +1    |
 | mkdir   | 116         | 121       | +5    |
 | uptime  | 50          | 78        | +28   |
@@ -23,11 +23,11 @@ and indexes for each character check.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
+**mkdir (+5):** Same null-terminator overhead across 4 string literals
+(+4 bytes), plus the compiler loads `argv` into AX before moving to
+SI (+1 byte) rather than loading SI directly.
+
 **uptime (+28):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
 and cleans up. The assembly version uses inline `FUNCTION_PRINT_DECIMAL`
 calls with no stack overhead.
-
-**mkdir (+5):** Same null-terminator overhead across 4 string literals
-(+4 bytes), plus the compiler loads `argv` into AX before moving to
-SI (+1 byte) rather than loading SI directly.

@@ -72,7 +72,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 24h   | net_send     | Send raw Ethernet frame, SI = frame, CX = len, CF err  |
 | 25h   | net_udp_receive | UDP receive, DI = data, CX = len, BX = src port, CF none |
 | 26h   | net_udp_send | UDP send, BX = IP, DI = src port, DX = dst port, SI = data, CX = len |
-| 30h   | rtc_datetime | Get date+time in BCD: CH=century, CL=year, DH=month, DL=day, BH=hours, BL=minutes, AL=seconds |
+| 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |
 | 31h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
 | 40h   | scr_clear    | Clear screen                                          |
 | F0h   | sys_exec     | Execute program, SI = filename, CF on error            |

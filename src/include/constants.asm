@@ -5,7 +5,7 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR 13
+        %assign DIRECTORY_SECTOR 15
         %assign DIRECTORY_SECTORS 3
         %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
@@ -35,10 +35,10 @@
         %assign FUNCTION_EXIT           FUNCTION_DIE + 3    ; Exit program (reload shell)
         %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 3   ; Read one byte from stdin; returns AL
         %assign FUNCTION_PARSE_ARGV   FUNCTION_GET_CHARACTER + 3 ; DI=argv buf: split EXEC_ARG, CX=argc
-        %assign FUNCTION_PRINT_BCD     FUNCTION_PARSE_ARGV + 3 ; AL=BCD byte: print two BCD digits
-        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PRINT_BCD + 3 ; AL=byte: print 1-3 decimal digits
+        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PARSE_ARGV + 3 ; AL=byte: print 1-3 decimal digits
         %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 3 ; AL=char: print to stdout
-        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_CHARACTER + 3 ; AL=byte: print 2 zero-padded decimal digits
+        %assign FUNCTION_PRINT_DATETIME FUNCTION_PRINT_CHARACTER + 3 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
+        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_DATETIME + 3 ; AL=byte: print 2 zero-padded decimal digits
         %assign FUNCTION_PRINT_HEX    FUNCTION_PRINT_DECIMAL + 3 ; AL=byte: print 2 hex digits
         %assign FUNCTION_PRINT_IP      FUNCTION_PRINT_HEX + 3 ; SI=4-byte IP: print dotted decimal
         %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
@@ -77,7 +77,7 @@
         %assign SYS_NET_UDP_RECEIVE 25h
         %assign SYS_NET_UDP_SEND 26h
 
-        %assign SYS_RTC_DATETIME 30h
+        %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_UPTIME 31h
 
         %assign SYS_SCREEN_CLEAR 40h

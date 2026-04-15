@@ -37,12 +37,12 @@ Register allocation:
 
 Builtins:
     close(fd)                -- close a file descriptor
-    datetime(array)          -- fill 7-word array with BCD date/time fields
+    datetime()               -- return unsigned seconds since 1970-01-01 UTC
     die(message)             -- print message and terminate
     exit()                   -- terminate program
     mkdir(name)              -- create directory, return 0 or ERR_* code
     open(name, flags)        -- open file, return fd or -1 on error
-    print_bcd(expression)    -- print BCD byte as two decimal digits
+    print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
     putc(expression)         -- print single character
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     uptime()                 -- return seconds since boot
@@ -211,7 +211,7 @@ JUMP_WHEN_FALSE = {
     "==": "jne",
 }
 
-KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "return", "sizeof", "void", "while"})
+KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
 
 TOKEN_PATTERN = re.compile(
     r"""
@@ -261,7 +261,7 @@ REGISTER_PARENT = {
     "dl": "dx",
 }
 
-TYPE_TOKENS = frozenset({"CHAR", "INT", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
 
 
 class CodeGenerator:
@@ -270,13 +270,13 @@ class CodeGenerator:
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
         "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax"}),
-        "datetime": frozenset({"ax", "bx", "cx", "dx"}),
+        "datetime": frozenset({"ax", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "mkdir": frozenset({"ax"}),
         "open": frozenset({"ax", "dx"}),
-        "print_bcd": frozenset({"ax"}),
+        "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putc": frozenset({"ax"}),
         "read": frozenset({"ax", "cx", "di"}),
@@ -310,6 +310,7 @@ class CodeGenerator:
         "char": 1,
         "char*": 2,
         "int": 2,
+        "unsigned long": 4,
         "void": 0,
     }
 
@@ -326,6 +327,7 @@ class CodeGenerator:
         self.frame_size: int = 0
         self.label_id: int = 0
         self.lines: list[str] = []
+        self.live_long_local: str | None = None
         self.locals: dict[str, int] = {}
         self.loop_end_labels: list[str] = []
         self.needs_argv_buf: bool = False
@@ -335,16 +337,21 @@ class CodeGenerator:
         self.strings: list[tuple[str, str]] = []
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
+        self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
 
-    def allocate_local(self, name: str, /) -> int:
-        """Allocate a 2-byte local variable on the stack frame.
+    def allocate_local(self, name: str, /, *, size: int = 2) -> int:
+        """Allocate a local variable on the stack frame.
+
+        Args:
+            name: local variable name.
+            size: slot size in bytes (2 for ints/pointers, 4 for unsigned long).
 
         Returns:
             The current frame size after allocation.
 
         """
-        self.frame_size += 2
+        self.frame_size += size
         self.locals[name] = self.frame_size
         return self.frame_size
 
@@ -428,34 +435,12 @@ class CodeGenerator:
     def builtin_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the datetime() builtin.
 
-        Takes a pointer to a 7-word array and fills it with BCD fields:
-        [0]=century, [1]=year, [2]=month, [3]=day,
-        [4]=hours, [5]=minutes, [6]=seconds.
-
-        When the argument is a variable backed by a known array label,
-        fields are cached in registers and spilled lazily.
+        Returns unsigned seconds since 1970-01-01 UTC in DX:AX. Valid
+        through the year 2106 (32-bit epoch overflow).
         """
-        self.check_argument_count(arguments=arguments, expected=1, name="datetime")
-        registers = ["ch", "cl", "dh", "dl", "bh", "bl", "al"]
-        argument = arguments[0]
-        array_label = self.array_labels.get(argument.name) if isinstance(argument, Var) else None
-        if array_label:
-            self.emit("        mov ah, SYS_RTC_DATETIME")
-            self.emit("        int 30h")
-            for index, register in enumerate(registers):
-                self.register_cache[array_label, index * 2] = register
-        else:
-            self.generate_expression(argument)
-            self.emit("        mov di, ax")
-            self.emit("        mov ah, SYS_RTC_DATETIME")
-            self.emit("        int 30h")
-            self.emit("        mov [di+12], al")
-            self.emit("        xor ah, ah")
-            for index, register in enumerate(registers[:6]):
-                self.emit(f"        mov al, {register}")
-                self.emit(f"        mov [di+{index * 2}], ax")
-            self.emit("        mov al, [di+12]")
-            self.emit("        mov [di+12], ax")
+        self.check_argument_count(arguments=arguments, expected=0, name="datetime")
+        self.emit("        mov ah, SYS_RTC_DATETIME")
+        self.emit("        int 30h")
 
     def builtin_die(self, arguments: list[Node], /) -> None:
         """Generate code for the die() builtin.
@@ -541,21 +526,14 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
-    def builtin_print_bcd(self, arguments: list[Node], /) -> None:
-        """Generate code for the print_bcd() builtin."""
-        self.check_argument_count(arguments=arguments, expected=1, name="print_bcd")
-        argument = arguments[0]
-        cache_key = self.index_cache_key(argument)
-        if cache_key and cache_key in self.register_cache:
-            register = self.register_cache[cache_key]
-            if register != "al":
-                self.emit(f"        mov al, {register}")
-        elif cache_key and self.spill_stack and self.spill_stack[-1] == cache_key:
-            self.spill_stack.pop()
-            self.emit("        pop ax")
-        else:
-            self.generate_expression(argument)
-        self.emit("        call FUNCTION_PRINT_BCD")
+    def builtin_print_datetime(self, arguments: list[Node], /) -> None:
+        """Generate code for the print_datetime(unsigned long) builtin.
+
+        Prints the epoch value as ``YYYY-MM-DD HH:MM:SS`` (no newline).
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="print_datetime")
+        self.generate_long_expression(arguments[0])
+        self.emit("        call FUNCTION_PRINT_DATETIME")
 
     def builtin_printf(self, arguments: list[Node], /) -> None:
         """Generate code for the printf() builtin.
@@ -699,6 +677,39 @@ class CodeGenerator:
             message = f"undefined variable: {name}"
             raise SyntaxError(message)
 
+    def discover_virtual_long_locals(self, statements: list[Node], /) -> None:
+        """Identify ``unsigned long`` locals whose DX:AX value can stay live.
+
+        Matches the narrow pattern:
+
+            unsigned long NAME = <long_expr>;
+            print_datetime(NAME);
+
+        where ``NAME`` is not referenced anywhere else in the function
+        body. Such locals skip the memory slot and the store/load
+        round-trip; DX:AX is produced by the initializer and consumed
+        directly by the next statement.
+        """
+        for index in range(len(statements) - 1):
+            statement = statements[index]
+            if not isinstance(statement, VarDecl):
+                continue
+            if statement.type_name != "unsigned long" or statement.init is None:
+                continue
+            consumer = statements[index + 1]
+            if not isinstance(consumer, Call) or consumer.name != "print_datetime":
+                continue
+            if len(consumer.args) != 1:
+                continue
+            argument = consumer.args[0]
+            if not isinstance(argument, Var) or argument.name != statement.name:
+                continue
+            other_statements = statements[:index] + statements[index + 2:]
+            name = statement.name
+            if any(self.statement_references(other, name) for other in other_statements):
+                continue
+            self.virtual_long_locals.add(name)
+
     def emit(self, line: str = "") -> None:
         """Append a line of assembly to the output buffer."""
         self.lines.append(line)
@@ -836,6 +847,23 @@ class CodeGenerator:
         without going through AX, so the caller's AX tracking (e.g.
         ``arg`` left by the argv startup) survives the store.
         """
+        if self.variable_types.get(name) == "unsigned long":
+            self.ax_clear()
+            self.generate_long_expression(expression)
+            if name in self.virtual_long_locals:
+                self.live_long_local = name
+                return
+            address = self.local_address(name)
+            if self.elide_frame:
+                self.emit(f"        mov [{address}], ax")
+                self.emit(f"        mov [{address}+2], dx")
+            else:
+                low_offset = self.locals[name]
+                self.emit(f"        mov [bp-{low_offset}], ax")
+                self.emit(f"        mov [bp-{low_offset - 2}], dx")
+            self.ax_is_byte = False
+            self.ax_local = None
+            return
         if name in self.pinned_register:
             register = self.pinned_register[name]
             if isinstance(expression, Int):
@@ -1045,6 +1073,9 @@ class CodeGenerator:
                 self.ax_clear()
                 return
             self.check_defined(vname)
+            if self.variable_types.get(vname) == "unsigned long":
+                message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
+                raise SyntaxError(message)
             if vname in self.pinned_register:
                 self.emit(f"        mov ax, {self.pinned_register[vname]}")
             else:
@@ -1150,6 +1181,42 @@ class CodeGenerator:
             message = f"unknown expression: {type(expression).__name__}"
             raise SyntaxError(message)
 
+    def generate_long_expression(self, expression: Node, /) -> None:
+        """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
+
+        Only the minimal forms needed by current callers are supported:
+        a call to the zero-arg ``datetime()`` builtin, or a reference
+        to a local variable of type ``unsigned long``. Anything else
+        raises :class:`SyntaxError`.
+        """
+        if isinstance(expression, Call) and expression.name == "datetime":
+            self.generate_call(expression)
+            return
+        if isinstance(expression, Var):
+            vname = expression.name
+            if self.variable_types.get(vname) != "unsigned long":
+                message = f"expected 'unsigned long' expression, got '{self.variable_types.get(vname, 'int')}' variable {vname!r}"
+                raise SyntaxError(message)
+            if vname in self.virtual_long_locals:
+                if self.live_long_local != vname:
+                    message = f"internal: virtual long {vname!r} consumed when not live"
+                    raise SyntaxError(message)
+                self.live_long_local = None
+                return
+            address = self.local_address(vname)
+            if self.elide_frame:
+                self.emit(f"        mov ax, [{address}]")
+                self.emit(f"        mov dx, [{address}+2]")
+            else:
+                low_offset = self.locals[vname]
+                self.emit(f"        mov ax, [bp-{low_offset}]")
+                self.emit(f"        mov dx, [bp-{low_offset - 2}]")
+            self.ax_is_byte = False
+            self.ax_local = None
+            return
+        message = f"unsupported 'unsigned long' expression: {type(expression).__name__}"
+        raise SyntaxError(message)
+
     def generate_function(self, function: Function, /) -> None:
         """Generate assembly for a single function definition."""
         name = function.name
@@ -1160,12 +1227,14 @@ class CodeGenerator:
         self.ax_clear()
         self.elide_frame = name == "main"
         self.frame_size = 0
+        self.live_long_local = None
         self.locals = {}
         self.pinned_register = {}
         self.register_cache = {}
         self.spill_stack = []
         self.variable_arrays = set()
         self.variable_types = {}
+        self.virtual_long_locals = set()
 
         # Allocate parameters as locals and record their types.
         for param in parameters:
@@ -1174,6 +1243,7 @@ class CodeGenerator:
             if param.is_array:
                 self.variable_arrays.add(param.name)
 
+        self.discover_virtual_long_locals(body)
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
@@ -1202,7 +1272,8 @@ class CodeGenerator:
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 for vname in sorted(self.locals):
-                    self.emit(f"_l_{vname}: dw 0")
+                    directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
+                    self.emit(f"_l_{vname}: {directive}")
         else:
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
@@ -1715,12 +1786,15 @@ class CodeGenerator:
         for index, statement in enumerate(statements):
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
-                if top_level:
+                if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.REGISTER_POOL[len(self.pinned_register)]
                         continue
-                self.allocate_local(statement.name)
+                if statement.name in self.virtual_long_locals:
+                    continue
+                size = self.TYPE_SIZES.get(statement.type_name, 2)
+                self.allocate_local(statement.name, size=size)
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.allocate_local(statement.name)
@@ -1730,6 +1804,23 @@ class CodeGenerator:
                     self.scan_locals(statement.else_body, top_level=False)
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
+
+    def statement_references(self, node: Node, name: str, /) -> bool:
+        """Return True if ``node`` reads or writes a variable named ``name``."""
+        if isinstance(node, Var) and node.name == name:
+            return True
+        if isinstance(node, Assign) and node.name == name:
+            return True
+        for field in node.__slots__:
+            value = getattr(node, field)
+            if isinstance(value, Node):
+                if self.statement_references(value, name):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and self.statement_references(item, name):
+                        return True
+        return False
 
     def transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
@@ -2128,13 +2219,14 @@ class Parser:
         raise SyntaxError(message)
 
     def parse_type(self) -> str:
-        """Parse a type specifier (void, int, char, char*).
+        """Parse a type specifier (void, int, char, char*, unsigned long).
 
         Returns:
             The type as a string.
 
         Raises:
-            SyntaxError: If an unexpected token is encountered.
+            SyntaxError: If an unexpected token is encountered, or a bare
+                ``long`` / ``unsigned`` without ``long`` appears.
 
         """
         token = self.peek()
@@ -2150,6 +2242,17 @@ class Parser:
                 self.eat()
                 return "char*"
             return "char"
+        if token[0] == "UNSIGNED":
+            self.eat()
+            if self.peek()[0] != "LONG":
+                following = self.peek()
+                message = f"line {token[2]}: only 'unsigned long' is supported, got 'unsigned {following[1]}'"
+                raise SyntaxError(message)
+            self.eat()
+            return "unsigned long"
+        if token[0] == "LONG":
+            message = f"line {token[2]}: bare 'long' is not supported; use 'unsigned long'"
+            raise SyntaxError(message)
         message = f"line {token[2]}: expected type, got {token[0]} ({token[1]!r})"
         raise SyntaxError(message)
 
