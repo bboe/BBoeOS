@@ -161,6 +161,12 @@ class LogicalAnd(Node):
 
 
 @dataclass(slots=True)
+class LogicalOr(Node):
+    left: Node
+    right: Node
+
+
+@dataclass(slots=True)
 class Program(Node):
     functions: list[Node]
 
@@ -232,6 +238,15 @@ JUMP_WHEN_FALSE = {
     "==": "jne",
 }
 
+JUMP_WHEN_TRUE = {
+    "!=": "jne",
+    "<": "jl",
+    "<=": "jle",
+    ">": "jg",
+    ">=": "jge",
+    "==": "je",
+}
+
 KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
 
 TOKEN_PATTERN = re.compile(
@@ -253,6 +268,8 @@ TOKEN_PATTERN = re.compile(
   | (?P<LT><)
   | (?P<MINUS>-)
   | (?P<AND_AND>&&)
+  | (?P<OR_OR>\|\|)
+  | (?P<AMP>&)
   | (?P<NOT>!)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
@@ -937,14 +954,41 @@ class CodeGenerator:
 
         For ``&&``, short-circuits by recursing on each operand with
         the same fail label — any false leg jumps directly to the
-        failure target.
+        failure target.  For ``||``, jumps past the right leg as soon
+        as the left leg is true, otherwise re-enters the false-jump on
+        the right leg.
         """
         if isinstance(condition, LogicalAnd):
             self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
             self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
             return
+        if isinstance(condition, LogicalOr):
+            pass_label = f".lor_{self.new_label()}"
+            self.emit_condition_true_jump(condition=condition.left, success_label=pass_label, context=context)
+            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            self.emit(f"{pass_label}:")
+            return
         operator = self.emit_condition(condition=condition, context=context)
         self.emit(f"        {JUMP_WHEN_FALSE[operator]} {fail_label}")
+
+    def emit_condition_true_jump(self, *, condition: Node, success_label: str, context: str) -> None:
+        """Emit a condition that jumps to ``success_label`` when true.
+
+        Dual of :meth:`emit_condition_false_jump`; used for the ``||``
+        short-circuit so that a truthy left leg can skip the right.
+        """
+        if isinstance(condition, LogicalOr):
+            self.emit_condition_true_jump(condition=condition.left, success_label=success_label, context=context)
+            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            return
+        if isinstance(condition, LogicalAnd):
+            skip_label = f".land_{self.new_label()}"
+            self.emit_condition_false_jump(condition=condition.left, fail_label=skip_label, context=context)
+            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            self.emit(f"{skip_label}:")
+            return
+        operator = self.emit_condition(condition=condition, context=context)
+        self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
 
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
@@ -1311,6 +1355,8 @@ class CodeGenerator:
                 self.emit("        add ax, cx")
             elif operator == "-":
                 self.emit("        sub ax, cx")
+            elif operator == "&":
+                self.emit("        and ax, cx")
             elif operator == "*":
                 dx_pinned = any(register == "dx" for register in self.pinned_register.values())
                 if dx_pinned:
@@ -2215,7 +2261,7 @@ class Parser:
 
         """
         expression = self.parse_expression()
-        if isinstance(expression, LogicalAnd):
+        if isinstance(expression, (LogicalAnd, LogicalOr)):
             return expression
         if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
@@ -2238,6 +2284,20 @@ class Parser:
         self.eat("SEMI")
         return DoWhile(condition, body)
 
+    def parse_bitwise_and(self) -> Node:
+        """Parse a left-associative bitwise ``&`` expression.
+
+        Returns:
+            A ``BinOp`` chain or the underlying comparison.
+
+        """
+        left = self.parse_comparison()
+        while self.peek()[0] == "AMP":
+            self.eat()
+            right = self.parse_comparison()
+            left = BinOp("&", left, right)
+        return left
+
     def parse_expression(self) -> Node:
         """Parse an expression.
 
@@ -2245,7 +2305,7 @@ class Parser:
             An AST node for the expression.
 
         """
-        return self.parse_logical_and()
+        return self.parse_logical_or()
 
     def parse_function(self) -> Node:
         """Parse a function declaration.
@@ -2289,14 +2349,28 @@ class Parser:
         """Parse a left-associative ``&&`` expression.
 
         Returns:
-            A ``LogicalAnd`` tree or the underlying comparison.
+            A ``LogicalAnd`` tree or the underlying bitwise-AND node.
 
         """
-        left = self.parse_comparison()
+        left = self.parse_bitwise_and()
         while self.peek()[0] == "AND_AND":
             self.eat()
-            right = self.parse_comparison()
+            right = self.parse_bitwise_and()
             left = LogicalAnd(left, right)
+        return left
+
+    def parse_logical_or(self) -> Node:
+        """Parse a left-associative ``||`` expression.
+
+        Returns:
+            A ``LogicalOr`` tree or the underlying ``&&`` node.
+
+        """
+        left = self.parse_logical_and()
+        while self.peek()[0] == "OR_OR":
+            self.eat()
+            right = self.parse_logical_and()
+            left = LogicalOr(left, right)
         return left
 
     def parse_multiplicative(self) -> Node:

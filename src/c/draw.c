@@ -1,4 +1,4 @@
-#define COLORS 16
+#define COLOR_MASK 15
 #define COLUMNS 40
 #define ROWS 25
 
@@ -23,11 +23,12 @@ void main() {
         } else if (character == 'w') {
             row = (row + ROWS - 1) % ROWS;
             moved = 1;
-        } else if (character == 'j') {
-            background = (background + COLORS - 1) % COLORS;
-            printf("\e[48;5;%dm", background);
-        } else if (character == 'k') {
-            background = (background + 1) % COLORS;
+        } else if (character == 'j' || character == 'k') {
+            if (character == 'j') {
+                background = (background - 1) & COLOR_MASK;
+            } else {
+                background = (background + 1) & COLOR_MASK;
+            }
             printf("\e[48;5;%dm", background);
         }
         if (moved) {

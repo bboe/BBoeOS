@@ -524,15 +524,21 @@ handle_add:
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
-;;; handle_and: and r, imm
+;;; handle_and: and r, r / and r, imm
 ;;; -----------------------------------------------------------------------
 handle_and:
         call skip_ws
         call parse_register    ; AL = reg, AH = size
-        push ax
+        push ax                ; save dst reg+size
         call skip_comma
-        call resolve_value     ; AX = immediate
-        mov cx, ax
+        call parse_operand
+        mov [op2_type], ah
+        mov [op2_register], al
+        mov [op2_value], dx
+        cmp byte [op2_type], 0
+        je .and_rr
+        ;; immediate
+        mov cx, [op2_value]
         pop bx                 ; BL = reg, BH = size
         cmp bh, 8
         je .and_r8
@@ -559,6 +565,20 @@ handle_and:
         or al, 0E0h
         call emit_byte_al
         mov al, cl
+        jmp emit_byte_al
+        .and_rr:
+        ;; reg-reg: opcode 20 (8-bit) / 21 (16-bit), modrm reg=src, rm=dst
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .and_rr8
+        mov al, 21h
+        jmp .and_rr_emit
+        .and_rr8:
+        mov al, 20h
+        .and_rr_emit:
+        call emit_byte_al
+        mov al, [op2_register]
+        call make_modrm_reg_reg
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
