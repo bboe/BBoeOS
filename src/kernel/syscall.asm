@@ -634,23 +634,7 @@ syscall_handler:
         iret
 
         .rtc_uptime:
-        ;; Return elapsed seconds in AX
-        push ecx
-        push edx
-        xor ah, ah
-        int 1Ah                 ; CX:DX = current ticks since midnight
-        movzx eax, cx
-        shl eax, 16
-        or ax, dx
-        movzx ecx, word [boot_ticks_high]
-        shl ecx, 16
-        or cx, [boot_ticks_low]
-        sub eax, ecx            ; EAX = elapsed ticks
-        xor edx, edx
-        mov ecx, 18
-        div ecx                 ; EAX = elapsed seconds
-        pop edx
-        pop ecx
+        call uptime_seconds
         iret
 
         .video_mode:
@@ -816,4 +800,25 @@ install_syscalls:
         pop es
         pop bx
         pop ax
+        ret
+
+uptime_seconds:
+        ;; Return AX = elapsed seconds since boot (low 16 bits of the
+        ;; 32-bit result; EAX holds the full value).  Preserves ECX, EDX.
+        push ecx
+        push edx
+        xor ah, ah
+        int 1Ah                 ; CX:DX = current ticks since midnight
+        movzx eax, cx
+        shl eax, 16
+        or ax, dx
+        movzx ecx, word [boot_ticks_high]
+        shl ecx, 16
+        or cx, [boot_ticks_low]
+        sub eax, ecx            ; EAX = elapsed ticks
+        xor edx, edx
+        mov ecx, 18
+        div ecx                 ; EAX = elapsed seconds
+        pop edx
+        pop ecx
         ret

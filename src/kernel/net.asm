@@ -1,6 +1,8 @@
         ;; NE2000 on-board RAM page layout (16KB = 64 pages of 256 bytes)
-        %assign ARP_ENTRY_SIZE 10  ; 4 bytes IP + 6 bytes MAC
+        %assign ARP_ENTRY_SIZE 12  ; 4 bytes IP + 6 bytes MAC + 2 bytes timestamp
         %assign ARP_TABLE_SIZE 8
+        %assign ARP_TIMESTAMP_OFFSET 10
+        %assign ARP_TTL_SECONDS 60
         %assign NE2K_RX_START 46h  ; RX ring start (6 TX pages = 1536 bytes)
         %assign NE2K_RX_STOP 80h   ; RX ring end (one past last page)
         %assign NE2K_TX_PAGE 40h   ; TX buffer start page
@@ -281,13 +283,13 @@ arp_table_add:
         loop .add_loop
 
         ;; Table full — round-robin eviction
+        push dx
         mov ax, [arp_evict]
-        mov bx, ax
-        shl ax, 1              ; ax = idx * 2
-        shl bx, 3              ; bx = idx * 8
-        add ax, bx             ; ax = idx * 10 = idx * ARP_ENTRY_SIZE
+        mov dx, ARP_ENTRY_SIZE
+        mul dx                 ; DX:AX = idx * ARP_ENTRY_SIZE
         add ax, arp_table
         mov bx, ax
+        pop dx
         mov ax, [arp_evict]
         inc ax
         cmp ax, ARP_TABLE_SIZE
@@ -305,6 +307,11 @@ arp_table_add:
         movsw
         movsw
         movsw
+        ;; Stamp with current uptime (16-bit seconds; wraps ~18h)
+        push eax
+        call uptime_seconds
+        mov [bx+ARP_TIMESTAMP_OFFSET], ax
+        pop eax
 
         pop di
         pop si
@@ -316,10 +323,14 @@ arp_table_add:
 arp_table_lookup:
         ;; Look up an IP in the ARP table
         ;; Input: SI = pointer to 4-byte IP
-        ;; Output: DI = pointer to 6-byte MAC, CF set if not found
+        ;; Output: DI = pointer to 6-byte MAC, CF set if not found or TTL expired
         push ax
         push bx
         push cx
+        push dx
+
+        call uptime_seconds
+        mov dx, ax              ; DX = now (seconds since boot, 16-bit)
 
         mov bx, arp_table
         mov cx, ARP_TABLE_SIZE
@@ -329,19 +340,24 @@ arp_table_lookup:
         cmp dword [bx], 0     ; Empty entry?
         je .lookup_miss
         cmp [bx], eax
-        je .lookup_hit
+        jne .lookup_next
+        ;; IP matches — check TTL
+        mov ax, dx
+        sub ax, [bx+ARP_TIMESTAMP_OFFSET]
+        cmp ax, ARP_TTL_SECONDS
+        ja .lookup_miss         ; expired (or unsigned-wrap from future stamp)
+        lea di, [bx+4]
+        clc
+        jmp .lookup_done
+        .lookup_next:
         add bx, ARP_ENTRY_SIZE
         loop .lookup_loop
 
         .lookup_miss:
         stc
-        jmp .lookup_done
-
-        .lookup_hit:
-        lea di, [bx+4]        ; DI = pointer to MAC (past IP)
-        clc
 
         .lookup_done:
+        pop dx
         pop cx
         pop bx
         pop ax
