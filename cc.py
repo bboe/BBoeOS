@@ -280,17 +280,20 @@ class CodeGenerator:
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putc": frozenset({"ax"}),
         "read": frozenset({"ax", "cx", "di"}),
+        "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
         "write": frozenset({"ax", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mkdir"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mkdir", "rename"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "ERROR_EXISTS",
+        "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
         "FLAG_EXECUTE",
         "O_CREAT",
@@ -609,6 +612,31 @@ class CodeGenerator:
         self.emit("        mov ah, SYS_IO_READ")
         self.emit("        int 30h")
         self.ax_clear()
+
+    def builtin_rename(self, arguments: list[Node], /, *, fuse_exit: bool = False) -> None:
+        """Generate code for the rename() builtin.
+
+        ``rename(oldname, newname)`` emits ``mov si, <oldname> /
+        mov di, <newname> / mov ah, SYS_FS_RENAME / int 30h``.
+        Returns 0 on success or an ERROR_* code on failure.  When
+        *fuse_exit* is True, emits ``jnc FUNCTION_EXIT`` instead of
+        converting the carry flag to a 0-or-error integer.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="rename")
+        self.emit_si_from_argument(arguments[0])
+        self.emit_register_from_argument(argument=arguments[1], register="di")
+        self.emit("        mov ah, SYS_FS_RENAME")
+        self.emit("        int 30h")
+        if fuse_exit:
+            self.emit("        jnc FUNCTION_EXIT")
+        else:
+            label_index = self.new_label()
+            self.emit(f"        jnc .ok_{label_index}")
+            self.emit("        xor ah, ah")
+            self.emit(f"        jmp .done_{label_index}")
+            self.emit(f".ok_{label_index}:")
+            self.emit("        xor ax, ax")
+            self.emit(f".done_{label_index}:")
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.
