@@ -1453,6 +1453,7 @@ class CodeGenerator:
         self.variable_arrays = set()
         self.variable_types = {}
         self.virtual_long_locals = set()
+        self.zero_init_skippable: set[str] = set()
 
         # Allocate parameters as locals and record their types.
         for param in parameters:
@@ -1541,7 +1542,10 @@ class CodeGenerator:
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
             if statement.init is not None:
-                self.emit_store_local(expression=statement.init, name=statement.name)
+                if statement.name in self.zero_init_skippable:
+                    self.zero_init_skippable.discard(statement.name)
+                else:
+                    self.emit_store_local(expression=statement.init, name=statement.name)
         elif isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
@@ -2031,6 +2035,11 @@ class CodeGenerator:
                     continue
                 size = self.TYPE_SIZES.get(statement.type_name, 2)
                 self.allocate_local(statement.name, size=size)
+                # Skip the init store for top-level main locals with an Int(0)
+                # initializer: the `dw 0` declaration already zeros the cell,
+                # and main re-runs from a fresh image each exec.
+                if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size == 2:
+                    self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.allocate_local(statement.name)
