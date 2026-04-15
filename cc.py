@@ -2173,6 +2173,48 @@ class Parser:
         self.position += 1
         return token
 
+    def fold_binop(self, operator: str, left: Node, right: Node, /) -> Node:
+        """Return a folded node when operands (or a left-subtree tail) are constant.
+
+        Handles two shapes:
+
+        1. ``Int op Int`` collapses to a single ``Int`` — lets
+           ``COLUMNS - 1`` become ``39`` at parse time.
+        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
+           folds the trailing constants through so
+           ``(column + 40) - 1`` becomes ``column + 39`` and
+           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
+           addition is already a tight pair.
+        """
+        if isinstance(left, Int) and isinstance(right, Int):
+            a, b = left.value, right.value
+            if operator == "+":
+                return Int(a + b)
+            if operator == "-":
+                return Int(a - b)
+            if operator == "*":
+                return Int(a * b)
+            if operator == "&":
+                return Int(a & b)
+            if operator == "/" and b != 0:
+                return Int(a // b)
+            if operator == "%" and b != 0:
+                return Int(a % b)
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Int)
+            and isinstance(left, BinOp)
+            and left.op in ("+", "-")
+            and isinstance(left.right, Int)
+        ):
+            inner_sign = 1 if left.op == "+" else -1
+            outer_sign = 1 if operator == "+" else -1
+            combined = inner_sign * left.right.value + outer_sign * right.value
+            if combined >= 0:
+                return BinOp("+", left.left, Int(combined))
+            return BinOp("-", left.left, Int(-combined))
+        return BinOp(operator, left, right)
+
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
 
@@ -2184,7 +2226,7 @@ class Parser:
         while self.peek()[0] in ADDITIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_multiplicative()
-            node = BinOp(operator_token[1], node, right)
+            node = self.fold_binop(operator_token[1], node, right)
         return node
 
     def parse_arguments(self) -> list[Node]:
@@ -2331,7 +2373,7 @@ class Parser:
         while self.peek()[0] == "AMP":
             self.eat()
             right = self.parse_comparison()
-            left = BinOp("&", left, right)
+            left = self.fold_binop("&", left, right)
         return left
 
     def parse_expression(self) -> Node:
@@ -2420,7 +2462,7 @@ class Parser:
         while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_primary()
-            node = BinOp(operator_token[1], node, right)
+            node = self.fold_binop(operator_token[1], node, right)
         return node
 
     def parse_parameter(self) -> Param:
