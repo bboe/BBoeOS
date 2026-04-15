@@ -308,23 +308,23 @@ class CodeGenerator:
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
         "chmod": frozenset({"ax", "si"}),
-        "close": frozenset({"ax"}),
+        "close": frozenset({"ax", "bx"}),
         "datetime": frozenset({"ax", "dx"}),
         "die": frozenset(),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getc": frozenset({"ax"}),
-        "mkdir": frozenset({"ax"}),
-        "open": frozenset({"ax", "dx"}),
+        "mkdir": frozenset({"ax", "si"}),
+        "open": frozenset({"ax", "dx", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putc": frozenset({"ax"}),
-        "read": frozenset({"ax", "cx", "di"}),
+        "read": frozenset({"ax", "bx", "cx", "di"}),
         "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
         "video_mode": frozenset({"ax"}),
-        "write": frozenset({"ax", "cx", "si"}),
+        "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mkdir", "rename"})
