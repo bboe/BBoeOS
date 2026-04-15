@@ -75,10 +75,8 @@
         %assign SYS_NET_MAC 21h
         %assign SYS_NET_OPEN 22h
         %assign SYS_NET_PING 23h
-        %assign SYS_NET_RECEIVE 24h
-        %assign SYS_NET_SEND 25h
-        %assign SYS_NET_UDP_RECEIVE 26h
-        %assign SYS_NET_UDP_SEND 27h
+        %assign SYS_NET_UDP_RECEIVE 24h
+        %assign SYS_NET_UDP_SEND 25h
 
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h

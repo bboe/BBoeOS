@@ -25,10 +25,6 @@ syscall_handler:
         je .net_open
         cmp ah, SYS_NET_PING   ; net_ping
         je .net_ping
-        cmp ah, SYS_NET_RECEIVE   ; net_receive
-        je .net_receive
-        cmp ah, SYS_NET_SEND   ; net_send
-        je .net_send
         cmp ah, SYS_NET_UDP_RECEIVE ; net_udp_receive
         je .net_udp_receive
         cmp ah, SYS_NET_UDP_SEND ; net_udp_send
@@ -458,14 +454,6 @@ syscall_handler:
 
         .net_ping:
         call icmp_ping
-        jmp .iret_cf
-
-        .net_receive:
-        call ne2k_receive
-        jmp .iret_cf
-
-        .net_send:
-        call ne2k_send
         jmp .iret_cf
 
         .net_udp_receive:
