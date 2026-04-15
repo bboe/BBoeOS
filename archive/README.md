@@ -12,6 +12,7 @@ source is kept here for reference.
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
 | hello   | 22          | 23        | +1    |
+| ls      | 129         | 180       | +51   |
 | mkdir   | 116         | 121       | +5    |
 | mv      | 232         | 292       | +60   |
 | uptime  | 50          | 78        | +28   |
@@ -23,6 +24,12 @@ and indexes for each character check.
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
+
+**ls (+51):** The assembly version uses inline `repne scasb` with a
+25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
+directly; the C version routes through `strlen()` (full 0xFFFF scan
+setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
+The flag-check branches and "else if" also emit more compares.
 
 **mkdir (+5):** Same null-terminator overhead across 4 string literals
 (+4 bytes), plus the compiler loads `argv` into AX before moving to

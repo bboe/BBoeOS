@@ -295,6 +295,7 @@ class CodeGenerator:
         "ERROR_EXISTS",
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
+        "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
         "O_CREAT",
         "O_RDONLY",
