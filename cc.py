@@ -139,6 +139,27 @@ class Int(Node):
     value: int
 
 
+class Char(Int):
+    """A ``char`` literal (``'x'``).
+
+    Subclasses :class:`Int` so existing ``isinstance(..., Int)`` checks
+    continue to treat char literals as integer constants for codegen,
+    while type-checking (e.g., equality operand validation) can still
+    distinguish char literals from plain integers.
+
+    Placed directly after :class:`Int` because the subclass relationship
+    requires its base to be defined first.
+    """
+
+    __slots__ = ()
+
+
+@dataclass(slots=True)
+class LogicalAnd(Node):
+    left: Node
+    right: Node
+
+
 @dataclass(slots=True)
 class Program(Node):
     functions: list[Node]
@@ -231,6 +252,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<GT>>)
   | (?P<LT><)
   | (?P<MINUS>-)
+  | (?P<AND_AND>&&)
   | (?P<NOT>!)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
@@ -292,10 +314,14 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "DIRECTORY_ENTRY_SIZE",
+        "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
+        "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
+        "NULL",
         "O_CREAT",
         "O_RDONLY",
         "O_TRUNC",
@@ -800,22 +826,31 @@ class CodeGenerator:
         Optimizes comparisons against integer constants by using
         ``cmp ax, imm`` directly, and ``test ax, ax`` for zero.  Pinned
         register variables compare against constants in place, skipping
-        the load into AX.
+        the load into AX.  ``NULL`` and other named constants are
+        treated as constant immediates.
         """
+        literal = None
+        is_zero = False
         if isinstance(right, Int):
+            literal = str(right.value)
+            is_zero = right.value == 0
+        elif isinstance(right, Var) and right.name in self.NAMED_CONSTANTS:
+            literal = right.name
+            is_zero = right.name == "NULL"
+        if literal is not None:
             if isinstance(left, Var) and left.name in self.pinned_register:
                 register = self.pinned_register[left.name]
-                if right.value == 0:
+                if is_zero:
                     self.emit(f"        test {register}, {register}")
                 else:
-                    self.emit(f"        cmp {register}, {right.value}")
+                    self.emit(f"        cmp {register}, {literal}")
                 return
             self.generate_expression(left)
-            if right.value == 0:
+            if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
             else:
                 register = "al" if self.ax_is_byte else "ax"
-                self.emit(f"        cmp {register}, {right.value}")
+                self.emit(f"        cmp {register}, {literal}")
         else:
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")
@@ -830,8 +865,24 @@ class CodeGenerator:
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise SyntaxError(message)
+        if condition.op in ("==", "!="):
+            self.validate_equality_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
         return condition.op
+
+    def emit_condition_false_jump(self, *, condition: Node, fail_label: str, context: str) -> None:
+        """Emit a condition that jumps to ``fail_label`` when false.
+
+        For ``&&``, short-circuits by recursing on each operand with
+        the same fail label — any false leg jumps directly to the
+        failure target.
+        """
+        if isinstance(condition, LogicalAnd):
+            self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
+            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            return
+        operator = self.emit_condition(condition=condition, context=context)
+        self.emit(f"        {JUMP_WHEN_FALSE[operator]} {fail_label}")
 
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
@@ -1071,10 +1122,13 @@ class CodeGenerator:
         self.emit(f".do_{label_index}:")
         self.loop_end_labels.append(end_label)
         self.generate_body(body, scoped=True)
-        operator = self.emit_condition(condition=condition, context="do_while")
-        # Jump back to top when condition is TRUE (invert the false-jump)
-        true_jump = {"!=": "jne", "<": "jl", "<=": "jle", ">": "jg", ">=": "jge", "==": "je"}
-        self.emit(f"        {true_jump[operator]} .do_{label_index}")
+        # Short-circuit any false operand straight to end; otherwise
+        # fall through to the unconditional jump back to the top.  The
+        # ``jfalse end_label; jmp top; end_label:`` pattern is collapsed
+        # by peephole_double_jump into ``jtrue top`` for single
+        # comparisons.
+        self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="do_while")
+        self.emit(f"        jmp .do_{label_index}")
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
 
@@ -1313,10 +1367,9 @@ class CodeGenerator:
         """Generate assembly for an if statement."""
         condition, body, else_body = statement.cond, statement.body, statement.else_body
         label_index = self.new_label()
-        operator = self.emit_condition(condition=condition, context="if")
         saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_else")
+            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
             self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
@@ -1329,7 +1382,7 @@ class CodeGenerator:
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
+            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_end", context="if")
             self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
@@ -1408,8 +1461,7 @@ class CodeGenerator:
         if self.is_constant_true_condition(condition):
             self.generate_body(body, scoped=True)
         else:
-            operator = self.emit_condition(condition=condition, context="while")
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} {end_label}")
+            self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="while")
             self.generate_body(body, scoped=True)
         self.emit(f"        jmp .while_{label_index}")
         self.emit(f"{end_label}:")
@@ -1872,6 +1924,64 @@ class CodeGenerator:
             return statement
         return If(condition, new_if, new_else)
 
+    def type_of_operand(self, node: Node, /) -> str:
+        """Classify an operand for equality type-checking.
+
+        Returns one of: ``"pointer"``, ``"null"``, ``"char"``,
+        ``"integer"``, or ``"unknown"`` (expressions whose type we
+        cannot statically determine — treated as integers for the
+        purposes of the check).
+        """
+        if isinstance(node, Char):
+            return "char"
+        if isinstance(node, Index):
+            if self.variable_types.get(node.name) in ("char", "char*"):
+                return "char"
+            return "unknown"
+        if isinstance(node, Var):
+            if node.name == "NULL":
+                return "null"
+            variable_type = self.variable_types.get(node.name)
+            if variable_type == "char*":
+                return "pointer"
+            if variable_type == "char":
+                return "char"
+            if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
+                return "integer"
+        return "unknown"
+
+    def validate_equality_types(self, left: Node, right: Node, /) -> None:
+        """Ensure ``==``/``!=`` operands have compatible types.
+
+        Pointers may only be compared to other pointers or ``NULL``;
+        ``NULL`` may only appear opposite a pointer; ``char`` values
+        must be compared against other ``char`` values or character
+        literals (so ``c != 0`` is rejected — use ``c != '\\0'``).
+        Comparing a pointer to a non-``NULL`` integer (``if (p == 0)``)
+        is a common C bug, so the compiler requires the explicit
+        ``NULL`` spelling.
+        """
+        left_type = self.type_of_operand(left)
+        right_type = self.type_of_operand(right)
+        if left_type == "pointer" and right_type not in ("pointer", "null"):
+            message = f"pointer compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "pointer" and left_type not in ("pointer", "null"):
+            message = f"pointer compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if left_type == "null" and right_type not in ("pointer", "null"):
+            message = f"NULL compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "null" and left_type not in ("pointer", "null"):
+            message = f"NULL compared to non-pointer: {left} vs {right}"
+            raise SyntaxError(message)
+        if left_type == "char" and right_type not in ("char", "unknown"):
+            message = f"char compared to non-char: {left} vs {right}"
+            raise SyntaxError(message)
+        if right_type == "char" and left_type not in ("char", "unknown"):
+            message = f"char compared to non-char: {left} vs {right}"
+            raise SyntaxError(message)
+
 
 class Parser:
     """Recursive descent parser for the C subset grammar."""
@@ -2022,6 +2132,8 @@ class Parser:
 
         """
         expression = self.parse_expression()
+        if isinstance(expression, LogicalAnd):
+            return expression
         if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
         return BinOp("!=", expression, Int(0))
@@ -2050,7 +2162,7 @@ class Parser:
             An AST node for the expression.
 
         """
-        return self.parse_comparison()
+        return self.parse_logical_and()
 
     def parse_function(self) -> Node:
         """Parse a function declaration.
@@ -2089,6 +2201,20 @@ class Parser:
                 self.eat("LBRACE")
                 else_body = self.parse_block()
         return If(condition, body, else_body)
+
+    def parse_logical_and(self) -> Node:
+        """Parse a left-associative ``&&`` expression.
+
+        Returns:
+            A ``LogicalAnd`` tree or the underlying comparison.
+
+        """
+        left = self.parse_comparison()
+        while self.peek()[0] == "AND_AND":
+            self.eat()
+            right = self.parse_comparison()
+            left = LogicalAnd(left, right)
+        return left
 
     def parse_multiplicative(self) -> Node:
         """Parse a multiplicative expression (multiplication and division).
@@ -2153,7 +2279,7 @@ class Parser:
             return Int(int(token[1], 0))
         if token[0] == "CHAR_LIT":
             self.eat()
-            return Int(decode_first_character(token[1][1:-1]))
+            return Char(decode_first_character(token[1][1:-1]))
         if token[0] == "STRING":
             self.eat()
             return String(token[1][1:-1])

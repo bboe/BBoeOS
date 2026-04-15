@@ -1,5 +1,5 @@
 void main(char *arg) {
-    if (arg == 0) {
+    if (arg == NULL) {
         die("Usage: cat <filename>\n");
     }
     int fd = open(arg, O_RDONLY);

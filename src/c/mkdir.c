@@ -1,5 +1,5 @@
 void main(char *arg) {
-    if (arg == 0) {
+    if (arg == NULL) {
         printf("Usage: mkdir <name>\n");
         return;
     }

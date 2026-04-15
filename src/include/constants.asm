@@ -49,6 +49,7 @@
         %assign NE2K_BASE 300h
         %assign NET_RECEIVE_BUFFER 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
         %assign NET_TRANSMIT_BUFFER 0E200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign NULL 0
         %assign O_CREAT  10h
         %assign O_RDONLY 00h
         %assign O_TRUNC  20h
