@@ -1725,6 +1725,7 @@ class CodeGenerator:
         self.peephole_label_forwarding()
         self.peephole_store_reload()
         self.peephole_memory_arithmetic()
+        self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
         self.peephole_dead_ah()
         self.peephole_unused_cld()
@@ -1917,6 +1918,24 @@ class CodeGenerator:
                     self.lines[j] = self.lines[j].replace(old_label, new_target)
             del self.lines[i : i + 2]
             i = max(1, i - 1)
+
+    def peephole_dx_to_memory(self) -> None:
+        """Fold ``mov ax, dx / mov [X], ax`` into ``mov [X], dx``.
+
+        The pair arises after a ``%`` expression whose remainder the
+        ``%`` handler stages into AX just so the standard store path
+        can flush it to the local — but the intermediate AX hop is
+        dead if the next instruction writes that memory anyway.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "mov ax, dx" and b.startswith("mov [") and b.endswith("], ax"):
+                self.lines[i + 1] = f"{self.lines[i + 1][:-3]}dx"
+                del self.lines[i]
+                continue
+            i += 1
 
     def peephole_memory_arithmetic(self) -> None:
         """Fuse load/modify/store sequences into direct arithmetic.
