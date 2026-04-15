@@ -7,7 +7,7 @@ main:
 
         ;; Init NIC
         mov di, my_mac
-        mov ah, SYS_NET_INIT
+        mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 

@@ -19,8 +19,8 @@ syscall_handler:
 
         cmp ah, SYS_NET_ARP    ; net_arp
         je .net_arp
-        cmp ah, SYS_NET_INIT   ; net_init
-        je .net_init
+        cmp ah, SYS_NET_MAC    ; net_mac
+        je .net_mac
         cmp ah, SYS_NET_PING   ; net_ping
         je .net_ping
         cmp ah, SYS_NET_RECEIVE   ; net_receive
@@ -422,11 +422,10 @@ syscall_handler:
         call arp_resolve
         jmp .iret_cf
 
-        .net_init:
-        call ne2k_probe
-        jc .iret_cf
-        call ne2k_init
-        ;; Copy MAC address to caller's buffer at DI
+        .net_mac:
+        ;; Copy cached MAC to caller's buffer at DI; CF set if NIC absent.
+        cmp byte [net_present], 0
+        je .net_mac_absent
         push si
         push cx
         cld
@@ -436,6 +435,9 @@ syscall_handler:
         pop cx
         pop si
         clc
+        jmp .iret_cf
+        .net_mac_absent:
+        stc
         jmp .iret_cf
 
         .net_ping:
