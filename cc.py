@@ -826,22 +826,31 @@ class CodeGenerator:
         Optimizes comparisons against integer constants by using
         ``cmp ax, imm`` directly, and ``test ax, ax`` for zero.  Pinned
         register variables compare against constants in place, skipping
-        the load into AX.
+        the load into AX.  ``NULL`` and other named constants are
+        treated as constant immediates.
         """
+        literal = None
+        is_zero = False
         if isinstance(right, Int):
+            literal = str(right.value)
+            is_zero = right.value == 0
+        elif isinstance(right, Var) and right.name in self.NAMED_CONSTANTS:
+            literal = right.name
+            is_zero = right.name == "NULL"
+        if literal is not None:
             if isinstance(left, Var) and left.name in self.pinned_register:
                 register = self.pinned_register[left.name]
-                if right.value == 0:
+                if is_zero:
                     self.emit(f"        test {register}, {register}")
                 else:
-                    self.emit(f"        cmp {register}, {right.value}")
+                    self.emit(f"        cmp {register}, {literal}")
                 return
             self.generate_expression(left)
-            if right.value == 0:
+            if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
             else:
                 register = "al" if self.ax_is_byte else "ax"
-                self.emit(f"        cmp {register}, {right.value}")
+                self.emit(f"        cmp {register}, {literal}")
         else:
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")

@@ -8,16 +8,16 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | cat     | 138         | 121       | -17   |
-| chmod   | 140         | 246       | +106  |
+| chmod   | 140         | 241       | +101  |
 | cp      | 287         | 285       | -2    |
 | date    | 15          | 15        |  0    |
 | hello   | 22          | 23        | +1    |
-| ls      | 129         | 180       | +51   |
+| ls      | 129         | 170       | +41   |
 | mkdir   | 116         | 121       | +5    |
-| mv      | 232         | 292       | +60   |
+| mv      | 232         | 277       | +45   |
 | uptime  | 50          | 78        | +28   |
 
-**chmod (+106):** The assembly version walks the argument with `lodsb`
+**chmod (+101):** The assembly version walks the argument with `lodsb`
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
 
@@ -25,17 +25,16 @@ and indexes for each character check.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+51):** The assembly version uses inline `repne scasb` with a
+**ls (+41):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
-The flag-check branches and "else if" also emit more compares.
 
 **mkdir (+5):** Same null-terminator overhead across 4 string literals
 (+4 bytes), plus the compiler loads `argv` into AX before moving to
 SI (+1 byte) rather than loading SI directly.
 
-**mv (+60):** The assembly version walks the argument string once with
+**mv (+45):** The assembly version walks the argument string once with
 `lodsb` to both find the space separator and count newname length.
 The C version calls `strlen(argv[1])` (which scans with `repne scasb`
 plus setup/teardown), and reloads `argv` through BX for each indexed
