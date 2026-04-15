@@ -802,6 +802,7 @@ ne2k_probe:
 
         ;; Variables
         mac_address times 6 db 0
+        net_present db 0        ; set to 1 by stage 2 boot if NE2000 probe succeeded
 
 ne2k_receive:
         ;; Receive a packet from the NE2000 RX ring buffer (polled)
@@ -1050,6 +1051,20 @@ ne2k_send:
         pop dx
         pop cx
         pop ax
+        ret
+
+network_initialize:
+        ;; Bring up the network interface (currently NE2000 only).
+        ;; Sets net_present on success.
+        ;; Output: CF clear if NIC is up, CF set if no NIC.
+        call ne2k_probe
+        jc .net_absent
+        call ne2k_init
+        mov byte [net_present], 1
+        clc
+        ret
+        .net_absent:
+        stc
         ret
 
 udp_receive:
