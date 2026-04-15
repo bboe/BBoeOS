@@ -2549,6 +2549,8 @@ parse_db:
         je .esc_bs
         cmp al, 'r'
         je .esc_r
+        cmp al, 'e'
+        je .esc_e
         ;; Unknown escape, emit backslash and char
         push ax
         mov al, '\'
@@ -2568,6 +2570,9 @@ parse_db:
         jmp .esc_emit
         .esc_r:
         mov al, 0Dh
+        jmp .esc_emit
+        .esc_e:
+        mov al, 1Bh
         jmp .esc_emit
         .esc_bs:
         mov al, '\'

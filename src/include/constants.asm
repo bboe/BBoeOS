@@ -5,7 +5,7 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR 15
+        %assign DIRECTORY_SECTOR 16
         %assign DIRECTORY_SECTORS 3
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists

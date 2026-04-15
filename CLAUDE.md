@@ -19,7 +19,7 @@ Requires `nasm` (`brew install nasm`).
 
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
-- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, ANSI parser (`put_character`, `put_string`), `serial_character`.
+- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, minimal output (`put_string`, `put_character_raw`), `serial_character`.  The full ANSI parser lives in stage 2.
 - **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
 - **Shell** (`src/asm/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
@@ -49,7 +49,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_character` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back) are translated to INT 10h calls for the screen. `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_character` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to INT 10h calls for the screen. The parser lives in stage 2; stage 1 includes a minimal variant (`ansi_minimal.asm`) used only for boot messages. `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 

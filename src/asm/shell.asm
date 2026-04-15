@@ -463,21 +463,29 @@ visual_bell:
         push bx
         push cx
         push dx
-        mov ax, 0B00h
-        mov bx, 0004h          ; Border color = red
-        int 10h
+        push si
+        ;; Flash background red via SGR: \e[48;5;4m
+        mov si, BELL_RED
+        mov cx, BELL_SGR_LEN
+        call FUNCTION_WRITE_STDOUT
         mov ah, 86h
         xor cx, cx
         mov dx, 0C350h         ; 50,000 µs = 50ms
         int 15h
-        mov ax, 0B00h
-        xor bx, bx             ; Border color = black
-        int 10h
+        ;; Restore background black: \e[48;5;0m
+        mov si, BELL_BLACK
+        mov cx, BELL_SGR_LEN
+        call FUNCTION_WRITE_STDOUT
+        pop si
         pop dx
         pop cx
         pop bx
         pop ax
         ret
+
+BELL_BLACK   db `\e[48;5;0m`
+BELL_RED     db `\e[48;5;4m`
+BELL_SGR_LEN equ $ - BELL_RED
 
 ;; Command table
 cmd_table:
