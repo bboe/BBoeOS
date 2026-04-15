@@ -1,9 +1,7 @@
 void main(char *arg) {
     char *name = ".";
-    if (arg != NULL) {
-        if (arg[0] != '\0') {
-            name = arg;
-        }
+    if (arg != NULL && arg[0] != '\0') {
+        name = arg;
     }
     int fd = open(name, O_RDONLY);
     if (fd < 0) {

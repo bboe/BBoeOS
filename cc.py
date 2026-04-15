@@ -155,6 +155,12 @@ class Char(Int):
 
 
 @dataclass(slots=True)
+class LogicalAnd(Node):
+    left: Node
+    right: Node
+
+
+@dataclass(slots=True)
 class Program(Node):
     functions: list[Node]
 
@@ -246,6 +252,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<GT>>)
   | (?P<LT><)
   | (?P<MINUS>-)
+  | (?P<AND_AND>&&)
   | (?P<NOT>!)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
@@ -852,6 +859,20 @@ class CodeGenerator:
         self.emit_comparison(condition.left, condition.right)
         return condition.op
 
+    def emit_condition_false_jump(self, *, condition: Node, fail_label: str, context: str) -> None:
+        """Emit a condition that jumps to ``fail_label`` when false.
+
+        For ``&&``, short-circuits by recursing on each operand with
+        the same fail label — any false leg jumps directly to the
+        failure target.
+        """
+        if isinstance(condition, LogicalAnd):
+            self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
+            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            return
+        operator = self.emit_condition(condition=condition, context=context)
+        self.emit(f"        {JUMP_WHEN_FALSE[operator]} {fail_label}")
+
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
         """Load an argument into a specific 16-bit register.
 
@@ -1090,10 +1111,13 @@ class CodeGenerator:
         self.emit(f".do_{label_index}:")
         self.loop_end_labels.append(end_label)
         self.generate_body(body, scoped=True)
-        operator = self.emit_condition(condition=condition, context="do_while")
-        # Jump back to top when condition is TRUE (invert the false-jump)
-        true_jump = {"!=": "jne", "<": "jl", "<=": "jle", ">": "jg", ">=": "jge", "==": "je"}
-        self.emit(f"        {true_jump[operator]} .do_{label_index}")
+        # Short-circuit any false operand straight to end; otherwise
+        # fall through to the unconditional jump back to the top.  The
+        # ``jfalse end_label; jmp top; end_label:`` pattern is collapsed
+        # by peephole_double_jump into ``jtrue top`` for single
+        # comparisons.
+        self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="do_while")
+        self.emit(f"        jmp .do_{label_index}")
         self.emit(f"{end_label}:")
         self.loop_end_labels.pop()
 
@@ -1332,10 +1356,9 @@ class CodeGenerator:
         """Generate assembly for an if statement."""
         condition, body, else_body = statement.cond, statement.body, statement.else_body
         label_index = self.new_label()
-        operator = self.emit_condition(condition=condition, context="if")
         saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_else")
+            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
             self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
@@ -1348,7 +1371,7 @@ class CodeGenerator:
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} .if_{label_index}_end")
+            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_end", context="if")
             self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
@@ -1427,8 +1450,7 @@ class CodeGenerator:
         if self.is_constant_true_condition(condition):
             self.generate_body(body, scoped=True)
         else:
-            operator = self.emit_condition(condition=condition, context="while")
-            self.emit(f"        {JUMP_WHEN_FALSE[operator]} {end_label}")
+            self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="while")
             self.generate_body(body, scoped=True)
         self.emit(f"        jmp .while_{label_index}")
         self.emit(f"{end_label}:")
@@ -2099,6 +2121,8 @@ class Parser:
 
         """
         expression = self.parse_expression()
+        if isinstance(expression, LogicalAnd):
+            return expression
         if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
         return BinOp("!=", expression, Int(0))
@@ -2127,7 +2151,7 @@ class Parser:
             An AST node for the expression.
 
         """
-        return self.parse_comparison()
+        return self.parse_logical_and()
 
     def parse_function(self) -> Node:
         """Parse a function declaration.
@@ -2166,6 +2190,20 @@ class Parser:
                 self.eat("LBRACE")
                 else_body = self.parse_block()
         return If(condition, body, else_body)
+
+    def parse_logical_and(self) -> Node:
+        """Parse a left-associative ``&&`` expression.
+
+        Returns:
+            A ``LogicalAnd`` tree or the underlying comparison.
+
+        """
+        left = self.parse_comparison()
+        while self.peek()[0] == "AND_AND":
+            self.eat()
+            right = self.parse_comparison()
+            left = LogicalAnd(left, right)
+        return left
 
     def parse_multiplicative(self) -> Node:
         """Parse a multiplicative expression (multiplication and division).
