@@ -568,6 +568,10 @@ class CodeGenerator:
             and self.variable_types.get(node.name) in ("char", "char*")
         )
 
+    def _is_byte_var(self, name: str, /) -> bool:
+        """Return True if *name* is a ``char`` or ``char*`` variable (not a local word array)."""
+        return name not in self.variable_arrays and self.variable_types.get(name) in ("char", "char*")
+
     @staticmethod
     def _is_live_after(*, name: str, statements: list[Node]) -> bool:
         """Check if *name* is read before being unconditionally killed.
@@ -1833,7 +1837,7 @@ class CodeGenerator:
                 else:
                     self.emit(f"        mov ax, [{label}]")
             elif isinstance(index_expression, Int):
-                is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
+                is_byte = self._is_byte_var(vname)
                 offset = index_expression.value * (1 if is_byte else 2)
                 # Direct memory access for constant/aliased bases:
                 # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
@@ -1861,7 +1865,7 @@ class CodeGenerator:
                     else:
                         self.emit("        mov ax, [bx]")
             else:
-                is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
+                is_byte = self._is_byte_var(vname)
                 if vname in self.pinned_register:
                     self.emit(f"        mov bx, {self.pinned_register[vname]}")
                 elif vname in self.constant_aliases:
