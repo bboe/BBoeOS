@@ -12,8 +12,6 @@ Requires: nasm, qemu-system-i386
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
 import shutil
 import struct
 import subprocess
@@ -31,62 +29,12 @@ from add_file import (
     iter_entries,
     read_assign,
 )
-from test_asm import (
-    BOOT_TIMEOUT,
-    PROMPT,
-    SERIAL_BASENAME,
-    cleanup_fifos,
-    setup_fifos,
-    terminate,
-    wait_for_bytes,
-)
+from run_qemu import run_commands
 
 COMMAND_TIMEOUT = 30
 DIRECTORY_ENTRY_SIZE = 32
 FLAG_DIRECTORY = 0x02
 IMAGE = Path("drive.img")
-
-
-def boot_and_run(*, commands: list[str], drive: Path, temporary_directory: Path) -> None:
-    """Boot QEMU on `drive`, send each command, and shut down."""
-    setup_fifos(temporary_directory=temporary_directory)
-    serial_base = temporary_directory / SERIAL_BASENAME
-    qemu: subprocess.Popen | None = None
-    serial_file_descriptor: int | None = None
-    try:
-        qemu = subprocess.Popen(
-            [
-                "qemu-system-i386",
-                "-chardev",
-                f"pipe,id=s,path={serial_base}",
-                "-display",
-                "none",
-                "-drive",
-                f"file={drive},format=raw",
-                "-monitor",
-                "none",
-                "-serial",
-                "chardev:s",
-            ],
-        )
-        serial_file_descriptor = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
-        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=BOOT_TIMEOUT)
-        with Path(f"{serial_base}.in").open("w", encoding="utf-8") as serial_input:
-            for command in commands:
-                serial_input.write(command + "\r")
-                serial_input.flush()
-                wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=COMMAND_TIMEOUT)
-            serial_input.write("shutdown\r")
-            serial_input.flush()
-        # Wait for QEMU to exit (shutdown takes a moment)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            qemu.wait(timeout=10)
-    finally:
-        if serial_file_descriptor is not None:
-            os.close(serial_file_descriptor)
-        if qemu is not None:
-            terminate(process=qemu)
-        cleanup_fifos(temporary_directory=temporary_directory)
 
 
 def find_entry(
@@ -197,7 +145,7 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
     Verify the destination is byte-identical to the source.
     """
     drive = make_drive(name="copy_large", temporary_directory=temporary_directory)
-    boot_and_run(commands=["cp src/asm.asm big"], drive=drive, temporary_directory=temporary_directory)
+    run_commands(["cp src/asm.asm big"], command_timeout=COMMAND_TIMEOUT, drive=drive)
     image = drive.read_bytes()
 
     big = find_entry(
@@ -237,10 +185,10 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
 def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
     """Copy a file into a subdirectory and verify the entry shows up there."""
     drive = make_drive(name="copy_subdirectory", temporary_directory=temporary_directory)
-    boot_and_run(
-        commands=["mkdir d", "cp bin/cat d/h"],
+    run_commands(
+        ["mkdir d", "cp bin/cat d/h"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
 
@@ -286,10 +234,10 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     in bin/, and the data is preserved.
     """
     drive = make_drive(name="cross_move", temporary_directory=temporary_directory)
-    boot_and_run(
-        commands=["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
+    run_commands(
+        ["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
 
@@ -339,7 +287,7 @@ def test_make_directory_high_sector(*, directory_sector: int, directory_sectors:
     asm.asm pushes the next free sector well beyond 256.
     """
     drive = make_drive(name="make_directory_high", temporary_directory=temporary_directory)
-    boot_and_run(commands=["mkdir hi"], drive=drive, temporary_directory=temporary_directory)
+    run_commands(["mkdir hi"], command_timeout=COMMAND_TIMEOUT, drive=drive)
     image = drive.read_bytes()
     hi = find_entry(
         directory_sectors=directory_sectors,
@@ -385,10 +333,10 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
     )
     assert not in_first, "shell unexpectedly in first bin sector"
 
-    boot_and_run(
-        commands=["cp bin/shell bin/s", "mv bin/s bin/s2"],
+    run_commands(
+        ["cp bin/shell bin/s", "mv bin/s bin/s2"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
     bin_entry = find_entry(

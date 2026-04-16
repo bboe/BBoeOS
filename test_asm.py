@@ -13,9 +13,6 @@ Requires: nasm, qemu-system-i386
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
-import select
 import shutil
 import struct
 import subprocess
@@ -32,14 +29,11 @@ from add_file import (
     iter_entries,
     read_assign,
 )
+from run_qemu import run_commands
 
-BOOT_TIMEOUT = 30
 C_DIR = Path("src/c")
-COMMAND_TIMEOUT = 8
 IMAGE = Path("drive.img")
 ORG_DIRECTIVE = "org 0600h"
-PROMPT = b"$ "
-SERIAL_BASENAME = "ser"
 STATIC_DIR = Path("static")
 
 
@@ -119,13 +113,6 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
     return 1 if fail_count else 0
 
 
-def cleanup_fifos(*, temporary_directory: Path) -> None:
-    """Remove the serial FIFO pipes from temporary_directory."""
-    for path in fifo_paths(temporary_directory=temporary_directory):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-
-
 def compare_drive_output(
     *,
     directory_sector: int,
@@ -193,14 +180,6 @@ def discover_programs(*, only: str | None) -> list[Path]:
     return programs
 
 
-def fifo_paths(*, temporary_directory: Path) -> tuple[Path, Path]:
-    """Return the (input, output) FIFO paths for QEMU serial communication."""
-    return (
-        temporary_directory / f"{SERIAL_BASENAME}.in",
-        temporary_directory / f"{SERIAL_BASENAME}.out",
-    )
-
-
 def main() -> int:
     """Run the self-hosted assembler test suite."""
     parser = argparse.ArgumentParser(
@@ -228,11 +207,10 @@ def main() -> int:
 
 
 def persist_artifacts(*, temporary_directory: Path) -> Path:
-    """Copy non-fifo artifacts out of `temporary_directory` to a persistent directory."""
+    """Copy artifacts out of `temporary_directory` to a persistent directory."""
     persist = Path(tempfile.mkdtemp(prefix="test_asm_keep_"))
-    fifos = set(fifo_paths(temporary_directory=temporary_directory))
     for item in temporary_directory.iterdir():
-        if item in fifos or not item.is_file():
+        if not item.is_file():
             continue
         shutil.copy(item, persist / item.name)
     return persist
@@ -242,64 +220,6 @@ def restore_static(generated: list[Path], /) -> None:
     """Undo compile_c_sources(): delete generated files."""
     for target in generated:
         target.unlink(missing_ok=True)
-
-
-def run_in_qemu(
-    *,
-    command_timeout: float,
-    command: str,
-    drive: Path,
-    temporary_directory: Path,
-) -> None:
-    """Boot QEMU with the drive image, send a command via serial, and wait for completion."""
-    setup_fifos(temporary_directory=temporary_directory)
-    serial_base = temporary_directory / SERIAL_BASENAME
-    qemu: subprocess.Popen | None = None
-    serial_file_descriptor: int | None = None
-    try:
-        qemu = subprocess.Popen(
-            [
-                "qemu-system-i386",
-                "-chardev",
-                f"pipe,id=s,path={serial_base}",
-                "-display",
-                "none",
-                "-drive",
-                f"file={drive},format=raw",
-                "-monitor",
-                "none",
-                "-serial",
-                "chardev:s",
-            ],
-        )
-
-        serial_file_descriptor = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
-        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=BOOT_TIMEOUT)
-
-        Path(f"{serial_base}.in").write_text(command, encoding="utf-8")
-        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=command_timeout)
-    finally:
-        if serial_file_descriptor is not None:
-            os.close(serial_file_descriptor)
-        if qemu is not None:
-            terminate(process=qemu)
-        cleanup_fifos(temporary_directory=temporary_directory)
-
-
-def setup_fifos(*, temporary_directory: Path) -> None:
-    """Create the serial FIFO pipes in temporary_directory for QEMU communication."""
-    cleanup_fifos(temporary_directory=temporary_directory)
-    for path in fifo_paths(temporary_directory=temporary_directory):
-        os.mkfifo(path)
-
-
-def terminate(*, process: subprocess.Popen) -> None:
-    """Kill the QEMU process and wait for it to exit."""
-    if process.poll() is not None:
-        return
-    process.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=5)
 
 
 def test_program(
@@ -316,11 +236,9 @@ def test_program(
     drive = temporary_directory / f"drive_{name}.img"
     shutil.copy(IMAGE, drive)
 
-    run_in_qemu(
-        command_timeout=COMMAND_TIMEOUT,
-        command=f"asm src/{name}.asm {output_name}\r",
+    run_commands(
+        [f"asm src/{name}.asm {output_name}"],
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     return compare_drive_output(
         directory_sector=directory_sector,
@@ -330,44 +248,6 @@ def test_program(
         output_name=output_name,
         reference_bytes=reference.read_bytes(),
     )
-
-
-def wait_for_bytes(
-    *,
-    file_descriptor: int,
-    needle: bytes,
-    process: subprocess.Popen,
-    timeout: float,
-) -> None:
-    """Read from `file_descriptor` until `needle` appears in the accumulated output.
-
-    `process` is the QEMU process; if it exits before `needle` is seen, raise
-    RuntimeError. Raises TimeoutError if `timeout` seconds elapse.
-    """
-    deadline = time.monotonic() + timeout
-    buffer = bytearray()
-    while needle not in buffer:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            message = f"timed out waiting for {needle!r}"
-            raise TimeoutError(message)
-        if process.poll() is not None:
-            message = f"qemu exited with {process.returncode} before {needle!r} appeared"
-            raise RuntimeError(
-                message,
-            )
-        ready, _, _ = select.select([file_descriptor], [], [], min(remaining, 0.1))
-        if not ready:
-            continue
-        try:
-            chunk = os.read(file_descriptor, 4096)
-        except BlockingIOError:
-            continue
-        if not chunk:
-            # No writer attached yet, or transient empty read — back off briefly.
-            time.sleep(0.01)
-            continue
-        buffer.extend(chunk)
 
 
 if __name__ == "__main__":
