@@ -487,6 +487,7 @@ class CodeGenerator:
         self.required_includes: set[str] = set()
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
+        self.user_functions: dict[str, int] = {}  # name → param count
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
@@ -742,7 +743,10 @@ class CodeGenerator:
         """Return the memory operand string for a local variable."""
         if self.elide_frame:
             return f"_l_{name}"
-        return f"bp-{self.locals[name]}"
+        offset = self.locals[name]
+        if offset > 0:
+            return f"bp-{offset}"
+        return f"bp+{-offset}"
 
     @staticmethod
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
@@ -1385,9 +1389,13 @@ class CodeGenerator:
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):
-                call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
-                if call_clobbers is not None:
-                    clobbered.update(call_clobbers)
+                if node.name in self.user_functions:
+                    # User function calls clobber all registers.
+                    clobbered.update(self.REGISTER_POOL)
+                else:
+                    call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
+                    if call_clobbers is not None:
+                        clobbered.update(call_clobbers)
             for slot in getattr(type(node), "__slots__", ()):
                 child = getattr(node, slot, None)
                 if isinstance(child, Node):
@@ -1831,6 +1839,19 @@ class CodeGenerator:
         self.emit('%include "constants.asm"')
         self.emit()
         for function in ast.functions:
+            if function.name != "main":
+                self.user_functions[function.name] = len(function.params)
+        # Emit main first so execution starts at PROGRAM_BASE.
+        main_func = None
+        helpers: list[Node] = []
+        for function in ast.functions:
+            if function.name == "main":
+                main_func = function
+            else:
+                helpers.append(function)
+        if main_func is not None:
+            self.generate_function(main_func)
+        for function in helpers:
             self.generate_function(function)
         self.peephole()
         for include in sorted(self.required_includes):
@@ -1971,14 +1992,32 @@ class CodeGenerator:
         """Generate code for a function call statement.
 
         Raises:
-            SyntaxError: If the called function is not a known builtin.
+            SyntaxError: If the called function is not a known builtin
+                or user-defined function.
 
         """
         name = statement.name
         arguments = statement.args
+        if name in self.user_functions:
+            expected = self.user_functions[name]
+            if len(arguments) != expected:
+                message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
+                raise SyntaxError(message)
+            # Invalidate all register caches — user functions clobber everything.
+            self.register_cache.clear()
+            self.spill_stack.clear()
+            # Push arguments right-to-left (C convention: first arg at [bp+4]).
+            for arg in reversed(arguments):
+                self.generate_expression(arg)
+                self.emit("        push ax")
+            self.emit(f"        call {name}")
+            if arguments:
+                self.emit(f"        add sp, {len(arguments) * 2}")
+            self.ax_clear()
+            return
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
-            message = f"unknown builtin: {name}"
+            message = f"unknown function: {name}"
             raise SyntaxError(message)
         clobbers = self.BUILTIN_CLOBBERS.get(name)
         if self.register_cache and clobbers:
@@ -2203,12 +2242,22 @@ class CodeGenerator:
         self.virtual_long_locals = set()
         self.zero_init_skippable: set[str] = set()
 
-        # Allocate parameters as locals and record their types.
-        for param in parameters:
-            self.allocate_local(param.name)
-            self.variable_types[param.name] = param.type
-            if param.is_array:
-                self.variable_arrays.add(param.name)
+        # Allocate parameters and record their types.
+        if name == "main":
+            # main parameters are handled by emit_argument_vector_startup.
+            for param in parameters:
+                self.allocate_local(param.name)
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
+        else:
+            # Non-main: parameters live at positive bp offsets (caller-pushed).
+            # First param at [bp+4], second at [bp+6], etc.
+            for i, param in enumerate(parameters):
+                self.locals[param.name] = -(4 + i * 2)  # negative = above bp
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
