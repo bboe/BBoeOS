@@ -4,9 +4,11 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/a0a0980...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
-### [2026-04-16](https://github.com/bboe/BBoeOS/compare/84a1efe...main)
+## [0.5.0](https://github.com/bboe/BBoeOS/compare/a0a0980...5156ae9) (2026-04-16)
+
+### [2026-04-16](https://github.com/bboe/BBoeOS/compare/84a1efe...5156ae9)
 
 - Add CHANGELOG.md with full project history
 - Add UDP socket support (`SOCK_DGRAM`) to `net_open`
