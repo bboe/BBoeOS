@@ -317,7 +317,7 @@ TOKEN_PATTERN = re.compile(
     (?P<WS>\s+)
   | (?P<BLOCK_COMMENT>/\*[\s\S]*?\*/)
   | (?P<LINE_COMMENT>//[^\n]*)
-  | (?P<CHAR_LIT>'(?:[^'\\]|\\.)')
+  | (?P<CHAR_LIT>'(?:[^'\\]|\\x[0-9a-fA-F]{1,2}|\\.)')
   | (?P<IDENT>[A-Za-z_][A-Za-z_0-9]*)
   | (?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)
   | (?P<STRING>"(?:[^"\\]|\\.)*")
@@ -3615,6 +3615,8 @@ def decode_first_character(text: str) -> int:
 
     """
     if text[0] == "\\" and len(text) >= 2:
+        if text[1] == "x" and len(text) >= 3:
+            return int(text[2:], 16)  # noqa: FURB166
         return CHARACTER_ESCAPES.get(text[1], ord(text[1]))
     return ord(text[0])
 
