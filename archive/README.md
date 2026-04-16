@@ -12,6 +12,7 @@ source is kept here for reference.
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
+| dns     | 720         | 1183      | +463  |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 173       | +38   |
@@ -28,6 +29,16 @@ remaining code is byte-identical to the hand-written assembly.
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
+
+**dns (+540):** Both versions use the same shared memory regions
+(`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
+The C version is larger because the helper functions (`decode_domain`,
+`encode_domain`, `skip_name`) carry full stack-frame overhead (push bp /
+mov bp,sp / pop bp / ret per call) and pass arguments via the stack,
+while the assembly version uses register calling conventions with no
+frame setup.  The C compiler also generates word-sized loads with `xor
+ah,ah` zero-extension for every byte read, whereas the assembly version
+uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
 **draw (+37):** The assembly version keeps row/col packed in a single
 DX register and edits it in place with `inc dh` / `dec dl`, then pokes

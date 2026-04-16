@@ -2145,12 +2145,17 @@ class CodeGenerator:
             else:
                 is_byte = self._is_byte_var(vname)
                 self._emit_load_var(vname)
-                self.emit("        push bx")
-                self.generate_expression(index_expression)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        pop bx")
-                self.emit("        add bx, ax")
+                # If the index is a pinned variable and the access is
+                # byte-sized, load it without clobbering BX.
+                if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
+                    self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                else:
+                    self.emit("        push bx")
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        pop bx")
+                    self.emit("        add bx, ax")
                 if is_byte:
                     self.emit("        mov al, [bx]")
                     self.emit("        xor ah, ah")
@@ -2260,8 +2265,9 @@ class CodeGenerator:
                 if param.is_array:
                     self.variable_arrays.add(param.name)
         else:
-            # Non-main: parameters live at positive bp offsets (caller-pushed).
-            # First param at [bp+4], second at [bp+6], etc.
+            # Non-main: record parameter types; stack offsets are kept
+            # as fallbacks but parameters will be pinned to registers
+            # when safe_pin_registers has room.
             for i, param in enumerate(parameters):
                 self.locals[param.name] = -(4 + i * 2)  # negative = above bp
                 self.variable_types[param.name] = param.type
@@ -2270,6 +2276,7 @@ class CodeGenerator:
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
+
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
