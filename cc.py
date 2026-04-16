@@ -378,6 +378,7 @@ class CodeGenerator:
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "ARGV",
         "arp_frame",
         "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
@@ -441,7 +442,6 @@ class CodeGenerator:
         self.live_long_local: str | None = None
         self.locals: dict[str, int] = {}
         self.loop_end_labels: list[str] = []
-        self.needs_argv_buf: bool = False
         self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
         self.required_includes: set[str] = set()
@@ -954,7 +954,12 @@ class CodeGenerator:
         self.lines.append(line)
 
     def emit_argument_vector_startup(self, parameters: list[Param], /) -> None:
-        """Emit inline startup code that parses EXEC_ARG into argc/argv."""
+        """Emit inline startup code that parses EXEC_ARG into argc/argv.
+
+        Registers ``argv`` as a constant alias to ``ARGV`` so all
+        subsequent accesses use the kernel constant directly, avoiding
+        a memory local and store/reload traffic.
+        """
         argc_name = None
         argv_name = None
         for param in parameters:
@@ -965,13 +970,14 @@ class CodeGenerator:
         if not argv_name:
             return
 
-        self.needs_argv_buf = True
+        # argv is always the fixed ARGV address — register as constant alias.
+        self.constant_aliases[argv_name] = "ARGV"
+
         self.emit("        cld")
-        self.emit("        mov di, _argv")
+        self.emit("        mov di, ARGV")
         self.emit("        call FUNCTION_PARSE_ARGV")
         if argc_name:
             self.emit(f"        mov [{self.local_address(argc_name)}], cx")
-        self.emit(f"        mov word [{self.local_address(argv_name)}], _argv")
 
     def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
         """Generate left into AX and right into CX.
@@ -1296,8 +1302,6 @@ class CodeGenerator:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
-        if self.needs_argv_buf:
-            self.emit("_argv: times 32 db 0")
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
