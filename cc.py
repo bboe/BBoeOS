@@ -206,6 +206,13 @@ class Program(Node):
 
 
 @dataclass(slots=True)
+class Return(Node):
+    """``return [expr];`` statement."""
+
+    value: Node | None
+
+
+@dataclass(slots=True)
 class SizeofType(Node):
     """``sizeof(type_name)`` expression."""
 
@@ -720,14 +727,14 @@ class CodeGenerator:
 
     @staticmethod
     def _is_zero_exit_if(statement: Node, /) -> bool:
-        """Check if a statement is ``if (VAR == 0) { exit(); }``."""
+        """Check if a statement is ``if (VAR == 0) { exit(); }`` or ``if (VAR == 0) { return ...; }``."""
         return (
             isinstance(statement, If)
             and isinstance(statement.cond, BinOp)
             and statement.cond.op == "=="
             and statement.cond.right == Int(0)
             and len(statement.body) == 1
-            and statement.body[0] == Call("exit", [])
+            and (statement.body[0] == Call("exit", []) or isinstance(statement.body[0], Return))
             and statement.else_body is None
         )
 
@@ -904,6 +911,8 @@ class CodeGenerator:
             return False
         last = body[-1]
         if isinstance(last, Break):
+            return True
+        if isinstance(last, Return):
             return True
         if isinstance(last, Call) and last.name in {"die", "exit"}:
             return True
@@ -1859,7 +1868,8 @@ class CodeGenerator:
         while i < len(statements):
             statement = statements[i]
             # Fuse simple printf() + exit() into die().
-            if self._is_simple_printf(statement) and i + 1 < len(statements) and statements[i + 1] == Call("exit", []):
+            next_is_exit = i + 1 < len(statements) and (statements[i + 1] == Call("exit", []) or isinstance(statements[i + 1], Return))
+            if self._is_simple_printf(statement) and next_is_exit:
                 self.builtin_die(statement.args)
                 i += 2
                 continue
@@ -2212,10 +2222,11 @@ class CodeGenerator:
         self.visible_vars.update(self.pinned_register)
 
         self.emit(f"{name}:")
-        if not self.elide_frame and self.frame_size > 0:
+        if not self.elide_frame:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
-            self.emit(f"        sub sp, {self.frame_size}")
+            if self.frame_size > 0:
+                self.emit(f"        sub sp, {self.frame_size}")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -2232,10 +2243,10 @@ class CodeGenerator:
                 for vname in sorted(self.locals):
                     directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
-        else:
+        elif not self.always_exits(body):
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
-                self.emit("        pop bp")
+            self.emit("        pop bp")
             self.emit("        ret")
         self.emit()
 
@@ -2305,6 +2316,24 @@ class CodeGenerator:
         message = f"unsupported 'unsigned long' expression: {type(expression).__name__}"
         raise SyntaxError(message)
 
+    def generate_return(self, statement: Return, /) -> None:
+        """Generate assembly for a return statement.
+
+        In ``main``, ``return`` maps to ``jmp FUNCTION_EXIT``.  In other
+        functions it evaluates the return expression into AX, tears down
+        the stack frame, and emits ``ret``.
+        """
+        if self.elide_frame:
+            # main: return [expr]; → exit() (discard return value)
+            self.emit("        jmp FUNCTION_EXIT")
+        else:
+            if statement.value is not None:
+                self.generate_expression(statement.value)
+            if self.frame_size > 0:
+                self.emit("        mov sp, bp")
+            self.emit("        pop bp")
+            self.emit("        ret")
+
     def generate_statement(self, statement: Node, /) -> None:
         """Generate assembly for a single statement.
 
@@ -2355,6 +2384,8 @@ class CodeGenerator:
         elif isinstance(statement, While):
             self.ax_clear()
             self.generate_while(statement)
+        elif isinstance(statement, Return):
+            self.generate_return(statement)
         elif isinstance(statement, Call):
             self.generate_call(statement)
             self.ax_clear()
@@ -3323,10 +3354,11 @@ class Parser:
             return self.parse_do_while()
         if token[0] == "RETURN":
             self.eat("RETURN")
+            value = None
             if self.peek()[0] != "SEMI":
-                self.parse_expression()
+                value = self.parse_expression()
             self.eat("SEMI")
-            return Call("exit", [])
+            return Return(value)
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":
