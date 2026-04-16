@@ -161,6 +161,15 @@ class Index(Node):
 
 
 @dataclass(slots=True)
+class IndexAssign(Node):
+    """Indexed assignment ``name[index] = expr;``."""
+
+    name: str
+    index: Node
+    expr: Node
+
+
+@dataclass(slots=True)
 class Int(Node):
     """Integer literal."""
 
@@ -2329,6 +2338,57 @@ class CodeGenerator:
             else:
                 self.ax_clear()
 
+    def generate_index_assign(self, statement: IndexAssign, /) -> None:
+        """Generate assembly for ``name[index] = expr;``."""
+        self.ax_clear()
+        name = statement.name
+        is_byte = self._is_byte_var(name)
+        self._check_defined(name)
+        # Evaluate value into AX, then store at base+index.
+        if isinstance(statement.index, Int) and isinstance(statement.expr, Int):
+            # Both index and value are constants: direct store.
+            offset = statement.index.value * (1 if is_byte else 2)
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                addr = f"{const_base}+{offset}" if offset else const_base
+            else:
+                self._emit_load_var(name)
+                addr = f"bx+{offset}" if offset else "bx"
+            if is_byte:
+                self.emit(f"        mov byte [{addr}], {statement.expr.value}")
+            else:
+                self.emit(f"        mov word [{addr}], {statement.expr.value}")
+        elif isinstance(statement.index, Int):
+            # Constant index, variable value.
+            offset = statement.index.value * (1 if is_byte else 2)
+            self.generate_expression(statement.expr)
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                addr = f"{const_base}+{offset}" if offset else const_base
+            else:
+                self._emit_load_var(name)
+                addr = f"bx+{offset}" if offset else "bx"
+            if is_byte:
+                self.emit(f"        mov [{addr}], al")
+            else:
+                self.emit(f"        mov [{addr}], ax")
+        else:
+            # Variable index: compute address in BX, then store.
+            self.generate_expression(statement.expr)
+            self.emit("        push ax")
+            self._emit_load_var(name)
+            self.emit("        push bx")
+            self.generate_expression(statement.index)
+            if not is_byte:
+                self.emit("        add ax, ax")
+            self.emit("        pop bx")
+            self.emit("        add bx, ax")
+            self.emit("        pop ax")
+            if is_byte:
+                self.emit("        mov [bx], al")
+            else:
+                self.emit("        mov [bx], ax")
+
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
 
@@ -2420,6 +2480,8 @@ class CodeGenerator:
                 self.emit(f"        mov word [{self._local_address(statement.name)}], {array_label}")
         elif isinstance(statement, Assign):
             self.emit_store_local(expression=statement.expr, name=statement.name)
+        elif isinstance(statement, IndexAssign):
+            self.generate_index_assign(statement)
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
@@ -3233,6 +3295,17 @@ class Parser:
                 else_body = self.parse_block()
         return If(condition, body, else_body)
 
+    def parse_index_assignment(self) -> Node:
+        """Parse an indexed assignment ``name[index] = expr;``."""
+        name = self.eat("IDENT")[1]
+        self.eat("LBRACKET")
+        index = self.parse_expression()
+        self.eat("RBRACKET")
+        self.eat("ASSIGN")
+        expr = self.parse_expression()
+        self.eat("SEMI")
+        return IndexAssign(name, index, expr)
+
     def parse_logical_and(self) -> Node:
         """Parse a left-associative ``&&`` expression.
 
@@ -3416,6 +3489,8 @@ class Parser:
                 return self.parse_assignment()
             if next_kind == "PLUS_ASSIGN":
                 return self.parse_compound_assignment()
+            if next_kind == "LBRACKET":
+                return self.parse_index_assignment()
             return self.parse_call_statement()
         message = f"line {token[2]}: expected statement, got {token[0]} ({token[1]!r})"
         raise SyntaxError(message)
