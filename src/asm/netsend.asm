@@ -5,9 +5,9 @@
 main:
         cld
 
-        ;; Init NIC
+        ;; Read our MAC
         mov di, my_mac
-        mov ah, SYS_NET_INIT
+        mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
@@ -21,12 +21,22 @@ main:
         mov cx, 3
         rep movsw
 
-        ;; Send ARP request
+        ;; Open raw Ethernet socket
+        mov ah, SYS_NET_OPEN
+        int 30h
+        jc .no_nic
+        mov bx, ax              ; BX = fd
+
+        ;; Write ARP frame to the socket
         mov si, arp_frame
         mov cx, 60
-        mov ah, SYS_NET_SEND
+        mov ah, SYS_IO_WRITE
         int 30h
         jc .error
+
+        ;; Close socket
+        mov ah, SYS_IO_CLOSE
+        int 30h
 
         mov si, MESSAGE_SENT
         mov cx, MESSAGE_SENT_LENGTH

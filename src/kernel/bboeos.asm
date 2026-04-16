@@ -63,6 +63,7 @@ start:
         mov [boot_ticks_low], dx
         mov [boot_ticks_high], cx
         call install_syscalls
+        call network_initialize ; probe NIC once; sets net_present on success
         jmp boot_shell
 
         .error:
