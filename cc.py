@@ -57,7 +57,10 @@ import re
 import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass(slots=True)
@@ -342,6 +345,27 @@ REGISTER_PARENT = {
 }
 
 TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
+
+
+def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
+    """Return True if any node in the tree satisfies *predicate*.
+
+    Generic AST walker used by :meth:`CodeGenerator.node_references_var`,
+    :meth:`CodeGenerator.name_is_reassigned`, and
+    :meth:`CodeGenerator.statement_references`.
+    """
+    if predicate(node):
+        return True
+    for field in fields(node):
+        value = getattr(node, field.name)
+        if isinstance(value, Node):
+            if _ast_contains(value, predicate):
+                return True
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, Node) and _ast_contains(item, predicate):
+                    return True
+    return False
 
 
 class CodeGenerator:
@@ -1147,7 +1171,7 @@ class CodeGenerator:
                 continue
             other_statements = statements[:index] + statements[index + 2 :]
             name = statement.name
-            if any(self.statement_references(other, name) for other in other_statements):
+            if any(CodeGenerator.statement_references(other, name) for other in other_statements):
                 continue
             self.virtual_long_locals.add(name)
 
@@ -2233,18 +2257,7 @@ class CodeGenerator:
     @staticmethod
     def name_is_reassigned(*, name: str, node: Node) -> bool:
         """Return True if an ``Assign(name=name, ...)`` occurs inside ``node``."""
-        if isinstance(node, Assign) and node.name == name:
-            return True
-        for field in fields(node):
-            value = getattr(node, field.name)
-            if isinstance(value, Node):
-                if CodeGenerator.name_is_reassigned(name=name, node=value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, Node) and CodeGenerator.name_is_reassigned(name=name, node=item):
-                        return True
-        return False
+        return _ast_contains(node, lambda n: isinstance(n, Assign) and n.name == name)
 
     def new_label(self) -> int:
         """Allocate and return a new unique label index.
@@ -2273,18 +2286,7 @@ class CodeGenerator:
     @staticmethod
     def node_references_var(*, name: str, node: Node) -> bool:
         """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
-        if isinstance(node, Var) and node.name == name:
-            return True
-        for field in fields(node):
-            value = getattr(node, field.name)
-            if isinstance(value, Node):
-                if CodeGenerator.node_references_var(name=name, node=value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, Node) and CodeGenerator.node_references_var(name=name, node=item):
-                        return True
-        return False
+        return _ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
 
     def peephole(self) -> None:
         """Run peephole optimization passes over generated assembly."""
@@ -2722,22 +2724,13 @@ class CodeGenerator:
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
 
-    def statement_references(self, node: Node, name: str, /) -> bool:
+    @staticmethod
+    def statement_references(node: Node, name: str, /) -> bool:
         """Return True if ``node`` reads or writes a variable named ``name``."""
-        if isinstance(node, Var) and node.name == name:
-            return True
-        if isinstance(node, Assign) and node.name == name:
-            return True
-        for field in node.__slots__:
-            value = getattr(node, field)
-            if isinstance(value, Node):
-                if self.statement_references(value, name):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, Node) and self.statement_references(item, name):
-                        return True
-        return False
+        return _ast_contains(
+            node,
+            lambda n: (isinstance(n, Var) and n.name == name) or (isinstance(n, Assign) and n.name == name),
+        )
 
     def transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
