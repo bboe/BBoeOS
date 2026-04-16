@@ -42,6 +42,7 @@ main:
         movsw
 
         ;; Open raw Ethernet socket
+        mov al, SOCK_RAW
         mov ah, SYS_NET_OPEN
         int 30h
         jc .no_nic

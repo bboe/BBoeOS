@@ -32,6 +32,8 @@
 #define FLAG_DIRECTORY 0x02
 #define FLAG_EXECUTE 0x01
 #define SECTOR_BUFFER ((char *)0xE000)
+#define SOCK_DGRAM 1
+#define SOCK_RAW 0
 #define STDERR STDERR_FILENO
 #define STDIN STDIN_FILENO
 #define STDOUT STDOUT_FILENO
@@ -57,8 +59,8 @@ unsigned long datetime(void);
 void die(const char *message) __attribute__((noreturn));
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
-/* Open a raw Ethernet socket (no POSIX equivalent) */
-int net_open(void);
+/* Open a socket: type is SOCK_RAW or SOCK_DGRAM (no POSIX equivalent) */
+int net_open(int type);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */

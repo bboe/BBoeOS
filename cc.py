@@ -41,6 +41,7 @@ Builtins:
     die(message)             -- print message and terminate
     exit()                   -- terminate program
     mkdir(name)              -- create directory, return 0 or ERR_* code
+    net_open(type)           -- open socket (SOCK_RAW or SOCK_DGRAM), return fd or -1
     open(name, flags)        -- open file, return fd or -1 on error
     print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
     putchar(expression)      -- print single character
@@ -420,6 +421,8 @@ class CodeGenerator:
         "O_TRUNC",
         "O_WRONLY",
         "SECTOR_BUFFER",
+        "SOCK_DGRAM",
+        "SOCK_RAW",
         "STDERR",
         "STDIN",
         "STDOUT",
@@ -1066,12 +1069,18 @@ class CodeGenerator:
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_net_open(self, arguments: list[Node], /) -> None:
-        """Generate code for the net_open() builtin.
+        """Generate code for the net_open(type) builtin.
 
-        Allocates a raw Ethernet socket fd via SYS_NET_OPEN.
+        ``net_open(type)`` emits ``mov al, <type> / mov ah, SYS_NET_OPEN /
+        int 30h`` where type is SOCK_RAW (0) or SOCK_DGRAM (1).
         Returns fd in AX on success, or -1 if no NIC is present.
         """
-        self._check_argument_count(arguments=arguments, expected=0, name="net_open")
+        self._check_argument_count(arguments=arguments, expected=1, name="net_open")
+        type_argument = arguments[0]
+        if isinstance(type_argument, Int) or (isinstance(type_argument, Var) and type_argument.name in self.NAMED_CONSTANTS):
+            self.emit(f"        mov al, {type_argument.value if isinstance(type_argument, Int) else type_argument.name}")
+        else:
+            self.generate_expression(type_argument)
         self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")

@@ -439,15 +439,24 @@ syscall_handler:
         jmp .iret_cf
 
         .net_open:
-        ;; Allocate a raw Ethernet socket fd. CF set if no NIC or table full.
+        ;; Allocate a socket fd: AL = type (SOCK_RAW=0, SOCK_DGRAM=1).
+        ;; CF set if no NIC or table full.
         cmp byte [net_present], 0
         je .net_open_err
-        call fd_alloc
+        mov [.net_open_type], al
+        call fd_alloc          ; AX = fd number, SI = entry pointer
         jc .net_open_err
+        cmp byte [.net_open_type], SOCK_DGRAM
+        je .net_open_udp
         mov byte [si+FD_OFFSET_TYPE], FD_TYPE_NET
+        jmp .net_open_done
+        .net_open_udp:
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
+        .net_open_done:
         mov byte [si+FD_OFFSET_FLAGS], 0
         clc
         jmp .iret_cf
+        .net_open_type db 0
         .net_open_err:
         stc
         jmp .iret_cf

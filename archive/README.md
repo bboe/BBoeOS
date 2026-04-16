@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 453       | +4    |
+| arp     | 451         | 455       | +4    |
 | cat     | 145         | 135       | -10   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
@@ -18,8 +18,8 @@ source is kept here for reference.
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 217       |  0    |
 | netinit | 72          | 63        | -9    |
-| netrecv | 332         | 382       | +50   |
-| netsend | 185         | 212       | +27   |
+| netrecv | 334         | 384       | +50   |
+| netsend | 187         | 214       | +27   |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+4):** Null terminators on 4 strings (+4 bytes).  The

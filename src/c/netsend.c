@@ -6,7 +6,7 @@ int main() {
     memcpy(arp_frame + 6, mac_buffer, 6);
     memcpy(arp_frame + 22, mac_buffer, 6);
 
-    int fd = net_open();
+    int fd = net_open(SOCK_RAW);
     if (fd < 0) {
         die("Socket error\n");
     }
