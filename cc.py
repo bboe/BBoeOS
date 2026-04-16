@@ -1366,6 +1366,10 @@ class CodeGenerator:
             self.emit(f"        mov {register}, [{self.local_address(argument.name)}]")
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
+        elif (constant_expr := self._constant_expression(argument)) is not None:
+            if isinstance(argument, BinOp):
+                self.emit_constant_reference(argument.left.name)
+            self.emit(f"        mov {register}, {constant_expr}")
         else:
             self.generate_expression(argument)
             if register != "ax":
@@ -1377,6 +1381,10 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.new_string_label(argument.content)}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
+        elif (constant_expr := self._constant_expression(argument)) is not None:
+            if isinstance(argument, BinOp):
+                self.emit_constant_reference(argument.left.name)
+            self.emit(f"        mov si, {constant_expr}")
         else:
             self.generate_expression(argument)
             self.emit("        mov si, ax")
