@@ -537,11 +537,21 @@ class CodeGenerator:
             return f"byte [{direct}]"
         vname = node.name
         offset = node.index.value
-        if vname in self.pinned_register:
-            self.emit(f"        mov bx, {self.pinned_register[vname]}")
-        else:
-            self.emit(f"        mov bx, [{self.local_address(vname)}]")
+        self._emit_load_var(vname)
         return f"byte [bx+{offset}]" if offset else "byte [bx]"
+
+    def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
+        """Load a variable's value into *register*.
+
+        Checks pinned registers first, then constant aliases, then
+        falls back to the memory frame slot.
+        """
+        if name in self.pinned_register:
+            self.emit(f"        mov {register}, {self.pinned_register[name]}")
+        elif name in self.constant_aliases:
+            self.emit(f"        mov {register}, {self.constant_aliases[name]}")
+        else:
+            self.emit(f"        mov {register}, [{self.local_address(name)}]")
 
     def _emit_syscall(self, name: str, /) -> None:
         """Emit ``mov ah, SYS_<NAME> / int 30h``."""
@@ -1842,10 +1852,7 @@ class CodeGenerator:
                     else:
                         self.emit(f"        mov ax, [{addr}]")
                 else:
-                    if vname in self.pinned_register:
-                        self.emit(f"        mov bx, {self.pinned_register[vname]}")
-                    else:
-                        self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                    self._emit_load_var(vname)
                     if is_byte:
                         if offset:
                             self.emit(f"        mov al, [bx+{offset}]")
@@ -1858,12 +1865,7 @@ class CodeGenerator:
                         self.emit("        mov ax, [bx]")
             else:
                 is_byte = self._is_byte_var(vname)
-                if vname in self.pinned_register:
-                    self.emit(f"        mov bx, {self.pinned_register[vname]}")
-                elif vname in self.constant_aliases:
-                    self.emit(f"        mov bx, {self.constant_aliases[vname]}")
-                else:
-                    self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                self._emit_load_var(vname)
                 self.emit("        push bx")
                 self.generate_expression(index_expression)
                 if not is_byte:
