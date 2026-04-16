@@ -543,6 +543,11 @@ class CodeGenerator:
             self.emit(f"        mov bx, [{self.local_address(vname)}]")
         return f"byte [bx+{offset}]" if offset else "byte [bx]"
 
+    def _emit_syscall(self, name: str, /) -> None:
+        """Emit ``mov ah, SYS_<NAME> / int 30h``."""
+        self.emit(f"        mov ah, SYS_{name}")
+        self.emit("        int 30h")
+
     @staticmethod
     def _flatten_and(condition: Node, /) -> list[Node]:
         """Flatten a left-leaning ``&&`` tree into a list of leaves."""
@@ -742,8 +747,7 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=2, name="chmod")
         self.emit_si_from_argument(arguments[0])
         self.generate_expression(arguments[1])
-        self.emit("        mov ah, SYS_FS_CHMOD")
-        self.emit("        int 30h")
+        self._emit_syscall("FS_CHMOD")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_close(self, arguments: list[Node], /) -> None:
@@ -754,8 +758,7 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="close")
         self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit("        mov ah, SYS_IO_CLOSE")
-        self.emit("        int 30h")
+        self._emit_syscall("IO_CLOSE")
 
     def builtin_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the datetime() builtin.
@@ -764,8 +767,7 @@ class CodeGenerator:
         through the year 2106 (32-bit epoch overflow).
         """
         self.check_argument_count(arguments=arguments, expected=0, name="datetime")
-        self.emit("        mov ah, SYS_RTC_DATETIME")
-        self.emit("        int 30h")
+        self._emit_syscall("RTC_DATETIME")
 
     def builtin_die(self, arguments: list[Node], /) -> None:
         """Generate code for the die() builtin.
@@ -799,8 +801,7 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="fstat")
         self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit("        mov ah, SYS_IO_FSTAT")
-        self.emit("        int 30h")
+        self._emit_syscall("IO_FSTAT")
         self.emit("        xor ah, ah")
 
     def builtin_getchar(self, arguments: list[Node], /) -> None:
@@ -829,8 +830,7 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="mac")
         self.emit_register_from_argument(argument=arguments[0], register="di")
-        self.emit("        mov ah, SYS_NET_MAC")
-        self.emit("        int 30h")
+        self._emit_syscall("NET_MAC")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
     def builtin_memcpy(self, arguments: list[Node], /) -> None:
@@ -863,8 +863,7 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="mkdir")
         self.emit_si_from_argument(arguments[0])
-        self.emit("        mov ah, SYS_FS_MKDIR")
-        self.emit("        int 30h")
+        self._emit_syscall("FS_MKDIR")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_net_open(self, arguments: list[Node], /) -> None:
@@ -874,8 +873,7 @@ class CodeGenerator:
         Returns fd in AX on success, or -1 if no NIC is present.
         """
         self.check_argument_count(arguments=arguments, expected=0, name="net_open")
-        self.emit("        mov ah, SYS_NET_OPEN")
-        self.emit("        int 30h")
+        self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
         self.emit("        mov ax, -1")
@@ -904,8 +902,7 @@ class CodeGenerator:
             self.generate_expression(flags_argument)
         if len(arguments) == 3:
             self.emit_register_from_argument(argument=arguments[2], register="dl")
-        self.emit("        mov ah, SYS_IO_OPEN")
-        self.emit("        int 30h")
+        self._emit_syscall("IO_OPEN")
         self.ax_clear()
 
     def builtin_parse_ip(
@@ -1026,8 +1023,7 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=fd_argument, register="bx")
         self.emit_register_from_argument(argument=buffer_argument, register="di")
         self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit("        mov ah, SYS_IO_READ")
-        self.emit("        int 30h")
+        self._emit_syscall("IO_READ")
         self.ax_clear()
 
     def builtin_rename(
@@ -1047,8 +1043,7 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=2, name="rename")
         self.emit_si_from_argument(arguments[0])
         self.emit_register_from_argument(argument=arguments[1], register="di")
-        self.emit("        mov ah, SYS_FS_RENAME")
-        self.emit("        int 30h")
+        self._emit_syscall("FS_RENAME")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
@@ -1070,8 +1065,7 @@ class CodeGenerator:
     def builtin_uptime(self, arguments: list[Node], /) -> None:
         """Generate code for the uptime() builtin."""
         self.check_argument_count(arguments=arguments, expected=0, name="uptime")
-        self.emit("        mov ah, SYS_RTC_UPTIME")
-        self.emit("        int 30h")
+        self._emit_syscall("RTC_UPTIME")
 
     def builtin_video_mode(self, arguments: list[Node], /) -> None:
         """Generate code for the video_mode(mode) builtin.
@@ -1081,8 +1075,7 @@ class CodeGenerator:
         """
         self.check_argument_count(arguments=arguments, expected=1, name="video_mode")
         self.emit_register_from_argument(argument=arguments[0], register="ax")
-        self.emit("        mov ah, SYS_VIDEO_MODE")
-        self.emit("        int 30h")
+        self._emit_syscall("VIDEO_MODE")
         self.ax_clear()
 
     def builtin_write(self, arguments: list[Node], /) -> None:
@@ -1097,8 +1090,7 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=buffer_argument, register="si")
         self.emit_register_from_argument(argument=count_argument, register="cx")
         self.emit_register_from_argument(argument=fd_argument, register="bx")
-        self.emit("        mov ah, SYS_IO_WRITE")
-        self.emit("        int 30h")
+        self._emit_syscall("IO_WRITE")
         self.ax_clear()
 
     def can_auto_pin(self, *, following_statement: Node | None, statement: VarDecl) -> bool:
