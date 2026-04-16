@@ -466,21 +466,25 @@ class CodeGenerator:
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
 
-        Recognizes bare ``NAMED_CONSTANT`` references and
-        ``NAMED_CONSTANT +/- Int`` arithmetic.  Returns the NASM
-        expression string (e.g. ``"BUFFER"`` or ``"BUFFER+128"``)
-        or ``None`` if the expression is not a compile-time constant.
+        Recognizes bare ``NAMED_CONSTANT`` references, constant aliases,
+        and ``(NAMED_CONSTANT|alias) +/- Int`` arithmetic.  Returns
+        the NASM expression string (e.g. ``"BUFFER"``, ``"BUFFER+128"``,
+        or ``"BUFFER+128+22"``) or ``None``.
         """
-        if isinstance(init, Var) and init.name in self.NAMED_CONSTANTS:
-            return init.name
-        if (
-            isinstance(init, BinOp)
-            and init.op in ("+", "-")
-            and isinstance(init.left, Var)
-            and init.left.name in self.NAMED_CONSTANTS
-            and isinstance(init.right, Int)
-        ):
-            return f"{init.left.name}+{init.right.value}" if init.op == "+" else f"{init.left.name}-{init.right.value}"
+        if isinstance(init, Var):
+            if init.name in self.NAMED_CONSTANTS:
+                return init.name
+            if init.name in self.constant_aliases:
+                return self.constant_aliases[init.name]
+        if isinstance(init, BinOp) and init.op in ("+", "-") and isinstance(init.right, Int) and isinstance(init.left, Var):
+            base = None
+            if init.left.name in self.NAMED_CONSTANTS:
+                base = init.left.name
+            elif init.left.name in self.constant_aliases:
+                base = self.constant_aliases[init.left.name]
+            if base is not None:
+                op = "+" if init.op == "+" else "-"
+                return f"{base}{op}{init.right.value}"
         return None
 
     def _emit_byte_index_bx(self, node: Index, /) -> str:
@@ -2580,17 +2584,31 @@ class CodeGenerator:
             i += 1
 
     def peephole_unused_cld(self) -> None:
-        """Remove ``cld`` when no string instruction is emitted.
+        """Remove or deduplicate ``cld`` instructions.
 
-        The argv parser and single-char* startup emit ``cld`` for
-        legacy reasons but never issue ``lodsb``/``stosb``/``rep``.
+        When no string instruction is emitted, all ``cld`` instructions
+        are removed.  Otherwise, redundant ``cld`` instructions are
+        removed when the direction flag is already clear (no intervening
+        label, call, or interrupt that could change DF).
         """
         string_ops = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
+        has_string_ops = any(any(line.strip().startswith(op) for op in string_ops) for line in self.lines)
+        if not has_string_ops:
+            self.lines = [line for line in self.lines if line.strip() != "cld"]
+            return
+        # Deduplicate: track whether DF is known-clear.
+        df_clear = False
+        result: list[str] = []
         for line in self.lines:
             stripped = line.strip()
-            if any(stripped.startswith(op) for op in string_ops):
-                return
-        self.lines = [line for line in self.lines if line.strip() != "cld"]
+            if stripped == "cld":
+                if df_clear:
+                    continue  # redundant
+                df_clear = True
+            elif stripped.endswith(":") or stripped.startswith(("call ", "int ")):
+                df_clear = False
+            result.append(line)
+        self.lines = result
 
     def scan_locals(self, statements: list[Node], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.

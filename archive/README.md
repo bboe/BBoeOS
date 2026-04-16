@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 477       | +28   |
+| arp     | 449         | 470       | +21   |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 186       | +37   |
 | cp      | 268         | 249       | -19   |
@@ -18,11 +18,11 @@ source is kept here for reference.
 | mkdir   | 123         | 137       | +14   |
 | mv      | 217         | 227       | +10   |
 | netinit | 72          | 63        | -9    |
-| netrecv | 332         | 383       | +51   |
-| netsend | 185         | 213       | +28   |
+| netrecv | 332         | 382       | +50   |
+| netsend | 185         | 212       | +27   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+28):** The `argc/argv` startup and six word-sized locals
+**arp (+21):** The `argc/argv` startup and six word-sized locals
 account for most of the delta.  The word-comparison fusing
 optimization matches the assembly version's comparison patterns,
 but the CF-to-integer conversion for `net_open` and null terminators
@@ -59,7 +59,7 @@ and the `_l_argc` local from the `argc/argv` startup.
 each indexed access.  Null terminators on 5 string literals add
 another +5.
 
-**netrecv (+51):** Both versions read into `BUFFER + 128` with a
+**netrecv (+50):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.
 The delta is ordinary C-compiler overhead: null-terminated strings,
 the net_open CF normalization, fd stashed in a memory local so it
@@ -67,7 +67,7 @@ survives across `FUNCTION_WRITE_STDOUT` calls, and printf-style hex
 formatting instead of the asm version's inline `FUNCTION_PRINT_HEX`
 loop.
 
-**netsend (+28):** Null terminators on three strings, the net_open
+**netsend (+27):** Null terminators on three strings, the net_open
 CF-to-integer normalization, and storing fd to a local all add a
 handful of bytes.  The asm version kept fd in BX and used
 length-bearing messages without null terminators.  Both versions
