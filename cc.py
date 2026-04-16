@@ -2493,6 +2493,45 @@ class CodeGenerator:
                 self.lines[i] = f"        {operator} {width}{source}, {immediate}"
             del self.lines[i + 1 : i + 4]
             continue
+        # Second pass: 3-instruction pattern without CX intermediate.
+        # ``mov ax, D / (add|sub) ax, imm / mov D, ax`` → ``(add|sub) D, imm``
+        # or ``inc D`` / ``dec D`` when imm is 1.
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            is_memory = source.startswith("[") and source.endswith("]")
+            is_register = source in registers
+            if not (is_memory or is_register):
+                i += 1
+                continue
+            operator = None
+            immediate = None
+            if b.startswith("add ax, "):
+                operator = "add"
+                immediate = b[len("add ax, ") :]
+            elif b.startswith("sub ax, "):
+                operator = "sub"
+                immediate = b[len("sub ax, ") :]
+            if operator is None or immediate.startswith("["):
+                i += 1
+                continue
+            if c != f"mov {source}, ax":
+                i += 1
+                continue
+            width = "word " if is_memory else ""
+            if immediate == "1":
+                instruction = "inc" if operator == "add" else "dec"
+                self.lines[i] = f"        {instruction} {width}{source}"
+            else:
+                self.lines[i] = f"        {operator} {width}{source}, {immediate}"
+            del self.lines[i + 1 : i + 3]
+            continue
 
     def peephole_redundant_bx(self) -> None:
         """Remove ``mov bx, X`` when BX already holds X.
