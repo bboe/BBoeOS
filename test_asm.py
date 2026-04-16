@@ -31,22 +31,14 @@ from add_file import (
 )
 from run_qemu import run_commands
 
+BASE_IMAGE = "drive.img"
 C_DIR = Path("src/c")
-IMAGE = Path("drive.img")
 ORG_DIRECTIVE = "org 0600h"
 STATIC_DIR = Path("static")
 
 
 def _run_tests(*, arguments: argparse.Namespace) -> int:
     """Execute the test loop: build OS, discover programs, compare outputs."""
-    print("Building OS...")
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
     programs = discover_programs(only=arguments.program)
     if not programs:
         if arguments.program:
@@ -64,6 +56,14 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
 
     with tempfile.TemporaryDirectory(prefix="test_asm_") as temporary_path:
         temporary_directory = Path(temporary_path)
+        print("Building OS...")
+        subprocess.run(
+            ["./make_os.sh", str(temporary_directory / BASE_IMAGE)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
         references: dict[str, Path] = {}
         for source in programs:
             name = source.stem
@@ -234,7 +234,7 @@ def test_program(
     """Assemble a single program in QEMU and compare the output to the NASM reference."""
     output_name = f"{name}_t"
     drive = temporary_directory / f"drive_{name}.img"
-    shutil.copy(IMAGE, drive)
+    shutil.copy(temporary_directory / BASE_IMAGE, drive)
 
     run_commands(
         [f"asm src/{name}.asm {output_name}"],

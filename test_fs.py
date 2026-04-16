@@ -31,10 +31,10 @@ from add_file import (
 )
 from run_qemu import run_commands
 
+BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = 30
 DIRECTORY_ENTRY_SIZE = 32
 FLAG_DIRECTORY = 0x02
-IMAGE = Path("drive.img")
 
 
 def find_entry(
@@ -73,14 +73,6 @@ def main() -> int:
     parser.add_argument("test", nargs="?", help="run only the named test")
     arguments = parser.parse_args()
 
-    print("Building OS...")
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
     directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
 
@@ -102,6 +94,13 @@ def main() -> int:
     failed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="test_fs_") as temporary_path:
         temporary_directory = Path(temporary_path)
+        print("Building OS...")
+        subprocess.run(
+            ["./make_os.sh", str(temporary_directory / BASE_IMAGE)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         for name, test_function in tests:
             started = time.monotonic()
             try:
@@ -135,7 +134,7 @@ def main() -> int:
 def make_drive(*, name: str, temporary_directory: Path) -> Path:
     """Create a copy of the base drive image for a test case."""
     drive = temporary_directory / f"drive_{name}.img"
-    shutil.copy(IMAGE, drive)
+    shutil.copy(temporary_directory / BASE_IMAGE, drive)
     return drive
 
 
