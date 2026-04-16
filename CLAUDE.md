@@ -128,6 +128,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.) — the direction flag may be in an unknown state at program entry.
 - Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
 
+## Releases
+
+Update `CHANGELOG.md` with new entries as features land. Group entries by date under the Unreleased section. After a batch of significant improvements, bump the version in `src/kernel/bboeos.asm` and move the Unreleased entries under a new version header with updated comparison links.
+
 ## Testing
 
 Manual testing in QEMU is still the primary workflow — use `-serial stdio` to exercise the serial console and `-machine acpi=off` to test the shutdown failure path.
