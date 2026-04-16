@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 553       | +104  |
+| arp     | 449         | 525       | +76   |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 186       | +37   |
 | cp      | 268         | 249       | -19   |
@@ -18,11 +18,11 @@ source is kept here for reference.
 | mkdir   | 123         | 137       | +14   |
 | mv      | 217         | 233       | +16   |
 | netinit | 72          | 63        | -9    |
-| netrecv | 332         | 416       | +84   |
+| netrecv | 332         | 403       | +71   |
 | netsend | 185         | 223       | +38   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+104):** The `argc/argv` startup and six word-sized locals
+**arp (+76):** The `argc/argv` startup and six word-sized locals
 account for most of the delta.  The word-comparison fusing
 optimization matches the assembly version's comparison patterns,
 but the CF-to-integer conversion for `net_open` and null terminators
@@ -59,7 +59,7 @@ and the `_l_argc` local from the `argc/argv` startup.
 each indexed access.  Null terminators on 5 string literals add
 another +5.
 
-**netrecv (+84):** Both versions read into `BUFFER + 128` with a
+**netrecv (+71):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.
 The delta is ordinary C-compiler overhead: null-terminated strings,
 the net_open CF normalization, fd stashed in a memory local so it

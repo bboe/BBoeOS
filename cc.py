@@ -463,6 +463,26 @@ class CodeGenerator:
         """
         return node.name
 
+    def _constant_expression(self, init: Node, /) -> str | None:
+        """Return a NASM constant expression if *init* is compile-time resolvable.
+
+        Recognizes bare ``NAMED_CONSTANT`` references and
+        ``NAMED_CONSTANT +/- Int`` arithmetic.  Returns the NASM
+        expression string (e.g. ``"BUFFER"`` or ``"BUFFER+128"``)
+        or ``None`` if the expression is not a compile-time constant.
+        """
+        if isinstance(init, Var) and init.name in self.NAMED_CONSTANTS:
+            return init.name
+        if (
+            isinstance(init, BinOp)
+            and init.op in ("+", "-")
+            and isinstance(init.left, Var)
+            and init.left.name in self.NAMED_CONSTANTS
+            and isinstance(init.right, Int)
+        ):
+            return f"{init.left.name}+{init.right.value}" if init.op == "+" else f"{init.left.name}-{init.right.value}"
+        return None
+
     def _emit_byte_index_bx(self, node: Index, /) -> str:
         """Load the base pointer of a byte-indexed node into BX.
 
@@ -2073,17 +2093,17 @@ class CodeGenerator:
         )
 
     def is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
-        """Check if ``statement`` is a NAMED_CONSTANT alias.
+        """Check if ``statement`` is a compile-time constant alias.
 
-        True when the local is initialized from a ``NAMED_CONSTANT`` and
-        never reassigned in ``body``.  Such locals can be replaced with
-        the underlying constant directly, skipping the memory slot, the
-        initial store, and every reload.
+        True when the local is initialized from a ``NAMED_CONSTANT``
+        or ``NAMED_CONSTANT +/- Int`` and never reassigned in ``body``.
+        Such locals can be replaced with the underlying constant
+        expression directly, skipping the memory slot, the initial
+        store, and every reload.
         """
         if statement.type_name == "unsigned long":
             return False
-        init = statement.init
-        if not (isinstance(init, Var) and init.name in self.NAMED_CONSTANTS):
+        if self._constant_expression(statement.init) is None:
             return False
         return not any(self.name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
 
@@ -2482,7 +2502,13 @@ class CodeGenerator:
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
                 if top_level and self.is_constant_alias(body=statements, statement=statement):
-                    self.constant_aliases[statement.name] = statement.init.name
+                    alias = self._constant_expression(statement.init)
+                    self.constant_aliases[statement.name] = alias
+                    # Ensure %include is queued for the base constant.
+                    base = statement.init.name if isinstance(statement.init, Var) else statement.init.left.name
+                    include = self.NAMED_CONSTANT_INCLUDES.get(base)
+                    if include is not None:
+                        self.required_includes.add(include)
                     continue
                 if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
