@@ -11,10 +11,12 @@ main:
         int 30h
         jc .no_nic
 
-        ;; Require domain argument
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .no_arg
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .no_arg
+        mov bx, [ARGV]
         mov [domain_arg], bx
         mov byte [found_a], 0
 

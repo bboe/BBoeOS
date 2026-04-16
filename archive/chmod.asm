@@ -5,12 +5,14 @@
 main:
         cld
 
-        ;; Require argument of the form "+x <filename>" or "-x <filename>"
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .usage
+        ;; Require exactly two arguments: mode (+x/-x) and filename
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 2
+        jne .usage
 
-        mov si, bx
+        ;; Parse mode argument (argv[0])
+        mov si, [ARGV]
         lodsb
         cmp al, '+'
         je .set_exec
@@ -28,11 +30,11 @@ main:
         lodsb
         cmp al, 'x'
         jne .usage
-        lodsb
-        cmp al, ' '
+        cmp byte [si], 0      ; Mode arg must be exactly 2 chars
         jne .usage
-        ;; SI now points to filename
 
+        ;; SI = filename (argv[1])
+        mov si, [ARGV+2]
         mov al, dl             ; AL = new flags value
         mov ah, SYS_FS_CHMOD
         int 30h

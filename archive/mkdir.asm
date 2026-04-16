@@ -4,10 +4,14 @@
 
 main:
         cld
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .usage
 
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .usage
+
+        mov si, [ARGV]
         mov ah, SYS_FS_MKDIR
         int 30h
         jnc .done

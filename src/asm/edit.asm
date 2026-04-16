@@ -25,10 +25,12 @@
 main:
         cld
 
-        ;; Require a filename argument
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .usage
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .usage
+        mov bx, [ARGV]
         mov [filename], bx
 
         ;; Try to open the file for reading

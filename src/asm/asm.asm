@@ -28,26 +28,14 @@ main:
         mov ax, SYMBOL_SEGMENT
         mov es, ax
         ;; Parse arguments: "source output"
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .usage
-        mov [source_name], si
-        ;; Find space separator, null-terminate source name
-        .find_space:
-        mov al, [si]
-        test al, al
-        jz .usage              ; no second arg
-        cmp al, ' '
-        je .found_space
-        inc si
-        jmp .find_space
-        .found_space:
-        mov byte [si], 0       ; null-terminate source name
-        inc si
-        call skip_ws
-        cmp byte [si], 0
-        je .usage              ; empty second arg
-        mov [output_name], si
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 2
+        jne .usage
+        mov ax, [ARGV]
+        mov [source_name], ax
+        mov ax, [ARGV+2]
+        mov [output_name], ax
 
         ;; Compute source_prefix = directory portion of source_name (incl. trailing '/')
         ;; Walk source_name and remember position just past the last '/'

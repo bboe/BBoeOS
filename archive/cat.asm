@@ -4,11 +4,15 @@
 
 main:
         cld
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .usage
+
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .usage
 
         ;; Open file for reading
+        mov si, [ARGV]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h

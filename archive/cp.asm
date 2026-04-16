@@ -5,30 +5,17 @@
 main:
         cld
 
-        ;; Require argument of the form "<srcname> <destname>"
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .usage
+        ;; Require exactly two arguments
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 2
+        jne .usage
 
-        ;; Find the space separating srcname and destname
-        mov di, si
-        .find_space:
-        mov al, [di]
-        test al, al
-        jz .usage
-        cmp al, ' '
-        je .found_space
-        inc di
-        jmp .find_space
-
-        .found_space:
-        mov byte [di], 0       ; Null-terminate srcname
-        inc di                 ; DI = destname
-        test byte [di], 0FFh
-        jz .usage
-        mov [dest_name], di
+        mov ax, [ARGV+2]
+        mov [dest_name], ax
 
         ;; Open source file for reading
+        mov si, [ARGV]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h
