@@ -7,25 +7,30 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 138         | 186       | +48   |
-| chmod   | 140         | 240       | +100  |
-| cp      | 287         | 291       | +4    |
+| cat     | 145         | 186       | +41   |
+| chmod   | 149         | 240       | +91   |
+| cp      | 268         | 291       | +23   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 129         | 216       | +87   |
-| mkdir   | 116         | 178       | +62   |
-| mv      | 232         | 276       | +44   |
+| ls      | 135         | 216       | +81   |
+| mkdir   | 123         | 178       | +55   |
+| mv      | 217         | 276       | +59   |
 | netinit | 72          | 63        | -9    |
 | netrecv | 332         | 416       | +84   |
 | netsend | 185         | 223       | +38   |
 | uptime  | 50          | 78        | +28   |
 
-**chmod (+100):** The assembly version walks the argument with `lodsb`
-(1 byte per character read); the C version reloads the base pointer
-and indexes for each character check.
+**cat (+41):** Both versions now use `FUNCTION_PARSE_ARGV`.  The C
+version's overhead comes from the per-program `_argv: times 32 db 0`
+buffer, `argv[0]` memory indirection through BX, and null terminators
+on strings.
 
-**cp (+4):** The BUILTIN_CLOBBERS correction forces the C version to
+**chmod (+91):** The assembly version walks the mode argument with
+`lodsb` (1 byte per character read); the C version reloads the base
+pointer and indexes for each character check.
+
+**cp (+23):** The BUILTIN_CLOBBERS correction forces the C version to
 reload the buffer pointer across every `read`/`write` call instead
 of pinning it to a register; the alias optimization shaves that
 cost back down by emitting `mov di/si, SECTOR_BUFFER` directly in
@@ -45,12 +50,7 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**cat (+48):** The assembly version loads EXEC_ARG directly into SI;
-the C version uses `argc/argv` which calls `FUNCTION_PARSE_ARGV` at
-startup and accesses `argv[0]` through memory indirection.  The argv
-buffer (`_argv: times 32 db 0`) adds 32 bytes alone.
-
-**ls (+87):** The assembly version uses inline `repne scasb` with a
+**ls (+81):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).  The
@@ -59,15 +59,15 @@ entry pointer across `read`/`write` instead of pinning it to BX.
 The `argc/argv` startup adds further overhead from `FUNCTION_PARSE_ARGV`
 and the 32-byte argv buffer.
 
-**mkdir (+62):** The `argc/argv` startup adds `FUNCTION_PARSE_ARGV`
+**mkdir (+55):** The `argc/argv` startup adds `FUNCTION_PARSE_ARGV`
 and a 32-byte argv buffer.  Null-terminator overhead across 4 string
 literals adds another +4 bytes.
 
-**mv (+44):** The assembly version walks the argument string once with
-`lodsb` to both find the space separator and count newname length.
-The C version calls `strlen(argv[1])` (which scans with `repne scasb`
-plus setup/teardown), and reloads `argv` through BX for each indexed
-access. Null terminators on 5 string literals add another +5.
+**mv (+59):** The C version calls `strlen(argv[1])` (which scans with
+`repne scasb` plus setup/teardown) and reloads `argv` through BX for
+each indexed access.  Both versions now use `FUNCTION_PARSE_ARGV`
+for argument splitting; the remaining delta is the per-program argv
+buffer and null terminators on 5 string literals.
 
 **netrecv (+84):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.

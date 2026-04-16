@@ -1,3 +1,4 @@
+        %assign ARGV 4DEh               ; 32 bytes (16 word-sized pointers)
         %assign BUFFER 500h
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 48

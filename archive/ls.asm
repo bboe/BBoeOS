@@ -5,14 +5,19 @@
 main:
         cld
 
+        ;; Parse arguments (0 or 1)
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        ja .not_found
+
         ;; Open directory: use argument or "." for root
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .open_root
-        cmp byte [si], 0
-        jne .open_dir
+        je .have_arg
         .open_root:
         mov si, DOT
+        jmp .open_dir
+        .have_arg:
+        mov si, [ARGV]
         .open_dir:
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN

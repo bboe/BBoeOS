@@ -11,17 +11,18 @@ main:
         int 30h
         jc .no_nic
 
-        ;; Require argument
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .no_arg
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .no_arg
 
         ;; Try to parse as dotted-decimal IP; fall back to DNS if it fails
-        mov si, bx
+        mov si, [ARGV]
         mov di, target_ip
         call parse_ip
         jnc .have_ip
-        mov si, bx             ; Restore SI (parse_ip clobbers it)
+        mov si, [ARGV]         ; Restore SI (parse_ip clobbers it)
         call resolve_dns
         jc .resolve_err
 

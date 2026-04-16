@@ -11,12 +11,13 @@ main:
         int 30h
         jc .no_nic
 
-        ;; Require dotted-decimal IP argument
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .usage
+        ;; Require exactly one argument
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 1
+        jne .usage
 
-        mov si, bx
+        mov si, [ARGV]
         mov di, target_ip
         call parse_ip
         jc .usage

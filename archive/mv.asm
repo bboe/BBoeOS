@@ -5,31 +5,15 @@
 main:
         cld
 
-        ;; Require argument of the form "<oldname> <newname>"
-        mov bx, [EXEC_ARG]
-        test bx, bx
-        jz .usage
+        ;; Require exactly two arguments
+        mov di, ARGV
+        call FUNCTION_PARSE_ARGV
+        cmp cx, 2
+        jne .usage
 
-        mov si, bx             ; SI = oldname (will be SI for syscall)
-
-        ;; Find the space separating oldname and newname
-        mov di, bx
-        .find_space:
-        mov al, [di]
-        test al, al
-        jz .usage
-        cmp al, ' '
-        je .found_space
-        inc di
-        jmp .find_space
-
-        .found_space:
-        mov byte [di], 0       ; Null-terminate oldname in EXEC_ARG buffer
-        inc di                 ; DI = newname
-
-        ;; Validate newname is non-empty and <= 10 chars
-        test byte [di], 0FFh
-        jz .usage
+        ;; Validate newname length
+        mov si, [ARGV]         ; SI = oldname (for syscall later)
+        mov di, [ARGV+2]       ; DI = newname (for syscall later)
         push si
         push di
         mov si, di
