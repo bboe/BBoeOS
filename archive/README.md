@@ -7,28 +7,25 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 462       | +13   |
-| cat     | 145         | 137       | -8    |
-| chmod   | 149         | 178       | +29   |
-| cp      | 268         | 241       | -27   |
+| arp     | 449         | 453       | +4    |
+| cat     | 145         | 135       | -10   |
+| chmod   | 149         | 173       | +24   |
+| cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 175       | +40   |
-| mkdir   | 123         | 129       | +6    |
-| mv      | 217         | 219       | +2    |
+| ls      | 135         | 173       | +38   |
+| mkdir   | 123         | 127       | +4    |
+| mv      | 217         | 217       |  0    |
 | netinit | 72          | 63        | -9    |
 | netrecv | 332         | 382       | +50   |
 | netsend | 185         | 212       | +27   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+13):** The `argc/argv` startup and six word-sized locals
-account for most of the delta.  The word-comparison fusing
-optimization matches the assembly version's comparison patterns,
-but the CF-to-integer conversion for `net_open` and null terminators
-on strings add the rest.
+**arp (+4):** Null terminators on 4 strings (+4 bytes).  The
+remaining code is byte-identical to the hand-written assembly.
 
-**chmod (+29):** The assembly version walks the mode argument with
+**chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
@@ -46,17 +43,12 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+40):** The assembly version uses inline `repne scasb` with a
+**ls (+38):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 
-**mkdir (+6):** Null-terminator overhead across 4 string literals.
-
-**mv (+2):** The C version calls `strlen(argv[1])` (which scans with
-`repne scasb` plus setup/teardown) and reloads `argv` through BX for
-each indexed access.  Null terminators on 5 string literals add
-another +5.
+**mkdir (+4):** Null-terminator overhead across 4 string literals.
 
 **netrecv (+50):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.

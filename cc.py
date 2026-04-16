@@ -463,6 +463,22 @@ class CodeGenerator:
         """
         return node.name
 
+    def _byte_index_direct(self, node: Index, /) -> str | None:
+        """Return a direct NASM memory operand for a constant-base Index.
+
+        When the base is a named constant or constant alias, returns
+        e.g. ``"BUFFER+128+12"`` without emitting any instructions.
+        Returns ``None`` for runtime (non-constant) bases.
+        """
+        vname = node.name
+        const_base = self.constant_aliases.get(vname)
+        if const_base is None and vname in self.NAMED_CONSTANTS:
+            const_base = vname
+        if const_base is None:
+            return None
+        offset = node.index.value
+        return f"{const_base}+{offset}" if offset else const_base
+
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
 
@@ -492,13 +508,15 @@ class CodeGenerator:
 
         Returns the NASM memory operand (e.g. ``byte [bx+12]`` or
         ``byte [bx]``) suitable for use in a ``cmp`` instruction.
+        Prefers direct addressing when the base is a constant.
         """
+        direct = self._byte_index_direct(node)
+        if direct is not None:
+            return f"byte [{direct}]"
         vname = node.name
         offset = node.index.value
         if vname in self.pinned_register:
             self.emit(f"        mov bx, {self.pinned_register[vname]}")
-        elif vname in self.constant_aliases:
-            self.emit(f"        mov bx, {self.constant_aliases[vname]}")
         else:
             self.emit(f"        mov bx, [{self.local_address(vname)}]")
         return f"byte [bx+{offset}]" if offset else "byte [bx]"
@@ -1781,22 +1799,33 @@ class CodeGenerator:
             elif isinstance(index_expression, Int):
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
                 offset = index_expression.value * (1 if is_byte else 2)
-                if vname in self.pinned_register:
-                    self.emit(f"        mov bx, {self.pinned_register[vname]}")
-                elif vname in self.constant_aliases:
-                    self.emit(f"        mov bx, {self.constant_aliases[vname]}")
-                else:
-                    self.emit(f"        mov bx, [{self.local_address(vname)}]")
-                if is_byte:
-                    if offset:
-                        self.emit(f"        mov al, [bx+{offset}]")
+                # Direct memory access for constant/aliased bases:
+                # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
+                const_base = self.constant_aliases.get(vname)
+                if const_base is None and vname in self.NAMED_CONSTANTS:
+                    const_base = vname
+                if const_base is not None:
+                    addr = f"{const_base}+{offset}" if offset else const_base
+                    if is_byte:
+                        self.emit(f"        mov al, [{addr}]")
+                        self.emit("        xor ah, ah")
                     else:
-                        self.emit("        mov al, [bx]")
-                    self.emit("        xor ah, ah")
-                elif offset:
-                    self.emit(f"        mov ax, [bx+{offset}]")
+                        self.emit(f"        mov ax, [{addr}]")
                 else:
-                    self.emit("        mov ax, [bx]")
+                    if vname in self.pinned_register:
+                        self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                    else:
+                        self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                    if is_byte:
+                        if offset:
+                            self.emit(f"        mov al, [bx+{offset}]")
+                        else:
+                            self.emit("        mov al, [bx]")
+                        self.emit("        xor ah, ah")
+                    elif offset:
+                        self.emit(f"        mov ax, [bx+{offset}]")
+                    else:
+                        self.emit("        mov ax, [bx]")
             else:
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
                 if vname in self.pinned_register:
