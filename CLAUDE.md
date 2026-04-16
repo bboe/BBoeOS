@@ -69,6 +69,7 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 21h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 22h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1); AX = fd, CF if no NIC or table full |
 | 23h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |
+| 24h   | net_recvfrom | Recv UDP via fd: BX=fd, DI=buf, CX=len, DX=port; AX=bytes (0=none), CF err |
 | 26h   | net_udp_receive | UDP receive, DI = data, CX = len, BX = src port, CF none |
 | 27h   | net_udp_send | UDP send, BX = IP, DI = src port, DX = dst port, SI = data, CX = len |
 | 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |

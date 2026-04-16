@@ -61,6 +61,8 @@ void die(const char *message) __attribute__((noreturn));
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW or SOCK_DGRAM (no POSIX equivalent) */
 int net_open(int type);
+/* Receive UDP datagram filtered by port (BBoeOS-specific) */
+int recvfrom(int fd, char *buffer, int length, int port);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */

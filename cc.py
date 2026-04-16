@@ -46,6 +46,7 @@ Builtins:
     print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
     putchar(expression)      -- print single character
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
+    recvfrom(fd, buf, len, port) -- receive UDP datagram filtered by port
     uptime()                 -- return seconds since boot
     write(fd, buffer, count) -- write bytes to fd, return count or -1
 
@@ -392,6 +393,7 @@ class CodeGenerator:
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
+        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
@@ -1232,6 +1234,23 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=buffer_argument, register="di")
         self.emit_register_from_argument(argument=count_argument, register="cx")
         self._emit_syscall("IO_READ")
+        self.ax_clear()
+
+    def builtin_recvfrom(self, arguments: list[Node], /) -> None:
+        """Generate code for the recvfrom() builtin.
+
+        ``recvfrom(fd, buf, len, port)`` emits ``mov bx, <fd> /
+        mov di, <buf> / mov cx, <len> / mov dx, <port> /
+        mov ah, SYS_NET_RECVFROM / int 30h``.
+        Returns bytes received in AX (0 if no matching packet).
+        """
+        self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
+        fd_argument, buffer_argument, len_argument, port_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=buffer_argument, register="di")
+        self.emit_register_from_argument(argument=len_argument, register="cx")
+        self.emit_register_from_argument(argument=port_argument, register="dx")
+        self._emit_syscall("NET_RECVFROM")
         self.ax_clear()
 
     def builtin_rename(
