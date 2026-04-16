@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 510       | +61   |
+| arp     | 449         | 504       | +55   |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 186       | +37   |
 | cp      | 268         | 249       | -19   |
@@ -16,13 +16,13 @@ source is kept here for reference.
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 175       | +40   |
 | mkdir   | 123         | 137       | +14   |
-| mv      | 217         | 233       | +16   |
+| mv      | 217         | 227       | +10   |
 | netinit | 72          | 63        | -9    |
 | netrecv | 332         | 393       | +61   |
 | netsend | 185         | 213       | +28   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+61):** The `argc/argv` startup and six word-sized locals
+**arp (+55):** The `argc/argv` startup and six word-sized locals
 account for most of the delta.  The word-comparison fusing
 optimization matches the assembly version's comparison patterns,
 but the CF-to-integer conversion for `net_open` and null terminators
@@ -54,7 +54,7 @@ setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 **mkdir (+14):** Null-terminator overhead across 4 string literals
 and the `_l_argc` local from the `argc/argv` startup.
 
-**mv (+16):** The C version calls `strlen(argv[1])` (which scans with
+**mv (+10):** The C version calls `strlen(argv[1])` (which scans with
 `repne scasb` plus setup/teardown) and reloads `argv` through BX for
 each indexed access.  Null terminators on 5 string literals add
 another +5.

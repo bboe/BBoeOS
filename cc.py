@@ -2209,6 +2209,7 @@ class CodeGenerator:
         self.peephole_unused_cld()
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
+        self.peephole_redundant_bx()
 
     def peephole_constant_to_register(self) -> None:
         """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
@@ -2471,6 +2472,40 @@ class CodeGenerator:
                 self.lines[i] = f"        {operator} {width}{source}, {immediate}"
             del self.lines[i + 1 : i + 4]
             continue
+
+    def peephole_redundant_bx(self) -> None:
+        """Remove ``mov bx, X`` when BX already holds X.
+
+        Tracks the value in BX across instructions that don't clobber
+        it (comparisons, conditional jumps).  Resets on labels, calls,
+        interrupts, and any instruction that writes to BX.
+        """
+        bx_value: str | None = None
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            if stripped.startswith("mov bx, "):
+                source = stripped[len("mov bx, ") :]
+                if source == bx_value:
+                    continue  # redundant — skip
+                bx_value = source
+            elif stripped.endswith(":") or stripped.startswith((
+                "add bx",
+                "call ",
+                "int ",
+                "lodsb",
+                "lodsw",
+                "movsb",
+                "movsw",
+                "pop bx",
+                "rep ",
+                "sub bx",
+                "xchg",
+                "xor bx",
+            )):
+                bx_value = None
+            result.append(line)
+        self.lines = result
 
     def peephole_store_reload(self) -> None:
         """Remove redundant store-then-reload sequences."""
