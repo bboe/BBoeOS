@@ -21,10 +21,7 @@ main:
 
         mov al, `\n`
         call FUNCTION_PRINT_CHARACTER
-
-        mov si, MESSAGE_INIT
-        mov cx, MESSAGE_INIT_LENGTH
-        jmp FUNCTION_DIE
+        jmp FUNCTION_EXIT
 
         .no_nic:
         mov si, MESSAGE_NO_NIC
@@ -33,10 +30,7 @@ main:
 
         ;; Data
         my_mac times 6 db 0
-        MESSAGE_INIT db `NIC initialized\n`
-        MESSAGE_INIT_LENGTH equ $ - MESSAGE_INIT
         MESSAGE_MAC db `NIC found: `
         MESSAGE_MAC_LENGTH equ $ - MESSAGE_MAC
         MESSAGE_NO_NIC db `No NIC found\n`
         MESSAGE_NO_NIC_LENGTH equ $ - MESSAGE_NO_NIC
-

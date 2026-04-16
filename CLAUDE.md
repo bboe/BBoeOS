@@ -94,8 +94,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_receive`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/asm/` single-purpose utilities (behavior follows the name): `arp`, `chmod`, `cp`, `mv`, `netinit`, `netrecv`, `netsend`.
-- `src/c/` programs written in the C subset: `cat`, `date`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `mkdir`, `uptime`.
+- `src/asm/` single-purpose utilities (behavior follows the name): `arp`.
+- `src/c/` programs written in the C subset: `cat`, `chmod`, `cp`, `date`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
 - `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
 - `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
