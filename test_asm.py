@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -22,11 +21,8 @@ import time
 from pathlib import Path
 
 from add_file import (
-    NAME_FIELD,
-    OFFSET_SECTOR,
-    OFFSET_SIZE,
     SECTOR_SIZE,
-    iter_entries,
+    find_entry,
     read_assign,
 )
 from run_qemu import run_commands
@@ -37,42 +33,75 @@ ORG_DIRECTIVE = "org 0600h"
 STATIC_DIR = Path("static")
 
 
+def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
+    """Compile C sources, build the drive image, and return discovered programs."""
+    c_programs = compile_c_sources(temporary_directory=temporary_directory)
+    if c_programs:
+        c_names = " ".join(path.stem + ".c" for path in c_programs)
+        print(f"Compiled C sources: {c_names}")
+
+    image = temporary_directory / BASE_IMAGE
+    print("Building OS...")
+    subprocess.run(
+        ["./make_os.sh", str(image)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for asm_source in c_programs:
+        subprocess.run(
+            ["./add_file.py", "--image", str(image), "-d", "src", str(asm_source)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+    return discover_programs(additional=c_programs, only=only)
+
+
+def _build_references(
+    *,
+    programs: list[Path],
+    temporary_directory: Path,
+) -> dict[str, Path]:
+    """Assemble each program with NASM to produce reference binaries."""
+    references: dict[str, Path] = {}
+    for source in programs:
+        name = source.stem
+        reference = temporary_directory / f"ref_{name}.bin"
+        subprocess.run(
+            ["nasm", "-f", "bin", "-o", str(reference), str(source), "-I", "static/"],
+            check=True,
+        )
+        references[name] = reference
+    return references
+
+
 def _run_tests(*, arguments: argparse.Namespace) -> int:
     """Execute the test loop: build OS, discover programs, compare outputs."""
-    programs = discover_programs(only=arguments.program)
-    if not programs:
-        if arguments.program:
-            print(f"No program named '{arguments.program}' in static/")
-        else:
-            print("No programs found in static/")
-        return 1
-
-    print("Programs to test:", " ".join(p.name for p in programs))
-    print()
-
     directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     keep_artifacts = arguments.program is not None
 
     with tempfile.TemporaryDirectory(prefix="test_asm_") as temporary_path:
         temporary_directory = Path(temporary_path)
-        print("Building OS...")
-        subprocess.run(
-            ["./make_os.sh", str(temporary_directory / BASE_IMAGE)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        programs = _build_and_discover(
+            only=arguments.program,
+            temporary_directory=temporary_directory,
         )
+        if not programs:
+            if arguments.program:
+                print(f"No program named '{arguments.program}' in static/")
+            else:
+                print("No programs found in static/")
+            return 1
 
-        references: dict[str, Path] = {}
-        for source in programs:
-            name = source.stem
-            reference = temporary_directory / f"ref_{name}.bin"
-            subprocess.run(
-                ["nasm", "-f", "bin", "-o", str(reference), str(source), "-I", "static/"],
-                check=True,
-            )
-            references[name] = reference
+        print("Programs to test:", " ".join(p.name for p in programs))
+        print()
+
+        references = _build_references(
+            programs=programs,
+            temporary_directory=temporary_directory,
+        )
 
         pass_count = 0
         fail_count = 0
@@ -123,40 +152,38 @@ def compare_drive_output(
     reference_bytes: bytes,
 ) -> tuple[bool, str]:
     """Extract the assembled output from the drive image and compare to the NASM reference."""
-    image = bytearray(drive.read_bytes())
-    base = (directory_sector - 1) * SECTOR_SIZE
-    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
-        if image[entry_offset] == 0:
-            continue
-        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode(errors="replace")
-        if entry_name != output_name:
-            continue
-        start_sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-        data_offset = (start_sector - 1) * SECTOR_SIZE
-        output_data = bytes(image[data_offset : data_offset + size])
-        output_binary.write_bytes(output_data)
-        if output_data == reference_bytes:
-            return True, ""
-        return False, f"expected {len(reference_bytes)} bytes, got {size} bytes"
-    return False, "output file not found on drive"
+    image = drive.read_bytes()
+    entry = find_entry(
+        directory_sectors=directory_sectors,
+        directory_start_sector=directory_sector,
+        image=image,
+        name=output_name,
+    )
+    if entry is None:
+        return False, "output file not found on drive"
+    _flags, start_sector, size = entry
+    output_data = image[(start_sector - 1) * SECTOR_SIZE :][:size]
+    output_binary.write_bytes(output_data)
+    if output_data == reference_bytes:
+        return True, ""
+    return False, f"expected {len(reference_bytes)} bytes, got {size} bytes"
 
 
-def compile_c_sources() -> list[Path]:
-    """Compile each src/c/*.c to static/<name>.asm via cc.py.
+def compile_c_sources(*, temporary_directory: Path) -> list[Path]:
+    """Compile each src/c/*.c to temporary_directory/<name>.asm via cc.py.
 
     Skips C sources whose corresponding .asm already exists in static/
     (i.e. a hand-written version is the source of truth).  Returns the
-    list of generated paths so they can be cleaned up after testing.
+    list of generated paths so they can be included in the test run.
     """
     if not C_DIR.is_dir():
         return []
     generated: list[Path] = []
     for c_source in sorted(C_DIR.glob("*.c")):
         name = c_source.stem
-        target = STATIC_DIR / f"{name}.asm"
-        if target.exists():
+        if (STATIC_DIR / f"{name}.asm").exists():
             continue
+        target = temporary_directory / f"{name}.asm"
         subprocess.run(
             ["./cc.py", str(c_source), str(target)],
             check=True,
@@ -165,10 +192,13 @@ def compile_c_sources() -> list[Path]:
     return generated
 
 
-def discover_programs(*, only: str | None) -> list[Path]:
-    """Return the list of static/*.asm programs that target PROGRAM_BASE."""
+def discover_programs(*, additional: list[Path] | None = None, only: str | None) -> list[Path]:
+    """Return the list of static/*.asm (plus any additional) programs that target PROGRAM_BASE."""
+    candidates = sorted(STATIC_DIR.glob("*.asm"))
+    if additional:
+        candidates = sorted(candidates + additional, key=lambda p: p.stem)
     programs: list[Path] = []
-    for source in sorted(STATIC_DIR.glob("*.asm")):
+    for source in candidates:
         if ORG_DIRECTIVE not in source.read_text(errors="replace"):
             continue
         name = source.stem
@@ -192,18 +222,7 @@ def main() -> int:
         help="restrict the test to one program (e.g. 'edit')",
     )
     arguments = parser.parse_args()
-
-    # Compile C sources to .asm and place in static/ so make_os.sh
-    # includes them on the disk image alongside hand-written .asm files.
-    generated = compile_c_sources()
-    if generated:
-        c_names = " ".join(path.stem + ".c" for path in generated)
-        print(f"Compiled C sources: {c_names}")
-
-    try:
-        return _run_tests(arguments=arguments)
-    finally:
-        restore_static(generated)
+    return _run_tests(arguments=arguments)
 
 
 def persist_artifacts(*, temporary_directory: Path) -> Path:
@@ -214,12 +233,6 @@ def persist_artifacts(*, temporary_directory: Path) -> Path:
             continue
         shutil.copy(item, persist / item.name)
     return persist
-
-
-def restore_static(generated: list[Path], /) -> None:
-    """Undo compile_c_sources(): delete generated files."""
-    for target in generated:
-        target.unlink(missing_ok=True)
 
 
 def test_program(

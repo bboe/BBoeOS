@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -21,12 +20,10 @@ import time
 from pathlib import Path
 
 from add_file import (
+    FLAG_DIRECTORY,
     NAME_FIELD,
-    OFFSET_FLAGS,
-    OFFSET_SECTOR,
-    OFFSET_SIZE,
     SECTOR_SIZE,
-    iter_entries,
+    find_entry,
     read_assign,
 )
 from run_qemu import run_commands
@@ -34,34 +31,6 @@ from run_qemu import run_commands
 BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = 30
 DIRECTORY_ENTRY_SIZE = 32
-FLAG_DIRECTORY = 0x02
-
-
-def find_entry(
-    *,
-    directory_sectors: int,
-    directory_start_sector: int,
-    image: bytes,
-    name: str,
-) -> tuple[int, int, int] | None:
-    """Return (flags, start_sector, size) for `name` in the directory.
-
-    Search the directory starting at `directory_start_sector`, or return None
-    if not found.
-    """
-    base = (directory_start_sector - 1) * SECTOR_SIZE
-    target = name.encode()
-    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
-        if image[entry_offset] == 0:
-            continue
-        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00")
-        if entry_name != target:
-            continue
-        flags = image[entry_offset + OFFSET_FLAGS]
-        sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-        return (flags, sector, size)
-    return None
 
 
 def main() -> int:
@@ -94,9 +63,10 @@ def main() -> int:
     failed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="test_fs_") as temporary_path:
         temporary_directory = Path(temporary_path)
+        image = temporary_directory / BASE_IMAGE
         print("Building OS...")
         subprocess.run(
-            ["./make_os.sh", str(temporary_directory / BASE_IMAGE)],
+            ["./make_os.sh", str(image)],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

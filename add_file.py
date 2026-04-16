@@ -88,6 +88,36 @@ def add_file(
     print(f"Added '{relative_path}' ({file_size} bytes) at sector {next_data_sector}")
 
 
+def find_entry(
+    *,
+    directory_sectors: int,
+    directory_start_sector: int,
+    image: bytes | bytearray,
+    name: str,
+) -> tuple[int, int, int] | None:
+    """Return (flags, start_sector, size) for `name` in a directory, or None.
+
+    Returns
+    -------
+    tuple[int, int, int] | None
+        ``(flags, start_sector, size)`` if found, else ``None``.
+
+    """
+    base = (directory_start_sector - 1) * SECTOR_SIZE
+    target = name.encode()
+    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
+        if image[entry_offset] == 0:
+            continue
+        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00")
+        if entry_name != target:
+            continue
+        flags = image[entry_offset + OFFSET_FLAGS]
+        sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
+        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
+        return (flags, sector, size)
+    return None
+
+
 def compute_next_data_sector(
     *,
     directory_sector: int,
