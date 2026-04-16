@@ -29,6 +29,7 @@
         %assign FD_TYPE_FILE 1
         %assign FD_TYPE_FREE 0
         %assign FD_TYPE_NET 4
+        %assign FD_TYPE_UDP 5
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (3 bytes per entry)
@@ -57,6 +58,8 @@
         %assign O_WRONLY 01h
         %assign PROGRAM_BASE 0600h
         %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
+        %assign SOCK_DGRAM 1
+        %assign SOCK_RAW 0
         %assign STDERR 2
         %assign STDIN 0
         %assign STDOUT 1
@@ -76,8 +79,10 @@
         %assign SYS_NET_MAC 21h
         %assign SYS_NET_OPEN 22h
         %assign SYS_NET_PING 23h
-        %assign SYS_NET_UDP_RECEIVE 24h
-        %assign SYS_NET_UDP_SEND 25h
+        %assign SYS_NET_RECVFROM 24h
+        %assign SYS_NET_SENDTO 25h
+        %assign SYS_NET_UDP_RECEIVE 26h
+        %assign SYS_NET_UDP_SEND 27h
 
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h

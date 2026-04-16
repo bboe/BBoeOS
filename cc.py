@@ -41,10 +41,13 @@ Builtins:
     die(message)             -- print message and terminate
     exit()                   -- terminate program
     mkdir(name)              -- create directory, return 0 or ERR_* code
+    net_open(type)           -- open socket (SOCK_RAW or SOCK_DGRAM), return fd or -1
     open(name, flags)        -- open file, return fd or -1 on error
     print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
     putchar(expression)      -- print single character
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
+    recvfrom(fd, buf, len, port) -- receive UDP datagram filtered by port
+    sendto(fd, buf, len, ip, src_port, dst_port) -- send UDP datagram
     uptime()                 -- return seconds since boot
     write(fd, buffer, count) -- write bytes to fd, return count or -1
 
@@ -391,7 +394,9 @@ class CodeGenerator:
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
+        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
+        "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "uptime": frozenset({"ax"}),
         "video_mode": frozenset({"ax"}),
@@ -420,6 +425,8 @@ class CodeGenerator:
         "O_TRUNC",
         "O_WRONLY",
         "SECTOR_BUFFER",
+        "SOCK_DGRAM",
+        "SOCK_RAW",
         "STDERR",
         "STDIN",
         "STDOUT",
@@ -1066,12 +1073,18 @@ class CodeGenerator:
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_net_open(self, arguments: list[Node], /) -> None:
-        """Generate code for the net_open() builtin.
+        """Generate code for the net_open(type) builtin.
 
-        Allocates a raw Ethernet socket fd via SYS_NET_OPEN.
+        ``net_open(type)`` emits ``mov al, <type> / mov ah, SYS_NET_OPEN /
+        int 30h`` where type is SOCK_RAW (0) or SOCK_DGRAM (1).
         Returns fd in AX on success, or -1 if no NIC is present.
         """
-        self._check_argument_count(arguments=arguments, expected=0, name="net_open")
+        self._check_argument_count(arguments=arguments, expected=1, name="net_open")
+        type_argument = arguments[0]
+        if isinstance(type_argument, Int) or (isinstance(type_argument, Var) and type_argument.name in self.NAMED_CONSTANTS):
+            self.emit(f"        mov al, {type_argument.value if isinstance(type_argument, Int) else type_argument.name}")
+        else:
+            self.generate_expression(type_argument)
         self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
@@ -1225,6 +1238,23 @@ class CodeGenerator:
         self._emit_syscall("IO_READ")
         self.ax_clear()
 
+    def builtin_recvfrom(self, arguments: list[Node], /) -> None:
+        """Generate code for the recvfrom() builtin.
+
+        ``recvfrom(fd, buf, len, port)`` emits ``mov bx, <fd> /
+        mov di, <buf> / mov cx, <len> / mov dx, <port> /
+        mov ah, SYS_NET_RECVFROM / int 30h``.
+        Returns bytes received in AX (0 if no matching packet).
+        """
+        self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
+        fd_argument, buffer_argument, len_argument, port_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=buffer_argument, register="di")
+        self.emit_register_from_argument(argument=len_argument, register="cx")
+        self.emit_register_from_argument(argument=port_argument, register="dx")
+        self._emit_syscall("NET_RECVFROM")
+        self.ax_clear()
+
     def builtin_rename(
         self,
         arguments: list[Node],
@@ -1244,6 +1274,37 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=arguments[1], register="di")
         self._emit_syscall("FS_RENAME")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
+
+    def builtin_sendto(self, arguments: list[Node], /) -> None:
+        """Generate code for the sendto() builtin.
+
+        ``sendto(fd, buf, len, ip_ptr, src_port, dst_port)`` emits
+        register setup and ``mov ah, SYS_NET_SENDTO / int 30h``.
+        The 6th argument (dst_port) goes in BP (saved/restored).
+        Returns bytes sent in AX, or -1 on error.
+        """
+        self._check_argument_count(arguments=arguments, expected=6, name="sendto")
+        fd_argument, buf_argument, len_argument, ip_argument, sport_argument, dport_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_si_from_argument(buf_argument)
+        self.emit_register_from_argument(argument=len_argument, register="cx")
+        self.emit_register_from_argument(argument=ip_argument, register="di")
+        self.emit_register_from_argument(argument=sport_argument, register="dx")
+        self.emit("        push bp")
+        if isinstance(dport_argument, Int):
+            self.emit(f"        mov bp, {dport_argument.value}")
+        elif isinstance(dport_argument, Var) and dport_argument.name in self.NAMED_CONSTANTS:
+            self.emit(f"        mov bp, {dport_argument.name}")
+        elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
+            self.emit(f"        mov bp, {self.pinned_register[dport_argument.name]}")
+        elif isinstance(dport_argument, Var) and dport_argument.name in self.locals:
+            self.emit(f"        mov bp, [{self._local_address(dport_argument.name)}]")
+        else:
+            self.generate_expression(dport_argument)
+            self.emit("        mov bp, ax")
+        self._emit_syscall("NET_SENDTO")
+        self.emit("        pop bp")
+        self.ax_clear()
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.

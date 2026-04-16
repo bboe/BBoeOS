@@ -19,7 +19,7 @@ int main(int argc, char *argv[]) {
     memcpy(arp_frame + 22, my_mac, 6);
     memcpy(arp_frame + 38, target_ip, 4);
 
-    int fd = net_open();
+    int fd = net_open(SOCK_RAW);
     if (fd < 0) {
         die("No NIC found\n");
     }
