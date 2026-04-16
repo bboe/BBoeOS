@@ -62,11 +62,13 @@ from typing import ClassVar
 
 @dataclass(slots=True)
 class Node:
-    pass
+    """Base class for every AST node."""
 
 
 @dataclass(slots=True)
 class Param:
+    """A function parameter: type, name, and whether it was declared with ``[]``."""
+
     type: str
     name: str
     is_array: bool
@@ -74,6 +76,8 @@ class Param:
 
 @dataclass(slots=True)
 class ArrayDecl(Node):
+    """Local array declaration ``T name[] = {...};``."""
+
     name: str
     type_name: str
     init: Node | None
@@ -81,17 +85,23 @@ class ArrayDecl(Node):
 
 @dataclass(slots=True)
 class ArrayInit(Node):
+    """Brace-initializer ``{a, b, c}`` for an array declaration."""
+
     elements: list[Node]
 
 
 @dataclass(slots=True)
 class Assign(Node):
+    """Assignment ``name = expr;`` or ``name += expr;`` (the latter lowers to ``name = name + expr``)."""
+
     name: str
     expr: Node
 
 
 @dataclass(slots=True)
 class BinOp(Node):
+    """Binary operator expression ``left OP right``."""
+
     op: str
     left: Node
     right: Node
@@ -99,23 +109,29 @@ class BinOp(Node):
 
 @dataclass(slots=True)
 class Break(Node):
-    pass
+    """``break;`` statement (exits the innermost loop)."""
 
 
 @dataclass(slots=True)
 class Call(Node):
+    """Function/builtin call ``name(args...)``."""
+
     name: str
     args: list[Node]
 
 
 @dataclass(slots=True)
 class DoWhile(Node):
+    """``do { body } while (cond);`` loop."""
+
     cond: Node
     body: list[Node]
 
 
 @dataclass(slots=True)
 class Function(Node):
+    """Function definition: name, parameter list, and body."""
+
     name: str
     params: list[Param]
     body: list[Node]
@@ -123,6 +139,8 @@ class Function(Node):
 
 @dataclass(slots=True)
 class If(Node):
+    """``if (cond) { body } [else { else_body }]`` statement."""
+
     cond: Node
     body: list[Node]
     else_body: list[Node] | None
@@ -130,12 +148,16 @@ class If(Node):
 
 @dataclass(slots=True)
 class Index(Node):
+    """Subscript expression ``name[index]``."""
+
     name: str
     index: Node
 
 
 @dataclass(slots=True)
 class Int(Node):
+    """Integer literal."""
+
     value: int
 
 
@@ -156,43 +178,59 @@ class Char(Int):
 
 @dataclass(slots=True)
 class LogicalAnd(Node):
+    """Short-circuit ``left && right`` expression."""
+
     left: Node
     right: Node
 
 
 @dataclass(slots=True)
 class LogicalOr(Node):
+    """Short-circuit ``left || right`` expression."""
+
     left: Node
     right: Node
 
 
 @dataclass(slots=True)
 class Program(Node):
+    """Top-level AST: the list of function definitions making up a translation unit."""
+
     functions: list[Node]
 
 
 @dataclass(slots=True)
 class SizeofType(Node):
+    """``sizeof(type_name)`` expression."""
+
     type_name: str
 
 
 @dataclass(slots=True)
 class SizeofVar(Node):
+    """``sizeof(name)`` expression (size of a declared variable)."""
+
     name: str
 
 
 @dataclass(slots=True)
 class String(Node):
+    """String literal."""
+
     content: str
 
 
 @dataclass(slots=True)
 class Var(Node):
+    """Reference to a named variable or named constant."""
+
     name: str
 
 
 @dataclass(slots=True)
 class VarDecl(Node):
+    """Scalar local declaration ``T name [= init];``."""
+
     name: str
     type_name: str
     init: Node | None
@@ -200,8 +238,11 @@ class VarDecl(Node):
 
 @dataclass(slots=True)
 class While(Node):
+    """``while (cond) { body }`` loop."""
+
     cond: Node
     body: list[Node]
+
 
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
@@ -523,7 +564,7 @@ class CodeGenerator:
         argument = arguments[0]
         if not isinstance(argument, String):
             message = "die() requires a string literal"
-            raise SyntaxError(message)
+            raise TypeError(message)
         label = self.new_string_label(argument.content)
         length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
@@ -902,7 +943,7 @@ class CodeGenerator:
             argument = consumer.args[0]
             if not isinstance(argument, Var) or argument.name != statement.name:
                 continue
-            other_statements = statements[:index] + statements[index + 2:]
+            other_statements = statements[:index] + statements[index + 2 :]
             name = statement.name
             if any(self.statement_references(other, name) for other in other_statements):
                 continue
@@ -1300,7 +1341,12 @@ class CodeGenerator:
             # through — the continuation path sees AX unchanged from before.
             if isinstance(statement, If) and statement.else_body is None and len(statement.body) == 1:
                 inner = statement.body[0]
-                if isinstance(inner, Call) and inner.name == "die" and isinstance(statement.cond, BinOp) and statement.cond.op in JUMP_WHEN_FALSE:
+                if (
+                    isinstance(inner, Call)
+                    and inner.name == "die"
+                    and isinstance(statement.cond, BinOp)
+                    and statement.cond.op in JUMP_WHEN_FALSE
+                ):
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
@@ -1318,9 +1364,7 @@ class CodeGenerator:
             # message and a single `jc FUNCTION_DIE` — no memory
             # round-trip for err, no CF->integer normalization.  Only
             # fires when `err` is never read after the if.
-            if (init is not None and isinstance(init, Call)
-                    and init.name in self.ERROR_RETURNING_BUILTINS
-                    and i + 1 < len(statements)):
+            if init is not None and isinstance(init, Call) and init.name in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
                 next_stmt = statements[i + 1]
                 die_call = None
                 # Match cond: `err` (BinOp != 0) or `!err` (BinOp == 0)
@@ -1332,17 +1376,18 @@ class CodeGenerator:
                     and cond.left.name == statement.name
                     and cond.right == Int(0)
                 )
-                if (is_truthy_cond
-                        and next_stmt.else_body is None
-                        and len(next_stmt.body) == 1
-                        and isinstance(next_stmt.body[0], Call)
-                        and next_stmt.body[0].name == "die"
-                        and len(next_stmt.body[0].args) == 1
-                        and isinstance(next_stmt.body[0].args[0], String)):
+                if (
+                    is_truthy_cond
+                    and next_stmt.else_body is None
+                    and len(next_stmt.body) == 1
+                    and isinstance(next_stmt.body[0], Call)
+                    and next_stmt.body[0].name == "die"
+                    and len(next_stmt.body[0].args) == 1
+                    and isinstance(next_stmt.body[0].args[0], String)
+                ):
                     die_call = next_stmt.body[0]
                 if die_call is not None and not any(
-                    self.node_references_var(name=statement.name, node=later)
-                    for later in statements[i + 2:]
+                    self.node_references_var(name=statement.name, node=later) for later in statements[i + 2 :]
                 ):
                     die_message = die_call.args[0]
                     die_label = self.new_string_label(die_message.content)
@@ -1594,7 +1639,7 @@ class CodeGenerator:
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
-            raise SyntaxError(message)
+            raise TypeError(message)
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
@@ -1758,7 +1803,7 @@ class CodeGenerator:
                         elem_labels.append(str(elem.value))
                     else:
                         message = "array initializer elements must be constants"
-                        raise SyntaxError(message)
+                        raise TypeError(message)
                 array_label = f"_arr_{len(self.arrays)}"
                 self.arrays.append((array_label, elem_labels))
                 self.array_labels[statement.name] = array_label
@@ -1784,7 +1829,7 @@ class CodeGenerator:
             self.ax_clear()
         else:
             message = f"unknown statement: {type(statement).__name__}"
-            raise SyntaxError(message)
+            raise TypeError(message)
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.
@@ -1851,12 +1896,7 @@ class CodeGenerator:
     @staticmethod
     def is_modulo_of(*, base: Node, expression: Node) -> bool:
         """Check if expression is (base % N) for some integer N."""
-        return (
-            isinstance(expression, BinOp)
-            and expression.op == "%"
-            and expression.left == base
-            and isinstance(expression.right, Int)
-        )
+        return isinstance(expression, BinOp) and expression.op == "%" and expression.left == base and isinstance(expression.right, Int)
 
     @staticmethod
     def is_simple_printf(node: Node, /) -> bool:
@@ -2376,12 +2416,12 @@ class CodeGenerator:
         return "unknown"
 
     def validate_equality_types(self, left: Node, right: Node, /) -> None:
-        """Ensure ``==``/``!=`` operands have compatible types.
+        r"""Ensure ``==``/``!=`` operands have compatible types.
 
         Pointers may only be compared to other pointers or ``NULL``;
         ``NULL`` may only appear opposite a pointer; ``char`` values
         must be compared against other ``char`` values or character
-        literals (so ``c != 0`` is rejected — use ``c != '\\0'``).
+        literals (so ``c != 0`` is rejected — use ``c != '\0'``).
         Comparing a pointer to a non-``NULL`` integer (``if (p == 0)``)
         is a common C bug, so the compiler requires the explicit
         ``NULL`` spelling.
@@ -2433,7 +2473,8 @@ class Parser:
         self.position += 1
         return token
 
-    def fold_binop(self, operator: str, left: Node, right: Node, /) -> Node:
+    @staticmethod
+    def fold_binop(operator: str, left: Node, right: Node, /) -> Node:
         """Return a folded node when operands (or a left-subtree tail) are constant.
 
         Handles two shapes:
@@ -3029,6 +3070,7 @@ def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
         (processed_source, defines).  ``defines`` maps each macro name
         to the raw value text, which is retokenized at substitution
         time so the tokens inherit the current position's line number.
+
     """
     defines: dict[str, str] = {}
     output_lines: list[str] = []
