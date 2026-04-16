@@ -1,7 +1,7 @@
-void main(char *arg) {
+int main(int argc, char *argv[]) {
     char *name = ".";
-    if (arg != NULL && arg[0] != '\0') {
-        name = arg;
+    if (argc > 0) {
+        name = argv[0];
     }
     int fd = open(name, O_RDONLY);
     if (fd < 0) {
@@ -17,11 +17,11 @@ void main(char *arg) {
         write(STDOUT, entry, len);
         int flags = entry[DIRECTORY_OFFSET_FLAGS];
         if (flags == FLAG_DIRECTORY) {
-            putc('/');
+            putchar('/');
         } else if (flags == FLAG_EXECUTE) {
-            putc('*');
+            putchar('*');
         }
-        putc('\n');
+        putchar('\n');
     }
     close(fd);
 }

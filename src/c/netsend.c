@@ -1,4 +1,4 @@
-void main() {
+int main() {
     char *mac_buffer = BUFFER;
     if (mac(mac_buffer)) {
         die("No NIC found\n");

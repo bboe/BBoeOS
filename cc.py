@@ -43,7 +43,7 @@ Builtins:
     mkdir(name)              -- create directory, return 0 or ERR_* code
     open(name, flags)        -- open file, return fd or -1 on error
     print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
-    putc(expression)         -- print single character
+    putchar(expression)      -- print single character
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     uptime()                 -- return seconds since boot
     write(fd, buffer, count) -- write bytes to fd, return count or -1
@@ -354,7 +354,7 @@ class CodeGenerator:
         "die": frozenset(),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
-        "getc": frozenset({"ax"}),
+        "getchar": frozenset({"ax"}),
         "mac": frozenset({"ax", "di"}),
         "memcpy": frozenset({"ax", "cx", "di", "si"}),
         "mkdir": frozenset({"ax", "si"}),
@@ -363,7 +363,7 @@ class CodeGenerator:
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
-        "putc": frozenset({"ax"}),
+        "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
         "rename": frozenset({"ax", "di", "si"}),
         "strlen": frozenset({"ax", "cx", "di"}),
@@ -590,13 +590,13 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.emit("        xor ah, ah")
 
-    def builtin_getc(self, arguments: list[Node], /) -> None:
-        """Generate code for the getc() builtin.
+    def builtin_getchar(self, arguments: list[Node], /) -> None:
+        """Generate code for the getchar() builtin.
 
         Reads a single byte from stdin (blocking) via
         FUNCTION_GET_CHARACTER.  Returns the byte zero-extended in AX.
         """
-        self.check_argument_count(arguments=arguments, expected=0, name="getc")
+        self.check_argument_count(arguments=arguments, expected=0, name="getchar")
         self.emit("        call FUNCTION_GET_CHARACTER")
         self.emit("        xor ah, ah")
         self.ax_clear()
@@ -759,9 +759,9 @@ class CodeGenerator:
         stack_size = len(arguments) * 2
         self.emit(f"        add sp, {stack_size}")
 
-    def builtin_putc(self, arguments: list[Node], /) -> None:
-        """Generate code for the putc() builtin."""
-        self.check_argument_count(arguments=arguments, expected=1, name="putc")
+    def builtin_putchar(self, arguments: list[Node], /) -> None:
+        """Generate code for the putchar() builtin."""
+        self.check_argument_count(arguments=arguments, expected=1, name="putchar")
         argument = arguments[0]
         if isinstance(argument, String):
             byte_val = decode_first_character(argument.content)
@@ -955,16 +955,6 @@ class CodeGenerator:
 
     def emit_argument_vector_startup(self, parameters: list[Param], /) -> None:
         """Emit inline startup code that parses EXEC_ARG into argc/argv."""
-        # Single char* parameter: just load EXEC_ARG directly.
-        if len(parameters) == 1 and parameters[0].type == "char*" and not parameters[0].is_array:
-            pname = parameters[0].name
-            self.emit("        cld")
-            self.emit("        mov ax, [EXEC_ARG]")
-            self.emit(f"        mov [{self.local_address(pname)}], ax")
-            self.ax_is_byte = False
-            self.ax_local = pname
-            return
-
         argc_name = None
         argv_name = None
         for param in parameters:
@@ -2894,6 +2884,8 @@ class Parser:
             return self.parse_do_while()
         if token[0] == "RETURN":
             self.eat("RETURN")
+            if self.peek()[0] != "SEMI":
+                self.parse_expression()
             self.eat("SEMI")
             return Call("exit", [])
         if token[0] == "WHILE":

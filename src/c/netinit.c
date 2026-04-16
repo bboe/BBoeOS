@@ -1,4 +1,4 @@
-void main() {
+int main() {
     char *mac_buffer = BUFFER;
     int error = mac(mac_buffer);
     if (error) {
@@ -6,5 +6,5 @@ void main() {
     }
     printf("NIC found: ");
     print_mac(mac_buffer);
-    putc('\n');
+    putchar('\n');
 }

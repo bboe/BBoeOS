@@ -1,4 +1,4 @@
-void main() {
+int main() {
     char *mac_buffer = BUFFER;
     int error = mac(mac_buffer);
     if (error) {
@@ -40,5 +40,5 @@ void main() {
         printf("%x ", receive_buffer[i]);
         i = i + 1;
     }
-    putc('\n');
+    putchar('\n');
 }

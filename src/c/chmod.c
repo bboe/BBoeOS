@@ -1,4 +1,4 @@
-void main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
     if (argc != 2) {
         die("Usage: chmod [+x|-x] <file>\n");
     }
@@ -16,7 +16,7 @@ void main(int argc, char *argv[]) {
     }
     int error = chmod(argv[1], flags);
     if (!error) {
-        return;
+        return 0;
     }
     if (error == ERROR_PROTECTED) {
         die("File is protected\n");

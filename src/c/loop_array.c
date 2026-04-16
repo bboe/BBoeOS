@@ -1,4 +1,4 @@
-void main() {
+int main() {
     char *messages[] = {"a", "b", "c"};
     int i = 0;
     while (i < sizeof(messages) / sizeof(char*)) {
@@ -6,5 +6,5 @@ void main() {
         write(STDOUT, messages[i], len);
         i = i + 1;
     }
-    putc('\n');
+    putchar('\n');
 }
