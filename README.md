@@ -66,6 +66,10 @@ make_os.sh            Build script
   17-bit (or dword) and routing every `BUF_BASE` access through a
   segment-aware helper.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes by version and date.
+
 ## Resources
 
 * https://neosmart.net/wiki/mbr-boot-process/
