@@ -1137,12 +1137,18 @@ class CodeGenerator:
         """Append a line of assembly to the output buffer."""
         self.lines.append(line)
 
-    def emit_argument_vector_startup(self, parameters: list[Param], /) -> None:
+    def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
         Registers ``argv`` as a constant alias to ``ARGV`` so all
         subsequent accesses use the kernel constant directly, avoiding
         a memory local and store/reload traffic.
+
+        When the first statement in *body* is ``if (argc != N) die(msg)``,
+        the argc check is fused directly into the startup using
+        ``cmp cx, N`` (before CX is clobbered), eliminating the
+        ``_l_argc`` memory local entirely.  Returns the (possibly
+        trimmed) body.
         """
         argc_name = None
         argv_name = None
@@ -1152,7 +1158,7 @@ class CodeGenerator:
             elif argc_name is None:
                 argc_name = param.name
         if not argv_name:
-            return
+            return body
 
         # argv is always the fixed ARGV address — register as constant alias.
         self.constant_aliases[argv_name] = "ARGV"
@@ -1160,8 +1166,39 @@ class CodeGenerator:
         self.emit("        cld")
         self.emit("        mov di, ARGV")
         self.emit("        call FUNCTION_PARSE_ARGV")
-        if argc_name:
+
+        # Try to fuse the first body statement: if (argc != N) die(msg)
+        fused_argc = False
+        if argc_name and body:
+            first = body[0]
+            if (
+                isinstance(first, If)
+                and first.else_body is None
+                and len(first.body) == 1
+                and isinstance(first.body[0], Call)
+                and first.body[0].name == "die"
+                and len(first.body[0].args) == 1
+                and isinstance(first.body[0].args[0], String)
+                and isinstance(first.cond, BinOp)
+                and first.cond.op == "!="
+                and isinstance(first.cond.left, Var)
+                and first.cond.left.name == argc_name
+                and isinstance(first.cond.right, Int)
+            ):
+                die_message = first.body[0].args[0]
+                die_label = self.new_string_label(die_message.content)
+                die_length = string_byte_length(die_message.content)
+                expected = first.cond.right.value
+                self.emit(f"        cmp cx, {expected}")
+                self.emit(f"        mov si, {die_label}")
+                self.emit(f"        mov cx, {die_length}")
+                self.emit("        jne FUNCTION_DIE")
+                fused_argc = True
+                body = body[1:]
+
+        if argc_name and not fused_argc:
             self.emit(f"        mov [{self.local_address(argc_name)}], cx")
+        return body
 
     def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
         """Generate left into AX and right into CX.
@@ -1936,7 +1973,7 @@ class CodeGenerator:
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
-            self.emit_argument_vector_startup(parameters)
+            body = self.emit_argument_vector_startup(parameters, body=body)
 
         # Fuse trailing printf() calls into die() since main exits implicitly.
         if name == "main":

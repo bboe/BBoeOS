@@ -7,28 +7,28 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 470       | +21   |
-| cat     | 145         | 145       |  0    |
-| chmod   | 149         | 186       | +37   |
-| cp      | 268         | 249       | -19   |
+| arp     | 449         | 462       | +13   |
+| cat     | 145         | 137       | -8    |
+| chmod   | 149         | 178       | +29   |
+| cp      | 268         | 241       | -27   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 175       | +40   |
-| mkdir   | 123         | 137       | +14   |
-| mv      | 217         | 227       | +10   |
+| mkdir   | 123         | 129       | +6    |
+| mv      | 217         | 219       | +2    |
 | netinit | 72          | 63        | -9    |
 | netrecv | 332         | 382       | +50   |
 | netsend | 185         | 212       | +27   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+21):** The `argc/argv` startup and six word-sized locals
+**arp (+13):** The `argc/argv` startup and six word-sized locals
 account for most of the delta.  The word-comparison fusing
 optimization matches the assembly version's comparison patterns,
 but the CF-to-integer conversion for `net_open` and null terminators
 on strings add the rest.
 
-**chmod (+37):** The assembly version walks the mode argument with
+**chmod (+29):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
@@ -51,10 +51,9 @@ explicit length.
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 
-**mkdir (+14):** Null-terminator overhead across 4 string literals
-and the `_l_argc` local from the `argc/argv` startup.
+**mkdir (+6):** Null-terminator overhead across 4 string literals.
 
-**mv (+10):** The C version calls `strlen(argv[1])` (which scans with
+**mv (+2):** The C version calls `strlen(argv[1])` (which scans with
 `repne scasb` plus setup/teardown) and reloads `argv` through BX for
 each indexed access.  Null terminators on 5 string literals add
 another +5.
