@@ -13,6 +13,7 @@ Requires: nasm, qemu-system-i386
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -20,12 +21,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from add_file import (
-    SECTOR_SIZE,
-    find_entry,
-    read_assign,
-)
-from run_qemu import run_commands
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from run_qemu import run_commands  # noqa: E402
+
+from add_file import SECTOR_SIZE, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
 C_DIR = Path("src/c")
@@ -211,6 +212,7 @@ def discover_programs(*, additional: list[Path] | None = None, only: str | None)
 
 def main() -> int:
     """Run the self-hosted assembler test suite."""
+    os.chdir(REPO_ROOT)
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

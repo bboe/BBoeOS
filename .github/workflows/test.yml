@@ -12,17 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
+        if: matrix.suite != 'test_cc'
         with:
           key: apt-nasm-qemu-${{ runner.os }}
           path: ~/apt-cache
       - name: Install dependencies
+        if: matrix.suite != 'test_cc'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Run ${{ matrix.suite }}
-        run: python3 ./${{ matrix.suite }}.py
+        run: python3 tests/${{ matrix.suite }}.py
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_asm, test_fs, test_programs]
+        suite: [test_asm, test_cc, test_fs, test_programs]

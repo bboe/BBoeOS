@@ -28,8 +28,8 @@ A minimal x86 operating system with a two-stage bootloader, shell, filesystem, n
 * Run the self-hosting assembler test suite (diffs each program in `static/`
   against NASM output after reassembling it inside the OS):
 
-    ./test_asm.py            # full suite
-    ./test_asm.py edit       # one program; artifacts kept in a temp dir
+    tests/test_asm.py            # full suite
+    tests/test_asm.py edit       # one program; artifacts kept in a temp dir
 
 ## File Structure
 

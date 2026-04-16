@@ -7,14 +7,14 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 138         | 128       | -10   |
+| cat     | 138         | 186       | +48   |
 | chmod   | 140         | 240       | +100  |
 | cp      | 287         | 291       | +4    |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 129         | 181       | +52   |
-| mkdir   | 116         | 121       | +5    |
+| ls      | 129         | 216       | +87   |
+| mkdir   | 116         | 178       | +62   |
 | mv      | 232         | 276       | +44   |
 | netinit | 72          | 63        | -9    |
 | netrecv | 332         | 416       | +84   |
@@ -45,16 +45,23 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+52):** The assembly version uses inline `repne scasb` with a
+**cat (+48):** The assembly version loads EXEC_ARG directly into SI;
+the C version uses `argc/argv` which calls `FUNCTION_PARSE_ARGV` at
+startup and accesses `argv[0]` through memory indirection.  The argv
+buffer (`_argv: times 32 db 0`) adds 32 bytes alone.
+
+**ls (+87):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).  The
 BUILTIN_CLOBBERS correction also forces the C version to spill the
 entry pointer across `read`/`write` instead of pinning it to BX.
+The `argc/argv` startup adds further overhead from `FUNCTION_PARSE_ARGV`
+and the 32-byte argv buffer.
 
-**mkdir (+5):** Same null-terminator overhead across 4 string literals
-(+4 bytes), plus the compiler loads `argv` into AX before moving to
-SI (+1 byte) rather than loading SI directly.
+**mkdir (+62):** The `argc/argv` startup adds `FUNCTION_PARSE_ARGV`
+and a 32-byte argv buffer.  Null-terminator overhead across 4 string
+literals adds another +4 bytes.
 
 **mv (+44):** The assembly version walks the argument string once with
 `lodsb` to both find the space separator and count newname length.

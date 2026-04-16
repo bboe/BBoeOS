@@ -1,4 +1,4 @@
-void main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
     if (argc != 2) {
         die("Usage: mv <oldname> <newname>\n");
     }
@@ -7,7 +7,7 @@ void main(int argc, char *argv[]) {
     }
     int error = rename(argv[0], argv[1]);
     if (!error) {
-        return;
+        return 0;
     }
     if (error == ERROR_EXISTS) {
         die("File already exists\n");

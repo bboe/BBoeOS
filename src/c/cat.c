@@ -1,8 +1,8 @@
-void main(char *arg) {
-    if (arg == NULL) {
+int main(int argc, char *argv[]) {
+    if (argc != 1) {
         die("Usage: cat <filename>\n");
     }
-    int fd = open(arg, O_RDONLY);
+    int fd = open(argv[0], O_RDONLY);
     if (fd < 0) {
         die("File not found\n");
     }

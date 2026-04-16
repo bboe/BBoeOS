@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from run_qemu import run_commands
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive.img"
 
 
@@ -94,6 +96,7 @@ def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, st
 
 def main() -> int:
     """Run the selected ProgramTests and print a summary."""
+    os.chdir(REPO_ROOT)
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
