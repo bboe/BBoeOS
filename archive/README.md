@@ -7,9 +7,9 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 669       | +220  |
+| arp     | 449         | 553       | +104  |
 | cat     | 145         | 145       |  0    |
-| chmod   | 149         | 198       | +49   |
+| chmod   | 149         | 186       | +37   |
 | cp      | 268         | 249       | -19   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
@@ -22,7 +22,13 @@ source is kept here for reference.
 | netsend | 185         | 223       | +38   |
 | uptime  | 50          | 78        | +28   |
 
-**chmod (+49):** The assembly version walks the mode argument with
+**arp (+104):** The `argc/argv` startup and six word-sized locals
+account for most of the delta.  The word-comparison fusing
+optimization matches the assembly version's comparison patterns,
+but the CF-to-integer conversion for `net_open` and null terminators
+on strings add the rest.
+
+**chmod (+37):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
@@ -72,9 +78,3 @@ than in an embedded cell.
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
 and cleans up. The assembly version uses inline `FUNCTION_PRINT_DECIMAL`
 calls with no stack overhead.
-
-**arp (+220):** The C version's packet-filtering loop is the main
-contributor: each of the eight byte comparisons emits a full
-load-zero-extend-push-load-zero-extend-pop-cmp sequence instead of
-the assembly version's word-sized comparisons.  The `argc/argv`
-startup and six word-sized locals add the rest.

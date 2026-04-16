@@ -454,6 +454,115 @@ class CodeGenerator:
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
 
+    @staticmethod
+    def _byte_index_base_key(node: Index, /) -> str:
+        """Return a string key identifying the base pointer of an Index.
+
+        Two byte-index nodes share a base when their keys match,
+        meaning a single ``mov bx, <base>`` can serve both.
+        """
+        return node.name
+
+    def _emit_byte_index_bx(self, node: Index, /) -> str:
+        """Load the base pointer of a byte-indexed node into BX.
+
+        Returns the NASM memory operand (e.g. ``byte [bx+12]`` or
+        ``byte [bx]``) suitable for use in a ``cmp`` instruction.
+        """
+        vname = node.name
+        offset = node.index.value
+        if vname in self.pinned_register:
+            self.emit(f"        mov bx, {self.pinned_register[vname]}")
+        elif vname in self.constant_aliases:
+            self.emit(f"        mov bx, {self.constant_aliases[vname]}")
+        else:
+            self.emit(f"        mov bx, [{self.local_address(vname)}]")
+        return f"byte [bx+{offset}]" if offset else "byte [bx]"
+
+    @staticmethod
+    def _flatten_and(condition: Node, /) -> list[Node]:
+        """Flatten a left-leaning ``&&`` tree into a list of leaves."""
+        leaves: list[Node] = []
+        while isinstance(condition, LogicalAnd):
+            leaves.append(condition.right)
+            condition = condition.left
+        leaves.append(condition)
+        leaves.reverse()
+        return leaves
+
+    def _is_byte_eq(self, node: Node, /) -> bool:
+        """Check if a node is ``byte_index == <something>``."""
+        return isinstance(node, BinOp) and node.op == "==" and self._is_byte_index(node.left)
+
+    def _is_byte_index(self, node: Node, /) -> bool:
+        """Check if a node is a constant-subscript byte index."""
+        return (
+            isinstance(node, Index)
+            and isinstance(node.index, Int)
+            and node.name not in self.array_labels
+            and node.name in self.visible_vars
+            and self.variable_types.get(node.name) in ("char", "char*")
+        )
+
+    def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
+        """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
+
+        Scans *leaves* for consecutive pairs where both sides are
+        byte-index ``==`` comparisons on the same base variable(s) with
+        adjacent indices.  Fusible pairs are emitted as a single
+        word-sized comparison; non-fusible leaves fall through to the
+        normal ``emit_condition`` path.
+
+        Two fusion patterns are recognized:
+
+        1. **byte-index vs constant pair** — ``a[N] == K1 && a[N+1] == K2``
+           becomes ``cmp word [bx+N], (K2<<8)|K1`` (little-endian).
+
+        2. **byte-index vs byte-index pair** —
+           ``a[N] == b[M] && a[N+1] == b[M+1]`` becomes
+           ``mov ax, [bx+N] / cmp ax, [bx+M]``.
+        """
+        i = 0
+        while i < len(leaves):
+            if i + 1 < len(leaves) and self._is_byte_eq(leaves[i]) and self._is_byte_eq(leaves[i + 1]):
+                a, b = leaves[i], leaves[i + 1]
+                a_left, a_right = a.left, a.right
+                b_left, b_right = b.left, b.right
+                # Check left-side indices are adjacent on the same base
+                if self._byte_index_base_key(a_left) == self._byte_index_base_key(b_left) and b_left.index.value == a_left.index.value + 1:
+                    # Pattern 1: both right sides are integer constants
+                    a_lit = a_right.value if isinstance(a_right, Int) else None
+                    b_lit = b_right.value if isinstance(b_right, Int) else None
+                    if a_lit is not None and b_lit is not None:
+                        self.validate_equality_types(a_left, a_right)
+                        operand = self._emit_byte_index_bx(a_left)
+                        word_mem = operand.replace("byte ", "word ")
+                        word_val = (b_lit << 8) | a_lit
+                        self.emit(f"        cmp {word_mem}, 0x{word_val:04x}")
+                        self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
+                        i += 2
+                        continue
+                    # Pattern 2: both right sides are byte-index with adjacent indices on same base
+                    if (
+                        self._is_byte_index(a_right)
+                        and self._is_byte_index(b_right)
+                        and self._byte_index_base_key(a_right) == self._byte_index_base_key(b_right)
+                        and b_right.index.value == a_right.index.value + 1
+                    ):
+                        self.validate_equality_types(a_left, a_right)
+                        left_operand = self._emit_byte_index_bx(a_left)
+                        left_mem = left_operand.replace("byte ", "word ")
+                        self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
+                        right_operand = self._emit_byte_index_bx(a_right)
+                        right_mem = right_operand.replace("byte ", "word ")
+                        self.emit(f"        cmp ax, {right_mem.removeprefix('word ')}")
+                        self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
+                        i += 2
+                        continue
+            # Not fusible — emit normally
+            self.emit_condition_false_jump(condition=leaves[i], fail_label=fail_label, context=context)
+            i += 1
+
     def allocate_local(self, name: str, /, *, size: int = 2) -> int:
         """Allocate a local variable on the stack frame.
 
@@ -1074,6 +1183,16 @@ class CodeGenerator:
                 else:
                     self.emit(f"        cmp word [{address}], {literal}")
                 return
+            # Byte-indexed variable compared to a constant: fuse into
+            # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
+            # the zero-extend into AX.
+            if self._is_byte_index(left):
+                operand = self._emit_byte_index_bx(left)
+                if is_zero:
+                    self.emit(f"        cmp {operand}, 0")
+                else:
+                    self.emit(f"        cmp {operand}, {literal}")
+                return
             self.generate_expression(left)
             if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
@@ -1081,6 +1200,17 @@ class CodeGenerator:
                 register = "al" if self.ax_is_byte else "ax"
                 self.emit(f"        cmp {register}, {literal}")
         else:
+            # Two byte-indexed variables: load left byte into AL, then
+            # compare directly against the right byte in memory.  Saves
+            # the zero-extend, push/pop, and CX round-trip.
+            if self._is_byte_index(left) and self._is_byte_index(right):
+                left_operand = self._emit_byte_index_bx(left)
+                left_mem = left_operand.removeprefix("byte ")
+                self.emit(f"        mov al, {left_mem}")
+                right_operand = self._emit_byte_index_bx(right)
+                right_mem = right_operand.removeprefix("byte ")
+                self.emit(f"        cmp al, {right_mem}")
+                return
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")
 
@@ -1107,10 +1237,14 @@ class CodeGenerator:
         failure target.  For ``||``, jumps past the right leg as soon
         as the left leg is true, otherwise re-enters the false-jump on
         the right leg.
+
+        When the ``&&`` chain contains adjacent byte-index ``==``
+        comparisons on the same base, they are fused into word-sized
+        comparisons (see :meth:`_try_fuse_word_conditions`).
         """
         if isinstance(condition, LogicalAnd):
-            self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
-            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            leaves = self._flatten_and(condition)
+            self._try_fuse_word_conditions(leaves, fail_label=fail_label, context=context)
             return
         if isinstance(condition, LogicalOr):
             pass_label = f".lor_{self.new_label()}"
