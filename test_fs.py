@@ -21,7 +21,6 @@ from pathlib import Path
 
 from add_file import (
     FLAG_DIRECTORY,
-    NAME_FIELD,
     SECTOR_SIZE,
     find_entry,
     read_assign,
@@ -30,7 +29,6 @@ from run_qemu import run_commands
 
 BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = 30
-DIRECTORY_ENTRY_SIZE = 32
 
 
 def main() -> int:
@@ -288,18 +286,16 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
     )
     assert bin_entry is not None
     assert bin_entry[0] & FLAG_DIRECTORY
-    bin_directory_sector = bin_entry[1]
-    # Verify shell is in the SECOND directory sector.
-    first_sector = image[(bin_directory_sector - 1) * SECTOR_SIZE : bin_directory_sector * SECTOR_SIZE]
-    target = b"shell"
-    in_first = any(
-        bytes(
-            first_sector[i * DIRECTORY_ENTRY_SIZE : i * DIRECTORY_ENTRY_SIZE + NAME_FIELD],
-        ).rstrip(b"\x00")
-        == target
-        for i in range(SECTOR_SIZE // DIRECTORY_ENTRY_SIZE)
-    )
-    assert not in_first, "shell unexpectedly in first bin sector"
+    # Verify shell is in the SECOND directory sector (not the first).
+    assert (
+        find_entry(
+            directory_sectors=1,
+            directory_start_sector=bin_entry[1],
+            image=image,
+            name="shell",
+        )
+        is None
+    ), "shell unexpectedly in first bin sector"
 
     run_commands(
         ["cp bin/shell bin/s", "mv bin/s bin/s2"],
