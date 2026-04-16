@@ -7,6 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
+| arp     | 449         | 669       | +220  |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 198       | +49   |
 | cp      | 268         | 249       | -19   |
@@ -71,3 +72,9 @@ than in an embedded cell.
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
 and cleans up. The assembly version uses inline `FUNCTION_PRINT_DECIMAL`
 calls with no stack overhead.
+
+**arp (+220):** The C version's packet-filtering loop is the main
+contributor: each of the eight byte comparisons emits a full
+load-zero-extend-push-load-zero-extend-pop-cmp sequence instead of
+the assembly version's word-sized comparisons.  The `argc/argv`
+startup and six word-sized locals add the rest.

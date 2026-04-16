@@ -360,7 +360,9 @@ class CodeGenerator:
         "mkdir": frozenset({"ax", "si"}),
         "net_open": frozenset({"ax"}),
         "open": frozenset({"ax", "dx", "si"}),
+        "parse_ip": frozenset({"ax", "di", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
+        "print_ip": frozenset({"ax", "cx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putchar": frozenset({"ax"}),
@@ -372,7 +374,7 @@ class CodeGenerator:
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "rename"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
@@ -695,6 +697,26 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
+    def builtin_parse_ip(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
+        """Generate code for the parse_ip(string, buffer) builtin.
+
+        Parses a dotted-decimal IP string into a 4-byte buffer.
+        Returns 0 on success, 1 on parse error.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="parse_ip")
+        self.emit_si_from_argument(arguments[0])
+        self.emit_register_from_argument(argument=arguments[1], register="di")
+        self.emit("        call parse_ip")
+        self.required_includes.add("parse_ip.asm")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
+
     def builtin_print_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the print_datetime(unsigned long) builtin.
 
@@ -703,6 +725,15 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
         self.emit("        call FUNCTION_PRINT_DATETIME")
+
+    def builtin_print_ip(self, arguments: list[Node], /) -> None:
+        """Generate code for the print_ip(buffer) builtin.
+
+        Prints a 4-byte IP address as ``A.B.C.D`` (no newline).
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="print_ip")
+        self.emit_si_from_argument(arguments[0])
+        self.emit("        call FUNCTION_PRINT_IP")
 
     def builtin_print_mac(self, arguments: list[Node], /) -> None:
         """Generate code for the print_mac(buffer) builtin.

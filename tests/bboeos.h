@@ -59,8 +59,12 @@ void die(const char *message) __attribute__((noreturn));
 int mac(char *buffer);
 /* Open a raw Ethernet socket (no POSIX equivalent) */
 int net_open(void);
+/* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
+int parse_ip(const char *string, char *buffer);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
 void print_datetime(unsigned long epoch);
+/* Print 4-byte IP as A.B.C.D (no POSIX equivalent) */
+void print_ip(const char *buffer);
 /* Print 6-byte MAC as XX:XX:XX:XX:XX:XX (no POSIX equivalent) */
 void print_mac(const char *buffer);
 /* BBoeOS syscall: seconds since boot */
