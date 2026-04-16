@@ -108,7 +108,6 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="test_programs_") as temporary_path:
         temporary_directory = Path(temporary_path)
-        print("Building OS...")
         _build_os(temporary_directory=temporary_directory)
 
         pass_count = 0

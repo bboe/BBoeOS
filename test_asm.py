@@ -41,7 +41,6 @@ def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[
         print(f"Compiled C sources: {c_names}")
 
     image = temporary_directory / BASE_IMAGE
-    print("Building OS...")
     subprocess.run(
         ["./make_os.sh", str(image)],
         check=True,

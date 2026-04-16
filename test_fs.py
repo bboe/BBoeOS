@@ -64,7 +64,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="test_fs_") as temporary_path:
         temporary_directory = Path(temporary_path)
         image = temporary_directory / BASE_IMAGE
-        print("Building OS...")
         subprocess.run(
             ["./make_os.sh", str(image)],
             check=True,
