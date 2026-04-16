@@ -360,7 +360,9 @@ class CodeGenerator:
         "mkdir": frozenset({"ax", "si"}),
         "net_open": frozenset({"ax"}),
         "open": frozenset({"ax", "dx", "si"}),
+        "parse_ip": frozenset({"ax", "di", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
+        "print_ip": frozenset({"ax", "cx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putchar": frozenset({"ax"}),
@@ -372,7 +374,7 @@ class CodeGenerator:
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "rename"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
@@ -451,6 +453,177 @@ class CodeGenerator:
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
+
+    @staticmethod
+    def _byte_index_base_key(node: Index, /) -> str:
+        """Return a string key identifying the base pointer of an Index.
+
+        Two byte-index nodes share a base when their keys match,
+        meaning a single ``mov bx, <base>`` can serve both.
+        """
+        return node.name
+
+    def _byte_index_direct(self, node: Index, /) -> str | None:
+        """Return a direct NASM memory operand for a constant-base Index.
+
+        When the base is a named constant or constant alias, returns
+        e.g. ``"BUFFER+128+12"`` without emitting any instructions.
+        Returns ``None`` for runtime (non-constant) bases.
+        """
+        vname = node.name
+        const_base = self.constant_aliases.get(vname)
+        if const_base is None and vname in self.NAMED_CONSTANTS:
+            const_base = vname
+        if const_base is None:
+            return None
+        offset = node.index.value
+        return f"{const_base}+{offset}" if offset else const_base
+
+    def _constant_expression(self, init: Node, /) -> str | None:
+        """Return a NASM constant expression if *init* is compile-time resolvable.
+
+        Recognizes bare ``NAMED_CONSTANT`` references, constant aliases,
+        and ``(NAMED_CONSTANT|alias) +/- Int`` arithmetic.  Returns
+        the NASM expression string (e.g. ``"BUFFER"``, ``"BUFFER+128"``,
+        or ``"BUFFER+128+22"``) or ``None``.
+        """
+        if isinstance(init, Var):
+            if init.name in self.NAMED_CONSTANTS:
+                return init.name
+            if init.name in self.constant_aliases:
+                return self.constant_aliases[init.name]
+        if isinstance(init, BinOp) and init.op in ("+", "-") and isinstance(init.right, Int) and isinstance(init.left, Var):
+            base = None
+            if init.left.name in self.NAMED_CONSTANTS:
+                base = init.left.name
+            elif init.left.name in self.constant_aliases:
+                base = self.constant_aliases[init.left.name]
+            if base is not None:
+                op = "+" if init.op == "+" else "-"
+                return f"{base}{op}{init.right.value}"
+        return None
+
+    def _emit_byte_index_bx(self, node: Index, /) -> str:
+        """Load the base pointer of a byte-indexed node into BX.
+
+        Returns the NASM memory operand (e.g. ``byte [bx+12]`` or
+        ``byte [bx]``) suitable for use in a ``cmp`` instruction.
+        Prefers direct addressing when the base is a constant.
+        """
+        direct = self._byte_index_direct(node)
+        if direct is not None:
+            return f"byte [{direct}]"
+        vname = node.name
+        offset = node.index.value
+        if vname in self.pinned_register:
+            self.emit(f"        mov bx, {self.pinned_register[vname]}")
+        else:
+            self.emit(f"        mov bx, [{self.local_address(vname)}]")
+        return f"byte [bx+{offset}]" if offset else "byte [bx]"
+
+    @staticmethod
+    def _flatten_and(condition: Node, /) -> list[Node]:
+        """Flatten a left-leaning ``&&`` tree into a list of leaves."""
+        leaves: list[Node] = []
+        while isinstance(condition, LogicalAnd):
+            leaves.append(condition.right)
+            condition = condition.left
+        leaves.append(condition)
+        leaves.reverse()
+        return leaves
+
+    def _is_byte_eq(self, node: Node, /) -> bool:
+        """Check if a node is ``byte_index == <something>``."""
+        return isinstance(node, BinOp) and node.op == "==" and self._is_byte_index(node.left)
+
+    def _is_byte_index(self, node: Node, /) -> bool:
+        """Check if a node is a constant-subscript byte index."""
+        return (
+            isinstance(node, Index)
+            and isinstance(node.index, Int)
+            and node.name not in self.array_labels
+            and node.name in self.visible_vars
+            and self.variable_types.get(node.name) in ("char", "char*")
+        )
+
+    @staticmethod
+    def _is_live_after(*, name: str, statements: list[Node]) -> bool:
+        """Check if *name* is read before being unconditionally killed.
+
+        Scans *statements* in order.  An unconditional ``Assign`` to
+        *name* (whose RHS does not read *name*) kills the old value,
+        so any subsequent reads reference the new value, not the one
+        from the fuse-die candidate.  Returns False (not live) if
+        *name* is never read, or is killed before being read.
+        """
+        for stmt in statements:
+            # Unconditional reassignment kills the old value — but only
+            # if the RHS doesn't read the variable (e.g. `err = err + 1`
+            # would read the old value).
+            if isinstance(stmt, Assign) and stmt.name == name and not CodeGenerator.node_references_var(name=name, node=stmt.expr):
+                return False
+            if CodeGenerator.node_references_var(name=name, node=stmt):
+                return True
+        return False
+
+    def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
+        """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
+
+        Scans *leaves* for consecutive pairs where both sides are
+        byte-index ``==`` comparisons on the same base variable(s) with
+        adjacent indices.  Fusible pairs are emitted as a single
+        word-sized comparison; non-fusible leaves fall through to the
+        normal ``emit_condition`` path.
+
+        Two fusion patterns are recognized:
+
+        1. **byte-index vs constant pair** — ``a[N] == K1 && a[N+1] == K2``
+           becomes ``cmp word [bx+N], (K2<<8)|K1`` (little-endian).
+
+        2. **byte-index vs byte-index pair** —
+           ``a[N] == b[M] && a[N+1] == b[M+1]`` becomes
+           ``mov ax, [bx+N] / cmp ax, [bx+M]``.
+        """
+        i = 0
+        while i < len(leaves):
+            if i + 1 < len(leaves) and self._is_byte_eq(leaves[i]) and self._is_byte_eq(leaves[i + 1]):
+                a, b = leaves[i], leaves[i + 1]
+                a_left, a_right = a.left, a.right
+                b_left, b_right = b.left, b.right
+                # Check left-side indices are adjacent on the same base
+                if self._byte_index_base_key(a_left) == self._byte_index_base_key(b_left) and b_left.index.value == a_left.index.value + 1:
+                    # Pattern 1: both right sides are integer constants
+                    a_lit = a_right.value if isinstance(a_right, Int) else None
+                    b_lit = b_right.value if isinstance(b_right, Int) else None
+                    if a_lit is not None and b_lit is not None:
+                        self.validate_equality_types(a_left, a_right)
+                        operand = self._emit_byte_index_bx(a_left)
+                        word_mem = operand.replace("byte ", "word ")
+                        word_val = (b_lit << 8) | a_lit
+                        self.emit(f"        cmp {word_mem}, 0x{word_val:04x}")
+                        self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
+                        i += 2
+                        continue
+                    # Pattern 2: both right sides are byte-index with adjacent indices on same base
+                    if (
+                        self._is_byte_index(a_right)
+                        and self._is_byte_index(b_right)
+                        and self._byte_index_base_key(a_right) == self._byte_index_base_key(b_right)
+                        and b_right.index.value == a_right.index.value + 1
+                    ):
+                        self.validate_equality_types(a_left, a_right)
+                        left_operand = self._emit_byte_index_bx(a_left)
+                        left_mem = left_operand.replace("byte ", "word ")
+                        self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
+                        right_operand = self._emit_byte_index_bx(a_right)
+                        right_mem = right_operand.replace("byte ", "word ")
+                        self.emit(f"        cmp ax, {right_mem.removeprefix('word ')}")
+                        self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
+                        i += 2
+                        continue
+            # Not fusible — emit normally
+            self.emit_condition_false_jump(condition=leaves[i], fail_label=fail_label, context=context)
+            i += 1
 
     def allocate_local(self, name: str, /, *, size: int = 2) -> int:
         """Allocate a local variable on the stack frame.
@@ -695,6 +868,26 @@ class CodeGenerator:
         self.emit("        int 30h")
         self.ax_clear()
 
+    def builtin_parse_ip(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
+        """Generate code for the parse_ip(string, buffer) builtin.
+
+        Parses a dotted-decimal IP string into a 4-byte buffer.
+        Returns 0 on success, 1 on parse error.
+        """
+        self.check_argument_count(arguments=arguments, expected=2, name="parse_ip")
+        self.emit_si_from_argument(arguments[0])
+        self.emit_register_from_argument(argument=arguments[1], register="di")
+        self.emit("        call parse_ip")
+        self.required_includes.add("parse_ip.asm")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
+
     def builtin_print_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the print_datetime(unsigned long) builtin.
 
@@ -703,6 +896,15 @@ class CodeGenerator:
         self.check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
         self.emit("        call FUNCTION_PRINT_DATETIME")
+
+    def builtin_print_ip(self, arguments: list[Node], /) -> None:
+        """Generate code for the print_ip(buffer) builtin.
+
+        Prints a 4-byte IP address as ``A.B.C.D`` (no newline).
+        """
+        self.check_argument_count(arguments=arguments, expected=1, name="print_ip")
+        self.emit_si_from_argument(arguments[0])
+        self.emit("        call FUNCTION_PRINT_IP")
 
     def builtin_print_mac(self, arguments: list[Node], /) -> None:
         """Generate code for the print_mac(buffer) builtin.
@@ -953,12 +1155,18 @@ class CodeGenerator:
         """Append a line of assembly to the output buffer."""
         self.lines.append(line)
 
-    def emit_argument_vector_startup(self, parameters: list[Param], /) -> None:
+    def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
         Registers ``argv`` as a constant alias to ``ARGV`` so all
         subsequent accesses use the kernel constant directly, avoiding
         a memory local and store/reload traffic.
+
+        When the first statement in *body* is ``if (argc != N) die(msg)``,
+        the argc check is fused directly into the startup using
+        ``cmp cx, N`` (before CX is clobbered), eliminating the
+        ``_l_argc`` memory local entirely.  Returns the (possibly
+        trimmed) body.
         """
         argc_name = None
         argv_name = None
@@ -968,7 +1176,7 @@ class CodeGenerator:
             elif argc_name is None:
                 argc_name = param.name
         if not argv_name:
-            return
+            return body
 
         # argv is always the fixed ARGV address — register as constant alias.
         self.constant_aliases[argv_name] = "ARGV"
@@ -976,8 +1184,39 @@ class CodeGenerator:
         self.emit("        cld")
         self.emit("        mov di, ARGV")
         self.emit("        call FUNCTION_PARSE_ARGV")
-        if argc_name:
+
+        # Try to fuse the first body statement: if (argc != N) die(msg)
+        fused_argc = False
+        if argc_name and body:
+            first = body[0]
+            if (
+                isinstance(first, If)
+                and first.else_body is None
+                and len(first.body) == 1
+                and isinstance(first.body[0], Call)
+                and first.body[0].name == "die"
+                and len(first.body[0].args) == 1
+                and isinstance(first.body[0].args[0], String)
+                and isinstance(first.cond, BinOp)
+                and first.cond.op == "!="
+                and isinstance(first.cond.left, Var)
+                and first.cond.left.name == argc_name
+                and isinstance(first.cond.right, Int)
+            ):
+                die_message = first.body[0].args[0]
+                die_label = self.new_string_label(die_message.content)
+                die_length = string_byte_length(die_message.content)
+                expected = first.cond.right.value
+                self.emit(f"        cmp cx, {expected}")
+                self.emit(f"        mov si, {die_label}")
+                self.emit(f"        mov cx, {die_length}")
+                self.emit("        jne FUNCTION_DIE")
+                fused_argc = True
+                body = body[1:]
+
+        if argc_name and not fused_argc:
             self.emit(f"        mov [{self.local_address(argc_name)}], cx")
+        return body
 
     def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
         """Generate left into AX and right into CX.
@@ -1043,6 +1282,16 @@ class CodeGenerator:
                 else:
                     self.emit(f"        cmp word [{address}], {literal}")
                 return
+            # Byte-indexed variable compared to a constant: fuse into
+            # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
+            # the zero-extend into AX.
+            if self._is_byte_index(left):
+                operand = self._emit_byte_index_bx(left)
+                if is_zero:
+                    self.emit(f"        cmp {operand}, 0")
+                else:
+                    self.emit(f"        cmp {operand}, {literal}")
+                return
             self.generate_expression(left)
             if is_zero:
                 self.emit("        test al, al" if self.ax_is_byte else "        test ax, ax")
@@ -1050,6 +1299,17 @@ class CodeGenerator:
                 register = "al" if self.ax_is_byte else "ax"
                 self.emit(f"        cmp {register}, {literal}")
         else:
+            # Two byte-indexed variables: load left byte into AL, then
+            # compare directly against the right byte in memory.  Saves
+            # the zero-extend, push/pop, and CX round-trip.
+            if self._is_byte_index(left) and self._is_byte_index(right):
+                left_operand = self._emit_byte_index_bx(left)
+                left_mem = left_operand.removeprefix("byte ")
+                self.emit(f"        mov al, {left_mem}")
+                right_operand = self._emit_byte_index_bx(right)
+                right_mem = right_operand.removeprefix("byte ")
+                self.emit(f"        cmp al, {right_mem}")
+                return
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")
 
@@ -1076,10 +1336,14 @@ class CodeGenerator:
         failure target.  For ``||``, jumps past the right leg as soon
         as the left leg is true, otherwise re-enters the false-jump on
         the right leg.
+
+        When the ``&&`` chain contains adjacent byte-index ``==``
+        comparisons on the same base, they are fused into word-sized
+        comparisons (see :meth:`_try_fuse_word_conditions`).
         """
         if isinstance(condition, LogicalAnd):
-            self.emit_condition_false_jump(condition=condition.left, fail_label=fail_label, context=context)
-            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            leaves = self._flatten_and(condition)
+            self._try_fuse_word_conditions(leaves, fail_label=fail_label, context=context)
             return
         if isinstance(condition, LogicalOr):
             pass_label = f".lor_{self.new_label()}"
@@ -1181,6 +1445,10 @@ class CodeGenerator:
             self.emit(f"        mov {register}, [{self.local_address(argument.name)}]")
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
+        elif (constant_expr := self._constant_expression(argument)) is not None:
+            if isinstance(argument, BinOp):
+                self.emit_constant_reference(argument.left.name)
+            self.emit(f"        mov {register}, {constant_expr}")
         else:
             self.generate_expression(argument)
             if register != "ax":
@@ -1192,6 +1460,10 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.new_string_label(argument.content)}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
+        elif (constant_expr := self._constant_expression(argument)) is not None:
+            if isinstance(argument, BinOp):
+                self.emit_constant_reference(argument.left.name)
+            self.emit(f"        mov si, {constant_expr}")
         else:
             self.generate_expression(argument)
             self.emit("        mov si, ax")
@@ -1329,7 +1601,12 @@ class CodeGenerator:
                 i += 2
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
-            init = statement.init if isinstance(statement, VarDecl) else None
+            if isinstance(statement, VarDecl):
+                init = statement.init
+            elif isinstance(statement, Assign) and isinstance(statement.expr, Call):
+                init = statement.expr
+            else:
+                init = None
             # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
@@ -1380,19 +1657,16 @@ class CodeGenerator:
                     and isinstance(next_stmt.body[0].args[0], String)
                 ):
                     die_call = next_stmt.body[0]
-                if die_call is not None and not any(
-                    self.node_references_var(name=statement.name, node=later) for later in statements[i + 2 :]
-                ):
+                if die_call is not None and not self._is_live_after(name=statement.name, statements=statements[i + 2 :]):
                     die_message = die_call.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
                     self.visible_vars.add(statement.name)
-                    call_node = statement.init
-                    handler = getattr(self, f"builtin_{call_node.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
+                    handler = getattr(self, f"builtin_{init.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
-                    handler(call_node.args, fuse_die=(die_label, die_length))
+                    handler(init.args, fuse_die=(die_label, die_length))
                     self.ax_clear()
                     i += 2
                     continue
@@ -1406,12 +1680,11 @@ class CodeGenerator:
                 next_stmt = statements[i + 1]
                 if self.is_zero_exit_if(next_stmt):
                     self.visible_vars.add(statement.name)
-                    call_node = statement.init
-                    handler = getattr(self, f"builtin_{call_node.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
+                    handler = getattr(self, f"builtin_{init.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
-                    handler(call_node.args, fuse_exit=True)
+                    handler(init.args, fuse_exit=True)
                     self.ax_is_byte = True
                     self.ax_local = statement.name
                     i += 2
@@ -1526,22 +1799,33 @@ class CodeGenerator:
             elif isinstance(index_expression, Int):
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
                 offset = index_expression.value * (1 if is_byte else 2)
-                if vname in self.pinned_register:
-                    self.emit(f"        mov bx, {self.pinned_register[vname]}")
-                elif vname in self.constant_aliases:
-                    self.emit(f"        mov bx, {self.constant_aliases[vname]}")
-                else:
-                    self.emit(f"        mov bx, [{self.local_address(vname)}]")
-                if is_byte:
-                    if offset:
-                        self.emit(f"        mov al, [bx+{offset}]")
+                # Direct memory access for constant/aliased bases:
+                # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
+                const_base = self.constant_aliases.get(vname)
+                if const_base is None and vname in self.NAMED_CONSTANTS:
+                    const_base = vname
+                if const_base is not None:
+                    addr = f"{const_base}+{offset}" if offset else const_base
+                    if is_byte:
+                        self.emit(f"        mov al, [{addr}]")
+                        self.emit("        xor ah, ah")
                     else:
-                        self.emit("        mov al, [bx]")
-                    self.emit("        xor ah, ah")
-                elif offset:
-                    self.emit(f"        mov ax, [bx+{offset}]")
+                        self.emit(f"        mov ax, [{addr}]")
                 else:
-                    self.emit("        mov ax, [bx]")
+                    if vname in self.pinned_register:
+                        self.emit(f"        mov bx, {self.pinned_register[vname]}")
+                    else:
+                        self.emit(f"        mov bx, [{self.local_address(vname)}]")
+                    if is_byte:
+                        if offset:
+                            self.emit(f"        mov al, [bx+{offset}]")
+                        else:
+                            self.emit("        mov al, [bx]")
+                        self.emit("        xor ah, ah")
+                    elif offset:
+                        self.emit(f"        mov ax, [bx+{offset}]")
+                    else:
+                        self.emit("        mov ax, [bx]")
             else:
                 is_byte = vname not in self.variable_arrays and self.variable_types.get(vname) in ("char", "char*")
                 if vname in self.pinned_register:
@@ -1718,7 +2002,7 @@ class CodeGenerator:
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
-            self.emit_argument_vector_startup(parameters)
+            body = self.emit_argument_vector_startup(parameters, body=body)
 
         # Fuse trailing printf() calls into die() since main exits implicitly.
         if name == "main":
@@ -1908,17 +2192,17 @@ class CodeGenerator:
         )
 
     def is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
-        """Check if ``statement`` is a NAMED_CONSTANT alias.
+        """Check if ``statement`` is a compile-time constant alias.
 
-        True when the local is initialized from a ``NAMED_CONSTANT`` and
-        never reassigned in ``body``.  Such locals can be replaced with
-        the underlying constant directly, skipping the memory slot, the
-        initial store, and every reload.
+        True when the local is initialized from a ``NAMED_CONSTANT``
+        or ``NAMED_CONSTANT +/- Int`` and never reassigned in ``body``.
+        Such locals can be replaced with the underlying constant
+        expression directly, skipping the memory slot, the initial
+        store, and every reload.
         """
         if statement.type_name == "unsigned long":
             return False
-        init = statement.init
-        if not (isinstance(init, Var) and init.name in self.NAMED_CONSTANTS):
+        if self._constant_expression(statement.init) is None:
             return False
         return not any(self.name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
 
@@ -2016,6 +2300,7 @@ class CodeGenerator:
         self.peephole_unused_cld()
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
+        self.peephole_redundant_bx()
 
     def peephole_constant_to_register(self) -> None:
         """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
@@ -2278,6 +2563,79 @@ class CodeGenerator:
                 self.lines[i] = f"        {operator} {width}{source}, {immediate}"
             del self.lines[i + 1 : i + 4]
             continue
+        # Second pass: 3-instruction pattern without CX intermediate.
+        # ``mov ax, D / (add|sub) ax, imm / mov D, ax`` → ``(add|sub) D, imm``
+        # or ``inc D`` / ``dec D`` when imm is 1.
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            is_memory = source.startswith("[") and source.endswith("]")
+            is_register = source in registers
+            if not (is_memory or is_register):
+                i += 1
+                continue
+            operator = None
+            immediate = None
+            if b.startswith("add ax, "):
+                operator = "add"
+                immediate = b[len("add ax, ") :]
+            elif b.startswith("sub ax, "):
+                operator = "sub"
+                immediate = b[len("sub ax, ") :]
+            if operator is None or immediate.startswith("["):
+                i += 1
+                continue
+            if c != f"mov {source}, ax":
+                i += 1
+                continue
+            width = "word " if is_memory else ""
+            if immediate == "1":
+                instruction = "inc" if operator == "add" else "dec"
+                self.lines[i] = f"        {instruction} {width}{source}"
+            else:
+                self.lines[i] = f"        {operator} {width}{source}, {immediate}"
+            del self.lines[i + 1 : i + 3]
+            continue
+
+    def peephole_redundant_bx(self) -> None:
+        """Remove ``mov bx, X`` when BX already holds X.
+
+        Tracks the value in BX across instructions that don't clobber
+        it (comparisons, conditional jumps).  Resets on labels, calls,
+        interrupts, and any instruction that writes to BX.
+        """
+        bx_value: str | None = None
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            if stripped.startswith("mov bx, "):
+                source = stripped[len("mov bx, ") :]
+                if source == bx_value:
+                    continue  # redundant — skip
+                bx_value = source
+            elif stripped.endswith(":") or stripped.startswith((
+                "add bx",
+                "call ",
+                "int ",
+                "lodsb",
+                "lodsw",
+                "movsb",
+                "movsw",
+                "pop bx",
+                "rep ",
+                "sub bx",
+                "xchg",
+                "xor bx",
+            )):
+                bx_value = None
+            result.append(line)
+        self.lines = result
 
     def peephole_store_reload(self) -> None:
         """Remove redundant store-then-reload sequences."""
@@ -2292,17 +2650,31 @@ class CodeGenerator:
             i += 1
 
     def peephole_unused_cld(self) -> None:
-        """Remove ``cld`` when no string instruction is emitted.
+        """Remove or deduplicate ``cld`` instructions.
 
-        The argv parser and single-char* startup emit ``cld`` for
-        legacy reasons but never issue ``lodsb``/``stosb``/``rep``.
+        When no string instruction is emitted, all ``cld`` instructions
+        are removed.  Otherwise, redundant ``cld`` instructions are
+        removed when the direction flag is already clear (no intervening
+        label, call, or interrupt that could change DF).
         """
         string_ops = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
+        has_string_ops = any(any(line.strip().startswith(op) for op in string_ops) for line in self.lines)
+        if not has_string_ops:
+            self.lines = [line for line in self.lines if line.strip() != "cld"]
+            return
+        # Deduplicate: track whether DF is known-clear.
+        df_clear = False
+        result: list[str] = []
         for line in self.lines:
             stripped = line.strip()
-            if any(stripped.startswith(op) for op in string_ops):
-                return
-        self.lines = [line for line in self.lines if line.strip() != "cld"]
+            if stripped == "cld":
+                if df_clear:
+                    continue  # redundant
+                df_clear = True
+            elif stripped.endswith(":") or stripped.startswith(("call ", "int ")):
+                df_clear = False
+            result.append(line)
+        self.lines = result
 
     def scan_locals(self, statements: list[Node], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
@@ -2317,7 +2689,13 @@ class CodeGenerator:
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
                 if top_level and self.is_constant_alias(body=statements, statement=statement):
-                    self.constant_aliases[statement.name] = statement.init.name
+                    alias = self._constant_expression(statement.init)
+                    self.constant_aliases[statement.name] = alias
+                    # Ensure %include is queued for the base constant.
+                    base = statement.init.name if isinstance(statement.init, Var) else statement.init.left.name
+                    include = self.NAMED_CONSTANT_INCLUDES.get(base)
+                    if include is not None:
+                        self.required_includes.add(include)
                     continue
                 if top_level and statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None

@@ -7,21 +7,25 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| cat     | 145         | 145       |  0    |
-| chmod   | 149         | 198       | +49   |
-| cp      | 268         | 249       | -19   |
+| arp     | 449         | 453       | +4    |
+| cat     | 145         | 135       | -10   |
+| chmod   | 149         | 173       | +24   |
+| cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 175       | +40   |
-| mkdir   | 123         | 137       | +14   |
-| mv      | 217         | 233       | +16   |
+| ls      | 135         | 173       | +38   |
+| mkdir   | 123         | 127       | +4    |
+| mv      | 217         | 217       |  0    |
 | netinit | 72          | 63        | -9    |
-| netrecv | 332         | 416       | +84   |
-| netsend | 185         | 223       | +38   |
+| netrecv | 332         | 382       | +50   |
+| netsend | 185         | 212       | +27   |
 | uptime  | 50          | 78        | +28   |
 
-**chmod (+49):** The assembly version walks the mode argument with
+**arp (+4):** Null terminators on 4 strings (+4 bytes).  The
+remaining code is byte-identical to the hand-written assembly.
+
+**chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
@@ -39,20 +43,14 @@ and the `dw 0` cells for each coordinate.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+40):** The assembly version uses inline `repne scasb` with a
+**ls (+38):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 
-**mkdir (+14):** Null-terminator overhead across 4 string literals
-and the `_l_argc` local from the `argc/argv` startup.
+**mkdir (+4):** Null-terminator overhead across 4 string literals.
 
-**mv (+16):** The C version calls `strlen(argv[1])` (which scans with
-`repne scasb` plus setup/teardown) and reloads `argv` through BX for
-each indexed access.  Null terminators on 5 string literals add
-another +5.
-
-**netrecv (+84):** Both versions read into `BUFFER + 128` with a
+**netrecv (+50):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.
 The delta is ordinary C-compiler overhead: null-terminated strings,
 the net_open CF normalization, fd stashed in a memory local so it
@@ -60,7 +58,7 @@ survives across `FUNCTION_WRITE_STDOUT` calls, and printf-style hex
 formatting instead of the asm version's inline `FUNCTION_PRINT_HEX`
 loop.
 
-**netsend (+38):** Null terminators on three strings, the net_open
+**netsend (+27):** Null terminators on three strings, the net_open
 CF-to-integer normalization, and storing fd to a local all add a
 handful of bytes.  The asm version kept fd in BX and used
 length-bearing messages without null terminators.  Both versions
