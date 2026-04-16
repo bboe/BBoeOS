@@ -20,10 +20,14 @@ import argparse
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from run_qemu import run_commands
+
+BASE_IMAGE = "drive.img"
 
 
 @dataclass
@@ -60,20 +64,22 @@ TESTS: list[ProgramTest] = [
 ]
 
 
-def _build_os() -> None:
+def _build_os(*, temporary_directory: Path) -> None:
     """Run make_os.sh; abort if the build fails."""
-    result = subprocess.run(["./make_os.sh"], capture_output=True, text=True, check=False)
+    image = temporary_directory / BASE_IMAGE
+    result = subprocess.run(["./make_os.sh", str(image)], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(1)
 
 
-def _run_test(*, test: ProgramTest) -> tuple[bool, str]:
+def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
     """Run one ProgramTest; return (passed, short message for report)."""
     try:
         output = run_commands(
             test.commands,
             command_timeout=test.timeout,
+            drive=temporary_directory / BASE_IMAGE,
             snapshot=True,
             with_net=test.with_net,
         )
@@ -100,26 +106,27 @@ def main() -> int:
         print(f"No test named {arguments.program!r}")
         return 1
 
-    print("Building OS...")
-    _build_os()
+    with tempfile.TemporaryDirectory(prefix="test_programs_") as temporary_path:
+        temporary_directory = Path(temporary_path)
+        _build_os(temporary_directory=temporary_directory)
 
-    pass_count = 0
-    fail_count = 0
-    failed: list[str] = []
-    for test in tests:
-        if test.skip is not None:
-            print(f"  SKIP  {test.name:<12} ({test.skip})")
-            continue
-        started = time.monotonic()
-        ok, message = _run_test(test=test)
-        elapsed = time.monotonic() - started
-        if ok:
-            print(f"  PASS  {test.name:<12}              {elapsed:6.2f}s")
-            pass_count += 1
-        else:
-            print(f"  FAIL  {test.name:<12}  {message}   {elapsed:6.2f}s")
-            fail_count += 1
-            failed.append(test.name)
+        pass_count = 0
+        fail_count = 0
+        failed: list[str] = []
+        for test in tests:
+            if test.skip is not None:
+                print(f"  SKIP  {test.name:<12} ({test.skip})")
+                continue
+            started = time.monotonic()
+            ok, message = _run_test(temporary_directory=temporary_directory, test=test)
+            elapsed = time.monotonic() - started
+            if ok:
+                print(f"  PASS  {test.name:<12}              {elapsed:6.2f}s")
+                pass_count += 1
+            else:
+                print(f"  FAIL  {test.name:<12}  {message}   {elapsed:6.2f}s")
+                fail_count += 1
+                failed.append(test.name)
     print()
     print(f"{pass_count} passed, {fail_count} failed")
     if fail_count:

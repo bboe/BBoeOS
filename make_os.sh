@@ -30,15 +30,16 @@ for src in src/c/*.c; do
     rm "$tmpdir/$name.asm"
 done
 
-dd bs=512 count=2880 if=/dev/zero of=drive.img
-dd conv=notrunc if=os.bin of=drive.img
-./add_file.py --mkdir bin
+IMAGE="${1:-drive.img}"
+dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
+dd conv=notrunc if=os.bin of="$IMAGE"
+./add_file.py --image "$IMAGE" --mkdir bin
 for bin in "$tmpdir"/*; do
-    ./add_file.py -x -d bin "$bin"
+    ./add_file.py --image "$IMAGE" -x -d bin "$bin"
 done
 
 # Add static files (non-executable) into src/
-./add_file.py --mkdir src
+./add_file.py --image "$IMAGE" --mkdir src
 for f in static/*; do
-    [ -f "$f" ] && ./add_file.py -d src "$f"
+    [ -f "$f" ] && ./add_file.py --image "$IMAGE" -d src "$f"
 done

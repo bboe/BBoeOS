@@ -12,10 +12,7 @@ Requires: nasm, qemu-system-i386
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -23,97 +20,15 @@ import time
 from pathlib import Path
 
 from add_file import (
-    NAME_FIELD,
-    OFFSET_FLAGS,
-    OFFSET_SECTOR,
-    OFFSET_SIZE,
+    FLAG_DIRECTORY,
     SECTOR_SIZE,
-    iter_entries,
+    find_entry,
     read_assign,
 )
-from test_asm import (
-    BOOT_TIMEOUT,
-    PROMPT,
-    SERIAL_BASENAME,
-    cleanup_fifos,
-    setup_fifos,
-    terminate,
-    wait_for_bytes,
-)
+from run_qemu import run_commands
 
+BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = 30
-DIRECTORY_ENTRY_SIZE = 32
-FLAG_DIRECTORY = 0x02
-IMAGE = Path("drive.img")
-
-
-def boot_and_run(*, commands: list[str], drive: Path, temporary_directory: Path) -> None:
-    """Boot QEMU on `drive`, send each command, and shut down."""
-    setup_fifos(temporary_directory=temporary_directory)
-    serial_base = temporary_directory / SERIAL_BASENAME
-    qemu: subprocess.Popen | None = None
-    serial_file_descriptor: int | None = None
-    try:
-        qemu = subprocess.Popen(
-            [
-                "qemu-system-i386",
-                "-chardev",
-                f"pipe,id=s,path={serial_base}",
-                "-display",
-                "none",
-                "-drive",
-                f"file={drive},format=raw",
-                "-monitor",
-                "none",
-                "-serial",
-                "chardev:s",
-            ],
-        )
-        serial_file_descriptor = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
-        wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=BOOT_TIMEOUT)
-        with Path(f"{serial_base}.in").open("w", encoding="utf-8") as serial_input:
-            for command in commands:
-                serial_input.write(command + "\r")
-                serial_input.flush()
-                wait_for_bytes(file_descriptor=serial_file_descriptor, needle=PROMPT, process=qemu, timeout=COMMAND_TIMEOUT)
-            serial_input.write("shutdown\r")
-            serial_input.flush()
-        # Wait for QEMU to exit (shutdown takes a moment)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            qemu.wait(timeout=10)
-    finally:
-        if serial_file_descriptor is not None:
-            os.close(serial_file_descriptor)
-        if qemu is not None:
-            terminate(process=qemu)
-        cleanup_fifos(temporary_directory=temporary_directory)
-
-
-def find_entry(
-    *,
-    directory_sectors: int,
-    directory_start_sector: int,
-    image: bytes,
-    name: str,
-) -> tuple[int, int, int] | None:
-    """Return (flags, start_sector, size) for `name` in the directory.
-
-    Search the directory starting at `directory_start_sector`, or return None
-    if not found.
-    """
-    base = (directory_start_sector - 1) * SECTOR_SIZE
-    target = name.encode()
-    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
-        if image[entry_offset] == 0:
-            continue
-        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00")
-        if entry_name != target:
-            continue
-        flags = image[entry_offset + OFFSET_FLAGS]
-        sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-        return (flags, sector, size)
-    return None
 
 
 def main() -> int:
@@ -124,14 +39,6 @@ def main() -> int:
     )
     parser.add_argument("test", nargs="?", help="run only the named test")
     arguments = parser.parse_args()
-
-    print("Building OS...")
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
 
     directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
@@ -154,6 +61,13 @@ def main() -> int:
     failed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="test_fs_") as temporary_path:
         temporary_directory = Path(temporary_path)
+        image = temporary_directory / BASE_IMAGE
+        subprocess.run(
+            ["./make_os.sh", str(image)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         for name, test_function in tests:
             started = time.monotonic()
             try:
@@ -187,7 +101,7 @@ def main() -> int:
 def make_drive(*, name: str, temporary_directory: Path) -> Path:
     """Create a copy of the base drive image for a test case."""
     drive = temporary_directory / f"drive_{name}.img"
-    shutil.copy(IMAGE, drive)
+    shutil.copy(temporary_directory / BASE_IMAGE, drive)
     return drive
 
 
@@ -197,7 +111,7 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
     Verify the destination is byte-identical to the source.
     """
     drive = make_drive(name="copy_large", temporary_directory=temporary_directory)
-    boot_and_run(commands=["cp src/asm.asm big"], drive=drive, temporary_directory=temporary_directory)
+    run_commands(["cp src/asm.asm big"], command_timeout=COMMAND_TIMEOUT, drive=drive)
     image = drive.read_bytes()
 
     big = find_entry(
@@ -237,10 +151,10 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
 def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
     """Copy a file into a subdirectory and verify the entry shows up there."""
     drive = make_drive(name="copy_subdirectory", temporary_directory=temporary_directory)
-    boot_and_run(
-        commands=["mkdir d", "cp bin/cat d/h"],
+    run_commands(
+        ["mkdir d", "cp bin/cat d/h"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
 
@@ -286,10 +200,10 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     in bin/, and the data is preserved.
     """
     drive = make_drive(name="cross_move", temporary_directory=temporary_directory)
-    boot_and_run(
-        commands=["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
+    run_commands(
+        ["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
 
@@ -339,7 +253,7 @@ def test_make_directory_high_sector(*, directory_sector: int, directory_sectors:
     asm.asm pushes the next free sector well beyond 256.
     """
     drive = make_drive(name="make_directory_high", temporary_directory=temporary_directory)
-    boot_and_run(commands=["mkdir hi"], drive=drive, temporary_directory=temporary_directory)
+    run_commands(["mkdir hi"], command_timeout=COMMAND_TIMEOUT, drive=drive)
     image = drive.read_bytes()
     hi = find_entry(
         directory_sectors=directory_sectors,
@@ -372,23 +286,21 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
     )
     assert bin_entry is not None
     assert bin_entry[0] & FLAG_DIRECTORY
-    bin_directory_sector = bin_entry[1]
-    # Verify shell is in the SECOND directory sector.
-    first_sector = image[(bin_directory_sector - 1) * SECTOR_SIZE : bin_directory_sector * SECTOR_SIZE]
-    target = b"shell"
-    in_first = any(
-        bytes(
-            first_sector[i * DIRECTORY_ENTRY_SIZE : i * DIRECTORY_ENTRY_SIZE + NAME_FIELD],
-        ).rstrip(b"\x00")
-        == target
-        for i in range(SECTOR_SIZE // DIRECTORY_ENTRY_SIZE)
-    )
-    assert not in_first, "shell unexpectedly in first bin sector"
+    # Verify shell is in the SECOND directory sector (not the first).
+    assert (
+        find_entry(
+            directory_sectors=1,
+            directory_start_sector=bin_entry[1],
+            image=image,
+            name="shell",
+        )
+        is None
+    ), "shell unexpectedly in first bin sector"
 
-    boot_and_run(
-        commands=["cp bin/shell bin/s", "mv bin/s bin/s2"],
+    run_commands(
+        ["cp bin/shell bin/s", "mv bin/s bin/s2"],
+        command_timeout=COMMAND_TIMEOUT,
         drive=drive,
-        temporary_directory=temporary_directory,
     )
     image = drive.read_bytes()
     bin_entry = find_entry(
