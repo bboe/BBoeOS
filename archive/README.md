@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 449         | 504       | +55   |
+| arp     | 449         | 482       | +33   |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 186       | +37   |
 | cp      | 268         | 249       | -19   |
@@ -22,7 +22,7 @@ source is kept here for reference.
 | netsend | 185         | 213       | +28   |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+55):** The `argc/argv` startup and six word-sized locals
+**arp (+33):** The `argc/argv` startup and six word-sized locals
 account for most of the delta.  The word-comparison fusing
 optimization matches the assembly version's comparison patterns,
 but the CF-to-integer conversion for `net_open` and null terminators

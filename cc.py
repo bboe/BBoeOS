@@ -524,6 +524,26 @@ class CodeGenerator:
             and self.variable_types.get(node.name) in ("char", "char*")
         )
 
+    @staticmethod
+    def _is_live_after(*, name: str, statements: list[Node]) -> bool:
+        """Check if *name* is read before being unconditionally killed.
+
+        Scans *statements* in order.  An unconditional ``Assign`` to
+        *name* (whose RHS does not read *name*) kills the old value,
+        so any subsequent reads reference the new value, not the one
+        from the fuse-die candidate.  Returns False (not live) if
+        *name* is never read, or is killed before being read.
+        """
+        for stmt in statements:
+            # Unconditional reassignment kills the old value — but only
+            # if the RHS doesn't read the variable (e.g. `err = err + 1`
+            # would read the old value).
+            if isinstance(stmt, Assign) and stmt.name == name and not CodeGenerator.node_references_var(name=name, node=stmt.expr):
+                return False
+            if CodeGenerator.node_references_var(name=name, node=stmt):
+                return True
+        return False
+
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
 
@@ -1522,7 +1542,12 @@ class CodeGenerator:
                 i += 2
                 continue
             # Fuse die-on-error syscall + if-(non)zero-die.
-            init = statement.init if isinstance(statement, VarDecl) else None
+            if isinstance(statement, VarDecl):
+                init = statement.init
+            elif isinstance(statement, Assign) and isinstance(statement.expr, Call):
+                init = statement.expr
+            else:
+                init = None
             # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
             # AX tracking is preserved because the die path doesn't fall
             # through — the continuation path sees AX unchanged from before.
@@ -1573,19 +1598,16 @@ class CodeGenerator:
                     and isinstance(next_stmt.body[0].args[0], String)
                 ):
                     die_call = next_stmt.body[0]
-                if die_call is not None and not any(
-                    self.node_references_var(name=statement.name, node=later) for later in statements[i + 2 :]
-                ):
+                if die_call is not None and not self._is_live_after(name=statement.name, statements=statements[i + 2 :]):
                     die_message = die_call.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
                     self.visible_vars.add(statement.name)
-                    call_node = statement.init
-                    handler = getattr(self, f"builtin_{call_node.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
+                    handler = getattr(self, f"builtin_{init.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
-                    handler(call_node.args, fuse_die=(die_label, die_length))
+                    handler(init.args, fuse_die=(die_label, die_length))
                     self.ax_clear()
                     i += 2
                     continue
@@ -1599,12 +1621,11 @@ class CodeGenerator:
                 next_stmt = statements[i + 1]
                 if self.is_zero_exit_if(next_stmt):
                     self.visible_vars.add(statement.name)
-                    call_node = statement.init
-                    handler = getattr(self, f"builtin_{call_node.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(call_node.name)
+                    handler = getattr(self, f"builtin_{init.name}")
+                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
-                    handler(call_node.args, fuse_exit=True)
+                    handler(init.args, fuse_exit=True)
                     self.ax_is_byte = True
                     self.ax_local = statement.name
                     i += 2
