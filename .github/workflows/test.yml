@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Run ${{ matrix.suite }}
-        run: python3 ./${{ matrix.suite }}.py
+        run: python3 tests/${{ matrix.suite }}.py
     strategy:
       fail-fast: false
       matrix:
