@@ -168,8 +168,8 @@ resolve_dns:
         ;; Data
         count db 0
         dns_base dw 0
-        dns_query_buf times 300 db 0
         dns_server_ip db 10, 0, 2, 3
+        dns_socket_fd dw 0
         my_mac times 6 db 0
         target_ip times 4 db 0
 

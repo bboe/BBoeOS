@@ -81,9 +81,6 @@
         %assign SYS_NET_PING 23h
         %assign SYS_NET_RECVFROM 24h
         %assign SYS_NET_SENDTO 25h
-        %assign SYS_NET_UDP_RECEIVE 26h
-        %assign SYS_NET_UDP_SEND 27h
-
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
         %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot

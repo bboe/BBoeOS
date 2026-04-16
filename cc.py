@@ -161,6 +161,15 @@ class Index(Node):
 
 
 @dataclass(slots=True)
+class IndexAssign(Node):
+    """Indexed assignment ``name[index] = expr;``."""
+
+    name: str
+    index: Node
+    expr: Node
+
+
+@dataclass(slots=True)
 class Int(Node):
     """Integer literal."""
 
@@ -203,6 +212,13 @@ class Program(Node):
     """Top-level AST: the list of function definitions making up a translation unit."""
 
     functions: list[Node]
+
+
+@dataclass(slots=True)
+class Return(Node):
+    """``return [expr];`` statement."""
+
+    value: Node | None
 
 
 @dataclass(slots=True)
@@ -301,7 +317,7 @@ TOKEN_PATTERN = re.compile(
     (?P<WS>\s+)
   | (?P<BLOCK_COMMENT>/\*[\s\S]*?\*/)
   | (?P<LINE_COMMENT>//[^\n]*)
-  | (?P<CHAR_LIT>'(?:[^'\\]|\\.)')
+  | (?P<CHAR_LIT>'(?:[^'\\]|\\x[0-9a-fA-F]{1,2}|\\.)')
   | (?P<IDENT>[A-Za-z_][A-Za-z_0-9]*)
   | (?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)
   | (?P<STRING>"(?:[^"\\]|\\.)*")
@@ -480,6 +496,7 @@ class CodeGenerator:
         self.required_includes: set[str] = set()
         self.spill_stack: list[tuple[str, int]] = []
         self.strings: list[tuple[str, str]] = []
+        self.user_functions: dict[str, int] = {}  # name → param count
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
@@ -720,14 +737,14 @@ class CodeGenerator:
 
     @staticmethod
     def _is_zero_exit_if(statement: Node, /) -> bool:
-        """Check if a statement is ``if (VAR == 0) { exit(); }``."""
+        """Check if a statement is ``if (VAR == 0) { exit(); }`` or ``if (VAR == 0) { return ...; }``."""
         return (
             isinstance(statement, If)
             and isinstance(statement.cond, BinOp)
             and statement.cond.op == "=="
             and statement.cond.right == Int(0)
             and len(statement.body) == 1
-            and statement.body[0] == Call("exit", [])
+            and (statement.body[0] == Call("exit", []) or isinstance(statement.body[0], Return))
             and statement.else_body is None
         )
 
@@ -735,7 +752,10 @@ class CodeGenerator:
         """Return the memory operand string for a local variable."""
         if self.elide_frame:
             return f"_l_{name}"
-        return f"bp-{self.locals[name]}"
+        offset = self.locals[name]
+        if offset > 0:
+            return f"bp-{offset}"
+        return f"bp+{-offset}"
 
     @staticmethod
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
@@ -904,6 +924,8 @@ class CodeGenerator:
             return False
         last = body[-1]
         if isinstance(last, Break):
+            return True
+        if isinstance(last, Return):
             return True
         if isinstance(last, Call) and last.name in {"die", "exit"}:
             return True
@@ -1376,9 +1398,13 @@ class CodeGenerator:
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):
-                call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
-                if call_clobbers is not None:
-                    clobbered.update(call_clobbers)
+                if node.name in self.user_functions:
+                    # User function calls clobber all registers.
+                    clobbered.update(self.REGISTER_POOL)
+                else:
+                    call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
+                    if call_clobbers is not None:
+                        clobbered.update(call_clobbers)
             for slot in getattr(type(node), "__slots__", ()):
                 child = getattr(node, slot, None)
                 if isinstance(child, Node):
@@ -1822,6 +1848,19 @@ class CodeGenerator:
         self.emit('%include "constants.asm"')
         self.emit()
         for function in ast.functions:
+            if function.name != "main":
+                self.user_functions[function.name] = len(function.params)
+        # Emit main first so execution starts at PROGRAM_BASE.
+        main_func = None
+        helpers: list[Node] = []
+        for function in ast.functions:
+            if function.name == "main":
+                main_func = function
+            else:
+                helpers.append(function)
+        if main_func is not None:
+            self.generate_function(main_func)
+        for function in helpers:
             self.generate_function(function)
         self.peephole()
         for include in sorted(self.required_includes):
@@ -1859,7 +1898,8 @@ class CodeGenerator:
         while i < len(statements):
             statement = statements[i]
             # Fuse simple printf() + exit() into die().
-            if self._is_simple_printf(statement) and i + 1 < len(statements) and statements[i + 1] == Call("exit", []):
+            next_is_exit = i + 1 < len(statements) and (statements[i + 1] == Call("exit", []) or isinstance(statements[i + 1], Return))
+            if self._is_simple_printf(statement) and next_is_exit:
                 self.builtin_die(statement.args)
                 i += 2
                 continue
@@ -1961,14 +2001,32 @@ class CodeGenerator:
         """Generate code for a function call statement.
 
         Raises:
-            SyntaxError: If the called function is not a known builtin.
+            SyntaxError: If the called function is not a known builtin
+                or user-defined function.
 
         """
         name = statement.name
         arguments = statement.args
+        if name in self.user_functions:
+            expected = self.user_functions[name]
+            if len(arguments) != expected:
+                message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
+                raise SyntaxError(message)
+            # Invalidate all register caches — user functions clobber everything.
+            self.register_cache.clear()
+            self.spill_stack.clear()
+            # Push arguments right-to-left (C convention: first arg at [bp+4]).
+            for arg in reversed(arguments):
+                self.generate_expression(arg)
+                self.emit("        push ax")
+            self.emit(f"        call {name}")
+            if arguments:
+                self.emit(f"        add sp, {len(arguments) * 2}")
+            self.ax_clear()
+            return
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
-            message = f"unknown builtin: {name}"
+            message = f"unknown function: {name}"
             raise SyntaxError(message)
         clobbers = self.BUILTIN_CLOBBERS.get(name)
         if self.register_cache and clobbers:
@@ -2087,12 +2145,17 @@ class CodeGenerator:
             else:
                 is_byte = self._is_byte_var(vname)
                 self._emit_load_var(vname)
-                self.emit("        push bx")
-                self.generate_expression(index_expression)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        pop bx")
-                self.emit("        add bx, ax")
+                # If the index is a pinned variable and the access is
+                # byte-sized, load it without clobbering BX.
+                if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
+                    self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                else:
+                    self.emit("        push bx")
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        pop bx")
+                    self.emit("        add bx, ax")
                 if is_byte:
                     self.emit("        mov al, [bx]")
                     self.emit("        xor ah, ah")
@@ -2193,15 +2256,27 @@ class CodeGenerator:
         self.virtual_long_locals = set()
         self.zero_init_skippable: set[str] = set()
 
-        # Allocate parameters as locals and record their types.
-        for param in parameters:
-            self.allocate_local(param.name)
-            self.variable_types[param.name] = param.type
-            if param.is_array:
-                self.variable_arrays.add(param.name)
+        # Allocate parameters and record their types.
+        if name == "main":
+            # main parameters are handled by emit_argument_vector_startup.
+            for param in parameters:
+                self.allocate_local(param.name)
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
+        else:
+            # Non-main: record parameter types; stack offsets are kept
+            # as fallbacks but parameters will be pinned to registers
+            # when safe_pin_registers has room.
+            for i, param in enumerate(parameters):
+                self.locals[param.name] = -(4 + i * 2)  # negative = above bp
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
+
         self.scan_locals(body)
 
         # Seed visible_vars with parameters and pinned variables.
@@ -2212,10 +2287,11 @@ class CodeGenerator:
         self.visible_vars.update(self.pinned_register)
 
         self.emit(f"{name}:")
-        if not self.elide_frame and self.frame_size > 0:
+        if not self.elide_frame:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
-            self.emit(f"        sub sp, {self.frame_size}")
+            if self.frame_size > 0:
+                self.emit(f"        sub sp, {self.frame_size}")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -2232,10 +2308,10 @@ class CodeGenerator:
                 for vname in sorted(self.locals):
                     directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
-        else:
+        elif not self.always_exits(body):
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
-                self.emit("        pop bp")
+            self.emit("        pop bp")
             self.emit("        ret")
         self.emit()
 
@@ -2268,6 +2344,57 @@ class CodeGenerator:
                 self.ax_local, self.ax_is_byte = saved_ax
             else:
                 self.ax_clear()
+
+    def generate_index_assign(self, statement: IndexAssign, /) -> None:
+        """Generate assembly for ``name[index] = expr;``."""
+        self.ax_clear()
+        name = statement.name
+        is_byte = self._is_byte_var(name)
+        self._check_defined(name)
+        # Evaluate value into AX, then store at base+index.
+        if isinstance(statement.index, Int) and isinstance(statement.expr, Int):
+            # Both index and value are constants: direct store.
+            offset = statement.index.value * (1 if is_byte else 2)
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                addr = f"{const_base}+{offset}" if offset else const_base
+            else:
+                self._emit_load_var(name)
+                addr = f"bx+{offset}" if offset else "bx"
+            if is_byte:
+                self.emit(f"        mov byte [{addr}], {statement.expr.value}")
+            else:
+                self.emit(f"        mov word [{addr}], {statement.expr.value}")
+        elif isinstance(statement.index, Int):
+            # Constant index, variable value.
+            offset = statement.index.value * (1 if is_byte else 2)
+            self.generate_expression(statement.expr)
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                addr = f"{const_base}+{offset}" if offset else const_base
+            else:
+                self._emit_load_var(name)
+                addr = f"bx+{offset}" if offset else "bx"
+            if is_byte:
+                self.emit(f"        mov [{addr}], al")
+            else:
+                self.emit(f"        mov [{addr}], ax")
+        else:
+            # Variable index: compute address in BX, then store.
+            self.generate_expression(statement.expr)
+            self.emit("        push ax")
+            self._emit_load_var(name)
+            self.emit("        push bx")
+            self.generate_expression(statement.index)
+            if not is_byte:
+                self.emit("        add ax, ax")
+            self.emit("        pop bx")
+            self.emit("        add bx, ax")
+            self.emit("        pop ax")
+            if is_byte:
+                self.emit("        mov [bx], al")
+            else:
+                self.emit("        mov [bx], ax")
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
@@ -2304,6 +2431,24 @@ class CodeGenerator:
             return
         message = f"unsupported 'unsigned long' expression: {type(expression).__name__}"
         raise SyntaxError(message)
+
+    def generate_return(self, statement: Return, /) -> None:
+        """Generate assembly for a return statement.
+
+        In ``main``, ``return`` maps to ``jmp FUNCTION_EXIT``.  In other
+        functions it evaluates the return expression into AX, tears down
+        the stack frame, and emits ``ret``.
+        """
+        if self.elide_frame:
+            # main: return [expr]; → exit() (discard return value)
+            self.emit("        jmp FUNCTION_EXIT")
+        else:
+            if statement.value is not None:
+                self.generate_expression(statement.value)
+            if self.frame_size > 0:
+                self.emit("        mov sp, bp")
+            self.emit("        pop bp")
+            self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:
         """Generate assembly for a single statement.
@@ -2342,6 +2487,8 @@ class CodeGenerator:
                 self.emit(f"        mov word [{self._local_address(statement.name)}], {array_label}")
         elif isinstance(statement, Assign):
             self.emit_store_local(expression=statement.expr, name=statement.name)
+        elif isinstance(statement, IndexAssign):
+            self.generate_index_assign(statement)
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
@@ -2355,6 +2502,8 @@ class CodeGenerator:
         elif isinstance(statement, While):
             self.ax_clear()
             self.generate_while(statement)
+        elif isinstance(statement, Return):
+            self.generate_return(statement)
         elif isinstance(statement, Call):
             self.generate_call(statement)
             self.ax_clear()
@@ -3153,6 +3302,17 @@ class Parser:
                 else_body = self.parse_block()
         return If(condition, body, else_body)
 
+    def parse_index_assignment(self) -> Node:
+        """Parse an indexed assignment ``name[index] = expr;``."""
+        name = self.eat("IDENT")[1]
+        self.eat("LBRACKET")
+        index = self.parse_expression()
+        self.eat("RBRACKET")
+        self.eat("ASSIGN")
+        expr = self.parse_expression()
+        self.eat("SEMI")
+        return IndexAssign(name, index, expr)
+
     def parse_logical_and(self) -> Node:
         """Parse a left-associative ``&&`` expression.
 
@@ -3323,10 +3483,11 @@ class Parser:
             return self.parse_do_while()
         if token[0] == "RETURN":
             self.eat("RETURN")
+            value = None
             if self.peek()[0] != "SEMI":
-                self.parse_expression()
+                value = self.parse_expression()
             self.eat("SEMI")
-            return Call("exit", [])
+            return Return(value)
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":
@@ -3335,6 +3496,8 @@ class Parser:
                 return self.parse_assignment()
             if next_kind == "PLUS_ASSIGN":
                 return self.parse_compound_assignment()
+            if next_kind == "LBRACKET":
+                return self.parse_index_assignment()
             return self.parse_call_statement()
         message = f"line {token[2]}: expected statement, got {token[0]} ({token[1]!r})"
         raise SyntaxError(message)
@@ -3459,6 +3622,8 @@ def decode_first_character(text: str) -> int:
 
     """
     if text[0] == "\\" and len(text) >= 2:
+        if text[1] == "x" and len(text) >= 3:
+            return int(text[2:], 16)  # noqa: FURB166
         return CHARACTER_ESCAPES.get(text[1], ord(text[1]))
     return ord(text[0])
 
