@@ -4,14 +4,16 @@ dns_query:
         ;; Output: DI = pointer to first answer record
         ;;         AL = ANCOUNT (may be 0; check before walking answers)
         ;;         CF set on send/receive error
-        ;; Caller must define: dns_base (dw), dns_query_buf (300 db), dns_server_ip (4 db)
+        ;; Caller must define: dns_base (dw), dns_server_ip (4 db),
+        ;;                     dns_socket_fd (dw)
         push bx
         push cx
         push dx
         push si
+        push bp
 
         ;; Build query: fixed header + QNAME + QTYPE + QCLASS
-        mov di, dns_query_buf
+        mov di, SECTOR_BUFFER
         push si
         mov si, .hdr_template
         mov cx, 12
@@ -24,30 +26,51 @@ dns_query:
         mov ax, 0100h          ; QCLASS: IN (big-endian 0x0001)
         stosw
         mov cx, di
-        sub cx, dns_query_buf  ; CX = total query length
+        sub cx, SECTOR_BUFFER  ; CX = total query length
 
-        ;; Send UDP query to DNS server
-        mov bx, dns_server_ip
-        mov di, 1024           ; Source port
-        mov dx, 53             ; Dest port (DNS)
-        mov si, dns_query_buf
-        mov ah, SYS_NET_UDP_SEND
+        ;; Open UDP socket
+        mov al, SOCK_DGRAM
+        mov ah, SYS_NET_OPEN
         int 30h
         jc .err
+        mov [dns_socket_fd], ax
+
+        ;; Send UDP query to DNS server
+        mov bx, [dns_socket_fd]
+        mov si, SECTOR_BUFFER
+        mov di, dns_server_ip
+        mov dx, 1024           ; Source port
+        mov bp, 53             ; Dest port (DNS)
+        mov ah, SYS_NET_SENDTO
+        int 30h
+        jc .err_close
 
         ;; Poll for response
-        mov bx, 0FFFFh
+        mov si, 0FFFFh
         .poll:
-        mov ah, SYS_NET_UDP_RECEIVE
+        mov bx, [dns_socket_fd]
+        mov di, SECTOR_BUFFER  ; Receive into separate buffer
+        mov cx, 512
+        mov dx, 1024           ; Filter on our source port
+        mov ah, SYS_NET_RECVFROM
         int 30h
-        jnc .got_response
-        dec bx
+        test ax, ax
+        jnz .got_response
+        dec si
         jnz .poll
-        jmp .err
+        jmp .err_close
 
         .got_response:
-        ;; DI = DNS response payload; save base for compression pointer resolution
-        mov [dns_base], di
+        ;; Close socket before processing response
+        push ax
+        mov bx, [dns_socket_fd]
+        mov ah, SYS_IO_CLOSE
+        int 30h
+        pop ax
+
+        ;; Response is in SECTOR_BUFFER; save base for compression pointers
+        mov word [dns_base], SECTOR_BUFFER
+        mov di, SECTOR_BUFFER
         mov al, [di+7]         ; ANCOUNT low byte (big-endian offset 6-7)
 
         ;; Skip header (12 bytes) + question QNAME + QTYPE(2) + QCLASS(2)
@@ -65,9 +88,14 @@ dns_query:
         ;; DI = first answer record; AL = ANCOUNT
         clc
         jmp .done
+        .err_close:
+        mov bx, [dns_socket_fd]
+        mov ah, SYS_IO_CLOSE
+        int 30h
         .err:
         stc
         .done:
+        pop bp
         pop si
         pop dx
         pop cx

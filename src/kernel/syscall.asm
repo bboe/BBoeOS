@@ -29,11 +29,6 @@ syscall_handler:
         je .net_recvfrom
         cmp ah, SYS_NET_SENDTO ; net_sendto
         je .net_sendto
-        cmp ah, SYS_NET_UDP_RECEIVE ; net_udp_receive
-        je .net_udp_receive
-        cmp ah, SYS_NET_UDP_SEND ; net_udp_send
-        je .net_udp_send
-
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
         cmp ah, SYS_RTC_SLEEP  ; rtc_sleep
@@ -538,14 +533,6 @@ syscall_handler:
         .st_ip dw 0
         .st_sport dw 0
         .st_dport dw 0
-
-        .net_udp_receive:
-        call udp_receive
-        jmp .iret_cf
-
-        .net_udp_send:
-        call udp_send
-        jmp .iret_cf
 
         .rtc_datetime:
         ;; Returns DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
