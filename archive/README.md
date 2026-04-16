@@ -8,19 +8,23 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | cat     | 138         | 138       |  0    |
-| chmod   | 140         | 241       | +101  |
-| cp      | 287         | 285       | -2    |
+| chmod   | 140         | 240       | +100  |
+| cp      | 287         | 301       | +14   |
 | date    | 15          | 15        |  0    |
 | draw    | 245         | 282       | +37   |
 | hello   | 22          | 23        | +1    |
 | ls      | 129         | 193       | +64   |
 | mkdir   | 116         | 121       | +5    |
-| mv      | 232         | 277       | +45   |
+| mv      | 232         | 276       | +44   |
 | uptime  | 50          | 78        | +28   |
 
-**chmod (+101):** The assembly version walks the argument with `lodsb`
+**chmod (+100):** The assembly version walks the argument with `lodsb`
 (1 byte per character read); the C version reloads the base pointer
 and indexes for each character check.
+
+**cp (+14):** The BUILTIN_CLOBBERS correction forces the C version to
+store the buffer pointer in memory and reload it across every
+`read`/`write` call instead of pinning it to a register.
 
 **draw (+37):** The assembly version keeps row/col packed in a single
 DX register and edits it in place with `inc dh` / `dec dl`, then pokes
@@ -47,7 +51,7 @@ entry pointer across `read`/`write` instead of pinning it to BX.
 (+4 bytes), plus the compiler loads `argv` into AX before moving to
 SI (+1 byte) rather than loading SI directly.
 
-**mv (+45):** The assembly version walks the argument string once with
+**mv (+44):** The assembly version walks the argument string once with
 `lodsb` to both find the space separator and count newname length.
 The C version calls `strlen(argv[1])` (which scans with `repne scasb`
 plus setup/teardown), and reloads `argv` through BX for each indexed
