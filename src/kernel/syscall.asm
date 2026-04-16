@@ -27,6 +27,8 @@ syscall_handler:
         je .net_ping
         cmp ah, SYS_NET_RECVFROM ; net_recvfrom
         je .net_recvfrom
+        cmp ah, SYS_NET_SENDTO ; net_sendto
+        je .net_sendto
         cmp ah, SYS_NET_UDP_RECEIVE ; net_udp_receive
         je .net_udp_receive
         cmp ah, SYS_NET_UDP_SEND ; net_udp_send
@@ -504,6 +506,38 @@ syscall_handler:
         .rf_buf dw 0
         .rf_max dw 0
         .rf_port dw 0
+
+        .net_sendto:
+        ;; Send UDP datagram via fd
+        ;; BX = fd, SI = payload buf, CX = payload len
+        ;; DI = ip_ptr, DX = src_port, BP = dst_port
+        ;; Returns AX = bytes sent, CF on error
+        mov [.st_buf], si
+        mov [.st_len], cx
+        mov [.st_ip], di
+        mov [.st_sport], dx
+        mov [.st_dport], bp
+        call fd_lookup         ; SI = entry pointer
+        jc .net_sendto_err
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
+        jne .net_sendto_err
+        mov bx, [.st_ip]      ; BX = dest IP pointer
+        mov di, [.st_sport]   ; DI = source port
+        mov dx, [.st_dport]   ; DX = dest port
+        mov si, [.st_buf]     ; SI = payload buffer
+        mov cx, [.st_len]     ; CX = payload length
+        call udp_send
+        jc .net_sendto_err
+        mov ax, [.st_len]     ; AX = bytes sent
+        jmp .iret_cf
+        .net_sendto_err:
+        stc
+        jmp .iret_cf
+        .st_buf dw 0
+        .st_len dw 0
+        .st_ip dw 0
+        .st_sport dw 0
+        .st_dport dw 0
 
         .net_udp_receive:
         call udp_receive

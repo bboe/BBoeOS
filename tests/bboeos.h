@@ -63,6 +63,8 @@ int mac(char *buffer);
 int net_open(int type);
 /* Receive UDP datagram filtered by port (BBoeOS-specific) */
 int recvfrom(int fd, char *buffer, int length, int port);
+/* Send UDP datagram (BBoeOS-specific) */
+int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
