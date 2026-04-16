@@ -495,9 +495,7 @@ class CodeGenerator:
         Returns ``None`` for runtime (non-constant) bases.
         """
         vname = node.name
-        const_base = self.constant_aliases.get(vname)
-        if const_base is None and vname in self.NAMED_CONSTANTS:
-            const_base = vname
+        const_base = self._resolve_constant(vname)
         if const_base is None:
             return None
         offset = node.index.value
@@ -589,6 +587,20 @@ class CodeGenerator:
             if CodeGenerator.node_references_var(name=name, node=stmt):
                 return True
         return False
+
+    def _resolve_constant(self, name: str, /) -> str | None:
+        """Return the NASM constant expression for *name*, or ``None``.
+
+        Checks :attr:`constant_aliases` first, then
+        :attr:`NAMED_CONSTANTS`.  Used wherever the code needs to
+        distinguish compile-time-constant bases from runtime variables.
+        """
+        alias = self.constant_aliases.get(name)
+        if alias is not None:
+            return alias
+        if name in self.NAMED_CONSTANTS:
+            return name
+        return None
 
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
@@ -1825,9 +1837,7 @@ class CodeGenerator:
                 offset = index_expression.value * (1 if is_byte else 2)
                 # Direct memory access for constant/aliased bases:
                 # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
-                const_base = self.constant_aliases.get(vname)
-                if const_base is None and vname in self.NAMED_CONSTANTS:
-                    const_base = vname
+                const_base = self._resolve_constant(vname)
                 if const_base is not None:
                     addr = f"{const_base}+{offset}" if offset else const_base
                     if is_byte:
