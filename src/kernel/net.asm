@@ -403,109 +403,6 @@ icmp_receive:
         pop ax
         ret
 
-icmp_ping:
-        ;; Send ICMP echo request and wait for reply
-        ;; Input: SI = pointer to 4-byte target IP
-        ;; Output: AX = round-trip time in timer ticks, CF set on timeout
-        push bx
-        push cx
-        push dx
-        push si
-        push di
-
-        mov [.ip_target], si
-
-        ;; Build ICMP echo request in icmp_buffer (16 bytes: 8 header + 8 data)
-        mov di, icmp_buffer
-        cld
-        mov al, 8              ; Type: Echo Request
-        stosb
-        xor al, al             ; Code: 0
-        stosb
-        xor ax, ax             ; Checksum placeholder
-        stosw
-        mov ax, 0100h          ; Identifier: 1 (big-endian)
-        stosw
-        mov ax, [ping_sequence]
-        xchg al, ah            ; Big-endian
-        stosw
-        inc word [ping_sequence]
-        xor ax, ax             ; 8 bytes of payload data (zeros)
-        stosw
-        stosw
-        stosw
-        stosw
-
-        ;; Compute ICMP checksum
-        mov si, icmp_buffer
-        mov cx, 16
-        call ip_checksum
-        mov [icmp_buffer + 2], ax
-
-        ;; Record start time
-        xor ah, ah
-        int 1Ah                ; CX:DX = ticks since midnight
-        mov [.ip_start], dx
-
-        ;; Send via IP
-        mov bx, [.ip_target]
-        mov al, 1              ; Protocol: ICMP
-        mov si, icmp_buffer
-        mov cx, 16
-        call ip_send
-        jc .ping_timeout
-
-        ;; Poll for ICMP echo reply
-        mov bx, 0FFFFh
-        .ping_poll:
-        call ne2k_receive
-        jc .ping_next
-
-        ;; Check: EtherType=IP (offset 12-13), Protocol=ICMP (offset 23),
-        ;; ICMP Type=Echo Reply (offset 34)
-        cmp byte [di+12], 08h
-        jne .ping_other
-        cmp byte [di+13], 00h
-        jne .ping_other
-        cmp byte [di+23], 1   ; IP protocol = ICMP
-        jne .ping_other
-        cmp byte [di+34], 0   ; ICMP type = Echo Reply
-        jne .ping_other
-
-        ;; Got reply — compute RTT
-        xor ah, ah
-        int 1Ah
-        sub dx, [.ip_start]
-        mov ax, dx
-        clc
-        jmp .ping_done
-
-        .ping_other:
-        ;; Handle ARP while waiting
-        push si
-        mov si, di
-        call arp_handle_packet
-        pop si
-
-        .ping_next:
-        dec bx
-        jnz .ping_poll
-
-        .ping_timeout:
-        xor ax, ax
-        stc
-
-        .ping_done:
-        pop di
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        ret
-
-        .ip_start dw 0
-        .ip_target dw 0
-
 ip_checksum:
         ;; Compute ones-complement checksum over a buffer
         ;; Input: SI = data pointer, CX = length in bytes (must be even)
@@ -1239,8 +1136,6 @@ udp_send:
         arp_evict dw 0
         arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
         gateway_ip db 10, 0, 2, 2
-        icmp_buffer times 16 db 0
         ip_id dw 1
         our_ip db 10, 0, 2, 15
-        ping_sequence dw 1
         udp_buffer times 256 db 0

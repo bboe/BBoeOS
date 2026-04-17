@@ -67,9 +67,8 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 14h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 21h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 22h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
-| 23h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |
-| 24h   | net_recvfrom | Recv UDP via fd: BX=fd, DI=buf, CX=len, DX=port; AX=bytes (0=none), CF err |
-| 25h   | net_sendto   | Send UDP via fd: BX=fd, SI=buf, CX=len, DI=IP, DX=src port, BP=dst port; AX=bytes, CF err |
+| 24h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
+| 25h   | net_sendto   | Send datagram via fd: BX=fd, SI=buf, CX=len, DI=IP; UDP also uses DX=src port, BP=dst port (ignored for ICMP); AX=bytes, CF err |
 | 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |
 | 31h   | rtc_sleep    | Busy-wait for CX milliseconds                           |
 | 32h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |

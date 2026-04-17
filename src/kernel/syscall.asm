@@ -21,8 +21,6 @@ syscall_handler:
         je .net_mac
         cmp ah, SYS_NET_OPEN   ; net_open
         je .net_open
-        cmp ah, SYS_NET_PING   ; net_ping
-        je .net_ping
         cmp ah, SYS_NET_RECVFROM ; net_recvfrom
         je .net_recvfrom
         cmp ah, SYS_NET_SENDTO ; net_sendto
@@ -461,10 +459,6 @@ syscall_handler:
         .net_open_type db 0
         .net_open_err:
         stc
-        jmp .iret_cf
-
-        .net_ping:
-        call icmp_ping
         jmp .iret_cf
 
         .net_recvfrom:

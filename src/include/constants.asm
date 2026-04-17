@@ -80,7 +80,6 @@
 
         %assign SYS_NET_MAC 21h
         %assign SYS_NET_OPEN 22h
-        %assign SYS_NET_PING 23h
         %assign SYS_NET_RECVFROM 24h
         %assign SYS_NET_SENDTO 25h
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
