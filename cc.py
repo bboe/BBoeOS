@@ -36,6 +36,7 @@ Register allocation:
                           | '(' expression ')'
 
 Builtins:
+    checksum(buf, len)       -- 1's-complement checksum (for ICMP/IP)
     close(fd)                -- close a file descriptor
     datetime()               -- return unsigned seconds since 1970-01-01 UTC
     die(message)             -- print message and terminate
@@ -48,6 +49,8 @@ Builtins:
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     recvfrom(fd, buf, len, port) -- receive UDP datagram filtered by port
     sendto(fd, buf, len, ip, src_port, dst_port) -- send UDP datagram
+    sleep(milliseconds)      -- busy-wait for the given duration
+    ticks()                  -- return low 16 bits of BIOS timer tick counter
     uptime()                 -- return seconds since boot
     write(fd, buffer, count) -- write bytes to fd, return count or -1
 
@@ -391,6 +394,7 @@ class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "checksum": frozenset({"ax", "bx", "cx", "si"}),
         "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax", "bx"}),
         "datetime": frozenset({"ax", "dx"}),
@@ -413,7 +417,9 @@ class CodeGenerator:
         "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
+        "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
+        "ticks": frozenset({"ax", "cx", "dx"}),
         "uptime": frozenset({"ax"}),
         "video_mode": frozenset({"ax"}),
         "write": frozenset({"ax", "bx", "cx", "si"}),
@@ -962,6 +968,31 @@ class CodeGenerator:
         self.ax_is_byte = False
         self.ax_local = None
 
+    def builtin_checksum(self, arguments: list[Node], /) -> None:
+        """Generate code for the checksum(buf, len) builtin.
+
+        Computes the 1's-complement 16-bit checksum used by IP and ICMP.
+        ``len`` must be even; caller is responsible for zero-padding
+        odd-length buffers.  Returns the folded, complemented checksum
+        in AX, ready to store in the header field.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="checksum")
+        buffer_argument, length_argument = arguments
+        self.emit_si_from_argument(buffer_argument)
+        self.emit_register_from_argument(argument=length_argument, register="cx")
+        label_index = self.new_label()
+        self.emit("        cld")
+        self.emit("        xor bx, bx")
+        self.emit("        shr cx, 1")
+        self.emit(f".ck_loop_{label_index}:")
+        self.emit("        lodsw")
+        self.emit("        add bx, ax")
+        self.emit("        adc bx, 0")
+        self.emit(f"        loop .ck_loop_{label_index}")
+        self.emit("        not bx")
+        self.emit("        mov ax, bx")
+        self.ax_clear()
+
     def builtin_chmod(
         self,
         arguments: list[Node],
@@ -1344,6 +1375,16 @@ class CodeGenerator:
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
+    def builtin_sleep(self, arguments: list[Node], /) -> None:
+        """Generate code for the sleep(milliseconds) builtin.
+
+        ``sleep(ms)`` emits ``mov cx, <ms> / mov ah, SYS_RTC_SLEEP /
+        int 30h``.  Busy-waits for the requested duration.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="sleep")
+        self.emit_register_from_argument(argument=arguments[0], register="cx")
+        self._emit_syscall("RTC_SLEEP")
+
     def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.
 
@@ -1358,6 +1399,20 @@ class CodeGenerator:
         self.emit("        repne scasb")
         self.emit("        mov ax, 0FFFEh")
         self.emit("        sub ax, cx")
+        self.ax_clear()
+
+    def builtin_ticks(self, arguments: list[Node], /) -> None:
+        """Generate code for the ticks() builtin.
+
+        Returns the low 16 bits of the BIOS timer tick counter
+        (~18.2 Hz).  Suitable for measuring short elapsed intervals —
+        subtract two readings to get a tick count in [0, 65535].  The
+        counter wraps roughly once an hour.
+        """
+        self._check_argument_count(arguments=arguments, expected=0, name="ticks")
+        self.emit("        xor ah, ah")
+        self.emit("        int 1Ah")
+        self.emit("        mov ax, dx")
         self.ax_clear()
 
     def builtin_uptime(self, arguments: list[Node], /) -> None:

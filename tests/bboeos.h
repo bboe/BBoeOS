@@ -55,6 +55,8 @@
 int bboeos_fstat(int fd);
 /* POSIX mkdir takes mode_t; BBoeOS takes only a name */
 int bboeos_mkdir(const char *name);
+/* 1's-complement checksum for IP / ICMP (BBoeOS-specific) */
+int checksum(const char *buffer, int length);
 /* BBoeOS syscall: seconds since 1970-01-01 UTC */
 unsigned long datetime(void);
 /* Print message and exit (no POSIX equivalent) */
@@ -63,10 +65,6 @@ void die(const char *message) __attribute__((noreturn));
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */
 int net_open(int type, int protocol);
-/* Receive UDP datagram filtered by port (BBoeOS-specific) */
-int recvfrom(int fd, char *buffer, int length, int port);
-/* Send UDP datagram (BBoeOS-specific) */
-int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
@@ -75,6 +73,14 @@ void print_datetime(unsigned long epoch);
 void print_ip(const char *buffer);
 /* Print 6-byte MAC as XX:XX:XX:XX:XX:XX (no POSIX equivalent) */
 void print_mac(const char *buffer);
+/* Receive UDP datagram filtered by port (BBoeOS-specific) */
+int recvfrom(int fd, char *buffer, int length, int port);
+/* Send UDP datagram (BBoeOS-specific) */
+int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
+/* Low 16 bits of BIOS tick counter (BBoeOS-specific) */
+int ticks(void);
+/* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);
+   rely on cc.py's builtin for compilation, don't redeclare here. */
 /* BBoeOS syscall: seconds since boot */
 int uptime(void);
 /* Switch video mode via INT 10h (no POSIX equivalent) */
