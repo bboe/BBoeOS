@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -70,9 +70,35 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+class CompileError(Exception):
+    """Raised for user-visible compilation errors.
+
+    The optional ``line`` attribute lets :func:`main` format the
+    diagnostic with a source line number without a Python traceback.
+    """
+
+    def __init__(self, message: str, /, *, line: int | None = None) -> None:
+        """Store the message and optional line number."""
+        self.message = message
+        self.line = line
+        super().__init__(f"line {line}: {message}" if line else message)
+
+
 @dataclass(slots=True)
 class Node:
-    """Base class for every AST node."""
+    """Base class for every AST node.
+
+    ``line`` is the 1-based source line where the construct begins; it
+    defaults to 0 for nodes synthesized by the compiler (e.g. constant
+    folding) and is set by the parser to the first token's line for
+    everything else.  The field is keyword-only so subclasses can keep
+    their positional constructors, and excluded from ``__eq__`` so two
+    AST nodes with the same shape compare equal regardless of source
+    location — several peephole / fusion passes rely on structural
+    equality (``cond.right == Int(0)`` etc.).
+    """
+
+    line: int = field(default=0, kw_only=True, compare=False)
 
 
 @dataclass(slots=True)
@@ -382,8 +408,8 @@ def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
     """
     if predicate(node):
         return True
-    for field in fields(node):
-        value = getattr(node, field.name)
+    for node_field in fields(node):
+        value = getattr(node, node_field.name)
         if isinstance(value, Node):
             if _ast_contains(value, predicate):
                 return True
@@ -543,21 +569,27 @@ class CodeGenerator:
 
     @staticmethod
     def _check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
-        """Raise SyntaxError if the argument count doesn't match expected."""
+        """Raise CompileError if the argument count doesn't match expected.
+
+        Derives the line number from the first argument when available,
+        so the diagnostic points at the call site even though the
+        builtin handlers are invoked with only the argument list.
+        """
+        line = arguments[0].line if arguments else None
         if expected == 0 and arguments:
             message = f"{name}() takes no arguments"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if expected > 0 and len(arguments) != expected:
             message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
 
-    def _check_defined(self, name: str, /) -> None:
-        """Raise SyntaxError if a variable is not in scope."""
+    def _check_defined(self, name: str, /, *, line: int | None = None) -> None:
+        """Raise CompileError if a variable is not in scope."""
         if name in self.NAMED_CONSTANTS:
             return
         if name not in self.visible_vars:
             message = f"undefined variable: {name}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
 
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
@@ -817,7 +849,8 @@ class CodeGenerator:
     def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
         if body and self._is_simple_printf(body[-1]):
-            return [*body[:-1], Call("die", body[-1].args)]
+            last = body[-1]
+            return [*body[:-1], Call("die", last.args, line=last.line)]
         return body
 
     def _transform_if_printf(self, statement: If, /) -> If:
@@ -834,7 +867,7 @@ class CodeGenerator:
                 new_else = self._transform_branch_printf(else_body)
         if new_if is if_body and new_else is else_body:
             return statement
-        return If(condition, new_if, new_else)
+        return If(condition, new_if, new_else, line=statement.line)
 
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
@@ -1057,7 +1090,7 @@ class CodeGenerator:
         argument = arguments[0]
         if not isinstance(argument, String):
             message = "die() requires a string literal"
-            raise TypeError(message)
+            raise CompileError(message, line=argument.line)
         label = self.new_string_label(argument.content)
         length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
@@ -1180,7 +1213,7 @@ class CodeGenerator:
         """
         if len(arguments) < 2 or len(arguments) > 3:
             message = "open() expects 2 or 3 arguments"
-            raise SyntaxError(message)
+            raise CompileError(message, line=arguments[0].line if arguments else None)
         name_argument = arguments[0]
         flags_argument = arguments[1]
         self.emit_si_from_argument(name_argument)
@@ -1254,7 +1287,7 @@ class CodeGenerator:
         """
         if not arguments or not isinstance(arguments[0], String):
             message = "printf() requires a string literal as the first argument"
-            raise SyntaxError(message)
+            raise CompileError(message, line=arguments[0].line if arguments else None)
         fmt = arguments[0].content
         # Fast path: no '%' at all → emit print_string directly.
         if "%" not in fmt and len(arguments) == 1:
@@ -1274,7 +1307,7 @@ class CodeGenerator:
                 i += 1
         if len(arguments) - 1 != expected_args:
             message = f"printf() format expects {expected_args} argument{'s' if expected_args != 1 else ''}, got {len(arguments) - 1}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=arguments[0].line)
         # Push arguments right-to-left.
         for arg in reversed(arguments[1:]):
             self.generate_expression(arg)
@@ -1497,9 +1530,10 @@ class CodeGenerator:
                     # User function calls clobber all registers.
                     clobbered.update(self.REGISTER_POOL)
                 else:
-                    call_clobbers = self.BUILTIN_CLOBBERS.get(node.name)
-                    if call_clobbers is not None:
-                        clobbered.update(call_clobbers)
+                    if node.name not in self.BUILTIN_CLOBBERS:
+                        message = f"unknown function: {node.name}"
+                        raise CompileError(message, line=node.line)
+                    clobbered.update(self.BUILTIN_CLOBBERS[node.name])
             for slot in getattr(type(node), "__slots__", ()):
                 child = getattr(node, slot, None)
                 if isinstance(child, Node):
@@ -1723,12 +1757,12 @@ class CodeGenerator:
         """Validate a condition, emit a comparison, and return the operator.
 
         Raises:
-            SyntaxError: If the condition is not a comparison.
+            CompileError: If the condition is not a comparison.
 
         """
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=condition.line)
         if condition.op in ("==", "!="):
             self.validate_equality_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
@@ -2072,7 +2106,7 @@ class CodeGenerator:
                     die_length = string_byte_length(die_message.content)
                     self.visible_vars.add(statement.name)
                     handler = getattr(self, f"builtin_{init.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
+                    clobbers = self.BUILTIN_CLOBBERS[init.name]
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
                     handler(init.args, fuse_die=(die_label, die_length))
@@ -2090,7 +2124,7 @@ class CodeGenerator:
                 if self._is_zero_exit_if(next_stmt):
                     self.visible_vars.add(statement.name)
                     handler = getattr(self, f"builtin_{init.name}")
-                    clobbers = self.BUILTIN_CLOBBERS.get(init.name)
+                    clobbers = self.BUILTIN_CLOBBERS[init.name]
                     if self.register_cache and clobbers:
                         self.auto_spill(clobbers=clobbers)
                     handler(init.args, fuse_exit=True)
@@ -2107,7 +2141,7 @@ class CodeGenerator:
         """Generate code for a function call statement.
 
         Raises:
-            SyntaxError: If the called function is not a known builtin
+            CompileError: If the called function is not a known builtin
                 or user-defined function.
 
         """
@@ -2117,7 +2151,7 @@ class CodeGenerator:
             expected = self.user_functions[name]
             if len(arguments) != expected:
                 message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
-                raise SyntaxError(message)
+                raise CompileError(message, line=statement.line)
             # Invalidate all register caches — user functions clobber everything.
             self.register_cache.clear()
             self.spill_stack.clear()
@@ -2133,8 +2167,8 @@ class CodeGenerator:
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
             message = f"unknown function: {name}"
-            raise SyntaxError(message)
-        clobbers = self.BUILTIN_CLOBBERS.get(name)
+            raise CompileError(message, line=statement.line)
+        clobbers = self.BUILTIN_CLOBBERS[name]
         if self.register_cache and clobbers:
             self.auto_spill(clobbers=clobbers)
         handler(arguments)
@@ -2166,7 +2200,7 @@ class CodeGenerator:
         """Generate code for an expression, leaving the result in AX.
 
         Raises:
-            SyntaxError: If an unknown expression kind or operator is encountered.
+            CompileError: If an unknown expression kind or operator is encountered.
 
         """
         # Skip load if AX already holds this variable's value.
@@ -2192,10 +2226,10 @@ class CodeGenerator:
                 self.emit(f"        mov ax, {self.constant_aliases[vname]}")
                 self.ax_clear()
                 return
-            self._check_defined(vname)
+            self._check_defined(vname, line=expression.line)
             if self.variable_types.get(vname) == "unsigned long":
                 message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
-                raise SyntaxError(message)
+                raise CompileError(message, line=expression.line)
             if vname in self.pinned_register:
                 self.emit(f"        mov ax, {self.pinned_register[vname]}")
             else:
@@ -2206,7 +2240,7 @@ class CodeGenerator:
             self.ax_clear()
             vname = expression.name
             index_expression = expression.index
-            self._check_defined(vname)
+            self._check_defined(vname, line=expression.line)
             if isinstance(index_expression, Int) and vname in self.array_labels:
                 offset = index_expression.value * 2
                 label = self.array_labels[vname]
@@ -2279,7 +2313,7 @@ class CodeGenerator:
                 self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
-            self.emit(f"        mov ax, {self.TYPE_SIZES.get(expression.type_name, 2)}")
+            self.emit(f"        mov ax, {self.TYPE_SIZES[expression.type_name]}")
         elif isinstance(expression, SizeofVar):
             self.ax_clear()
             vname = expression.name
@@ -2391,13 +2425,13 @@ class CodeGenerator:
                 self.emit("        mov ax, 0")
             else:
                 message = f"unknown operator: {operator}"
-                raise SyntaxError(message)
+                raise CompileError(message, line=expression.line)
             if cx_pinned_var is not None:
                 self.emit("        pop cx")
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
-            raise TypeError(message)
+            raise CompileError(message, line=expression.line)
 
     def generate_function(self, function: Function, /) -> None:
         """Generate assembly for a single function definition."""
@@ -2532,7 +2566,7 @@ class CodeGenerator:
         self.ax_clear()
         name = statement.name
         is_byte = self._is_byte_var(name)
-        self._check_defined(name)
+        self._check_defined(name, line=statement.line)
         # Evaluate value into AX, then store at base+index.
         if isinstance(statement.index, Int) and isinstance(statement.expr, Int):
             # Both index and value are constants: direct store.
@@ -2604,11 +2638,11 @@ class CodeGenerator:
             vname = expression.name
             if self.variable_types.get(vname) != "unsigned long":
                 message = f"expected 'unsigned long' expression, got '{self.variable_types.get(vname, 'int')}' variable {vname!r}"
-                raise SyntaxError(message)
+                raise CompileError(message, line=expression.line)
             if vname in self.virtual_long_locals:
                 if self.live_long_local != vname:
                     message = f"internal: virtual long {vname!r} consumed when not live"
-                    raise SyntaxError(message)
+                    raise CompileError(message, line=expression.line)
                 self.live_long_local = None
                 return
             address = self._local_address(vname)
@@ -2623,7 +2657,7 @@ class CodeGenerator:
             self.ax_local = None
             return
         message = f"unsupported 'unsigned long' expression: {type(expression).__name__}"
-        raise SyntaxError(message)
+        raise CompileError(message, line=expression.line)
 
     def generate_return(self, statement: Return, /) -> None:
         """Generate assembly for a return statement.
@@ -2647,7 +2681,7 @@ class CodeGenerator:
         """Generate assembly for a single statement.
 
         Raises:
-            SyntaxError: If an unknown statement kind is encountered.
+            CompileError: If an unknown statement kind is encountered.
 
         """
         if isinstance(statement, VarDecl):
@@ -2663,7 +2697,7 @@ class CodeGenerator:
         elif isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
-            if statement.init is not None and isinstance(statement.init, ArrayInit):
+            if statement.init is not None:
                 elem_labels = []
                 for elem in statement.init.elements:
                     if isinstance(elem, String):
@@ -2672,20 +2706,21 @@ class CodeGenerator:
                         elem_labels.append(str(elem.value))
                     else:
                         message = "array initializer elements must be constants"
-                        raise TypeError(message)
+                        raise CompileError(message, line=elem.line)
                 array_label = f"_arr_{len(self.arrays)}"
                 self.arrays.append((array_label, elem_labels))
                 self.array_labels[statement.name] = array_label
                 self.array_sizes[statement.name] = len(elem_labels)
                 self.emit(f"        mov word [{self._local_address(statement.name)}], {array_label}")
         elif isinstance(statement, Assign):
+            self._check_defined(statement.name, line=statement.line)
             self.emit_store_local(expression=statement.expr, name=statement.name)
         elif isinstance(statement, IndexAssign):
             self.generate_index_assign(statement)
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
-                raise SyntaxError(message)
+                raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
         elif isinstance(statement, DoWhile):
             self.ax_clear()
@@ -2702,7 +2737,7 @@ class CodeGenerator:
             self.ax_clear()
         else:
             message = f"unknown statement: {type(statement).__name__}"
-            raise TypeError(message)
+            raise CompileError(message, line=statement.line)
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.
@@ -3179,7 +3214,7 @@ class CodeGenerator:
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
-                size = self.TYPE_SIZES.get(statement.type_name, 2)
+                size = self.TYPE_SIZES[statement.type_name]
                 self.allocate_local(statement.name, size=size)
                 # Skip the init store for top-level main locals with an Int(0)
                 # initializer: the `dw 0` declaration already zeros the cell,
@@ -3210,24 +3245,25 @@ class CodeGenerator:
         """
         left_type = self._type_of_operand(left)
         right_type = self._type_of_operand(right)
+        line = left.line or right.line
         if left_type == "pointer" and right_type not in ("pointer", "null"):
             message = f"pointer compared to non-pointer: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if right_type == "pointer" and left_type not in ("pointer", "null"):
             message = f"pointer compared to non-pointer: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if left_type == "null" and right_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if right_type == "null" and left_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if left_type == "char" and right_type not in ("char", "unknown"):
             message = f"char compared to non-char: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
         if right_type == "char" and left_type not in ("char", "unknown"):
             message = f"char compared to non-char: {left} vs {right}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line)
 
 
 class Parser:
@@ -3245,13 +3281,13 @@ class Parser:
             The consumed token as a (kind, text, line) triple.
 
         Raises:
-            SyntaxError: If the token kind does not match the expected kind.
+            CompileError: If the token kind does not match the expected kind.
 
         """
         token = self.tokens[self.position]
         if kind is not None and token[0] != kind:
-            message = f"line {token[2]}: expected {kind}, got {token[0]} ({token[1]!r})"
-            raise SyntaxError(message)
+            message = f"expected {kind}, got {token[0]} ({token[1]!r})"
+            raise CompileError(message, line=token[2])
         self.position += 1
         return token
 
@@ -3269,28 +3305,29 @@ class Parser:
            ``(column + 1) % 40`` keeps the ``%`` outer but the inner
            addition is already a tight pair.
         """
+        line = left.line
         if isinstance(left, Int) and isinstance(right, Int):
             a, b = left.value, right.value
             if operator == "+":
-                return Int(a + b)
+                return Int(a + b, line=line)
             if operator == "-":
-                return Int(a - b)
+                return Int(a - b, line=line)
             if operator == "*":
-                return Int(a * b)
+                return Int(a * b, line=line)
             if operator == "&":
-                return Int(a & b)
+                return Int(a & b, line=line)
             if operator == "/" and b != 0:
-                return Int(a // b)
+                return Int(a // b, line=line)
             if operator == "%" and b != 0:
-                return Int(a % b)
+                return Int(a % b, line=line)
             if operator == ">>":
-                return Int((a & 0xFFFF) >> (b & 0x1F))
+                return Int((a & 0xFFFF) >> (b & 0x1F), line=line)
         # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
         # div sequence and avoids the slow div instruction.  Only kicks
         # in when N is a positive power of two; other divisions stay as-is.
         if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
             shift = right.value.bit_length() - 1
-            return BinOp(">>", left, Int(shift))
+            return BinOp(">>", left, Int(shift, line=line), line=line)
         if (
             operator in ("+", "-")
             and isinstance(right, Int)
@@ -3302,9 +3339,9 @@ class Parser:
             outer_sign = 1 if operator == "+" else -1
             combined = inner_sign * left.right.value + outer_sign * right.value
             if combined >= 0:
-                return BinOp("+", left.left, Int(combined))
-            return BinOp("-", left.left, Int(-combined))
-        return BinOp(operator, left, right)
+                return BinOp("+", left.left, Int(combined, line=line), line=line)
+            return BinOp("-", left.left, Int(-combined, line=line), line=line)
+        return BinOp(operator, left, right, line=line)
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -3343,13 +3380,14 @@ class Parser:
             An AST node for the array initializer.
 
         """
+        line = self.peek()[2]
         self.eat("LBRACE")
         elems = [self.parse_expression()]
         while self.peek()[0] == "COMMA":
             self.eat("COMMA")
             elems.append(self.parse_expression())
         self.eat("RBRACE")
-        return ArrayInit(elems)
+        return ArrayInit(elems, line=line)
 
     def parse_assignment(self) -> Node:
         """Parse a simple assignment statement.
@@ -3358,11 +3396,12 @@ class Parser:
             An AST node for the assignment.
 
         """
-        name = self.eat("IDENT")[1]
+        token = self.eat("IDENT")
+        name = token[1]
         self.eat("ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
-        return Assign(name, expression)
+        return Assign(name, expression, line=token[2])
 
     def parse_bitwise_and(self) -> Node:
         """Parse a left-associative bitwise ``&`` expression.
@@ -3398,11 +3437,12 @@ class Parser:
             An AST node for the call statement.
 
         """
-        name = self.eat("IDENT")[1]
+        token = self.eat("IDENT")
+        name = token[1]
         self.eat("LPAREN")
         arguments = self.parse_arguments()
         self.eat("SEMI")
-        return Call(name, arguments)
+        return Call(name, arguments, line=token[2])
 
     def parse_comparison(self) -> Node:
         """Parse a comparison expression.
@@ -3415,7 +3455,7 @@ class Parser:
         if self.peek()[0] in COMPARISON_OPERATORS:
             operator_token = self.eat()
             right = self.parse_shift()
-            return BinOp(operator_token[1], left, right)
+            return BinOp(operator_token[1], left, right, line=operator_token[2])
         return left
 
     def parse_compound_assignment(self) -> Node:
@@ -3425,12 +3465,14 @@ class Parser:
             An AST node for the desugared assignment.
 
         """
-        name = self.eat("IDENT")[1]
+        token = self.eat("IDENT")
+        name = token[1]
+        line = token[2]
         self.eat("PLUS_ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
         # Desugar: i += expr  →  i = i + expr
-        return Assign(name, BinOp("+", Var(name), expression))
+        return Assign(name, BinOp("+", Var(name, line=line), expression, line=line), line=line)
 
     def parse_condition(self) -> Node:
         """Parse an if/while condition.
@@ -3448,7 +3490,7 @@ class Parser:
             return expression
         if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
             return expression
-        return BinOp("!=", expression, Int(0))
+        return BinOp("!=", expression, Int(0, line=expression.line), line=expression.line)
 
     def parse_do_while(self) -> Node:
         """Parse a do...while loop statement.
@@ -3457,7 +3499,7 @@ class Parser:
             A ``DoWhile`` AST node.
 
         """
-        self.eat("DO")
+        token = self.eat("DO")
         self.eat("LBRACE")
         body = self.parse_block()
         self.eat("WHILE")
@@ -3465,7 +3507,7 @@ class Parser:
         condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("SEMI")
-        return DoWhile(condition, body)
+        return DoWhile(condition, body, line=token[2])
 
     def parse_expression(self) -> Node:
         """Parse an expression.
@@ -3483,13 +3525,14 @@ class Parser:
             An AST node for the function.
 
         """
+        line = self.peek()[2]
         self.parse_type()
         name = self.eat("IDENT")[1]
         self.eat("LPAREN")
         parameters = self.parse_parameters()
         self.eat("RPAREN")
         self.eat("LBRACE")
-        return Function(name, parameters, self.parse_block())
+        return Function(name, parameters, self.parse_block(), line=line)
 
     def parse_if(self) -> Node:
         """Parse an if statement.
@@ -3498,7 +3541,7 @@ class Parser:
             An AST node for the if statement.
 
         """
-        self.eat("IF")
+        token = self.eat("IF")
         self.eat("LPAREN")
         condition = self.parse_condition()
         self.eat("RPAREN")
@@ -3512,18 +3555,19 @@ class Parser:
             else:
                 self.eat("LBRACE")
                 else_body = self.parse_block()
-        return If(condition, body, else_body)
+        return If(condition, body, else_body, line=token[2])
 
     def parse_index_assignment(self) -> Node:
         """Parse an indexed assignment ``name[index] = expr;``."""
-        name = self.eat("IDENT")[1]
+        token = self.eat("IDENT")
+        name = token[1]
         self.eat("LBRACKET")
         index = self.parse_expression()
         self.eat("RBRACKET")
         self.eat("ASSIGN")
         expr = self.parse_expression()
         self.eat("SEMI")
-        return IndexAssign(name, index, expr)
+        return IndexAssign(name, index, expr, line=token[2])
 
     def parse_logical_and(self) -> Node:
         """Parse a left-associative ``&&`` expression.
@@ -3534,9 +3578,9 @@ class Parser:
         """
         left = self.parse_bitwise_and()
         while self.peek()[0] == "AND_AND":
-            self.eat()
+            op_token = self.eat()
             right = self.parse_bitwise_and()
-            left = LogicalAnd(left, right)
+            left = LogicalAnd(left, right, line=op_token[2])
         return left
 
     def parse_logical_or(self) -> Node:
@@ -3548,9 +3592,9 @@ class Parser:
         """
         left = self.parse_logical_and()
         while self.peek()[0] == "OR_OR":
-            self.eat()
+            op_token = self.eat()
             right = self.parse_logical_and()
-            left = LogicalOr(left, right)
+            left = LogicalOr(left, right, line=op_token[2])
         return left
 
     def parse_multiplicative(self) -> Node:
@@ -3618,42 +3662,43 @@ class Parser:
             An AST node for the primary expression.
 
         Raises:
-            SyntaxError: If an unexpected token is encountered.
+            CompileError: If an unexpected token is encountered.
 
         """
         token = self.peek()
+        line = token[2]
         if token[0] == "SIZEOF":
             return self.parse_sizeof()
         if token[0] == "NUMBER":
             self.eat()
-            return Int(int(token[1], 0))
+            return Int(int(token[1], 0), line=line)
         if token[0] == "CHAR_LIT":
             self.eat()
-            return Char(decode_first_character(token[1][1:-1]))
+            return Char(decode_first_character(token[1][1:-1], line=line), line=line)
         if token[0] == "STRING":
             self.eat()
-            return String(token[1][1:-1])
+            return String(token[1][1:-1], line=line)
         if token[0] == "IDENT":
             self.eat()
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
-                return Call(token[1], self.parse_arguments())
+                return Call(token[1], self.parse_arguments(), line=line)
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
-                return Index(token[1], index)
-            return Var(token[1])
+                return Index(token[1], index, line=line)
+            return Var(token[1], line=line)
         if token[0] == "NOT":
             self.eat()
-            return BinOp("==", self.parse_primary(), Int(0))
+            return BinOp("==", self.parse_primary(), Int(0, line=line), line=line)
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
             self.eat("RPAREN")
             return expression
-        message = f"line {token[2]}: expected expression, got {token[0]} ({token[1]!r})"
-        raise SyntaxError(message)
+        message = f"expected expression, got {token[0]} ({token[1]!r})"
+        raise CompileError(message, line=line)
 
     def parse_program(self) -> Node:
         """Parse the entire program as a sequence of function declarations.
@@ -3662,10 +3707,11 @@ class Parser:
             An AST node for the program.
 
         """
+        line = self.peek()[2]
         functions = []
         while self.peek()[0] != "EOF":
             functions.append(self.parse_function())
-        return Program(functions)
+        return Program(functions, line=line)
 
     def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
@@ -3674,16 +3720,16 @@ class Parser:
             An AST node for sizeof(type) or sizeof(variable).
 
         """
-        self.eat("SIZEOF")
+        token = self.eat("SIZEOF")
         self.eat("LPAREN")
         # sizeof(type) or sizeof(variable)
         if self.peek()[0] in TYPE_TOKENS:
             type_string = self.parse_type()
             self.eat("RPAREN")
-            return SizeofType(type_string)
+            return SizeofType(type_string, line=token[2])
         name = self.eat("IDENT")[1]
         self.eat("RPAREN")
-        return SizeofVar(name)
+        return SizeofVar(name, line=token[2])
 
     def parse_statement(self) -> Node:
         """Parse a single statement.
@@ -3692,7 +3738,7 @@ class Parser:
             An AST node for the statement.
 
         Raises:
-            SyntaxError: If an unexpected token is encountered.
+            CompileError: If an unexpected token is encountered.
 
         """
         token = self.peek()
@@ -3703,7 +3749,7 @@ class Parser:
         if token[0] == "BREAK":
             self.eat("BREAK")
             self.eat("SEMI")
-            return Break()
+            return Break(line=token[2])
         if token[0] == "DO":
             return self.parse_do_while()
         if token[0] == "RETURN":
@@ -3712,7 +3758,7 @@ class Parser:
             if self.peek()[0] != "SEMI":
                 value = self.parse_expression()
             self.eat("SEMI")
-            return Return(value)
+            return Return(value, line=token[2])
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":
@@ -3724,8 +3770,8 @@ class Parser:
             if next_kind == "LBRACKET":
                 return self.parse_index_assignment()
             return self.parse_call_statement()
-        message = f"line {token[2]}: expected statement, got {token[0]} ({token[1]!r})"
-        raise SyntaxError(message)
+        message = f"expected statement, got {token[0]} ({token[1]!r})"
+        raise CompileError(message, line=token[2])
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned long).
@@ -3734,7 +3780,7 @@ class Parser:
             The type as a string.
 
         Raises:
-            SyntaxError: If an unexpected token is encountered, or a bare
+            CompileError: If an unexpected token is encountered, or a bare
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
@@ -3755,15 +3801,15 @@ class Parser:
             self.eat()
             if self.peek()[0] != "LONG":
                 following = self.peek()
-                message = f"line {token[2]}: only 'unsigned long' is supported, got 'unsigned {following[1]}'"
-                raise SyntaxError(message)
+                message = f"expected 'long' after 'unsigned', got {following[1]!r}"
+                raise CompileError(message, line=token[2])
             self.eat()
             return "unsigned long"
         if token[0] == "LONG":
-            message = f"line {token[2]}: bare 'long' is not supported; use 'unsigned long'"
-            raise SyntaxError(message)
-        message = f"line {token[2]}: expected type, got {token[0]} ({token[1]!r})"
-        raise SyntaxError(message)
+            message = "bare 'long' is not supported; use 'unsigned long'"
+            raise CompileError(message, line=token[2])
+        message = f"expected type, got {token[0]} ({token[1]!r})"
+        raise CompileError(message, line=token[2])
 
     def parse_variable_declaration(self) -> Node:
         """Parse a variable or array declaration.
@@ -3772,6 +3818,7 @@ class Parser:
             An AST node for the declaration.
 
         """
+        line = self.peek()[2]
         type_string = self.parse_type()
         name = self.eat("IDENT")[1]
         # Optional [] for array declarations
@@ -3786,8 +3833,8 @@ class Parser:
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
-            return ArrayDecl(name, type_string, init)
-        return VarDecl(name, type_string, init)
+            return ArrayDecl(name, type_string, init, line=line)
+        return VarDecl(name, type_string, init, line=line)
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.
@@ -3796,12 +3843,12 @@ class Parser:
             An AST node for the while loop.
 
         """
-        self.eat("WHILE")
+        token = self.eat("WHILE")
         self.eat("LPAREN")
         condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("LBRACE")
-        return While(condition, self.parse_block())
+        return While(condition, self.parse_block(), line=token[2])
 
     def peek(self, offset: int = 0) -> tuple[str, str, int]:
         """Return the token at the current position plus an optional offset.
@@ -3839,17 +3886,23 @@ def apply_defines(
     return result
 
 
-def decode_first_character(text: str) -> int:
+def decode_first_character(text: str, /, *, line: int | None = None) -> int:
     """Return the byte value of the first character in a C string literal.
 
     Returns:
         The integer byte value of the decoded character.
 
+    Raises:
+        CompileError: If the text contains an unrecognized escape sequence.
+
     """
     if text[0] == "\\" and len(text) >= 2:
         if text[1] == "x" and len(text) >= 3:
             return int(text[2:], 16)  # noqa: FURB166
-        return CHARACTER_ESCAPES.get(text[1], ord(text[1]))
+        if text[1] not in CHARACTER_ESCAPES:
+            message = f"unknown escape sequence: '\\{text[1]}'"
+            raise CompileError(message, line=line)
+        return CHARACTER_ESCAPES[text[1]]
     return ord(text[0])
 
 
@@ -3857,19 +3910,25 @@ def main() -> int:
     """Compile a C source file to NASM assembly.
 
     Returns:
-        Exit code (0 for success, 1 for usage error).
+        Exit code (0 for success, 1 for usage or compilation error).
 
     """
     if len(sys.argv) < 2 or len(sys.argv) > 3:
         print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
         return 1
 
-    source = Path(sys.argv[1]).read_text(encoding="utf-8")
-    source, defines = preprocess(source)
-    tokens = tokenize(source)
-    tokens = apply_defines(defines=defines, tokens=tokens)
-    ast = Parser(tokens).parse_program()
-    output = CodeGenerator().generate(ast)
+    input_path = sys.argv[1]
+    try:
+        source = Path(input_path).read_text(encoding="utf-8")
+        source, defines = preprocess(source)
+        tokens = tokenize(source)
+        tokens = apply_defines(defines=defines, tokens=tokens)
+        ast = Parser(tokens).parse_program()
+        output = CodeGenerator().generate(ast)
+    except CompileError as error:
+        location = f"{input_path}:{error.line}" if error.line else input_path
+        print(f"{location}: error: {error.message}", file=sys.stderr)
+        return 1
 
     if len(sys.argv) == 3:
         Path(sys.argv[2]).write_text(output, encoding="utf-8")
@@ -3895,7 +3954,7 @@ def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
     """
     defines: dict[str, str] = {}
     output_lines: list[str] = []
-    for line in source.splitlines(keepends=True):
+    for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
         stripped = line.lstrip()
         if not stripped.startswith("#define"):
             output_lines.append(line)
@@ -3903,12 +3962,12 @@ def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
         parts = stripped.split(None, 2)
         if len(parts) < 3:
             message = f"malformed #define: {line.rstrip()!r}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line_number)
         name = parts[1]
         value = parts[2].rstrip()
         if not value:
             message = f"empty #define value for {name!r}"
-            raise SyntaxError(message)
+            raise CompileError(message, line=line_number)
         defines[name] = value
         output_lines.append("\n")  # Preserve line numbering.
     return "".join(output_lines), defines
@@ -3943,7 +4002,7 @@ def tokenize(source: str, /) -> list[tuple[str, str, int]]:
         A list of (kind, text, line) token triples.
 
     Raises:
-        SyntaxError: If an unexpected character is encountered.
+        CompileError: If an unexpected character is encountered.
 
     """
     tokens: list[tuple[str, str, int]] = []
@@ -3952,8 +4011,8 @@ def tokenize(source: str, /) -> list[tuple[str, str, int]]:
     while position < len(source):
         match = TOKEN_PATTERN.match(source, position)
         if not match:
-            message = f"line {line}: unexpected character {source[position]!r}"
-            raise SyntaxError(message)
+            message = f"unexpected character {source[position]!r}"
+            raise CompileError(message, line=line)
         kind = match.lastgroup
         assert kind is not None
         text = match.group()
