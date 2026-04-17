@@ -496,6 +496,10 @@ class CodeGenerator:
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
+        "EDIT_BUFFER_BASE",
+        "EDIT_BUFFER_SIZE",
+        "EDIT_KILL_BUFFER",
+        "EDIT_KILL_BUFFER_SIZE",
         "ERROR_EXISTS",
         "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",
@@ -1175,6 +1179,7 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=arguments[0], register="bx")
         self._emit_syscall("IO_FSTAT")
         self.emit("        xor ah, ah")
+        self.ax_clear()
 
     def builtin_getchar(self, arguments: list[Node], /) -> None:
         """Generate code for the getchar() builtin.
@@ -2632,29 +2637,31 @@ class CodeGenerator:
         """Generate assembly for an if statement."""
         condition, body, else_body = statement.cond, statement.body, statement.else_body
         label_index = self.new_label()
-        saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
             self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
+            # Snapshot AX tracking at the point the fall-through (else)
+            # path actually resumes — before body generation disturbs it.
+            post_condition_ax = (self.ax_local, self.ax_is_byte)
             self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
                 self.emit(f"        jmp .if_{label_index}_end")
             self.emit(f".if_{label_index}_else:")
-            # On the else path, AX is unchanged (comparison doesn't modify it).
-            self.ax_local, self.ax_is_byte = saved_ax
+            self.ax_local, self.ax_is_byte = post_condition_ax
             self.generate_body(else_body, scoped=True)
             if not if_exits or not self.always_exits(else_body):
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
             self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_end", context="if")
+            post_condition_ax = (self.ax_local, self.ax_is_byte)
             self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
-            # exit, return, or break), AX is unchanged on the
-            # fall-through path.
+            # exit, return, or break), the fall-through path resumes
+            # with AX tracking as of the end of condition evaluation.
             if self.always_exits(body):
-                self.ax_local, self.ax_is_byte = saved_ax
+                self.ax_local, self.ax_is_byte = post_condition_ax
             else:
                 self.ax_clear()
 
@@ -3020,6 +3027,8 @@ class CodeGenerator:
         """Collapse conditional-jump-over-unconditional-jump sequences.
 
         Replaces ``jCC .L1 / jmp .L2 / .L1:`` with ``jCC_inv .L2``.
+        The ``.L1:`` label is kept when other jumps still target it;
+        deleting it would leave those references dangling.
         """
         i = 0
         while i < len(self.lines) - 2:
@@ -3030,8 +3039,16 @@ class CodeGenerator:
             parts = a.split()
             if len(parts) == 2 and parts[0] in JUMP_INVERT and b.startswith("jmp ") and c == f"{parts[1]}:":
                 target = b.split()[1]
+                label = parts[1]
                 self.lines[i] = f"        {JUMP_INVERT[parts[0]]} {target}"
-                del self.lines[i + 1 : i + 3]
+                label_referenced_elsewhere = any(
+                    j != i and j != i + 1 and j != i + 2 and (tokens := self.lines[j].split()) and len(tokens) >= 2 and tokens[-1] == label
+                    for j in range(len(self.lines))
+                )
+                if label_referenced_elsewhere:
+                    del self.lines[i + 1]
+                else:
+                    del self.lines[i + 1 : i + 3]
                 continue
             i += 1
 

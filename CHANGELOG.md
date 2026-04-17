@@ -6,6 +6,14 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
+### [2026-04-17](https://github.com/bboe/BBoeOS/compare/9dfd6d8...main)
+
+- Convert `edit` from assembly to C; retire `src/asm/edit.asm`
+- Add `EDIT_BUFFER_BASE`, `EDIT_BUFFER_SIZE`, `EDIT_KILL_BUFFER`, `EDIT_KILL_BUFFER_SIZE` constants (fixed addresses replace the former float-on-`program_end` gap buffer)
+- cc.py fix: `peephole_double_jump` now keeps `.L1:` when other jumps still target it; deleting it stranded the top-of-loop `jCC` that guards `while (cond)` with `break`
+- cc.py fix: `generate_if` restores AX tracking to the post-condition state (not the pre-if state) on the exit-body fall-through path, so a condition that clobbers AX (e.g. `fstat(fd) & FLAG_DIRECTORY`) no longer leaves stale `ax_local` tracking pointing at the pre-if variable
+- cc.py fix: `builtin_fstat` clears AX tracking after the syscall (the syscall overwrites AX but tracking still pointed at the argument local)
+
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
 - Convert the shell, `dns`, and `ping` from assembly to C; archive each `.asm` as a same-layout reference
