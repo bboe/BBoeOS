@@ -45,23 +45,18 @@ int skip_name(char *buf, int offset) {
 
 int resolve_dns(char *domain, char *target) {
     char *query = SECTOR_BUFFER;
-    query[0] = 0;  query[1] = 1;
-    query[2] = 1;  query[3] = 0;
-    query[4] = 0;  query[5] = 1;
-    query[6] = 0;  query[7] = 0;
-    query[8] = 0;  query[9] = 0;
-    query[10] = 0; query[11] = 0;
+    /* DNS header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1, rest zero. */
+    memcpy(query, "\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
     int name_length = encode_domain(domain, query + 12);
     if (name_length == 0) {
         return 1;
     }
-    char *after = query + 12 + name_length;
-    after[0] = 0; after[1] = 1;
-    after[2] = 0; after[3] = 1;
+    /* QTYPE=A, QCLASS=IN, both 0x0001 big-endian. */
+    memcpy(query + 12 + name_length, "\x00\x01\x00\x01", 4);
     int query_length = 16 + name_length;
 
     char *dns_ip = BUFFER + 8;
-    dns_ip[0] = 10; dns_ip[1] = 0; dns_ip[2] = 2; dns_ip[3] = 3;
+    memcpy(dns_ip, "\x0a\x00\x02\x03", 4);
 
     int fd = net_open(SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
@@ -77,10 +72,9 @@ int resolve_dns(char *domain, char *target) {
     while (tries > 0) {
         received = recvfrom(fd, query, 512, 1024);
         if (received > 0) {
-            tries = 0;
-        } else {
-            tries = tries - 1;
+            break;
         }
+        tries = tries - 1;
     }
     close(fd);
     if (received == 0) {
@@ -97,10 +91,7 @@ int resolve_dns(char *domain, char *target) {
         char *record = query + offset;
         int rdlength = record[9];
         if (record[0] == 0 && record[1] == 1) {
-            target[0] = record[10];
-            target[1] = record[11];
-            target[2] = record[12];
-            target[3] = record[13];
+            memcpy(target, record + 10, 4);
             return 0;
         }
         offset = offset + 10 + rdlength;
@@ -137,19 +128,12 @@ int main(int argc, char *argv[]) {
     int seq = 1;
     int count = 4;
     while (count > 0) {
-        packet[0] = 8;
-        packet[1] = 0;
-        packet[2] = 0;
-        packet[3] = 0;
-        packet[4] = 0;
-        packet[5] = 1;
-        packet[6] = seq / 256;
+        /* ICMP echo request: type=8 code=0 checksum=placeholder
+           identifier=0x0001 sequence=<seq>. Payload (bytes 8..15) is
+           whatever happens to be in SECTOR_BUFFER — echo reply mirrors
+           it back verbatim. */
+        memcpy(packet, "\x08\x00\x00\x00\x00\x01\x00\x00", 8);
         packet[7] = seq;
-        int i = 8;
-        while (i < 16) {
-            packet[i] = 0;
-            i = i + 1;
-        }
         int sum = checksum(packet, 16);
         packet[2] = sum;
         packet[3] = sum / 256;
@@ -157,17 +141,17 @@ int main(int argc, char *argv[]) {
         int t0 = ticks();
         int got = 0;
         if (sendto(fd, packet, 16, target_ip, 0, 0) > 0) {
-            /* ~32k tries is plenty for the local ring to surface a reply
-               and fits signed 16-bit, which is how our C subset compares. */
+            /* ~32k tries fits signed 16-bit (our C subset compares
+               signed) and is plenty for the local ring to surface a
+               reply. */
             int tries = 30000;
             while (tries > 0) {
                 int n = recvfrom(fd, packet, 128, 0);
                 if (n > 0 && packet[0] == 0) {
                     got = 1;
-                    tries = 0;
-                } else {
-                    tries = tries - 1;
+                    break;
                 }
+                tries = tries - 1;
             }
         }
         if (got) {
