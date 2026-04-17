@@ -2302,9 +2302,24 @@ class CodeGenerator:
                 self.ax_clear()
                 return
             if operator == ">>" and isinstance(right, Int):
+                shift = right.value & 0x1F
+                # Special case: `local >> 8` when ``local`` lives in memory.
+                # Loading the high byte directly avoids one instruction
+                # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
+                # an ALU op on a shift that's really a byte-select.
+                if (
+                    shift == 8
+                    and isinstance(left, Var)
+                    and left.name in self.locals
+                    and left.name not in self.pinned_register
+                    and left.name not in self.array_labels
+                ):
+                    self.emit(f"        mov al, [{self._local_address(left.name)}+1]")
+                    self.emit("        xor ah, ah")
+                    self.ax_clear()
+                    return
                 # Fast path: shr r16, imm — one instruction, no CX scratch.
                 self.generate_expression(left)
-                shift = right.value & 0x1F
                 if shift == 0:
                     pass
                 elif shift >= 16:
@@ -2817,9 +2832,14 @@ class CodeGenerator:
                 start = stripped.find("[_l_", cursor)
                 if start < 0:
                     break
-                end = stripped.index("]", start)
-                loaded.add(stripped[start + 1 : end])
-                cursor = end + 1
+                # Extract the bare label — stop at the first non-identifier
+                # byte. `[_l_sum+1]` must count as a reference to `_l_sum`,
+                # not `_l_sum+1`.
+                label_end = start + 1
+                while label_end < len(stripped) and (stripped[label_end].isalnum() or stripped[label_end] == "_"):
+                    label_end += 1
+                loaded.add(stripped[start + 1 : label_end])
+                cursor = stripped.index("]", label_end) + 1
         # Remove stores and declarations for labels never loaded.
         result: list[str] = []
         for line in self.lines:

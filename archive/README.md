@@ -21,7 +21,7 @@ source is kept here for reference.
 | netinit | 72          | 63        | -9    |
 | netrecv | 334         | 382       | +48   |
 | netsend | 187         | 214       | +27   |
-| ping    | 1019        | 1240      | +221  |
+| ping    | 1019        | 1239      | +220  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+4):** Null terminators on 4 strings (+4 bytes).  The
@@ -77,7 +77,7 @@ length-bearing messages without null terminators.  Both versions
 stash the MAC in the shell's idle input buffer at ``BUFFER`` rather
 than in an embedded cell.
 
-**ping (+221):** Both versions build ICMP echo requests in userspace
+**ping (+220):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  Most of the delta is
 the DNS fallback: ``encode_domain``, ``skip_name``, and
