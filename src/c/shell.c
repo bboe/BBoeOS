@@ -25,7 +25,7 @@ int visual_bell() {
     return 0;
 }
 
-int insert_char(char *buf, int cursor, int end, int ch) {
+int insert_char(char *buf, int cursor, int end, char ch) {
     /* Shift buf[cursor..end) right one slot, write ch at cursor, redraw
        tail, and reposition cursor.  Returns the new end index. Caller
        guarantees end < MAX_INPUT. */
@@ -83,7 +83,7 @@ int main() {
         int cursor = 0;
         int end = 0;
         while (1) {
-            int ch = getchar();
+            char ch = getchar();
             if (ch == 1) {
                 /* Ctrl-A: beginning of line */
                 if (cursor > 0) {
