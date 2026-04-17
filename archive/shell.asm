@@ -2,6 +2,15 @@
 
 %include "constants.asm"
 
+;; Borrow otherwise-unused fixed regions instead of carrying static
+;; storage inside the shell binary.  kill_buffer lives past the 1-byte
+;; scratch slot that FUNCTION_GET_CHARACTER writes into on every
+;; keypress; exec_path reuses the ARGV region (32 bytes), which is
+;; free here because the shell never calls FUNCTION_PARSE_ARGV on its
+;; own command line.
+%assign exec_path   ARGV
+%assign kill_buffer SECTOR_BUFFER + 4
+
 main:
         cld
         mov si, PROMPT
@@ -57,6 +66,10 @@ main:
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
         ;; Not found in root: retry inside bin/
+        ;; Write the "bin/" prefix at runtime since exec_path is
+        ;; volatile ARGV scratch, not prefilled binary data.
+        mov word [exec_path], 0x6962        ; 'b','i'
+        mov word [exec_path+2], 0x2F6E      ; 'n','/'
         mov si, BUFFER
         mov di, exec_path + 4   ; just past "bin/"
         mov cx, DIRECTORY_NAME_LENGTH    ; name + null
@@ -506,8 +519,8 @@ PROMPT_LENGTH equ $ - PROMPT
 SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 
 ;; Variables
-exec_path     db `bin/`              ; 4 bytes prefix
-              times DIRECTORY_NAME_LENGTH+1 db 0 ; name (up to 26 chars) + null + safety byte
-kill_buffer   times MAX_INPUT db 0
+;; kill_buffer and exec_path live in the fixed scratch regions declared
+;; as %assigns at the top of this file; no binary storage is reserved
+;; for them here.
 kill_length   dw 0
 

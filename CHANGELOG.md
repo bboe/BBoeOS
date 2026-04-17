@@ -6,6 +6,23 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
+### [2026-04-16](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
+
+- Convert the shell, `dns`, and `ping` from assembly to C; archive each `.asm` as a same-layout reference
+- Add protocol argument to `net_open` (Linux-style `(type, protocol)` API)
+- Add ICMP sockets via `(SOCK_DGRAM, IPPROTO_ICMP)`; build ICMP echo requests in userspace
+- Remove `SYS_NET_ARP` and `SYS_NET_PING` syscalls (both protocols now live in userspace); collapse NET syscall numbers
+- Convert the `dns_query` helper to socket-based UDP syscalls
+- Add cc.py builtins: `checksum`, `ticks`, `exec`, `reboot`, `shutdown`, `set_exec_arg`
+- Extend cc.py language: user-defined function calls with return values, indexed assignment (`name[expr] = expr`), `\x` hex escapes in character literals, `>>` right-shift, `continue`, `const` (accepted and discarded)
+- cc.py codegen: pin non-main parameters and body locals to registers, skip push/pop bx around simple subscript indices, emit inc/dec for ±1 and fuse via peephole, use memory operands directly in add/sub
+- cc.py peephole: rewrite `x / 2^N` as `x >> N`, shortcut `local >> 8` to a direct high-byte load
+- cc.py fixes: several codegen correctness issues exposed by dns.c, strip `+N` offset when extracting `_l_` label from stores, line-aware diagnostics on compile errors
+- Sort cc.py module-level constants alphabetically
+- Extend the self-hosted assembler with `lodsw` / `adc` / `not` and shorter encodings
+- Add regression test that `archive/*.asm` still assembles and matches the size table in `archive/README.md`
+- Drop stale UDP syscall rows from the CLAUDE.md syscall table
+
 ## [0.5.0](https://github.com/bboe/BBoeOS/compare/a0a0980...5156ae9) (2026-04-16)
 
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/84a1efe...5156ae9)

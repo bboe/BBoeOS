@@ -36,7 +36,7 @@ int skip_name(char *buf, int offset) {
         if (byte == '\0') {
             return offset + 1;
         }
-        if (byte >= 192) {
+        if (byte >= '\xC0') {
             return offset + 2;
         }
         offset = offset + 1 + byte;
@@ -90,7 +90,7 @@ int resolve_dns(char *domain, char *target) {
         offset = skip_name(query, offset);
         char *record = query + offset;
         int rdlength = record[9];
-        if (record[0] == 0 && record[1] == 1) {
+        if (record[0] == '\0' && record[1] == '\x01') {
             memcpy(target, record + 10, 4);
             return 0;
         }
@@ -146,7 +146,7 @@ int main(int argc, char *argv[]) {
         int tries = 30000;
         while (tries) {
             int n = recvfrom(fd, packet, 128, 0);
-            if (n > 0 && packet[0] == 0) {
+            if (n > 0 && packet[0] == '\0') {
                 got = 1;
                 break;
             }

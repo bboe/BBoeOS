@@ -41,6 +41,7 @@ Builtins:
     close(fd)                -- close a file descriptor
     datetime()               -- return unsigned seconds since 1970-01-01 UTC
     die(message)             -- print message and terminate
+    exec(name)               -- run program; on failure returns ERROR_* code
     exit()                   -- terminate program
     mkdir(name)              -- create directory, return 0 or ERR_* code
     net_open(type)           -- open socket (SOCK_RAW or SOCK_DGRAM), return fd or -1
@@ -48,8 +49,11 @@ Builtins:
     print_datetime(epoch)    -- print epoch as YYYY-MM-DD HH:MM:SS
     putchar(expression)      -- print single character
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
+    reboot()                 -- warm-reboot the machine (does not return)
     recvfrom(fd, buf, len, port) -- receive UDP datagram filtered by port
     sendto(fd, buf, len, ip, src_port, dst_port) -- send UDP datagram
+    set_exec_arg(ptr)        -- pass argument pointer to the next exec()
+    shutdown()               -- APM power off (returns only on failure)
     sleep(milliseconds)      -- busy-wait for the given duration
     ticks()                  -- return low 16 bits of BIOS timer tick counter
     uptime()                 -- return seconds since boot
@@ -154,6 +158,11 @@ class Call(Node):
 
     name: str
     args: list[Node]
+
+
+@dataclass(slots=True)
+class Continue(Node):
+    """``continue;`` statement (jumps to the innermost loop's condition test)."""
 
 
 @dataclass(slots=True)
@@ -302,6 +311,7 @@ CHARACTER_ESCAPES = {
     '"': 0x22,
     "0": 0x00,
     "\\": 0x5C,
+    "b": 0x08,
     "n": 0x0A,
     "r": 0x0D,
     "t": 0x09,
@@ -340,7 +350,22 @@ JUMP_WHEN_TRUE = {
     "==": "je",
 }
 
-KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
+KEYWORDS = frozenset({
+    "break",
+    "char",
+    "const",
+    "continue",
+    "do",
+    "else",
+    "if",
+    "int",
+    "long",
+    "return",
+    "sizeof",
+    "unsigned",
+    "void",
+    "while",
+})
 
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
@@ -396,7 +421,7 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UNSIGNED", "VOID"})
 
 
 def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
@@ -429,6 +454,7 @@ class CodeGenerator:
         "close": frozenset({"ax", "bx"}),
         "datetime": frozenset({"ax", "dx"}),
         "die": frozenset(),
+        "exec": frozenset({"ax", "si"}),
         "exit": frozenset(),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getchar": frozenset({"ax"}),
@@ -444,9 +470,12 @@ class CodeGenerator:
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
+        "reboot": frozenset({"ax"}),
         "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
+        "set_exec_arg": frozenset({"ax"}),
+        "shutdown": frozenset({"ax"}),
         "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "ticks": frozenset({"ax", "cx", "dx"}),
@@ -465,14 +494,18 @@ class CodeGenerator:
         "arp_frame",
         "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
+        "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
+        "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
+        "EXEC_ARG",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
         "IPPROTO_ICMP",
         "IPPROTO_UDP",
+        "MAX_INPUT",
         "NULL",
         "O_CREAT",
         "O_RDONLY",
@@ -532,6 +565,7 @@ class CodeGenerator:
         self.lines: list[str] = []
         self.live_long_local: str | None = None
         self.locals: dict[str, int] = {}
+        self.loop_continue_labels: list[str] = []
         self.loop_end_labels: list[str] = []
         self.pinned_register: dict[str, str] = {}
         self.register_cache: dict[tuple[str, int], str] = {}
@@ -899,7 +933,7 @@ class CodeGenerator:
                     a_lit = a_right.value if isinstance(a_right, Int) else None
                     b_lit = b_right.value if isinstance(b_right, Int) else None
                     if a_lit is not None and b_lit is not None:
-                        self.validate_equality_types(a_left, a_right)
+                        self.validate_comparison_types(a_left, a_right)
                         operand = self._emit_byte_index_bx(a_left)
                         word_mem = operand.replace("byte ", "word ")
                         word_val = (b_lit << 8) | a_lit
@@ -914,7 +948,7 @@ class CodeGenerator:
                         and self._byte_index_base_key(a_right) == self._byte_index_base_key(b_right)
                         and b_right.index.value == a_right.index.value + 1
                     ):
-                        self.validate_equality_types(a_left, a_right)
+                        self.validate_comparison_types(a_left, a_right)
                         left_operand = self._emit_byte_index_bx(a_left)
                         left_mem = left_operand.replace("byte ", "word ")
                         self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
@@ -929,19 +963,24 @@ class CodeGenerator:
             i += 1
 
     def _type_of_operand(self, node: Node, /) -> str:
-        """Classify an operand for equality type-checking.
+        """Classify an operand for comparison type-checking.
 
-        Returns one of: ``"pointer"``, ``"null"``, ``"char"``,
-        ``"integer"``, or ``"unknown"`` (expressions whose type we
-        cannot statically determine — treated as integers for the
-        purposes of the check).
+        Returns one of ``"pointer"``, ``"null"``, ``"char"``, or
+        ``"integer"``.  Every AST node that can legally appear inside
+        a comparison must classify into one of the four buckets;
+        anything else raises ``CompileError`` so no operand silently
+        slips through the type check.
         """
         if isinstance(node, Char):
             return "char"
+        if isinstance(node, Int):
+            return "integer"
+        if isinstance(node, String):
+            return "pointer"
         if isinstance(node, Index):
             if self.variable_types.get(node.name) in ("char", "char*"):
                 return "char"
-            return "unknown"
+            return "integer"
         if isinstance(node, Var):
             if node.name == "NULL":
                 return "null"
@@ -952,7 +991,12 @@ class CodeGenerator:
                 return "char"
             if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
                 return "integer"
-        return "unknown"
+            message = f"undefined operand: {node.name}"
+            raise CompileError(message, line=node.line)
+        if isinstance(node, (BinOp, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
+            return "integer"
+        message = f"cannot classify operand type for comparison: {type(node).__name__}"
+        raise CompileError(message, line=node.line)
 
     def allocate_local(self, name: str, /, *, size: int = 2) -> int:
         """Allocate a local variable on the stack frame.
@@ -982,6 +1026,8 @@ class CodeGenerator:
             return False
         last = body[-1]
         if isinstance(last, Break):
+            return True
+        if isinstance(last, Continue):
             return True
         if isinstance(last, Return):
             return True
@@ -1096,6 +1142,21 @@ class CodeGenerator:
         self.emit(f"        mov si, {label}")
         self.emit(f"        mov cx, {length}")
         self.emit("        jmp FUNCTION_DIE")
+
+    def builtin_exec(self, arguments: list[Node], /) -> None:
+        """Generate code for the exec(name) builtin.
+
+        Emits ``mov si, <name> / mov ah, SYS_EXEC / int 30h``.  On
+        success, control is transferred to the loaded program and never
+        returns here.  On failure (CF set), AL contains an ``ERROR_*``
+        code; ``xor ah, ah`` zero-extends it for comparison against
+        ``ERROR_NOT_EXECUTE`` etc.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="exec")
+        self.emit_si_from_argument(arguments[0])
+        self._emit_syscall("EXEC")
+        self.emit("        xor ah, ah")
+        self.ax_clear()
 
     def builtin_exit(self, arguments: list[Node], /) -> None:
         """Generate code for the exit() builtin."""
@@ -1347,6 +1408,16 @@ class CodeGenerator:
         self._emit_syscall("IO_READ")
         self.ax_clear()
 
+    def builtin_reboot(self, arguments: list[Node], /) -> None:
+        """Generate code for the reboot() builtin.
+
+        Emits ``mov ah, SYS_REBOOT / int 30h``.  Does not return on
+        success; the kernel triggers a warm reboot via the keyboard
+        controller.
+        """
+        self._check_argument_count(arguments=arguments, expected=0, name="reboot")
+        self._emit_syscall("REBOOT")
+
     def builtin_recvfrom(self, arguments: list[Node], /) -> None:
         """Generate code for the recvfrom() builtin.
 
@@ -1420,6 +1491,28 @@ class CodeGenerator:
         self.emit("        mov ax, -1")
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
+
+    def builtin_set_exec_arg(self, arguments: list[Node], /) -> None:
+        """Generate code for the set_exec_arg(arg) builtin.
+
+        Writes the 16-bit pointer *arg* to ``[EXEC_ARG]`` so that
+        ``FUNCTION_PARSE_ARGV`` in the next exec()'d program can find
+        it.  Pass NULL (0) to clear.  Used by the shell to forward
+        command arguments into child programs.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="set_exec_arg")
+        self.generate_expression(arguments[0])
+        self.emit("        mov [EXEC_ARG], ax")
+
+    def builtin_shutdown(self, arguments: list[Node], /) -> None:
+        """Generate code for the shutdown() builtin.
+
+        Emits ``mov ah, SYS_SHUTDOWN / int 30h``.  Does not return on
+        success.  On APM failure the syscall returns, letting the caller
+        print a diagnostic and continue.
+        """
+        self._check_argument_count(arguments=arguments, expected=0, name="shutdown")
+        self._emit_syscall("SHUTDOWN")
 
     def builtin_sleep(self, arguments: list[Node], /) -> None:
         """Generate code for the sleep(milliseconds) builtin.
@@ -1763,8 +1856,7 @@ class CodeGenerator:
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise CompileError(message, line=condition.line)
-        if condition.op in ("==", "!="):
-            self.validate_equality_types(condition.left, condition.right)
+        self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
         return condition.op
 
@@ -2178,14 +2270,18 @@ class CodeGenerator:
 
         The body executes unconditionally once, then the condition is
         tested at the bottom.  ``break`` inside the body jumps to the
-        end label, same as in a ``while`` loop.
+        end label, same as in a ``while`` loop.  ``continue`` jumps to
+        the condition test so the loop can re-evaluate and restart.
         """
         condition, body = statement.cond, statement.body
         label_index = self.new_label()
         end_label = f".do_{label_index}_end"
+        continue_label = f".do_{label_index}_continue"
         self.emit(f".do_{label_index}:")
         self.loop_end_labels.append(end_label)
+        self.loop_continue_labels.append(continue_label)
         self.generate_body(body, scoped=True)
+        self.emit(f"{continue_label}:")
         # Short-circuit any false operand straight to end; otherwise
         # fall through to the unconditional jump back to the top.  The
         # ``jfalse end_label; jmp top; end_label:`` pattern is collapsed
@@ -2194,6 +2290,7 @@ class CodeGenerator:
         self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="do_while")
         self.emit(f"        jmp .do_{label_index}")
         self.emit(f"{end_label}:")
+        self.loop_continue_labels.pop()
         self.loop_end_labels.pop()
 
     def generate_expression(self, expression: Node, /) -> None:
@@ -2722,6 +2819,11 @@ class CodeGenerator:
                 message = "break outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
+        elif isinstance(statement, Continue):
+            if not self.loop_continue_labels:
+                message = "continue outside of a loop"
+                raise CompileError(message, line=statement.line)
+            self.emit(f"        jmp {self.loop_continue_labels[-1]}")
         elif isinstance(statement, DoWhile):
             self.ax_clear()
             self.generate_do_while(statement)
@@ -2746,19 +2848,24 @@ class CodeGenerator:
         header check entirely.  The end label is still emitted so a
         ``break`` statement inside the body has a target; when no
         ``break`` is present the label is dead and costs nothing.
+        ``continue`` jumps back to the loop header, re-running the
+        condition test.
         """
         condition, body = statement.cond, statement.body
         label_index = self.new_label()
         end_label = f".while_{label_index}_end"
-        self.emit(f".while_{label_index}:")
+        top_label = f".while_{label_index}"
+        self.emit(f"{top_label}:")
         self.loop_end_labels.append(end_label)
+        self.loop_continue_labels.append(top_label)
         if self._is_constant_true_condition(condition):
             self.generate_body(body, scoped=True)
         else:
             self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="while")
             self.generate_body(body, scoped=True)
-        self.emit(f"        jmp .while_{label_index}")
+        self.emit(f"        jmp {top_label}")
         self.emit(f"{end_label}:")
+        self.loop_continue_labels.pop()
         self.loop_end_labels.pop()
 
     def new_label(self) -> int:
@@ -3232,16 +3339,16 @@ class CodeGenerator:
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
 
-    def validate_equality_types(self, left: Node, right: Node, /) -> None:
-        r"""Ensure ``==``/``!=`` operands have compatible types.
+    def validate_comparison_types(self, left: Node, right: Node, /) -> None:
+        r"""Ensure ``==``/``!=``/``<``/``<=``/``>``/``>=`` operand types match.
 
         Pointers may only be compared to other pointers or ``NULL``;
         ``NULL`` may only appear opposite a pointer; ``char`` values
         must be compared against other ``char`` values or character
-        literals (so ``c != 0`` is rejected — use ``c != '\0'``).
-        Comparing a pointer to a non-``NULL`` integer (``if (p == 0)``)
-        is a common C bug, so the compiler requires the explicit
-        ``NULL`` spelling.
+        literals (so ``c != 0`` and ``c < 32`` are rejected — use
+        ``c != '\0'`` and ``c < ' '``).  Comparing a pointer to a
+        non-``NULL`` integer (``if (p == 0)``) is a common C bug, so
+        the compiler requires the explicit ``NULL`` spelling.
         """
         left_type = self._type_of_operand(left)
         right_type = self._type_of_operand(right)
@@ -3258,10 +3365,10 @@ class CodeGenerator:
         if right_type == "null" and left_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
             raise CompileError(message, line=line)
-        if left_type == "char" and right_type not in ("char", "unknown"):
+        if left_type == "char" and right_type != "char":
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
-        if right_type == "char" and left_type not in ("char", "unknown"):
+        if right_type == "char" and left_type != "char":
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
 
@@ -3750,6 +3857,10 @@ class Parser:
             self.eat("BREAK")
             self.eat("SEMI")
             return Break(line=token[2])
+        if token[0] == "CONTINUE":
+            self.eat("CONTINUE")
+            self.eat("SEMI")
+            return Continue(line=token[2])
         if token[0] == "DO":
             return self.parse_do_while()
         if token[0] == "RETURN":
@@ -3776,6 +3887,12 @@ class Parser:
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned long).
 
+        An optional leading ``const`` is accepted and discarded — the C
+        subset has no notion of const-ness but tolerating the keyword
+        lets sources carry POSIX-compatible signatures (e.g. ``int
+        strcmp(const char *, const char *)``) that ``<string.h>``
+        expects when the same source is syntax-checked by clang.
+
         Returns:
             The type as a string.
 
@@ -3784,6 +3901,8 @@ class Parser:
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
+        if self.peek()[0] == "CONST":
+            self.eat()
         token = self.peek()
         if token[0] == "VOID":
             self.eat()

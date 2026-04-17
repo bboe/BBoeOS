@@ -9,7 +9,7 @@ int decode_domain(char *base, int offset, char *out) {
             out[out_position] = '\0';
             return out_position;
         }
-        if (byte >= 192) {
+        if (byte >= '\xC0') {
             /* Compression pointer: next two bytes encode offset */
             char high = byte & 63;
             char low = base[offset + 1];
@@ -22,8 +22,9 @@ int decode_domain(char *base, int offset, char *out) {
             }
             label_count = label_count + 1;
             offset = offset + 1;
+            int length = byte;
             int copied = 0;
-            while (copied < byte) {
+            while (copied < length) {
                 out[out_position] = base[offset];
                 out_position = out_position + 1;
                 offset = offset + 1;
@@ -75,7 +76,7 @@ int skip_name(char *buf, int offset) {
         if (byte == '\0') {
             return offset + 1;
         }
-        if (byte >= 192) {
+        if (byte >= '\xC0') {
             return offset + 2;
         }
         offset = offset + 1 + byte;
