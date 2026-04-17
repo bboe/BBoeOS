@@ -25,9 +25,10 @@ Register allocation:
     call_statement       := IDENT '(' arguments ')' ';'
     arguments            := expression (',' expression)*
     expression           := comparison_expression
-    comparison_expression := additive_expression
+    comparison_expression := shift_expression
                            (('<'|'>'|'<='|'>='|'=='|'!=')
-                            additive_expression)?
+                            shift_expression)?
+    shift_expression     := additive_expression ('>>' additive_expression)*
     additive_expression  := multiplicative_expression
                            (('+'|'-') multiplicative_expression)*
     multiplicative_expression := primary (('*'|'/'|'%') primary)*
@@ -326,6 +327,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<STRING>"(?:[^"\\]|\\.)*")
   | (?P<EQ>==)
   | (?P<GE>>=)
+  | (?P<SHR>>>)
   | (?P<LE><=)
   | (?P<NE>!=)
   | (?P<PLUS_ASSIGN>\+=)
@@ -365,6 +367,8 @@ REGISTER_PARENT = {
     "dh": "dx",
     "dl": "dx",
 }
+
+SHIFT_OPERATORS = frozenset({"SHR"})
 
 TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
 
@@ -2297,6 +2301,18 @@ class CodeGenerator:
                     self.emit(f"        {mnemonic} ax, {right.value}")
                 self.ax_clear()
                 return
+            if operator == ">>" and isinstance(right, Int):
+                # Fast path: shr r16, imm — one instruction, no CX scratch.
+                self.generate_expression(left)
+                shift = right.value & 0x1F
+                if shift == 0:
+                    pass
+                elif shift >= 16:
+                    self.emit("        xor ax, ax")
+                else:
+                    self.emit(f"        shr ax, {shift}")
+                self.ax_clear()
+                return
             # Fast path for ``+``/``-`` with a stack-resident right operand:
             # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
             if (
@@ -3238,6 +3254,8 @@ class Parser:
                 return Int(a // b)
             if operator == "%" and b != 0:
                 return Int(a % b)
+            if operator == ">>":
+                return Int((a & 0xFFFF) >> (b & 0x1F))
         if (
             operator in ("+", "-")
             and isinstance(right, Int)
@@ -3358,10 +3376,10 @@ class Parser:
             An AST node for the comparison expression.
 
         """
-        left = self.parse_additive()
+        left = self.parse_shift()
         if self.peek()[0] in COMPARISON_OPERATORS:
             operator_token = self.eat()
-            right = self.parse_additive()
+            right = self.parse_shift()
             return BinOp(operator_token[1], left, right)
         return left
 
@@ -3511,6 +3529,19 @@ class Parser:
         while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_primary()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
+
+    def parse_shift(self) -> Node:
+        """Parse a shift expression (``>>``).
+
+        Higher precedence than comparison, lower than additive — matches
+        C's precedence order.
+        """
+        node = self.parse_additive()
+        while self.peek()[0] in SHIFT_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_additive()
             node = self.fold_binop(operator_token[1], node, right)
         return node
 
