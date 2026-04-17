@@ -12,8 +12,8 @@ source is kept here for reference.
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
-| dns     | 722         | 1159      | +437  |
-| draw    | 245         | 282       | +37   |
+| dns     | 722         | 1151      | +429  |
+| draw    | 245         | 265       | +20   |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 171       | +36   |
 | mkdir   | 123         | 127       | +4    |
@@ -30,7 +30,7 @@ remaining code is byte-identical to the hand-written assembly.
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+437):** Both versions use the same shared memory regions
+**dns (+429):** Both versions use the same shared memory regions
 (`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
 The C version is larger because the helper functions (`decode_domain`,
 `encode_domain`, `skip_name`) carry full stack-frame overhead (push bp /
@@ -40,7 +40,7 @@ frame setup.  The C compiler also generates word-sized loads with `xor
 ah,ah` zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**draw (+37):** The assembly version keeps row/col packed in a single
+**draw (+20):** The assembly version keeps row/col packed in a single
 DX register and edits it in place with `inc dh` / `dec dl`, then pokes
 INT 10h for cursor moves, character output, and background palette.
 The C version tracks each coordinate as a word-sized local and emits

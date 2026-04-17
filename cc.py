@@ -2226,8 +2226,14 @@ class CodeGenerator:
                 # Fast path: reg op imm16 uses the immediate form, skipping
                 # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
                 self.generate_expression(left)
-                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
-                self.emit(f"        {mnemonic} ax, {right.value}")
+                # +1 and -1 fit in a 1-byte inc/dec.
+                if operator == "+" and right.value == 1:
+                    self.emit("        inc ax")
+                elif operator == "-" and right.value == 1:
+                    self.emit("        dec ax")
+                else:
+                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    self.emit(f"        {mnemonic} ax, {right.value}")
                 self.ax_clear()
                 return
             cx_pinned_var = next(
@@ -2924,7 +2930,13 @@ class CodeGenerator:
                 continue
             operator = None
             immediate = None
-            if b.startswith("add ax, "):
+            if b == "inc ax":
+                operator = "add"
+                immediate = "1"
+            elif b == "dec ax":
+                operator = "sub"
+                immediate = "1"
+            elif b.startswith("add ax, "):
                 operator = "add"
                 immediate = b[len("add ax, ") :]
             elif b.startswith("sub ax, "):
