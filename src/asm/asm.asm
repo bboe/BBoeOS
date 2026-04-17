@@ -448,6 +448,10 @@ handle_adc:
 ;;; -----------------------------------------------------------------------
 handle_add:
         call skip_ws
+        ;; Detect ``add [mem], <reg>`` (memory destination) up front so
+        ;; the register-first happy path can skip the check.
+        cmp byte [si], '['
+        je .add_mem_dst
         call parse_register    ; AL = reg, AH = size
         push ax                ; save dst reg+size
         call skip_comma
@@ -568,12 +572,47 @@ handle_add:
         call emit_byte_al
         mov al, cl
         jmp emit_byte_al
+        .add_mem_dst:
+        ;; add [disp16], r16: opcode 01 /r with mod=00 r/m=110.
+        mov al, 01h
+        jmp mem_op_reg_emit
+
+;;; -----------------------------------------------------------------------
+;;; mem_op_reg_emit: emit ``<op> [disp16], r16`` given AL = opcode.
+;;; Consumes the remaining source text: ``[disp16], <reg>``.
+;;; -----------------------------------------------------------------------
+mem_op_reg_emit:
+        push ax                        ; save opcode
+        inc si                         ; skip `[`
+        call resolve_value             ; AX = disp16
+        mov dx, ax                     ; stash disp
+        cmp byte [si], ']'
+        jne abort_unknown
+        inc si
+        call skip_comma
+        call parse_register            ; AL = reg, AH = size
+        jc abort_unknown
+        mov bl, al                     ; BL = reg field
+        pop ax                         ; AL = opcode
+        call emit_byte_al
+        mov al, bl
+        shl al, 3
+        or al, 06h                     ; modrm: mod=00, reg=src, rm=110
+        call emit_byte_al
+        mov ax, dx
+        jmp emit_word_ax
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_and: and r, r / and r, imm
 ;;; -----------------------------------------------------------------------
 handle_and:
         call skip_ws
+        ;; ``and [disp16], <reg>`` uses the r/m16 destination form.
+        cmp byte [si], '['
+        jne .and_not_mem_dst
+        mov al, 21h             ; 21 /r (and r/m16, r16)
+        jmp mem_op_reg_emit
+        .and_not_mem_dst:
         call parse_register    ; AL = reg, AH = size
         push ax                ; save dst reg+size
         call skip_comma
@@ -2021,6 +2060,12 @@ handle_stosw:
 ;;; -----------------------------------------------------------------------
 handle_sub:
         call skip_ws
+        ;; ``sub [disp16], <reg>`` uses the r/m16 destination form.
+        cmp byte [si], '['
+        jne .sub_check_word
+        mov al, 29h             ; 29 /r (sub r/m16, r16)
+        jmp mem_op_reg_emit
+        .sub_check_word:
         ;; Detect `sub word [disp16], imm` form (only 16-bit mem-imm form
         ;; needed by self-host).
         push si

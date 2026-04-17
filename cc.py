@@ -654,11 +654,11 @@ class CodeGenerator:
                 return f"{base}{op}{init.right.value}"
         return None
 
-    def _emit_byte_index_bx(self, node: Index, /) -> str:
-        """Load the base pointer of a byte-indexed node into BX.
+    def _emit_byte_index_si(self, node: Index, /) -> str:
+        """Load the base pointer of a byte-indexed node into SI.
 
-        Returns the NASM memory operand (e.g. ``byte [bx+12]`` or
-        ``byte [bx]``) suitable for use in a ``cmp`` instruction.
+        Returns the NASM memory operand (e.g. ``byte [si+12]`` or
+        ``byte [si]``) suitable for use in a ``cmp`` instruction.
         Prefers direct addressing when the base is a constant.
         """
         direct = self._byte_index_direct(node)
@@ -666,8 +666,8 @@ class CodeGenerator:
             return f"byte [{direct}]"
         vname = node.name
         offset = node.index.value
-        self._emit_load_var(vname)
-        return f"byte [bx+{offset}]" if offset else "byte [bx]"
+        self._emit_load_var(vname, register="si")
+        return f"byte [si+{offset}]" if offset else "byte [si]"
 
     def _emit_constant_base_index_addr(
         self,
@@ -677,14 +677,14 @@ class CodeGenerator:
         is_byte: bool,
         preserve_ax: bool,
     ) -> str:
-        """Set up ``[CONST + disp + bx]`` addressing for a constant-base index.
+        """Set up ``[CONST + disp + si]`` addressing for a constant-base index.
 
         Folds a trailing ``±Int`` off a ``Var ± Int`` index into the
         displacement so ``buf[gap_start - 1]`` becomes
-        ``[EDIT_BUFFER_BASE-1+bx]`` after a single
-        ``mov bx, [_l_gap_start]``.  Byte-indexed references skip the
-        load entirely when the index variable is pinned to DI
-        (``[CONST+di]`` is valid 8086 addressing).
+        ``[EDIT_BUFFER_BASE-1+si]`` after a single
+        ``mov si, [_l_gap_start]``.  Byte-indexed references skip the
+        load entirely when the index variable is pinned to DI or BX
+        (``[CONST+di]`` / ``[CONST+bx]`` are valid 8086 addressing).
 
         When *preserve_ax* is True, any path that evaluates the index
         through AX pushes/pops AX so the caller's value survives.
@@ -695,27 +695,27 @@ class CodeGenerator:
             sign = 1 if index.op == "+" else -1
             displacement = sign * index.right.value * element_size
             index = index.left
-        base_register = "bx"
+        base_register = "si"
         if isinstance(index, Int):
             displacement += index.value * element_size
-            self.emit("        xor bx, bx")
-        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] == "di":
-            base_register = "di"
+            self.emit("        xor si, si")
+        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
+            base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
-            self.emit(f"        mov bx, {self.pinned_register[index.name]}")
+            self.emit(f"        mov si, {self.pinned_register[index.name]}")
             if not is_byte:
-                self.emit("        add bx, bx")
+                self.emit("        add si, si")
         elif isinstance(index, Var) and index.name in self.locals:
-            self.emit(f"        mov bx, [{self._local_address(index.name)}]")
+            self.emit(f"        mov si, [{self._local_address(index.name)}]")
             if not is_byte:
-                self.emit("        add bx, bx")
+                self.emit("        add si, si")
         else:
             if preserve_ax:
                 self.emit("        push ax")
             self.generate_expression(index)
             if not is_byte:
                 self.emit("        add ax, ax")
-            self.emit("        mov bx, ax")
+            self.emit("        mov si, ax")
             if preserve_ax:
                 self.emit("        pop ax")
         addr = const_base
@@ -994,7 +994,7 @@ class CodeGenerator:
                     b_lit = b_right.value if isinstance(b_right, Int) else None
                     if a_lit is not None and b_lit is not None:
                         self.validate_comparison_types(a_left, a_right)
-                        operand = self._emit_byte_index_bx(a_left)
+                        operand = self._emit_byte_index_si(a_left)
                         word_mem = operand.replace("byte ", "word ")
                         word_val = (b_lit << 8) | a_lit
                         self.emit(f"        cmp {word_mem}, 0x{word_val:04x}")
@@ -1009,10 +1009,10 @@ class CodeGenerator:
                         and b_right.index.value == a_right.index.value + 1
                     ):
                         self.validate_comparison_types(a_left, a_right)
-                        left_operand = self._emit_byte_index_bx(a_left)
+                        left_operand = self._emit_byte_index_si(a_left)
                         left_mem = left_operand.replace("byte ", "word ")
                         self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
-                        right_operand = self._emit_byte_index_bx(a_right)
+                        right_operand = self._emit_byte_index_si(a_right)
                         right_mem = right_operand.replace("byte ", "word ")
                         self.emit(f"        cmp ax, {right_mem.removeprefix('word ')}")
                         self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
@@ -1665,20 +1665,13 @@ class CodeGenerator:
         doesn't spill pinned vars across builtin calls.  Limiting pins
         to registers that survive every call avoids that hazard.
 
-        BX is additionally excluded when the body contains any subscript
-        expression: subscript codegen uses BX as a scratch register
-        (``_emit_load_var`` into BX, then ``add bx, <index>``), which
-        clobbers any pinned variable held there.  The clobber is not
-        obvious from the source because later reads/writes of the
-        variable emit ``mov bx, bx`` or ``inc bx`` on the stale BX.
+        Subscript codegen uses SI as its scratch register; SI isn't in
+        REGISTER_POOL so no extra exclusion is needed for subscript
+        presence.
         """
         clobbered: set[str] = set()
-        has_subscript = False
 
         def visit(node: Node) -> None:
-            nonlocal has_subscript
-            if isinstance(node, (Index, IndexAssign)):
-                has_subscript = True
             if isinstance(node, Call):
                 if node.name in self.user_functions:
                     # User function calls clobber all registers.
@@ -1699,8 +1692,6 @@ class CodeGenerator:
 
         for statement in body:
             visit(statement)
-        if has_subscript:
-            clobbered.add("bx")
         return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
 
     def discover_virtual_long_locals(self, statements: list[Node], /) -> None:
@@ -1873,7 +1864,7 @@ class CodeGenerator:
             # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
             # the zero-extend into AX.
             if self._is_byte_index(left):
-                operand = self._emit_byte_index_bx(left)
+                operand = self._emit_byte_index_si(left)
                 if is_zero:
                     self.emit(f"        cmp {operand}, 0")
                 else:
@@ -1890,10 +1881,10 @@ class CodeGenerator:
             # compare directly against the right byte in memory.  Saves
             # the zero-extend, push/pop, and CX round-trip.
             if self._is_byte_index(left) and self._is_byte_index(right):
-                left_operand = self._emit_byte_index_bx(left)
+                left_operand = self._emit_byte_index_si(left)
                 left_mem = left_operand.removeprefix("byte ")
                 self.emit(f"        mov al, {left_mem}")
-                right_operand = self._emit_byte_index_bx(right)
+                right_operand = self._emit_byte_index_si(right)
                 right_mem = right_operand.removeprefix("byte ")
                 self.emit(f"        cmp al, {right_mem}")
                 return
@@ -2476,17 +2467,17 @@ class CodeGenerator:
                     else:
                         self.emit(f"        mov ax, [{addr}]")
                 else:
-                    self._emit_load_var(vname)
+                    self._emit_load_var(vname, register="si")
                     if is_byte:
                         if offset:
-                            self.emit(f"        mov al, [bx+{offset}]")
+                            self.emit(f"        mov al, [si+{offset}]")
                         else:
-                            self.emit("        mov al, [bx]")
+                            self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
                     elif offset:
-                        self.emit(f"        mov ax, [bx+{offset}]")
+                        self.emit(f"        mov ax, [si+{offset}]")
                     else:
-                        self.emit("        mov ax, [bx]")
+                        self.emit("        mov ax, [si]")
             else:
                 is_byte = self._is_byte_var(vname)
                 const_base = self._resolve_constant(vname)
@@ -2505,30 +2496,30 @@ class CodeGenerator:
                         self.emit(f"        mov ax, [{addr}]")
                     self.ax_clear()
                 else:
-                    self._emit_load_var(vname)
+                    self._emit_load_var(vname, register="si")
                     # If the index is a pinned variable and the access is
-                    # byte-sized, load it without clobbering BX.
+                    # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
-                        self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                        self.emit(f"        add si, {self.pinned_register[index_expression.name]}")
                     elif isinstance(index_expression, (Var, Int)):
-                        # Simple Var/Int load doesn't touch BX, so skip the
+                        # Simple Var/Int load doesn't touch SI, so skip the
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit("        add ax, ax")
-                        self.emit("        add bx, ax")
+                        self.emit("        add si, ax")
                     else:
-                        self.emit("        push bx")
+                        self.emit("        push si")
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit("        add ax, ax")
-                        self.emit("        pop bx")
-                        self.emit("        add bx, ax")
+                        self.emit("        pop si")
+                        self.emit("        add si, ax")
                     if is_byte:
-                        self.emit("        mov al, [bx]")
+                        self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
                     else:
-                        self.emit("        mov ax, [bx]")
+                        self.emit("        mov ax, [si]")
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
                     self.ax_clear()
@@ -2816,8 +2807,8 @@ class CodeGenerator:
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
             else:
-                self._emit_load_var(name)
-                addr = f"bx+{offset}" if offset else "bx"
+                self._emit_load_var(name, register="si")
+                addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
             else:
@@ -2830,8 +2821,8 @@ class CodeGenerator:
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
             else:
-                self._emit_load_var(name)
-                addr = f"bx+{offset}" if offset else "bx"
+                self._emit_load_var(name, register="si")
+                addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov [{addr}], al")
             else:
@@ -2853,32 +2844,32 @@ class CodeGenerator:
                     self.emit(f"        mov [{addr}], ax")
                 self.ax_clear()
             else:
-                # Variable index: compute address in BX, then store.
+                # Variable index: compute address in SI, then store.
                 self.generate_expression(statement.expr)
                 self.emit("        push ax")
-                self._emit_load_var(name)
+                self._emit_load_var(name, register="si")
                 # If the index is a simple Var/Int, evaluating it doesn't
-                # clobber BX, so we can skip the push/pop round-trip.
+                # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit("        add ax, ax")
-                    self.emit("        add bx, ax")
+                    self.emit("        add si, ax")
                 else:
-                    self.emit("        push bx")
+                    self.emit("        push si")
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit("        add ax, ax")
-                    self.emit("        pop bx")
-                    self.emit("        add bx, ax")
+                    self.emit("        pop si")
+                    self.emit("        add si, ax")
                 self.emit("        pop ax")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
                 self.ax_clear()
                 if is_byte:
-                    self.emit("        mov [bx], al")
+                    self.emit("        mov [si], al")
                 else:
-                    self.emit("        mov [bx], ax")
+                    self.emit("        mov [si], ax")
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
@@ -3397,8 +3388,13 @@ class CodeGenerator:
             del self.lines[i + 1 : i + 4]
             continue
         # Second pass: 3-instruction pattern without CX intermediate.
-        # ``mov ax, D / (add|sub) ax, imm / mov D, ax`` → ``(add|sub) D, imm``
-        # or ``inc D`` / ``dec D`` when imm is 1.
+        # Handles four shapes of ``D = D <op> Y`` where D is memory or
+        # a 16-bit register:
+        #   mov ax, D / (add|sub|and) ax, imm  / mov D, ax → op D, imm
+        #   mov ax, D / inc ax  / mov D, ax                → inc D
+        #   mov ax, D / dec ax  / mov D, ax                → dec D
+        #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → op D, <reg>
+        mnemonic_ops = {"add", "sub", "and"}
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -3414,65 +3410,122 @@ class CodeGenerator:
                 i += 1
                 continue
             operator = None
-            immediate = None
+            operand = None
             if b == "inc ax":
-                operator = "add"
-                immediate = "1"
+                operator = "inc"
+                operand = ""
             elif b == "dec ax":
-                operator = "sub"
-                immediate = "1"
-            elif b.startswith("add ax, "):
-                operator = "add"
-                immediate = b[len("add ax, ") :]
-            elif b.startswith("sub ax, "):
-                operator = "sub"
-                immediate = b[len("sub ax, ") :]
-            if operator is None or immediate.startswith("["):
+                operator = "dec"
+                operand = ""
+            else:
+                for op in mnemonic_ops:
+                    prefix = f"{op} ax, "
+                    if b.startswith(prefix):
+                        operator = op
+                        operand = b[len(prefix) :]
+                        break
+            if operator is None:
+                i += 1
+                continue
+            # Reject memory operands — would need swapping to ``mov ax, [X] /
+            # op D, ax`` and handled by the next pass instead.
+            if operand.startswith("["):
                 i += 1
                 continue
             if c != f"mov {source}, ax":
                 i += 1
                 continue
             width = "word " if is_memory else ""
-            if immediate == "1":
+            if operator in ("inc", "dec"):
+                self.lines[i] = f"        {operator} {width}{source}"
+            elif operand == "1" and operator in ("add", "sub"):
                 instruction = "inc" if operator == "add" else "dec"
                 self.lines[i] = f"        {instruction} {width}{source}"
             else:
-                self.lines[i] = f"        {operator} {width}{source}, {immediate}"
+                self.lines[i] = f"        {operator} {width}{source}, {operand}"
             del self.lines[i + 1 : i + 3]
+            continue
+        # Third pass: ``D = D <op> [X]`` with both sides in memory.
+        # ``mov ax, D / op ax, [X] / mov D, ax`` collapses to
+        # ``mov ax, [X] / op D, ax`` (10 bytes → 7 for word ops).  Only
+        # safe when D is memory (the target of ``op D, ax`` must be
+        # addressable as r/m16) and D ≠ X (overlapping would read the
+        # stale value after the op writes D).
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if not (source.startswith("[") and source.endswith("]")):
+                i += 1
+                continue
+            operator = None
+            rhs = None
+            for op in ("add", "sub", "and"):
+                prefix = f"{op} ax, "
+                if b.startswith(prefix):
+                    operator = op
+                    rhs = b[len(prefix) :]
+                    break
+            if operator is None:
+                i += 1
+                continue
+            if not (rhs.startswith("[") and rhs.endswith("]")):
+                i += 1
+                continue
+            if rhs == source:
+                i += 1
+                continue
+            if c != f"mov {source}, ax":
+                i += 1
+                continue
+            self.lines[i] = f"        mov ax, {rhs}"
+            self.lines[i + 1] = f"        {operator} {source}, ax"
+            del self.lines[i + 2]
             continue
 
     def peephole_redundant_bx(self) -> None:
-        """Remove ``mov bx, X`` when BX already holds X.
+        """Remove redundant ``mov bx, X`` / ``mov si, X`` reloads.
 
-        Tracks the value in BX across instructions that don't clobber
-        it (comparisons, conditional jumps).  Resets on labels, calls,
-        interrupts, and any instruction that writes to BX.
+        Tracks the value in each scratch register across instructions
+        that don't clobber it (comparisons, conditional jumps).  Resets
+        on labels, calls, interrupts, and any instruction that writes
+        to the register.  BX and SI are both subscript scratch targets
+        so either can linger with a useful value across sites.
         """
-        bx_value: str | None = None
+        self._dedup_register_reloads("bx")
+        self._dedup_register_reloads("si")
+
+    def _dedup_register_reloads(self, register: str, /) -> None:
+        value: str | None = None
         result: list[str] = []
+        clobber_prefixes = (
+            f"add {register}",
+            "call ",
+            "int ",
+            "lodsb",
+            "lodsw",
+            "movsb",
+            "movsw",
+            f"pop {register}",
+            "rep ",
+            f"sub {register}",
+            "xchg",
+            f"xor {register}",
+        )
         for line in self.lines:
             stripped = line.strip()
-            if stripped.startswith("mov bx, "):
-                source = stripped[len("mov bx, ") :]
-                if source == bx_value:
+            if stripped.startswith(f"mov {register}, "):
+                source = stripped[len(f"mov {register}, ") :]
+                if source == value:
                     continue  # redundant — skip
-                bx_value = source
-            elif stripped.endswith(":") or stripped.startswith((
-                "add bx",
-                "call ",
-                "int ",
-                "lodsb",
-                "lodsw",
-                "movsb",
-                "movsw",
-                "pop bx",
-                "rep ",
-                "sub bx",
-                "xchg",
-                "xor bx",
-            )):
-                bx_value = None
+                value = source
+            elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
+                value = None
             result.append(line)
         self.lines = result
 

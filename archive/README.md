@@ -12,9 +12,9 @@ source is kept here for reference.
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
-| dns     | 724         | 1130      | +406  |
+| dns     | 724         | 1120      | +396  |
 | draw    | 245         | 265       | +20   |
-| edit    | 1977        | 2591      | +614  |
+| edit    | 1977        | 2588      | +611  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 168       | +33   |
 | mkdir   | 123         | 127       | +4    |
@@ -22,7 +22,7 @@ source is kept here for reference.
 | netinit | 72          | 63        | -9    |
 | netrecv | 334         | 380       | +46   |
 | netsend | 187         | 216       | +29   |
-| ping    | 1019        | 1228      | +209  |
+| ping    | 1019        | 1217      | +198  |
 | shell   | 921         | 1358      | +437  |
 | uptime  | 50          | 78        | +28   |
 
@@ -33,7 +33,7 @@ remaining code is byte-identical to the hand-written assembly.
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+406):** Both versions use the same shared memory regions
+**dns (+396):** Both versions use the same shared memory regions
 (`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
 The C version is larger because the helper functions (`decode_domain`,
 `encode_domain`, `skip_name`) carry full stack-frame overhead (push bp /
@@ -43,7 +43,7 @@ frame setup.  The C compiler also generates word-sized loads with `xor
 ah,ah` zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+614):** Both versions implement the same gap-buffer /
+**edit (+611):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -83,7 +83,7 @@ length-bearing messages without null terminators.  Both versions
 stash the MAC in the shell's idle input buffer at ``BUFFER`` rather
 than in an embedded cell.
 
-**ping (+209):** Both versions build ICMP echo requests in userspace
+**ping (+198):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  Most of the delta is
 the DNS fallback: ``encode_domain``, ``skip_name``, and
