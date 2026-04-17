@@ -30,6 +30,7 @@ dns_query:
 
         ;; Open UDP socket
         mov al, SOCK_DGRAM
+        mov dl, IPPROTO_UDP
         mov ah, SYS_NET_OPEN
         int 30h
         jc .err

@@ -12,7 +12,7 @@ source is kept here for reference.
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
-| dns     | 722         | 1139      | +417  |
+| dns     | 724         | 1141      | +417  |
 | draw    | 245         | 265       | +20   |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 171       | +36   |

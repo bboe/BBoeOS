@@ -31,6 +31,8 @@
 #define ERROR_PROTECTED 0x05
 #define FLAG_DIRECTORY 0x02
 #define FLAG_EXECUTE 0x01
+#define IPPROTO_ICMP 1
+#define IPPROTO_UDP 17
 #define SECTOR_BUFFER ((char *)0xE000)
 #define SOCK_DGRAM 1
 #define SOCK_RAW 0
@@ -59,8 +61,8 @@ unsigned long datetime(void);
 void die(const char *message) __attribute__((noreturn));
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
-/* Open a socket: type is SOCK_RAW or SOCK_DGRAM (no POSIX equivalent) */
-int net_open(int type);
+/* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */
+int net_open(int type, int protocol);
 /* Receive UDP datagram filtered by port (BBoeOS-specific) */
 int recvfrom(int fd, char *buffer, int length, int port);
 /* Send UDP datagram (BBoeOS-specific) */

@@ -401,7 +401,7 @@ class CodeGenerator:
         "mac": frozenset({"ax", "di"}),
         "memcpy": frozenset({"ax", "cx", "di", "si"}),
         "mkdir": frozenset({"ax", "si"}),
-        "net_open": frozenset({"ax"}),
+        "net_open": frozenset({"ax", "dx"}),
         "open": frozenset({"ax", "dx", "si"}),
         "parse_ip": frozenset({"ax", "di", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
@@ -435,6 +435,8 @@ class CodeGenerator:
         "ERROR_PROTECTED",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
+        "IPPROTO_ICMP",
+        "IPPROTO_UDP",
         "NULL",
         "O_CREAT",
         "O_RDONLY",
@@ -1099,18 +1101,22 @@ class CodeGenerator:
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_net_open(self, arguments: list[Node], /) -> None:
-        """Generate code for the net_open(type) builtin.
+        """Generate code for the net_open(type, protocol) builtin.
 
-        ``net_open(type)`` emits ``mov al, <type> / mov ah, SYS_NET_OPEN /
-        int 30h`` where type is SOCK_RAW (0) or SOCK_DGRAM (1).
-        Returns fd in AX on success, or -1 if no NIC is present.
+        ``net_open(type, protocol)`` emits ``mov al, <type> /
+        mov dl, <protocol> / mov ah, SYS_NET_OPEN / int 30h`` where type
+        is SOCK_RAW (0) or SOCK_DGRAM (1) and protocol is IPPROTO_UDP (17)
+        or IPPROTO_ICMP (1) for datagram sockets (ignored for raw
+        Ethernet sockets — pass 0).  Returns fd in AX on success, or -1
+        if no NIC is present.
         """
-        self._check_argument_count(arguments=arguments, expected=1, name="net_open")
-        type_argument = arguments[0]
+        self._check_argument_count(arguments=arguments, expected=2, name="net_open")
+        type_argument, protocol_argument = arguments
         if isinstance(type_argument, Int) or (isinstance(type_argument, Var) and type_argument.name in self.NAMED_CONSTANTS):
             self.emit(f"        mov al, {type_argument.value if isinstance(type_argument, Int) else type_argument.name}")
         else:
             self.generate_expression(type_argument)
+        self.emit_register_from_argument(argument=protocol_argument, register="dl")
         self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
