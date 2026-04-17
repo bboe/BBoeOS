@@ -882,6 +882,7 @@ handle_cmp:
 handle_dec:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
+        mov [op1_register], al ; .dec_mem reads this below
         cmp ah, 0
         jne .dec_mem
         ;; dec register
@@ -955,6 +956,7 @@ handle_div:
 handle_inc:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
+        mov [op1_register], al ; .inc_mem reads this below
         cmp ah, 0
         jne .inc_mem
         ;; inc register
