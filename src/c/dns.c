@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
     dns_ip[2] = 2;
     dns_ip[3] = 3;
 
-    int socket_fd = net_open(SOCK_DGRAM);
+    int socket_fd = net_open(SOCK_DGRAM, IPPROTO_UDP);
     if (socket_fd < 0) {
         die("DNS query failed\n");
     }

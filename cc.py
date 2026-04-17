@@ -25,9 +25,10 @@ Register allocation:
     call_statement       := IDENT '(' arguments ')' ';'
     arguments            := expression (',' expression)*
     expression           := comparison_expression
-    comparison_expression := additive_expression
+    comparison_expression := shift_expression
                            (('<'|'>'|'<='|'>='|'=='|'!=')
-                            additive_expression)?
+                            shift_expression)?
+    shift_expression     := additive_expression ('>>' additive_expression)*
     additive_expression  := multiplicative_expression
                            (('+'|'-') multiplicative_expression)*
     multiplicative_expression := primary (('*'|'/'|'%') primary)*
@@ -36,6 +37,7 @@ Register allocation:
                           | '(' expression ')'
 
 Builtins:
+    checksum(buf, len)       -- 1's-complement checksum (for ICMP/IP)
     close(fd)                -- close a file descriptor
     datetime()               -- return unsigned seconds since 1970-01-01 UTC
     die(message)             -- print message and terminate
@@ -48,6 +50,8 @@ Builtins:
     read(fd, buffer, count)  -- read bytes from fd, return count or -1
     recvfrom(fd, buf, len, port) -- receive UDP datagram filtered by port
     sendto(fd, buf, len, ip, src_port, dst_port) -- send UDP datagram
+    sleep(milliseconds)      -- busy-wait for the given duration
+    ticks()                  -- return low 16 bits of BIOS timer tick counter
     uptime()                 -- return seconds since boot
     write(fd, buffer, count) -- write bytes to fd, return count or -1
 
@@ -269,9 +273,9 @@ class While(Node):
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
 CHARACTER_ESCAPES = {
+    '"': 0x22,
     "0": 0x00,
     "\\": 0x5C,
-    '"': 0x22,
     "n": 0x0A,
     "r": 0x0D,
     "t": 0x09,
@@ -312,6 +316,21 @@ JUMP_WHEN_TRUE = {
 
 KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
 
+MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
+
+REGISTER_PARENT = {
+    "ah": "ax",
+    "al": "ax",
+    "bh": "bx",
+    "bl": "bx",
+    "ch": "cx",
+    "cl": "cx",
+    "dh": "dx",
+    "dl": "dx",
+}
+
+SHIFT_OPERATORS = frozenset({"SHR"})
+
 TOKEN_PATTERN = re.compile(
     r"""
     (?P<WS>\s+)
@@ -323,6 +342,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<STRING>"(?:[^"\\]|\\.)*")
   | (?P<EQ>==)
   | (?P<GE>>=)
+  | (?P<SHR>>>)
   | (?P<LE><=)
   | (?P<NE>!=)
   | (?P<PLUS_ASSIGN>\+=)
@@ -349,19 +369,6 @@ TOKEN_PATTERN = re.compile(
 """,
     re.VERBOSE,
 )
-
-MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
-
-REGISTER_PARENT = {
-    "ah": "ax",
-    "al": "ax",
-    "bh": "bx",
-    "bl": "bx",
-    "ch": "cx",
-    "cl": "cx",
-    "dh": "dx",
-    "dl": "dx",
-}
 
 TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
 
@@ -391,6 +398,7 @@ class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "checksum": frozenset({"ax", "bx", "cx", "si"}),
         "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax", "bx"}),
         "datetime": frozenset({"ax", "dx"}),
@@ -401,7 +409,7 @@ class CodeGenerator:
         "mac": frozenset({"ax", "di"}),
         "memcpy": frozenset({"ax", "cx", "di", "si"}),
         "mkdir": frozenset({"ax", "si"}),
-        "net_open": frozenset({"ax"}),
+        "net_open": frozenset({"ax", "dx"}),
         "open": frozenset({"ax", "dx", "si"}),
         "parse_ip": frozenset({"ax", "di", "si"}),
         "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
@@ -413,7 +421,9 @@ class CodeGenerator:
         "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
+        "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
+        "ticks": frozenset({"ax", "cx", "dx"}),
         "uptime": frozenset({"ax"}),
         "video_mode": frozenset({"ax"}),
         "write": frozenset({"ax", "bx", "cx", "si"}),
@@ -435,6 +445,8 @@ class CodeGenerator:
         "ERROR_PROTECTED",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
+        "IPPROTO_ICMP",
+        "IPPROTO_UDP",
         "NULL",
         "O_CREAT",
         "O_RDONLY",
@@ -606,10 +618,19 @@ class CodeGenerator:
 
     @staticmethod
     def _extract_local_label(line: str, /) -> str | None:
-        """Return the _l_ label from a store or declaration, or None."""
+        """Return the _l_ label from a store or declaration, or None.
+
+        Stops at the first non-identifier byte so a byte-offset store
+        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
+        same way peephole_dead_stores resolves reads.
+        """
         # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
         if line.startswith("mov") and "[_l_" in line and "], " in line:
-            return line[line.index("[_l_") + 1 : line.index("]")]
+            start = line.index("[_l_") + 1
+            end = start
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            return line[start:end]
         # Declaration: _l_NAME: dw 0
         if line.startswith("_l_") and line.endswith(": dw 0"):
             return line[: line.index(":")]
@@ -960,6 +981,31 @@ class CodeGenerator:
         self.ax_is_byte = False
         self.ax_local = None
 
+    def builtin_checksum(self, arguments: list[Node], /) -> None:
+        """Generate code for the checksum(buf, len) builtin.
+
+        Computes the 1's-complement 16-bit checksum used by IP and ICMP.
+        ``len`` must be even; caller is responsible for zero-padding
+        odd-length buffers.  Returns the folded, complemented checksum
+        in AX, ready to store in the header field.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="checksum")
+        buffer_argument, length_argument = arguments
+        self.emit_si_from_argument(buffer_argument)
+        self.emit_register_from_argument(argument=length_argument, register="cx")
+        label_index = self.new_label()
+        self.emit("        cld")
+        self.emit("        xor bx, bx")
+        self.emit("        shr cx, 1")
+        self.emit(f".ck_loop_{label_index}:")
+        self.emit("        lodsw")
+        self.emit("        add bx, ax")
+        self.emit("        adc bx, 0")
+        self.emit(f"        loop .ck_loop_{label_index}")
+        self.emit("        not bx")
+        self.emit("        mov ax, bx")
+        self.ax_clear()
+
     def builtin_chmod(
         self,
         arguments: list[Node],
@@ -1099,18 +1145,22 @@ class CodeGenerator:
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
     def builtin_net_open(self, arguments: list[Node], /) -> None:
-        """Generate code for the net_open(type) builtin.
+        """Generate code for the net_open(type, protocol) builtin.
 
-        ``net_open(type)`` emits ``mov al, <type> / mov ah, SYS_NET_OPEN /
-        int 30h`` where type is SOCK_RAW (0) or SOCK_DGRAM (1).
-        Returns fd in AX on success, or -1 if no NIC is present.
+        ``net_open(type, protocol)`` emits ``mov al, <type> /
+        mov dl, <protocol> / mov ah, SYS_NET_OPEN / int 30h`` where type
+        is SOCK_RAW (0) or SOCK_DGRAM (1) and protocol is IPPROTO_UDP (17)
+        or IPPROTO_ICMP (1) for datagram sockets (ignored for raw
+        Ethernet sockets — pass 0).  Returns fd in AX on success, or -1
+        if no NIC is present.
         """
-        self._check_argument_count(arguments=arguments, expected=1, name="net_open")
-        type_argument = arguments[0]
+        self._check_argument_count(arguments=arguments, expected=2, name="net_open")
+        type_argument, protocol_argument = arguments
         if isinstance(type_argument, Int) or (isinstance(type_argument, Var) and type_argument.name in self.NAMED_CONSTANTS):
             self.emit(f"        mov al, {type_argument.value if isinstance(type_argument, Int) else type_argument.name}")
         else:
             self.generate_expression(type_argument)
+        self.emit_register_from_argument(argument=protocol_argument, register="dl")
         self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
@@ -1338,6 +1388,16 @@ class CodeGenerator:
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
+    def builtin_sleep(self, arguments: list[Node], /) -> None:
+        """Generate code for the sleep(milliseconds) builtin.
+
+        ``sleep(ms)`` emits ``mov cx, <ms> / mov ah, SYS_RTC_SLEEP /
+        int 30h``.  Busy-waits for the requested duration.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="sleep")
+        self.emit_register_from_argument(argument=arguments[0], register="cx")
+        self._emit_syscall("RTC_SLEEP")
+
     def builtin_strlen(self, arguments: list[Node], /) -> None:
         """Generate code for the strlen() builtin.
 
@@ -1352,6 +1412,20 @@ class CodeGenerator:
         self.emit("        repne scasb")
         self.emit("        mov ax, 0FFFEh")
         self.emit("        sub ax, cx")
+        self.ax_clear()
+
+    def builtin_ticks(self, arguments: list[Node], /) -> None:
+        """Generate code for the ticks() builtin.
+
+        Returns the low 16 bits of the BIOS timer tick counter
+        (~18.2 Hz).  Suitable for measuring short elapsed intervals —
+        subtract two readings to get a tick count in [0, 65535].  The
+        counter wraps roughly once an hour.
+        """
+        self._check_argument_count(arguments=arguments, expected=0, name="ticks")
+        self.emit("        xor ah, ah")
+        self.emit("        int 1Ah")
+        self.emit("        mov ax, dx")
         self.ax_clear()
 
     def builtin_uptime(self, arguments: list[Node], /) -> None:
@@ -2236,6 +2310,33 @@ class CodeGenerator:
                     self.emit(f"        {mnemonic} ax, {right.value}")
                 self.ax_clear()
                 return
+            if operator == ">>" and isinstance(right, Int):
+                shift = right.value & 0x1F
+                # Special case: `local >> 8` when ``local`` lives in memory.
+                # Loading the high byte directly avoids one instruction
+                # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
+                # an ALU op on a shift that's really a byte-select.
+                if (
+                    shift == 8
+                    and isinstance(left, Var)
+                    and left.name in self.locals
+                    and left.name not in self.pinned_register
+                    and left.name not in self.array_labels
+                ):
+                    self.emit(f"        mov al, [{self._local_address(left.name)}+1]")
+                    self.emit("        xor ah, ah")
+                    self.ax_clear()
+                    return
+                # Fast path: shr r16, imm — one instruction, no CX scratch.
+                self.generate_expression(left)
+                if shift == 0:
+                    pass
+                elif shift >= 16:
+                    self.emit("        xor ax, ax")
+                else:
+                    self.emit(f"        shr ax, {shift}")
+                self.ax_clear()
+                return
             # Fast path for ``+``/``-`` with a stack-resident right operand:
             # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
             if (
@@ -2740,9 +2841,14 @@ class CodeGenerator:
                 start = stripped.find("[_l_", cursor)
                 if start < 0:
                     break
-                end = stripped.index("]", start)
-                loaded.add(stripped[start + 1 : end])
-                cursor = end + 1
+                # Extract the bare label — stop at the first non-identifier
+                # byte. `[_l_sum+1]` must count as a reference to `_l_sum`,
+                # not `_l_sum+1`.
+                label_end = start + 1
+                while label_end < len(stripped) and (stripped[label_end].isalnum() or stripped[label_end] == "_"):
+                    label_end += 1
+                loaded.add(stripped[start + 1 : label_end])
+                cursor = stripped.index("]", label_end) + 1
         # Remove stores and declarations for labels never loaded.
         result: list[str] = []
         for line in self.lines:
@@ -3177,6 +3283,14 @@ class Parser:
                 return Int(a // b)
             if operator == "%" and b != 0:
                 return Int(a % b)
+            if operator == ">>":
+                return Int((a & 0xFFFF) >> (b & 0x1F))
+        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
+        # div sequence and avoids the slow div instruction.  Only kicks
+        # in when N is a positive power of two; other divisions stay as-is.
+        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
+            shift = right.value.bit_length() - 1
+            return BinOp(">>", left, Int(shift))
         if (
             operator in ("+", "-")
             and isinstance(right, Int)
@@ -3297,10 +3411,10 @@ class Parser:
             An AST node for the comparison expression.
 
         """
-        left = self.parse_additive()
+        left = self.parse_shift()
         if self.peek()[0] in COMPARISON_OPERATORS:
             operator_token = self.eat()
-            right = self.parse_additive()
+            right = self.parse_shift()
             return BinOp(operator_token[1], left, right)
         return left
 
@@ -3450,6 +3564,19 @@ class Parser:
         while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
             operator_token = self.eat()
             right = self.parse_primary()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
+
+    def parse_shift(self) -> Node:
+        """Parse a shift expression (``>>``).
+
+        Higher precedence than comparison, lower than additive — matches
+        C's precedence order.
+        """
+        node = self.parse_additive()
+        while self.peek()[0] in SHIFT_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_additive()
             node = self.fold_binop(operator_token[1], node, right)
         return node
 

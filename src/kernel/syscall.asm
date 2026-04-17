@@ -17,14 +17,10 @@ syscall_handler:
         cmp ah, SYS_IO_WRITE   ; io_write
         je .io_write
 
-        cmp ah, SYS_NET_ARP    ; net_arp
-        je .net_arp
         cmp ah, SYS_NET_MAC    ; net_mac
         je .net_mac
         cmp ah, SYS_NET_OPEN   ; net_open
         je .net_open
-        cmp ah, SYS_NET_PING   ; net_ping
-        je .net_ping
         cmp ah, SYS_NET_RECVFROM ; net_recvfrom
         je .net_recvfrom
         cmp ah, SYS_NET_SENDTO ; net_sendto
@@ -415,10 +411,6 @@ syscall_handler:
         call fd_write
         jmp .iret_cf
 
-        .net_arp:
-        call arp_resolve
-        jmp .iret_cf
-
         .net_mac:
         ;; Copy cached MAC to caller's buffer at DI; CF set if NIC absent.
         cmp byte [net_present], 0
@@ -438,16 +430,24 @@ syscall_handler:
         jmp .iret_cf
 
         .net_open:
-        ;; Allocate a socket fd: AL = type (SOCK_RAW=0, SOCK_DGRAM=1).
+        ;; Allocate a socket fd: AL = type (SOCK_RAW=0, SOCK_DGRAM=1),
+        ;; DL = protocol (IPPROTO_UDP or IPPROTO_ICMP for SOCK_DGRAM;
+        ;; 0 / ignored for SOCK_RAW — raw Ethernet sees every frame).
         ;; CF set if no NIC or table full.
         cmp byte [net_present], 0
         je .net_open_err
         mov [.net_open_type], al
+        mov [.net_open_proto], dl
         call fd_alloc          ; AX = fd number, SI = entry pointer
         jc .net_open_err
         cmp byte [.net_open_type], SOCK_DGRAM
-        je .net_open_udp
+        je .net_open_dgram
         mov byte [si+FD_OFFSET_TYPE], FD_TYPE_NET
+        jmp .net_open_done
+        .net_open_dgram:
+        cmp byte [.net_open_proto], IPPROTO_ICMP
+        jne .net_open_udp
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_ICMP
         jmp .net_open_done
         .net_open_udp:
         mov byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
@@ -455,26 +455,28 @@ syscall_handler:
         mov byte [si+FD_OFFSET_FLAGS], 0
         clc
         jmp .iret_cf
+        .net_open_proto db 0
         .net_open_type db 0
         .net_open_err:
         stc
         jmp .iret_cf
 
-        .net_ping:
-        call icmp_ping
-        jmp .iret_cf
-
         .net_recvfrom:
-        ;; Receive UDP datagram via fd, filtered by port
-        ;; BX = fd, DI = recv buf, CX = max len, DX = local_port
-        ;; Returns AX = bytes copied (0 if none), CF clear
+        ;; Receive datagram via fd.
+        ;;   UDP (FD_TYPE_UDP):  BX=fd, DI=recv buf, CX=max len, DX=local_port
+        ;;   ICMP (FD_TYPE_ICMP): BX=fd, DI=recv buf, CX=max len, DX ignored
+        ;; Returns AX = bytes copied (0 if none), CF clear.
         mov [.rf_buf], di
         mov [.rf_max], cx
         mov [.rf_port], dx
         call fd_lookup         ; SI = entry pointer
         jc .net_recvfrom_none
         cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
-        jne .net_recvfrom_none
+        je .rf_udp
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_ICMP
+        je .rf_icmp
+        jmp .net_recvfrom_none
+        .rf_udp:
         call udp_receive       ; DI = payload, CX = len, CF if none
         jc .net_recvfrom_none
         ;; Check dest port: UDP dest port is at NET_RECEIVE_BUFFER+36 (big-endian)
@@ -482,13 +484,18 @@ syscall_handler:
         xchg al, ah            ; Convert to big-endian for comparison
         cmp ax, [NET_RECEIVE_BUFFER+36]
         jne .net_recvfrom_none
+        jmp .rf_common_copy
+        .rf_icmp:
+        call icmp_receive      ; DI = ICMP payload, CX = len, CF if none
+        jc .net_recvfrom_none
+        .rf_common_copy:
         ;; Copy min(CX payload, rf_max) bytes from DI to rf_buf
         cmp cx, [.rf_max]
         jbe .rf_copy
         mov cx, [.rf_max]
         .rf_copy:
         mov ax, cx             ; AX = bytes to copy (return value)
-        mov si, di             ; SI = source (payload from udp_receive)
+        mov si, di             ; SI = source payload pointer
         mov di, [.rf_buf]      ; DI = destination (caller's buffer)
         cld
         rep movsb
@@ -503,10 +510,12 @@ syscall_handler:
         .rf_port dw 0
 
         .net_sendto:
-        ;; Send UDP datagram via fd
-        ;; BX = fd, SI = payload buf, CX = payload len
-        ;; DI = ip_ptr, DX = src_port, BP = dst_port
-        ;; Returns AX = bytes sent, CF on error
+        ;; Send datagram via fd.
+        ;;   UDP (FD_TYPE_UDP):   BX=fd, SI=payload, CX=len,
+        ;;                         DI=ip_ptr, DX=src_port, BP=dst_port
+        ;;   ICMP (FD_TYPE_ICMP): BX=fd, SI=icmp_bytes, CX=len,
+        ;;                         DI=ip_ptr; DX/BP ignored
+        ;; Returns AX = bytes sent, CF on error.
         mov [.st_buf], si
         mov [.st_len], cx
         mov [.st_ip], di
@@ -515,7 +524,11 @@ syscall_handler:
         call fd_lookup         ; SI = entry pointer
         jc .net_sendto_err
         cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
-        jne .net_sendto_err
+        je .st_udp
+        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_ICMP
+        je .st_icmp
+        jmp .net_sendto_err
+        .st_udp:
         mov bx, [.st_ip]      ; BX = dest IP pointer
         mov di, [.st_sport]   ; DI = source port
         mov dx, [.st_dport]   ; DX = dest port
@@ -524,6 +537,15 @@ syscall_handler:
         call udp_send
         jc .net_sendto_err
         mov ax, [.st_len]     ; AX = bytes sent
+        jmp .iret_cf
+        .st_icmp:
+        mov bx, [.st_ip]      ; BX = dest IP pointer
+        mov al, 1              ; AL = protocol = ICMP
+        mov si, [.st_buf]     ; SI = ICMP bytes (header + data)
+        mov cx, [.st_len]     ; CX = length
+        call ip_send
+        jc .net_sendto_err
+        mov ax, [.st_len]
         jmp .iret_cf
         .net_sendto_err:
         stc

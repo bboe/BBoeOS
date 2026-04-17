@@ -28,6 +28,7 @@
         %assign FD_TYPE_DIRECTORY 3
         %assign FD_TYPE_FILE 1
         %assign FD_TYPE_FREE 0
+        %assign FD_TYPE_ICMP 6
         %assign FD_TYPE_NET 4
         %assign FD_TYPE_UDP 5
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
@@ -47,6 +48,8 @@
         %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 3 ; cdecl: push args R-to-L, push fmt, call
         %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 3 ; SI=buf, CX=len: write to stdout
+        %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
+        %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
         %assign NET_RECEIVE_BUFFER 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
@@ -75,12 +78,10 @@
         %assign SYS_IO_READ  13h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
         %assign SYS_IO_WRITE 14h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
-        %assign SYS_NET_ARP 20h
-        %assign SYS_NET_MAC 21h
-        %assign SYS_NET_OPEN 22h
-        %assign SYS_NET_PING 23h
-        %assign SYS_NET_RECVFROM 24h
-        %assign SYS_NET_SENDTO 25h
+        %assign SYS_NET_MAC 20h
+        %assign SYS_NET_OPEN 21h
+        %assign SYS_NET_RECVFROM 22h
+        %assign SYS_NET_SENDTO 23h
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
         %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot
