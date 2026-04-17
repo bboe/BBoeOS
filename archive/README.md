@@ -14,16 +14,16 @@ source is kept here for reference.
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1147      | +423  |
 | draw    | 245         | 265       | +20   |
-| edit    | 1977        | 3323      | +1346 |
+| edit    | 1977        | 3154      | +1177 |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 171       | +36   |
+| ls      | 135         | 168       | +33   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 217       |  0    |
 | netinit | 72          | 63        | -9    |
-| netrecv | 334         | 384       | +50   |
+| netrecv | 334         | 382       | +48   |
 | netsend | 187         | 216       | +29   |
 | ping    | 1019        | 1239      | +220  |
-| shell   | 921         | 1451      | +530  |
+| shell   | 921         | 1404      | +483  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+4):** Null terminators on 4 strings (+4 bytes).  The
@@ -43,33 +43,19 @@ frame setup.  The C compiler also generates word-sized loads with `xor
 ah,ah` zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**draw (+20):** The assembly version keeps row/col packed in a single
-DX register and edits it in place with `inc dh` / `dec dl`, then pokes
-INT 10h for cursor moves, character output, and background palette.
-The C version tracks each coordinate as a word-sized local and emits
-state changes as a single `printf` of the full ANSI burst —
-`\e[38;5;3m\e[48;5;%dm\e[%d;%dH*` — gated by a `changed` flag so
-unmapped keypresses don't redraw.  Remaining overhead is the printf
-call (push/call/cleanup around three args), the flag's store/test,
-and the `dw 0` cells for each coordinate.
-
-**edit (+1346):** Both versions implement the same gap-buffer /
-kill-buffer editor over the same key bindings, but arrow-key dispatch
-in the C version duplicates the Ctrl+B/F/N/P move bodies under the
-`ESC [ A/B/C/D` branches rather than falling through to them via
-local labels the way the asm does — that alone accounts for most of
-the delta.  The asm also keeps `gap_start`/`gap_end` modifications as
-tight `inc word [mem]` / `dec word [mem]` bursts, whereas the C
-version reloads both into AX via `mov ax, [_l_gap_start]` for every
-update so each shift-over-the-gap step costs ~15 bytes instead of
-~6.  `buffer_character_at` is a real function call (frame setup, stack
-arguments, ret) invoked from render's inner loop and from save;
-the asm inlines the equivalent logic with register-convention
-subroutines.  Cursor repositioning uses `printf("\e[%d;%dH", ...)`
-(varargs push/format scan/`add sp, 6`) where the asm emits a
-literal ESC sequence through `FUNCTION_PRINT_CHARACTER`.  char
-locals spill to word slots so every byte read comes with a
-`xor ah, ah` zero-extension.
+**edit (+1177):** Both versions implement the same gap-buffer /
+kill-buffer editor over the same key bindings, but arrow-key
+dispatch in the C version duplicates the Ctrl+B/F/N/P move bodies
+under the `ESC [ A/B/C/D` branches rather than falling through to
+them via local labels the way the asm does — that alone accounts
+for most of the delta.  `buffer_character_at` is a real function
+call (frame setup, stack arguments, ret) invoked from render's
+inner loop and from save; the asm inlines the equivalent logic
+with register-convention subroutines.  Cursor repositioning uses
+`printf("\e[%d;%dH", ...)` (varargs push / format scan / `add
+sp, 6`) where the asm emits a literal ESC sequence through
+`FUNCTION_PRINT_CHARACTER`.  char locals spill to word slots so
+every byte read comes with a `xor ah, ah` zero-extension.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
@@ -82,7 +68,7 @@ setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 
 **mkdir (+4):** Null-terminator overhead across 4 string literals.
 
-**netrecv (+50):** Both versions read into `BUFFER + 128` with a
+**netrecv (+48):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.
 The delta is ordinary C-compiler overhead: null-terminated strings,
 the net_open CF normalization, fd stashed in a memory local so it

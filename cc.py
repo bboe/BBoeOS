@@ -668,6 +668,61 @@ class CodeGenerator:
         self._emit_load_var(vname)
         return f"byte [bx+{offset}]" if offset else "byte [bx]"
 
+    def _emit_constant_base_index_addr(
+        self,
+        *,
+        const_base: str,
+        index: Node,
+        is_byte: bool,
+        preserve_ax: bool,
+    ) -> str:
+        """Set up ``[CONST + disp + bx]`` addressing for a constant-base index.
+
+        Folds a trailing ``±Int`` off a ``Var ± Int`` index into the
+        displacement so ``buf[gap_start - 1]`` becomes
+        ``[EDIT_BUFFER_BASE-1+bx]`` after a single
+        ``mov bx, [_l_gap_start]``.  Byte-indexed references skip the
+        load entirely when the index variable is pinned to DI
+        (``[CONST+di]`` is valid 8086 addressing).
+
+        When *preserve_ax* is True, any path that evaluates the index
+        through AX pushes/pops AX so the caller's value survives.
+        """
+        element_size = 1 if is_byte else 2
+        displacement = 0
+        if isinstance(index, BinOp) and index.op in ("+", "-") and isinstance(index.right, Int):
+            sign = 1 if index.op == "+" else -1
+            displacement = sign * index.right.value * element_size
+            index = index.left
+        base_register = "bx"
+        if isinstance(index, Int):
+            displacement += index.value * element_size
+            self.emit("        xor bx, bx")
+        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] == "di":
+            base_register = "di"
+        elif isinstance(index, Var) and index.name in self.pinned_register:
+            self.emit(f"        mov bx, {self.pinned_register[index.name]}")
+            if not is_byte:
+                self.emit("        add bx, bx")
+        elif isinstance(index, Var) and index.name in self.locals:
+            self.emit(f"        mov bx, [{self._local_address(index.name)}]")
+            if not is_byte:
+                self.emit("        add bx, bx")
+        else:
+            if preserve_ax:
+                self.emit("        push ax")
+            self.generate_expression(index)
+            if not is_byte:
+                self.emit("        add ax, ax")
+            self.emit("        mov bx, ax")
+            if preserve_ax:
+                self.emit("        pop ax")
+        addr = const_base
+        if displacement != 0:
+            addr += f"{displacement:+d}"
+        addr += f"+{base_register}"
+        return addr
+
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.
 
@@ -2386,33 +2441,49 @@ class CodeGenerator:
                         self.emit("        mov ax, [bx]")
             else:
                 is_byte = self._is_byte_var(vname)
-                self._emit_load_var(vname)
-                # If the index is a pinned variable and the access is
-                # byte-sized, load it without clobbering BX.
-                if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
-                    self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
-                elif isinstance(index_expression, (Var, Int)):
-                    # Simple Var/Int load doesn't touch BX, so skip the
-                    # push/pop round-trip.
-                    self.generate_expression(index_expression)
-                    if not is_byte:
-                        self.emit("        add ax, ax")
-                    self.emit("        add bx, ax")
+                const_base = self._resolve_constant(vname)
+                if const_base is not None:
+                    self.emit_constant_reference(vname)
+                    addr = self._emit_constant_base_index_addr(
+                        const_base=const_base,
+                        index=index_expression,
+                        is_byte=is_byte,
+                        preserve_ax=False,
+                    )
+                    if is_byte:
+                        self.emit(f"        mov al, [{addr}]")
+                        self.emit("        xor ah, ah")
+                    else:
+                        self.emit(f"        mov ax, [{addr}]")
+                    self.ax_clear()
                 else:
-                    self.emit("        push bx")
-                    self.generate_expression(index_expression)
-                    if not is_byte:
-                        self.emit("        add ax, ax")
-                    self.emit("        pop bx")
-                    self.emit("        add bx, ax")
-                if is_byte:
-                    self.emit("        mov al, [bx]")
-                    self.emit("        xor ah, ah")
-                else:
-                    self.emit("        mov ax, [bx]")
-                # AX now holds the subscript result, not the index —
-                # invalidate the tracking that generate_expression set.
-                self.ax_clear()
+                    self._emit_load_var(vname)
+                    # If the index is a pinned variable and the access is
+                    # byte-sized, load it without clobbering BX.
+                    if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
+                        self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                    elif isinstance(index_expression, (Var, Int)):
+                        # Simple Var/Int load doesn't touch BX, so skip the
+                        # push/pop round-trip.
+                        self.generate_expression(index_expression)
+                        if not is_byte:
+                            self.emit("        add ax, ax")
+                        self.emit("        add bx, ax")
+                    else:
+                        self.emit("        push bx")
+                        self.generate_expression(index_expression)
+                        if not is_byte:
+                            self.emit("        add ax, ax")
+                        self.emit("        pop bx")
+                        self.emit("        add bx, ax")
+                    if is_byte:
+                        self.emit("        mov al, [bx]")
+                        self.emit("        xor ah, ah")
+                    else:
+                        self.emit("        mov ax, [bx]")
+                    # AX now holds the subscript result, not the index —
+                    # invalidate the tracking that generate_expression set.
+                    self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
             self.emit(f"        mov ax, {self.TYPE_SIZES[expression.type_name]}")
@@ -2700,32 +2771,48 @@ class CodeGenerator:
             else:
                 self.emit(f"        mov [{addr}], ax")
         else:
-            # Variable index: compute address in BX, then store.
-            self.generate_expression(statement.expr)
-            self.emit("        push ax")
-            self._emit_load_var(name)
-            # If the index is a simple Var/Int, evaluating it doesn't
-            # clobber BX, so we can skip the push/pop round-trip.
-            if isinstance(statement.index, (Var, Int)):
-                self.generate_expression(statement.index)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        add bx, ax")
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                self.emit_constant_reference(name)
+                self.generate_expression(statement.expr)
+                addr = self._emit_constant_base_index_addr(
+                    const_base=const_base,
+                    index=statement.index,
+                    is_byte=is_byte,
+                    preserve_ax=True,
+                )
+                if is_byte:
+                    self.emit(f"        mov [{addr}], al")
+                else:
+                    self.emit(f"        mov [{addr}], ax")
+                self.ax_clear()
             else:
-                self.emit("        push bx")
-                self.generate_expression(statement.index)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        pop bx")
-                self.emit("        add bx, ax")
-            self.emit("        pop ax")
-            # After pop, AX holds the value being stored, not the index —
-            # invalidate the ax_local tracking that generate_expression set.
-            self.ax_clear()
-            if is_byte:
-                self.emit("        mov [bx], al")
-            else:
-                self.emit("        mov [bx], ax")
+                # Variable index: compute address in BX, then store.
+                self.generate_expression(statement.expr)
+                self.emit("        push ax")
+                self._emit_load_var(name)
+                # If the index is a simple Var/Int, evaluating it doesn't
+                # clobber BX, so we can skip the push/pop round-trip.
+                if isinstance(statement.index, (Var, Int)):
+                    self.generate_expression(statement.index)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        add bx, ax")
+                else:
+                    self.emit("        push bx")
+                    self.generate_expression(statement.index)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        pop bx")
+                    self.emit("        add bx, ax")
+                self.emit("        pop ax")
+                # After pop, AX holds the value being stored, not the index —
+                # invalidate the ax_local tracking that generate_expression set.
+                self.ax_clear()
+                if is_byte:
+                    self.emit("        mov [bx], al")
+                else:
+                    self.emit("        mov [bx], ax")
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.

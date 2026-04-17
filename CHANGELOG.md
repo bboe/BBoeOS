@@ -13,6 +13,7 @@ at the time.
 - cc.py fix: `peephole_double_jump` now keeps `.L1:` when other jumps still target it; deleting it stranded the top-of-loop `jCC` that guards `while (cond)` with `break`
 - cc.py fix: `generate_if` restores AX tracking to the post-condition state (not the pre-if state) on the exit-body fall-through path, so a condition that clobbers AX (e.g. `fstat(fd) & FLAG_DIRECTORY`) no longer leaves stale `ax_local` tracking pointing at the pre-if variable
 - cc.py fix: `builtin_fstat` clears AX tracking after the syscall (the syscall overwrites AX but tracking still pointed at the argument local)
+- cc.py codegen: constant-base `Index` / `IndexAssign` fold into `[CONST ± disp + bx]` addressing, so `buf[gap_start - 1]` compiles to `mov bx, [_l_gap_start] / mov al, [EDIT_BUFFER_BASE-1+bx]` instead of the old `mov bx, CONST / push / load index / pop / add / load` sequence. Shrinks edit by 173 bytes, shell by 47, ls/echo/netrecv by 2–6 each
 
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
