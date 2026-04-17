@@ -324,16 +324,27 @@ encode_rel8_jump:
         pop bx
         jc .long_form                  ; unknown target -> stay near
 
-        ;; Compute displacement using near instruction size.
-        ;; Near jcc = 4 bytes (0F 8x rel16), near jmp = 3 bytes (E9 rel16).
+        ;; Forward jumps already assume the near size in the target's
+        ;; symbol-table address; shrinking moves the target by the same
+        ;; amount so the displacement is unchanged.  Backward targets,
+        ;; though, are fixed — shrinking brings the post-jump address
+        ;; closer by 1 (jmp) or 2 (jcc) bytes, which may be exactly
+        ;; what a boundary-case `-128` displacement needs.  Pick the
+        ;; post-shrink size to compute against: near size for forward,
+        ;; short size (2) for backward.
         mov dx, [current_address]
-        add dx, 4                      ; assume jcc
+        cmp ax, dx
+        jae .shrink_forward            ; target >= current -> forward
+        add dx, 2                      ; backward: use short size
+        jmp .shrink_check
+        .shrink_forward:
+        add dx, 4                      ; forward: assume jcc (4 bytes)
         push bp
         mov bp, sp
-        cmp byte [bp+2], 0EBh          ; saved opcode: [bp]=old_bp, [bp+2]=opcode
+        cmp byte [bp+2], 0EBh
         pop bp
         jne .shrink_check
-        dec dx                         ; jmp: 3 bytes, not 4
+        dec dx                         ; jmp: 3 bytes
         .shrink_check:
         sub ax, dx
         add ax, 128
@@ -1812,7 +1823,19 @@ handle_push:
         .push_imm16:
         pop si
         call resolve_value     ; AX = imm16
+        ;; Prefer the 2-byte sign-extended form `6A imm8` when the
+        ;; value fits in a signed byte (pass-1 references default to
+        ;; 0, which also fits).
         push ax
+        mov dx, ax
+        add dx, 80h
+        cmp dx, 0FFh
+        ja .push_imm16_long
+        mov al, 6Ah            ; push imm8 (sign-extended)
+        call emit_byte_al
+        pop ax
+        jmp emit_byte_al
+        .push_imm16_long:
         mov al, 68h            ; push imm16 opcode
         call emit_byte_al
         pop ax

@@ -575,6 +575,7 @@ class CodeGenerator:
         self.register_cache: dict[tuple[str, int], str] = {}
         self.required_includes: set[str] = set()
         self.spill_stack: list[tuple[str, int]] = []
+        self.store_target_register: str | None = None
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
         self.variable_arrays: set[str] = set()
@@ -1813,7 +1814,9 @@ class CodeGenerator:
             self.emit(f"        mov cx, {right.value}")
         elif isinstance(right, Var) and right.name in self.pinned_register:
             self.generate_expression(left)
-            self.emit(f"        mov cx, {self.pinned_register[right.name]}")
+            source_register = self.pinned_register[right.name]
+            if source_register != "cx":
+                self.emit(f"        mov cx, {source_register}")
         elif isinstance(right, Var) and right.name in self.locals:
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self._local_address(right.name)}]")
@@ -1893,6 +1896,26 @@ class CodeGenerator:
                 right_operand = self._emit_byte_index_bx(right)
                 right_mem = right_operand.removeprefix("byte ")
                 self.emit(f"        cmp al, {right_mem}")
+                return
+            # Fast path: right is a pinned register variable.  Compare
+            # AX against it directly, skipping the CX load.  Unsafe when
+            # the pinned register is CX because generate_expression(left)
+            # could clobber CX.
+            if isinstance(right, Var) and right.name in self.pinned_register and self.pinned_register[right.name] != "cx":
+                self.generate_expression(left)
+                self.emit(f"        cmp ax, {self.pinned_register[right.name]}")
+                return
+            # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
+            # skips the CX load entirely.
+            if (
+                isinstance(right, Var)
+                and right.name in self.locals
+                and right.name not in self.pinned_register
+                and right.name not in self.variable_arrays
+                and self.variable_types.get(right.name) != "unsigned long"
+            ):
+                self.generate_expression(left)
+                self.emit(f"        cmp ax, [{self._local_address(right.name)}]")
                 return
             # emit_binary_operator_operands clobbers CX; save it when a
             # pinned variable lives there (push/pop don't modify flags,
@@ -2102,10 +2125,17 @@ class CodeGenerator:
             if isinstance(expression, Var) and expression.name in self.NAMED_CONSTANTS:
                 self.emit(f"        mov {register}, {expression.name}")
                 return
+        # Tell nested expression handling that the pinned destination
+        # register (if any) will be overwritten at end of this store, so
+        # they don't need to push/pop it to preserve the old value.
+        previous_store_target = self.store_target_register
+        self.store_target_register = self.pinned_register.get(name)
         self.generate_expression(expression)
+        self.store_target_register = previous_store_target
         if name in self.pinned_register:
             register = self.pinned_register[name]
-            self.emit(f"        mov {register}, ax")
+            if register != "ax":
+                self.emit(f"        mov {register}, ax")
         else:
             self.emit(f"        mov [{self._local_address(name)}], ax")
         self.ax_is_byte = False
@@ -2308,9 +2338,24 @@ class CodeGenerator:
             self.register_cache.clear()
             self.spill_stack.clear()
             # Push arguments right-to-left (C convention: first arg at [bp+4]).
+            # Use immediate/register/memory push where possible to skip the
+            # `mov ax, X / push ax` pair (saves 1-2 bytes per arg).
             for arg in reversed(arguments):
-                self.generate_expression(arg)
-                self.emit("        push ax")
+                if isinstance(arg, Int):
+                    self.emit(f"        push {arg.value}")
+                elif isinstance(arg, String):
+                    label = self.new_string_label(arg.content)
+                    self.emit(f"        push {label}")
+                elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
+                    self.emit_constant_reference(arg.name)
+                    self.emit(f"        push {arg.name}")
+                elif isinstance(arg, Var) and arg.name in self.constant_aliases:
+                    self.emit(f"        push {self.constant_aliases[arg.name]}")
+                elif isinstance(arg, Var) and arg.name in self.pinned_register:
+                    self.emit(f"        push {self.pinned_register[arg.name]}")
+                else:
+                    self.generate_expression(arg)
+                    self.emit("        push ax")
             self.emit(f"        call {name}")
             if arguments:
                 self.emit(f"        add sp, {len(arguments) * 2}")
@@ -2559,11 +2604,30 @@ class CodeGenerator:
                 self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
+            # Fast path for ``+``/``-``/``&`` with a pinned-register right
+            # operand: arithmetic targets the register directly, skipping
+            # the `mov cx, <reg>` load and any CX save/restore.  Only safe
+            # when the pinned register isn't CX — otherwise generate_expression
+            # for ``left`` could clobber it mid-expression.
+            if (
+                operator in ("+", "-", "&")
+                and isinstance(right, Var)
+                and right.name in self.pinned_register
+                and self.pinned_register[right.name] != "cx"
+            ):
+                self.generate_expression(left)
+                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                self.emit(f"        {mnemonic} ax, {self.pinned_register[right.name]}")
+                self.ax_clear()
+                return
             cx_pinned_var = next(
                 (name for name, register in self.pinned_register.items() if register == "cx"),
                 None,
             )
-            if cx_pinned_var is not None:
+            # Skip the CX save when an enclosing store is about to
+            # overwrite CX anyway — its original value is dead.
+            protect_cx = cx_pinned_var is not None and self.store_target_register != "cx"
+            if protect_cx:
                 self.emit("        push cx")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
@@ -2573,23 +2637,25 @@ class CodeGenerator:
             elif operator == "&":
                 self.emit("        and ax, cx")
             elif operator == "*":
-                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
-                if dx_pinned:
+                protect_dx = any(register == "dx" for register in self.pinned_register.values()) and self.store_target_register != "dx"
+                if protect_dx:
                     self.emit("        push dx")
                 self.emit("        mul cx")
-                if dx_pinned:
+                if protect_dx:
                     self.emit("        pop dx")
                 self.division_remainder = None
             elif operator in {"/", "%"}:
                 dx_pinned = any(register == "dx" for register in self.pinned_register.values())
-                if dx_pinned:
+                protect_dx = dx_pinned and self.store_target_register != "dx"
+                if protect_dx:
                     self.emit("        push dx")
                 self.emit("        xor dx, dx")
                 self.emit("        div cx")
                 if operator == "%":
                     self.emit("        mov ax, dx")
-                if dx_pinned:
+                if protect_dx:
                     self.emit("        pop dx")
+                if dx_pinned:
                     self.division_remainder = None
                 else:
                     self.division_remainder = (left, right)
@@ -2599,7 +2665,7 @@ class CodeGenerator:
             else:
                 message = f"unknown operator: {operator}"
                 raise CompileError(message, line=expression.line)
-            if cx_pinned_var is not None:
+            if protect_cx:
                 self.emit("        pop cx")
             self.ax_clear()
         else:
