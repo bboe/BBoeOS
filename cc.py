@@ -471,7 +471,7 @@ class CodeGenerator:
         "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
         "reboot": frozenset({"ax"}),
-        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
+        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx"}),
         "rename": frozenset({"ax", "di", "si"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "set_exec_arg": frozenset({"ax"}),

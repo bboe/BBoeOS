@@ -1,4 +1,19 @@
 syscall_handler:
+        ;; Preserve the full user register file across every syscall.
+        ;; ``pusha`` saves AX, CX, DX, BX, SP, BP, SI, DI (in that order),
+        ;; so at [BP .. BP+14]:
+        ;;   [BP+0]  DI [BP+2]  SI [BP+4]  BP [BP+6]  SP
+        ;;   [BP+8]  BX [BP+10] DX [BP+12] CX [BP+14] AX
+        ;; The iret frame from INT 30h sits above that:
+        ;;   [BP+16] IP [BP+18] CS [BP+20] FLAGS
+        ;; Handlers that return a value in AX (or CX/DX for fstat,
+        ;; DX:AX for datetime) write it into the saved slot before
+        ;; jumping to the common exit path, which pops back and
+        ;; irets.  Net effect: the only register a caller treats as
+        ;; clobbered is the one the ABI documents as "return value".
+        pusha
+        mov bp, sp
+
         cmp ah, SYS_FS_CHMOD   ; fs_chmod
         je .fs_chmod
         cmp ah, SYS_FS_MKDIR   ; fs_mkdir
@@ -43,7 +58,7 @@ syscall_handler:
         je .sys_reboot
         cmp ah, SYS_SHUTDOWN   ; sys_shutdown
         je .sys_shutdown
-        iret
+        jmp .iret_done
 
         .fs_chmod:
         ;; Update flags byte for a file: SI = filename, AL = new flags value
@@ -391,6 +406,8 @@ syscall_handler:
         ;; Returns AL = mode (permission flags), CX:DX = size (32-bit)
         ;; CF on error
         call fd_fstat
+        mov [bp+12], cx         ; high 16 of size → saved CX
+        mov [bp+10], dx         ; low 16 of size → saved DX
         jmp .iret_cf
 
         .io_open:
@@ -520,7 +537,10 @@ syscall_handler:
         mov [.st_len], cx
         mov [.st_ip], di
         mov [.st_sport], dx
-        mov [.st_dport], bp
+        ;; BP holds our pusha frame pointer; the user's BP (dst_port)
+        ;; lives at [bp+4] in the saved area.
+        mov ax, [bp+4]
+        mov [.st_dport], ax
         call fd_lookup         ; SI = entry pointer
         jc .net_sendto_err
         cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
@@ -559,10 +579,6 @@ syscall_handler:
         .rtc_datetime:
         ;; Returns DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
         ;; Gregorian leap rule. Valid through 2106 (32-bit seconds).
-        push bx
-        push cx
-        push si
-        push di
         push ebx
         push ecx
         push esi
@@ -655,11 +671,9 @@ syscall_handler:
         pop ebx
         mov edx, eax
         shr edx, 16             ; DX = high 16
-        pop di
-        pop si
-        pop cx
-        pop bx
-        iret
+        mov [bp+14], ax         ; AX = low 16 of epoch seconds
+        mov [bp+10], dx         ; DX = high 16 of epoch seconds
+        jmp .iret_done
 
         .bcd_to_bin:
         ;; AL (BCD) -> AL (binary). Clobbers AX.
@@ -714,9 +728,6 @@ syscall_handler:
         .rtc_sleep:
         ;; Busy-wait for CX milliseconds via BIOS INT 15h AH=86h
         ;; which takes CX:DX = microseconds.  CX ms * 1000 = us.
-        push ax
-        push cx
-        push dx
         mov ax, cx
         mov cx, 1000
         mul cx                  ; DX:AX = ms * 1000 (microseconds)
@@ -724,14 +735,12 @@ syscall_handler:
         mov dx, ax
         mov ah, 86h
         int 15h
-        pop dx
-        pop cx
-        pop ax
-        iret
+        jmp .iret_done
 
         .rtc_uptime:
         call uptime_seconds
-        iret
+        mov [bp+14], ax         ; return seconds in AX
+        jmp .iret_done
 
         .video_mode:
         ;; Set video mode: AL = mode; clears serial and screen
@@ -743,7 +752,7 @@ syscall_handler:
         pop ax
         xor ah, ah              ; INT 10h AH=00h set mode (AL), clears screen
         int 10h
-        iret
+        jmp .iret_done
 
         .sys_exec:
         ;; Execute program: SI = filename
@@ -763,9 +772,11 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_load:
-        ;; Save SP from before INT 30h (skip iret frame: IP, CS, flags)
+        ;; Save SP from before INT 30h.  Our frame has 16 bytes of
+        ;; pusha save area plus the 6-byte iret frame, so the caller's
+        ;; pre-INT-30h SP is current SP + 22.
         mov bp, sp
-        add bp, 6
+        add bp, 22
         mov [shell_sp], bp
         ;; Load program into PROGRAM_BASE
         mov di, PROGRAM_BASE
@@ -795,17 +806,18 @@ syscall_handler:
         iret
 
         .iret_cf:
-        ;; Return via iret, propagating current CF to caller's saved flags
-        ;; Stack: [IP] [CS] [FLAGS]
-        push bp
-        mov bp, sp
-        jnc .iret_clc
-        or word [bp+6], 0001h   ; Set CF in saved FLAGS
-        pop bp
-        iret
-        .iret_clc:
-        and word [bp+6], 0FFFEh ; Clear CF in saved FLAGS
-        pop bp
+        ;; Propagate the handler's CF to the caller's saved FLAGS,
+        ;; write AX into the saved slot, then fall through to popa/iret.
+        jnc .iret_cf_clear
+        or word [bp+20], 0001h  ; Set CF in saved FLAGS
+        jmp .iret_cf_write
+        .iret_cf_clear:
+        and word [bp+20], 0FFFEh ; Clear CF in saved FLAGS
+        .iret_cf_write:
+        mov [bp+14], ax         ; AX = return value / error code
+        .iret_done:
+        ;; Common exit: restore the full user register file and iret.
+        popa
         iret
 
         .check_shell:
