@@ -618,10 +618,19 @@ class CodeGenerator:
 
     @staticmethod
     def _extract_local_label(line: str, /) -> str | None:
-        """Return the _l_ label from a store or declaration, or None."""
+        """Return the _l_ label from a store or declaration, or None.
+
+        Stops at the first non-identifier byte so a byte-offset store
+        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
+        same way peephole_dead_stores resolves reads.
+        """
         # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
         if line.startswith("mov") and "[_l_" in line and "], " in line:
-            return line[line.index("[_l_") + 1 : line.index("]")]
+            start = line.index("[_l_") + 1
+            end = start
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            return line[start:end]
         # Declaration: _l_NAME: dw 0
         if line.startswith("_l_") and line.endswith(": dw 0"):
             return line[: line.index(":")]
