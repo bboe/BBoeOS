@@ -412,6 +412,29 @@ handle_aam:
 ;;; -----------------------------------------------------------------------
 ;;; handle_add: add r, imm
 ;;; -----------------------------------------------------------------------
+;;; -----------------------------------------------------------------------
+;;; handle_adc: adc r16, imm8 — the only form cc.py emits (checksum fold)
+;;; Opcode 83 /2: sign-extended imm8 into r16.
+;;; -----------------------------------------------------------------------
+handle_adc:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        call skip_comma
+        call resolve_value     ; AX = immediate
+        mov cx, ax
+        pop bx                 ; BL = reg, BH = size
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0D0h            ; modrm = C0 | (2<<3) | rm = D0 | rm
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
+;;; handle_add
+;;; -----------------------------------------------------------------------
 handle_add:
         call skip_ws
         call parse_register    ; AL = reg, AH = size
@@ -819,13 +842,25 @@ handle_cmp:
         mov al, cl
         jmp emit_byte_al
         .cmp_mem:
-        ;; cmp byte [reg+disp], imm8 or cmp word [reg+disp], imm16
+        ;; cmp byte [reg+disp], imm8 or cmp word [reg+disp], imm
+        mov byte [cmp_imm_byte], 0
         cmp byte [op1_size], 8
         je .cmp_mem8
+        ;; word form: prefer 83 sign-extended-imm8 when imm fits in
+        ;; [-128, 127] (saves one byte vs 81 imm16).
+        mov ax, cx
+        add ax, 80h
+        cmp ax, 0FFh
+        ja .cmp_mem_word_full
+        mov al, 83h
+        mov byte [cmp_imm_byte], 1
+        jmp .cmp_mem_modrm
+        .cmp_mem_word_full:
         mov al, 81h
         jmp .cmp_mem_modrm
         .cmp_mem8:
         mov al, 80h
+        mov byte [cmp_imm_byte], 1
         .cmp_mem_modrm:
         call emit_byte_al
         ;; Build modrm: /7 with memory addressing
@@ -855,8 +890,8 @@ handle_cmp:
         .cmp_mem_no_disp:
         call emit_byte_al      ; mod=00
         .cmp_mem_imm:
-        cmp byte [op1_size], 8
-        je .cmp_mem_imm8
+        cmp byte [cmp_imm_byte], 0
+        jne .cmp_mem_imm8
         mov ax, cx
         jmp emit_word_ax
         .cmp_mem_imm8:
@@ -1144,6 +1179,13 @@ handle_jz:
 ;;; -----------------------------------------------------------------------
 handle_lodsb:
         mov al, 0ACh
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
+;;; handle_lodsw
+;;; -----------------------------------------------------------------------
+handle_lodsw:
+        mov al, 0ADh
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
@@ -1626,6 +1668,25 @@ handle_neg:
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
+;;; handle_not: not r8 / not r16 — F6/F7 /2
+;;; -----------------------------------------------------------------------
+handle_not:
+        call skip_ws
+        call parse_register    ; AL = reg, AH = size
+        push ax
+        cmp ah, 8
+        je .not8
+        mov al, 0F7h
+        jmp .not_emit
+        .not8:
+        mov al, 0F6h
+        .not_emit:
+        call emit_byte_al
+        pop ax
+        or al, 0D0h            ; modrm = C0 | (2<<3) | rm = D0 | rm
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
 ;;; handle_or
 ;;; -----------------------------------------------------------------------
 handle_or:
@@ -1838,6 +1899,21 @@ handle_shl:
         call resolve_value     ; AX = shift count
         mov cl, al
         pop bx                 ; BL = reg, BH = size
+        ;; shl r8/r16, 1: D0/D1 /4 rm — one byte shorter than the imm8 form.
+        cmp cl, 1
+        jne .shl_imm
+        cmp bh, 8
+        je .shl1_8
+        mov al, 0D1h
+        jmp .shl1_emit
+        .shl1_8:
+        mov al, 0D0h
+        .shl1_emit:
+        call emit_byte_al
+        mov al, bl
+        or al, 0E0h
+        jmp emit_byte_al
+        .shl_imm:
         ;; shl r8, imm8: C0 /4 imm8. shl r16, imm8: C1 /4 imm8
         cmp bh, 8
         je .shl8
@@ -1865,6 +1941,21 @@ handle_shr:
         call resolve_value     ; AX = shift count
         mov cl, al
         pop bx                 ; BL = reg, BH = size
+        ;; shr r8/r16, 1: D0/D1 /5 rm — one byte shorter than the imm8 form.
+        cmp cl, 1
+        jne .shr_imm
+        cmp bh, 8
+        je .shr1_8
+        mov al, 0D1h
+        jmp .shr1_emit
+        .shr1_8:
+        mov al, 0D0h
+        .shr1_emit:
+        call emit_byte_al
+        mov al, bl
+        or al, 0E8h
+        jmp emit_byte_al
+        .shr_imm:
         ;; shr r8, imm8: C0 /5 imm8. shr r16, imm8: C1 /5 imm8
         cmp bh, 8
         je .shr8
@@ -2622,6 +2713,8 @@ parse_db:
         je .esc_r
         cmp al, 'e'
         je .esc_e
+        cmp al, 'x'
+        je .esc_x
         ;; Unknown escape, emit backslash and char
         push ax
         mov al, '\'
@@ -2650,6 +2743,21 @@ parse_db:
         .esc_emit:
         call emit_byte_al
         inc si
+        jmp .str_char
+        .esc_x:
+        ;; \xNN — read two hex digits after the 'x' and emit as one byte.
+        inc si                 ; past 'x', at first hex digit
+        mov cl, [si]
+        call hex_digit         ; CL = digit (assumes valid input)
+        mov bl, cl
+        shl bl, 4
+        inc si
+        mov cl, [si]
+        call hex_digit
+        or cl, bl
+        mov al, cl
+        call emit_byte_al
+        inc si                 ; past the second hex digit
         jmp .str_char
         .str_end:
         inc si                 ; skip closing backtick
@@ -4014,6 +4122,7 @@ symbol_set:
 ;;; -----------------------------------------------------------------------
 mnemonic_table:
         dw STR_AAM, handle_aam
+        dw STR_ADC, handle_adc
         dw STR_ADD, handle_add
         dw STR_AND, handle_and
         dw STR_CALL, handle_call
@@ -4041,6 +4150,7 @@ mnemonic_table:
         dw STR_JNZ, handle_jne
         dw STR_JZ,  handle_jz
         dw STR_LODSB, handle_lodsb
+        dw STR_LODSW, handle_lodsw
         dw STR_LOOP, handle_loop
         dw STR_MOV, handle_mov
         dw STR_MOVSB, handle_movsb
@@ -4048,6 +4158,7 @@ mnemonic_table:
         dw STR_MOVZX, handle_movzx
         dw STR_MUL, handle_mul
         dw STR_NEG, handle_neg
+        dw STR_NOT, handle_not
         dw STR_OR,  handle_or
         dw STR_POP, handle_pop
         dw STR_PUSH, handle_push
@@ -4069,6 +4180,7 @@ mnemonic_table:
 
 ;;; Mnemonic strings
 STR_AAM     db 'aam',0
+STR_ADC     db 'adc',0
 STR_ADD     db 'add',0
 STR_AND     db 'and',0
 STR_ASSIGN  db 'assign',0
@@ -4104,6 +4216,7 @@ STR_JNS     db 'jns',0
 STR_JNZ     db 'jnz',0
 STR_JZ      db 'jz',0
 STR_LODSB   db 'lodsb',0
+STR_LODSW   db 'lodsw',0
 STR_LOOP    db 'loop',0
 STR_MOV     db 'mov',0
 STR_MOVSB   db 'movsb',0
@@ -4111,6 +4224,7 @@ STR_MOVSW   db 'movsw',0
 STR_MOVZX   db 'movzx',0
 STR_MUL     db 'mul',0
 STR_NEG     db 'neg',0
+STR_NOT     db 'not',0
 STR_OR      db 'or',0
 STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
@@ -4232,6 +4346,7 @@ MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
 ;;; Variables
 ;;; -----------------------------------------------------------------------
 changed_flag  db 0
+cmp_imm_byte  db 0
 cmp_op1_size  db 0
 current_address      dw 0
 equ_space     dw 0
