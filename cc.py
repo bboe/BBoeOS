@@ -273,9 +273,9 @@ class While(Node):
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
 CHARACTER_ESCAPES = {
+    '"': 0x22,
     "0": 0x00,
     "\\": 0x5C,
-    '"': 0x22,
     "n": 0x0A,
     "r": 0x0D,
     "t": 0x09,
@@ -316,6 +316,21 @@ JUMP_WHEN_TRUE = {
 
 KEYWORDS = frozenset({"break", "char", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
 
+MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
+
+REGISTER_PARENT = {
+    "ah": "ax",
+    "al": "ax",
+    "bh": "bx",
+    "bl": "bx",
+    "ch": "cx",
+    "cl": "cx",
+    "dh": "dx",
+    "dl": "dx",
+}
+
+SHIFT_OPERATORS = frozenset({"SHR"})
+
 TOKEN_PATTERN = re.compile(
     r"""
     (?P<WS>\s+)
@@ -354,21 +369,6 @@ TOKEN_PATTERN = re.compile(
 """,
     re.VERBOSE,
 )
-
-MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
-
-REGISTER_PARENT = {
-    "ah": "ax",
-    "al": "ax",
-    "bh": "bx",
-    "bl": "bx",
-    "ch": "cx",
-    "cl": "cx",
-    "dh": "dx",
-    "dl": "dx",
-}
-
-SHIFT_OPERATORS = frozenset({"SHR"})
 
 TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
 
