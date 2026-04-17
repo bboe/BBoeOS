@@ -28,6 +28,7 @@
         %assign FD_TYPE_DIRECTORY 3
         %assign FD_TYPE_FILE 1
         %assign FD_TYPE_FREE 0
+        %assign FD_TYPE_ICMP 6
         %assign FD_TYPE_NET 4
         %assign FD_TYPE_UDP 5
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
