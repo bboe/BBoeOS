@@ -16,6 +16,7 @@ at the time.
 - cc.py codegen: constant-base `Index` / `IndexAssign` fold into `[CONST ± disp + bx]` addressing, so `buf[gap_start - 1]` compiles to `mov bx, [_l_gap_start] / mov al, [EDIT_BUFFER_BASE-1+bx]` instead of the old `mov bx, CONST / push / load index / pop / add / load` sequence. Shrinks edit by 173 bytes, shell by 47, ls/echo/netrecv by 2–6 each
 - cc.py codegen: auto-pin by usage count (body locals before parameters, tiebroken by declaration order). Combined with the next entry, pins the most-used locals onto the cheapest-to-save registers
 - cc.py codegen: pin aggressively and wrap each call with `push`/`pop` for any caller pin the callee clobbers. Pinning is gated by a cost model that only keeps a pin when the local's reference count strictly exceeds the matched register's clobber count. Shrinks edit by 196 bytes, shell by 21, arp/cat/cp/draw/ls by 2–14 each
+- cc.py codegen: register calling convention for user functions whose every call site passes only simple (Int/String/Var) arguments. Pinned params arrive in their assigned registers instead of being pushed and reloaded, with topological ordering (and an AX spill for cycles) to resolve source/target conflicts. Shrinks shell by 35, ping/edit/dns by 11–14 each
 
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 

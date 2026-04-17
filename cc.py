@@ -583,6 +583,58 @@ class CodeGenerator:
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
 
+    def _analyze_user_function_conventions(self, functions: list[Node], /) -> None:
+        """Pre-compute each user function's pinned-param register map.
+
+        Runs the same pin-selection logic that :meth:`generate_function`
+        uses, but purely analytically — no code is emitted.  The result
+        populates :attr:`user_function_pin_params` so call-site emission
+        knows which registers every callee expects.
+
+        A function also qualifies for the register calling convention
+        (added to :attr:`register_convention_functions`) when every
+        call to it in the program passes only simple arguments (``Int``,
+        ``String``, or ``Var``).  Complex-expression arguments would
+        require ordering complex eval against register-moves without
+        clobbering caller pins, so those callees fall back to the
+        stack convention.
+        """
+        self.user_function_pin_params: dict[str, dict[int, str]] = {}
+        self.register_convention_functions: set[str] = set()
+
+        for function in functions:
+            if function.name == "main":
+                continue
+            self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
+            assignments = self._select_auto_pin_candidates(body=function.body, parameters=function.params)
+            param_pins: dict[int, str] = {}
+            for index, param in enumerate(function.params):
+                if param.name in assignments:
+                    param_pins[index] = assignments[param.name]
+            self.user_function_pin_params[function.name] = param_pins
+
+        has_complex_call: dict[str, bool] = dict.fromkeys(self.user_functions, False)
+
+        def visit(node: Node) -> None:
+            if isinstance(node, Call) and node.name in self.user_functions and any(not self._is_simple_arg(arg) for arg in node.args):
+                has_complex_call[node.name] = True
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            visit(item)
+
+        for function in functions:
+            for statement in function.body:
+                visit(statement)
+
+        for name, pins in self.user_function_pin_params.items():
+            if pins and not has_complex_call.get(name):
+                self.register_convention_functions.add(name)
+
     @staticmethod
     def _byte_index_base_key(node: Index, /) -> str:
         """Return a string key identifying the base pointer of an Index.
@@ -872,6 +924,20 @@ class CodeGenerator:
         return isinstance(expression, BinOp) and expression.op == "%" and expression.left == base and isinstance(expression.right, Int)
 
     @staticmethod
+    def _is_simple_arg(node: Node, /) -> bool:
+        """Return True if a call argument evaluates without register clobbers.
+
+        Simple args compile to a single ``mov reg, ...`` (reading from
+        an immediate, string label, pinned register, memory slot, or
+        NAMED_CONSTANT) — they can be safely ordered against other
+        register-bound args by :meth:`_emit_register_arg_moves`.
+        Complex args run full expression emission (``BinOp``, ``Index``,
+        nested ``Call``), which clobbers AX and sometimes more, so they
+        force the caller onto the stack calling convention.
+        """
+        return isinstance(node, (Int, String, Var))
+
+    @staticmethod
     def _is_simple_printf(node: Node, /) -> bool:
         """Return True if *node* is ``printf(<literal with no '%'>)``.
 
@@ -917,6 +983,100 @@ class CodeGenerator:
     def _node_references_var(*, name: str, node: Node) -> bool:
         """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
         return _ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
+
+    def _emit_push_arg(self, arg: Node, /) -> None:
+        """Push a single argument onto the stack, preferring compact forms.
+
+        Immediates, string labels, NAMED_CONSTANTs, constant aliases,
+        and pinned-register variables all avoid the ``mov ax, X / push
+        ax`` pair.  Any other form falls back to ``generate_expression``
+        followed by ``push ax``.
+        """
+        if isinstance(arg, Int):
+            self.emit(f"        push {arg.value}")
+        elif isinstance(arg, String):
+            label = self.new_string_label(arg.content)
+            self.emit(f"        push {label}")
+        elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
+            self.emit_constant_reference(arg.name)
+            self.emit(f"        push {arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.constant_aliases:
+            self.emit(f"        push {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var) and arg.name in self.pinned_register:
+            self.emit(f"        push {self.pinned_register[arg.name]}")
+        else:
+            self.generate_expression(arg)
+            self.emit("        push ax")
+
+    def _emit_register_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
+        """Emit ``mov`` instructions that place simple args in target registers.
+
+        Only used for user function calls that qualify for the register
+        calling convention — every arg is simple (``Int``/``String``/
+        ``Var``), so expression emission can't clobber a destination
+        that another arg still needs to read.  When two args would form
+        a read/write cycle (e.g. ``mov bx, di`` and ``mov di, bx``),
+        the first item's source is copied through AX to break the
+        cycle (AX isn't a pinning target, so no other item reads it).
+        """
+        items: list[dict] = []
+        for target, arg in register_args:
+            source: str | None = None
+            if isinstance(arg, Var) and arg.name in self.pinned_register:
+                source = self.pinned_register[arg.name]
+            items.append({"target": target, "arg": arg, "source": source})
+        while items:
+            progress_index = None
+            for index, item in enumerate(items):
+                target = item["target"]
+                blocked = any(j != index and other["source"] == target for j, other in enumerate(items))
+                if not blocked:
+                    progress_index = index
+                    break
+            if progress_index is not None:
+                item = items.pop(progress_index)
+                self._emit_register_arg_single(target=item["target"], arg=item["arg"], source=item["source"])
+                continue
+            # Cycle break: spill the first item's source to AX, then
+            # redirect every pending reader through AX.
+            item = items[0]
+            source = item["source"]
+            self.emit(f"        mov ax, {source}")
+            for other in items:
+                if other["source"] == source:
+                    other["source"] = "ax"
+                    other["arg"] = None  # mark as "load from ax"
+
+    def _emit_register_arg_single(self, *, target: str, arg: Node, source: str | None) -> None:
+        """Emit a single register-arg load for :meth:`_emit_register_arg_moves`.
+
+        *source* is the register currently holding the value to move
+        (set when the original ``arg`` was a pinned-register ``Var``
+        and may have been redirected to ``ax`` after a cycle break).
+        A ``None`` *source* means read directly from the AST node.
+        """
+        if source is not None:
+            if source != target:
+                self.emit(f"        mov {target}, {source}")
+            return
+        if isinstance(arg, Int):
+            if arg.value == 0 and target != "ax":
+                self.emit(f"        xor {target}, {target}")
+            else:
+                self.emit(f"        mov {target}, {arg.value}")
+        elif isinstance(arg, String):
+            label = self.new_string_label(arg.content)
+            self.emit(f"        mov {target}, {label}")
+        elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
+            self.emit_constant_reference(arg.name)
+            self.emit(f"        mov {target}, {arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.constant_aliases:
+            self.emit(f"        mov {target}, {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var):
+            self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
+        else:
+            message = f"register-arg target {target} given unexpected complex node {arg!r}"
+            raise CompileError(message, line=getattr(arg, "line", None))
 
     def _pinned_registers_to_save(self, clobbers: frozenset[str], /) -> list[str]:
         """Return the pinned registers that need push/pop around a call.
@@ -2270,6 +2430,7 @@ class CodeGenerator:
         for function in ast.functions:
             if function.name != "main":
                 self.user_functions[function.name] = len(function.params)
+        self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
         main_func = None
         helpers: list[Node] = []
@@ -2439,28 +2600,22 @@ class CodeGenerator:
             # Invalidate all register caches — user functions clobber everything.
             self.register_cache.clear()
             self.spill_stack.clear()
-            # Push arguments right-to-left (C convention: first arg at [bp+4]).
-            # Use immediate/register/memory push where possible to skip the
-            # `mov ax, X / push ax` pair (saves 1-2 bytes per arg).
-            for arg in reversed(arguments):
-                if isinstance(arg, Int):
-                    self.emit(f"        push {arg.value}")
-                elif isinstance(arg, String):
-                    label = self.new_string_label(arg.content)
-                    self.emit(f"        push {label}")
-                elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
-                    self.emit_constant_reference(arg.name)
-                    self.emit(f"        push {arg.name}")
-                elif isinstance(arg, Var) and arg.name in self.constant_aliases:
-                    self.emit(f"        push {self.constant_aliases[arg.name]}")
-                elif isinstance(arg, Var) and arg.name in self.pinned_register:
-                    self.emit(f"        push {self.pinned_register[arg.name]}")
+            callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
+            register_args: list[tuple[str, Node]] = []
+            stack_args: list[Node] = []
+            for index, arg in enumerate(arguments):
+                if index in callee_pins:
+                    register_args.append((callee_pins[index], arg))
                 else:
-                    self.generate_expression(arg)
-                    self.emit("        push ax")
+                    stack_args.append(arg)
+            # Push stack-bound arguments right-to-left (C convention).
+            for arg in reversed(stack_args):
+                self._emit_push_arg(arg)
+            # Load register-bound arguments with topological ordering.
+            self._emit_register_arg_moves(register_args)
             self.emit(f"        call {name}")
-            if arguments:
-                self.emit(f"        add sp, {len(arguments) * 2}")
+            if stack_args:
+                self.emit(f"        add sp, {len(stack_args) * 2}")
             for register in reversed(saved):
                 self.emit(f"        pop {register}")
             self.ax_clear()
@@ -2841,18 +2996,32 @@ class CodeGenerator:
             self.visible_vars.add(param.name)
         self.visible_vars.update(self.pinned_register)
 
+        # Register calling convention: pinned parameters arrive in their
+        # target register (caller loaded them before the call), and
+        # non-pinned parameters keep compact [bp+N] offsets that skip
+        # register-passed slots.
+        register_convention = name != "main" and name in self.register_convention_functions
+        if register_convention:
+            stack_position = 0
+            for param in parameters:
+                if param.name in self.pinned_register:
+                    continue
+                self.locals[param.name] = -(4 + stack_position * 2)
+                stack_position += 1
+
         self.emit(f"{name}:")
         if not self.elide_frame:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
             if self.frame_size > 0:
                 self.emit(f"        sub sp, {self.frame_size}")
-            # Load pinned parameters from caller-pushed stack slots
-            # into their registers.
-            for i, param in enumerate(parameters):
-                if param.name in self.pinned_register:
-                    register = self.pinned_register[param.name]
-                    self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
+            if not register_convention:
+                # Load pinned parameters from caller-pushed stack slots
+                # into their registers.
+                for i, param in enumerate(parameters):
+                    if param.name in self.pinned_register:
+                        register = self.pinned_register[param.name]
+                        self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
