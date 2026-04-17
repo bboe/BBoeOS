@@ -55,21 +55,21 @@ int resolve_dns(char *domain, char *target) {
     memcpy(query + 12 + name_length, "\x00\x01\x00\x01", 4);
     int query_length = 16 + name_length;
 
-    char *dns_ip = BUFFER + 8;
-    memcpy(dns_ip, "\x0a\x00\x02\x03", 4);
+    /* DNS server IP 10.0.2.3 stashed just past target_ip in BUFFER. */
+    memcpy(BUFFER + 8, "\x0a\x00\x02\x03", 4);
 
     int fd = net_open(SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         return 1;
     }
-    if (sendto(fd, query, query_length, dns_ip, 1024, 53) < 0) {
+    if (sendto(fd, query, query_length, BUFFER + 8, 1024, 53) < 0) {
         close(fd);
         return 1;
     }
 
     int received = 0;
     int tries = 30000;
-    while (tries > 0) {
+    while (tries) {
         received = recvfrom(fd, query, 512, 1024);
         if (received > 0) {
             break;
@@ -86,7 +86,7 @@ int resolve_dns(char *domain, char *target) {
         return 1;
     }
     int offset = skip_name(query, 12) + 4;
-    while (answer_count > 0) {
+    while (answer_count) {
         offset = skip_name(query, offset);
         char *record = query + offset;
         int rdlength = record[9];
@@ -127,7 +127,7 @@ int main(int argc, char *argv[]) {
     char *packet = SECTOR_BUFFER;
     int seq = 1;
     int count = 4;
-    while (count > 0) {
+    while (count) {
         /* ICMP echo request: type=8 code=0 checksum=placeholder
            identifier=0x0001 sequence=<seq>. Payload (bytes 8..15) is
            whatever happens to be in SECTOR_BUFFER — echo reply mirrors
@@ -139,20 +139,18 @@ int main(int argc, char *argv[]) {
         packet[3] = sum / 256;
 
         int t0 = ticks();
+        sendto(fd, packet, 16, target_ip, 0, 0);
+        /* ~32k tries fits signed 16-bit (our C subset compares signed)
+           and is plenty for the local ring to surface a reply. */
         int got = 0;
-        if (sendto(fd, packet, 16, target_ip, 0, 0) > 0) {
-            /* ~32k tries fits signed 16-bit (our C subset compares
-               signed) and is plenty for the local ring to surface a
-               reply. */
-            int tries = 30000;
-            while (tries > 0) {
-                int n = recvfrom(fd, packet, 128, 0);
-                if (n > 0 && packet[0] == 0) {
-                    got = 1;
-                    break;
-                }
-                tries = tries - 1;
+        int tries = 30000;
+        while (tries) {
+            int n = recvfrom(fd, packet, 128, 0);
+            if (n > 0 && packet[0] == 0) {
+                got = 1;
+                break;
             }
+            tries = tries - 1;
         }
         if (got) {
             printf("Reply from ");
