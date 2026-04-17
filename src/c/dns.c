@@ -87,8 +87,10 @@ int main(int argc, char *argv[]) {
         die("Usage: dns <domain>\n");
     }
 
-    char *mac_buffer = BUFFER;
-    int error = mac(mac_buffer);
+    /* Use SECTOR_BUFFER for the MAC check: BUFFER overlaps the input
+       buffer, which still holds argv[0] until we've printed and
+       encoded it. */
+    int error = mac(SECTOR_BUFFER);
     if (error) {
         die("No NIC found\n");
     }
@@ -146,7 +148,7 @@ int main(int argc, char *argv[]) {
     /* Receive response into SECTOR_BUFFER (reuse query buffer) */
     char *response = SECTOR_BUFFER;
     int received = 0;
-    int tries = 65535;
+    int tries = 30000;
     while (tries > 0) {
         received = recvfrom(socket_fd, response, 512, 1024);
         if (received > 0) {

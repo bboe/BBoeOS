@@ -467,7 +467,11 @@ class CodeGenerator:
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
-        "char": 1,
+        # ``char`` locals are stored via word-sized ``mov [addr], ax``;
+        # allocating them as 1 byte would let the high byte spill into
+        # an adjacent stack slot.  Round up to a word so each local
+        # occupies its own aligned slot.
+        "char": 2,
         "char*": 2,
         "int": 2,
         "unsigned long": 4,
@@ -1326,6 +1330,12 @@ class CodeGenerator:
             self.emit("        mov bp, ax")
         self._emit_syscall("NET_SENDTO")
         self.emit("        pop bp")
+        # Normalize the CF error signal into AX = -1 so callers can
+        # check the return value with ``< 0``.
+        label_index = self.new_label()
+        self.emit(f"        jnc .ok_{label_index}")
+        self.emit("        mov ax, -1")
+        self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
@@ -1387,16 +1397,27 @@ class CodeGenerator:
         return not isinstance(init, Call)
 
     def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
-        """Return the subset of REGISTER_POOL that no builtin call in *body* clobbers.
+        """Return the subset of REGISTER_POOL safe to pin variables to in *body*.
 
         A pinned variable held in a register that a later builtin call
         overwrites would be stale when next read, since the compiler
         doesn't spill pinned vars across builtin calls.  Limiting pins
         to registers that survive every call avoids that hazard.
+
+        BX is additionally excluded when the body contains any subscript
+        expression: subscript codegen uses BX as a scratch register
+        (``_emit_load_var`` into BX, then ``add bx, <index>``), which
+        clobbers any pinned variable held there.  The clobber is not
+        obvious from the source because later reads/writes of the
+        variable emit ``mov bx, bx`` or ``inc bx`` on the stale BX.
         """
         clobbered: set[str] = set()
+        has_subscript = False
 
         def visit(node: Node) -> None:
+            nonlocal has_subscript
+            if isinstance(node, (Index, IndexAssign)):
+                has_subscript = True
             if isinstance(node, Call):
                 if node.name in self.user_functions:
                     # User function calls clobber all registers.
@@ -1416,6 +1437,8 @@ class CodeGenerator:
 
         for statement in body:
             visit(statement)
+        if has_subscript:
+            clobbered.add("bx")
         return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
 
     def discover_virtual_long_locals(self, statements: list[Node], /) -> None:
@@ -1610,8 +1633,17 @@ class CodeGenerator:
                 right_mem = right_operand.removeprefix("byte ")
                 self.emit(f"        cmp al, {right_mem}")
                 return
+            # emit_binary_operator_operands clobbers CX; save it when a
+            # pinned variable lives there (push/pop don't modify flags,
+            # so the cmp's flags survive the restore for the caller's
+            # conditional jump).
+            cx_pinned = any(register == "cx" for register in self.pinned_register.values())
+            if cx_pinned:
+                self.emit("        push cx")
             self.emit_binary_operator_operands(left, right)
             self.emit("        cmp ax, cx")
+            if cx_pinned:
+                self.emit("        pop cx")
 
     def emit_condition(self, *, condition: Node, context: str) -> str:
         """Validate a condition, emit a comparison, and return the operator.
@@ -2149,6 +2181,13 @@ class CodeGenerator:
                 # byte-sized, load it without clobbering BX.
                 if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                     self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                elif isinstance(index_expression, (Var, Int)):
+                    # Simple Var/Int load doesn't touch BX, so skip the
+                    # push/pop round-trip.
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        add bx, ax")
                 else:
                     self.emit("        push bx")
                     self.generate_expression(index_expression)
@@ -2161,6 +2200,9 @@ class CodeGenerator:
                     self.emit("        xor ah, ah")
                 else:
                     self.emit("        mov ax, [bx]")
+                # AX now holds the subscript result, not the index —
+                # invalidate the tracking that generate_expression set.
+                self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
             self.emit(f"        mov ax, {self.TYPE_SIZES.get(expression.type_name, 2)}")
@@ -2184,8 +2226,29 @@ class CodeGenerator:
                 # Fast path: reg op imm16 uses the immediate form, skipping
                 # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
                 self.generate_expression(left)
-                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
-                self.emit(f"        {mnemonic} ax, {right.value}")
+                # +1 and -1 fit in a 1-byte inc/dec.
+                if operator == "+" and right.value == 1:
+                    self.emit("        inc ax")
+                elif operator == "-" and right.value == 1:
+                    self.emit("        dec ax")
+                else:
+                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    self.emit(f"        {mnemonic} ax, {right.value}")
+                self.ax_clear()
+                return
+            # Fast path for ``+``/``-`` with a stack-resident right operand:
+            # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
+            if (
+                operator in ("+", "-")
+                and isinstance(right, Var)
+                and right.name in self.locals
+                and right.name not in self.pinned_register
+                and right.name not in self.variable_arrays
+                and self.variable_types.get(right.name) != "unsigned long"
+            ):
+                self.generate_expression(left)
+                mnemonic = "add" if operator == "+" else "sub"
+                self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
             cx_pinned_var = next(
@@ -2279,6 +2342,18 @@ class CodeGenerator:
 
         self.scan_locals(body)
 
+        # Non-main: pin parameters to any remaining safe registers after
+        # scan_locals has assigned top-level and body locals.  Parameters
+        # that don't fit stay on the stack at [bp+N].
+        if name != "main":
+            used = set(self.pinned_register.values())
+            for param in parameters:
+                for register in self.safe_pin_registers:
+                    if register not in used:
+                        self.pinned_register[param.name] = register
+                        used.add(register)
+                        break
+
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
         # is reached during code generation.
@@ -2292,6 +2367,12 @@ class CodeGenerator:
             self.emit("        mov bp, sp")
             if self.frame_size > 0:
                 self.emit(f"        sub sp, {self.frame_size}")
+            # Load pinned parameters from caller-pushed stack slots
+            # into their registers.
+            for i, param in enumerate(parameters):
+                if param.name in self.pinned_register:
+                    register = self.pinned_register[param.name]
+                    self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -2384,13 +2465,24 @@ class CodeGenerator:
             self.generate_expression(statement.expr)
             self.emit("        push ax")
             self._emit_load_var(name)
-            self.emit("        push bx")
-            self.generate_expression(statement.index)
-            if not is_byte:
-                self.emit("        add ax, ax")
-            self.emit("        pop bx")
-            self.emit("        add bx, ax")
+            # If the index is a simple Var/Int, evaluating it doesn't
+            # clobber BX, so we can skip the push/pop round-trip.
+            if isinstance(statement.index, (Var, Int)):
+                self.generate_expression(statement.index)
+                if not is_byte:
+                    self.emit("        add ax, ax")
+                self.emit("        add bx, ax")
+            else:
+                self.emit("        push bx")
+                self.generate_expression(statement.index)
+                if not is_byte:
+                    self.emit("        add ax, ax")
+                self.emit("        pop bx")
+                self.emit("        add bx, ax")
             self.emit("        pop ax")
+            # After pop, AX holds the value being stored, not the index —
+            # invalidate the ax_local tracking that generate_expression set.
+            self.ax_clear()
             if is_byte:
                 self.emit("        mov [bx], al")
             else:
@@ -2853,7 +2945,13 @@ class CodeGenerator:
                 continue
             operator = None
             immediate = None
-            if b.startswith("add ax, "):
+            if b == "inc ax":
+                operator = "add"
+                immediate = "1"
+            elif b == "dec ax":
+                operator = "sub"
+                immediate = "1"
+            elif b.startswith("add ax, "):
                 operator = "add"
                 immediate = b[len("add ax, ") :]
             elif b.startswith("sub ax, "):
@@ -2968,7 +3066,7 @@ class CodeGenerator:
                     if include is not None:
                         self.required_includes.add(include)
                     continue
-                if top_level and statement.type_name != "unsigned long":
+                if statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]

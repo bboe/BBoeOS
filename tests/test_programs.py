@@ -50,7 +50,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("chmod", ["chmod +x hello"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
-    ProgramTest("dns", ["dns example.com"], r"(DNS query failed|is at \d+\.\d+\.\d+\.\d+|CNAME)", with_net=True, timeout=30.0),
+    ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("loop", ["loop"], r"aaaaa"),

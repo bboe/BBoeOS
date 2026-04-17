@@ -426,6 +426,8 @@ handle_add:
         je .add_rr
         cmp byte [op2_type], 2
         je .add_rm_direct
+        cmp byte [op2_type], 3
+        je .add_rm_reg_disp
         ;; immediate
         mov cx, dx
         pop bx                 ; BL = dst reg, BH = dst size
@@ -463,6 +465,28 @@ handle_add:
         call emit_byte_al
         mov ax, [op2_value]
         jmp emit_word_ax
+        .add_rm_reg_disp:
+        ;; add r16, [reg+disp8]: 03 modrm disp8 (or 02 for r8)
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .add_rm_rd8
+        mov al, 03h
+        jmp .add_rm_rd_emit
+        .add_rm_rd8:
+        mov al, 02h
+        .add_rm_rd_emit:
+        call emit_byte_al
+        push dx                ; save disp
+        mov al, [op2_register]
+        call reg_to_rm         ; AL = rm field for that base
+        or al, 40h             ; mod=01 (disp8)
+        mov ah, bl             ; dst reg
+        shl ah, 3
+        or al, ah              ; merge reg field
+        call emit_byte_al
+        pop dx                 ; restore disp
+        mov al, dl
+        jmp emit_byte_al
         .add_r16_imm:
         ;; add r16, imm: prefer the 83 sign-extended-imm8 form (works for
         ;; any reg) when the immediate fits, else fall back to 05 imm16
@@ -882,6 +906,7 @@ handle_cmp:
 handle_dec:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
+        mov [op1_register], al ; .dec_mem reads this below
         cmp ah, 0
         jne .dec_mem
         ;; dec register
@@ -955,6 +980,7 @@ handle_div:
 handle_inc:
         call skip_ws
         call parse_operand     ; AH=type, AL=reg, DX=val
+        mov [op1_register], al ; .inc_mem reads this below
         cmp ah, 0
         jne .inc_mem
         ;; inc register
@@ -1924,6 +1950,8 @@ handle_sub:
         je .sub_rr
         cmp byte [op2_type], 2
         je .sub_rm_direct
+        cmp byte [op2_type], 3
+        je .sub_rm_reg_disp
         ;; immediate
         mov cx, dx
         pop bx                 ; BL = dst reg, BH = dst size
@@ -1972,6 +2000,28 @@ handle_sub:
         call emit_byte_al
         mov ax, [op2_value]
         jmp emit_word_ax
+        .sub_rm_reg_disp:
+        ;; sub r16, [reg+disp8]: 2B modrm disp8 (or 2A for r8)
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .sub_rm_rd8
+        mov al, 2Bh
+        jmp .sub_rm_rd_emit
+        .sub_rm_rd8:
+        mov al, 2Ah
+        .sub_rm_rd_emit:
+        call emit_byte_al
+        push dx                ; save disp
+        mov al, [op2_register]
+        call reg_to_rm         ; AL = rm field for base
+        or al, 40h             ; mod=01 (disp8)
+        mov ah, bl             ; dst reg
+        shl ah, 3
+        or al, ah
+        call emit_byte_al
+        pop dx
+        mov al, dl
+        jmp emit_byte_al
         .sub_r16_full:
         mov al, 81h
         call emit_byte_al
