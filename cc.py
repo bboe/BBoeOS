@@ -932,6 +932,79 @@ class CodeGenerator:
             return name
         return None
 
+    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> set[str]:
+        """Choose locals and parameters to auto-pin, ranked by usage count.
+
+        Body locals win slots before parameters — pinning a body local
+        lets its initializer target the register directly (avoiding the
+        store) and, when every body local fits, eliminates the frame
+        allocation entirely.  Within each class, candidates are ranked
+        by the number of Var/Assign/Index/IndexAssign occurrences in
+        *body*, with declaration order as the tiebreaker.  Only the
+        top ``len(safe_pin_registers)`` names win a slot, and
+        candidates with zero references never consume one.
+
+        Eligibility mirrors :meth:`can_auto_pin` and :meth:`scan_locals`:
+        ``unsigned long`` locals, constant aliases, and call-initialized
+        locals are skipped; array parameters are skipped as well.
+        """
+        slot_count = len(self.safe_pin_registers)
+        if slot_count == 0:
+            return set()
+
+        param_candidates: list[tuple[str, int]] = []
+        for order, param in enumerate(parameters):
+            if param.is_array:
+                continue
+            param_candidates.append((param.name, order))
+
+        body_candidates: list[tuple[str, int]] = []
+        order = 0
+
+        def collect(nodes: list[Node], *, top_level: bool) -> None:
+            nonlocal order
+            for statement in nodes:
+                if isinstance(statement, VarDecl):
+                    eligible = (
+                        statement.type_name != "unsigned long"
+                        and not (top_level and self._is_constant_alias(body=nodes, statement=statement))
+                        and not isinstance(statement.init, Call)
+                    )
+                    if eligible:
+                        body_candidates.append((statement.name, order))
+                        order += 1
+                if isinstance(statement, If):
+                    collect(statement.body, top_level=False)
+                    if statement.else_body is not None:
+                        collect(statement.else_body, top_level=False)
+                elif isinstance(statement, (DoWhile, While)):
+                    collect(statement.body, top_level=False)
+
+        collect(body, top_level=True)
+
+        counts: dict[str, int] = {}
+
+        def count_visit(node: Node) -> None:
+            if isinstance(node, (Var, Assign, Index, IndexAssign)):
+                counts[node.name] = counts.get(node.name, 0) + 1
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    count_visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            count_visit(item)
+
+        for statement in body:
+            count_visit(statement)
+
+        def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
+            return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
+
+        combined = rank(body_candidates) + rank(param_candidates)
+        return {name for name, _ in combined[:slot_count] if counts.get(name, 0) > 0}
+
     @staticmethod
     def _statement_references(node: Node, name: str, /) -> bool:
         """Return True if ``node`` reads or writes a variable named ``name``."""
@@ -2670,6 +2743,7 @@ class CodeGenerator:
         body = function.body
         self.array_labels = {}
         self.array_sizes = {}
+        self.auto_pin_candidates: set[str] = set()
         self.ax_clear()
         self.constant_aliases = {}
         self.elide_frame = name == "main"
@@ -2704,15 +2778,19 @@ class CodeGenerator:
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
+        param_candidates = parameters if name != "main" else []
+        self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
 
         self.scan_locals(body)
 
-        # Non-main: pin parameters to any remaining safe registers after
-        # scan_locals has assigned top-level and body locals.  Parameters
-        # that don't fit stay on the stack at [bp+N].
+        # Non-main: pin parameters that won a candidate slot but weren't
+        # claimed during scan_locals.  Parameters that don't fit stay on
+        # the stack at [bp+N].
         if name != "main":
             used = set(self.pinned_register.values())
             for param in parameters:
+                if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
+                    continue
                 for register in self.safe_pin_registers:
                     if register not in used:
                         self.pinned_register[param.name] = register
@@ -3572,9 +3650,11 @@ class CodeGenerator:
         """Recursively find variable declarations.
 
         Plain ``int`` declarations are auto-pinned to a CPU register
-        (from :data:`REGISTER_POOL`, in declaration order) when a slot
-        is still available.  Call initializers stay in memory so they
-        can participate in error-fusion optimizations without
+        (from :data:`REGISTER_POOL`) when the declaration was chosen
+        by :meth:`_select_auto_pin_candidates` and a slot is still
+        available.  Slots are assigned in declaration order among
+        selected candidates.  Call initializers stay in memory so
+        they can participate in error-fusion optimizations without
         clobbering a pin.
         """
         for index, statement in enumerate(statements):
@@ -3589,7 +3669,7 @@ class CodeGenerator:
                     if include is not None:
                         self.required_includes.add(include)
                     continue
-                if statement.type_name != "unsigned long":
+                if statement.type_name != "unsigned long" and statement.name in self.auto_pin_candidates:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
