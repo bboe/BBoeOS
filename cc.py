@@ -2236,6 +2236,21 @@ class CodeGenerator:
                     self.emit(f"        {mnemonic} ax, {right.value}")
                 self.ax_clear()
                 return
+            # Fast path for ``+``/``-`` with a stack-resident right operand:
+            # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
+            if (
+                operator in ("+", "-")
+                and isinstance(right, Var)
+                and right.name in self.locals
+                and right.name not in self.pinned_register
+                and right.name not in self.variable_arrays
+                and self.variable_types.get(right.name) != "unsigned long"
+            ):
+                self.generate_expression(left)
+                mnemonic = "add" if operator == "+" else "sub"
+                self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
+                self.ax_clear()
+                return
             cx_pinned_var = next(
                 (name for name, register in self.pinned_register.items() if register == "cx"),
                 None,

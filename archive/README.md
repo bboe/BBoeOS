@@ -12,7 +12,7 @@ source is kept here for reference.
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 236       | -32   |
 | date    | 15          | 15        |  0    |
-| dns     | 722         | 1151      | +429  |
+| dns     | 722         | 1139      | +417  |
 | draw    | 245         | 265       | +20   |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 171       | +36   |
@@ -30,7 +30,7 @@ remaining code is byte-identical to the hand-written assembly.
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+429):** Both versions use the same shared memory regions
+**dns (+417):** Both versions use the same shared memory regions
 (`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
 The C version is larger because the helper functions (`decode_domain`,
 `encode_domain`, `skip_name`) carry full stack-frame overhead (push bp /
