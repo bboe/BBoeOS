@@ -349,7 +349,22 @@ JUMP_WHEN_TRUE = {
     "==": "je",
 }
 
-KEYWORDS = frozenset({"break", "char", "continue", "do", "else", "if", "int", "long", "return", "sizeof", "unsigned", "void", "while"})
+KEYWORDS = frozenset({
+    "break",
+    "char",
+    "const",
+    "continue",
+    "do",
+    "else",
+    "if",
+    "int",
+    "long",
+    "return",
+    "sizeof",
+    "unsigned",
+    "void",
+    "while",
+})
 
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
@@ -405,7 +420,7 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "INT", "LONG", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UNSIGNED", "VOID"})
 
 
 def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
@@ -3862,6 +3877,12 @@ class Parser:
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned long).
 
+        An optional leading ``const`` is accepted and discarded — the C
+        subset has no notion of const-ness but tolerating the keyword
+        lets sources carry POSIX-compatible signatures (e.g. ``int
+        strcmp(const char *, const char *)``) that ``<string.h>``
+        expects when the same source is syntax-checked by clang.
+
         Returns:
             The type as a string.
 
@@ -3870,6 +3891,8 @@ class Parser:
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
+        if self.peek()[0] == "CONST":
+            self.eat()
         token = self.peek()
         if token[0] == "VOID":
             self.eat()

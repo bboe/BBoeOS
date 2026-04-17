@@ -1,11 +1,11 @@
-int streq(char *a, char *b) {
+int strcmp(const char *a, const char *b) {
     int index = 0;
     while (1) {
         if (a[index] != b[index]) {
-            return 0;
+            return a[index] - b[index];
         }
         if (a[index] == 0) {
-            return 1;
+            return 0;
         }
         index = index + 1;
     }
@@ -197,11 +197,11 @@ int main() {
             buf[scan] = 0;
             set_exec_arg(buf + scan + 1);
         }
-        if (streq(buf, "help")) {
+        if (strcmp(buf, "help") == 0) {
             printf("Commands: help reboot shutdown\n");
-        } else if (streq(buf, "reboot")) {
+        } else if (strcmp(buf, "reboot") == 0) {
             reboot();
-        } else if (streq(buf, "shutdown")) {
+        } else if (strcmp(buf, "shutdown") == 0) {
             shutdown();
             printf("APM shutdown failed\n");
         } else if (try_exec(buf)) {

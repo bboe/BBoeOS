@@ -6,8 +6,8 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
-- Convert the shell from assembly to C (same 1456-byte binary; archived `shell.asm`)
-- Add cc.py builtins `exec`, `reboot`, `shutdown`, `set_exec_arg` and `continue` keyword support
+- Convert the shell from assembly to C; archived `shell.asm` as a same-layout reference
+- Add cc.py builtins `exec`, `reboot`, `shutdown`, `set_exec_arg`; add `continue` and `const` keyword support
 
 ## [0.5.0](https://github.com/bboe/BBoeOS/compare/a0a0980...5156ae9) (2026-04-16)
 
