@@ -3969,6 +3969,15 @@ class Parser:
         if token[0] == "NOT":
             self.eat()
             return BinOp("==", self.parse_primary(), Int(0, line=line), line=line)
+        if token[0] == "MINUS":
+            self.eat()
+            operand = self.parse_primary()
+            # Fold ``-<int>`` to a single negative ``Int`` so ``-1`` and ``-42``
+            # round-trip as literals instead of an addition node.  Runtime
+            # negation still rewrites to ``0 - x`` to reuse the subtract path.
+            if isinstance(operand, Int):
+                return Int(-operand.value, line=line)
+            return BinOp("-", Int(0, line=line), operand, line=line)
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()

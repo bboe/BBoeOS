@@ -6,7 +6,7 @@ int buffer_character_at(char *buffer, int offset, int gap_start, int gap_end) {
     int gap_size = gap_end - gap_start;
     int length = EDIT_BUFFER_SIZE - gap_size;
     if (offset >= length) {
-        return 0 - 1;
+        return -1;
     }
     if (offset >= gap_start) {
         offset = offset + gap_size;
