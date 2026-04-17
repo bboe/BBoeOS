@@ -22,6 +22,7 @@ source is kept here for reference.
 | netrecv | 334         | 382       | +48   |
 | netsend | 187         | 214       | +27   |
 | ping    | 1019        | 1239      | +220  |
+| shell   | 921         | 1456      | +535  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+4):** Null terminators on 4 strings (+4 bytes).  The
@@ -89,6 +90,25 @@ QTYPE/QCLASS tail, ICMP echo template) use ``memcpy`` from short
 string-literal constants instead of per-byte assignments, which
 collapses each ~8 × ``mov byte [...], imm`` burst into a single
 ``rep movsb``.
+
+**shell (+535):** The archived ``shell.asm`` has been edited so
+that both versions share the same scratch layout — ``SECTOR_BUFFER
++ 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
+exec path — instead of carrying ~290 bytes of zero-initialized
+trailing data inside the binary.  With storage out of the way,
+the entire delta is pure code overhead.  cdecl call setup (push
+bp / mov bp,sp / pop bp / ret, plus stack argument passing) on
+every helper — ``streq``, ``cursor_back``, ``visual_bell``,
+``insert_char``, ``delete_at_cursor``, ``try_exec`` — is the
+bulk of it; the asm version uses register-convention subroutines
+with local-label jumps and inlines insert/delete.  ``printf`` for
+the ``ESC[nD`` cursor-back sequence routes each emission through
+the full printf machinery (varargs push, format scan, specifier
+dispatch) where the asm version emits bytes one at a time via
+``putc``.  The ``if/else streq`` dispatch chain also runs longer
+per comparison than the asm's ``dw string, handler`` table, and
+char locals spill to word slots so every byte load comes with
+``xor ah, ah`` zero-extension.
 
 **uptime (+28):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,

@@ -21,7 +21,7 @@ Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h
 
 - **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, minimal output (`put_string`, `put_character_raw`), `serial_character`.  The full ANSI parser lives in stage 2.
 - **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
-- **Shell** (`src/asm/shell.asm`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
+- **Shell** (`src/c/shell.c`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
 - **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
@@ -99,21 +99,16 @@ renumbering is source-compatible — just rebuild.
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_receive`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/asm/` single-purpose utilities (behavior follows the name): `arp`.
-- `src/c/` programs written in the C subset: `cat`, `chmod`, `cp`, `date`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `uptime`.
+- `src/c/` programs written in the C subset: `arp`, `cat`, `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `hello`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `ping`, `shell`, `uptime`.
 - `src/asm/asm.asm` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`); see source comments for supported directives.
-- `src/asm/dns.asm` — Resolves arbitrary domains, displays CNAME chains and all A records.
 - `src/asm/edit.asm` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. `BUFFER_BASE` is `%define`d to `program_end` and `BUFFER_SIZE` auto-sizes to fill segment 0 up to the resident kernel at `0x7C00` (~25 KB usable). Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
-- `src/asm/ls.asm` — Lists files in root or a subdirectory; marks executables `*` and directories `/`.
-- `src/asm/ping.asm` — Sends 4 ICMP echo requests to a user-supplied IP address or hostname (resolves via DNS).
-- `src/asm/shell.asm` — CLI loop, command dispatch, built-in commands, external program exec, line editor with full editing (insert, delete, cursor movement, kill/yank).
 
 ## Key Conventions
 
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
-- Shell command dispatch uses a table of `dw string_ptr, handler_ptr` pairs terminated by `dw 0`. Adding a command requires: a `cmd_*` handler, a table entry, and the command string.
-- The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
+- Shell command dispatch is a chain of `else if (streq(buf, "name"))` checks in `src/c/shell.c`. Adding a built-in requires a new branch (and a matching entry in the `help` string).
+- The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none; use `set_exec_arg()`). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
 - Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs call kernel-provided functions at fixed addresses (e.g., `FUNCTION_PRINT_BCD`, `FUNCTION_WRITE_STDOUT`) instead of `%include`ing shared helpers. Only program-specific logic files (e.g., `dns_query.asm`, `parse_ip.asm`) are still `%include`d.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIRECTORY_SECTOR` constant, stage 2 sector count adjusts automatically.
