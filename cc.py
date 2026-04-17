@@ -3256,6 +3256,12 @@ class Parser:
                 return Int(a % b)
             if operator == ">>":
                 return Int((a & 0xFFFF) >> (b & 0x1F))
+        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
+        # div sequence and avoids the slow div instruction.  Only kicks
+        # in when N is a positive power of two; other divisions stay as-is.
+        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
+            shift = right.value.bit_length() - 1
+            return BinOp(">>", left, Int(shift))
         if (
             operator in ("+", "-")
             and isinstance(right, Int)
