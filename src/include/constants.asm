@@ -78,10 +78,10 @@
         %assign SYS_IO_READ  13h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
         %assign SYS_IO_WRITE 14h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
-        %assign SYS_NET_MAC 21h
-        %assign SYS_NET_OPEN 22h
-        %assign SYS_NET_RECVFROM 24h
-        %assign SYS_NET_SENDTO 25h
+        %assign SYS_NET_MAC 20h
+        %assign SYS_NET_OPEN 21h
+        %assign SYS_NET_RECVFROM 22h
+        %assign SYS_NET_SENDTO 23h
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
         %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot
