@@ -21,6 +21,7 @@ source is kept here for reference.
 | netinit | 72          | 63        | -9    |
 | netrecv | 334         | 382       | +48   |
 | netsend | 187         | 214       | +27   |
+| ping    | 1019        | 1397      | +378  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+4):** Null terminators on 4 strings (+4 bytes).  The
@@ -75,6 +76,18 @@ handful of bytes.  The asm version kept fd in BX and used
 length-bearing messages without null terminators.  Both versions
 stash the MAC in the shell's idle input buffer at ``BUFFER`` rather
 than in an embedded cell.
+
+**ping (+378):** Both versions build ICMP echo requests in userspace
+over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
+``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  Most of the delta is
+the DNS fallback: ``encode_domain``, ``skip_name``, and
+``resolve_dns`` each carry full stack-frame overhead (push bp /
+mov bp,sp / pop bp / ret) and pass arguments via the stack, whereas
+the asm version inlines the equivalent logic using register
+calling conventions.  The ICMP build itself is also slightly
+chunkier in C (word-sized moves with zero-extension instead of
+``stosb`` / ``stosw`` streams, plus div-by-256 for the big-endian
+sequence byte).
 
 **uptime (+28):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
