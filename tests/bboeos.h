@@ -22,17 +22,22 @@
 
 /* --- Constants (from src/include/constants.asm) --- */
 
+#define ARGV ((char *)0x4DE)
 #define BUFFER ((char *)0x500)
 #define DIRECTORY_ENTRY_SIZE 32
+#define DIRECTORY_NAME_LENGTH 25
 #define DIRECTORY_OFFSET_FLAGS 25
 #define ERROR_DIRECTORY_FULL 0x01
 #define ERROR_EXISTS 0x02
+#define ERROR_NOT_EXECUTE 0x03
 #define ERROR_NOT_FOUND 0x04
 #define ERROR_PROTECTED 0x05
+#define EXEC_ARG ((char *)0x4FE)
 #define FLAG_DIRECTORY 0x02
 #define FLAG_EXECUTE 0x01
 #define IPPROTO_ICMP 1
 #define IPPROTO_UDP 17
+#define MAX_INPUT 256
 #define SECTOR_BUFFER ((char *)0xE000)
 #define SOCK_DGRAM 1
 #define SOCK_RAW 0
@@ -61,6 +66,9 @@ int checksum(const char *buffer, int length);
 unsigned long datetime(void);
 /* Print message and exit (no POSIX equivalent) */
 void die(const char *message) __attribute__((noreturn));
+/* Execute a filesystem program. On success never returns; on failure
+   returns an ERROR_* code (e.g. ERROR_NOT_EXECUTE, ERROR_NOT_FOUND). */
+int exec(const char *name);
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */
@@ -73,10 +81,16 @@ void print_datetime(unsigned long epoch);
 void print_ip(const char *buffer);
 /* Print 6-byte MAC as XX:XX:XX:XX:XX:XX (no POSIX equivalent) */
 void print_mac(const char *buffer);
+/* Warm-reboot the machine via the keyboard controller (no return) */
+void reboot(void) __attribute__((noreturn));
 /* Receive UDP datagram filtered by port (BBoeOS-specific) */
 int recvfrom(int fd, char *buffer, int length, int port);
 /* Send UDP datagram (BBoeOS-specific) */
 int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
+/* Publish the argument pointer for the next exec()'d program */
+void set_exec_arg(const char *arg);
+/* Power off via APM. Returns only when APM is unavailable. */
+void shutdown(void);
 /* Low 16 bits of BIOS tick counter (BBoeOS-specific) */
 int ticks(void);
 /* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);
