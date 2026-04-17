@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
     int kill_length = 0;
     int dirty = 0;
     int confirm_quit = 0;
-    char *status_message = NULL;
+    char *status_message;
 
     int fd = open(filename, O_RDONLY);
     if (fd >= 0) {
@@ -174,6 +174,26 @@ int main(int argc, char *argv[]) {
             }
             confirm_quit = 0;
             continue;
+        }
+
+        /* Serial arrow keys arrive as ESC [ A/B/C/D.  Translate them
+           into the matching Ctrl-char so the handlers below cover
+           both paths from a single body. */
+        if (character == '\x1B') {
+            char prefix = getchar();
+            character = 0;
+            if (prefix == '[') {
+                char code = getchar();
+                if (code == 'A') {
+                    character = '\x10';
+                } else if (code == 'B') {
+                    character = '\x0E';
+                } else if (code == 'C') {
+                    character = '\x06';
+                } else if (code == 'D') {
+                    character = '\x02';
+                }
+            }
         }
 
         if (character == '\x01') {
@@ -425,126 +445,6 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 i = i + 1;
-            }
-        } else if (character == '\x1B') {
-            /* ESC: read the CSI prefix and the final byte for an arrow
-               key (serial terminals emit ESC [ A/B/C/D; keyboard arrows
-               currently don't reach userspace through getchar()). */
-            char bracket = getchar();
-            if (bracket == '[') {
-                char code = getchar();
-                if (code == 'A') {
-                    /* Up arrow: same as Ctrl+P. */
-                    if (cursor_line > 0) {
-                        int target_col = cursor_column;
-                        int found_nl = 0;
-                        while (gap_start > 0) {
-                            char c = buffer[gap_start - 1];
-                            buffer[gap_end - 1] = c;
-                            gap_start = gap_start - 1;
-                            gap_end = gap_end - 1;
-                            if (c == '\n') {
-                                found_nl = 1;
-                                break;
-                            }
-                        }
-                        if (found_nl) {
-                            while (gap_start > 0) {
-                                char c = buffer[gap_start - 1];
-                                if (c == '\n') {
-                                    break;
-                                }
-                                buffer[gap_end - 1] = c;
-                                gap_start = gap_start - 1;
-                                gap_end = gap_end - 1;
-                            }
-                            cursor_line = cursor_line - 1;
-                            cursor_column = 0;
-                            if (cursor_line < view_line) {
-                                view_line = cursor_line;
-                            }
-                            while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE) {
-                                char c = buffer[gap_end];
-                                if (c == '\n') {
-                                    break;
-                                }
-                                buffer[gap_start] = c;
-                                gap_start = gap_start + 1;
-                                gap_end = gap_end + 1;
-                                cursor_column = cursor_column + 1;
-                                target_col = target_col - 1;
-                            }
-                        }
-                    }
-                } else if (code == 'B') {
-                    /* Down arrow: same as Ctrl+N. */
-                    int target_col = cursor_column;
-                    int found_nl = 0;
-                    while (gap_end < EDIT_BUFFER_SIZE) {
-                        char c = buffer[gap_end];
-                        buffer[gap_start] = c;
-                        gap_start = gap_start + 1;
-                        gap_end = gap_end + 1;
-                        if (c == '\n') {
-                            found_nl = 1;
-                            break;
-                        }
-                    }
-                    if (found_nl) {
-                        cursor_line = cursor_line + 1;
-                        cursor_column = 0;
-                        if (cursor_line >= view_line + 24) {
-                            view_line = cursor_line - 23;
-                        }
-                        while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE) {
-                            char c = buffer[gap_end];
-                            if (c == '\n') {
-                                break;
-                            }
-                            buffer[gap_start] = c;
-                            gap_start = gap_start + 1;
-                            gap_end = gap_end + 1;
-                            cursor_column = cursor_column + 1;
-                            target_col = target_col - 1;
-                        }
-                    }
-                } else if (code == 'C') {
-                    /* Right arrow: same as Ctrl+F. */
-                    if (gap_end < EDIT_BUFFER_SIZE) {
-                        char c = buffer[gap_end];
-                        buffer[gap_start] = c;
-                        gap_start = gap_start + 1;
-                        gap_end = gap_end + 1;
-                        if (c == '\n') {
-                            cursor_line = cursor_line + 1;
-                            cursor_column = 0;
-                            if (cursor_line >= view_line + 24) {
-                                view_line = cursor_line - 23;
-                            }
-                        } else {
-                            cursor_column = cursor_column + 1;
-                        }
-                    }
-                } else if (code == 'D') {
-                    /* Left arrow: same as Ctrl+B. */
-                    if (gap_start > 0) {
-                        char c = buffer[gap_start - 1];
-                        buffer[gap_end - 1] = c;
-                        gap_start = gap_start - 1;
-                        gap_end = gap_end - 1;
-                        if (c == '\n') {
-                            if (cursor_line > 0) {
-                                cursor_line = cursor_line - 1;
-                                cursor_column = column_before(buffer, gap_start);
-                                if (cursor_line < view_line) {
-                                    view_line = cursor_line;
-                                }
-                            }
-                        } else if (cursor_column > 0) {
-                            cursor_column = cursor_column - 1;
-                        }
-                    }
-                }
             }
         } else if (character >= ' ' && character <= '~') {
             /* Printable ASCII: insert at cursor. */

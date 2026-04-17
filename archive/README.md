@@ -14,7 +14,7 @@ source is kept here for reference.
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1147      | +423  |
 | draw    | 245         | 265       | +20   |
-| edit    | 1977        | 3154      | +1177 |
+| edit    | 1977        | 2643      | +666  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 168       | +33   |
 | mkdir   | 123         | 127       | +4    |
@@ -43,15 +43,15 @@ frame setup.  The C compiler also generates word-sized loads with `xor
 ah,ah` zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+1177):** Both versions implement the same gap-buffer /
-kill-buffer editor over the same key bindings, but arrow-key
-dispatch in the C version duplicates the Ctrl+B/F/N/P move bodies
-under the `ESC [ A/B/C/D` branches rather than falling through to
-them via local labels the way the asm does — that alone accounts
-for most of the delta.  `buffer_character_at` is a real function
-call (frame setup, stack arguments, ret) invoked from render's
-inner loop and from save; the asm inlines the equivalent logic
-with register-convention subroutines.  Cursor repositioning uses
+**edit (+666):** Both versions implement the same gap-buffer /
+kill-buffer editor over the same key bindings.  The C version
+translates `ESC [ A/B/C/D` into the matching Ctrl-char before
+dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
+body — same trick the asm achieves via fall-through to local
+labels.  `buffer_character_at` is still a real function call
+(frame setup, stack arguments, ret) invoked from render's inner
+loop and from save; the asm inlines the equivalent logic with
+register-convention subroutines.  Cursor repositioning uses
 `printf("\e[%d;%dH", ...)` (varargs push / format scan / `add
 sp, 6`) where the asm emits a literal ESC sequence through
 `FUNCTION_PRINT_CHARACTER`.  char locals spill to word slots so
