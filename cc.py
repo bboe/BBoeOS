@@ -933,7 +933,7 @@ class CodeGenerator:
                     a_lit = a_right.value if isinstance(a_right, Int) else None
                     b_lit = b_right.value if isinstance(b_right, Int) else None
                     if a_lit is not None and b_lit is not None:
-                        self.validate_equality_types(a_left, a_right)
+                        self.validate_comparison_types(a_left, a_right)
                         operand = self._emit_byte_index_bx(a_left)
                         word_mem = operand.replace("byte ", "word ")
                         word_val = (b_lit << 8) | a_lit
@@ -948,7 +948,7 @@ class CodeGenerator:
                         and self._byte_index_base_key(a_right) == self._byte_index_base_key(b_right)
                         and b_right.index.value == a_right.index.value + 1
                     ):
-                        self.validate_equality_types(a_left, a_right)
+                        self.validate_comparison_types(a_left, a_right)
                         left_operand = self._emit_byte_index_bx(a_left)
                         left_mem = left_operand.replace("byte ", "word ")
                         self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
@@ -963,21 +963,24 @@ class CodeGenerator:
             i += 1
 
     def _type_of_operand(self, node: Node, /) -> str:
-        """Classify an operand for equality type-checking.
+        """Classify an operand for comparison type-checking.
 
-        Returns one of: ``"pointer"``, ``"null"``, ``"char"``,
-        ``"integer"``, or ``"unknown"`` (expressions whose type we
-        cannot statically determine — treated as integers for the
-        purposes of the check).
+        Returns one of ``"pointer"``, ``"null"``, ``"char"``, or
+        ``"integer"``.  Every AST node that can legally appear inside
+        a comparison must classify into one of the four buckets;
+        anything else raises ``CompileError`` so no operand silently
+        slips through the type check.
         """
         if isinstance(node, Char):
             return "char"
         if isinstance(node, Int):
             return "integer"
+        if isinstance(node, String):
+            return "pointer"
         if isinstance(node, Index):
             if self.variable_types.get(node.name) in ("char", "char*"):
                 return "char"
-            return "unknown"
+            return "integer"
         if isinstance(node, Var):
             if node.name == "NULL":
                 return "null"
@@ -988,7 +991,12 @@ class CodeGenerator:
                 return "char"
             if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
                 return "integer"
-        return "unknown"
+            message = f"undefined operand: {node.name}"
+            raise CompileError(message, line=node.line)
+        if isinstance(node, (BinOp, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
+            return "integer"
+        message = f"cannot classify operand type for comparison: {type(node).__name__}"
+        raise CompileError(message, line=node.line)
 
     def allocate_local(self, name: str, /, *, size: int = 2) -> int:
         """Allocate a local variable on the stack frame.
@@ -1848,8 +1856,7 @@ class CodeGenerator:
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise CompileError(message, line=condition.line)
-        if condition.op in ("==", "!="):
-            self.validate_equality_types(condition.left, condition.right)
+        self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
         return condition.op
 
@@ -3332,16 +3339,16 @@ class CodeGenerator:
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
 
-    def validate_equality_types(self, left: Node, right: Node, /) -> None:
-        r"""Ensure ``==``/``!=`` operands have compatible types.
+    def validate_comparison_types(self, left: Node, right: Node, /) -> None:
+        r"""Ensure ``==``/``!=``/``<``/``<=``/``>``/``>=`` operand types match.
 
         Pointers may only be compared to other pointers or ``NULL``;
         ``NULL`` may only appear opposite a pointer; ``char`` values
         must be compared against other ``char`` values or character
-        literals (so ``c != 0`` is rejected — use ``c != '\0'``).
-        Comparing a pointer to a non-``NULL`` integer (``if (p == 0)``)
-        is a common C bug, so the compiler requires the explicit
-        ``NULL`` spelling.
+        literals (so ``c != 0`` and ``c < 32`` are rejected — use
+        ``c != '\0'`` and ``c < ' '``).  Comparing a pointer to a
+        non-``NULL`` integer (``if (p == 0)``) is a common C bug, so
+        the compiler requires the explicit ``NULL`` spelling.
         """
         left_type = self._type_of_operand(left)
         right_type = self._type_of_operand(right)
@@ -3358,10 +3365,10 @@ class CodeGenerator:
         if right_type == "null" and left_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
             raise CompileError(message, line=line)
-        if left_type == "char" and right_type not in ("char", "unknown"):
+        if left_type == "char" and right_type != "char":
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
-        if right_type == "char" and left_type not in ("char", "unknown"):
+        if right_type == "char" and left_type != "char":
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
 

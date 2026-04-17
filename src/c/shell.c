@@ -163,7 +163,7 @@ int main() {
                     cursor = cursor + 1;
                     yank_index = yank_index + 1;
                 }
-            } else if (ch >= 32) {
+            } else if (ch >= ' ') {
                 /* Printable char — insert at cursor */
                 if (end >= MAX_INPUT) {
                     visual_bell();

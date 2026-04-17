@@ -36,7 +36,7 @@ int skip_name(char *buf, int offset) {
         if (byte == '\0') {
             return offset + 1;
         }
-        if (byte >= 192) {
+        if (byte >= '\xC0') {
             return offset + 2;
         }
         offset = offset + 1 + byte;
