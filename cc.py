@@ -2181,6 +2181,13 @@ class CodeGenerator:
                 # byte-sized, load it without clobbering BX.
                 if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                     self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
+                elif isinstance(index_expression, (Var, Int)):
+                    # Simple Var/Int load doesn't touch BX, so skip the
+                    # push/pop round-trip.
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        add bx, ax")
                 else:
                     self.emit("        push bx")
                     self.generate_expression(index_expression)
@@ -2437,12 +2444,20 @@ class CodeGenerator:
             self.generate_expression(statement.expr)
             self.emit("        push ax")
             self._emit_load_var(name)
-            self.emit("        push bx")
-            self.generate_expression(statement.index)
-            if not is_byte:
-                self.emit("        add ax, ax")
-            self.emit("        pop bx")
-            self.emit("        add bx, ax")
+            # If the index is a simple Var/Int, evaluating it doesn't
+            # clobber BX, so we can skip the push/pop round-trip.
+            if isinstance(statement.index, (Var, Int)):
+                self.generate_expression(statement.index)
+                if not is_byte:
+                    self.emit("        add ax, ax")
+                self.emit("        add bx, ax")
+            else:
+                self.emit("        push bx")
+                self.generate_expression(statement.index)
+                if not is_byte:
+                    self.emit("        add ax, ax")
+                self.emit("        pop bx")
+                self.emit("        add bx, ax")
             self.emit("        pop ax")
             # After pop, AX holds the value being stored, not the index —
             # invalidate the ax_local tracking that generate_expression set.
