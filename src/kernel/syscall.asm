@@ -17,8 +17,6 @@ syscall_handler:
         cmp ah, SYS_IO_WRITE   ; io_write
         je .io_write
 
-        cmp ah, SYS_NET_ARP    ; net_arp
-        je .net_arp
         cmp ah, SYS_NET_MAC    ; net_mac
         je .net_mac
         cmp ah, SYS_NET_OPEN   ; net_open
@@ -413,10 +411,6 @@ syscall_handler:
         ;; Write to fd: BX = fd, SI = buffer, CX = count
         ;; Returns AX = bytes written, or -1 on error
         call fd_write
-        jmp .iret_cf
-
-        .net_arp:
-        call arp_resolve
         jmp .iret_cf
 
         .net_mac:

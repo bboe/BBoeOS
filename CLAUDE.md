@@ -65,7 +65,6 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 12h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
 | 13h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
 | 14h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
-| 20h   | net_arp      | ARP resolve, SI = 4-byte IP, DI = 6-byte MAC, CF err   |
 | 21h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 22h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 23h   | net_ping     | ICMP ping, SI = 4-byte IP, AX = RTT ticks, CF timeout  |

@@ -77,7 +77,6 @@
         %assign SYS_IO_READ  13h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
         %assign SYS_IO_WRITE 14h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
-        %assign SYS_NET_ARP 20h
         %assign SYS_NET_MAC 21h
         %assign SYS_NET_OPEN 22h
         %assign SYS_NET_PING 23h
