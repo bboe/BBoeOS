@@ -27,7 +27,7 @@ main:
         mov si, MESSAGE_QUERY
         mov cx, MESSAGE_QUERY_LENGTH
         call FUNCTION_WRITE_STDOUT
-        mov di, bx
+        mov di, [domain_arg]   ; FUNCTION_WRITE_STDOUT clobbered bx
         call FUNCTION_PRINT_STRING
         mov si, MESSAGE_ELLIPSIS
         mov cx, MESSAGE_ELLIPSIS_LENGTH
