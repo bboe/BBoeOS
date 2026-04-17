@@ -36,11 +36,7 @@ int insert_char(char *buf, int cursor, int end, int ch) {
     }
     buf[cursor] = ch;
     end = end + 1;
-    int print_index = cursor;
-    while (print_index < end) {
-        putchar(buf[print_index]);
-        print_index = print_index + 1;
-    }
+    write(STDOUT, buf + cursor, end - cursor);
     cursor_back(end - cursor - 1);
     return end;
 }
@@ -54,11 +50,7 @@ int delete_at_cursor(char *buf, int cursor, int end) {
         shift = shift + 1;
     }
     end = end - 1;
-    int print_index = cursor;
-    while (print_index < end) {
-        putchar(buf[print_index]);
-        print_index = print_index + 1;
-    }
+    write(STDOUT, buf + cursor, end - cursor);
     putchar(' ');
     cursor_back(end - cursor + 1);
     return end;
@@ -114,10 +106,8 @@ int main() {
                 shutdown();
             } else if (ch == 5) {
                 /* Ctrl-E: end of line */
-                while (cursor < end) {
-                    putchar(buf[cursor]);
-                    cursor = cursor + 1;
-                }
+                write(STDOUT, buf + cursor, end - cursor);
+                cursor = end;
             } else if (ch == 6) {
                 /* Ctrl-F: cursor right */
                 if (cursor < end) {
