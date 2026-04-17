@@ -1898,13 +1898,16 @@ class CodeGenerator:
                 self.emit(f"        cmp al, {right_mem}")
                 return
             # Fast path: right is a pinned register variable.  Compare
-            # AX against it directly, skipping the CX load.  Unsafe when
-            # the pinned register is CX because generate_expression(left)
-            # could clobber CX.
-            if isinstance(right, Var) and right.name in self.pinned_register and self.pinned_register[right.name] != "cx":
-                self.generate_expression(left)
-                self.emit(f"        cmp ax, {self.pinned_register[right.name]}")
-                return
+            # AX against it directly, skipping the CX load and any
+            # push/pop protection.  When the pinned register is CX we
+            # additionally require ``left`` to be a leaf expression so
+            # generate_expression can't clobber CX mid-compare.
+            if isinstance(right, Var) and right.name in self.pinned_register:
+                source = self.pinned_register[right.name]
+                if source != "cx" or isinstance(left, (Int, Var, String)):
+                    self.generate_expression(left)
+                    self.emit(f"        cmp ax, {source}")
+                    return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
             # skips the CX load entirely.
             if (
@@ -2606,20 +2609,17 @@ class CodeGenerator:
                 return
             # Fast path for ``+``/``-``/``&`` with a pinned-register right
             # operand: arithmetic targets the register directly, skipping
-            # the `mov cx, <reg>` load and any CX save/restore.  Only safe
-            # when the pinned register isn't CX — otherwise generate_expression
-            # for ``left`` could clobber it mid-expression.
-            if (
-                operator in ("+", "-", "&")
-                and isinstance(right, Var)
-                and right.name in self.pinned_register
-                and self.pinned_register[right.name] != "cx"
-            ):
-                self.generate_expression(left)
-                mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
-                self.emit(f"        {mnemonic} ax, {self.pinned_register[right.name]}")
-                self.ax_clear()
-                return
+            # the `mov cx, <reg>` load and any CX save/restore.  When the
+            # pinned register is CX, require ``left`` to be a leaf so
+            # generate_expression can't clobber it mid-compute.
+            if operator in ("+", "-", "&") and isinstance(right, Var) and right.name in self.pinned_register:
+                source = self.pinned_register[right.name]
+                if source != "cx" or isinstance(left, (Int, Var, String)):
+                    self.generate_expression(left)
+                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    self.emit(f"        {mnemonic} ax, {source}")
+                    self.ax_clear()
+                    return
             cx_pinned_var = next(
                 (name for name, register in self.pinned_register.items() if register == "cx"),
                 None,
@@ -3062,11 +3062,63 @@ class CodeGenerator:
         self.peephole_memory_arithmetic()
         self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
+        self.peephole_register_arithmetic()
         self.peephole_dead_ah()
         self.peephole_unused_cld()
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
         self.peephole_redundant_bx()
+
+    def peephole_register_arithmetic(self) -> None:
+        """Compute directly into a pinned-local target register.
+
+        Turns ``mov ax, X / <op> ax, Y / mov <reg>, ax`` into
+        ``mov <reg>, X / <op> <reg>, Y`` when <reg> isn't already
+        read by Y (e.g., ``sub reg, reg`` would zero it).
+
+        Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
+        arithmetic result is being piped straight into a register
+        (typically a pinned local).  After the transform AX retains
+        whatever it held before the sequence, which is safe because
+        pinned-register locals aren't referenced via AX tracking
+        post-codegen.
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        ops = ("add ax,", "sub ax,", "and ax,")
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            if not any(b.startswith(op) for op in ops):
+                i += 1
+                continue
+            if not c.startswith("mov "):
+                i += 1
+                continue
+            parts = c[len("mov ") :].split(", ")
+            if len(parts) != 2 or parts[1] != "ax" or parts[0] not in registers:
+                i += 1
+                continue
+            target = parts[0]
+            # Skip when the operand of the arithmetic references the
+            # target register — rewriting would make it self-referential.
+            operand = b.split(", ", 1)[1]
+            if target in operand.split():
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if target in source.split():
+                i += 1
+                continue
+            new_op = b.replace("ax,", f"{target},", 1)
+            self.lines[i] = f"        mov {target}, {source}"
+            self.lines[i + 1] = f"        {new_op}"
+            del self.lines[i + 2]
+            continue
 
     def peephole_constant_to_register(self) -> None:
         """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
