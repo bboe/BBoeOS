@@ -2314,6 +2314,18 @@ class CodeGenerator:
 
         self.scan_locals(body)
 
+        # Non-main: pin parameters to any remaining safe registers after
+        # scan_locals has assigned top-level and body locals.  Parameters
+        # that don't fit stay on the stack at [bp+N].
+        if name != "main":
+            used = set(self.pinned_register.values())
+            for param in parameters:
+                for register in self.safe_pin_registers:
+                    if register not in used:
+                        self.pinned_register[param.name] = register
+                        used.add(register)
+                        break
+
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
         # is reached during code generation.
@@ -2327,6 +2339,12 @@ class CodeGenerator:
             self.emit("        mov bp, sp")
             if self.frame_size > 0:
                 self.emit(f"        sub sp, {self.frame_size}")
+            # Load pinned parameters from caller-pushed stack slots
+            # into their registers.
+            for i, param in enumerate(parameters):
+                if param.name in self.pinned_register:
+                    register = self.pinned_register[param.name]
+                    self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -3006,7 +3024,7 @@ class CodeGenerator:
                     if include is not None:
                         self.required_includes.add(include)
                     continue
-                if top_level and statement.type_name != "unsigned long":
+                if statement.type_name != "unsigned long":
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
