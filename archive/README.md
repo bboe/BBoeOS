@@ -7,33 +7,35 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 451         | 457       | +6    |
-| cat     | 145         | 135       | -10   |
+| arp     | 451         | 450       | -1    |
+| cat     | 145         | 131       | -14   |
 | chmod   | 149         | 173       | +24   |
-| cp      | 268         | 236       | -32   |
+| cp      | 268         | 232       | -36   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1116      | +392  |
-| draw    | 245         | 265       | +20   |
-| edit    | 1977        | 2587      | +610  |
+| draw    | 245         | 263       | +18   |
+| edit    | 1977        | 2391      | +414  |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 168       | +33   |
+| ls      | 135         | 163       | +28   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 217       |  0    |
 | netinit | 72          | 63        | -9    |
 | netrecv | 334         | 380       | +46   |
 | netsend | 187         | 216       | +29   |
 | ping    | 1019        | 1217      | +198  |
-| shell   | 921         | 1358      | +437  |
+| shell   | 921         | 1337      | +416  |
 | uptime  | 50          | 78        | +28   |
 
-**arp (+4):** Null terminators on 4 strings (+4 bytes).  The
-remaining code is byte-identical to the hand-written assembly.
+**arp (-1):** Null terminators on 4 strings cost a few bytes, but
+the ``printf`` wrappers around the ARP packet now preserve the
+pinned ``bx`` (the fd) with a ``push``/``pop`` pair instead of
+stashing it in memory, which more than claws those bytes back.
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+396):** Both versions use the same shared memory regions
+**dns (+392):** Both versions use the same shared memory regions
 (`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
 The C version is larger because the helper functions (`decode_domain`,
 `encode_domain`, `skip_name`) carry full stack-frame overhead (push bp /
@@ -43,7 +45,7 @@ frame setup.  The C compiler also generates word-sized loads with `xor
 ah,ah` zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+611):** Both versions implement the same gap-buffer /
+**edit (+414):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -55,13 +57,18 @@ register-convention subroutines.  Cursor repositioning uses
 `printf("\e[%d;%dH", ...)` (varargs push / format scan / `add
 sp, 6`) where the asm emits a literal ESC sequence through
 `FUNCTION_PRINT_CHARACTER`.  char locals spill to word slots so
-every byte read comes with a `xor ah, ah` zero-extension.
+every byte read comes with a `xor ah, ah` zero-extension.  The
+main loop now pins its most-used locals (`gap_start`, `gap_end`,
+`cursor_column`) to registers and wraps each builtin call with
+a ``push``/``pop`` for the pins that call would clobber, which
+cuts the memory-backed load/store traffic around every
+``printf`` / ``read`` / ``write``.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+36):** The assembly version uses inline `repne scasb` with a
+**ls (+28):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
@@ -96,7 +103,7 @@ string-literal constants instead of per-byte assignments, which
 collapses each ~8 × ``mov byte [...], imm`` burst into a single
 ``rep movsb``.
 
-**shell (+437):** The archived ``shell.asm`` has been edited so
+**shell (+416):** The archived ``shell.asm`` has been edited so
 that both versions share the same scratch layout — ``SECTOR_BUFFER
 + 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
 exec path — instead of carrying ~290 bytes of zero-initialized

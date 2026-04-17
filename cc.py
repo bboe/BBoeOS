@@ -918,6 +918,15 @@ class CodeGenerator:
         """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
         return _ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
 
+    def _pinned_registers_to_save(self, clobbers: frozenset[str], /) -> list[str]:
+        """Return the pinned registers that need push/pop around a call.
+
+        Order is deterministic (sorted) so ``push`` / ``pop`` pairs
+        nest correctly.  ``ax`` is never pinned, so never saved here.
+        """
+        pinned_set = set(self.pinned_register.values())
+        return sorted(register for register in clobbers if register in pinned_set and register != "ax")
+
     def _resolve_constant(self, name: str, /) -> str | None:
         """Return the NASM constant expression for *name*, or ``None``.
 
@@ -932,25 +941,33 @@ class CodeGenerator:
             return name
         return None
 
-    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> set[str]:
-        """Choose locals and parameters to auto-pin, ranked by usage count.
+    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> dict[str, str]:
+        """Choose locals/parameters to auto-pin and match them to registers.
 
         Body locals win slots before parameters — pinning a body local
         lets its initializer target the register directly (avoiding the
         store) and, when every body local fits, eliminates the frame
         allocation entirely.  Within each class, candidates are ranked
-        by the number of Var/Assign/Index/IndexAssign occurrences in
-        *body*, with declaration order as the tiebreaker.  Only the
-        top ``len(safe_pin_registers)`` names win a slot, and
-        candidates with zero references never consume one.
+        by Var/Assign/Index/IndexAssign occurrence count in *body*,
+        with declaration order as the tiebreaker.  The ranked candidate
+        list is zipped with :attr:`safe_pin_registers` (already sorted
+        by ascending clobber count), so the top candidate gets the
+        cheapest register.  A pin is emitted only when the candidate's
+        reference count strictly exceeds the matched register's
+        clobber count — otherwise the ``push``/``pop`` overhead at each
+        clobbering call would swallow the savings.
 
         Eligibility mirrors :meth:`can_auto_pin` and :meth:`scan_locals`:
         ``unsigned long`` locals, constant aliases, and call-initialized
         locals are skipped; array parameters are skipped as well.
+
+        Returns:
+            ``{name: register}`` for each selected pin.  Empty when no
+            candidate beats its register's clobber cost.
+
         """
-        slot_count = len(self.safe_pin_registers)
-        if slot_count == 0:
-            return set()
+        if not self.safe_pin_registers:
+            return {}
 
         param_candidates: list[tuple[str, int]] = []
         for order, param in enumerate(parameters):
@@ -1003,7 +1020,14 @@ class CodeGenerator:
             return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
 
         combined = rank(body_candidates) + rank(param_candidates)
-        return {name for name, _ in combined[:slot_count] if counts.get(name, 0) > 0}
+        assignments: dict[str, str] = {}
+        for (name, _), register in zip(combined, self.safe_pin_registers, strict=False):
+            refs = counts.get(name, 0)
+            if refs > self.register_clobber_counts.get(register, 0):
+                assignments[name] = register
+            else:
+                break
+        return assignments
 
     @staticmethod
     def _statement_references(node: Node, name: str, /) -> bool:
@@ -1731,29 +1755,34 @@ class CodeGenerator:
         return not isinstance(init, Call)
 
     def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
-        """Return the subset of REGISTER_POOL safe to pin variables to in *body*.
+        """Return REGISTER_POOL ordered by ascending call-site clobber count.
 
-        A pinned variable held in a register that a later builtin call
-        overwrites would be stale when next read, since the compiler
-        doesn't spill pinned vars across builtin calls.  Limiting pins
-        to registers that survive every call avoids that hazard.
+        All registers in the pool are pinnable; :meth:`generate_call`
+        wraps each call with ``push``/``pop`` for any caller pin the
+        callee clobbers.  Ordering by clobber count so that the first
+        (most-referenced) candidate lands on the cheapest register.
+        The per-function counts are memoised on
+        :attr:`register_clobber_counts` so the cost model in
+        :meth:`_select_auto_pin_candidates` can reuse them.
 
         Subscript codegen uses SI as its scratch register; SI isn't in
         REGISTER_POOL so no extra exclusion is needed for subscript
         presence.
         """
-        clobbered: set[str] = set()
+        clobber_counts: dict[str, int] = dict.fromkeys(self.REGISTER_POOL, 0)
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):
                 if node.name in self.user_functions:
-                    # User function calls clobber all registers.
-                    clobbered.update(self.REGISTER_POOL)
+                    for register in self.REGISTER_POOL:
+                        clobber_counts[register] += 1
                 else:
                     if node.name not in self.BUILTIN_CLOBBERS:
                         message = f"unknown function: {node.name}"
                         raise CompileError(message, line=node.line)
-                    clobbered.update(self.BUILTIN_CLOBBERS[node.name])
+                    for register in self.BUILTIN_CLOBBERS[node.name]:
+                        if register in clobber_counts:
+                            clobber_counts[register] += 1
             for slot in getattr(type(node), "__slots__", ()):
                 child = getattr(node, slot, None)
                 if isinstance(child, Node):
@@ -1765,7 +1794,9 @@ class CodeGenerator:
 
         for statement in body:
             visit(statement)
-        return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
+        self.register_clobber_counts = clobber_counts
+        pool_index = {register: index for index, register in enumerate(self.REGISTER_POOL)}
+        return tuple(sorted(self.REGISTER_POOL, key=lambda register: (clobber_counts[register], pool_index[register])))
 
     def discover_virtual_long_locals(self, statements: list[Node], /) -> None:
         """Identify ``unsigned long`` locals whose DX:AX value can stay live.
@@ -2401,6 +2432,10 @@ class CodeGenerator:
             if len(arguments) != expected:
                 message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
                 raise CompileError(message, line=statement.line)
+            clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
+            saved = self._pinned_registers_to_save(clobbers)
+            for register in saved:
+                self.emit(f"        push {register}")
             # Invalidate all register caches — user functions clobber everything.
             self.register_cache.clear()
             self.spill_stack.clear()
@@ -2426,6 +2461,8 @@ class CodeGenerator:
             self.emit(f"        call {name}")
             if arguments:
                 self.emit(f"        add sp, {len(arguments) * 2}")
+            for register in reversed(saved):
+                self.emit(f"        pop {register}")
             self.ax_clear()
             return
         handler = getattr(self, f"builtin_{name}", None)
@@ -2433,9 +2470,14 @@ class CodeGenerator:
             message = f"unknown function: {name}"
             raise CompileError(message, line=statement.line)
         clobbers = self.BUILTIN_CLOBBERS[name]
+        saved = self._pinned_registers_to_save(clobbers)
+        for register in saved:
+            self.emit(f"        push {register}")
         if self.register_cache and clobbers:
             self.auto_spill(clobbers=clobbers)
         handler(arguments)
+        for register in reversed(saved):
+            self.emit(f"        pop {register}")
 
     def generate_do_while(self, statement: DoWhile, /) -> None:
         """Generate assembly for a do...while loop.
@@ -2743,7 +2785,7 @@ class CodeGenerator:
         body = function.body
         self.array_labels = {}
         self.array_sizes = {}
-        self.auto_pin_candidates: set[str] = set()
+        self.auto_pin_candidates: dict[str, str] = {}
         self.ax_clear()
         self.constant_aliases = {}
         self.elide_frame = name == "main"
@@ -2787,15 +2829,10 @@ class CodeGenerator:
         # claimed during scan_locals.  Parameters that don't fit stay on
         # the stack at [bp+N].
         if name != "main":
-            used = set(self.pinned_register.values())
             for param in parameters:
                 if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
                     continue
-                for register in self.safe_pin_registers:
-                    if register not in used:
-                        self.pinned_register[param.name] = register
-                        used.add(register)
-                        break
+                self.pinned_register[param.name] = self.auto_pin_candidates[param.name]
 
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
@@ -3672,7 +3709,7 @@ class CodeGenerator:
                 if statement.type_name != "unsigned long" and statement.name in self.auto_pin_candidates:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
-                        self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
+                        self.pinned_register[statement.name] = self.auto_pin_candidates[statement.name]
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
