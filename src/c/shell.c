@@ -4,7 +4,7 @@ int strcmp(const char *a, const char *b) {
         if (a[index] != b[index]) {
             return a[index] - b[index];
         }
-        if (a[index] == 0) {
+        if (a[index] == '\0') {
             return 0;
         }
         index = index + 1;
@@ -84,44 +84,44 @@ int main() {
         int end = 0;
         while (1) {
             char ch = getchar();
-            if (ch == 1) {
+            if (ch == '\x01') {
                 /* Ctrl-A: beginning of line */
                 if (cursor > 0) {
                     cursor_back(cursor);
                     cursor = 0;
                 }
-            } else if (ch == 2) {
+            } else if (ch == '\x02') {
                 /* Ctrl-B: cursor left */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor = cursor - 1;
                 }
-            } else if (ch == 3) {
+            } else if (ch == '\x03') {
                 /* Ctrl-C: cancel line */
                 putchar('\n');
                 end = 0;
                 break;
-            } else if (ch == 4) {
+            } else if (ch == '\x04') {
                 /* Ctrl-D: shutdown (returns here only on APM failure) */
                 shutdown();
-            } else if (ch == 5) {
+            } else if (ch == '\x05') {
                 /* Ctrl-E: end of line */
                 write(STDOUT, buf + cursor, end - cursor);
                 cursor = end;
-            } else if (ch == 6) {
+            } else if (ch == '\x06') {
                 /* Ctrl-F: cursor right */
                 if (cursor < end) {
                     putchar(buf[cursor]);
                     cursor = cursor + 1;
                 }
-            } else if (ch == 8 || ch == 127) {
+            } else if (ch == '\b' || ch == '\x7F') {
                 /* Backspace / DEL */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor = cursor - 1;
                     end = delete_at_cursor(buf, cursor, end);
                 }
-            } else if (ch == 11) {
+            } else if (ch == '\x0B') {
                 /* Ctrl-K: kill to end of line */
                 if (cursor < end) {
                     int span = end - cursor;
@@ -142,16 +142,16 @@ int main() {
                     cursor_back(span);
                     end = cursor;
                 }
-            } else if (ch == 12) {
+            } else if (ch == '\x0C') {
                 /* Ctrl-L: clear screen and reprompt */
                 video_mode(VIDEO_MODE_TEXT_80x25);
                 end = 0;
                 break;
-            } else if (ch == 13) {
+            } else if (ch == '\r') {
                 /* Enter */
                 putchar('\n');
                 break;
-            } else if (ch == 25) {
+            } else if (ch == '\x19') {
                 /* Ctrl-Y: yank from kill buffer */
                 int yank_index = 0;
                 while (yank_index < kill_len) {
@@ -180,11 +180,11 @@ int main() {
         /* Split command name and argument at the first space */
         set_exec_arg(NULL);
         int scan = 0;
-        while (buf[scan] != 0 && buf[scan] != ' ') {
+        while (buf[scan] != '\0' && buf[scan] != ' ') {
             scan = scan + 1;
         }
         if (buf[scan] == ' ') {
-            buf[scan] = 0;
+            buf[scan] = '\0';
             set_exec_arg(buf + scan + 1);
         }
         if (strcmp(buf, "help") == 0) {
@@ -203,11 +203,11 @@ int main() {
             exec_path[2] = 'n';
             exec_path[3] = '/';
             int copy_index = 0;
-            while (buf[copy_index] != 0) {
+            while (buf[copy_index] != '\0') {
                 exec_path[4 + copy_index] = buf[copy_index];
                 copy_index = copy_index + 1;
             }
-            exec_path[4 + copy_index] = 0;
+            exec_path[4 + copy_index] = '\0';
             if (try_exec(exec_path)) {
                 printf("not executable\n");
             } else {

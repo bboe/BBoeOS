@@ -311,6 +311,7 @@ CHARACTER_ESCAPES = {
     '"': 0x22,
     "0": 0x00,
     "\\": 0x5C,
+    "b": 0x08,
     "n": 0x0A,
     "r": 0x0D,
     "t": 0x09,
@@ -971,6 +972,8 @@ class CodeGenerator:
         """
         if isinstance(node, Char):
             return "char"
+        if isinstance(node, Int):
+            return "integer"
         if isinstance(node, Index):
             if self.variable_types.get(node.name) in ("char", "char*"):
                 return "char"
