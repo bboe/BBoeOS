@@ -34,7 +34,7 @@ int op2_type;
 int op2_value;
 int org_value;
 int output_fd;
-int output_name;
+char *output_name;
 int output_position;
 int output_total;
 int pass;
@@ -46,6 +46,78 @@ char source_prefix[32];
 int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
+
+/* Pass-1 error reporters.  Called by ``run_pass1`` while ES is still
+   pointed at the symbol-table segment, so each resets ES to DS
+   before handing off to cc.py's ``die()`` builtin (which jumps to
+   FUNCTION_DIE with the string preloaded). */
+void die_error_pass1_io() {
+    asm("push ds\npop es");
+    die("Error: pass 1 io\n");
+}
+
+void die_error_pass1_iter() {
+    asm("push ds\npop es");
+    die("Error: pass 1 iter\n");
+}
+
+/* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
+   from pass 1 are reused (the jump_table in ES is still set), and
+   ``current_address`` resets to the org origin chosen by pass 1.
+   Caller has already opened output_fd. */
+void run_pass2() {
+    pass = 2;
+    current_address = org_value;
+    global_scope = 0xFFFF;
+    jump_index = 0;
+    output_position = 0;
+    output_total = 0;
+    asm("call do_pass");
+}
+
+/* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
+   and lets the instruction handlers mark any jump they can shrink
+   to rel8; loops until no jump changes size.  Convergence is
+   monotonic (shrinking only makes targets closer), so a 100-
+   iteration safety bound is enough to catch any infinite
+   oscillation a buggy handler might introduce.  Always runs at
+   least two iterations so forward references get verified against
+   the symbol table built in iteration 1. */
+void run_pass1() {
+    pass = 1;
+    symbol_count = 0;
+    org_value = 0;
+    /* Initialize ES:JUMP_TABLE to all-1 (near).  JUMP_TABLE / JUMP_MAX
+       are %assigned inside the file-scope asm block below, which cc.py
+       emits after every function body — so this inline asm has to
+       reproduce them as literals. */
+    asm("mov di, 0F000h\n"
+        "mov cx, 4096\n"
+        "mov al, 1\n"
+        "cld\n"
+        "rep stosb");
+    iteration_count = 0;
+    while (1) {
+        changed_flag = 0;
+        current_address = 0;
+        global_scope = 0xFFFF;
+        jump_index = 0;
+        asm("call do_pass");
+        if (error_flag != 0) {
+            die_error_pass1_io();
+        }
+        iteration_count = iteration_count + 1;
+        if (iteration_count >= 100) {
+            die_error_pass1_iter();
+        }
+        if (iteration_count < 2) {
+            continue;
+        }
+        if (changed_flag == 0) {
+            break;
+        }
+    }
+}
 
 /* Populate ``source_prefix`` with the directory portion of
    ``source_name`` (everything up to and including the last ``/``).
@@ -69,10 +141,40 @@ void compute_source_prefix() {
     source_prefix[end] = '\0';
 }
 
-int main() {
-    /* Jump to the assembler's original entry point (renamed from
-       `main:` so it does not collide with cc.py's own `main:`). */
-    asm("jmp asm_main");
+int main(int argc, char *argv[]) {
+    /* ES starts at DS (kernel convention) so die() / open() run
+       safely.  We only switch to SYMBOL_SEGMENT once we're ready to
+       run the assembler passes — the handlers index the symbol table
+       via ``[es:...]``, which needs ES pointed at that segment. */
+    if (argc != 2) {
+        die("Usage: asm <source> <output>\n");
+    }
+    source_name = argv[0];
+    output_name = argv[1];
+    compute_source_prefix();
+    int fd = open(output_name, O_WRONLY + O_CREAT + O_TRUNC, FLAG_EXECUTE);
+    if (fd < 0) {
+        die("Error: cannot create output\n");
+    }
+    output_fd = fd;
+    /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
+       handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
+    asm("mov ax, 2000h\n"
+        "mov es, ax\n"
+        "cld");
+    run_pass1();
+    run_pass2();
+    /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
+       it preserves ES=SYMBOL_SEGMENT across the write. */
+    asm("call flush_output");
+    /* Restore ES=DS before the cc.py close() builtin (kernel expects
+       ES=DS on int 30h). */
+    asm("push ds\n"
+        "pop es");
+    if (close(output_fd) < 0) {
+        die("Error: directory write failed\n");
+    }
+    die("OK\n");
 }
 
 asm(
@@ -135,129 +237,11 @@ asm(
     "        symbol_set_value        equ _g_symbol_set_value\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; Main entry point\n"
+    ";;; Main driver lives in cc.py-emitted ``main`` at the top of\n"
+    ";;; src/c/asm.c.  It parses argv, opens the output file, switches\n"
+    ";;; ES to the symbol-table segment, runs ``run_pass1`` / ``run_pass2``\n"
+    ";;; / ``flush_output``, restores ES=DS, closes the output, and exits.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "asm_main:\n"
-    "        cld\n"
-    "        ;; Set ES to symbol table segment\n"
-    "        mov ax, SYMBOL_SEGMENT\n"
-    "        mov es, ax\n"
-    "        ;; Parse arguments: \"source output\"\n"
-    "        mov di, ARGV\n"
-    "        call FUNCTION_PARSE_ARGV\n"
-    "        cmp cx, 2\n"
-    "        jne .usage\n"
-    "        mov ax, [ARGV]\n"
-    "        mov [source_name], ax\n"
-    "        mov ax, [ARGV+2]\n"
-    "        mov [output_name], ax\n"
-    "\n"
-    "        ;; source_prefix = directory portion of source_name (incl.\n"
-    "        ;; trailing '/').  Implementation lives in cc.py-emitted\n"
-    "        ;; ``compute_source_prefix`` (see C definition at the top of\n"
-    "        ;; src/c/asm.c).\n"
-    "        call compute_source_prefix\n"
-    "\n"
-    "        ;; -- Pass 1: collect labels and converge jump sizes --\n"
-    "        ;; Iterative pass 1: jumps start near (pessimistic) and are\n"
-    "        ;; shrunk to short where they fit. Matches NASM's optimizer:\n"
-    "        ;; shrinking only makes targets closer, so convergence is\n"
-    "        ;; monotonic with no oscillation.\n"
-    "        mov byte [pass], 1\n"
-    "        mov word [symbol_count], 0\n"
-    "        mov word [org_value], 0\n"
-    "        ;; Fill jump_table with 1 (all jumps start near, in ES segment)\n"
-    "        push di\n"
-    "        push cx\n"
-    "        mov di, JUMP_TABLE\n"
-    "        mov cx, JUMP_MAX\n"
-    "        mov al, 1\n"
-    "        cld\n"
-    "        rep stosb\n"
-    "        pop cx\n"
-    "        pop di\n"
-    "        mov word [iteration_count], 0\n"
-    "        .pass1_loop:\n"
-    "        mov byte [changed_flag], 0\n"
-    "        mov word [current_address], 0\n"
-    "        mov word [global_scope], 0FFFFh\n"
-    "        mov word [jump_index], 0\n"
-    "        call do_pass\n"
-    "        test byte [error_flag], 0FFh\n"
-    "        jnz .error_pass1_io\n"
-    "        inc word [iteration_count]\n"
-    "        ;; Safety bound to catch oscillation.\n"
-    "        cmp word [iteration_count], 100\n"
-    "        jae .error_pass1_iter\n"
-    "        ;; Always run at least 2 iterations: iter 1 builds the symbol\n"
-    "        ;; table; iter 2 is the first one that can verify forward refs.\n"
-    "        cmp word [iteration_count], 2\n"
-    "        jb .pass1_loop\n"
-    "        ;; Loop while any jump changed size this iteration.\n"
-    "        test byte [changed_flag], 0FFh\n"
-    "        jnz .pass1_loop\n"
-    "\n"
-    "        ;; -- Open output file for writing --\n"
-    "        mov si, [output_name]\n"
-    "        mov al, O_WRONLY + O_CREAT + O_TRUNC\n"
-    "        mov dl, FLAG_EXECUTE\n"
-    "        mov ah, SYS_IO_OPEN\n"
-    "        call syscall\n"
-    "        jc .error_create\n"
-    "        mov [output_fd], ax\n"
-    "\n"
-    "        ;; -- Pass 2: emit bytes --\n"
-    "        mov byte [pass], 2\n"
-    "        mov ax, [org_value]\n"
-    "        mov [current_address], ax\n"
-    "        mov word [global_scope], 0FFFFh\n"
-    "        mov word [jump_index], 0\n"
-    "        mov word [output_position], 0\n"
-    "        mov word [output_total], 0\n"
-    "        call do_pass\n"
-    "\n"
-    "        ;; Flush remaining output\n"
-    "        call flush_output\n"
-    "\n"
-    "        ;; Close output — kernel writes back directory size from fd_pos\n"
-    "        mov bx, [output_fd]\n"
-    "        mov ah, SYS_IO_CLOSE\n"
-    "        call syscall\n"
-    "        jc .error_write_dir\n"
-    "\n"
-    "        ;; Print success message\n"
-    "        mov si, MESSAGE_OK\n"
-    "        mov cx, MESSAGE_OK_LENGTH\n"
-    "        jmp call_die\n"
-    "\n"
-    "        .error_create:\n"
-    "        mov si, MESSAGE_ERROR_CREATE\n"
-    "        mov cx, MESSAGE_ERROR_CREATE_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_find_out:\n"
-    "        mov si, MESSAGE_ERROR_FIND_OUT\n"
-    "        mov cx, MESSAGE_ERROR_FIND_OUT_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1:\n"
-    "        mov si, MESSAGE_ERROR_PASS1\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1_io:\n"
-    "        mov si, MESSAGE_ERROR_PASS1_IO\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_IO_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1_iter:\n"
-    "        mov si, MESSAGE_ERROR_PASS1_ITER\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_ITER_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_write_dir:\n"
-    "        mov si, MESSAGE_ERROR_WRITE_DIR\n"
-    "        mov cx, MESSAGE_ERROR_WRITE_DIR_LENGTH\n"
-    "        jmp call_die\n"
-    "        .usage:\n"
-    "        mov si, MESSAGE_USAGE\n"
-    "        mov cx, MESSAGE_USAGE_LENGTH\n"
-    "        jmp call_die\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; abort_unknown: print the offending line and exit\n"
@@ -4615,26 +4599,10 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "MESSAGE_ERROR_AT        db `  at: `\n"
     "MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT\n"
-    "MESSAGE_ERROR_CREATE    db `Error: cannot create output\\n`\n"
-    "MESSAGE_ERROR_CREATE_LENGTH equ $ - MESSAGE_ERROR_CREATE\n"
-    "MESSAGE_ERROR_FIND_OUT  db `Error: cannot find output file\\n`\n"
-    "MESSAGE_ERROR_FIND_OUT_LENGTH equ $ - MESSAGE_ERROR_FIND_OUT\n"
-    "MESSAGE_ERROR_PASS1     db `Error: pass 1 failed\\n`\n"
-    "MESSAGE_ERROR_PASS1_LENGTH equ $ - MESSAGE_ERROR_PASS1\n"
-    "MESSAGE_ERROR_PASS1_IO  db `Error: pass 1 io\\n`\n"
-    "MESSAGE_ERROR_PASS1_IO_LENGTH equ $ - MESSAGE_ERROR_PASS1_IO\n"
-    "MESSAGE_ERROR_PASS1_ITER db `Error: pass 1 iter\\n`\n"
-    "MESSAGE_ERROR_PASS1_ITER_LENGTH equ $ - MESSAGE_ERROR_PASS1_ITER\n"
     "MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\\n  `\n"
     "MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN\n"
-    "MESSAGE_ERROR_WRITE_DIR db `Error: directory write failed\\n`\n"
-    "MESSAGE_ERROR_WRITE_DIR_LENGTH equ $ - MESSAGE_ERROR_WRITE_DIR\n"
-    "MESSAGE_OK      db `OK\\n`\n"
-    "MESSAGE_OK_LENGTH equ $ - MESSAGE_OK\n"
     "MESSAGE_SYMBOL_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\\n`\n"
     "MESSAGE_SYMBOL_OVERFLOW_LENGTH equ $ - MESSAGE_SYMBOL_OVERFLOW\n"
-    "MESSAGE_USAGE   db `Usage: asm <source> <output>\\n`\n"
-    "MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
