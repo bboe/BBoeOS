@@ -1,23 +1,26 @@
 /* Demonstrates file-scope (global) variable support.  Exercises a
-   scalar counter mutated from a helper, a fixed-size char buffer
-   filled by main, and a zero-initialized int array treated as a ring
-   of scratch slots.  Also verifies that sizeof(global_array) folds to
-   the expected byte count at compile time. */
+   scalar counter mutated from a helper that returns the updated
+   value (which is also the regression test for the peephole
+   AX-tracking fix — a pre-fix cc.py would fuse the helper body
+   into a single ``inc word [counter]`` and return stale AX), a
+   fixed-size char buffer filled by main, and a zero-initialized
+   int array treated as a ring of scratch slots.  Also verifies
+   that sizeof(global_array) folds at compile time. */
 
 int counter;
 int history[8];
 char label[8];
 
-void bump() {
+int bump() {
     counter = counter + 1;
+    return counter;
 }
 
 int main() {
     counter = 10;
     int i = 0;
     while (i < 5) {
-        bump();
-        history[i] = counter;
+        history[i] = bump();
         i = i + 1;
     }
     label[0] = 'g';
