@@ -56,6 +56,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
     ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
+    ProgramTest("inctest", ["inctest"], r"^square = 144$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
