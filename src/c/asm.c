@@ -331,6 +331,19 @@ void emit_word_ax() {
         "call emit_byte_al");
 }
 
+/* Compute the ES-relative offset of a symbol table entry: input AX
+   = index, output DI = index * SYMBOL_ENTRY (36).  Preserves BX;
+   clobbers AX and DX (MUL writes its high word into DX).  ``mul bx``
+   is shorter than an ``imul ax, bx, 36`` encoding, which is why the
+   retired asm took the BX-save-and-restore detour. */
+void symbol_entry_address() {
+    asm("push bx\n"
+        "mov bx, 36\n"
+        "mul bx\n"
+        "mov di, ax\n"
+        "pop bx");
+}
+
 /* Error reporters called while ES is still pointed at the symbol-
    table segment.  Each resets ES to DS before handing off to cc.py's
    ``die()`` builtin (which jumps to FUNCTION_DIE with the string
@@ -4306,17 +4319,11 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; symbol_entry_address: compute symbol table entry offset within ES segment\n"
-    ";;; AX = index, returns DI = index * SYMBOL_ENTRY (ES-relative)\n"
-    ";;; Clobbers AX, DX\n"
+    ";;; symbol_entry_address lives in cc.py-emitted\n"
+    ";;; ``symbol_entry_address`` near the top of src/c/asm.c.  The\n"
+    ";;; SYMBOL_ENTRY multiplier is spelled inline as the literal 36\n"
+    ";;; because the ``%assign`` is emitted after each C function.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "symbol_entry_address:\n"
-    "        push bx\n"
-    "        mov bx, SYMBOL_ENTRY\n"
-    "        mul bx                 ; AX = index * SYMBOL_ENTRY (DX clobbered)\n"
-    "        mov di, ax\n"
-    "        pop bx\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; symbol_lookup: find symbol by name\n"
