@@ -53,6 +53,106 @@ int symbol_set_value;
    jumping to the pure-C reporter. */
 char *line_buffer;
 char *error_word;
+/* Saved parent-file state for a single %include level.  These
+   replace the INCLUDE_SAVE memory region that previously lived at
+   ``_program_end + 1280`` — moving the 6 bytes into cc.py-emitted
+   globals lets include_push / include_pop access the fields by name
+   instead of [bx+0/2/4]. */
+int include_save_fd;
+int include_save_position;
+int include_save_valid;
+/* Pointer to the parent's 512-byte SOURCE_BUFFER copy, held in
+   post-binary scratch RAM (set in main() to
+   ``_program_end + 1280`` — past LINE_BUFFER / OUTPUT_BUFFER /
+   SOURCE_BUFFER).  Storing the buffer as a C array instead would
+   bake 512 zero bytes into the binary; the scratch address keeps
+   the on-disk size the same as the NASM layout. */
+char *include_source_save;
+/* Bridge for include_push's SI input (pointer to the raw include
+   filename parsed out of the source line).  cc.py has no syntax for
+   mapping SI to a C parameter, so the caller's asm stashes SI here
+   before the C body runs. */
+char *include_push_arg;
+
+/* Pop the include stack: close the included file, restore the
+   parent file's fd / buffer / position / valid fields, and copy the
+   saved SOURCE_BUFFER contents back.  Called from do_pass (via
+   ``call include_pop`` in the pass-loop inline asm) when read_line
+   hits EOF while include_depth > 0.  The original inline-asm label
+   also preserved AX/BX/CX/SI/DI, but the sole caller jumps to
+   ``.line_loop`` → ``call read_line`` which reloads its own
+   registers, so the C version only guards ES (callers rely on ES
+   staying at SYMBOL_SEGMENT across the rep movsw that needs ES=DS).
+   Keeping every asm() block SP-balanced is required because cc.py
+   wraps each inline block with ``push dx / pop dx`` to preserve the
+   local pinned to DX. */
+void include_pop() {
+    asm("mov bx, [_g_source_fd]\n"
+        "mov ah, SYS_IO_CLOSE\n"
+        "call syscall");
+    source_fd = include_save_fd;
+    source_buffer_position = include_save_position;
+    source_buffer_valid = include_save_valid;
+    asm("push es\n"
+        "push ds\npop es\n"
+        "mov si, [_g_include_source_save]\n"
+        "mov di, _program_end + 768\n"
+        "mov cx, 256\n"
+        "cld\nrep movsw\n"
+        "pop es");
+    include_depth = include_depth - 1;
+}
+
+/* Push the include stack: save the current file's fd / buffer
+   state, stash a copy of the 512-byte SOURCE_BUFFER, build
+   ``include_path = source_prefix + <name>``, and open the result
+   via the ES-safe syscall wrapper.  On success source_fd points at
+   the included file and include_depth is bumped; on failure
+   error_flag is raised so the enclosing pass iteration reports it.
+   SI-on-entry holds the raw filename pointer taken straight from
+   the source line; the first instruction stashes it into
+   ``include_push_arg`` before cc.py's codegen gets a chance to
+   clobber SI. */
+void include_push() {
+    asm("mov [_g_include_push_arg], si");
+    include_save_fd = source_fd;
+    include_save_position = source_buffer_position;
+    include_save_valid = source_buffer_valid;
+    asm("push es\n"
+        "push ds\npop es\n"
+        "mov si, _program_end + 768\n"
+        "mov di, [_g_include_source_save]\n"
+        "mov cx, 256\n"
+        "cld\nrep movsw\n"
+        "pop es");
+    int i = 0;
+    int j = 0;
+    while (source_prefix[i] != '\0') {
+        include_path[j] = source_prefix[i];
+        i = i + 1;
+        j = j + 1;
+    }
+    int k = 0;
+    while (include_push_arg[k] != '\0') {
+        include_path[j] = include_push_arg[k];
+        j = j + 1;
+        k = k + 1;
+    }
+    include_path[j] = '\0';
+    asm("mov si, _g_include_path\n"
+        "mov al, O_RDONLY\n"
+        "mov ah, SYS_IO_OPEN\n"
+        "call syscall\n"
+        "jc .ipush_err\n"
+        "mov [_g_source_fd], ax\n"
+        "mov word [_g_source_buffer_position], 0\n"
+        "mov word [_g_source_buffer_valid], 0\n"
+        "inc word [_g_include_depth]\n"
+        "jmp .ipush_end\n"
+        ".ipush_err:\n"
+        "mov byte [_g_error_flag], 1\n"
+        ".ipush_end:");
+}
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
    output_fd via SYS_IO_WRITE, then reset the position.  No-op when
@@ -207,8 +307,13 @@ int main(int argc, char *argv[]) {
        run the assembler passes — the handlers index the symbol table
        via ``[es:...]``, which needs ES pointed at that segment. */
     /* Publish ``_program_end`` (the scratch-buffer base) as a C-visible
-       pointer so abort_unknown_impl can printf the bad source line. */
-    asm("mov word [_g_line_buffer], _program_end");
+       pointer so abort_unknown_impl can printf the bad source line.
+       ``include_source_save`` lives 1280 bytes past that sentinel —
+       immediately after LINE_BUFFER / OUTPUT_BUFFER / SOURCE_BUFFER —
+       so an %include level saves the 512-byte SOURCE_BUFFER into
+       scratch RAM instead of bloating the binary. */
+    asm("mov word [_g_line_buffer], _program_end\n"
+        "mov word [_g_include_source_save], _program_end + 1280");
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -257,8 +362,6 @@ asm(
     "        %define LINE_BUFFER      _program_end\n"
     "        %define OUTPUT_BUFFER       LINE_BUFFER + 256\n"
     "        %define SOURCE_BUFFER       OUTPUT_BUFFER + 512\n"
-    "        %define INCLUDE_SAVE      SOURCE_BUFFER + 512   ; include stack (6 bytes: source_fd, source_buffer_position, source_buffer_valid)\n"
-    "        %define INCLUDE_SOURCE_SAVE  INCLUDE_SAVE + 64   ; saved source buffer (512 bytes per level)\n"
     "\n"
     "        ;; Historical variable names aliased to cc.py-emitted globals.\n"
     "        ;; The mutable state lives at the tail of the binary as\n"
@@ -2650,113 +2753,13 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; include_pop: restore parent file state\n"
+    ";;; include_push / include_pop live in cc.py-emitted functions at\n"
+    ";;; the top of src/c/asm.c.  The parent-file save area (fd /\n"
+    ";;; position / valid triplet, plus the 512-byte SOURCE_BUFFER copy)\n"
+    ";;; moved into cc.py globals alongside the rest of the assembler's\n"
+    ";;; mutable state, so the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE memory\n"
+    ";;; regions are gone.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "include_pop:\n"
-    "        push ax\n"
-    "        push bx\n"
-    "        push cx\n"
-    "        push si\n"
-    "        push di\n"
-    "        ;; Close the include file's fd\n"
-    "        mov bx, [source_fd]\n"
-    "        mov ah, SYS_IO_CLOSE\n"
-    "        call syscall\n"
-    "        ;; Restore from INCLUDE_SAVE (parent file state)\n"
-    "        mov bx, INCLUDE_SAVE\n"
-    "        mov ax, [bx+0]                 ; source_fd\n"
-    "        mov [source_fd], ax\n"
-    "        mov ax, [bx+2]                 ; source_buffer_position\n"
-    "        mov [source_buffer_position], ax\n"
-    "        mov ax, [bx+4]                 ; source_buffer_valid\n"
-    "        mov [source_buffer_valid], ax\n"
-    "        ;; Restore SOURCE_BUFFER\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es                  ; ES=0 for rep movsw\n"
-    "        mov si, INCLUDE_SOURCE_SAVE\n"
-    "        mov di, SOURCE_BUFFER\n"
-    "        mov cx, 256\n"
-    "        cld\n"
-    "        rep movsw\n"
-    "        pop es\n"
-    "        dec byte [include_depth]\n"
-    "        pop di\n"
-    "        pop si\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        pop ax\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; include_push: save current file state, switch to included file\n"
-    ";;; SI = pointer to include filename (null-terminated)\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "include_push:\n"
-    "        push ax\n"
-    "        push bx\n"
-    "        ;; Save current file state to INCLUDE_SAVE (6 bytes)\n"
-    "        mov bx, INCLUDE_SAVE\n"
-    "        mov ax, [source_fd]\n"
-    "        mov [bx+0], ax\n"
-    "        mov ax, [source_buffer_position]\n"
-    "        mov [bx+2], ax\n"
-    "        mov ax, [source_buffer_valid]\n"
-    "        mov [bx+4], ax\n"
-    "        ;; Save SOURCE_BUFFER content\n"
-    "        push si\n"
-    "        push di\n"
-    "        push cx\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es                  ; ES=0 for rep movsw\n"
-    "        mov si, SOURCE_BUFFER\n"
-    "        mov di, INCLUDE_SOURCE_SAVE\n"
-    "        mov cx, 256\n"
-    "        cld\n"
-    "        rep movsw\n"
-    "        pop es\n"
-    "        pop cx\n"
-    "        pop di\n"
-    "        pop si\n"
-    "        ;; Construct include_path = source_prefix + (include name at SI)\n"
-    "        mov bx, source_prefix\n"
-    "        mov di, include_path\n"
-    "        .ip_pfx:\n"
-    "        mov al, [bx]\n"
-    "        test al, al\n"
-    "        jz .ip_name\n"
-    "        mov [di], al\n"
-    "        inc bx\n"
-    "        inc di\n"
-    "        jmp .ip_pfx\n"
-    "        .ip_name:\n"
-    "        mov al, [si]\n"
-    "        mov [di], al\n"
-    "        inc di\n"
-    "        test al, al\n"
-    "        jz .ip_done\n"
-    "        inc si\n"
-    "        jmp .ip_name\n"
-    "        .ip_done:\n"
-    "        ;; Open included file\n"
-    "        mov si, include_path\n"
-    "        mov al, O_RDONLY\n"
-    "        mov ah, SYS_IO_OPEN\n"
-    "        call syscall\n"
-    "        jc .inc_err\n"
-    "        mov [source_fd], ax\n"
-    "        mov word [source_buffer_position], 0\n"
-    "        mov word [source_buffer_valid], 0\n"
-    "        inc byte [include_depth]\n"
-    "        pop bx\n"
-    "        pop ax\n"
-    "        ret\n"
-    "        .inc_err:\n"
-    "        mov byte [error_flag], 1\n"
-    "        pop bx\n"
-    "        pop ax\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; load_src_sector: read next chunk of source file into SOURCE_BUFFER via fd\n"
