@@ -1257,6 +1257,48 @@ class CodeGenerator:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
 
+    def _peephole_will_strand_ax(self) -> bool:
+        """Return True if the last three emitted lines form a fusion target.
+
+        :meth:`peephole_memory_arithmetic` collapses
+        ``mov ax, D / <op> ax, ... / mov D, ax`` into ``<op> D, ...`` when
+        source and destination match (passes 2 and 3); :meth:`peephole_register_arithmetic`
+        pushes the computation directly into a pin-eligible destination
+        register when it differs from the source.  Both leave AX holding
+        something other than the new stored value, so the ``ax_local``
+        tracking the caller just set (pointing at the store's destination
+        local) would mislead later reads into skipping a reload and
+        picking up stale contents.
+
+        The caller — :meth:`emit_store_local` — consults this after the
+        final ``mov <D>, ax`` has been emitted; if we report True it
+        clears its own tracking instead of guessing at peephole time.
+        """
+        if len(self.lines) < 3:
+            return False
+        first = self.lines[-3].strip()
+        middle = self.lines[-2].strip()
+        last = self.lines[-1].strip()
+        if not (first.startswith("mov ax, ") and last.startswith("mov ") and last.endswith(", ax")):
+            return False
+        source = first[len("mov ax, ") :]
+        destination = last[len("mov ") : -len(", ax")].strip()
+        if source == destination:
+            # Passes 2 and 3 of peephole_memory_arithmetic cover inc/dec
+            # and (add|sub|and) with any operand shape (imm, register,
+            # or ``[mem]``).
+            if middle in ("inc ax", "dec ax"):
+                return True
+            return middle.startswith(("add ax, ", "sub ax, ", "and ax, "))
+        # peephole_register_arithmetic: different register destination,
+        # op in {add, sub, and}, operand doesn't reference the target.
+        if destination in {"bx", "cx", "dx", "si", "di", "bp"}:
+            for prefix in ("add ax, ", "sub ax, ", "and ax, "):
+                if middle.startswith(prefix):
+                    operand = middle[len(prefix) :]
+                    return destination not in operand.split()
+        return False
+
     def _pinned_registers_to_save(self, clobbers: frozenset[str], /) -> list[str]:
         """Return the pinned registers that need push/pop around a call.
 
@@ -2772,6 +2814,16 @@ class CodeGenerator:
             self.emit(f"        mov [{self._local_address(name)}], ax")
         self.ax_is_byte = False
         self.ax_local = name
+        # ``mov ax, D / <op> ax, ... / mov D, ax`` sequences are fused
+        # by the late peephole passes into a single ``<op> D, ...`` (or
+        # into a compute-into-pinned-register form), neither of which
+        # leaves AX holding the new value.  When that fusion applies,
+        # the ``ax_local`` tracking we just set would let a downstream
+        # read of ``name`` skip its reload and pick up the pre-sequence
+        # AX contents instead.  Invalidate the tracking here so the
+        # reload happens naturally.
+        if self._peephole_will_strand_ax():
+            self.ax_local = None
 
     def fuse_trailing_printf(self, body: list[Node], /) -> list[Node]:
         """Transform trailing simple printf() calls into die() for main.
@@ -3765,13 +3817,21 @@ class CodeGenerator:
         return label
 
     def peephole(self) -> None:
-        """Run peephole optimization passes over generated assembly."""
+        """Run peephole optimization passes over generated assembly.
+
+        Ordering note: :meth:`peephole_memory_arithmetic` runs before
+        :meth:`peephole_store_reload` so that load/modify/store triples
+        get folded into a direct ``inc D`` (etc.) first.  Reversing the
+        order lets ``store_reload`` delete a reload that ``emit_store_local``
+        added as a safety net — ``memory_arithmetic`` would then fuse
+        the triple and leave the downstream read picking up stale AX.
+        """
         self.peephole_dead_code()
         self.peephole_double_jump()
         self.peephole_jump_next()
         self.peephole_label_forwarding()
-        self.peephole_store_reload()
         self.peephole_memory_arithmetic()
+        self.peephole_store_reload()
         self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()
