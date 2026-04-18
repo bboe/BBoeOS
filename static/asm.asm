@@ -1,1 +1,1 @@
-../src/asm/asm.asm
+../archive/asm.asm
