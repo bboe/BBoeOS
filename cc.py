@@ -5,8 +5,10 @@ Compiles a tiny subset of C to NASM-compatible assembly that the BBoeOS
 self-hosted assembler (or host NASM) can assemble into a flat binary.
 
 Grammar:
-    program              := function_declaration*
-    function_declaration := type IDENT '(' ')' '{' statement* '}'
+    program              := (function_declaration | global_declaration)*
+    function_declaration := type IDENT '(' parameters? ')' '{' statement* '}'
+    global_declaration   := type IDENT ('[' expression? ']')?
+                          ('=' (expression | '{' expression_list '}'))? ';'
     type                 := 'void' | 'int' | 'char' '*'
     statement            := variable_declaration | assign_statement | do_while_statement
                           | while_statement | call_statement
@@ -116,11 +118,17 @@ class Param:
 
 @dataclass(slots=True)
 class ArrayDecl(Node):
-    """Local array declaration ``T name[] = {...};``."""
+    """Array declaration ``T name[] = {...};`` (local or global).
+
+    At global scope the array may also carry an explicit ``[SIZE]`` with
+    no initializer — stored as ``size`` (a parser node, evaluated at
+    NASM assemble time so it can reference kernel constants).
+    """
 
     name: str
     type_name: str
     init: Node | None
+    size: Node | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -248,9 +256,16 @@ class LogicalOr(Node):
 
 @dataclass(slots=True)
 class Program(Node):
-    """Top-level AST: the list of function definitions making up a translation unit."""
+    """Top-level AST: functions and file-scope global declarations.
+
+    ``globals`` holds :class:`VarDecl` / :class:`ArrayDecl` nodes
+    declared at file scope.  Scalars become ``_g_<name>`` cells in the
+    tail data block; arrays become ``_g_<name>`` labels that user code
+    references by name just like a local ``int arr[] = {...};``.
+    """
 
     functions: list[Node]
+    globals: list[Node] = field(default_factory=list, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -557,6 +572,9 @@ class CodeGenerator:
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
         self.frame_size: int = 0
+        self.global_arrays: dict[str, ArrayDecl] = {}
+        self.global_byte_arrays: set[str] = set()
+        self.global_scalars: dict[str, VarDecl] = {}
         self.label_id: int = 0
         self.lines: list[str] = []
         self.live_long_local: str | None = None
@@ -753,7 +771,7 @@ class CodeGenerator:
             if not (isinstance(condition.left, Var) and isinstance(condition.right, Int)):
                 break
             name = condition.left.name
-            if name not in self.locals:
+            if not self._is_memory_scalar(name):
                 break
             if name in self.pinned_register or name in self.constant_aliases or name in self.variable_arrays:
                 break
@@ -826,7 +844,7 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.pinned_register[index.name]}")
             if not is_byte:
                 self.emit("        add si, si")
-        elif isinstance(index, Var) and index.name in self.locals:
+        elif isinstance(index, Var) and self._is_memory_scalar(index.name):
             self.emit(f"        mov si, [{self._local_address(index.name)}]")
             if not is_byte:
                 self.emit("        add si, si")
@@ -844,6 +862,41 @@ class CodeGenerator:
             addr += f"{displacement:+d}"
         addr += f"+{base_register}"
         return addr
+
+    def _emit_global_storage(self) -> None:
+        """Emit ``_g_<name>`` data cells for every global, once at tail.
+
+        Scalars lay out as a single ``dw`` with either the constant
+        initializer or zero.  Initialized arrays use ``db``/``dw``
+        literals matching the element type.  Uninitialized arrays use
+        ``times <byte_count> db 0``; byte-granular output keeps the
+        self-hosted assembler happy (it only implements the ``times N
+        db ...`` form).  Size expressions can reference named constants
+        so NASM folds the arithmetic at assemble time.
+        """
+        if not self.global_scalars and not self.global_arrays:
+            return
+        self.emit(";; --- global data ---")
+        for name in sorted(self.global_scalars):
+            declaration = self.global_scalars[name]
+            init_expression = "0"
+            if declaration.init is not None:
+                init_expression = self._constant_expression(declaration.init)
+            self.emit(f"_g_{name}: dw {init_expression}")
+        for name in sorted(self.global_arrays):
+            declaration = self.global_arrays[name]
+            stride = 1 if declaration.type_name == "char" else 2
+            if declaration.init is not None:
+                directive = "db" if declaration.type_name == "char" else "dw"
+                rendered = [
+                    self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
+                    for element in declaration.init.elements
+                ]
+                self.emit(f"_g_{name}: {directive} {', '.join(rendered)}")
+            else:
+                size_expression = self._constant_expression(declaration.size)
+                byte_count = f"({size_expression})*{stride}" if stride != 1 else size_expression
+                self.emit(f"_g_{name}: times {byte_count} db 0")
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.
@@ -935,7 +988,15 @@ class CodeGenerator:
         )
 
     def _is_byte_var(self, name: str, /) -> bool:
-        """Return True if *name* is a ``char`` or ``char*`` variable (not a local word array)."""
+        """Return True if *name* is a byte-sized element source.
+
+        Covers plain ``char`` / ``char *`` scalars and file-scope ``char``
+        arrays (declared ``char NAME[SIZE];``).  Locally-declared arrays
+        and ``int``-typed globals keep word-sized element access — only
+        the explicit ``char`` array path widens to byte semantics.
+        """
+        if name in self.global_byte_arrays:
+            return True
         return name not in self.variable_arrays and self.variable_types.get(name) in ("char", "char*")
 
     def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
@@ -986,6 +1047,16 @@ class CodeGenerator:
             if CodeGenerator._node_references_var(name=name, node=stmt):
                 return True
         return False
+
+    def _is_memory_scalar(self, name: str, /) -> bool:
+        """Return True when *name* is a memory-resident scalar.
+
+        Covers frame-based locals (``self.locals``) and file-scope
+        scalars (``self.global_scalars``).  Call sites use this to
+        decide whether a ``Var`` can be addressed directly via ``[mem]``
+        instead of being loaded into AX first.
+        """
+        return name in self.locals or name in self.global_scalars
 
     @staticmethod
     def _is_modulo_of(*, base: Node, expression: Node) -> bool:
@@ -1041,13 +1112,23 @@ class CodeGenerator:
         )
 
     def _local_address(self, name: str, /) -> str:
-        """Return the memory operand string for a local variable."""
-        if self.elide_frame:
-            return f"_l_{name}"
-        offset = self.locals[name]
-        if offset > 0:
-            return f"bp-{offset}"
-        return f"bp+{-offset}"
+        """Return the memory operand string for a local or global scalar.
+
+        Local variables shadow globals with the same name (standard C),
+        so the local-frame path runs first and only falls through to
+        ``_g_<name>`` when no local slot exists.
+        """
+        if name in self.locals:
+            if self.elide_frame:
+                return f"_l_{name}"
+            offset = self.locals[name]
+            if offset > 0:
+                return f"bp-{offset}"
+            return f"bp+{-offset}"
+        if name in self.global_scalars:
+            return f"_g_{name}"
+        message = f"no address for '{name}' (not a local or global scalar)"
+        raise CompileError(message)
 
     @staticmethod
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
@@ -1077,6 +1158,8 @@ class CodeGenerator:
             self.emit(f"        push {arg.name}")
         elif isinstance(arg, Var) and arg.name in self.constant_aliases:
             self.emit(f"        push {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var) and arg.name in self.global_arrays:
+            self.emit(f"        push _g_{arg.name}")
         elif isinstance(arg, Var) and arg.name in self.pinned_register:
             self.emit(f"        push {self.pinned_register[arg.name]}")
         else:
@@ -1158,6 +1241,8 @@ class CodeGenerator:
             self.emit(f"        mov {target}, {arg.name}")
         elif isinstance(arg, Var) and arg.name in self.constant_aliases:
             self.emit(f"        mov {target}, {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var) and arg.name in self.global_arrays:
+            self.emit(f"        mov {target}, _g_{arg.name}")
         elif isinstance(arg, Var):
             self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
         elif isinstance(arg, BinOp):
@@ -1181,18 +1266,81 @@ class CodeGenerator:
         pinned_set = set(self.pinned_register.values())
         return sorted(register for register in clobbers if register in pinned_set and register != "ax")
 
+    def _register_globals(self, declarations: list[Node], /) -> None:
+        """Record file-scope declarations and validate their shapes.
+
+        Scalars are stashed in :attr:`global_scalars`; arrays in
+        :attr:`global_arrays`.  ``char`` arrays are additionally tracked
+        in :attr:`global_byte_arrays` so :meth:`_is_byte_var` reports
+        byte-wide element access (``int`` arrays keep word access).
+        """
+        for declaration in declarations:
+            name = declaration.name
+            if name in self.NAMED_CONSTANTS:
+                message = f"global '{name}' shadows a kernel constant"
+                raise CompileError(message, line=declaration.line)
+            if name in self.user_functions or name == "main":
+                message = f"global '{name}' collides with a function name"
+                raise CompileError(message, line=declaration.line)
+            if name in self.global_scalars or name in self.global_arrays:
+                message = f"duplicate global declaration: {name}"
+                raise CompileError(message, line=declaration.line)
+            if isinstance(declaration, VarDecl):
+                if declaration.type_name == "unsigned long":
+                    message = "unsigned long globals are not supported"
+                    raise CompileError(message, line=declaration.line)
+                if declaration.type_name == "void":
+                    message = f"global '{name}' cannot have type void"
+                    raise CompileError(message, line=declaration.line)
+                if declaration.init is not None and self._constant_expression(declaration.init) is None:
+                    message = f"global '{name}' initializer must be a constant expression"
+                    raise CompileError(message, line=declaration.line)
+                if declaration.init is not None:
+                    for constant in self._collect_constant_references(declaration.init):
+                        self.emit_constant_reference(constant)
+                self.global_scalars[name] = declaration
+            elif isinstance(declaration, ArrayDecl):
+                if declaration.type_name not in ("char", "int"):
+                    message = f"global array '{name}' must have element type 'char' or 'int'"
+                    raise CompileError(message, line=declaration.line)
+                if declaration.type_name == "char":
+                    self.global_byte_arrays.add(name)
+                if declaration.size is not None:
+                    if self._constant_expression(declaration.size) is None:
+                        message = f"global array '{name}' size must be a constant expression"
+                        raise CompileError(message, line=declaration.line)
+                    for constant in self._collect_constant_references(declaration.size):
+                        self.emit_constant_reference(constant)
+                if declaration.init is not None:
+                    for element in declaration.init.elements:
+                        if isinstance(element, String):
+                            continue
+                        if self._constant_expression(element) is None:
+                            message = "global array initializer elements must be constants"
+                            raise CompileError(message, line=element.line)
+                        for reference in self._collect_constant_references(element):
+                            self.emit_constant_reference(reference)
+                self.global_arrays[name] = declaration
+            else:
+                message = f"unexpected top-level declaration: {type(declaration).__name__}"
+                raise CompileError(message, line=declaration.line)
+
     def _resolve_constant(self, name: str, /) -> str | None:
         """Return the NASM constant expression for *name*, or ``None``.
 
         Checks :attr:`constant_aliases` first, then
-        :attr:`NAMED_CONSTANTS`.  Used wherever the code needs to
-        distinguish compile-time-constant bases from runtime variables.
+        :attr:`NAMED_CONSTANTS`, then file-scope arrays (whose
+        ``_g_<name>`` label is itself a fixed address).  Used wherever
+        the code needs to distinguish compile-time-constant bases from
+        runtime variables.
         """
         alias = self.constant_aliases.get(name)
         if alias is not None:
             return alias
         if name in self.NAMED_CONSTANTS:
             return name
+        if name in self.global_arrays:
+            return f"_g_{name}"
         return None
 
     def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> dict[str, str]:
@@ -1991,7 +2139,7 @@ class CodeGenerator:
             self.emit(f"        mov bp, {dport_argument.name}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
             self.emit(f"        mov bp, {self.pinned_register[dport_argument.name]}")
-        elif isinstance(dport_argument, Var) and dport_argument.name in self.locals:
+        elif isinstance(dport_argument, Var) and self._is_memory_scalar(dport_argument.name):
             self.emit(f"        mov bp, [{self._local_address(dport_argument.name)}]")
         else:
             self.generate_expression(dport_argument)
@@ -2291,7 +2439,7 @@ class CodeGenerator:
             source_register = self.pinned_register[right.name]
             if source_register != "cx":
                 self.emit(f"        mov cx, {source_register}")
-        elif isinstance(right, Var) and right.name in self.locals:
+        elif isinstance(right, Var) and self._is_memory_scalar(right.name):
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self._local_address(right.name)}]")
         else:
@@ -2332,7 +2480,7 @@ class CodeGenerator:
             # conditional jump and AX's prior value was not promised.
             if (
                 isinstance(left, Var)
-                and left.name in self.locals
+                and self._is_memory_scalar(left.name)
                 and left.name not in self.variable_arrays
                 and left.name != self.ax_local
                 and self.variable_types.get(left.name) != "unsigned long"
@@ -2386,7 +2534,7 @@ class CodeGenerator:
             # skips the CX load entirely.
             if (
                 isinstance(right, Var)
-                and right.name in self.locals
+                and self._is_memory_scalar(right.name)
                 and right.name not in self.pinned_register
                 and right.name not in self.variable_arrays
                 and self.variable_types.get(right.name) != "unsigned long"
@@ -2533,7 +2681,9 @@ class CodeGenerator:
         elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != "ax":
                 self.emit(f"        mov {register}, ax")
-        elif isinstance(argument, Var) and argument.name in self.locals:
+        elif isinstance(argument, Var) and argument.name in self.global_arrays:
+            self.emit(f"        mov {register}, _g_{argument.name}")
+        elif isinstance(argument, Var) and self._is_memory_scalar(argument.name):
             self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
@@ -2552,6 +2702,8 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.new_string_label(argument.content)}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
+        elif isinstance(argument, Var) and argument.name in self.global_arrays:
+            self.emit(f"        mov si, _g_{argument.name}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
             for name in self._collect_constant_references(argument):
                 self.emit_constant_reference(name)
@@ -2570,6 +2722,9 @@ class CodeGenerator:
         without going through AX, so the caller's AX tracking (e.g.
         ``arg`` left by the argv startup) survives the store.
         """
+        if name in self.global_arrays:
+            message = f"cannot assign to array '{name}'"
+            raise CompileError(message)
         if self.variable_types.get(name) == "unsigned long":
             self.ax_clear()
             self.generate_long_expression(expression)
@@ -2649,6 +2804,7 @@ class CodeGenerator:
         for function in ast.functions:
             if function.name != "main":
                 self.user_functions[function.name] = len(function.params)
+        self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
         main_func = None
@@ -2665,6 +2821,7 @@ class CodeGenerator:
         self.peephole()
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
+        self._emit_global_storage()
         if self.strings:
             self.emit(";; --- string literals ---")
             for label, content in self.strings:
@@ -2922,6 +3079,13 @@ class CodeGenerator:
                 self.emit(f"        mov ax, {self.constant_aliases[vname]}")
                 self.ax_clear()
                 return
+            if vname in self.global_arrays:
+                # A global array name decays to its base address — the
+                # ``_g_<name>`` label.  Load it as an immediate, not as a
+                # memory fetch from that address.
+                self.emit(f"        mov ax, _g_{vname}")
+                self.ax_clear()
+                return
             self._check_defined(vname, line=expression.line)
             if self.variable_types.get(vname) == "unsigned long":
                 message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
@@ -3020,11 +3184,21 @@ class CodeGenerator:
         elif isinstance(expression, SizeofVar):
             self.ax_clear()
             vname = expression.name
-            if vname in self.array_sizes:
+            if vname in self.global_arrays:
+                declaration = self.global_arrays[vname]
+                stride = 1 if declaration.type_name == "char" else 2
+                if declaration.init is not None:
+                    size = len(declaration.init.elements) * stride
+                    self.emit(f"        mov ax, {size}")
+                else:
+                    size_expression = self._constant_expression(declaration.size)
+                    self.emit(f"        mov ax, ({size_expression})*{stride}")
+            elif vname in self.array_sizes:
                 size = self.array_sizes[vname] * 2  # word-sized elements
+                self.emit(f"        mov ax, {size}")
             else:
                 size = 2  # all non-array variables are word-sized
-            self.emit(f"        mov ax, {size}")
+                self.emit(f"        mov ax, {size}")
         elif isinstance(expression, Call):
             self.generate_call(expression)
         elif isinstance(expression, BinOp):
@@ -3067,7 +3241,7 @@ class CodeGenerator:
                 if (
                     shift == 8
                     and isinstance(left, Var)
-                    and left.name in self.locals
+                    and self._is_memory_scalar(left.name)
                     and left.name not in self.pinned_register
                     and left.name not in self.array_labels
                 ):
@@ -3090,7 +3264,7 @@ class CodeGenerator:
             if (
                 operator in ("+", "-")
                 and isinstance(right, Var)
-                and right.name in self.locals
+                and self._is_memory_scalar(right.name)
                 and right.name not in self.pinned_register
                 and right.name not in self.variable_arrays
                 and self.variable_types.get(right.name) != "unsigned long"
@@ -3185,7 +3359,24 @@ class CodeGenerator:
         self.virtual_long_locals = set()
         self.zero_init_skippable: set[str] = set()
 
+        # Globals are visible in every function.  Scalars get a
+        # ``_g_<name>`` memory slot; arrays are resolved via the
+        # ``_resolve_constant`` path (they behave like a fixed base
+        # address, word-strided for ``int`` and byte-strided for
+        # ``char``).
+        for global_name, declaration in self.global_scalars.items():
+            self.variable_types[global_name] = declaration.type_name
+            self.visible_vars.add(global_name)
+        for global_name, declaration in self.global_arrays.items():
+            self.variable_types[global_name] = declaration.type_name
+            self.variable_arrays.add(global_name)
+            self.visible_vars.add(global_name)
+
         # Allocate parameters and record their types.
+        for param in parameters:
+            if param.name in self.global_scalars or param.name in self.global_arrays:
+                message = f"parameter '{param.name}' shadows a file-scope global"
+                raise CompileError(message, line=function.line)
         if name == "main":
             # main parameters are handled by emit_argument_vector_startup.
             for param in parameters:
@@ -4301,6 +4492,11 @@ class CodeGenerator:
         clobbering a pin.
         """
         for index, statement in enumerate(statements):
+            if isinstance(statement, (VarDecl, ArrayDecl)) and (
+                statement.name in self.global_scalars or statement.name in self.global_arrays
+            ):
+                message = f"local '{statement.name}' shadows a file-scope global"
+                raise CompileError(message, line=statement.line)
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
@@ -4622,22 +4818,6 @@ class Parser:
         """
         return self.parse_logical_or()
 
-    def parse_function(self) -> Node:
-        """Parse a function declaration.
-
-        Returns:
-            An AST node for the function.
-
-        """
-        line = self.peek()[2]
-        self.parse_type()
-        name = self.eat("IDENT")[1]
-        self.eat("LPAREN")
-        parameters = self.parse_parameters()
-        self.eat("RPAREN")
-        self.eat("LBRACE")
-        return Function(name, parameters, self.parse_block(), line=line)
-
     def parse_if(self) -> Node:
         """Parse an if statement.
 
@@ -4814,17 +4994,24 @@ class Parser:
         raise CompileError(message, line=line)
 
     def parse_program(self) -> Node:
-        """Parse the entire program as a sequence of function declarations.
+        """Parse the entire program as a sequence of top-level declarations.
 
-        Returns:
-            An AST node for the program.
-
+        Top-level declarations are either function definitions or
+        file-scope (``global``) variable / array declarations.  Both
+        start with ``type IDENT``; the token after the name
+        disambiguates — ``(`` introduces a function, anything else a
+        variable.
         """
         line = self.peek()[2]
-        functions = []
+        functions: list[Node] = []
+        globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
-            functions.append(self.parse_function())
-        return Program(functions, line=line)
+            declaration = self.parse_top_level_declaration()
+            if isinstance(declaration, Function):
+                functions.append(declaration)
+            else:
+                globals_list.append(declaration)
+        return Program(functions, globals=globals_list, line=line)
 
     def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
@@ -4889,6 +5076,45 @@ class Parser:
             return self.parse_call_statement()
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
+
+    def parse_top_level_declaration(self) -> Node:
+        """Parse a function definition or a file-scope variable / array.
+
+        Dispatches on the token after ``type IDENT``: ``(`` drives the
+        function path, any other token means a global declaration.
+        """
+        line = self.peek()[2]
+        type_string = self.parse_type()
+        name_token = self.eat("IDENT")
+        name = name_token[1]
+        if self.peek()[0] == "LPAREN":
+            self.eat("LPAREN")
+            parameters = self.parse_parameters()
+            self.eat("RPAREN")
+            self.eat("LBRACE")
+            return Function(name, parameters, self.parse_block(), line=line)
+        # File-scope variable: scalar or array.  Globals may specify a
+        # size inside ``[...]`` (unlike locals) since there is no
+        # runtime initializer to imply one.
+        is_array = False
+        size_expression: Node | None = None
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            is_array = True
+            if self.peek()[0] != "RBRACKET":
+                size_expression = self.parse_expression()
+            self.eat("RBRACKET")
+        init: Node | None = None
+        if self.peek()[0] == "ASSIGN":
+            self.eat("ASSIGN")
+            init = self.parse_array_init() if is_array else self.parse_expression()
+        self.eat("SEMI")
+        if is_array:
+            if size_expression is None and init is None:
+                message = f"global array '{name}' needs either a size or an initializer"
+                raise CompileError(message, line=line)
+            return ArrayDecl(name, type_string, init, line=line, size=size_expression)
+        return VarDecl(name, type_string, init, line=line)
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned long).
