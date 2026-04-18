@@ -46,11 +46,71 @@ char source_prefix[32];
 int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
+/* ``line_buffer`` / ``error_word`` live above the main driver's
+   ``_program_end``-relative buffers; main() initializes them at
+   startup (``line_buffer = _program_end``), and ``abort_unknown``
+   stores the offending mnemonic's SI into ``error_word`` before
+   jumping to the pure-C reporter. */
+char *line_buffer;
+char *error_word;
 
-/* Pass-1 error reporters.  Called by ``run_pass1`` while ES is still
-   pointed at the symbol-table segment, so each resets ES to DS
-   before handing off to cc.py's ``die()`` builtin (which jumps to
-   FUNCTION_DIE with the string preloaded). */
+/* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
+   output_fd via SYS_IO_WRITE, then reset the position.  No-op when
+   nothing is queued.  Callable from inline asm (``call flush_output``)
+   since cc.py emits the label with the C name.  The body preserves
+   AX / CX / SI / DI so the handler callers that reach flush_output
+   through emit_byte_al don't need to guard those registers at every
+   call site (matches the retired inline-asm flush_output's contract).
+   Uses the ES-safe ``syscall`` wrapper at the tail of the inline
+   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   OUTPUT_BUFFER is ``_program_end + 256`` — NASM folds the raw
+   arithmetic at assembly time. */
+void flush_output() {
+    asm("push ax\n"
+        "push cx\n"
+        "push si\n"
+        "push di\n"
+        "cmp word [_g_output_position], 0\n"
+        "je .fl_done\n"
+        "mov bx, [_g_output_fd]\n"
+        "mov si, _program_end + 256\n"
+        "mov cx, [_g_output_position]\n"
+        "mov ah, SYS_IO_WRITE\n"
+        "call syscall\n"
+        "mov word [_g_output_position], 0\n"
+        ".fl_done:\n"
+        "pop di\n"
+        "pop si\n"
+        "pop cx\n"
+        "pop ax");
+}
+
+/* Error reporters called while ES is still pointed at the symbol-
+   table segment.  Each resets ES to DS before handing off to cc.py's
+   ``die()`` builtin (which jumps to FUNCTION_DIE with the string
+   preloaded).  ``die_symbol_overflow`` is the jmp-target of the
+   symbol_set overflow branch; the pass-1 variants are called from
+   ``run_pass1`` when do_pass signals an I/O error or the jump-size
+   convergence fails to settle. */
+void die_symbol_overflow() {
+    asm("push ds\npop es");
+    die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
+}
+
+/* Invoked through an inline-asm trampoline that stashes SI into
+   ``error_word`` before jumping here (``abort_unknown:`` in the
+   file-scope asm block).  Prints the offending source line from
+   ``line_buffer`` together with the bad token, then exits. */
+void abort_unknown_impl() {
+    asm("push ds\npop es");
+    printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
+           line_buffer, error_word);
+    /* ``exit()`` would be cleaner but clang sees the stdlib prototype
+       via tests/bboeos.h and rejects the zero-argument form.  Jumping
+       to FUNCTION_EXIT keeps cc.py and clang both happy. */
+    asm("jmp FUNCTION_EXIT");
+}
+
 void die_error_pass1_io() {
     asm("push ds\npop es");
     die("Error: pass 1 io\n");
@@ -146,6 +206,9 @@ int main(int argc, char *argv[]) {
        safely.  We only switch to SYMBOL_SEGMENT once we're ready to
        run the assembler passes — the handlers index the symbol table
        via ``[es:...]``, which needs ES pointed at that segment. */
+    /* Publish ``_program_end`` (the scratch-buffer base) as a C-visible
+       pointer so abort_unknown_impl can printf the bad source line. */
+    asm("mov word [_g_line_buffer], _program_end");
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -244,27 +307,15 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; abort_unknown: print the offending line and exit\n"
-    ";;; Used by handle_unknown_word when it detects a line that has no\n"
-    ";;; recognized mnemonic or directive after stripping a bare label.\n"
+    ";;; abort_unknown: stash SI (the offending mnemonic) into a\n"
+    ";;; C-visible global and jump to the pure-C reporter.  Called\n"
+    ";;; from handle_unknown_word and friends when a source line has\n"
+    ";;; no recognized mnemonic or directive after stripping a bare\n"
+    ";;; label.  ``abort_unknown_impl`` does the printf + exit.\n"
     ";;; -----------------------------------------------------------------------\n"
     "abort_unknown:\n"
-    "        push si                ; save SI for second print\n"
-    "        mov si, MESSAGE_ERROR_UNKNOWN\n"
-    "        mov cx, MESSAGE_ERROR_UNKNOWN_LENGTH\n"
-    "        call call_write_stdout\n"
-    "        mov di, LINE_BUFFER\n"
-    "        call call_print_string\n"
-    "        mov al, 0Ah\n"
-    "        call call_print_character\n"
-    "        mov si, MESSAGE_ERROR_AT\n"
-    "        mov cx, MESSAGE_ERROR_AT_LENGTH\n"
-    "        call call_write_stdout\n"
-    "        pop di\n"
-    "        call call_print_string\n"
-    "        mov al, 0Ah\n"
-    "        call call_print_character\n"
-    "        jmp call_exit\n"
+    "        mov [_g_error_word], si\n"
+    "        jmp abort_unknown_impl\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; do_pass: run one pass over the source file\n"
@@ -467,29 +518,9 @@ asm(
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; flush_output: write OUTPUT_BUFFER to disk\n"
+    ";;; flush_output lives in cc.py-emitted ``flush_output`` at the\n"
+    ";;; top of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "flush_output:\n"
-    "        push ax\n"
-    "        push cx\n"
-    "        push si\n"
-    "        push di\n"
-    "        ;; Don't flush if nothing to write\n"
-    "        cmp word [output_position], 0\n"
-    "        je .fl_done\n"
-    "        ;; Write output_position bytes from OUTPUT_BUFFER via fd\n"
-    "        mov bx, [output_fd]\n"
-    "        mov si, OUTPUT_BUFFER\n"
-    "        mov cx, [output_position]\n"
-    "        mov ah, SYS_IO_WRITE\n"
-    "        call syscall\n"
-    "        mov word [output_position], 0\n"
-    "        .fl_done:\n"
-    "        pop di\n"
-    "        pop si\n"
-    "        pop cx\n"
-    "        pop ax\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_aam\n"
@@ -3827,33 +3858,6 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; print_hex_word: print AX as 4-digit hex\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "print_hex_word:\n"
-    "        push ax\n"
-    "        xchg al, ah\n"
-    "        call .print_byte\n"
-    "        pop ax\n"
-    "        call .print_byte\n"
-    "        ret\n"
-    "        .print_byte:\n"
-    "        push ax\n"
-    "        shr al, 4\n"
-    "        call .nibble\n"
-    "        pop ax\n"
-    "        and al, 0Fh\n"
-    "        call .nibble\n"
-    "        ret\n"
-    "        .nibble:\n"
-    "        add al, '0'\n"
-    "        cmp al, '9'\n"
-    "        jbe .nib_ok\n"
-    "        add al, 7\n"
-    "        .nib_ok:\n"
-    "        call call_print_character\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; read_line: read one line from source into LINE_BUFFER\n"
     ";;; Returns CF set on EOF\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -4242,9 +4246,7 @@ asm(
     "        pop cx\n"
     "        ret\n"
     "        .symbol_overflow:\n"
-    "        mov si, MESSAGE_SYMBOL_OVERFLOW\n"
-    "        mov cx, MESSAGE_SYMBOL_OVERFLOW_LENGTH\n"
-    "        jmp call_die\n"
+    "        jmp die_symbol_overflow\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; symbol_add_constant: add constant (%assign) to symbol table\n"
@@ -4546,43 +4548,6 @@ asm(
     "        db 0                   ; terminator\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; ES-safe kernel jump table wrappers\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "call_die:\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        jmp FUNCTION_DIE\n"
-    "\n"
-    "call_exit:\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        jmp FUNCTION_EXIT\n"
-    "\n"
-    "call_print_character:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_PRINT_CHARACTER\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    "call_print_string:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_PRINT_STRING\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    "call_write_stdout:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_WRITE_STDOUT\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0\n"
     ";;; for kernel calls, then restore ES before returning.\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -4593,16 +4558,6 @@ asm(
     "        int 30h\n"
     "        pop es\n"
     "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; Strings\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "MESSAGE_ERROR_AT        db `  at: `\n"
-    "MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT\n"
-    "MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\\n  `\n"
-    "MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN\n"
-    "MESSAGE_SYMBOL_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\\n`\n"
-    "MESSAGE_SYMBOL_OVERFLOW_LENGTH equ $ - MESSAGE_SYMBOL_OVERFLOW\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
