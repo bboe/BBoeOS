@@ -221,6 +221,63 @@ void die_error_pass1_iter() {
     die("Error: pass 1 iter\n");
 }
 
+/* CF-to-int bridge for the inline-asm ``read_line`` routine.  AX
+   returned as 1 when read_line hit EOF (CF set) or 0 when a full
+   line landed in LINE_BUFFER.  ``sbb ax, ax`` materializes CF into
+   all-ones / all-zeros and the trailing ``and ax, 1`` normalizes.
+   The function has no locals, so cc.py's prologue / epilogue leave
+   AX untouched between the final ``and`` and the ``ret``. */
+int read_line_is_eof() {
+    asm("call read_line\n"
+        "sbb ax, ax\n"
+        "and ax, 1");
+}
+
+/* Run one full pass over the source file: open it, reset the
+   per-pass buffer cursors, and loop through read_line / parse_line
+   until every line (including those from %included files, via
+   include_pop on inner EOF) has been processed.  On open failure
+   the pass exits immediately with error_flag raised; the enclosing
+   run_pass1 / run_pass2 callers check error_flag and invoke
+   die_error_pass1_io() as appropriate.
+
+   Written to remain callable from inline asm (``call do_pass``)
+   since run_pass1 / run_pass2 reach it that way — cc.py emits the
+   bare label.  The function has no locals, so no DX-pinned spill
+   cc.py would otherwise wrap the inline-asm blocks with. */
+void do_pass() {
+    current_address = org_value;
+    asm("mov si, [_g_source_name]\n"
+        "mov al, O_RDONLY\n"
+        "mov ah, SYS_IO_OPEN\n"
+        "call syscall\n"
+        "jc .dp_open_fail\n"
+        "mov [_g_source_fd], ax\n"
+        "jmp .dp_open_ok\n"
+        ".dp_open_fail:\n"
+        "mov byte [_g_error_flag], 1\n"
+        "jmp .dp_end\n"
+        ".dp_open_ok:");
+    source_buffer_position = 0;
+    source_buffer_valid = 0;
+    include_depth = 0;
+    global_scope = 0xFFFF;
+    while (1) {
+        if (read_line_is_eof() != 0) {
+            if (include_depth == 0) {
+                break;
+            }
+            asm("call include_pop");
+            continue;
+        }
+        asm("call parse_line");
+    }
+    asm("mov bx, [_g_source_fd]\n"
+        "mov ah, SYS_IO_CLOSE\n"
+        "call syscall\n"
+        ".dp_end:");
+}
+
 /* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
    from pass 1 are reused (the jump_table in ES is still set), and
    ``current_address`` resets to the org origin chosen by pass 1.
@@ -421,61 +478,13 @@ asm(
     "        jmp abort_unknown_impl\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; do_pass: run one pass over the source file\n"
+    ";;; do_pass lives in cc.py-emitted ``do_pass`` at the top of\n"
+    ";;; src/c/asm.c.  The body uses a C ``while(1)`` loop over\n"
+    ";;; read_line_is_eof() and drops the all-registers push/pop the\n"
+    ";;; asm version did at entry/exit — callers (run_pass1 /\n"
+    ";;; run_pass2 in cc.py-emitted C) don't depend on register\n"
+    ";;; preservation across this call.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "do_pass:\n"
-    "        push ax\n"
-    "        push bx\n"
-    "        push cx\n"
-    "        push dx\n"
-    "        push si\n"
-    "        push di\n"
-    "\n"
-    "        ;; Reset origin for pass\n"
-    "        mov ax, [org_value]\n"
-    "        mov [current_address], ax\n"
-    "\n"
-    "        ;; Open source file\n"
-    "        mov si, [source_name]\n"
-    "        mov al, O_RDONLY\n"
-    "        mov ah, SYS_IO_OPEN\n"
-    "        call syscall\n"
-    "        jc .pass_err\n"
-    "        mov [source_fd], ax\n"
-    "        mov word [source_buffer_position], 0\n"
-    "        mov word [source_buffer_valid], 0\n"
-    "        mov byte [include_depth], 0\n"
-    "        mov word [global_scope], 0FFFFh\n"
-    "\n"
-    "        .line_loop:\n"
-    "        call read_line\n"
-    "        jc .eof\n"
-    "        call parse_line\n"
-    "        jmp .line_loop\n"
-    "\n"
-    "        .eof:\n"
-    "        ;; Check if we're in an include -- if so, pop and continue\n"
-    "        cmp byte [include_depth], 0\n"
-    "        je .pass_done\n"
-    "        call include_pop\n"
-    "        jmp .line_loop\n"
-    "\n"
-    "        .pass_done:\n"
-    "        ;; Close source fd\n"
-    "        mov bx, [source_fd]\n"
-    "        mov ah, SYS_IO_CLOSE\n"
-    "        call syscall\n"
-    "        pop di\n"
-    "        pop si\n"
-    "        pop dx\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        pop ax\n"
-    "        ret\n"
-    "\n"
-    "        .pass_err:\n"
-    "        mov byte [error_flag], 1\n"
-    "        jmp .pass_done\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; emit_byte_al: emit byte in AL\n"
