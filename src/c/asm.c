@@ -221,6 +221,39 @@ void die_error_pass1_iter() {
     die("Error: pass 1 iter\n");
 }
 
+/* Refill SOURCE_BUFFER from the current source_fd via SYS_IO_READ
+   (512-byte chunks).  Returns CF set on EOF (zero-byte read) or
+   I/O error (AX == -1), CF clear when a new chunk lands in the
+   buffer and the position / valid cursors are reset.  Callers
+   (only ``read_line``) rely on the CF-return convention, which
+   cc.py's prologue (``push bp / mov bp, sp``) and epilogue (``pop
+   bp / ret``) preserve — neither POP nor RET touch FLAGS.  Every
+   register the caller cares about (BX / CX / DI — read_line holds
+   DI at LINE_BUFFER and uses CX as the line-length counter) is
+   saved and restored in one SP-balanced asm block so cc.py's
+   automatic ``push dx / pop dx`` wrapper can still balance. */
+void load_src_sector() {
+    asm("push bx\npush cx\npush di\n"
+        "mov bx, [_g_source_fd]\n"
+        "mov di, _program_end + 768\n"
+        "mov cx, 512\n"
+        "mov ah, SYS_IO_READ\n"
+        "call syscall\n"
+        "cmp ax, -1\n"
+        "je .lss_no_more\n"
+        "test ax, ax\n"
+        "jz .lss_no_more\n"
+        "mov [_g_source_buffer_valid], ax\n"
+        "mov word [_g_source_buffer_position], 0\n"
+        "pop di\npop cx\npop bx\n"
+        "clc\n"
+        "jmp .lss_end\n"
+        ".lss_no_more:\n"
+        "pop di\npop cx\npop bx\n"
+        "stc\n"
+        ".lss_end:");
+}
+
 /* CF-to-int bridge for the inline-asm ``read_line`` routine.  AX
    returned as 1 when read_line hit EOF (CF set) or 0 when a full
    line landed in LINE_BUFFER.  ``sbb ax, ax`` materializes CF into
@@ -2771,35 +2804,11 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; load_src_sector: read next chunk of source file into SOURCE_BUFFER via fd\n"
-    ";;; Returns CF if no more data (EOF)\n"
+    ";;; load_src_sector lives in cc.py-emitted ``load_src_sector`` at\n"
+    ";;; the top of src/c/asm.c.  Returns CF set on EOF / IO error, CF\n"
+    ";;; clear on success (cc.py's prologue / epilogue preserves\n"
+    ";;; FLAGS across push/pop bp / ret).\n"
     ";;; -----------------------------------------------------------------------\n"
-    "load_src_sector:\n"
-    "        push bx\n"
-    "        push cx\n"
-    "        push di\n"
-    "        mov bx, [source_fd]\n"
-    "        mov di, SOURCE_BUFFER\n"
-    "        mov cx, 512\n"
-    "        mov ah, SYS_IO_READ\n"
-    "        call syscall\n"
-    "        cmp ax, -1\n"
-    "        je .no_more\n"
-    "        test ax, ax\n"
-    "        jz .no_more\n"
-    "        mov [source_buffer_valid], ax\n"
-    "        mov word [source_buffer_position], 0\n"
-    "        clc\n"
-    "        pop di\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        ret\n"
-    "        .no_more:\n"
-    "        stc\n"
-    "        pop di\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; make_modrm_reg_reg: AL=reg field, BL=rm field -> AL = modrm byte\n"
