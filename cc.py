@@ -603,14 +603,23 @@ class CodeGenerator:
         "void": 0,
     }
 
-    def __init__(self) -> None:
-        """Initialize code generator state."""
+    def __init__(self, *, defines: dict[str, str] | None = None) -> None:
+        """Initialize code generator state.
+
+        ``defines`` is the ``#define`` table the preprocessor collected.
+        Each entry is re-emitted as a NASM ``%define NAME VALUE`` at the
+        top of the output so inline-asm strings (which cc.py does not
+        scan for C macros) can reference the same symbolic names that
+        C code uses — otherwise every use inside an ``asm(...)`` string
+        would have to spell the literal.
+        """
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.constant_aliases: dict[str, str] = {}
+        self.defines: dict[str, str] = dict(defines) if defines else {}
 
         self.division_remainder: tuple | None = None
         self.elide_frame: bool = False
@@ -2916,6 +2925,10 @@ class CodeGenerator:
         self.emit("        org 0600h")
         self.emit()
         self.emit('%include "constants.asm"')
+        if self.defines:
+            self.emit()
+            for name in sorted(self.defines):
+                self.emit(f"%define {name} {self.defines[name]}")
         self.emit()
         for function in ast.functions:
             if function.name != "main":
@@ -5524,7 +5537,7 @@ def main() -> int:
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        output = CodeGenerator().generate(ast)
+        output = CodeGenerator(defines=defines).generate(ast)
     except CompileError as error:
         location = f"{input_path}:{error.line}" if error.line else input_path
         print(f"{location}: error: {error.message}", file=sys.stderr)
