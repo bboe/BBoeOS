@@ -210,6 +210,88 @@ void flush_output() {
         "pop ax");
 }
 
+/* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
+   handler is dispatched through ``mnemonic_table`` (inline-asm tail
+   of this file): ``parse_mnemonic`` does an indirect ``call`` on the
+   label, so the cc.py-emitted ``push bp / mov bp, sp`` prologue and
+   ``pop bp / ret`` epilogue produce the same observable effect as
+   the retired ``mov al, OPCODE / jmp emit_byte_al`` inline-asm
+   versions.  Note: tail-jumping to ``emit_byte_al`` from inside a C
+   body would bypass cc.py's epilogue and leak the pushed bp — each
+   body uses ``call emit_byte_al`` + fall-through to the epilogue
+   instead. */
+void handle_aam() {
+    asm("mov al, 0D4h\n"
+        "call emit_byte_al\n"
+        "mov al, 0Ah\n"
+        "call emit_byte_al");
+}
+
+void handle_clc() {
+    asm("mov al, 0F8h\n"
+        "call emit_byte_al");
+}
+
+void handle_cld() {
+    asm("mov al, 0FCh\n"
+        "call emit_byte_al");
+}
+
+void handle_lodsb() {
+    asm("mov al, 0ACh\n"
+        "call emit_byte_al");
+}
+
+void handle_lodsw() {
+    asm("mov al, 0ADh\n"
+        "call emit_byte_al");
+}
+
+void handle_movsb() {
+    asm("mov al, 0A4h\n"
+        "call emit_byte_al");
+}
+
+void handle_movsw() {
+    asm("mov al, 0A5h\n"
+        "call emit_byte_al");
+}
+
+void handle_popa() {
+    asm("mov al, 61h\n"
+        "call emit_byte_al");
+}
+
+void handle_pusha() {
+    asm("mov al, 60h\n"
+        "call emit_byte_al");
+}
+
+void handle_ret() {
+    asm("mov al, 0C3h\n"
+        "call emit_byte_al");
+}
+
+void handle_scasb() {
+    asm("mov al, 0AEh\n"
+        "call emit_byte_al");
+}
+
+void handle_stc() {
+    asm("mov al, 0F9h\n"
+        "call emit_byte_al");
+}
+
+void handle_stosb() {
+    asm("mov al, 0AAh\n"
+        "call emit_byte_al");
+}
+
+void handle_stosw() {
+    asm("mov al, 0ABh\n"
+        "call emit_byte_al");
+}
+
 /* Convert the ASCII hex digit in CL to its numeric value in place
    (0..15), or leave CL alone and set CF on a non-hex byte.  Both
    ``0``-``9`` and ``A``-``F`` / ``a``-``f`` are accepted.  Called by
@@ -883,13 +965,13 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_aam\n"
+    ";;; Zero-operand emitters (handle_aam, handle_clc, handle_cld,\n"
+    ";;; handle_lodsb, handle_lodsw, handle_movsb, handle_movsw,\n"
+    ";;; handle_popa, handle_pusha, handle_ret, handle_scasb,\n"
+    ";;; handle_stc, handle_stosb, handle_stosw) live in cc.py-emitted\n"
+    ";;; functions near the top of src/c/asm.c.  ``mnemonic_table``\n"
+    ";;; references them by their C name; cc.py emits the bare labels.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "handle_aam:\n"
-    "        mov al, 0D4h\n"
-    "        call emit_byte_al\n"
-    "        mov al, 0Ah\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_add: add r, imm\n"
@@ -1190,20 +1272,6 @@ asm(
     "        pop ax\n"
     "        call emit_byte_al      ; disp8\n"
     "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_clc\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_clc:\n"
-    "        mov al, 0F8h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_cld\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_cld:\n"
-    "        mov al, 0FCh\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_cmp\n"
@@ -1696,20 +1764,6 @@ asm(
     "        jmp encode_rel8_jump\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_lodsb\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_lodsb:\n"
-    "        mov al, 0ACh\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_lodsw\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_lodsw:\n"
-    "        mov al, 0ADh\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; handle_loop\n"
     ";;; -----------------------------------------------------------------------\n"
     "handle_loop:\n"
@@ -2095,20 +2149,6 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_movsb: movsb (no operands)\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_movsb:\n"
-    "        mov al, 0A4h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_movsw: movsw (no operands)\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_movsw:\n"
-    "        mov al, 0A5h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; handle_movzx: movzx r16, byte [reg+disp]\n"
     ";;; -----------------------------------------------------------------------\n"
     "handle_movzx:\n"
@@ -2323,20 +2363,6 @@ asm(
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_popa: emit single-byte popa opcode\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_popa:\n"
-    "        mov al, 61h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_pusha: emit single-byte pusha opcode\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_pusha:\n"
-    "        mov al, 60h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; handle_push: push r16 / push ds / push es\n"
     ";;; -----------------------------------------------------------------------\n"
     "handle_push:\n"
@@ -2406,13 +2432,6 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_ret\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_ret:\n"
-    "        mov al, 0C3h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; handle_sbb: only `sbb word [disp16], imm8` is supported\n"
     ";;; -----------------------------------------------------------------------\n"
     "handle_sbb:\n"
@@ -2447,13 +2466,6 @@ asm(
     "        pop si\n"
     "        .sbb_bad2:\n"
     "        jmp abort_unknown\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_scasb\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_scasb:\n"
-    "        mov al, 0AEh\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_shl: shl r8, imm8 / shl r16, imm8\n"
@@ -2537,27 +2549,6 @@ asm(
     "        or al, 0E8h\n"
     "        call emit_byte_al\n"
     "        mov al, cl\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_stc\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_stc:\n"
-    "        mov al, 0F9h\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_stosb\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_stosb:\n"
-    "        mov al, 0AAh\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_stosw\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_stosw:\n"
-    "        mov al, 0ABh\n"
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
