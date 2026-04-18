@@ -34,7 +34,7 @@ int op2_type;
 int op2_value;
 int org_value;
 int output_fd;
-int output_name;
+char *output_name;
 int output_position;
 int output_total;
 int pass;
@@ -47,22 +47,10 @@ int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
 
-/* Error / success reporters for the main driver.  Each resets ES to
-   DS (asm_main keeps ES pointed at the symbol table segment while
-   assembling) and jumps into FUNCTION_DIE via cc.py's die() builtin.
-   The inline asm uses these via ``jCC die_...`` instead of the
-   scattered ``jmp .error_...`` / ``mov si / mov cx`` chain that the
-   asm.asm source carries. */
-void die_ok() {
-    asm("push ds\npop es");
-    die("OK\n");
-}
-
-void die_error_create() {
-    asm("push ds\npop es");
-    die("Error: cannot create output\n");
-}
-
+/* Pass-1 error reporters.  Called by ``run_pass1`` while ES is still
+   pointed at the symbol-table segment, so each resets ES to DS
+   before handing off to cc.py's ``die()`` builtin (which jumps to
+   FUNCTION_DIE with the string preloaded). */
 void die_error_pass1_io() {
     asm("push ds\npop es");
     die("Error: pass 1 io\n");
@@ -71,16 +59,6 @@ void die_error_pass1_io() {
 void die_error_pass1_iter() {
     asm("push ds\npop es");
     die("Error: pass 1 iter\n");
-}
-
-void die_error_write_dir() {
-    asm("push ds\npop es");
-    die("Error: directory write failed\n");
-}
-
-void die_usage() {
-    asm("push ds\npop es");
-    die("Usage: asm <source> <output>\n");
 }
 
 /* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
@@ -163,10 +141,40 @@ void compute_source_prefix() {
     source_prefix[end] = '\0';
 }
 
-int main() {
-    /* Jump to the assembler's original entry point (renamed from
-       `main:` so it does not collide with cc.py's own `main:`). */
-    asm("jmp asm_main");
+int main(int argc, char *argv[]) {
+    /* ES starts at DS (kernel convention) so die() / open() run
+       safely.  We only switch to SYMBOL_SEGMENT once we're ready to
+       run the assembler passes — the handlers index the symbol table
+       via ``[es:...]``, which needs ES pointed at that segment. */
+    if (argc != 2) {
+        die("Usage: asm <source> <output>\n");
+    }
+    source_name = argv[0];
+    output_name = argv[1];
+    compute_source_prefix();
+    int fd = open(output_name, O_WRONLY + O_CREAT + O_TRUNC, FLAG_EXECUTE);
+    if (fd < 0) {
+        die("Error: cannot create output\n");
+    }
+    output_fd = fd;
+    /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
+       handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
+    asm("mov ax, 2000h\n"
+        "mov es, ax\n"
+        "cld");
+    run_pass1();
+    run_pass2();
+    /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
+       it preserves ES=SYMBOL_SEGMENT across the write. */
+    asm("call flush_output");
+    /* Restore ES=DS before the cc.py close() builtin (kernel expects
+       ES=DS on int 30h). */
+    asm("push ds\n"
+        "pop es");
+    if (close(output_fd) < 0) {
+        die("Error: directory write failed\n");
+    }
+    die("OK\n");
 }
 
 asm(
@@ -229,59 +237,11 @@ asm(
     "        symbol_set_value        equ _g_symbol_set_value\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; Main entry point\n"
+    ";;; Main driver lives in cc.py-emitted ``main`` at the top of\n"
+    ";;; src/c/asm.c.  It parses argv, opens the output file, switches\n"
+    ";;; ES to the symbol-table segment, runs ``run_pass1`` / ``run_pass2``\n"
+    ";;; / ``flush_output``, restores ES=DS, closes the output, and exits.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "asm_main:\n"
-    "        cld\n"
-    "        ;; Set ES to symbol table segment\n"
-    "        mov ax, SYMBOL_SEGMENT\n"
-    "        mov es, ax\n"
-    "        ;; Parse arguments: \"source output\"\n"
-    "        mov di, ARGV\n"
-    "        call FUNCTION_PARSE_ARGV\n"
-    "        cmp cx, 2\n"
-    "        jne die_usage\n"
-    "        mov ax, [ARGV]\n"
-    "        mov [source_name], ax\n"
-    "        mov ax, [ARGV+2]\n"
-    "        mov [output_name], ax\n"
-    "\n"
-    "        ;; source_prefix = directory portion of source_name (incl.\n"
-    "        ;; trailing '/').  Implementation lives in cc.py-emitted\n"
-    "        ;; ``compute_source_prefix`` (see C definition at the top of\n"
-    "        ;; src/c/asm.c).\n"
-    "        call compute_source_prefix\n"
-    "\n"
-    "        ;; -- Pass 1: collect labels and converge jump sizes --\n"
-    "        ;; Implementation lives in cc.py-emitted ``run_pass1`` (see\n"
-    "        ;; C definition at the top of src/c/asm.c).\n"
-    "        call run_pass1\n"
-    "\n"
-    "        ;; -- Open output file for writing --\n"
-    "        mov si, [output_name]\n"
-    "        mov al, O_WRONLY + O_CREAT + O_TRUNC\n"
-    "        mov dl, FLAG_EXECUTE\n"
-    "        mov ah, SYS_IO_OPEN\n"
-    "        call syscall\n"
-    "        jc die_error_create\n"
-    "        mov [output_fd], ax\n"
-    "\n"
-    "        ;; -- Pass 2: emit bytes --\n"
-    "        ;; Implementation lives in cc.py-emitted ``run_pass2`` (see\n"
-    "        ;; C definition at the top of src/c/asm.c).\n"
-    "        call run_pass2\n"
-    "\n"
-    "        ;; Flush remaining output\n"
-    "        call flush_output\n"
-    "\n"
-    "        ;; Close output — kernel writes back directory size from fd_pos\n"
-    "        mov bx, [output_fd]\n"
-    "        mov ah, SYS_IO_CLOSE\n"
-    "        call syscall\n"
-    "        jc die_error_write_dir\n"
-    "\n"
-    "        ;; Print success message and exit.\n"
-    "        jmp die_ok\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; abort_unknown: print the offending line and exit\n"
