@@ -625,6 +625,23 @@ class CodeGenerator:
             if pins and not has_complex_call.get(name):
                 self.register_convention_functions.add(name)
 
+    def _arg_pinned_sources(self, arg: Node, /) -> set[str]:
+        """Return caller-pinned registers read while evaluating *arg*.
+
+        Used by :meth:`_emit_register_arg_moves` to schedule arg loads
+        without overwriting a register that another arg still needs.
+        Walks ``Var``/``BinOp`` recursively; non-leaf nodes outside
+        the simple-arg shape contribute no sources (and would be
+        rejected by :meth:`_is_simple_arg` upstream anyway).
+        """
+        if isinstance(arg, Var):
+            if arg.name in self.pinned_register:
+                return {self.pinned_register[arg.name]}
+            return set()
+        if isinstance(arg, BinOp):
+            return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
+        return set()
+
     @staticmethod
     def _byte_index_base_key(node: Index, /) -> str:
         """Return a string key identifying the base pointer of an Index.
@@ -671,6 +688,20 @@ class CodeGenerator:
         if name not in self.visible_vars:
             message = f"undefined variable: {name}"
             raise CompileError(message, line=line)
+
+    def _collect_constant_references(self, node: Node, /) -> set[str]:
+        """Return every NAMED_CONSTANT name referenced inside *node*.
+
+        Used by callers of :meth:`_constant_expression` to register
+        ``%include`` requirements for constants that need them.  Only
+        descends through the same node shapes :meth:`_constant_expression`
+        accepts, so the result matches what was actually inlined.
+        """
+        if isinstance(node, Var) and node.name in self.NAMED_CONSTANTS:
+            return {node.name}
+        if isinstance(node, BinOp):
+            return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
+        return set()
 
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
@@ -738,20 +769,6 @@ class CodeGenerator:
                 break
             current = else_body[0]
         return target if chain_length >= 2 else None
-
-    def _collect_constant_references(self, node: Node, /) -> set[str]:
-        """Return every NAMED_CONSTANT name referenced inside *node*.
-
-        Used by callers of :meth:`_constant_expression` to register
-        ``%include`` requirements for constants that need them.  Only
-        descends through the same node shapes :meth:`_constant_expression`
-        accepts, so the result matches what was actually inlined.
-        """
-        if isinstance(node, Var) and node.name in self.NAMED_CONSTANTS:
-            return {node.name}
-        if isinstance(node, BinOp):
-            return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
-        return set()
 
     def _emit_byte_index_si(self, node: Index, /) -> str:
         """Load the base pointer of a byte-indexed node into SI.
@@ -1115,23 +1132,6 @@ class CodeGenerator:
                     if other["source"] == source:
                         other["source"] = "ax"
                         other["arg"] = None  # mark as "load from ax"
-
-    def _arg_pinned_sources(self, arg: Node, /) -> set[str]:
-        """Return caller-pinned registers read while evaluating *arg*.
-
-        Used by :meth:`_emit_register_arg_moves` to schedule arg loads
-        without overwriting a register that another arg still needs.
-        Walks ``Var``/``BinOp`` recursively; non-leaf nodes outside
-        the simple-arg shape contribute no sources (and would be
-        rejected by :meth:`_is_simple_arg` upstream anyway).
-        """
-        if isinstance(arg, Var):
-            if arg.name in self.pinned_register:
-                return {self.pinned_register[arg.name]}
-            return set()
-        if isinstance(arg, BinOp):
-            return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
-        return set()
 
     def _emit_register_arg_single(self, *, target: str, arg: Node, source: str | None) -> None:
         """Emit a single register-arg load for :meth:`_emit_register_arg_moves`.
@@ -3654,134 +3654,6 @@ class CodeGenerator:
             self.lines[i] = f"        cmp {source}, {rhs}"
             del self.lines[i + 1]
 
-    def peephole_fold_zero_save(self) -> None:
-        """Fuse ``xor reg, reg / push reg`` into ``push 0``.
-
-        When ``cursor_column = 0`` is immediately followed by code that
-        clobbers the pinned CX as scratch (and therefore needs to
-        push/pop it), the compiler emits ``xor cx, cx / push cx``
-        followed later by ``pop cx`` to restore zero.  The two-byte
-        ``xor cx, cx`` plus one-byte ``push cx`` (3 bytes) collapses
-        to a single two-byte ``push 0`` (``6A 00``) — the body and the
-        eventual ``pop cx`` are unchanged, since the popped value is
-        still zero.
-
-        The xor's flag-side-effects are dead in every emission path
-        cc.py produces here: ``push cx`` doesn't read flags and the
-        intervening body overwrites them before the next conditional
-        jump.
-        """
-        registers = {"ax", "bx", "cx", "dx", "si", "di", "bp"}
-        i = 0
-        while i < len(self.lines) - 1:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            if a.startswith("xor ") and " " in a[4:]:
-                parts = a[4:].split(", ")
-                if len(parts) == 2 and parts[0] == parts[1] and parts[0] in registers and b == f"push {parts[0]}":
-                    self.lines[i] = "        push 0"
-                    del self.lines[i + 1]
-                    continue
-            i += 1
-
-    def peephole_index_through_memory(self) -> None:
-        """Use ``add si, [mem]`` instead of staging through AX.
-
-        Recognizes::
-
-            push ax
-            mov si, [BASE]
-            mov ax, [INDEX]
-            add si, ax
-            pop ax
-
-        and rewrites it as::
-
-            mov si, [BASE]
-            add si, [INDEX]
-
-        Safe because the eight-byte form ``add si, [mem]`` is a single
-        8086 instruction and AX is never disturbed.  Saves the
-        push/pop AX pair (2 bytes) and the redundant ``mov ax, [mem]``
-        (3 bytes) for a net 3-byte gain (the new ``add si, [mem]`` is
-        2 bytes longer than the old ``add si, ax``).
-        """
-        i = 0
-        while i < len(self.lines) - 4:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            c = self.lines[i + 2].strip()
-            d = self.lines[i + 3].strip()
-            e = self.lines[i + 4].strip()
-            if a != "push ax" or e != "pop ax":
-                i += 1
-                continue
-            if not (b.startswith("mov si, [") and b.endswith("]")):
-                i += 1
-                continue
-            if not (c.startswith("mov ax, [") and c.endswith("]")):
-                i += 1
-                continue
-            if d != "add si, ax":
-                i += 1
-                continue
-            mem_operand = c[len("mov ax, ") :]
-            self.lines[i] = self.lines[i + 1]
-            self.lines[i + 1] = f"        add si, {mem_operand}"
-            del self.lines[i + 2 : i + 5]
-            continue
-
-    def peephole_register_arithmetic(self) -> None:
-        """Compute directly into a pinned-local target register.
-
-        Turns ``mov ax, X / <op> ax, Y / mov <reg>, ax`` into
-        ``mov <reg>, X / <op> <reg>, Y`` when <reg> isn't already
-        read by Y (e.g., ``sub reg, reg`` would zero it).
-
-        Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
-        arithmetic result is being piped straight into a register
-        (typically a pinned local).  After the transform AX retains
-        whatever it held before the sequence, which is safe because
-        pinned-register locals aren't referenced via AX tracking
-        post-codegen.
-        """
-        registers = {"bx", "cx", "dx", "si", "di", "bp"}
-        ops = ("add ax,", "sub ax,", "and ax,")
-        i = 0
-        while i < len(self.lines) - 2:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            c = self.lines[i + 2].strip()
-            if not a.startswith("mov ax, "):
-                i += 1
-                continue
-            if not any(b.startswith(op) for op in ops):
-                i += 1
-                continue
-            if not c.startswith("mov "):
-                i += 1
-                continue
-            parts = c[len("mov ") :].split(", ")
-            if len(parts) != 2 or parts[1] != "ax" or parts[0] not in registers:
-                i += 1
-                continue
-            target = parts[0]
-            # Skip when the operand of the arithmetic references the
-            # target register — rewriting would make it self-referential.
-            operand = b.split(", ", 1)[1]
-            if target in operand.split():
-                i += 1
-                continue
-            source = a[len("mov ax, ") :]
-            if target in source.split():
-                i += 1
-                continue
-            new_op = b.replace("ax,", f"{target},", 1)
-            self.lines[i] = f"        mov {target}, {source}"
-            self.lines[i + 1] = f"        {new_op}"
-            del self.lines[i + 2]
-            continue
-
     def peephole_constant_to_register(self) -> None:
         """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
 
@@ -3936,6 +3808,83 @@ class CodeGenerator:
                 del self.lines[i]
                 continue
             i += 1
+
+    def peephole_fold_zero_save(self) -> None:
+        """Fuse ``xor reg, reg / push reg`` into ``push 0``.
+
+        When ``cursor_column = 0`` is immediately followed by code that
+        clobbers the pinned CX as scratch (and therefore needs to
+        push/pop it), the compiler emits ``xor cx, cx / push cx``
+        followed later by ``pop cx`` to restore zero.  The two-byte
+        ``xor cx, cx`` plus one-byte ``push cx`` (3 bytes) collapses
+        to a single two-byte ``push 0`` (``6A 00``) — the body and the
+        eventual ``pop cx`` are unchanged, since the popped value is
+        still zero.
+
+        The xor's flag-side-effects are dead in every emission path
+        cc.py produces here: ``push cx`` doesn't read flags and the
+        intervening body overwrites them before the next conditional
+        jump.
+        """
+        registers = {"ax", "bx", "cx", "dx", "si", "di", "bp"}
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a.startswith("xor ") and " " in a[4:]:
+                parts = a[4:].split(", ")
+                if len(parts) == 2 and parts[0] == parts[1] and parts[0] in registers and b == f"push {parts[0]}":
+                    self.lines[i] = "        push 0"
+                    del self.lines[i + 1]
+                    continue
+            i += 1
+
+    def peephole_index_through_memory(self) -> None:
+        """Use ``add si, [mem]`` instead of staging through AX.
+
+        Recognizes::
+
+            push ax
+            mov si, [BASE]
+            mov ax, [INDEX]
+            add si, ax
+            pop ax
+
+        and rewrites it as::
+
+            mov si, [BASE]
+            add si, [INDEX]
+
+        Safe because the eight-byte form ``add si, [mem]`` is a single
+        8086 instruction and AX is never disturbed.  Saves the
+        push/pop AX pair (2 bytes) and the redundant ``mov ax, [mem]``
+        (3 bytes) for a net 3-byte gain (the new ``add si, [mem]`` is
+        2 bytes longer than the old ``add si, ax``).
+        """
+        i = 0
+        while i < len(self.lines) - 4:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            d = self.lines[i + 3].strip()
+            e = self.lines[i + 4].strip()
+            if a != "push ax" or e != "pop ax":
+                i += 1
+                continue
+            if not (b.startswith("mov si, [") and b.endswith("]")):
+                i += 1
+                continue
+            if not (c.startswith("mov ax, [") and c.endswith("]")):
+                i += 1
+                continue
+            if d != "add si, ax":
+                i += 1
+                continue
+            mem_operand = c[len("mov ax, ") :]
+            self.lines[i] = self.lines[i + 1]
+            self.lines[i + 1] = f"        add si, {mem_operand}"
+            del self.lines[i + 2 : i + 5]
+            continue
 
     def peephole_jump_next(self) -> None:
         """Remove unconditional jumps to the immediately following label."""
@@ -4170,6 +4119,57 @@ class CodeGenerator:
         """
         self._dedup_register_reloads("bx")
         self._dedup_register_reloads("si")
+
+    def peephole_register_arithmetic(self) -> None:
+        """Compute directly into a pinned-local target register.
+
+        Turns ``mov ax, X / <op> ax, Y / mov <reg>, ax`` into
+        ``mov <reg>, X / <op> <reg>, Y`` when <reg> isn't already
+        read by Y (e.g., ``sub reg, reg`` would zero it).
+
+        Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
+        arithmetic result is being piped straight into a register
+        (typically a pinned local).  After the transform AX retains
+        whatever it held before the sequence, which is safe because
+        pinned-register locals aren't referenced via AX tracking
+        post-codegen.
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        ops = ("add ax,", "sub ax,", "and ax,")
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            if not any(b.startswith(op) for op in ops):
+                i += 1
+                continue
+            if not c.startswith("mov "):
+                i += 1
+                continue
+            parts = c[len("mov ") :].split(", ")
+            if len(parts) != 2 or parts[1] != "ax" or parts[0] not in registers:
+                i += 1
+                continue
+            target = parts[0]
+            # Skip when the operand of the arithmetic references the
+            # target register — rewriting would make it self-referential.
+            operand = b.split(", ", 1)[1]
+            if target in operand.split():
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if target in source.split():
+                i += 1
+                continue
+            new_op = b.replace("ax,", f"{target},", 1)
+            self.lines[i] = f"        mov {target}, {source}"
+            self.lines[i + 1] = f"        {new_op}"
+            del self.lines[i + 2]
+            continue
 
     def _dedup_register_reloads(self, register: str, /) -> None:
         value: str | None = None
