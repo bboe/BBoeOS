@@ -237,6 +237,19 @@ void handle_cld() {
         "call emit_byte_al");
 }
 
+/* ``int <imm8>`` — emits CD imm8.  Uses push/pop AX to shuttle the
+   immediate across the emit_byte_al call, since both the opcode
+   byte and the immediate byte land in AL. */
+void handle_int() {
+    asm("call skip_ws\n"
+        "call resolve_value\n"
+        "push ax\n"
+        "mov al, 0CDh\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "call emit_byte_al");
+}
+
 /* Conditional-jump family: each handler loads its rel8 opcode into
    AL and hands off to ``encode_rel8_jump`` (still in the file-scope
    asm block), which picks between short (rel8) and near (rel16)
@@ -357,6 +370,24 @@ void handle_popa() {
 void handle_pusha() {
     asm("mov al, 60h\n"
         "call emit_byte_al");
+}
+
+/* ``rep`` / ``repne`` prefixes — emit the prefix byte then recurse
+   into parse_mnemonic so the following mnemonic's handler appends
+   its own opcode(s).  parse_mnemonic is still in the file-scope asm
+   block; cc.py's bp frame here wraps the call path cleanly. */
+void handle_rep() {
+    asm("mov al, 0F3h\n"
+        "call emit_byte_al\n"
+        "call skip_ws\n"
+        "call parse_mnemonic");
+}
+
+void handle_repne() {
+    asm("mov al, 0F2h\n"
+        "call emit_byte_al\n"
+        "call skip_ws\n"
+        "call parse_mnemonic");
 }
 
 void handle_ret() {
@@ -1745,25 +1776,14 @@ asm(
     "        jmp emit_word_ax\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_int\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_int:\n"
-    "        call skip_ws\n"
-    "        call resolve_value\n"
-    "        push ax\n"
-    "        mov al, 0CDh\n"
-    "        call emit_byte_al\n"
-    "        pop ax\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; Conditional-jump family + handle_loop + handle_jmp live in\n"
-    ";;; cc.py-emitted C functions near the top of src/c/asm.c.  Each\n"
-    ";;; handler loads its rel8 opcode into AL and ``call``s into\n"
-    ";;; ``encode_rel8_jump`` below.  mnemonic_table aliases:\n"
-    ";;; STR_JAE→handle_jnc, STR_JE→handle_jz, STR_JNZ→handle_jne,\n"
-    ";;; STR_JC→handle_jb (the retired asm defined handle_jc as a\n"
-    ";;; duplicate label on handle_jb's body).\n"
+    ";;; handle_int plus the conditional-jump family (handle_ja / jb /\n"
+    ";;; jbe / jg / jge / jl / jle / jmp / jnc / jne / jns / jz) and\n"
+    ";;; handle_loop live in cc.py-emitted C functions near the top of\n"
+    ";;; src/c/asm.c.  Each jump handler loads its rel8 opcode into AL\n"
+    ";;; and ``call``s into ``encode_rel8_jump`` below.  mnemonic_table\n"
+    ";;; aliases: STR_JAE→handle_jnc, STR_JE→handle_jz,\n"
+    ";;; STR_JNZ→handle_jne, STR_JC→handle_jb (retired asm defined\n"
+    ";;; handle_jc as a duplicate label on handle_jb's body).\n"
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -2408,24 +2428,11 @@ asm(
     "        jmp emit_word_ax\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_rep: rep prefix — emits 0xF3 then parses the next mnemonic\n"
+    ";;; handle_rep / handle_repne live in cc.py-emitted C functions\n"
+    ";;; near the top of src/c/asm.c.  Each emits its prefix byte\n"
+    ";;; (F3 or F2) then tail-calls parse_mnemonic to dispatch the\n"
+    ";;; string instruction that follows.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "handle_rep:\n"
-    "        mov al, 0F3h\n"
-    "        call emit_byte_al\n"
-    "        call skip_ws\n"
-    "        call parse_mnemonic\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_repne: repne prefix — emits 0xF2 then parses the next mnemonic\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_repne:\n"
-    "        mov al, 0F2h\n"
-    "        call emit_byte_al\n"
-    "        call skip_ws\n"
-    "        call parse_mnemonic\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_sbb: only `sbb word [disp16], imm8` is supported\n"
