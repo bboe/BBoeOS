@@ -12,19 +12,52 @@
    handler reference to the historical name still resolves.  Scalars
    widen from ``db`` to ``dw`` (cc.py's global layout), but every
    byte-width access reads/writes only the low byte — verified safe
-   by grep for any word-granular load on the old ``db`` variables. */
+   by grep for any word-granular load on the old ``db`` variables.
+
+   ``char *`` pointer globals point at fixed post-binary scratch
+   addresses (``_program_end`` + offset) initialized by main() so the
+   on-disk image stays the same size as the NASM layout; ``char[N]``
+   arrays emit ``times N db 0`` at the binary tail, which is fine for
+   the two small fixed-size buffers. */
 int changed_flag;
 int cmp_imm_byte;
 int cmp_op1_size;
 int current_address;
 int equ_space;
 int error_flag;
+/* abort_unknown stores the offending mnemonic's SI into
+   ``error_word`` before jumping to the pure-C reporter. */
+char *error_word;
 int global_scope = 0xFFFF;
 int include_depth;
 char include_path[32];
+/* Bridge for include_push's SI input (pointer to the raw include
+   filename parsed out of the source line).  cc.py has no syntax for
+   mapping SI to a C parameter, so the caller's asm stashes SI here
+   before the C body runs. */
+char *include_push_arg;
+/* Saved parent-file state for a single %include level.  These
+   replace the INCLUDE_SAVE memory region that previously lived at
+   ``_program_end + 1280`` — moving the 6 bytes into cc.py-emitted
+   globals lets include_push / include_pop access the fields by name
+   instead of [bx+0/2/4]. */
+int include_save_fd;
+int include_save_position;
+int include_save_valid;
+/* Pointer to the parent's 512-byte SOURCE_BUFFER copy, held in
+   post-binary scratch RAM (main() sets it to ``_program_end + 1280``
+   — past LINE_BUFFER / OUTPUT_BUFFER / SOURCE_BUFFER).  Storing the
+   buffer as a C array instead would bake 512 zero bytes into the
+   binary; the scratch address keeps the on-disk size the same as
+   the NASM layout. */
+char *include_source_save;
 int iteration_count;
 int jump_index;
 int last_symbol_index;
+/* Pointer to the 256-byte line-accumulation buffer at
+   ``_program_end`` (main() initializes it).  read_line fills it
+   null-terminated; abort_unknown_impl prints it. */
+char *line_buffer;
 int op1_register;
 int op1_size;
 int op1_type;
@@ -38,6 +71,11 @@ char *output_name;
 int output_position;
 int output_total;
 int pass;
+/* Pointer to the 512-byte source-file read buffer at
+   ``_program_end + 768`` (= SOURCE_BUFFER in the old %define).
+   main() initializes it; read_line / include_pop / include_push
+   index into it directly. */
+char *source_buffer;
 int source_buffer_position;
 int source_buffer_valid;
 int source_fd;
@@ -46,38 +84,6 @@ char source_prefix[32];
 int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
-/* ``line_buffer`` / ``error_word`` live above the main driver's
-   ``_program_end``-relative buffers; main() initializes them at
-   startup (``line_buffer = _program_end``), and ``abort_unknown``
-   stores the offending mnemonic's SI into ``error_word`` before
-   jumping to the pure-C reporter. */
-char *line_buffer;
-char *error_word;
-/* Saved parent-file state for a single %include level.  These
-   replace the INCLUDE_SAVE memory region that previously lived at
-   ``_program_end + 1280`` — moving the 6 bytes into cc.py-emitted
-   globals lets include_push / include_pop access the fields by name
-   instead of [bx+0/2/4]. */
-int include_save_fd;
-int include_save_position;
-int include_save_valid;
-/* Pointer to the parent's 512-byte SOURCE_BUFFER copy, held in
-   post-binary scratch RAM (set in main() to
-   ``_program_end + 1280`` — past LINE_BUFFER / OUTPUT_BUFFER /
-   SOURCE_BUFFER).  Storing the buffer as a C array instead would
-   bake 512 zero bytes into the binary; the scratch address keeps
-   the on-disk size the same as the NASM layout. */
-char *include_source_save;
-/* Bridge for include_push's SI input (pointer to the raw include
-   filename parsed out of the source line).  cc.py has no syntax for
-   mapping SI to a C parameter, so the caller's asm stashes SI here
-   before the C body runs. */
-char *include_push_arg;
-/* Pointer to the 512-byte source-file read buffer at
-   ``_program_end + 768`` (= SOURCE_BUFFER in the old %define).
-   main() initializes it; read_line / include_pop / include_push
-   index into it directly. */
-char *source_buffer;
 
 /* Invoked through an inline-asm trampoline that stashes SI into
    ``error_word`` before jumping here (``abort_unknown:`` in the
