@@ -227,6 +227,25 @@ void handle_aam() {
         "call emit_byte_al");
 }
 
+/* ``adc r16, imm8`` — the only form cc.py emits (the checksum-fold
+   idiom).  Encoded as 83 /2 ib: sign-extended imm8 into r16. */
+void handle_adc() {
+    asm("call skip_ws\n"
+        "call parse_register\n"
+        "push ax\n"
+        "call skip_comma\n"
+        "call resolve_value\n"
+        "mov cx, ax\n"
+        "pop bx\n"
+        "mov al, 83h\n"
+        "call emit_byte_al\n"
+        "mov al, bl\n"
+        "or al, 0D0h\n"
+        "call emit_byte_al\n"
+        "mov al, cl\n"
+        "call emit_byte_al");
+}
+
 void handle_clc() {
     asm("mov al, 0F8h\n"
         "call emit_byte_al");
@@ -359,6 +378,64 @@ void handle_movsb() {
 
 void handle_movsw() {
     asm("mov al, 0A5h\n"
+        "call emit_byte_al");
+}
+
+/* Single-operand arithmetic family (``mul`` / ``neg`` / ``not`` on a
+   r8 or r16).  Each handler picks opcode F6 (byte) or F7 (word) based
+   on the register's width and ORs the /r field constant (4 for mul,
+   3 for neg, 2 for not) into a register-mode ModR/M byte (C0 | (n<<3)
+   | rm).  The C bodies stash the parsed AX (AL=reg, AH=size) on the
+   stack around the opcode emit; cc.py's bp frame is outside this
+   push/pop so the balance stays clean. */
+void handle_mul() {
+    asm("call skip_ws\n"
+        "call parse_register\n"
+        "push ax\n"
+        "cmp ah, 8\n"
+        "je .hmu_8\n"
+        "mov al, 0F7h\n"
+        "jmp .hmu_emit\n"
+        ".hmu_8:\n"
+        "mov al, 0F6h\n"
+        ".hmu_emit:\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "or al, 0E0h\n"
+        "call emit_byte_al");
+}
+
+void handle_neg() {
+    asm("call skip_ws\n"
+        "call parse_register\n"
+        "push ax\n"
+        "cmp ah, 8\n"
+        "je .hne_8\n"
+        "mov al, 0F7h\n"
+        "jmp .hne_emit\n"
+        ".hne_8:\n"
+        "mov al, 0F6h\n"
+        ".hne_emit:\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "or al, 0D8h\n"
+        "call emit_byte_al");
+}
+
+void handle_not() {
+    asm("call skip_ws\n"
+        "call parse_register\n"
+        "push ax\n"
+        "cmp ah, 8\n"
+        "je .hno_8\n"
+        "mov al, 0F7h\n"
+        "jmp .hno_emit\n"
+        ".hno_8:\n"
+        "mov al, 0F6h\n"
+        ".hno_emit:\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "or al, 0D0h\n"
         "call emit_byte_al");
 }
 
@@ -1097,30 +1174,12 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_add: add r, imm\n"
+    ";;; handle_adc lives in a cc.py-emitted C function near the top\n"
+    ";;; of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_adc: adc r16, imm8 — the only form cc.py emits (checksum fold)\n"
-    ";;; Opcode 83 /2: sign-extended imm8 into r16.\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_adc:\n"
-    "        call skip_ws\n"
-    "        call parse_register    ; AL = reg, AH = size\n"
-    "        push ax\n"
-    "        call skip_comma\n"
-    "        call resolve_value     ; AX = immediate\n"
-    "        mov cx, ax\n"
-    "        pop bx                 ; BL = reg, BH = size\n"
-    "        mov al, 83h\n"
-    "        call emit_byte_al\n"
-    "        mov al, bl\n"
-    "        or al, 0D0h            ; modrm = C0 | (2<<3) | rm = D0 | rm\n"
-    "        call emit_byte_al\n"
-    "        mov al, cl\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_add\n"
+    ";;; handle_add: add r, r / add r, [mem] / add r, imm / add [mem], r\n"
     ";;; -----------------------------------------------------------------------\n"
     "handle_add:\n"
     "        call skip_ws\n"
@@ -2207,61 +2266,12 @@ asm(
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_mul: mul r16\n"
+    ";;; handle_mul / handle_neg / handle_not live in cc.py-emitted C\n"
+    ";;; functions near the top of src/c/asm.c.  Each parses a single\n"
+    ";;; register operand, picks F6/F7 for byte/word width, and ORs\n"
+    ";;; its /r field constant (mul=4, neg=3, not=2) into the\n"
+    ";;; register-mode ModR/M byte.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "handle_mul:\n"
-    "        call skip_ws\n"
-    "        call parse_register    ; AL = reg, AH = size\n"
-    "        push ax\n"
-    "        cmp ah, 8\n"
-    "        je .mul8\n"
-    "        mov al, 0F7h\n"
-    "        jmp .mul_emit\n"
-    "        .mul8:\n"
-    "        mov al, 0F6h\n"
-    "        .mul_emit:\n"
-    "        call emit_byte_al\n"
-    "        pop ax\n"
-    "        or al, 0E0h            ; modrm = C0 | (4<<3) | rm = E0 | rm\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_neg: neg r16 / neg r8 (F7 /3 modrm or F6 /3 modrm)\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_neg:\n"
-    "        call skip_ws\n"
-    "        call parse_register    ; AL = reg, AH = size\n"
-    "        push ax\n"
-    "        cmp ah, 8\n"
-    "        je .neg8\n"
-    "        mov al, 0F7h\n"
-    "        jmp .neg_emit\n"
-    "        .neg8:\n"
-    "        mov al, 0F6h\n"
-    "        .neg_emit:\n"
-    "        call emit_byte_al\n"
-    "        pop ax\n"
-    "        or al, 0D8h            ; modrm = C0 | (3<<3) | rm = D8 | rm\n"
-    "        jmp emit_byte_al\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_not: not r8 / not r16 — F6/F7 /2\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_not:\n"
-    "        call skip_ws\n"
-    "        call parse_register    ; AL = reg, AH = size\n"
-    "        push ax\n"
-    "        cmp ah, 8\n"
-    "        je .not8\n"
-    "        mov al, 0F7h\n"
-    "        jmp .not_emit\n"
-    "        .not8:\n"
-    "        mov al, 0F6h\n"
-    "        .not_emit:\n"
-    "        call emit_byte_al\n"
-    "        pop ax\n"
-    "        or al, 0D0h            ; modrm = C0 | (2<<3) | rm = D0 | rm\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_or\n"
