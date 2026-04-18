@@ -2962,6 +2962,11 @@ class CodeGenerator:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
+        # Sentinel label at the very end so inline asm can address the
+        # first byte past the loaded image (scratch buffers, heap bases,
+        # etc.).  Zero bytes, so it does not affect programs that ignore
+        # it.
+        self.emit("_program_end:")
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
