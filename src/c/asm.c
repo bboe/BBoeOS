@@ -73,6 +73,11 @@ char *include_source_save;
    mapping SI to a C parameter, so the caller's asm stashes SI here
    before the C body runs. */
 char *include_push_arg;
+/* Pointer to the 512-byte source-file read buffer at
+   ``_program_end + 768`` (= SOURCE_BUFFER in the old %define).
+   main() initializes it; read_line / include_pop / include_push
+   index into it directly. */
+char *source_buffer;
 
 /* Pop the include stack: close the included file, restore the
    parent file's fd / buffer / position / valid fields, and copy the
@@ -222,19 +227,13 @@ void die_error_pass1_iter() {
 }
 
 /* Refill SOURCE_BUFFER from the current source_fd via SYS_IO_READ
-   (512-byte chunks).  Returns CF set on EOF (zero-byte read) or
-   I/O error (AX == -1), CF clear when a new chunk lands in the
-   buffer and the position / valid cursors are reset.  Callers
-   (only ``read_line``) rely on the CF-return convention, which
-   cc.py's prologue (``push bp / mov bp, sp``) and epilogue (``pop
-   bp / ret``) preserve — neither POP nor RET touch FLAGS.  Every
-   register the caller cares about (BX / CX / DI — read_line holds
-   DI at LINE_BUFFER and uses CX as the line-length counter) is
-   saved and restored in one SP-balanced asm block so cc.py's
-   automatic ``push dx / pop dx`` wrapper can still balance. */
-void load_src_sector() {
-    asm("push bx\npush cx\npush di\n"
-        "mov bx, [_g_source_fd]\n"
+   (512-byte chunks).  Returns AX = 0 when a new chunk lands in the
+   buffer (position / valid cursors reset) or AX = 1 on EOF
+   (zero-byte read) or I/O error (AX == -1 back from the syscall).
+   Sole caller is ``read_line``; the pre-C-port CF-return convention
+   gave way to an int return once both ends live in C. */
+int load_src_sector() {
+    asm("mov bx, [_g_source_fd]\n"
         "mov di, _program_end + 768\n"
         "mov cx, 512\n"
         "mov ah, SYS_IO_READ\n"
@@ -245,25 +244,48 @@ void load_src_sector() {
         "jz .lss_no_more\n"
         "mov [_g_source_buffer_valid], ax\n"
         "mov word [_g_source_buffer_position], 0\n"
-        "pop di\npop cx\npop bx\n"
-        "clc\n"
+        "xor ax, ax\n"
         "jmp .lss_end\n"
         ".lss_no_more:\n"
-        "pop di\npop cx\npop bx\n"
-        "stc\n"
+        "mov ax, 1\n"
         ".lss_end:");
 }
 
-/* CF-to-int bridge for the inline-asm ``read_line`` routine.  AX
-   returned as 1 when read_line hit EOF (CF set) or 0 when a full
-   line landed in LINE_BUFFER.  ``sbb ax, ax`` materializes CF into
-   all-ones / all-zeros and the trailing ``and ax, 1`` normalizes.
-   The function has no locals, so cc.py's prologue / epilogue leave
-   AX untouched between the final ``and`` and the ``ret``. */
-int read_line_is_eof() {
-    asm("call read_line\n"
-        "sbb ax, ax\n"
-        "and ax, 1");
+/* Read one line of source into LINE_BUFFER (null-terminated, at
+   most LINE_MAX = 255 chars; over-long lines silently truncate to
+   LINE_MAX before the terminating NUL).  Returns 1 on true EOF
+   (load_src_sector signaled no more data and no bytes had been
+   accumulated into the current line), 0 on any successful outcome
+   including a partial trailing line without a final newline.  CR
+   bytes are silently skipped so DOS line endings fold to Unix.
+   Called by do_pass's line loop; replaces the pre-port inline-asm
+   ``read_line`` + ``read_line_is_eof`` CF-to-int bridge. */
+int read_line() {
+    int length = 0;
+    while (1) {
+        if (source_buffer_position >= source_buffer_valid) {
+            if (load_src_sector() != 0) {
+                if (length == 0) {
+                    return 1;
+                }
+                break;
+            }
+        }
+        char c = source_buffer[source_buffer_position];
+        source_buffer_position = source_buffer_position + 1;
+        if (c == '\n') {
+            break;
+        }
+        if (c == '\r') {
+            continue;
+        }
+        if (length < 255) {
+            line_buffer[length] = c;
+            length = length + 1;
+        }
+    }
+    line_buffer[length] = '\0';
+    return 0;
 }
 
 /* Run one full pass over the source file: open it, reset the
@@ -296,11 +318,11 @@ void do_pass() {
     include_depth = 0;
     global_scope = 0xFFFF;
     while (1) {
-        if (read_line_is_eof() != 0) {
+        if (read_line() != 0) {
             if (include_depth == 0) {
                 break;
             }
-            asm("call include_pop");
+            include_pop();
             continue;
         }
         asm("call parse_line");
@@ -403,6 +425,7 @@ int main(int argc, char *argv[]) {
        so an %include level saves the 512-byte SOURCE_BUFFER into
        scratch RAM instead of bloating the binary. */
     asm("mov word [_g_line_buffer], _program_end\n"
+        "mov word [_g_source_buffer], _program_end + 768\n"
         "mov word [_g_include_source_save], _program_end + 1280");
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
@@ -444,7 +467,6 @@ asm(
     "        ;; 0x20000) so they don't compete with segment-0 memory.\n"
     "        %assign JUMP_MAX      4096      ; max jcc/jmp instructions per source\n"
     "        %assign JUMP_TABLE    0F000h    ; jump_table offset within ES segment (4096 bytes)\n"
-    "        %assign LINE_MAX      255\n"
     "        %assign SYMBOL_ENTRY     36        ; bytes per symbol entry (32 name + 2 val + 1 type + 1 scope)\n"
     "        %assign SYMBOL_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)\n"
     "        %assign SYMBOL_NAME_LENGTH  32        ; 31 chars + null\n"
@@ -3879,60 +3901,11 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; read_line: read one line from source into LINE_BUFFER\n"
-    ";;; Returns CF set on EOF\n"
+    ";;; read_line lives in cc.py-emitted ``read_line`` at the top of\n"
+    ";;; src/c/asm.c.  Returns int (1 = EOF, 0 = line available in\n"
+    ";;; LINE_BUFFER).  load_src_sector adopts the same int-return\n"
+    ";;; convention now that C owns both ends of the relationship.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "read_line:\n"
-    "        push bx\n"
-    "        push cx\n"
-    "        push dx\n"
-    "        mov di, LINE_BUFFER\n"
-    "        xor cx, cx             ; CX = chars in line\n"
-    "\n"
-    "        .next_byte:\n"
-    "        ;; Check if source buffer needs refill\n"
-    "        mov ax, [source_buffer_position]\n"
-    "        cmp ax, [source_buffer_valid]\n"
-    "        jb .have_byte\n"
-    "\n"
-    "        ;; Need more data -- is file exhausted?\n"
-    "        call load_src_sector\n"
-    "        jc .check_eof\n"
-    "\n"
-    "        .have_byte:\n"
-    "        mov bx, [source_buffer_position]\n"
-    "        mov al, [SOURCE_BUFFER + bx]\n"
-    "        inc word [source_buffer_position]\n"
-    "\n"
-    "        cmp al, 0Ah            ; newline\n"
-    "        je .got_line\n"
-    "        cmp al, 0Dh            ; carriage return -- skip\n"
-    "        je .next_byte\n"
-    "        cmp cx, LINE_MAX\n"
-    "        jae .next_byte         ; line too long, discard\n"
-    "        mov [di], al\n"
-    "        inc di\n"
-    "        inc cx\n"
-    "        jmp .next_byte\n"
-    "\n"
-    "        .got_line:\n"
-    "        mov byte [di], 0\n"
-    "        clc\n"
-    "        pop dx\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        ret\n"
-    "\n"
-    "        .check_eof:\n"
-    "        ;; If we read some chars, return them\n"
-    "        test cx, cx\n"
-    "        jnz .got_line\n"
-    "        ;; True EOF\n"
-    "        stc\n"
-    "        pop dx\n"
-    "        pop cx\n"
-    "        pop bx\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; resolve_label: like resolve_value but for jump targets\n"
