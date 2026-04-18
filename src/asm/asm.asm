@@ -3933,12 +3933,14 @@ resolve_value:
         pop cx
         mov [si], cl           ; restore delimiter
         .check_expr:
-        ;; Check for +/-/* arithmetic after the parsed value
+        ;; Check for +/-/*// arithmetic after the parsed value
         call skip_ws
         cmp byte [si], '+'
         je .expr_add
         cmp byte [si], '-'
         je .expr_sub
+        cmp byte [si], '*'
+        je .expr_mul
         cmp byte [si], '/'
         je .expr_div
         .expr_done:
@@ -3963,6 +3965,15 @@ resolve_value:
         mov cx, ax
         pop ax
         sub ax, cx
+        jmp .expr_done
+        .expr_mul:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        mul cx                 ; DX:AX = AX * CX; upper word discarded
         jmp .expr_done
         .expr_div:
         inc si
