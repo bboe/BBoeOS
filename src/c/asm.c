@@ -41,11 +41,33 @@ int pass;
 int source_buffer_position;
 int source_buffer_valid;
 int source_fd;
-int source_name;
+char *source_name;
 char source_prefix[32];
 int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
+
+/* Populate ``source_prefix`` with the directory portion of
+   ``source_name`` (everything up to and including the last ``/``).
+   Empty when the source has no directory.  Bounded by the
+   ``source_prefix[32]`` buffer — deeper include paths would overflow
+   silently, which matches the original inline-asm behavior. */
+void compute_source_prefix() {
+    int end = 0;
+    int i = 0;
+    while (source_name[i] != '\0') {
+        if (source_name[i] == '/') {
+            end = i + 1;
+        }
+        i = i + 1;
+    }
+    int j = 0;
+    while (j < end) {
+        source_prefix[j] = source_name[j];
+        j = j + 1;
+    }
+    source_prefix[end] = '\0';
+}
 
 int main() {
     /* Jump to the assembler's original entry point (renamed from
@@ -130,30 +152,11 @@ asm(
     "        mov ax, [ARGV+2]\n"
     "        mov [output_name], ax\n"
     "\n"
-    "        ;; Compute source_prefix = directory portion of source_name (incl. trailing '/')\n"
-    "        ;; Walk source_name and remember position just past the last '/'\n"
-    "        mov si, [source_name]\n"
-    "        mov di, source_prefix     ; di tracks length of valid prefix\n"
-    "        .pfx_scan:\n"
-    "        mov al, [si]\n"
-    "        test al, al\n"
-    "        jz .pfx_scan_done\n"
-    "        inc si\n"
-    "        cmp al, '/'\n"
-    "        jne .pfx_scan\n"
-    "        ;; Found a '/'; copy source_name[0..si) to source_prefix\n"
-    "        mov bx, [source_name]\n"
-    "        mov di, source_prefix\n"
-    "        .pfx_copy:\n"
-    "        mov al, [bx]\n"
-    "        mov [di], al\n"
-    "        inc bx\n"
-    "        inc di\n"
-    "        cmp bx, si\n"
-    "        jb .pfx_copy\n"
-    "        jmp .pfx_scan\n"
-    "        .pfx_scan_done:\n"
-    "        mov byte [di], 0       ; null-terminate prefix\n"
+    "        ;; source_prefix = directory portion of source_name (incl.\n"
+    "        ;; trailing '/').  Implementation lives in cc.py-emitted\n"
+    "        ;; ``compute_source_prefix`` (see C definition at the top of\n"
+    "        ;; src/c/asm.c).\n"
+    "        call compute_source_prefix\n"
     "\n"
     "        ;; -- Pass 1: collect labels and converge jump sizes --\n"
     "        ;; Iterative pass 1: jumps start near (pessimistic) and are\n"
