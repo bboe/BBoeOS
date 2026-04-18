@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 BOOT_TIMEOUT = 30
-COMMAND_TIMEOUT = 20
+COMMAND_TIMEOUT = 4
 DEFAULT_IMAGE = Path(__file__).resolve().parent.parent / "drive.img"
 PROMPT = b"$ "
 SERIAL_BASENAME = "ser"

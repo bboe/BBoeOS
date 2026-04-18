@@ -24,7 +24,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import run_commands  # noqa: E402
+from run_qemu import COMMAND_TIMEOUT, run_commands  # noqa: E402
 
 from add_file import SECTOR_SIZE, find_entry, read_assign  # noqa: E402
 
@@ -32,6 +32,11 @@ BASE_IMAGE = "drive.img"
 C_DIR = Path("src/c")
 ORG_DIRECTIVE = "org 0600h"
 STATIC_DIR = Path("static")
+
+# The self-host run on asm.asm itself takes ~8s; every other program
+# in static/ finishes well under a second.  Give asm.asm its own
+# generous budget and let everything else trip the default 4s cap.
+ASM_SELF_HOST_TIMEOUT = 16
 
 
 def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
@@ -250,8 +255,10 @@ def test_program(
     drive = temporary_directory / f"drive_{name}.img"
     shutil.copy(temporary_directory / BASE_IMAGE, drive)
 
+    command_timeout = ASM_SELF_HOST_TIMEOUT if name == "asm" else COMMAND_TIMEOUT
     run_commands(
         [f"asm src/{name}.asm {output_name}"],
+        command_timeout=command_timeout,
         drive=drive,
     )
     return compare_drive_output(
