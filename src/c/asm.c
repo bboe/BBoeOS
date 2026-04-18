@@ -78,10 +78,18 @@ void flush_output() {
         "pop ax");
 }
 
-/* Pass-1 error reporters.  Called by ``run_pass1`` while ES is still
-   pointed at the symbol-table segment, so each resets ES to DS
-   before handing off to cc.py's ``die()`` builtin (which jumps to
-   FUNCTION_DIE with the string preloaded). */
+/* Error reporters called while ES is still pointed at the symbol-
+   table segment.  Each resets ES to DS before handing off to cc.py's
+   ``die()`` builtin (which jumps to FUNCTION_DIE with the string
+   preloaded).  ``die_symbol_overflow`` is the jmp-target of the
+   symbol_set overflow branch; the pass-1 variants are called from
+   ``run_pass1`` when do_pass signals an I/O error or the jump-size
+   convergence fails to settle. */
+void die_symbol_overflow() {
+    asm("push ds\npop es");
+    die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
+}
+
 void die_error_pass1_io() {
     asm("push ds\npop es");
     die("Error: pass 1 io\n");
@@ -3838,33 +3846,6 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; print_hex_word: print AX as 4-digit hex\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "print_hex_word:\n"
-    "        push ax\n"
-    "        xchg al, ah\n"
-    "        call .print_byte\n"
-    "        pop ax\n"
-    "        call .print_byte\n"
-    "        ret\n"
-    "        .print_byte:\n"
-    "        push ax\n"
-    "        shr al, 4\n"
-    "        call .nibble\n"
-    "        pop ax\n"
-    "        and al, 0Fh\n"
-    "        call .nibble\n"
-    "        ret\n"
-    "        .nibble:\n"
-    "        add al, '0'\n"
-    "        cmp al, '9'\n"
-    "        jbe .nib_ok\n"
-    "        add al, 7\n"
-    "        .nib_ok:\n"
-    "        call call_print_character\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; read_line: read one line from source into LINE_BUFFER\n"
     ";;; Returns CF set on EOF\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -4253,9 +4234,7 @@ asm(
     "        pop cx\n"
     "        ret\n"
     "        .symbol_overflow:\n"
-    "        mov si, MESSAGE_SYMBOL_OVERFLOW\n"
-    "        mov cx, MESSAGE_SYMBOL_OVERFLOW_LENGTH\n"
-    "        jmp call_die\n"
+    "        jmp die_symbol_overflow\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; symbol_add_constant: add constant (%assign) to symbol table\n"
@@ -4559,11 +4538,6 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     ";;; ES-safe kernel jump table wrappers\n"
     ";;; -----------------------------------------------------------------------\n"
-    "call_die:\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        jmp FUNCTION_DIE\n"
-    "\n"
     "call_exit:\n"
     "        push ds\n"
     "        pop es\n"
@@ -4612,8 +4586,6 @@ asm(
     "MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT\n"
     "MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\\n  `\n"
     "MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN\n"
-    "MESSAGE_SYMBOL_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\\n`\n"
-    "MESSAGE_SYMBOL_OVERFLOW_LENGTH equ $ - MESSAGE_SYMBOL_OVERFLOW\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
