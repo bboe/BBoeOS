@@ -33,10 +33,12 @@ C_DIR = Path("src/c")
 ORG_DIRECTIVE = "org 0600h"
 STATIC_DIR = Path("static")
 
-# The self-host run on asm.asm itself takes ~8s; every other program
-# in static/ finishes well under a second.  Give asm.asm its own
-# generous budget and let everything else trip the default 4s cap.
-ASM_SELF_HOST_TIMEOUT = 16
+# The self-host run on asm.asm itself takes ~16s after the port (the
+# bp-framed resolve_value / symbol_lookup add per-call overhead on hot
+# paths); every other program in static/ finishes well under a second.
+# Give asm.asm its own generous budget and let everything else trip
+# the default 4s cap.
+ASM_SELF_HOST_TIMEOUT = 32
 
 
 def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
