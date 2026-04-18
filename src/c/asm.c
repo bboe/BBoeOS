@@ -190,6 +190,37 @@ void flush_output() {
         "pop ax");
 }
 
+/* Advance SI past any run of ' ' / '\t' at the current source cursor.
+   Called hundreds of times from the instruction handlers; the body is
+   inline asm so cc.py's bp frame is the only overhead (push bp /
+   mov bp, sp at entry, pop bp / ret at exit — neither touches SI or
+   FLAGS, so the handler-side register ABI is preserved). */
+void skip_ws() {
+    asm(".sws_loop:\n"
+        "cmp byte [si], ' '\n"
+        "je .sws_skip\n"
+        "cmp byte [si], 9\n"
+        "je .sws_skip\n"
+        "jmp .sws_end\n"
+        ".sws_skip:\n"
+        "inc si\n"
+        "jmp .sws_loop\n"
+        ".sws_end:");
+}
+
+/* Skip whitespace, a single ``,``, then whitespace — the inter-operand
+   separator every multi-operand handler uses.  No-op if no comma is
+   present (the first call to skip_ws still advances past leading
+   whitespace). */
+void skip_comma() {
+    asm("call skip_ws\n"
+        "cmp byte [si], ','\n"
+        "jne .sc_end\n"
+        "inc si\n"
+        "call skip_ws\n"
+        ".sc_end:");
+}
+
 /* Error reporters called while ES is still pointed at the symbol-
    table segment.  Each resets ES to DS before handing off to cc.py's
    ``die()`` builtin (which jumps to FUNCTION_DIE with the string
@@ -4166,30 +4197,12 @@ asm(
     "        jmp .expr_done\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; skip_comma: skip whitespace, comma, whitespace\n"
+    ";;; skip_ws / skip_comma live in cc.py-emitted ``skip_ws`` /\n"
+    ";;; ``skip_comma`` near the top of src/c/asm.c.  Handlers still\n"
+    ";;; reach them via ``call skip_ws`` / ``call skip_comma`` — cc.py\n"
+    ";;; emits the bare label, and the inline-asm body preserves the\n"
+    ";;; SI-register ABI across cc.py's bp frame.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "skip_comma:\n"
-    "        call skip_ws\n"
-    "        cmp byte [si], ','\n"
-    "        jne .done\n"
-    "        inc si\n"
-    "        call skip_ws\n"
-    "        .done:\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; skip_ws: skip spaces and tabs at SI\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "skip_ws:\n"
-    "        .loop:\n"
-    "        cmp byte [si], ' '\n"
-    "        je .skip\n"
-    "        cmp byte [si], 9\n"
-    "        je .skip\n"
-    "        ret\n"
-    "        .skip:\n"
-    "        inc si\n"
-    "        jmp .loop\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; symbol_add: add label to symbol table\n"
