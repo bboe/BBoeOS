@@ -6,6 +6,69 @@
    and each instruction-handler family with pure C one at a time.  The
    original NASM source is preserved under archive/asm.asm. */
 
+/* File-scope globals that back the assembler's mutable state.  cc.py
+   emits each as ``_g_<name>`` at the tail of the output; the inline
+   asm below declares ``<name> equ _g_<name>`` aliases so every
+   handler reference to the historical name still resolves.  Scalars
+   widen from ``db`` to ``dw`` (cc.py's global layout), but every
+   byte-width access reads/writes only the low byte — verified safe
+   by grep for any word-granular load on the old ``db`` variables. */
+int changed_flag;
+int cmp_imm_byte;
+int cmp_op1_size;
+int current_address;
+int equ_space;
+int error_flag;
+int global_scope = 0xFFFF;
+int include_depth;
+char include_path[32];
+int iteration_count;
+int jump_index;
+int last_symbol_index;
+int op1_register;
+int op1_size;
+int op1_type;
+int op1_value;
+int op2_register;
+int op2_type;
+int op2_value;
+int org_value;
+int output_fd;
+int output_name;
+int output_position;
+int output_total;
+int pass;
+int source_buffer_position;
+int source_buffer_valid;
+int source_fd;
+char *source_name;
+char source_prefix[32];
+int symbol_count;
+int symbol_set_scope;
+int symbol_set_value;
+
+/* Populate ``source_prefix`` with the directory portion of
+   ``source_name`` (everything up to and including the last ``/``).
+   Empty when the source has no directory.  Bounded by the
+   ``source_prefix[32]`` buffer — deeper include paths would overflow
+   silently, which matches the original inline-asm behavior. */
+void compute_source_prefix() {
+    int end = 0;
+    int i = 0;
+    while (source_name[i] != '\0') {
+        if (source_name[i] == '/') {
+            end = i + 1;
+        }
+        i = i + 1;
+    }
+    int j = 0;
+    while (j < end) {
+        source_prefix[j] = source_name[j];
+        j = j + 1;
+    }
+    source_prefix[end] = '\0';
+}
+
 int main() {
     /* Jump to the assembler's original entry point (renamed from
        `main:` so it does not collide with cc.py's own `main:`). */
@@ -16,9 +79,9 @@ asm(
     "\n"
     "\n"
     "        ;; Memory layout. The assembler's scratch buffers live after the\n"
-    "        ;; binary at program_end. The symbol table and jump table live in\n"
-    "        ;; a dedicated ES segment (0x2000, linear 0x20000) so they don't\n"
-    "        ;; compete with segment-0 memory.\n"
+    "        ;; binary at _program_end (cc.py tail sentinel). The symbol table\n"
+    "        ;; and jump table live in a dedicated ES segment (0x2000, linear\n"
+    "        ;; 0x20000) so they don't compete with segment-0 memory.\n"
     "        %assign JUMP_MAX      4096      ; max jcc/jmp instructions per source\n"
     "        %assign JUMP_TABLE    0F000h    ; jump_table offset within ES segment (4096 bytes)\n"
     "        %assign LINE_MAX      255\n"
@@ -26,11 +89,50 @@ asm(
     "        %assign SYMBOL_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)\n"
     "        %assign SYMBOL_NAME_LENGTH  32        ; 31 chars + null\n"
     "        %assign SYMBOL_SEGMENT   2000h     ; ES segment for symbol table (linear 0x20000)\n"
-    "        %define LINE_BUFFER      program_end\n"
+    "        %define LINE_BUFFER      _program_end\n"
     "        %define OUTPUT_BUFFER       LINE_BUFFER + 256\n"
     "        %define SOURCE_BUFFER       OUTPUT_BUFFER + 512\n"
     "        %define INCLUDE_SAVE      SOURCE_BUFFER + 512   ; include stack (6 bytes: source_fd, source_buffer_position, source_buffer_valid)\n"
     "        %define INCLUDE_SOURCE_SAVE  INCLUDE_SAVE + 64   ; saved source buffer (512 bytes per level)\n"
+    "\n"
+    "        ;; Historical variable names aliased to cc.py-emitted globals.\n"
+    "        ;; The mutable state lives at the tail of the binary as\n"
+    "        ;; ``_g_<name>: dw 0`` (scalars) or ``_g_<name>: times N db 0``\n"
+    "        ;; (char arrays).  See the C declarations at the top of\n"
+    "        ;; src/c/asm.c.\n"
+    "        changed_flag            equ _g_changed_flag\n"
+    "        cmp_imm_byte            equ _g_cmp_imm_byte\n"
+    "        cmp_op1_size            equ _g_cmp_op1_size\n"
+    "        current_address         equ _g_current_address\n"
+    "        equ_space               equ _g_equ_space\n"
+    "        error_flag              equ _g_error_flag\n"
+    "        global_scope            equ _g_global_scope\n"
+    "        include_depth           equ _g_include_depth\n"
+    "        include_path            equ _g_include_path\n"
+    "        iteration_count         equ _g_iteration_count\n"
+    "        jump_index              equ _g_jump_index\n"
+    "        last_symbol_index       equ _g_last_symbol_index\n"
+    "        op1_register            equ _g_op1_register\n"
+    "        op1_size                equ _g_op1_size\n"
+    "        op1_type                equ _g_op1_type\n"
+    "        op1_value               equ _g_op1_value\n"
+    "        op2_register            equ _g_op2_register\n"
+    "        op2_type                equ _g_op2_type\n"
+    "        op2_value               equ _g_op2_value\n"
+    "        org_value               equ _g_org_value\n"
+    "        output_fd               equ _g_output_fd\n"
+    "        output_name             equ _g_output_name\n"
+    "        output_position         equ _g_output_position\n"
+    "        output_total            equ _g_output_total\n"
+    "        pass                    equ _g_pass\n"
+    "        source_buffer_position  equ _g_source_buffer_position\n"
+    "        source_buffer_valid     equ _g_source_buffer_valid\n"
+    "        source_fd               equ _g_source_fd\n"
+    "        source_name             equ _g_source_name\n"
+    "        source_prefix           equ _g_source_prefix\n"
+    "        symbol_count            equ _g_symbol_count\n"
+    "        symbol_set_scope        equ _g_symbol_set_scope\n"
+    "        symbol_set_value        equ _g_symbol_set_value\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Main entry point\n"
@@ -50,30 +152,11 @@ asm(
     "        mov ax, [ARGV+2]\n"
     "        mov [output_name], ax\n"
     "\n"
-    "        ;; Compute source_prefix = directory portion of source_name (incl. trailing '/')\n"
-    "        ;; Walk source_name and remember position just past the last '/'\n"
-    "        mov si, [source_name]\n"
-    "        mov di, source_prefix     ; di tracks length of valid prefix\n"
-    "        .pfx_scan:\n"
-    "        mov al, [si]\n"
-    "        test al, al\n"
-    "        jz .pfx_scan_done\n"
-    "        inc si\n"
-    "        cmp al, '/'\n"
-    "        jne .pfx_scan\n"
-    "        ;; Found a '/'; copy source_name[0..si) to source_prefix\n"
-    "        mov bx, [source_name]\n"
-    "        mov di, source_prefix\n"
-    "        .pfx_copy:\n"
-    "        mov al, [bx]\n"
-    "        mov [di], al\n"
-    "        inc bx\n"
-    "        inc di\n"
-    "        cmp bx, si\n"
-    "        jb .pfx_copy\n"
-    "        jmp .pfx_scan\n"
-    "        .pfx_scan_done:\n"
-    "        mov byte [di], 0       ; null-terminate prefix\n"
+    "        ;; source_prefix = directory portion of source_name (incl.\n"
+    "        ;; trailing '/').  Implementation lives in cc.py-emitted\n"
+    "        ;; ``compute_source_prefix`` (see C definition at the top of\n"
+    "        ;; src/c/asm.c).\n"
+    "        call compute_source_prefix\n"
     "\n"
     "        ;; -- Pass 1: collect labels and converge jump sizes --\n"
     "        ;; Iterative pass 1: jumps start near (pessimistic) and are\n"
@@ -4554,47 +4637,11 @@ asm(
     "MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; Variables\n"
+    ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
+    ";;; this inline-asm block (see the C declarations at the top of\n"
+    ";;; src/c/asm.c and the ``<name> equ _g_<name>`` aliases above).\n"
+    ";;; cc.py emits a ``_program_end:`` sentinel at the very end of\n"
+    ";;; the output, which LINE_BUFFER and friends point at so the\n"
+    ";;; scratch buffers still sit immediately past the loaded image.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "changed_flag  db 0\n"
-    "cmp_imm_byte  db 0\n"
-    "cmp_op1_size  db 0\n"
-    "current_address      dw 0\n"
-    "equ_space     dw 0\n"
-    "error_flag    db 0\n"
-    "global_scope  dw 0FFFFh\n"
-    "include_depth     db 0\n"
-    "include_path  times 32 db 0\n"
-    "iteration_count    dw 0\n"
-    "jump_index    dw 0\n"
-    "last_symbol_index  dw 0\n"
-    "op1_register  db 0\n"
-    "op1_size      db 0\n"
-    "op1_type      db 0\n"
-    "op1_value     dw 0\n"
-    "op2_register  db 0\n"
-    "op2_type      db 0\n"
-    "op2_value     dw 0\n"
-    "org_value     dw 0\n"
-    "output_fd        dw 0\n"
-    "output_name      dw 0\n"
-    "output_position  dw 0\n"
-    "output_total     dw 0\n"
-    "pass          db 0\n"
-    "source_buffer_position  dw 0\n"
-    "source_buffer_valid     dw 0\n"
-    "source_fd     dw 0\n"
-    "source_name   dw 0\n"
-    "source_prefix times 32 db 0\n"
-    "symbol_count  dw 0\n"
-    "symbol_set_scope  dw 0\n"
-    "symbol_set_value  dw 0\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; program_end: marks the end of the loaded image. Floating buffers\n"
-    ";;; (LINE_BUFFER, OUTPUT_BUFFER, SOURCE_BUFFER, INCLUDE_SAVE, INCLUDE_SOURCE_SAVE) are %defined\n"
-    ";;; relative to this label so they always sit immediately after the\n"
-    ";;; program in memory.\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "program_end:\n"
 );
