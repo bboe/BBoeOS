@@ -5146,7 +5146,12 @@ class Parser:
             return Char(decode_first_character(token[1][1:-1], line=line), line=line)
         if token[0] == "STRING":
             self.eat()
-            return String(token[1][1:-1], line=line)
+            content = token[1][1:-1]
+            # Adjacent string literals concatenate — standard C behavior.
+            # ``"foo" "bar"`` folds to ``"foobar"`` at parse time.
+            while self.peek()[0] == "STRING":
+                content += self.eat()[1][1:-1]
+            return String(content, line=line)
         if token[0] == "IDENT":
             self.eat()
             if self.peek()[0] == "LPAREN":
@@ -5281,9 +5286,13 @@ class Parser:
             self.eat("IDENT")
             self.eat("LPAREN")
             string_token = self.eat("STRING")
+            content = string_token[1][1:-1]
+            # Adjacent string literals concatenate (as in parse_primary).
+            while self.peek()[0] == "STRING":
+                content += self.eat()[1][1:-1]
             self.eat("RPAREN")
             self.eat("SEMI")
-            return InlineAsm(string_token[1][1:-1], line=line)
+            return InlineAsm(content, line=line)
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
