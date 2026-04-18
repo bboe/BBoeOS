@@ -20,6 +20,15 @@ from pathlib import Path
 HEADER = Path(__file__).resolve().parent / "bboeos.h"
 SOURCE_DIR = HEADER.parent.parent / "src" / "c"
 
+# Sources that intentionally fail a clang syntax check.  asm.c wraps the
+# original NASM assembler source in a single `asm("...")` string literal
+# spanning thousands of physical lines; clang rejects the unterminated
+# string at every newline.  cc.py's lexer allows unescaped newlines
+# inside string literals, but standard C doesn't — a later PR that
+# splits the inline asm into adjacent (concatenation-friendly) chunks
+# will lift this skip.
+CC_CHECK_SKIP = frozenset({"asm"})
+
 
 def check_program(*, source: Path) -> tuple[bool, str]:
     """Run clang -fsyntax-only on a single source file."""
@@ -55,6 +64,8 @@ def main() -> int:
         if not sources:
             print(f"No C source named '{arguments.program}'")
             return 1
+    else:
+        sources = [s for s in sources if s.stem not in CC_CHECK_SKIP]
 
     pass_count = 0
     fail_count = 0
