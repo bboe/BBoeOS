@@ -47,6 +47,42 @@ int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
 
+/* Error / success reporters for the main driver.  Each resets ES to
+   DS (asm_main keeps ES pointed at the symbol table segment while
+   assembling) and jumps into FUNCTION_DIE via cc.py's die() builtin.
+   The inline asm uses these via ``jCC die_...`` instead of the
+   scattered ``jmp .error_...`` / ``mov si / mov cx`` chain that the
+   asm.asm source carries. */
+void die_ok() {
+    asm("push ds\npop es");
+    die("OK\n");
+}
+
+void die_error_create() {
+    asm("push ds\npop es");
+    die("Error: cannot create output\n");
+}
+
+void die_error_pass1_io() {
+    asm("push ds\npop es");
+    die("Error: pass 1 io\n");
+}
+
+void die_error_pass1_iter() {
+    asm("push ds\npop es");
+    die("Error: pass 1 iter\n");
+}
+
+void die_error_write_dir() {
+    asm("push ds\npop es");
+    die("Error: directory write failed\n");
+}
+
+void die_usage() {
+    asm("push ds\npop es");
+    die("Usage: asm <source> <output>\n");
+}
+
 /* Populate ``source_prefix`` with the directory portion of
    ``source_name`` (everything up to and including the last ``/``).
    Empty when the source has no directory.  Bounded by the
@@ -146,7 +182,7 @@ asm(
     "        mov di, ARGV\n"
     "        call FUNCTION_PARSE_ARGV\n"
     "        cmp cx, 2\n"
-    "        jne .usage\n"
+    "        jne die_usage\n"
     "        mov ax, [ARGV]\n"
     "        mov [source_name], ax\n"
     "        mov ax, [ARGV+2]\n"
@@ -184,11 +220,11 @@ asm(
     "        mov word [jump_index], 0\n"
     "        call do_pass\n"
     "        test byte [error_flag], 0FFh\n"
-    "        jnz .error_pass1_io\n"
+    "        jnz die_error_pass1_io\n"
     "        inc word [iteration_count]\n"
     "        ;; Safety bound to catch oscillation.\n"
     "        cmp word [iteration_count], 100\n"
-    "        jae .error_pass1_iter\n"
+    "        jae die_error_pass1_iter\n"
     "        ;; Always run at least 2 iterations: iter 1 builds the symbol\n"
     "        ;; table; iter 2 is the first one that can verify forward refs.\n"
     "        cmp word [iteration_count], 2\n"
@@ -203,7 +239,7 @@ asm(
     "        mov dl, FLAG_EXECUTE\n"
     "        mov ah, SYS_IO_OPEN\n"
     "        call syscall\n"
-    "        jc .error_create\n"
+    "        jc die_error_create\n"
     "        mov [output_fd], ax\n"
     "\n"
     "        ;; -- Pass 2: emit bytes --\n"
@@ -223,41 +259,10 @@ asm(
     "        mov bx, [output_fd]\n"
     "        mov ah, SYS_IO_CLOSE\n"
     "        call syscall\n"
-    "        jc .error_write_dir\n"
+    "        jc die_error_write_dir\n"
     "\n"
-    "        ;; Print success message\n"
-    "        mov si, MESSAGE_OK\n"
-    "        mov cx, MESSAGE_OK_LENGTH\n"
-    "        jmp call_die\n"
-    "\n"
-    "        .error_create:\n"
-    "        mov si, MESSAGE_ERROR_CREATE\n"
-    "        mov cx, MESSAGE_ERROR_CREATE_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_find_out:\n"
-    "        mov si, MESSAGE_ERROR_FIND_OUT\n"
-    "        mov cx, MESSAGE_ERROR_FIND_OUT_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1:\n"
-    "        mov si, MESSAGE_ERROR_PASS1\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1_io:\n"
-    "        mov si, MESSAGE_ERROR_PASS1_IO\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_IO_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_pass1_iter:\n"
-    "        mov si, MESSAGE_ERROR_PASS1_ITER\n"
-    "        mov cx, MESSAGE_ERROR_PASS1_ITER_LENGTH\n"
-    "        jmp call_die\n"
-    "        .error_write_dir:\n"
-    "        mov si, MESSAGE_ERROR_WRITE_DIR\n"
-    "        mov cx, MESSAGE_ERROR_WRITE_DIR_LENGTH\n"
-    "        jmp call_die\n"
-    "        .usage:\n"
-    "        mov si, MESSAGE_USAGE\n"
-    "        mov cx, MESSAGE_USAGE_LENGTH\n"
-    "        jmp call_die\n"
+    "        ;; Print success message and exit.\n"
+    "        jmp die_ok\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; abort_unknown: print the offending line and exit\n"
@@ -4615,26 +4620,10 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "MESSAGE_ERROR_AT        db `  at: `\n"
     "MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT\n"
-    "MESSAGE_ERROR_CREATE    db `Error: cannot create output\\n`\n"
-    "MESSAGE_ERROR_CREATE_LENGTH equ $ - MESSAGE_ERROR_CREATE\n"
-    "MESSAGE_ERROR_FIND_OUT  db `Error: cannot find output file\\n`\n"
-    "MESSAGE_ERROR_FIND_OUT_LENGTH equ $ - MESSAGE_ERROR_FIND_OUT\n"
-    "MESSAGE_ERROR_PASS1     db `Error: pass 1 failed\\n`\n"
-    "MESSAGE_ERROR_PASS1_LENGTH equ $ - MESSAGE_ERROR_PASS1\n"
-    "MESSAGE_ERROR_PASS1_IO  db `Error: pass 1 io\\n`\n"
-    "MESSAGE_ERROR_PASS1_IO_LENGTH equ $ - MESSAGE_ERROR_PASS1_IO\n"
-    "MESSAGE_ERROR_PASS1_ITER db `Error: pass 1 iter\\n`\n"
-    "MESSAGE_ERROR_PASS1_ITER_LENGTH equ $ - MESSAGE_ERROR_PASS1_ITER\n"
     "MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\\n  `\n"
     "MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN\n"
-    "MESSAGE_ERROR_WRITE_DIR db `Error: directory write failed\\n`\n"
-    "MESSAGE_ERROR_WRITE_DIR_LENGTH equ $ - MESSAGE_ERROR_WRITE_DIR\n"
-    "MESSAGE_OK      db `OK\\n`\n"
-    "MESSAGE_OK_LENGTH equ $ - MESSAGE_OK\n"
     "MESSAGE_SYMBOL_OVERFLOW db `Error: symbol table overflow (raise SYMBOL_MAX)\\n`\n"
     "MESSAGE_SYMBOL_OVERFLOW_LENGTH equ $ - MESSAGE_SYMBOL_OVERFLOW\n"
-    "MESSAGE_USAGE   db `Usage: asm <source> <output>\\n`\n"
-    "MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
