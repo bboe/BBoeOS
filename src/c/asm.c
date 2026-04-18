@@ -2119,6 +2119,38 @@ void match_word() {
         "pop ax");
 }
 
+/* Shared helper for the ``<op> [disp16], r16`` memory-destination
+   form (called by handle_add / handle_and / handle_sub).  AL holds
+   the opcode on entry; SI points at ``[``.  Consumes ``[disp16],
+   <reg>`` from the source line, emits ``<opcode> <modrm(mod=00,
+   reg=src, rm=110)> <disp16>``.  Bad structure (missing ``]`` or a
+   non-register source) jumps to abort_unknown; successful path
+   falls through to the cc.py ``pop bp / ret`` epilogue.  The
+   retired asm ended with ``jmp emit_word_ax`` as a tail call; the
+   C version uses ``call emit_word_ax`` so the frame closes
+   cleanly. */
+void mem_op_reg_emit() {
+    asm("push ax\n"
+        "inc si\n"
+        "call resolve_value\n"
+        "mov dx, ax\n"
+        "cmp byte [si], ']'\n"
+        "jne abort_unknown\n"
+        "inc si\n"
+        "call skip_comma\n"
+        "call parse_register\n"
+        "jc abort_unknown\n"
+        "mov bl, al\n"
+        "pop ax\n"
+        "call emit_byte_al\n"
+        "mov al, bl\n"
+        "shl al, 3\n"
+        "or al, 06h\n"
+        "call emit_byte_al\n"
+        "mov ax, dx\n"
+        "call emit_word_ax");
+}
+
 /* Read one line of source into LINE_BUFFER (null-terminated, at
    most LINE_MAX = 255 chars; over-long lines silently truncate to
    LINE_MAX before the terminating NUL).  Returns 1 on true EOF
@@ -2597,29 +2629,9 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; mem_op_reg_emit: emit ``<op> [disp16], r16`` given AL = opcode.\n"
-    ";;; Consumes the remaining source text: ``[disp16], <reg>``.\n"
+    ";;; mem_op_reg_emit lives in a cc.py-emitted C function near the\n"
+    ";;; top of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "mem_op_reg_emit:\n"
-    "        push ax                        ; save opcode\n"
-    "        inc si                         ; skip `[`\n"
-    "        call resolve_value             ; AX = disp16\n"
-    "        mov dx, ax                     ; stash disp\n"
-    "        cmp byte [si], ']'\n"
-    "        jne abort_unknown\n"
-    "        inc si\n"
-    "        call skip_comma\n"
-    "        call parse_register            ; AL = reg, AH = size\n"
-    "        jc abort_unknown\n"
-    "        mov bl, al                     ; BL = reg field\n"
-    "        pop ax                         ; AL = opcode\n"
-    "        call emit_byte_al\n"
-    "        mov al, bl\n"
-    "        shl al, 3\n"
-    "        or al, 06h                     ; modrm: mod=00, reg=src, rm=110\n"
-    "        call emit_byte_al\n"
-    "        mov ax, dx\n"
-    "        jmp emit_word_ax\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_and lives in a cc.py-emitted C function near the top\n"
