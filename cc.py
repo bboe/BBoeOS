@@ -43,6 +43,12 @@ Register allocation:
                           | IDENT ('(' arguments ')' | '[' expression ']')?
                           | '(' expression ')'
 
+Preprocessor:
+    ``#define NAME VALUE`` — object-like macro, substituted at tokenization.
+    ``#include "path"`` — NASM ``%include`` semantics: double-quoted only,
+    resolved relative to the including file's directory, recursively
+    expanded, cycles rejected.
+
 Builtins:
     checksum(buf, len)       -- 1's-complement checksum (for ICMP/IP)
     close(fd)                -- close a file descriptor
@@ -5415,7 +5421,7 @@ def main() -> int:
     input_path = sys.argv[1]
     try:
         source = Path(input_path).read_text(encoding="utf-8")
-        source, defines = preprocess(source)
+        source, defines = preprocess(source, include_base=Path(input_path).parent)
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
@@ -5432,14 +5438,32 @@ def main() -> int:
     return 0
 
 
-def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
-    """Strip ``#define`` directives and collect them into a symbol table.
+INCLUDE_PATTERN = re.compile(r'\s*"([^"]+)"\s*$')
 
-    Only object-like macros with a non-empty value are supported:
-    ``#define NAME VALUE`` where VALUE is whatever remains on the line
-    after the name (typically an integer or character literal).  Each
-    directive line is replaced with a blank line so downstream line
+
+def preprocess(
+    source: str,
+    /,
+    *,
+    include_base: Path | None = None,
+    include_stack: frozenset[Path] = frozenset(),
+) -> tuple[str, dict[str, str]]:
+    """Expand ``#include "..."`` directives and collect ``#define`` macros.
+
+    Only object-like ``#define NAME VALUE`` macros are supported.  Each
+    ``#define`` line is replaced with a blank line so downstream line
     numbers stay correct.
+
+    ``#include`` accepts only the double-quoted form and resolves the
+    path relative to *include_base* (the directory of the source
+    currently being preprocessed) — matching NASM's ``%include``.
+    Included files are preprocessed recursively; their ``#define``
+    entries merge into the outer pool so later definitions override.
+    ``include_stack`` carries the set of files currently being
+    expanded so a cycle is rejected with a clear error.  The directive
+    line itself is replaced by the included file's processed text, so
+    error line numbers after an include shift by the included file's
+    length — acceptable in the absence of ``#line`` support.
 
     Returns:
         (processed_source, defines).  ``defines`` maps each macro name
@@ -5447,10 +5471,34 @@ def preprocess(source: str, /) -> tuple[str, dict[str, str]]:
         time so the tokens inherit the current position's line number.
 
     """
+    if include_base is None:
+        include_base = Path()
     defines: dict[str, str] = {}
     output_lines: list[str] = []
     for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
         stripped = line.lstrip()
+        if stripped.startswith("#include"):
+            match = INCLUDE_PATTERN.match(stripped[len("#include") :])
+            if match is None:
+                message = f"malformed #include: {line.rstrip()!r}"
+                raise CompileError(message, line=line_number)
+            include_path = (include_base / match.group(1)).resolve()
+            if include_path in include_stack:
+                message = f"circular #include of {include_path}"
+                raise CompileError(message, line=line_number)
+            try:
+                included_source = include_path.read_text(encoding="utf-8")
+            except OSError as error:
+                message = f"cannot open #include file {match.group(1)!r}: {error}"
+                raise CompileError(message, line=line_number) from error
+            included_text, included_defines = preprocess(
+                included_source,
+                include_base=include_path.parent,
+                include_stack=include_stack | {include_path},
+            )
+            defines.update(included_defines)
+            output_lines.append(included_text)
+            continue
         if not stripped.startswith("#define"):
             output_lines.append(line)
             continue
