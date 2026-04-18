@@ -47,6 +47,37 @@ int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
 
+/* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
+   output_fd via SYS_IO_WRITE, then reset the position.  No-op when
+   nothing is queued.  Callable from inline asm (``call flush_output``)
+   since cc.py emits the label with the C name.  The body preserves
+   AX / CX / SI / DI so the handler callers that reach flush_output
+   through emit_byte_al don't need to guard those registers at every
+   call site (matches the retired inline-asm flush_output's contract).
+   Uses the ES-safe ``syscall`` wrapper at the tail of the inline
+   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   OUTPUT_BUFFER is ``_program_end + 256`` — NASM folds the raw
+   arithmetic at assembly time. */
+void flush_output() {
+    asm("push ax\n"
+        "push cx\n"
+        "push si\n"
+        "push di\n"
+        "cmp word [_g_output_position], 0\n"
+        "je .fl_done\n"
+        "mov bx, [_g_output_fd]\n"
+        "mov si, _program_end + 256\n"
+        "mov cx, [_g_output_position]\n"
+        "mov ah, SYS_IO_WRITE\n"
+        "call syscall\n"
+        "mov word [_g_output_position], 0\n"
+        ".fl_done:\n"
+        "pop di\n"
+        "pop si\n"
+        "pop cx\n"
+        "pop ax");
+}
+
 /* Pass-1 error reporters.  Called by ``run_pass1`` while ES is still
    pointed at the symbol-table segment, so each resets ES to DS
    before handing off to cc.py's ``die()`` builtin (which jumps to
@@ -467,29 +498,9 @@ asm(
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; flush_output: write OUTPUT_BUFFER to disk\n"
+    ";;; flush_output lives in cc.py-emitted ``flush_output`` at the\n"
+    ";;; top of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "flush_output:\n"
-    "        push ax\n"
-    "        push cx\n"
-    "        push si\n"
-    "        push di\n"
-    "        ;; Don't flush if nothing to write\n"
-    "        cmp word [output_position], 0\n"
-    "        je .fl_done\n"
-    "        ;; Write output_position bytes from OUTPUT_BUFFER via fd\n"
-    "        mov bx, [output_fd]\n"
-    "        mov si, OUTPUT_BUFFER\n"
-    "        mov cx, [output_position]\n"
-    "        mov ah, SYS_IO_WRITE\n"
-    "        call syscall\n"
-    "        mov word [output_position], 0\n"
-    "        .fl_done:\n"
-    "        pop di\n"
-    "        pop si\n"
-    "        pop cx\n"
-    "        pop ax\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_aam\n"
