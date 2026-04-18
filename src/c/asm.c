@@ -257,6 +257,41 @@ void hex_digit() {
         ".hd_end:");
 }
 
+/* Build a register/register ModR/M byte: AL = reg field, BL = r/m
+   field in, AL = ``(3 << 6) | (reg << 3) | rm`` out.  Two-operand
+   register-form handlers (handle_add / handle_sub / …) call this
+   once per emit. */
+void make_modrm_reg_reg() {
+    asm("shl al, 3\n"
+        "or al, bl\n"
+        "or al, 0C0h");
+}
+
+/* Map a register number to its 16-bit addressing ModR/M r/m field.
+   Input AL is a cc.py-style register index (3=bx, 5=bp, 6=si,
+   7=di); output AL is the ModR/M encoding (bx=7, bp=6, si=4,
+   di=5).  Any input that isn't one of the four indexable base
+   registers is treated as bp (rm=6), matching the retired asm. */
+void reg_to_rm() {
+    asm("cmp al, 3\n"
+        "je .rtr_bx\n"
+        "cmp al, 6\n"
+        "je .rtr_si\n"
+        "cmp al, 7\n"
+        "je .rtr_di\n"
+        "mov al, 6\n"
+        "jmp .rtr_end\n"
+        ".rtr_bx:\n"
+        "mov al, 7\n"
+        "jmp .rtr_end\n"
+        ".rtr_si:\n"
+        "mov al, 4\n"
+        "jmp .rtr_end\n"
+        ".rtr_di:\n"
+        "mov al, 5\n"
+        ".rtr_end:");
+}
+
 /* Error reporters called while ES is still pointed at the symbol-
    table segment.  Each resets ES to DS before handing off to cc.py's
    ``die()`` builtin (which jumps to FUNCTION_DIE with the string
@@ -2872,38 +2907,10 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; make_modrm_reg_reg: AL=reg field, BL=rm field -> AL = modrm byte\n"
-    ";;; modrm = (3 << 6) | (reg << 3) | rm = C0 | (reg<<3) | rm\n"
+    ";;; make_modrm_reg_reg / reg_to_rm live in cc.py-emitted functions\n"
+    ";;; near the top of src/c/asm.c.  Handlers reach both via\n"
+    ";;; ``call make_modrm_reg_reg`` / ``call reg_to_rm``.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "make_modrm_reg_reg:\n"
-    "        shl al, 3\n"
-    "        or al, bl\n"
-    "        or al, 0C0h\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; reg_to_rm: convert register number to 16-bit addressing ModRM rm field\n"
-    ";;; Input: AL = register number (3=bx, 5=bp, 6=si, 7=di)\n"
-    ";;; Output: AL = rm field value\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "reg_to_rm:\n"
-    "        cmp al, 3\n"
-    "        je .rm_bx\n"
-    "        cmp al, 6\n"
-    "        je .rm_si\n"
-    "        cmp al, 7\n"
-    "        je .rm_di\n"
-    "        mov al, 6              ; bp -> rm=6\n"
-    "        ret\n"
-    "        .rm_bx:\n"
-    "        mov al, 7\n"
-    "        ret\n"
-    "        .rm_si:\n"
-    "        mov al, 4\n"
-    "        ret\n"
-    "        .rm_di:\n"
-    "        mov al, 5\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; match_word: check if SI starts with word at DI (case-insensitive)\n"
