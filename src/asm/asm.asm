@@ -1832,6 +1832,20 @@ handle_pop:
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
+;;; handle_popa: emit single-byte popa opcode
+;;; -----------------------------------------------------------------------
+handle_popa:
+        mov al, 61h
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
+;;; handle_pusha: emit single-byte pusha opcode
+;;; -----------------------------------------------------------------------
+handle_pusha:
+        mov al, 60h
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
 ;;; handle_push: push r16 / push ds / push es
 ;;; -----------------------------------------------------------------------
 handle_push:
@@ -4229,7 +4243,9 @@ mnemonic_table:
         dw STR_NOT, handle_not
         dw STR_OR,  handle_or
         dw STR_POP, handle_pop
+        dw STR_POPA, handle_popa
         dw STR_PUSH, handle_push
+        dw STR_PUSHA, handle_pusha
         dw STR_REP, handle_rep
         dw STR_REPNE, handle_repne
         dw STR_RET, handle_ret
@@ -4297,7 +4313,9 @@ STR_OR      db 'or',0
 STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
+STR_POPA    db 'popa',0
 STR_PUSH    db 'push',0
+STR_PUSHA   db 'pusha',0
 STR_REP     db 'rep',0
 STR_REPNE   db 'repne',0
 STR_RET     db 'ret',0
