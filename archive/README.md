@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8348      | +95   |
+| asm     | 8253        | 8351      | +98   |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+95):** Phase 1 port wraps the remaining NASM source in a
+**asm (+98):** Phase 1 port wraps the remaining NASM source in a
 file-scope `asm("...")` block.  The entire driver — parse argv,
 open output, run passes, flush, close, exit — lives in pure C
 `main(int argc, char *argv[])` via cc.py's own `die()` / `open()`
@@ -48,7 +48,7 @@ widening); `compute_source_prefix`, `run_pass1`, `run_pass2`,
 `include_push`, `include_pop`, `do_pass`, `read_line`,
 `load_src_sector`, `skip_ws`, `skip_comma`, `hex_digit`,
 `make_modrm_reg_reg`, `reg_to_rm`, `emit_byte_al`, `emit_word_ax`,
-`symbol_entry_address`, and the full `main` into pure C; eight dead `.error_*` labels, thirteen
+`symbol_entry_address`, `match_word`, and the full `main` into pure C; eight dead `.error_*` labels, thirteen
 MESSAGE_* strings, the dead `print_hex_word` helper, the `call_die`
 / `call_exit` / `call_print_character` / `call_print_string` /
 `call_write_stdout` kernel-jump wrappers, the `abort_unknown` asm
