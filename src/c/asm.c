@@ -46,6 +46,13 @@ char source_prefix[32];
 int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
+/* ``line_buffer`` / ``error_word`` live above the main driver's
+   ``_program_end``-relative buffers; main() initializes them at
+   startup (``line_buffer = _program_end``), and ``abort_unknown``
+   stores the offending mnemonic's SI into ``error_word`` before
+   jumping to the pure-C reporter. */
+char *line_buffer;
+char *error_word;
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
    output_fd via SYS_IO_WRITE, then reset the position.  No-op when
@@ -88,6 +95,20 @@ void flush_output() {
 void die_symbol_overflow() {
     asm("push ds\npop es");
     die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
+}
+
+/* Invoked through an inline-asm trampoline that stashes SI into
+   ``error_word`` before jumping here (``abort_unknown:`` in the
+   file-scope asm block).  Prints the offending source line from
+   ``line_buffer`` together with the bad token, then exits. */
+void abort_unknown_impl() {
+    asm("push ds\npop es");
+    printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
+           line_buffer, error_word);
+    /* ``exit()`` would be cleaner but clang sees the stdlib prototype
+       via tests/bboeos.h and rejects the zero-argument form.  Jumping
+       to FUNCTION_EXIT keeps cc.py and clang both happy. */
+    asm("jmp FUNCTION_EXIT");
 }
 
 void die_error_pass1_io() {
@@ -185,6 +206,9 @@ int main(int argc, char *argv[]) {
        safely.  We only switch to SYMBOL_SEGMENT once we're ready to
        run the assembler passes — the handlers index the symbol table
        via ``[es:...]``, which needs ES pointed at that segment. */
+    /* Publish ``_program_end`` (the scratch-buffer base) as a C-visible
+       pointer so abort_unknown_impl can printf the bad source line. */
+    asm("mov word [_g_line_buffer], _program_end");
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -283,27 +307,15 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; abort_unknown: print the offending line and exit\n"
-    ";;; Used by handle_unknown_word when it detects a line that has no\n"
-    ";;; recognized mnemonic or directive after stripping a bare label.\n"
+    ";;; abort_unknown: stash SI (the offending mnemonic) into a\n"
+    ";;; C-visible global and jump to the pure-C reporter.  Called\n"
+    ";;; from handle_unknown_word and friends when a source line has\n"
+    ";;; no recognized mnemonic or directive after stripping a bare\n"
+    ";;; label.  ``abort_unknown_impl`` does the printf + exit.\n"
     ";;; -----------------------------------------------------------------------\n"
     "abort_unknown:\n"
-    "        push si                ; save SI for second print\n"
-    "        mov si, MESSAGE_ERROR_UNKNOWN\n"
-    "        mov cx, MESSAGE_ERROR_UNKNOWN_LENGTH\n"
-    "        call call_write_stdout\n"
-    "        mov di, LINE_BUFFER\n"
-    "        call call_print_string\n"
-    "        mov al, 0Ah\n"
-    "        call call_print_character\n"
-    "        mov si, MESSAGE_ERROR_AT\n"
-    "        mov cx, MESSAGE_ERROR_AT_LENGTH\n"
-    "        call call_write_stdout\n"
-    "        pop di\n"
-    "        call call_print_string\n"
-    "        mov al, 0Ah\n"
-    "        call call_print_character\n"
-    "        jmp call_exit\n"
+    "        mov [_g_error_word], si\n"
+    "        jmp abort_unknown_impl\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; do_pass: run one pass over the source file\n"
@@ -4536,38 +4548,6 @@ asm(
     "        db 0                   ; terminator\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; ES-safe kernel jump table wrappers\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "call_exit:\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        jmp FUNCTION_EXIT\n"
-    "\n"
-    "call_print_character:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_PRINT_CHARACTER\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    "call_print_string:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_PRINT_STRING\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    "call_write_stdout:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es\n"
-    "        call FUNCTION_WRITE_STDOUT\n"
-    "        pop es\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
     ";;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0\n"
     ";;; for kernel calls, then restore ES before returning.\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -4578,14 +4558,6 @@ asm(
     "        int 30h\n"
     "        pop es\n"
     "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; Strings\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "MESSAGE_ERROR_AT        db `  at: `\n"
-    "MESSAGE_ERROR_AT_LENGTH equ $ - MESSAGE_ERROR_AT\n"
-    "MESSAGE_ERROR_UNKNOWN   db `Error: unknown mnemonic or directive at line:\\n  `\n"
-    "MESSAGE_ERROR_UNKNOWN_LENGTH equ $ - MESSAGE_ERROR_UNKNOWN\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"

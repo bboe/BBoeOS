@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8230      | -23   |
+| asm     | 8253        | 8216      | -37   |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (-23):** Phase 1 port wraps the remaining NASM source in a
+**asm (-37):** Phase 1 port wraps the remaining NASM source in a
 file-scope `asm("...")` block.  The entire driver — parse argv,
 open output, run passes, flush, close, exit — lives in pure C
 `main(int argc, char *argv[])` via cc.py's own `die()` / `open()`
@@ -39,12 +39,14 @@ of do_pass + emit_byte_al / parse_operand / resolve_value / the 45+
 `handle_*` mnemonic handlers).  Path-A extractions landed to date:
 33 mutable globals into cc.py file-scope declarations (+11 bytes,
 db→dw widening); `compute_source_prefix`, `run_pass1`, `run_pass2`,
-`flush_output`, three `die_*` helpers, and the full `main` into
-pure C; eight dead `.error_*` labels, eleven MESSAGE_* strings,
-the dead `print_hex_word` helper, and the `call_die` wrapper
-retired along the way.  Follow-up PRs will extract the symbol
-table, emit functions, and each instruction-handler family into
-pure C.
+`flush_output`, `abort_unknown_impl`, three `die_*` helpers, and
+the full `main` into pure C; eight dead `.error_*` labels, thirteen
+MESSAGE_* strings, the dead `print_hex_word` helper, the `call_die`
+/ `call_exit` / `call_print_character` / `call_print_string` /
+`call_write_stdout` kernel-jump wrappers, and the `abort_unknown`
+asm body all retired along the way.  Follow-up PRs will extract
+the symbol table, emit functions, and each instruction-handler
+family into pure C.
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
