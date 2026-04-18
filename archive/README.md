@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8255      | +2    |
+| asm     | 8253        | 8266      | +13   |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,12 +27,15 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+2):** Phase 1 port only — `src/c/asm.c` wraps the entire
-contents of `asm.asm` in a single file-scope `asm("...")` block and
-jumps to the original entry.  NASM still assembles every byte of the
-handler code, so the emitted output is identical modulo the 2-byte
-`jmp asm_main` trampoline at the top of cc.py's `main:`.  Follow-up
-PRs will extract the driver, symbol table, emit functions, and each
+**asm (+13):** Phase 1 port wraps the entire contents of `asm.asm` in
+a single file-scope `asm("...")` block and jumps to the original
+entry via a 2-byte `jmp asm_main` trampoline at the top of cc.py's
+`main:`.  The assembler's 33 mutable globals have since been lifted
+out of the inline asm and declared as cc.py globals (aliased with
+`<name> equ _g_<name>` so handler references still resolve); cc.py's
+scalar layout forces each to `dw 0`, so the 11 former `db` fields
+widen by one byte each (+11 bytes total).  Follow-up PRs will
+extract the driver, symbol table, emit functions, and each
 instruction-handler family into pure C.
 
 **chmod (+24):** The assembly version walks the mode argument with
