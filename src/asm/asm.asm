@@ -1756,7 +1756,29 @@ handle_or:
         mov cx, dx
         pop bx                 ; BL = dst reg, BH = dst size
         cmp bh, 8
-        jne .or_unsupported    ; r16, imm not used yet
+        je .or_r8
+        ;; or r16, imm: prefer 83 /1 sign-extended-imm8 when the value
+        ;; fits in -128..127, else fall back to 81 /1 imm16.
+        mov ax, cx
+        add ax, 80h
+        cmp ax, 0FFh
+        ja .or_r16_imm16
+        mov al, 83h
+        call emit_byte_al
+        mov al, bl
+        or al, 0C8h            ; modrm = C0 | (1<<3) | rm = C8 | rm
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .or_r16_imm16:
+        mov al, 81h
+        call emit_byte_al
+        mov al, bl
+        or al, 0C8h
+        call emit_byte_al
+        mov ax, cx
+        jmp emit_word_ax
+        .or_r8:
         ;; or r8, imm8. Short form for AL: 0C imm8
         test bl, bl
         jnz .or_r8_general
@@ -1803,8 +1825,6 @@ handle_or:
         call emit_byte_al
         mov ax, [op2_value]
         jmp emit_word_ax
-        .or_unsupported:
-        jmp abort_unknown
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_pop: pop r16 / pop ds / pop es
@@ -2362,22 +2382,67 @@ handle_xchg:
 handle_xor:
         call skip_ws
         call parse_register    ; AH = size, AL = reg num (dst)
-        push ax
+        push ax                ; save dst reg+size
         call skip_comma
-        call parse_register    ; AH = size, AL = reg num (src)
-        pop bx                 ; BL = dst reg
-        ;; xor r8,r8: opcode 30, xor r16,r16: opcode 31
-        push ax
-        cmp ah, 8
-        je .xor8
-        mov al, 31h
-        jmp .xor_emit
-        .xor8:
-        mov al, 30h
-        .xor_emit:
+        call parse_operand
+        mov [op2_type], ah
+        mov [op2_register], al
+        mov [op2_value], dx
+        cmp byte [op2_type], 0
+        je .xor_rr
+        ;; immediate
+        mov cx, [op2_value]
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .xor_r8
+        ;; xor r16, imm: prefer 83 /6 sign-extended-imm8 when the value
+        ;; fits in -128..127, else fall back to 81 /6 imm16.
+        mov ax, cx
+        add ax, 80h
+        cmp ax, 0FFh
+        ja .xor_r16_imm16
+        mov al, 83h
         call emit_byte_al
-        pop ax
-        ;; modrm: mod=11, reg=src(AL), rm=dst(BL)
+        mov al, bl
+        or al, 0F0h            ; modrm = C0 | (6<<3) | rm
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .xor_r16_imm16:
+        mov al, 81h
+        call emit_byte_al
+        mov al, bl
+        or al, 0F0h
+        call emit_byte_al
+        mov ax, cx
+        jmp emit_word_ax
+        .xor_r8:
+        ;; xor r8, imm8. Short form for AL: 34 imm8
+        test bl, bl
+        jnz .xor_r8_general
+        mov al, 34h
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .xor_r8_general:
+        mov al, 80h
+        call emit_byte_al
+        mov al, bl
+        or al, 0F0h
+        call emit_byte_al
+        mov al, cl
+        jmp emit_byte_al
+        .xor_rr:
+        pop bx                 ; BL = dst reg, BH = dst size
+        cmp bh, 8
+        je .xor_rr8
+        mov al, 31h
+        jmp .xor_rr_emit
+        .xor_rr8:
+        mov al, 30h
+        .xor_rr_emit:
+        call emit_byte_al
+        mov al, [op2_register]      ; src reg goes in reg field
         call make_modrm_reg_reg
         jmp emit_byte_al
 
@@ -3933,7 +3998,10 @@ resolve_value:
         pop cx
         mov [si], cl           ; restore delimiter
         .check_expr:
-        ;; Check for +/-/*// arithmetic after the parsed value
+        ;; Check for binary arithmetic after the parsed value.  No
+        ;; precedence: operators chain left-to-right.  cc.py's
+        ;; _constant_expression parenthesises every subtree, so the
+        ;; flat precedence still produces the intended grouping.
         call skip_ws
         cmp byte [si], '+'
         je .expr_add
@@ -3943,6 +4011,12 @@ resolve_value:
         je .expr_mul
         cmp byte [si], '/'
         je .expr_div
+        cmp byte [si], '&'
+        je .expr_and
+        cmp byte [si], '|'
+        je .expr_or
+        cmp byte [si], '^'
+        je .expr_xor
         .expr_done:
         pop di
         pop cx
@@ -3984,6 +4058,33 @@ resolve_value:
         pop ax
         xor dx, dx
         div cx
+        jmp .expr_done
+        .expr_and:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        and ax, cx
+        jmp .expr_done
+        .expr_or:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        or ax, cx
+        jmp .expr_done
+        .expr_xor:
+        inc si
+        push ax
+        call skip_ws
+        call resolve_value
+        mov cx, ax
+        pop ax
+        xor ax, cx
         jmp .expr_done
 
 ;;; -----------------------------------------------------------------------

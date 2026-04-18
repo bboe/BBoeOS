@@ -33,11 +33,6 @@ C_DIR = Path("src/c")
 ORG_DIRECTIVE = "org 0600h"
 STATIC_DIR = Path("static")
 
-# Programs whose cc.py output uses instructions or expression forms the
-# current src/asm/asm.asm doesn't accept.  Re-enable once the C port
-# (src/c/asm.c) replaces the NASM assembler.
-SELF_HOST_SKIP = frozenset({"bits"})
-
 
 def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
     """Compile C sources, build the drive image, and return discovered programs."""
@@ -207,8 +202,6 @@ def discover_programs(*, additional: list[Path] | None = None, only: str | None)
         if ORG_DIRECTIVE not in source.read_text(errors="replace"):
             continue
         name = source.stem
-        if only is None and name in SELF_HOST_SKIP:
-            continue
         if only is not None:
             if name == only:
                 programs.append(source)

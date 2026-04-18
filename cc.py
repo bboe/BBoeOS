@@ -762,7 +762,7 @@ class CodeGenerator:
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
             return None
-        if isinstance(init, BinOp) and init.op in ("+", "-", "*", "&", "|", "^", "<<", ">>"):
+        if isinstance(init, BinOp) and init.op in ("+", "-", "*", "&", "|", "^"):
             left = self._constant_expression(init.left)
             right = self._constant_expression(init.right)
             if left is not None and right is not None:
