@@ -21,20 +21,25 @@ Register allocation:
     a call, in which case the value would interfere with error fusion
     and the variable goes into memory instead.
     assign               := IDENT '=' expression ';'
-                          |  IDENT '+=' expression ';'
+                          |  IDENT ('+='|'&='|'|='|'^='|'<<='|'>>=') expression ';'
     do_while             := 'do' '{' statement* '}' 'while' '(' expression ')' ';'
     while                := 'while' '(' expression ')' '{' statement* '}'
     call_statement       := IDENT '(' arguments ')' ';'
     arguments            := expression (',' expression)*
-    expression           := comparison_expression
+    expression           := logical_or_expression
+    logical_or_expression := logical_and_expression ('||' logical_and_expression)*
+    logical_and_expression := bitwise_or_expression ('&&' bitwise_or_expression)*
+    bitwise_or_expression := bitwise_xor_expression ('|' bitwise_xor_expression)*
+    bitwise_xor_expression := bitwise_and_expression ('^' bitwise_and_expression)*
+    bitwise_and_expression := comparison_expression ('&' comparison_expression)*
     comparison_expression := shift_expression
                            (('<'|'>'|'<='|'>='|'=='|'!=')
                             shift_expression)?
-    shift_expression     := additive_expression ('>>' additive_expression)*
+    shift_expression     := additive_expression (('<<'|'>>') additive_expression)*
     additive_expression  := multiplicative_expression
                            (('+'|'-') multiplicative_expression)*
     multiplicative_expression := primary (('*'|'/'|'%') primary)*
-    primary              := NUMBER | STRING | sizeof
+    primary              := NUMBER | STRING | sizeof | '~' primary
                           | IDENT ('(' arguments ')' | '[' expression ']')?
                           | '(' expression ')'
 
@@ -384,7 +389,16 @@ KEYWORDS = frozenset({
 
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
-SHIFT_OPERATORS = frozenset({"SHR"})
+SHIFT_OPERATORS = frozenset({"SHL", "SHR"})
+
+COMPOUND_ASSIGN_OPERATORS = {
+    "AMP_ASSIGN": "&",
+    "CARET_ASSIGN": "^",
+    "PIPE_ASSIGN": "|",
+    "PLUS_ASSIGN": "+",
+    "SHL_ASSIGN": "<<",
+    "SHR_ASSIGN": ">>",
+}
 
 TOKEN_PATTERN = re.compile(
     r"""
@@ -397,8 +411,11 @@ TOKEN_PATTERN = re.compile(
   | (?P<STRING>"(?:[^"\\]|\\.)*")
   | (?P<EQ>==)
   | (?P<GE>>=)
+  | (?P<SHR_ASSIGN>>>=)
   | (?P<SHR>>>)
   | (?P<LE><=)
+  | (?P<SHL_ASSIGN><<=)
+  | (?P<SHL><<)
   | (?P<NE>!=)
   | (?P<PLUS_ASSIGN>\+=)
   | (?P<ASSIGN>=)
@@ -406,8 +423,14 @@ TOKEN_PATTERN = re.compile(
   | (?P<LT><)
   | (?P<MINUS>-)
   | (?P<AND_AND>&&)
-  | (?P<OR_OR>\|\|)
+  | (?P<AMP_ASSIGN>&=)
   | (?P<AMP>&)
+  | (?P<OR_OR>\|\|)
+  | (?P<PIPE_ASSIGN>\|=)
+  | (?P<PIPE>\|)
+  | (?P<CARET_ASSIGN>\^=)
+  | (?P<CARET>\^)
+  | (?P<TILDE>~)
   | (?P<NOT>!)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
@@ -739,7 +762,7 @@ class CodeGenerator:
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
             return None
-        if isinstance(init, BinOp) and init.op in ("+", "-", "*"):
+        if isinstance(init, BinOp) and init.op in ("+", "-", "*", "&", "|", "^"):
             left = self._constant_expression(init.left)
             right = self._constant_expression(init.right)
             if left is not None and right is not None:
@@ -1289,11 +1312,11 @@ class CodeGenerator:
             # or ``[mem]``).
             if middle in ("inc ax", "dec ax"):
                 return True
-            return middle.startswith(("add ax, ", "sub ax, ", "and ax, "))
+            return middle.startswith(("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, "))
         # peephole_register_arithmetic: different register destination,
-        # op in {add, sub, and}, operand doesn't reference the target.
+        # op in {add, sub, and, or, xor}, operand doesn't reference the target.
         if destination in {"bx", "cx", "dx", "si", "di", "bp"}:
-            for prefix in ("add ax, ", "sub ax, ", "and ax, "):
+            for prefix in ("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, "):
                 if middle.startswith(prefix):
                     operand = middle[len(prefix) :]
                     return destination not in operand.split()
@@ -3270,7 +3293,7 @@ class CodeGenerator:
                 self.emit("        mov ax, dx")
                 self.ax_clear()
                 return
-            if operator in ("+", "-", "&") and isinstance(right, Int):
+            if operator in ("+", "-", "&", "|", "^") and isinstance(right, Int):
                 # Fast path: reg op imm16 uses the immediate form, skipping
                 # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
                 self.generate_expression(left)
@@ -3279,9 +3302,25 @@ class CodeGenerator:
                     self.emit("        inc ax")
                 elif operator == "-" and right.value == 1:
                     self.emit("        dec ax")
+                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF:
+                    # ``x ^ 0xFFFF`` is the ``~x`` lowering — ``not ax``
+                    # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
+                    self.emit("        not ax")
                 else:
-                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
                     self.emit(f"        {mnemonic} ax, {right.value}")
+                self.ax_clear()
+                return
+            if operator == "<<" and isinstance(right, Int):
+                shift = right.value & 0x1F
+                # Fast path: shl r16, imm — one instruction, no CX scratch.
+                self.generate_expression(left)
+                if shift == 0:
+                    pass
+                elif shift >= 16:
+                    self.emit("        xor ax, ax")
+                else:
+                    self.emit(f"        shl ax, {shift}")
                 self.ax_clear()
                 return
             if operator == ">>" and isinstance(right, Int):
@@ -3326,16 +3365,17 @@ class CodeGenerator:
                 self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
-            # Fast path for ``+``/``-``/``&`` with a pinned-register right
-            # operand: arithmetic targets the register directly, skipping
-            # the `mov cx, <reg>` load and any CX save/restore.  When the
-            # pinned register is CX, require ``left`` to be a leaf so
-            # generate_expression can't clobber it mid-compute.
-            if operator in ("+", "-", "&") and isinstance(right, Var) and right.name in self.pinned_register:
+            # Fast path for ``+``/``-``/``&``/``|``/``^`` with a
+            # pinned-register right operand: arithmetic targets the
+            # register directly, skipping the `mov cx, <reg>` load and
+            # any CX save/restore.  When the pinned register is CX,
+            # require ``left`` to be a leaf so generate_expression
+            # can't clobber it mid-compute.
+            if operator in ("+", "-", "&", "|", "^") and isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
                 if source != "cx" or isinstance(left, (Int, Var, String)):
                     self.generate_expression(left)
-                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
                     self.emit(f"        {mnemonic} ax, {source}")
                     self.ax_clear()
                     return
@@ -3355,6 +3395,14 @@ class CodeGenerator:
                 self.emit("        sub ax, cx")
             elif operator == "&":
                 self.emit("        and ax, cx")
+            elif operator == "|":
+                self.emit("        or ax, cx")
+            elif operator == "^":
+                self.emit("        xor ax, cx")
+            elif operator == "<<":
+                self.emit("        shl ax, cl")
+            elif operator == ">>":
+                self.emit("        shr ax, cl")
             elif operator == "*":
                 protect_dx = any(register == "dx" for register in self.pinned_register.values()) and self.store_target_register != "dx"
                 if protect_dx:
@@ -4265,7 +4313,7 @@ class CodeGenerator:
         #   mov ax, D / inc ax  / mov D, ax                → inc D
         #   mov ax, D / dec ax  / mov D, ax                → dec D
         #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → op D, <reg>
-        mnemonic_ops = {"add", "sub", "and"}
+        mnemonic_ops = {"add", "sub", "and", "or", "xor"}
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -4336,7 +4384,7 @@ class CodeGenerator:
                 continue
             operator = None
             rhs = None
-            for op in ("add", "sub", "and"):
+            for op in ("add", "sub", "and", "or", "xor"):
                 prefix = f"{op} ax, "
                 if b.startswith(prefix):
                     operator = op
@@ -4386,7 +4434,7 @@ class CodeGenerator:
         post-codegen.
         """
         registers = {"bx", "cx", "dx", "si", "di", "bp"}
-        ops = ("add ax,", "sub ax,", "and ax,")
+        ops = ("add ax,", "sub ax,", "and ax,", "or ax,", "xor ax,")
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -4676,10 +4724,16 @@ class Parser:
                 return Int(a * b, line=line)
             if operator == "&":
                 return Int(a & b, line=line)
+            if operator == "|":
+                return Int(a | b, line=line)
+            if operator == "^":
+                return Int(a ^ b, line=line)
             if operator == "/" and b != 0:
                 return Int(a // b, line=line)
             if operator == "%" and b != 0:
                 return Int(a % b, line=line)
+            if operator == "<<":
+                return Int(((a & 0xFFFF) << (b & 0x1F)) & 0xFFFF, line=line)
             if operator == ">>":
                 return Int((a & 0xFFFF) >> (b & 0x1F), line=line)
         # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
@@ -4777,6 +4831,30 @@ class Parser:
             left = self.fold_binop("&", left, right)
         return left
 
+    def parse_bitwise_or(self) -> Node:
+        """Parse a left-associative bitwise ``|`` expression.
+
+        Lower precedence than ``^`` and ``&``, higher than ``&&``.
+        """
+        left = self.parse_bitwise_xor()
+        while self.peek()[0] == "PIPE":
+            self.eat()
+            right = self.parse_bitwise_xor()
+            left = self.fold_binop("|", left, right)
+        return left
+
+    def parse_bitwise_xor(self) -> Node:
+        """Parse a left-associative bitwise ``^`` expression.
+
+        Lower precedence than ``&``, higher than ``|``.
+        """
+        left = self.parse_bitwise_and()
+        while self.peek()[0] == "CARET":
+            self.eat()
+            right = self.parse_bitwise_and()
+            left = self.fold_binop("^", left, right)
+        return left
+
     def parse_block(self) -> list[Node]:
         """Parse statements until a closing brace and consume it.
 
@@ -4819,20 +4897,20 @@ class Parser:
         return left
 
     def parse_compound_assignment(self) -> Node:
-        """Parse a compound assignment (+=) statement.
+        """Parse a compound assignment (``+=``, ``&=``, ``|=``, ``^=``, ``<<=``, ``>>=``).
 
         Returns:
-            An AST node for the desugared assignment.
+            An AST node for the desugared assignment ``x = x op rhs``.
 
         """
         token = self.eat("IDENT")
         name = token[1]
         line = token[2]
-        self.eat("PLUS_ASSIGN")
+        op_token = self.eat()
+        operator = COMPOUND_ASSIGN_OPERATORS[op_token[0]]
         expression = self.parse_expression()
         self.eat("SEMI")
-        # Desugar: i += expr  →  i = i + expr
-        return Assign(name, BinOp("+", Var(name, line=line), expression, line=line), line=line)
+        return Assign(name, BinOp(operator, Var(name, line=line), expression, line=line), line=line)
 
     def parse_condition(self) -> Node:
         """Parse an if/while condition.
@@ -4917,13 +4995,13 @@ class Parser:
         """Parse a left-associative ``&&`` expression.
 
         Returns:
-            A ``LogicalAnd`` tree or the underlying bitwise-AND node.
+            A ``LogicalAnd`` tree or the underlying bitwise-OR node.
 
         """
-        left = self.parse_bitwise_and()
+        left = self.parse_bitwise_or()
         while self.peek()[0] == "AND_AND":
             op_token = self.eat()
-            right = self.parse_bitwise_and()
+            right = self.parse_bitwise_or()
             left = LogicalAnd(left, right, line=op_token[2])
         return left
 
@@ -4956,7 +5034,7 @@ class Parser:
         return node
 
     def parse_shift(self) -> Node:
-        """Parse a shift expression (``>>``).
+        """Parse a shift expression (``<<`` and ``>>``).
 
         Higher precedence than comparison, lower than additive — matches
         C's precedence order.
@@ -5036,6 +5114,12 @@ class Parser:
         if token[0] == "NOT":
             self.eat()
             return BinOp("==", self.parse_primary(), Int(0, line=line), line=line)
+        if token[0] == "TILDE":
+            self.eat()
+            operand = self.parse_primary()
+            if isinstance(operand, Int):
+                return Int(operand.value ^ 0xFFFF, line=line)
+            return BinOp("^", operand, Int(0xFFFF, line=line), line=line)
         if token[0] == "MINUS":
             self.eat()
             operand = self.parse_primary()
@@ -5129,7 +5213,7 @@ class Parser:
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":
                 return self.parse_assignment()
-            if next_kind == "PLUS_ASSIGN":
+            if next_kind in COMPOUND_ASSIGN_OPERATORS:
                 return self.parse_compound_assignment()
             if next_kind == "LBRACKET":
                 return self.parse_index_assignment()
