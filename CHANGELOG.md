@@ -8,6 +8,8 @@ at the time.
 
 ### [2026-04-17](https://github.com/bboe/BBoeOS/compare/9dfd6d8...main)
 
+- cc.py: file-scope (global) variables. Declare a scalar (`int counter;`), a sized byte buffer (`char name[64];`), a sized word buffer (`int table[16];`), or an initialized array (`int fib[] = {1, 1, 2, 3, 5};`) at top level. Storage emits as `_g_<name>` at program tail; locals and parameters shadow globals (error on overlap). Global `char` arrays use byte-granular element access, `int` arrays use word-granular. `sizeof(global_array)` folds to a compile-time constant. New `gdemo.c` / `gtable.c` smoke tests exercise scalar mutation from a helper, sized char/int buffers, initialized tables, and sizeof
+- asm.asm: `resolve_value` now parses `*` alongside `+`/`-`/`/`, so `times (N)*2 db 0` (cc.py's byte-count expression for uninitialized int globals) assembles byte-identically under the self-hosted assembler
 - Convert `edit` from assembly to C; retire `src/asm/edit.asm`
 - Add `EDIT_BUFFER_BASE`, `EDIT_BUFFER_SIZE`, `EDIT_KILL_BUFFER`, `EDIT_KILL_BUFFER_SIZE` constants (fixed addresses replace the former float-on-`program_end` gap buffer)
 - cc.py fix: `peephole_double_jump` now keeps `.L1:` when other jumps still target it; deleting it stranded the top-of-loop `jCC` that guards `while (cond)` with `break`

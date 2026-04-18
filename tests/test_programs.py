@@ -52,6 +52,8 @@ TESTS: list[ProgramTest] = [
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
+    ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
+    ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
