@@ -369,17 +369,6 @@ KEYWORDS = frozenset({
 
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
-REGISTER_PARENT = {
-    "ah": "ax",
-    "al": "ax",
-    "bh": "bx",
-    "bl": "bx",
-    "ch": "cx",
-    "cl": "cx",
-    "dh": "dx",
-    "dl": "dx",
-}
-
 SHIFT_OPERATORS = frozenset({"SHR"})
 
 TOKEN_PATTERN = re.compile(
@@ -496,6 +485,10 @@ class CodeGenerator:
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
+        "EDIT_BUFFER_BASE",
+        "EDIT_BUFFER_SIZE",
+        "EDIT_KILL_BUFFER",
+        "EDIT_KILL_BUFFER_SIZE",
         "ERROR_EXISTS",
         "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",
@@ -538,10 +531,13 @@ class CodeGenerator:
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
-        # ``char`` locals are stored via word-sized ``mov [addr], ax``;
-        # allocating them as 1 byte would let the high byte spill into
-        # an adjacent stack slot.  Round up to a word so each local
-        # occupies its own aligned slot.
+        # ``char`` locals share the word-sized store/load codepaths
+        # the rest of codegen uses (``mov [addr], ax`` / ``mov ax,
+        # [addr]`` plus ``xor ah, ah``), so each char gets a full
+        # word.  Switching to byte slots would require a parallel
+        # ``mov byte`` / ``mov al`` codepath in every emitter — not
+        # done because the savings are small (mainly the ``xor ah,
+        # ah`` zero-extend) and the duplication isn't worth it.
         "char": 2,
         "char*": 2,
         "int": 2,
@@ -568,15 +564,83 @@ class CodeGenerator:
         self.loop_continue_labels: list[str] = []
         self.loop_end_labels: list[str] = []
         self.pinned_register: dict[str, str] = {}
-        self.register_cache: dict[tuple[str, int], str] = {}
         self.required_includes: set[str] = set()
-        self.spill_stack: list[tuple[str, int]] = []
+        self.store_target_register: str | None = None
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
+
+    def _analyze_user_function_conventions(self, functions: list[Node], /) -> None:
+        """Pre-compute each user function's pinned-param register map.
+
+        Runs the same pin-selection logic that :meth:`generate_function`
+        uses, but purely analytically — no code is emitted.  The result
+        populates :attr:`user_function_pin_params` so call-site emission
+        knows which registers every callee expects.
+
+        A function also qualifies for the register calling convention
+        (added to :attr:`register_convention_functions`) when every
+        call to it in the program passes only simple arguments (``Int``,
+        ``String``, or ``Var``).  Complex-expression arguments would
+        require ordering complex eval against register-moves without
+        clobbering caller pins, so those callees fall back to the
+        stack convention.
+        """
+        self.user_function_pin_params: dict[str, dict[int, str]] = {}
+        self.register_convention_functions: set[str] = set()
+
+        for function in functions:
+            if function.name == "main":
+                continue
+            self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
+            assignments = self._select_auto_pin_candidates(body=function.body, parameters=function.params)
+            param_pins: dict[int, str] = {}
+            for index, param in enumerate(function.params):
+                if param.name in assignments:
+                    param_pins[index] = assignments[param.name]
+            self.user_function_pin_params[function.name] = param_pins
+
+        has_complex_call: dict[str, bool] = dict.fromkeys(self.user_functions, False)
+
+        def visit(node: Node) -> None:
+            if isinstance(node, Call) and node.name in self.user_functions and any(not self._is_simple_arg(arg) for arg in node.args):
+                has_complex_call[node.name] = True
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            visit(item)
+
+        for function in functions:
+            for statement in function.body:
+                visit(statement)
+
+        for name, pins in self.user_function_pin_params.items():
+            if pins and not has_complex_call.get(name):
+                self.register_convention_functions.add(name)
+
+    def _arg_pinned_sources(self, arg: Node, /) -> set[str]:
+        """Return caller-pinned registers read while evaluating *arg*.
+
+        Used by :meth:`_emit_register_arg_moves` to schedule arg loads
+        without overwriting a register that another arg still needs.
+        Walks ``Var``/``BinOp`` recursively; non-leaf nodes outside
+        the simple-arg shape contribute no sources (and would be
+        rejected by :meth:`_is_simple_arg` upstream anyway).
+        """
+        if isinstance(arg, Var):
+            if arg.name in self.pinned_register:
+                return {self.pinned_register[arg.name]}
+            return set()
+        if isinstance(arg, BinOp):
+            return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
+        return set()
 
     @staticmethod
     def _byte_index_base_key(node: Index, /) -> str:
@@ -625,35 +689,92 @@ class CodeGenerator:
             message = f"undefined variable: {name}"
             raise CompileError(message, line=line)
 
+    def _collect_constant_references(self, node: Node, /) -> set[str]:
+        """Return every NAMED_CONSTANT name referenced inside *node*.
+
+        Used by callers of :meth:`_constant_expression` to register
+        ``%include`` requirements for constants that need them.  Only
+        descends through the same node shapes :meth:`_constant_expression`
+        accepts, so the result matches what was actually inlined.
+        """
+        if isinstance(node, Var) and node.name in self.NAMED_CONSTANTS:
+            return {node.name}
+        if isinstance(node, BinOp):
+            return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
+        return set()
+
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
 
-        Recognizes bare ``NAMED_CONSTANT`` references, constant aliases,
-        and ``(NAMED_CONSTANT|alias) +/- Int`` arithmetic.  Returns
-        the NASM expression string (e.g. ``"BUFFER"``, ``"BUFFER+128"``,
-        or ``"BUFFER+128+22"``) or ``None``.
+        Recognizes integer literals, ``NAMED_CONSTANT`` references,
+        constant aliases, and arbitrarily-nested ``+``/``-``/``*``
+        combinations of those.  Returns a NASM expression string (e.g.
+        ``"BUFFER"``, ``"(BUFFER+128)"``, or
+        ``"((O_WRONLY+O_CREAT)+O_TRUNC)"``) that the assembler folds at
+        link time, or ``None`` if any leaf is not constant.
         """
+        if isinstance(init, Int):
+            return str(init.value)
         if isinstance(init, Var):
             if init.name in self.NAMED_CONSTANTS:
                 return init.name
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
-        if isinstance(init, BinOp) and init.op in ("+", "-") and isinstance(init.right, Int) and isinstance(init.left, Var):
-            base = None
-            if init.left.name in self.NAMED_CONSTANTS:
-                base = init.left.name
-            elif init.left.name in self.constant_aliases:
-                base = self.constant_aliases[init.left.name]
-            if base is not None:
-                op = "+" if init.op == "+" else "-"
-                return f"{base}{op}{init.right.value}"
+            return None
+        if isinstance(init, BinOp) and init.op in ("+", "-", "*"):
+            left = self._constant_expression(init.left)
+            right = self._constant_expression(init.right)
+            if left is not None and right is not None:
+                return f"({left}{init.op}{right})"
         return None
 
-    def _emit_byte_index_bx(self, node: Index, /) -> str:
-        """Load the base pointer of a byte-indexed node into BX.
+    def _dispatch_chain_var(self, statement: If, /) -> str | None:
+        """Return the local var name shared by an if-else dispatch chain.
 
-        Returns the NASM memory operand (e.g. ``byte [bx+12]`` or
-        ``byte [bx]``) suitable for use in a ``cmp`` instruction.
+        A chain is two or more nested ``if (var op literal) … else if
+        (var op literal) …`` clauses on the same memory-resident
+        local, where each comparison is one of ``==``/``!=``/``<``/
+        ``<=``/``>``/``>=`` and the variable always sits on the left.
+        Pinned vars, constant aliases, and array bases are excluded —
+        their compares already avoid the memory operand.
+
+        Returns the variable's name when hoisting it into AX would
+        let two or more comparisons collapse to ``cmp ax, imm``.
+        Returns ``None`` for unrelated ifs and single comparisons
+        (where the hoist would only break even).
+        """
+        target: str | None = None
+        chain_length = 0
+        current: Node | None = statement
+        while isinstance(current, If):
+            condition = current.cond
+            if not (isinstance(condition, BinOp) and condition.op in ("==", "!=", "<", "<=", ">", ">=")):
+                break
+            if not (isinstance(condition.left, Var) and isinstance(condition.right, Int)):
+                break
+            name = condition.left.name
+            if name not in self.locals:
+                break
+            if name in self.pinned_register or name in self.constant_aliases or name in self.variable_arrays:
+                break
+            if self.variable_types.get(name) == "unsigned long":
+                break
+            if target is None:
+                target = name
+            elif target != name:
+                break
+            chain_length += 1
+            else_body = current.else_body
+            if else_body is None or len(else_body) != 1:
+                break
+            current = else_body[0]
+        return target if chain_length >= 2 else None
+
+    def _emit_byte_index_si(self, node: Index, /) -> str:
+        """Load the base pointer of a byte-indexed node into SI.
+
+        Returns the NASM memory operand (e.g. ``byte [si+12]`` or
+        ``byte [si]``) suitable for use in a ``cmp`` instruction.
         Prefers direct addressing when the base is a constant.
         """
         direct = self._byte_index_direct(node)
@@ -661,8 +782,68 @@ class CodeGenerator:
             return f"byte [{direct}]"
         vname = node.name
         offset = node.index.value
-        self._emit_load_var(vname)
-        return f"byte [bx+{offset}]" if offset else "byte [bx]"
+        self._emit_load_var(vname, register="si")
+        return f"byte [si+{offset}]" if offset else "byte [si]"
+
+    def _emit_constant_base_index_addr(
+        self,
+        *,
+        const_base: str,
+        index: Node,
+        is_byte: bool,
+        preserve_ax: bool,
+    ) -> str:
+        """Set up ``[CONST + disp + si]`` addressing for a constant-base index.
+
+        Folds a trailing ``±Int`` off a ``Var ± Int`` index into the
+        displacement so ``buf[gap_start - 1]`` becomes
+        ``[EDIT_BUFFER_BASE-1+si]`` after a single
+        ``mov si, [_l_gap_start]``.  Byte-indexed references skip the
+        load entirely when the index variable is pinned to DI or BX
+        (``[CONST+di]`` / ``[CONST+bx]`` are valid 8086 addressing);
+        BP-pinned vars don't qualify because BP would resolve through
+        SS, not DS, and CX/DX aren't general index registers in real
+        mode either.  This BX/DI restriction is what
+        :meth:`_select_auto_pin_candidates` reads via
+        ``index_uses`` to keep heavily-subscripted vars off BP.
+
+        When *preserve_ax* is True, any path that evaluates the index
+        through AX pushes/pops AX so the caller's value survives.
+        """
+        element_size = 1 if is_byte else 2
+        displacement = 0
+        if isinstance(index, BinOp) and index.op in ("+", "-") and isinstance(index.right, Int):
+            sign = 1 if index.op == "+" else -1
+            displacement = sign * index.right.value * element_size
+            index = index.left
+        base_register = "si"
+        if isinstance(index, Int):
+            displacement += index.value * element_size
+            self.emit("        xor si, si")
+        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
+            base_register = self.pinned_register[index.name]
+        elif isinstance(index, Var) and index.name in self.pinned_register:
+            self.emit(f"        mov si, {self.pinned_register[index.name]}")
+            if not is_byte:
+                self.emit("        add si, si")
+        elif isinstance(index, Var) and index.name in self.locals:
+            self.emit(f"        mov si, [{self._local_address(index.name)}]")
+            if not is_byte:
+                self.emit("        add si, si")
+        else:
+            if preserve_ax:
+                self.emit("        push ax")
+            self.generate_expression(index)
+            if not is_byte:
+                self.emit("        add ax, ax")
+            self.emit("        mov si, ax")
+            if preserve_ax:
+                self.emit("        pop ax")
+        addr = const_base
+        if displacement != 0:
+            addr += f"{displacement:+d}"
+        addr += f"+{base_register}"
+        return addr
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.
@@ -812,6 +993,26 @@ class CodeGenerator:
         return isinstance(expression, BinOp) and expression.op == "%" and expression.left == base and isinstance(expression.right, Int)
 
     @staticmethod
+    def _is_simple_arg(node: Node, /) -> bool:
+        """Return True if a call argument is safe for the register calling convention.
+
+        "Safe" means :meth:`_emit_register_arg_single` can evaluate it
+        without clobbering registers that another arg still needs.
+        The base case is ``Int``/``String``/``Var`` (a single ``mov``
+        from immediate/memory/pinned-reg).  ``BinOp(+/-, leaf, leaf)``
+        is also safe: ``generate_expression`` handles those via the
+        ``add ax, [mem]``/``sub ax, imm`` fast paths, which only touch
+        AX.  Inter-arg conflicts are checked separately at codegen
+        time by the topological ordering in
+        :meth:`_emit_register_arg_moves`.
+        """
+        if isinstance(node, (Int, String, Var)):
+            return True
+        if isinstance(node, BinOp) and node.op in ("+", "-"):
+            return isinstance(node.left, (Int, String, Var)) and isinstance(node.right, (Int, String, Var))
+        return False
+
+    @staticmethod
     def _is_simple_printf(node: Node, /) -> bool:
         """Return True if *node* is ``printf(<literal with no '%'>)``.
 
@@ -858,6 +1059,128 @@ class CodeGenerator:
         """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
         return _ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
 
+    def _emit_push_arg(self, arg: Node, /) -> None:
+        """Push a single argument onto the stack, preferring compact forms.
+
+        Immediates, string labels, NAMED_CONSTANTs, constant aliases,
+        and pinned-register variables all avoid the ``mov ax, X / push
+        ax`` pair.  Any other form falls back to ``generate_expression``
+        followed by ``push ax``.
+        """
+        if isinstance(arg, Int):
+            self.emit(f"        push {arg.value}")
+        elif isinstance(arg, String):
+            label = self.new_string_label(arg.content)
+            self.emit(f"        push {label}")
+        elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
+            self.emit_constant_reference(arg.name)
+            self.emit(f"        push {arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.constant_aliases:
+            self.emit(f"        push {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var) and arg.name in self.pinned_register:
+            self.emit(f"        push {self.pinned_register[arg.name]}")
+        else:
+            self.generate_expression(arg)
+            self.emit("        push ax")
+
+    def _emit_register_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
+        """Emit ``mov`` instructions that place args in target registers.
+
+        Each item carries a ``sources`` set of caller-pinned registers
+        it reads (``{caller_pin}`` for simple ``Var`` args,
+        recursively-collected for ``BinOp`` args, empty otherwise).
+        The topological loop picks an item whose target register is
+        not in any other item's source set, which guarantees that
+        emitting the item won't trash a value another item still
+        needs.  When two simple args form a read/write cycle
+        (``mov bx, di`` / ``mov di, bx``), the first item's source is
+        copied through AX to break it.  ``BinOp`` args participating
+        in a cycle would need a stack temp that the current cdecl-
+        fallback never has to emit; we raise a ``CompileError`` so
+        the caller can be reshaped instead.
+        """
+        items: list[dict] = []
+        for target, arg in register_args:
+            sources = self._arg_pinned_sources(arg)
+            primary_source: str | None = None
+            if isinstance(arg, Var) and arg.name in self.pinned_register:
+                primary_source = self.pinned_register[arg.name]
+            items.append({"target": target, "arg": arg, "source": primary_source, "sources": sources})
+        while items:
+            progress_index = None
+            for index, item in enumerate(items):
+                target = item["target"]
+                blocked = any(j != index and target in other["sources"] for j, other in enumerate(items))
+                if not blocked:
+                    progress_index = index
+                    break
+            if progress_index is not None:
+                item = items.pop(progress_index)
+                self._emit_register_arg_single(target=item["target"], arg=item["arg"], source=item["source"])
+                continue
+            # Cycle break: only the simple-Var case supports the AX
+            # spill (the BinOp path can't reroute its operand reads).
+            item = items[0]
+            if not isinstance(item["arg"], Var) or item["source"] is None:
+                message = "register-convention call has a cyclic register dependency that involves a complex argument"
+                raise CompileError(message, line=getattr(item["arg"], "line", None))
+            source = item["source"]
+            self.emit(f"        mov ax, {source}")
+            for other in items:
+                if source in other["sources"]:
+                    other["sources"] = {register if register != source else "ax" for register in other["sources"]}
+                    if other["source"] == source:
+                        other["source"] = "ax"
+                        other["arg"] = None  # mark as "load from ax"
+
+    def _emit_register_arg_single(self, *, target: str, arg: Node, source: str | None) -> None:
+        """Emit a single register-arg load for :meth:`_emit_register_arg_moves`.
+
+        *source* is the register currently holding the value to move
+        (set when the original ``arg`` was a pinned-register ``Var``
+        and may have been redirected to ``ax`` after a cycle break).
+        A ``None`` *source* means read directly from the AST node.
+        """
+        if source is not None:
+            if source != target:
+                self.emit(f"        mov {target}, {source}")
+            return
+        if isinstance(arg, Int):
+            if arg.value == 0 and target != "ax":
+                self.emit(f"        xor {target}, {target}")
+            else:
+                self.emit(f"        mov {target}, {arg.value}")
+        elif isinstance(arg, String):
+            label = self.new_string_label(arg.content)
+            self.emit(f"        mov {target}, {label}")
+        elif isinstance(arg, Var) and arg.name in self.NAMED_CONSTANTS:
+            self.emit_constant_reference(arg.name)
+            self.emit(f"        mov {target}, {arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.constant_aliases:
+            self.emit(f"        mov {target}, {self.constant_aliases[arg.name]}")
+        elif isinstance(arg, Var):
+            self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
+        elif isinstance(arg, BinOp):
+            # ``_is_simple_arg`` only admits BinOp(+/-, leaf, leaf), and
+            # the topological scheduler in ``_emit_register_arg_moves``
+            # already verified that ``target`` is not read by any other
+            # pending arg.  Evaluate into AX, then move into target.
+            self.generate_expression(arg)
+            if target != "ax":
+                self.emit(f"        mov {target}, ax")
+        else:
+            message = f"register-arg target {target} given unexpected complex node {arg!r}"
+            raise CompileError(message, line=getattr(arg, "line", None))
+
+    def _pinned_registers_to_save(self, clobbers: frozenset[str], /) -> list[str]:
+        """Return the pinned registers that need push/pop around a call.
+
+        Order is deterministic (sorted) so ``push`` / ``pop`` pairs
+        nest correctly.  ``ax`` is never pinned, so never saved here.
+        """
+        pinned_set = set(self.pinned_register.values())
+        return sorted(register for register in clobbers if register in pinned_set and register != "ax")
+
     def _resolve_constant(self, name: str, /) -> str | None:
         """Return the NASM constant expression for *name*, or ``None``.
 
@@ -871,6 +1194,211 @@ class CodeGenerator:
         if name in self.NAMED_CONSTANTS:
             return name
         return None
+
+    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> dict[str, str]:
+        """Choose locals/parameters to auto-pin and match them to registers.
+
+        Body locals win slots before parameters — pinning a body local
+        lets its initializer target the register directly (avoiding the
+        store) and, when every body local fits, eliminates the frame
+        allocation entirely.  Within each class, candidates are ranked
+        by Var/Assign/Index/IndexAssign occurrence count in *body*,
+        with declaration order as the tiebreaker.  The ranked candidate
+        list is zipped with :attr:`safe_pin_registers` (already sorted
+        by ascending clobber count), so the top candidate gets the
+        cheapest register.  A pin is emitted only when the candidate's
+        reference count strictly exceeds the matched register's
+        clobber count — otherwise the ``push``/``pop`` overhead at each
+        clobbering call would swallow the savings.
+
+        Eligibility mirrors :meth:`can_auto_pin` and :meth:`scan_locals`:
+        ``unsigned long`` locals, constant aliases, and call-initialized
+        locals are skipped; array parameters are skipped as well.
+
+        Returns:
+            ``{name: register}`` for each selected pin.  Empty when no
+            candidate beats its register's clobber cost.
+
+        """
+        if not self.safe_pin_registers:
+            return {}
+
+        param_candidates: list[tuple[str, int]] = []
+        for order, param in enumerate(parameters):
+            if param.is_array:
+                continue
+            param_candidates.append((param.name, order))
+
+        body_candidates: list[tuple[str, int]] = []
+        order = 0
+
+        def collect(nodes: list[Node], *, top_level: bool) -> None:
+            nonlocal order
+            for statement in nodes:
+                if isinstance(statement, VarDecl):
+                    eligible = (
+                        statement.type_name != "unsigned long"
+                        and not (top_level and self._is_constant_alias(body=nodes, statement=statement))
+                        and not isinstance(statement.init, Call)
+                    )
+                    if eligible:
+                        body_candidates.append((statement.name, order))
+                        order += 1
+                if isinstance(statement, If):
+                    collect(statement.body, top_level=False)
+                    if statement.else_body is not None:
+                        collect(statement.else_body, top_level=False)
+                elif isinstance(statement, (DoWhile, While)):
+                    collect(statement.body, top_level=False)
+
+        collect(body, top_level=True)
+
+        counts: dict[str, int] = {}
+        index_uses: dict[str, int] = {}
+        # Per-var tallies that drive the expression-temporary check
+        # below.  ``ax_resident_uses`` counts Var refs sitting on the
+        # LEFT of a comparison whose right side is an integer literal
+        # — those are exactly the sites ``emit_comparison`` reuses an
+        # AX-resident value for via the ``ax_local`` fast path.  Right
+        # operands and non-cmp uses go to ``other_uses`` because the
+        # left operand's expression eval clobbers AX before they're
+        # reached, so they need either a memory load or a pin.
+        ax_resident_uses: dict[str, int] = {}
+        other_uses: dict[str, int] = {}
+        init_count: dict[str, int] = {}
+        init_expr: dict[str, Node] = {}
+        comparison_ops = {"==", "!=", "<", "<=", ">", ">="}
+
+        def collect_index_vars(node: Node) -> None:
+            """Tally Var occurrences inside Index/IndexAssign subscripts.
+
+            Each subscript pays a 2-byte ``mov si, bp`` penalty when
+            its index variable is BP-pinned, since BP can't index
+            DS-relative memory in real mode.  The cost-model below
+            uses this tally to decide whether a candidate's
+            BP-clobber-savings outweigh that per-subscript penalty.
+            """
+            if isinstance(node, Var):
+                index_uses[node.name] = index_uses.get(node.name, 0) + 1
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    collect_index_vars(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            collect_index_vars(item)
+
+        def count_visit(node: Node, *, role: str = "other") -> None:
+            if isinstance(node, (Var, Assign, Index, IndexAssign)):
+                counts[node.name] = counts.get(node.name, 0) + 1
+            if isinstance(node, VarDecl) and node.init is not None:
+                init_count[node.name] = init_count.get(node.name, 0) + 1
+                init_expr[node.name] = node.init
+                count_visit(node.init)
+                return
+            if isinstance(node, Assign):
+                init_count[node.name] = init_count.get(node.name, 0) + 1
+                init_expr[node.name] = node.expr
+                count_visit(node.expr)
+                return
+            if isinstance(node, Var):
+                if role == "cmp_left_imm":
+                    ax_resident_uses[node.name] = ax_resident_uses.get(node.name, 0) + 1
+                else:
+                    other_uses[node.name] = other_uses.get(node.name, 0) + 1
+            if isinstance(node, BinOp):
+                if node.op in comparison_ops:
+                    # Only the LEFT operand can reuse an AX-resident
+                    # value: the right side is loaded into CX after the
+                    # left's evaluation has overwritten AX.  Even on
+                    # the left, the fast path requires the right side
+                    # to be a constant (Int or NAMED_CONSTANT) so the
+                    # cmp can be ``cmp ax, imm`` / ``cmp ax, NAME``.
+                    right_is_const = isinstance(node.right, Int) or (
+                        isinstance(node.right, Var) and node.right.name in self.NAMED_CONSTANTS
+                    )
+                    left_role = "cmp_left_imm" if right_is_const else "other"
+                    count_visit(node.left, role=left_role)
+                    count_visit(node.right, role="other")
+                else:
+                    count_visit(node.left, role="other")
+                    count_visit(node.right, role="other")
+                return
+            if isinstance(node, (Index, IndexAssign)):
+                collect_index_vars(node.index)
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    count_visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            count_visit(item)
+
+        for statement in body:
+            count_visit(statement)
+
+        def is_expression_temporary(name: str) -> bool:
+            """Skip pinning vars whose value lives in AX between assignment and consumer.
+
+            A var assigned exactly once from a non-trivial expression
+            (Call/Index/BinOp — all leave the value in AX) and consumed
+            only as the LEFT operand of a comparison against an integer
+            literal naturally lives in AX through its lifetime.
+            ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
+            those uses without re-loading the value, so pinning the
+            var would only add a redundant ``mov pin, ax`` after the
+            assignment.  Vars used as right-of-cmp or in arithmetic
+            still benefit from a pin (the left operand's eval clobbers
+            AX before reaching them) so they're left alone here.
+            """
+            if init_count.get(name, 0) != 1:
+                return False
+            if other_uses.get(name, 0) != 0:
+                return False
+            if ax_resident_uses.get(name, 0) == 0:
+                return False
+            return isinstance(init_expr.get(name), (Call, Index, BinOp))
+
+        def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
+            return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
+
+        combined = rank(body_candidates) + rank(param_candidates)
+        # Drop expression-temporary vars: pinning them adds a 2-byte
+        # ``mov pin, ax`` after their single complex-expression
+        # initializer without shrinking the comparisons that follow
+        # (those already work against AX).
+        combined = [item for item in combined if not is_expression_temporary(item[0])]
+        assignments: dict[str, str] = {}
+        available = list(self.safe_pin_registers)
+        for name, _ in combined:
+            if not available:
+                break
+            non_bp = [register for register in available if register != "bp"]
+            best_other = min(non_bp, key=lambda register: self.register_clobber_counts.get(register, 0)) if non_bp else None
+            # Decide BP vs the cheapest non-BP register when both are
+            # still available.  BP avoids push/pop at every callee
+            # that clobbers ``best_other`` (2 bytes each), but adds a
+            # 2-byte ``mov si, bp`` to every subscript reference.
+            # Choose whichever side wins by raw byte count.
+            if "bp" in available and best_other is not None:
+                bp_savings = self.register_clobber_counts.get(best_other, 0)
+                bp_penalty = index_uses.get(name, 0)
+                chosen = "bp" if bp_savings > bp_penalty else best_other
+            elif "bp" in available:
+                chosen = "bp"
+            elif best_other is not None:
+                chosen = best_other
+            else:
+                break
+            refs = counts.get(name, 0)
+            if refs > self.register_clobber_counts.get(chosen, 0):
+                assignments[name] = chosen
+                available.remove(chosen)
+            else:
+                break
+        return assignments
 
     @staticmethod
     def _statement_references(node: Node, name: str, /) -> bool:
@@ -934,7 +1462,7 @@ class CodeGenerator:
                     b_lit = b_right.value if isinstance(b_right, Int) else None
                     if a_lit is not None and b_lit is not None:
                         self.validate_comparison_types(a_left, a_right)
-                        operand = self._emit_byte_index_bx(a_left)
+                        operand = self._emit_byte_index_si(a_left)
                         word_mem = operand.replace("byte ", "word ")
                         word_val = (b_lit << 8) | a_lit
                         self.emit(f"        cmp {word_mem}, 0x{word_val:04x}")
@@ -949,10 +1477,10 @@ class CodeGenerator:
                         and b_right.index.value == a_right.index.value + 1
                     ):
                         self.validate_comparison_types(a_left, a_right)
-                        left_operand = self._emit_byte_index_bx(a_left)
+                        left_operand = self._emit_byte_index_si(a_left)
                         left_mem = left_operand.replace("byte ", "word ")
                         self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
-                        right_operand = self._emit_byte_index_bx(a_right)
+                        right_operand = self._emit_byte_index_si(a_right)
                         right_mem = right_operand.replace("byte ", "word ")
                         self.emit(f"        cmp ax, {right_mem.removeprefix('word ')}")
                         self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
@@ -1037,23 +1565,6 @@ class CodeGenerator:
         if isinstance(last, If) and last.else_body is not None:
             return CodeGenerator.always_exits(last.body) and CodeGenerator.always_exits(last.else_body)
         return False
-
-    def auto_spill(self, *, clobbers: frozenset[str]) -> None:
-        """Spill cached registers that overlap with the clobber set.
-
-        Pushes values onto the stack. Spills AX-parented entries first
-        so AX is available as scratch for spilling other registers.
-        """
-        to_spill = [(key, register) for key, register in self.register_cache.items() if REGISTER_PARENT[register] in clobbers]
-        if not to_spill:
-            return
-        to_spill.sort(key=lambda entry: REGISTER_PARENT[entry[1]] != "ax")
-        for key, register in to_spill:
-            if register != "al":
-                self.emit(f"        mov al, {register}")
-            self.emit("        push ax")
-            self.spill_stack.append(key)
-            del self.register_cache[key]
 
     def ax_clear(self) -> None:
         """Clear AX tracking state."""
@@ -1175,6 +1686,7 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=arguments[0], register="bx")
         self._emit_syscall("IO_FSTAT")
         self.emit("        xor ah, ah")
+        self.ax_clear()
 
     def builtin_getchar(self, arguments: list[Node], /) -> None:
         """Generate code for the getchar() builtin.
@@ -1278,8 +1790,10 @@ class CodeGenerator:
         name_argument = arguments[0]
         flags_argument = arguments[1]
         self.emit_si_from_argument(name_argument)
-        if isinstance(flags_argument, Int) or (isinstance(flags_argument, Var) and flags_argument.name in self.NAMED_CONSTANTS):
-            self.emit(f"        mov al, {flags_argument.value if isinstance(flags_argument, Int) else flags_argument.name}")
+        if (flags_expr := self._constant_expression(flags_argument)) is not None:
+            for name in self._collect_constant_references(flags_argument):
+                self.emit_constant_reference(name)
+            self.emit(f"        mov al, {flags_expr}")
         else:
             self.generate_expression(flags_argument)
         if len(arguments) == 3:
@@ -1597,36 +2111,48 @@ class CodeGenerator:
         return not isinstance(init, Call)
 
     def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
-        """Return the subset of REGISTER_POOL safe to pin variables to in *body*.
+        """Return the pinnable register pool ordered by clobber cost.
 
-        A pinned variable held in a register that a later builtin call
-        overwrites would be stale when next read, since the compiler
-        doesn't spill pinned vars across builtin calls.  Limiting pins
-        to registers that survive every call avoids that hazard.
+        All registers in the pool are pinnable; :meth:`generate_call`
+        wraps each call with ``push``/``pop`` for any caller pin the
+        callee clobbers.  Ordering by clobber count so that the first
+        (most-referenced) candidate lands on the cheapest register.
+        The per-function counts are memoised on
+        :attr:`register_clobber_counts` so the cost model in
+        :meth:`_select_auto_pin_candidates` can reuse them.
 
-        BX is additionally excluded when the body contains any subscript
-        expression: subscript codegen uses BX as a scratch register
-        (``_emit_load_var`` into BX, then ``add bx, <index>``), which
-        clobbers any pinned variable held there.  The clobber is not
-        obvious from the source because later reads/writes of the
-        variable emit ``mov bx, bx`` or ``inc bx`` on the stale BX.
+        ``main`` (recognised by :attr:`elide_frame`) extends the base
+        pool with BP — it doesn't need BP as a frame pointer and
+        every callee preserves BP across calls (builtins via the
+        kernel's ``pusha``/``popa`` syscall wrapper, user functions
+        via the standard ``push bp`` / ``pop bp`` prologue).  That
+        gives main a fifth register at zero clobber cost, perfect
+        for a high-traffic flag (``dirty``) or scroll counter
+        (``view_line``).
+
+        Subscript codegen uses SI as its scratch register; SI isn't
+        in the pool so no extra exclusion is needed for subscript
+        presence.
         """
-        clobbered: set[str] = set()
-        has_subscript = False
+        pool = (*self.REGISTER_POOL, "bp") if self.elide_frame else self.REGISTER_POOL
+        clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
         def visit(node: Node) -> None:
-            nonlocal has_subscript
-            if isinstance(node, (Index, IndexAssign)):
-                has_subscript = True
             if isinstance(node, Call):
                 if node.name in self.user_functions:
-                    # User function calls clobber all registers.
-                    clobbered.update(self.REGISTER_POOL)
+                    # User functions follow the standard cdecl prologue
+                    # (``push bp / mov bp, sp / … / pop bp``) which
+                    # preserves the caller's BP, so BP is omitted from
+                    # the user-call clobber set even when it's pinned.
+                    for register in self.REGISTER_POOL:
+                        clobber_counts[register] += 1
                 else:
                     if node.name not in self.BUILTIN_CLOBBERS:
                         message = f"unknown function: {node.name}"
                         raise CompileError(message, line=node.line)
-                    clobbered.update(self.BUILTIN_CLOBBERS[node.name])
+                    for register in self.BUILTIN_CLOBBERS[node.name]:
+                        if register in clobber_counts:
+                            clobber_counts[register] += 1
             for slot in getattr(type(node), "__slots__", ()):
                 child = getattr(node, slot, None)
                 if isinstance(child, Node):
@@ -1638,9 +2164,18 @@ class CodeGenerator:
 
         for statement in body:
             visit(statement)
-        if has_subscript:
-            clobbered.add("bx")
-        return tuple(register for register in self.REGISTER_POOL if register not in clobbered)
+        self.register_clobber_counts = clobber_counts
+        pool_index = {register: index for index, register in enumerate(pool)}
+        # Sort by clobber count, then declaration order — but force BP
+        # to the tail of the list.  BP can't be used as an index
+        # register for DS-relative addressing in real mode (every
+        # ``buffer[bp_var]`` access pays a 2-byte ``mov si, bp``), so
+        # the highest-traffic candidate (which usually IS an index
+        # base) should land on a BX/DI/CX/DX slot first.  BP picks up
+        # whatever lower-priority scalar candidate is left over —
+        # zero-clobber across every callee makes it pure profit
+        # there.
+        return tuple(sorted(pool, key=lambda register: (clobber_counts[register], pool_index[register])))
 
     def discover_virtual_long_locals(self, statements: list[Node], /) -> None:
         """Identify ``unsigned long`` locals whose DX:AX value can stay live.
@@ -1753,7 +2288,9 @@ class CodeGenerator:
             self.emit(f"        mov cx, {right.value}")
         elif isinstance(right, Var) and right.name in self.pinned_register:
             self.generate_expression(left)
-            self.emit(f"        mov cx, {self.pinned_register[right.name]}")
+            source_register = self.pinned_register[right.name]
+            if source_register != "cx":
+                self.emit(f"        mov cx, {source_register}")
         elif isinstance(right, Var) and right.name in self.locals:
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self._local_address(right.name)}]")
@@ -1810,7 +2347,7 @@ class CodeGenerator:
             # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
             # the zero-extend into AX.
             if self._is_byte_index(left):
-                operand = self._emit_byte_index_bx(left)
+                operand = self._emit_byte_index_si(left)
                 if is_zero:
                     self.emit(f"        cmp {operand}, 0")
                 else:
@@ -1827,12 +2364,35 @@ class CodeGenerator:
             # compare directly against the right byte in memory.  Saves
             # the zero-extend, push/pop, and CX round-trip.
             if self._is_byte_index(left) and self._is_byte_index(right):
-                left_operand = self._emit_byte_index_bx(left)
+                left_operand = self._emit_byte_index_si(left)
                 left_mem = left_operand.removeprefix("byte ")
                 self.emit(f"        mov al, {left_mem}")
-                right_operand = self._emit_byte_index_bx(right)
+                right_operand = self._emit_byte_index_si(right)
                 right_mem = right_operand.removeprefix("byte ")
                 self.emit(f"        cmp al, {right_mem}")
+                return
+            # Fast path: right is a pinned register variable.  Compare
+            # AX against it directly, skipping the CX load and any
+            # push/pop protection.  When the pinned register is CX we
+            # additionally require ``left`` to be a leaf expression so
+            # generate_expression can't clobber CX mid-compare.
+            if isinstance(right, Var) and right.name in self.pinned_register:
+                source = self.pinned_register[right.name]
+                if source != "cx" or isinstance(left, (Int, Var, String)):
+                    self.generate_expression(left)
+                    self.emit(f"        cmp ax, {source}")
+                    return
+            # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
+            # skips the CX load entirely.
+            if (
+                isinstance(right, Var)
+                and right.name in self.locals
+                and right.name not in self.pinned_register
+                and right.name not in self.variable_arrays
+                and self.variable_types.get(right.name) != "unsigned long"
+            ):
+                self.generate_expression(left)
+                self.emit(f"        cmp ax, [{self._local_address(right.name)}]")
                 return
             # emit_binary_operator_operands clobbers CX; save it when a
             # pinned variable lives there (push/pop don't modify flags,
@@ -1978,8 +2538,8 @@ class CodeGenerator:
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
-            if isinstance(argument, BinOp):
-                self.emit_constant_reference(argument.left.name)
+            for name in self._collect_constant_references(argument):
+                self.emit_constant_reference(name)
             self.emit(f"        mov {register}, {constant_expr}")
         else:
             self.generate_expression(argument)
@@ -1993,8 +2553,8 @@ class CodeGenerator:
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
-            if isinstance(argument, BinOp):
-                self.emit_constant_reference(argument.left.name)
+            for name in self._collect_constant_references(argument):
+                self.emit_constant_reference(name)
             self.emit(f"        mov si, {constant_expr}")
         else:
             self.generate_expression(argument)
@@ -2042,10 +2602,17 @@ class CodeGenerator:
             if isinstance(expression, Var) and expression.name in self.NAMED_CONSTANTS:
                 self.emit(f"        mov {register}, {expression.name}")
                 return
+        # Tell nested expression handling that the pinned destination
+        # register (if any) will be overwritten at end of this store, so
+        # they don't need to push/pop it to preserve the old value.
+        previous_store_target = self.store_target_register
+        self.store_target_register = self.pinned_register.get(name)
         self.generate_expression(expression)
+        self.store_target_register = previous_store_target
         if name in self.pinned_register:
             register = self.pinned_register[name]
-            self.emit(f"        mov {register}, ax")
+            if register != "ax":
+                self.emit(f"        mov {register}, ax")
         else:
             self.emit(f"        mov [{self._local_address(name)}], ax")
         self.ax_is_byte = False
@@ -2082,6 +2649,7 @@ class CodeGenerator:
         for function in ast.functions:
             if function.name != "main":
                 self.user_functions[function.name] = len(function.params)
+        self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
         main_func = None
         helpers: list[Node] = []
@@ -2198,9 +2766,6 @@ class CodeGenerator:
                     die_length = string_byte_length(die_message.content)
                     self.visible_vars.add(statement.name)
                     handler = getattr(self, f"builtin_{init.name}")
-                    clobbers = self.BUILTIN_CLOBBERS[init.name]
-                    if self.register_cache and clobbers:
-                        self.auto_spill(clobbers=clobbers)
                     handler(init.args, fuse_die=(die_label, die_length))
                     self.ax_clear()
                     i += 2
@@ -2216,9 +2781,6 @@ class CodeGenerator:
                 if self._is_zero_exit_if(next_stmt):
                     self.visible_vars.add(statement.name)
                     handler = getattr(self, f"builtin_{init.name}")
-                    clobbers = self.BUILTIN_CLOBBERS[init.name]
-                    if self.register_cache and clobbers:
-                        self.auto_spill(clobbers=clobbers)
                     handler(init.args, fuse_exit=True)
                     self.ax_is_byte = True
                     self.ax_local = statement.name
@@ -2229,8 +2791,16 @@ class CodeGenerator:
         if saved is not None:
             self.visible_vars = saved
 
-    def generate_call(self, statement: Call, /) -> None:
+    def generate_call(self, statement: Call, /, *, discard_return: bool = False) -> None:
         """Generate code for a function call statement.
+
+        When *discard_return* is True (the call is at statement level
+        with its return value unused) and three or more pinned
+        registers need preserving, swaps the per-register
+        ``push``/``pop`` pair for a single byte ``pusha``/``popa`` —
+        2 bytes instead of 2 * N.  Pusha/popa restores AX too, so the
+        return value would be lost; only the discard case can take
+        this shortcut.
 
         Raises:
             CompileError: If the called function is not a known builtin
@@ -2244,16 +2814,35 @@ class CodeGenerator:
             if len(arguments) != expected:
                 message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
                 raise CompileError(message, line=statement.line)
-            # Invalidate all register caches — user functions clobber everything.
-            self.register_cache.clear()
-            self.spill_stack.clear()
-            # Push arguments right-to-left (C convention: first arg at [bp+4]).
-            for arg in reversed(arguments):
-                self.generate_expression(arg)
-                self.emit("        push ax")
+            clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
+            saved = self._pinned_registers_to_save(clobbers)
+            use_pusha = discard_return and len(saved) >= 3
+            if use_pusha:
+                self.emit("        pusha")
+            else:
+                for register in saved:
+                    self.emit(f"        push {register}")
+            callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
+            register_args: list[tuple[str, Node]] = []
+            stack_args: list[Node] = []
+            for index, arg in enumerate(arguments):
+                if index in callee_pins:
+                    register_args.append((callee_pins[index], arg))
+                else:
+                    stack_args.append(arg)
+            # Push stack-bound arguments right-to-left (C convention).
+            for arg in reversed(stack_args):
+                self._emit_push_arg(arg)
+            # Load register-bound arguments with topological ordering.
+            self._emit_register_arg_moves(register_args)
             self.emit(f"        call {name}")
-            if arguments:
-                self.emit(f"        add sp, {len(arguments) * 2}")
+            if stack_args:
+                self.emit(f"        add sp, {len(stack_args) * 2}")
+            if use_pusha:
+                self.emit("        popa")
+            else:
+                for register in reversed(saved):
+                    self.emit(f"        pop {register}")
             self.ax_clear()
             return
         handler = getattr(self, f"builtin_{name}", None)
@@ -2261,9 +2850,19 @@ class CodeGenerator:
             message = f"unknown function: {name}"
             raise CompileError(message, line=statement.line)
         clobbers = self.BUILTIN_CLOBBERS[name]
-        if self.register_cache and clobbers:
-            self.auto_spill(clobbers=clobbers)
+        saved = self._pinned_registers_to_save(clobbers)
+        use_pusha = discard_return and len(saved) >= 3
+        if use_pusha:
+            self.emit("        pusha")
+        else:
+            for register in saved:
+                self.emit(f"        push {register}")
         handler(arguments)
+        if use_pusha:
+            self.emit("        popa")
+        else:
+            for register in reversed(saved):
+                self.emit(f"        pop {register}")
 
     def generate_do_while(self, statement: DoWhile, /) -> None:
         """Generate assembly for a do...while loop.
@@ -2341,16 +2940,7 @@ class CodeGenerator:
             if isinstance(index_expression, Int) and vname in self.array_labels:
                 offset = index_expression.value * 2
                 label = self.array_labels[vname]
-                cache_key = (label, offset)
-                if cache_key in self.register_cache:
-                    register = self.register_cache[cache_key]
-                    if register != "al":
-                        self.emit(f"        mov al, {register}")
-                    self.emit("        xor ah, ah")
-                elif self.spill_stack and self.spill_stack[-1] == cache_key:
-                    self.spill_stack.pop()
-                    self.emit("        pop ax")
-                elif offset:
+                if offset:
                     self.emit(f"        mov ax, [{label}+{offset}]")
                 else:
                     self.emit(f"        mov ax, [{label}]")
@@ -2368,46 +2958,62 @@ class CodeGenerator:
                     else:
                         self.emit(f"        mov ax, [{addr}]")
                 else:
-                    self._emit_load_var(vname)
+                    self._emit_load_var(vname, register="si")
                     if is_byte:
                         if offset:
-                            self.emit(f"        mov al, [bx+{offset}]")
+                            self.emit(f"        mov al, [si+{offset}]")
                         else:
-                            self.emit("        mov al, [bx]")
+                            self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
                     elif offset:
-                        self.emit(f"        mov ax, [bx+{offset}]")
+                        self.emit(f"        mov ax, [si+{offset}]")
                     else:
-                        self.emit("        mov ax, [bx]")
+                        self.emit("        mov ax, [si]")
             else:
                 is_byte = self._is_byte_var(vname)
-                self._emit_load_var(vname)
-                # If the index is a pinned variable and the access is
-                # byte-sized, load it without clobbering BX.
-                if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
-                    self.emit(f"        add bx, {self.pinned_register[index_expression.name]}")
-                elif isinstance(index_expression, (Var, Int)):
-                    # Simple Var/Int load doesn't touch BX, so skip the
-                    # push/pop round-trip.
-                    self.generate_expression(index_expression)
-                    if not is_byte:
-                        self.emit("        add ax, ax")
-                    self.emit("        add bx, ax")
+                const_base = self._resolve_constant(vname)
+                if const_base is not None:
+                    self.emit_constant_reference(vname)
+                    addr = self._emit_constant_base_index_addr(
+                        const_base=const_base,
+                        index=index_expression,
+                        is_byte=is_byte,
+                        preserve_ax=False,
+                    )
+                    if is_byte:
+                        self.emit(f"        mov al, [{addr}]")
+                        self.emit("        xor ah, ah")
+                    else:
+                        self.emit(f"        mov ax, [{addr}]")
+                    self.ax_clear()
                 else:
-                    self.emit("        push bx")
-                    self.generate_expression(index_expression)
-                    if not is_byte:
-                        self.emit("        add ax, ax")
-                    self.emit("        pop bx")
-                    self.emit("        add bx, ax")
-                if is_byte:
-                    self.emit("        mov al, [bx]")
-                    self.emit("        xor ah, ah")
-                else:
-                    self.emit("        mov ax, [bx]")
-                # AX now holds the subscript result, not the index —
-                # invalidate the tracking that generate_expression set.
-                self.ax_clear()
+                    self._emit_load_var(vname, register="si")
+                    # If the index is a pinned variable and the access is
+                    # byte-sized, load it without clobbering SI.
+                    if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
+                        self.emit(f"        add si, {self.pinned_register[index_expression.name]}")
+                    elif isinstance(index_expression, (Var, Int)):
+                        # Simple Var/Int load doesn't touch SI, so skip the
+                        # push/pop round-trip.
+                        self.generate_expression(index_expression)
+                        if not is_byte:
+                            self.emit("        add ax, ax")
+                        self.emit("        add si, ax")
+                    else:
+                        self.emit("        push si")
+                        self.generate_expression(index_expression)
+                        if not is_byte:
+                            self.emit("        add ax, ax")
+                        self.emit("        pop si")
+                        self.emit("        add si, ax")
+                    if is_byte:
+                        self.emit("        mov al, [si]")
+                        self.emit("        xor ah, ah")
+                    else:
+                        self.emit("        mov ax, [si]")
+                    # AX now holds the subscript result, not the index —
+                    # invalidate the tracking that generate_expression set.
+                    self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
             self.emit(f"        mov ax, {self.TYPE_SIZES[expression.type_name]}")
@@ -2422,6 +3028,17 @@ class CodeGenerator:
         elif isinstance(expression, Call):
             self.generate_call(expression)
         elif isinstance(expression, BinOp):
+            # Fold an entirely-constant subtree (named constants and
+            # integer literals) into a single ``mov ax, <expr>`` so the
+            # assembler does the arithmetic.  Without this, expressions
+            # like ``O_WRONLY + O_CREAT + O_TRUNC`` build the value at
+            # runtime via push/pop chains.
+            if (constant_expr := self._constant_expression(expression)) is not None:
+                for name in self._collect_constant_references(expression):
+                    self.emit_constant_reference(name)
+                self.emit(f"        mov ax, {constant_expr}")
+                self.ax_clear()
+                return
             operator, left, right = expression.op, expression.left, expression.right
             if operator == "%" and self._has_remainder(left, right):
                 self.emit("        mov ax, dx")
@@ -2483,11 +3100,27 @@ class CodeGenerator:
                 self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
+            # Fast path for ``+``/``-``/``&`` with a pinned-register right
+            # operand: arithmetic targets the register directly, skipping
+            # the `mov cx, <reg>` load and any CX save/restore.  When the
+            # pinned register is CX, require ``left`` to be a leaf so
+            # generate_expression can't clobber it mid-compute.
+            if operator in ("+", "-", "&") and isinstance(right, Var) and right.name in self.pinned_register:
+                source = self.pinned_register[right.name]
+                if source != "cx" or isinstance(left, (Int, Var, String)):
+                    self.generate_expression(left)
+                    mnemonic = {"+": "add", "-": "sub", "&": "and"}[operator]
+                    self.emit(f"        {mnemonic} ax, {source}")
+                    self.ax_clear()
+                    return
             cx_pinned_var = next(
                 (name for name, register in self.pinned_register.items() if register == "cx"),
                 None,
             )
-            if cx_pinned_var is not None:
+            # Skip the CX save when an enclosing store is about to
+            # overwrite CX anyway — its original value is dead.
+            protect_cx = cx_pinned_var is not None and self.store_target_register != "cx"
+            if protect_cx:
                 self.emit("        push cx")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
@@ -2497,23 +3130,25 @@ class CodeGenerator:
             elif operator == "&":
                 self.emit("        and ax, cx")
             elif operator == "*":
-                dx_pinned = any(register == "dx" for register in self.pinned_register.values())
-                if dx_pinned:
+                protect_dx = any(register == "dx" for register in self.pinned_register.values()) and self.store_target_register != "dx"
+                if protect_dx:
                     self.emit("        push dx")
                 self.emit("        mul cx")
-                if dx_pinned:
+                if protect_dx:
                     self.emit("        pop dx")
                 self.division_remainder = None
             elif operator in {"/", "%"}:
                 dx_pinned = any(register == "dx" for register in self.pinned_register.values())
-                if dx_pinned:
+                protect_dx = dx_pinned and self.store_target_register != "dx"
+                if protect_dx:
                     self.emit("        push dx")
                 self.emit("        xor dx, dx")
                 self.emit("        div cx")
                 if operator == "%":
                     self.emit("        mov ax, dx")
-                if dx_pinned:
+                if protect_dx:
                     self.emit("        pop dx")
+                if dx_pinned:
                     self.division_remainder = None
                 else:
                     self.division_remainder = (left, right)
@@ -2523,7 +3158,7 @@ class CodeGenerator:
             else:
                 message = f"unknown operator: {operator}"
                 raise CompileError(message, line=expression.line)
-            if cx_pinned_var is not None:
+            if protect_cx:
                 self.emit("        pop cx")
             self.ax_clear()
         else:
@@ -2537,6 +3172,7 @@ class CodeGenerator:
         body = function.body
         self.array_labels = {}
         self.array_sizes = {}
+        self.auto_pin_candidates: dict[str, str] = {}
         self.ax_clear()
         self.constant_aliases = {}
         self.elide_frame = name == "main"
@@ -2544,8 +3180,6 @@ class CodeGenerator:
         self.live_long_local = None
         self.locals = {}
         self.pinned_register = {}
-        self.register_cache = {}
-        self.spill_stack = []
         self.variable_arrays = set()
         self.variable_types = {}
         self.virtual_long_locals = set()
@@ -2571,20 +3205,19 @@ class CodeGenerator:
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
+        param_candidates = parameters if name != "main" else []
+        self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
 
         self.scan_locals(body)
 
-        # Non-main: pin parameters to any remaining safe registers after
-        # scan_locals has assigned top-level and body locals.  Parameters
-        # that don't fit stay on the stack at [bp+N].
+        # Non-main: pin parameters that won a candidate slot but weren't
+        # claimed during scan_locals.  Parameters that don't fit stay on
+        # the stack at [bp+N].
         if name != "main":
-            used = set(self.pinned_register.values())
             for param in parameters:
-                for register in self.safe_pin_registers:
-                    if register not in used:
-                        self.pinned_register[param.name] = register
-                        used.add(register)
-                        break
+                if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
+                    continue
+                self.pinned_register[param.name] = self.auto_pin_candidates[param.name]
 
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
@@ -2593,18 +3226,32 @@ class CodeGenerator:
             self.visible_vars.add(param.name)
         self.visible_vars.update(self.pinned_register)
 
+        # Register calling convention: pinned parameters arrive in their
+        # target register (caller loaded them before the call), and
+        # non-pinned parameters keep compact [bp+N] offsets that skip
+        # register-passed slots.
+        register_convention = name != "main" and name in self.register_convention_functions
+        if register_convention:
+            stack_position = 0
+            for param in parameters:
+                if param.name in self.pinned_register:
+                    continue
+                self.locals[param.name] = -(4 + stack_position * 2)
+                stack_position += 1
+
         self.emit(f"{name}:")
         if not self.elide_frame:
             self.emit("        push bp")
             self.emit("        mov bp, sp")
             if self.frame_size > 0:
                 self.emit(f"        sub sp, {self.frame_size}")
-            # Load pinned parameters from caller-pushed stack slots
-            # into their registers.
-            for i, param in enumerate(parameters):
-                if param.name in self.pinned_register:
-                    register = self.pinned_register[param.name]
-                    self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
+            if not register_convention:
+                # Load pinned parameters from caller-pushed stack slots
+                # into their registers.
+                for i, param in enumerate(parameters):
+                    if param.name in self.pinned_register:
+                        register = self.pinned_register[param.name]
+                        self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -2629,32 +3276,50 @@ class CodeGenerator:
         self.emit()
 
     def generate_if(self, statement: If, /) -> None:
-        """Generate assembly for an if statement."""
+        """Generate assembly for an if statement.
+
+        Before emitting anything, checks whether this if begins a
+        ``var op literal`` dispatch chain over a memory-resident local
+        (e.g. ``if (c == 1) … else if (c == 2) …``).  If so and AX
+        does not already hold the local, hoists a single
+        ``mov ax, [_l_var]`` so every subsequent comparison along the
+        chain uses the 3-byte ``cmp ax, imm`` form instead of a
+        6-byte ``cmp word [mem], imm``.  The else-label snapshot logic
+        below preserves AX-tracking through each branch so the chain
+        keeps reusing the same load.
+        """
         condition, body, else_body = statement.cond, statement.body, statement.else_body
+        chain_var = self._dispatch_chain_var(statement)
+        if chain_var is not None and chain_var != self.ax_local:
+            self.emit(f"        mov ax, [{self._local_address(chain_var)}]")
+            self.ax_local = chain_var
+            self.ax_is_byte = False
         label_index = self.new_label()
-        saved_ax = (self.ax_local, self.ax_is_byte)
         if else_body is not None:
             self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
+            # Snapshot AX tracking at the point the fall-through (else)
+            # path actually resumes — before body generation disturbs it.
+            post_condition_ax = (self.ax_local, self.ax_is_byte)
             self.generate_body(body, scoped=True)
             if_exits = self.always_exits(body)
             if not if_exits:
                 self.emit(f"        jmp .if_{label_index}_end")
             self.emit(f".if_{label_index}_else:")
-            # On the else path, AX is unchanged (comparison doesn't modify it).
-            self.ax_local, self.ax_is_byte = saved_ax
+            self.ax_local, self.ax_is_byte = post_condition_ax
             self.generate_body(else_body, scoped=True)
             if not if_exits or not self.always_exits(else_body):
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
             self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_end", context="if")
+            post_condition_ax = (self.ax_local, self.ax_is_byte)
             self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
             # If the body always exits its enclosing block (via die,
-            # exit, return, or break), AX is unchanged on the
-            # fall-through path.
+            # exit, return, or break), the fall-through path resumes
+            # with AX tracking as of the end of condition evaluation.
             if self.always_exits(body):
-                self.ax_local, self.ax_is_byte = saved_ax
+                self.ax_local, self.ax_is_byte = post_condition_ax
             else:
                 self.ax_clear()
 
@@ -2672,8 +3337,8 @@ class CodeGenerator:
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
             else:
-                self._emit_load_var(name)
-                addr = f"bx+{offset}" if offset else "bx"
+                self._emit_load_var(name, register="si")
+                addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
             else:
@@ -2686,39 +3351,55 @@ class CodeGenerator:
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
             else:
-                self._emit_load_var(name)
-                addr = f"bx+{offset}" if offset else "bx"
+                self._emit_load_var(name, register="si")
+                addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov [{addr}], al")
             else:
                 self.emit(f"        mov [{addr}], ax")
         else:
-            # Variable index: compute address in BX, then store.
-            self.generate_expression(statement.expr)
-            self.emit("        push ax")
-            self._emit_load_var(name)
-            # If the index is a simple Var/Int, evaluating it doesn't
-            # clobber BX, so we can skip the push/pop round-trip.
-            if isinstance(statement.index, (Var, Int)):
-                self.generate_expression(statement.index)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        add bx, ax")
+            const_base = self._resolve_constant(name)
+            if const_base is not None:
+                self.emit_constant_reference(name)
+                self.generate_expression(statement.expr)
+                addr = self._emit_constant_base_index_addr(
+                    const_base=const_base,
+                    index=statement.index,
+                    is_byte=is_byte,
+                    preserve_ax=True,
+                )
+                if is_byte:
+                    self.emit(f"        mov [{addr}], al")
+                else:
+                    self.emit(f"        mov [{addr}], ax")
+                self.ax_clear()
             else:
-                self.emit("        push bx")
-                self.generate_expression(statement.index)
-                if not is_byte:
-                    self.emit("        add ax, ax")
-                self.emit("        pop bx")
-                self.emit("        add bx, ax")
-            self.emit("        pop ax")
-            # After pop, AX holds the value being stored, not the index —
-            # invalidate the ax_local tracking that generate_expression set.
-            self.ax_clear()
-            if is_byte:
-                self.emit("        mov [bx], al")
-            else:
-                self.emit("        mov [bx], ax")
+                # Variable index: compute address in SI, then store.
+                self.generate_expression(statement.expr)
+                self.emit("        push ax")
+                self._emit_load_var(name, register="si")
+                # If the index is a simple Var/Int, evaluating it doesn't
+                # clobber SI, so we can skip the push/pop round-trip.
+                if isinstance(statement.index, (Var, Int)):
+                    self.generate_expression(statement.index)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        add si, ax")
+                else:
+                    self.emit("        push si")
+                    self.generate_expression(statement.index)
+                    if not is_byte:
+                        self.emit("        add ax, ax")
+                    self.emit("        pop si")
+                    self.emit("        add si, ax")
+                self.emit("        pop ax")
+                # After pop, AX holds the value being stored, not the index —
+                # invalidate the ax_local tracking that generate_expression set.
+                self.ax_clear()
+                if is_byte:
+                    self.emit("        mov [si], al")
+                else:
+                    self.emit("        mov [si], ax")
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
@@ -2835,7 +3516,7 @@ class CodeGenerator:
         elif isinstance(statement, Return):
             self.generate_return(statement)
         elif isinstance(statement, Call):
-            self.generate_call(statement)
+            self.generate_call(statement, discard_return=True)
             self.ax_clear()
         else:
             message = f"unknown statement: {type(statement).__name__}"
@@ -2902,11 +3583,76 @@ class CodeGenerator:
         self.peephole_memory_arithmetic()
         self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
+        self.peephole_register_arithmetic()
+        self.peephole_index_through_memory()
+        self.peephole_fold_zero_save()
+        self.peephole_compare_through_register()
         self.peephole_dead_ah()
         self.peephole_unused_cld()
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
         self.peephole_redundant_bx()
+
+    def peephole_compare_through_register(self) -> None:
+        """Fold ``mov ax, <reg> / cmp ax, <X>`` into ``cmp <reg>, <X>``.
+
+        When the cmp's left operand is already in a 16-bit register,
+        the rebinding through AX is just to satisfy the existing
+        ``emit_comparison`` template that always lands the left
+        operand in AX.  ``cmp r16, r16`` and ``cmp r16, [mem]`` are
+        the same length as the AX-flavored forms, so deleting the
+        2-byte ``mov ax, <reg>`` is pure win.
+
+        Only applied when the instruction after the cmp is a
+        conditional jump — that's the only context where AX's value
+        is provably dead after the cmp (the cmp itself doesn't write
+        AX, but subsequent fall-through code might consume the
+        rebinding).
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        jump_prefixes = (
+            "ja ",
+            "jae ",
+            "jb ",
+            "jbe ",
+            "jc ",
+            "je ",
+            "jg ",
+            "jge ",
+            "jl ",
+            "jle ",
+            "jnc ",
+            "jne ",
+            "jno ",
+            "jnp ",
+            "jns ",
+            "jnz ",
+            "jo ",
+            "jp ",
+            "js ",
+            "jz ",
+        )
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if source not in registers:
+                i += 1
+                continue
+            if not b.startswith("cmp ax, "):
+                i += 1
+                continue
+            if not any(c.startswith(prefix) for prefix in jump_prefixes):
+                i += 1
+                continue
+            rhs = b[len("cmp ax, ") :]
+            self.lines[i] = f"        cmp {source}, {rhs}"
+            del self.lines[i + 1]
 
     def peephole_constant_to_register(self) -> None:
         """Fold ``mov ax, imm / mov <reg>, ax`` into a direct load.
@@ -3020,6 +3766,8 @@ class CodeGenerator:
         """Collapse conditional-jump-over-unconditional-jump sequences.
 
         Replaces ``jCC .L1 / jmp .L2 / .L1:`` with ``jCC_inv .L2``.
+        The ``.L1:`` label is kept when other jumps still target it;
+        deleting it would leave those references dangling.
         """
         i = 0
         while i < len(self.lines) - 2:
@@ -3030,8 +3778,16 @@ class CodeGenerator:
             parts = a.split()
             if len(parts) == 2 and parts[0] in JUMP_INVERT and b.startswith("jmp ") and c == f"{parts[1]}:":
                 target = b.split()[1]
+                label = parts[1]
                 self.lines[i] = f"        {JUMP_INVERT[parts[0]]} {target}"
-                del self.lines[i + 1 : i + 3]
+                label_referenced_elsewhere = any(
+                    j != i and j != i + 1 and j != i + 2 and (tokens := self.lines[j].split()) and len(tokens) >= 2 and tokens[-1] == label
+                    for j in range(len(self.lines))
+                )
+                if label_referenced_elsewhere:
+                    del self.lines[i + 1]
+                else:
+                    del self.lines[i + 1 : i + 3]
                 continue
             i += 1
 
@@ -3052,6 +3808,83 @@ class CodeGenerator:
                 del self.lines[i]
                 continue
             i += 1
+
+    def peephole_fold_zero_save(self) -> None:
+        """Fuse ``xor reg, reg / push reg`` into ``push 0``.
+
+        When ``cursor_column = 0`` is immediately followed by code that
+        clobbers the pinned CX as scratch (and therefore needs to
+        push/pop it), the compiler emits ``xor cx, cx / push cx``
+        followed later by ``pop cx`` to restore zero.  The two-byte
+        ``xor cx, cx`` plus one-byte ``push cx`` (3 bytes) collapses
+        to a single two-byte ``push 0`` (``6A 00``) — the body and the
+        eventual ``pop cx`` are unchanged, since the popped value is
+        still zero.
+
+        The xor's flag-side-effects are dead in every emission path
+        cc.py produces here: ``push cx`` doesn't read flags and the
+        intervening body overwrites them before the next conditional
+        jump.
+        """
+        registers = {"ax", "bx", "cx", "dx", "si", "di", "bp"}
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a.startswith("xor ") and " " in a[4:]:
+                parts = a[4:].split(", ")
+                if len(parts) == 2 and parts[0] == parts[1] and parts[0] in registers and b == f"push {parts[0]}":
+                    self.lines[i] = "        push 0"
+                    del self.lines[i + 1]
+                    continue
+            i += 1
+
+    def peephole_index_through_memory(self) -> None:
+        """Use ``add si, [mem]`` instead of staging through AX.
+
+        Recognizes::
+
+            push ax
+            mov si, [BASE]
+            mov ax, [INDEX]
+            add si, ax
+            pop ax
+
+        and rewrites it as::
+
+            mov si, [BASE]
+            add si, [INDEX]
+
+        Safe because the eight-byte form ``add si, [mem]`` is a single
+        8086 instruction and AX is never disturbed.  Saves the
+        push/pop AX pair (2 bytes) and the redundant ``mov ax, [mem]``
+        (3 bytes) for a net 3-byte gain (the new ``add si, [mem]`` is
+        2 bytes longer than the old ``add si, ax``).
+        """
+        i = 0
+        while i < len(self.lines) - 4:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            d = self.lines[i + 3].strip()
+            e = self.lines[i + 4].strip()
+            if a != "push ax" or e != "pop ax":
+                i += 1
+                continue
+            if not (b.startswith("mov si, [") and b.endswith("]")):
+                i += 1
+                continue
+            if not (c.startswith("mov ax, [") and c.endswith("]")):
+                i += 1
+                continue
+            if d != "add si, ax":
+                i += 1
+                continue
+            mem_operand = c[len("mov ax, ") :]
+            self.lines[i] = self.lines[i + 1]
+            self.lines[i + 1] = f"        add si, {mem_operand}"
+            del self.lines[i + 2 : i + 5]
+            continue
 
     def peephole_jump_next(self) -> None:
         """Remove unconditional jumps to the immediately following label."""
@@ -3175,8 +4008,13 @@ class CodeGenerator:
             del self.lines[i + 1 : i + 4]
             continue
         # Second pass: 3-instruction pattern without CX intermediate.
-        # ``mov ax, D / (add|sub) ax, imm / mov D, ax`` → ``(add|sub) D, imm``
-        # or ``inc D`` / ``dec D`` when imm is 1.
+        # Handles four shapes of ``D = D <op> Y`` where D is memory or
+        # a 16-bit register:
+        #   mov ax, D / (add|sub|and) ax, imm  / mov D, ax → op D, imm
+        #   mov ax, D / inc ax  / mov D, ax                → inc D
+        #   mov ax, D / dec ax  / mov D, ax                → dec D
+        #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → op D, <reg>
+        mnemonic_ops = {"add", "sub", "and"}
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -3192,77 +4030,235 @@ class CodeGenerator:
                 i += 1
                 continue
             operator = None
-            immediate = None
+            operand = None
             if b == "inc ax":
-                operator = "add"
-                immediate = "1"
+                operator = "inc"
+                operand = ""
             elif b == "dec ax":
-                operator = "sub"
-                immediate = "1"
-            elif b.startswith("add ax, "):
-                operator = "add"
-                immediate = b[len("add ax, ") :]
-            elif b.startswith("sub ax, "):
-                operator = "sub"
-                immediate = b[len("sub ax, ") :]
-            if operator is None or immediate.startswith("["):
+                operator = "dec"
+                operand = ""
+            else:
+                for op in mnemonic_ops:
+                    prefix = f"{op} ax, "
+                    if b.startswith(prefix):
+                        operator = op
+                        operand = b[len(prefix) :]
+                        break
+            if operator is None:
+                i += 1
+                continue
+            # Reject memory operands — would need swapping to ``mov ax, [X] /
+            # op D, ax`` and handled by the next pass instead.
+            if operand.startswith("["):
                 i += 1
                 continue
             if c != f"mov {source}, ax":
                 i += 1
                 continue
             width = "word " if is_memory else ""
-            if immediate == "1":
+            if operator in ("inc", "dec"):
+                self.lines[i] = f"        {operator} {width}{source}"
+            elif operand == "1" and operator in ("add", "sub"):
                 instruction = "inc" if operator == "add" else "dec"
                 self.lines[i] = f"        {instruction} {width}{source}"
             else:
-                self.lines[i] = f"        {operator} {width}{source}, {immediate}"
+                self.lines[i] = f"        {operator} {width}{source}, {operand}"
             del self.lines[i + 1 : i + 3]
+            continue
+        # Third pass: ``D = D <op> [X]`` with both sides in memory.
+        # ``mov ax, D / op ax, [X] / mov D, ax`` collapses to
+        # ``mov ax, [X] / op D, ax`` (10 bytes → 7 for word ops).  Only
+        # safe when D is memory (the target of ``op D, ax`` must be
+        # addressable as r/m16) and D ≠ X (overlapping would read the
+        # stale value after the op writes D).
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if not (source.startswith("[") and source.endswith("]")):
+                i += 1
+                continue
+            operator = None
+            rhs = None
+            for op in ("add", "sub", "and"):
+                prefix = f"{op} ax, "
+                if b.startswith(prefix):
+                    operator = op
+                    rhs = b[len(prefix) :]
+                    break
+            if operator is None:
+                i += 1
+                continue
+            if not (rhs.startswith("[") and rhs.endswith("]")):
+                i += 1
+                continue
+            if rhs == source:
+                i += 1
+                continue
+            if c != f"mov {source}, ax":
+                i += 1
+                continue
+            self.lines[i] = f"        mov ax, {rhs}"
+            self.lines[i + 1] = f"        {operator} {source}, ax"
+            del self.lines[i + 2]
             continue
 
     def peephole_redundant_bx(self) -> None:
-        """Remove ``mov bx, X`` when BX already holds X.
+        """Remove redundant ``mov bx, X`` / ``mov si, X`` reloads.
 
-        Tracks the value in BX across instructions that don't clobber
-        it (comparisons, conditional jumps).  Resets on labels, calls,
-        interrupts, and any instruction that writes to BX.
+        Tracks the value in each scratch register across instructions
+        that don't clobber it (comparisons, conditional jumps).  Resets
+        on labels, calls, interrupts, and any instruction that writes
+        to the register.  BX and SI are both subscript scratch targets
+        so either can linger with a useful value across sites.
         """
-        bx_value: str | None = None
+        self._dedup_register_reloads("bx")
+        self._dedup_register_reloads("si")
+
+    def peephole_register_arithmetic(self) -> None:
+        """Compute directly into a pinned-local target register.
+
+        Turns ``mov ax, X / <op> ax, Y / mov <reg>, ax`` into
+        ``mov <reg>, X / <op> <reg>, Y`` when <reg> isn't already
+        read by Y (e.g., ``sub reg, reg`` would zero it).
+
+        Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
+        arithmetic result is being piped straight into a register
+        (typically a pinned local).  After the transform AX retains
+        whatever it held before the sequence, which is safe because
+        pinned-register locals aren't referenced via AX tracking
+        post-codegen.
+        """
+        registers = {"bx", "cx", "dx", "si", "di", "bp"}
+        ops = ("add ax,", "sub ax,", "and ax,")
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            if not a.startswith("mov ax, "):
+                i += 1
+                continue
+            if not any(b.startswith(op) for op in ops):
+                i += 1
+                continue
+            if not c.startswith("mov "):
+                i += 1
+                continue
+            parts = c[len("mov ") :].split(", ")
+            if len(parts) != 2 or parts[1] != "ax" or parts[0] not in registers:
+                i += 1
+                continue
+            target = parts[0]
+            # Skip when the operand of the arithmetic references the
+            # target register — rewriting would make it self-referential.
+            operand = b.split(", ", 1)[1]
+            if target in operand.split():
+                i += 1
+                continue
+            source = a[len("mov ax, ") :]
+            if target in source.split():
+                i += 1
+                continue
+            new_op = b.replace("ax,", f"{target},", 1)
+            self.lines[i] = f"        mov {target}, {source}"
+            self.lines[i + 1] = f"        {new_op}"
+            del self.lines[i + 2]
+            continue
+
+    def _dedup_register_reloads(self, register: str, /) -> None:
+        value: str | None = None
         result: list[str] = []
+        clobber_prefixes = (
+            f"add {register}",
+            "call ",
+            "int ",
+            "lodsb",
+            "lodsw",
+            "movsb",
+            "movsw",
+            f"pop {register}",
+            "rep ",
+            f"sub {register}",
+            "xchg",
+            f"xor {register}",
+        )
         for line in self.lines:
             stripped = line.strip()
-            if stripped.startswith("mov bx, "):
-                source = stripped[len("mov bx, ") :]
-                if source == bx_value:
+            if stripped.startswith(f"mov {register}, "):
+                source = stripped[len(f"mov {register}, ") :]
+                if source == value:
                     continue  # redundant — skip
-                bx_value = source
-            elif stripped.endswith(":") or stripped.startswith((
-                "add bx",
-                "call ",
-                "int ",
-                "lodsb",
-                "lodsw",
-                "movsb",
-                "movsw",
-                "pop bx",
-                "rep ",
-                "sub bx",
-                "xchg",
-                "xor bx",
-            )):
-                bx_value = None
+                value = source
+            elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
+                value = None
             result.append(line)
         self.lines = result
 
     def peephole_store_reload(self) -> None:
-        """Remove redundant store-then-reload sequences."""
+        """Remove redundant store-then-reload sequences.
+
+        Looks for ``mov [ADDR], ax`` followed (possibly across
+        AX-preserving instructions like ``cmp``, ``test``, conditional
+        jumps, or pushes/pops of non-AX registers) by ``mov ax, [ADDR]``
+        — the reload is dead.  Stops scanning when it hits an
+        instruction that could change AX, ``[ADDR]``, or control flow
+        in a way that lets a different value reach the reload.
+        """
+        skip_prefixes = (
+            "cmp ",
+            "test ",
+            "ja ",
+            "jae ",
+            "jb ",
+            "jbe ",
+            "jc ",
+            "je ",
+            "jg ",
+            "jge ",
+            "jl ",
+            "jle ",
+            "jnc ",
+            "jne ",
+            "jno ",
+            "jnp ",
+            "jns ",
+            "jnz ",
+            "jo ",
+            "jp ",
+            "js ",
+            "jz ",
+        )
+        non_ax_pushpop = {f"{op} {reg}" for op in ("push", "pop") for reg in ("bx", "cx", "dx", "si", "di", "bp")}
         i = 0
         while i < len(self.lines) - 1:
             line = self.lines[i].strip()
-            next_line = self.lines[i + 1].strip()
-            # mov [ADDR], ax  followed by  mov ax, [ADDR]  →  drop the reload
-            if line.startswith("mov [") and line.endswith("], ax") and next_line == f"mov ax, {line[4 : line.index(']') + 1]}":
-                del self.lines[i + 1]
+            if not (line.startswith("mov [") and line.endswith(("], ax", "], al"))):
+                i += 1
+                continue
+            address = line[4 : line.index("]") + 1]
+            reload_word = f"mov ax, {address}"
+            reload_byte = f"mov al, {address}"
+            j = i + 1
+            removed = False
+            while j < len(self.lines):
+                candidate = self.lines[j].strip()
+                if candidate in (reload_word, reload_byte):
+                    del self.lines[j]
+                    removed = True
+                    break
+                # AX-preserving instructions: cmp/test/Jcc and pushes/pops
+                # of registers other than AX.
+                if any(candidate.startswith(prefix) for prefix in skip_prefixes) or candidate in non_ax_pushpop:
+                    j += 1
+                    continue
+                break
+            if removed:
                 continue
             i += 1
 
@@ -3297,9 +4293,11 @@ class CodeGenerator:
         """Recursively find variable declarations.
 
         Plain ``int`` declarations are auto-pinned to a CPU register
-        (from :data:`REGISTER_POOL`, in declaration order) when a slot
-        is still available.  Call initializers stay in memory so they
-        can participate in error-fusion optimizations without
+        (from :data:`REGISTER_POOL`) when the declaration was chosen
+        by :meth:`_select_auto_pin_candidates` and a slot is still
+        available.  Slots are assigned in declaration order among
+        selected candidates.  Call initializers stay in memory so
+        they can participate in error-fusion optimizations without
         clobbering a pin.
         """
         for index, statement in enumerate(statements):
@@ -3308,16 +4306,15 @@ class CodeGenerator:
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
                     alias = self._constant_expression(statement.init)
                     self.constant_aliases[statement.name] = alias
-                    # Ensure %include is queued for the base constant.
-                    base = statement.init.name if isinstance(statement.init, Var) else statement.init.left.name
-                    include = self.NAMED_CONSTANT_INCLUDES.get(base)
-                    if include is not None:
-                        self.required_includes.add(include)
+                    for name in self._collect_constant_references(statement.init):
+                        include = self.NAMED_CONSTANT_INCLUDES.get(name)
+                        if include is not None:
+                            self.required_includes.add(include)
                     continue
-                if statement.type_name != "unsigned long":
+                if statement.type_name != "unsigned long" and statement.name in self.auto_pin_candidates:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
-                        self.pinned_register[statement.name] = self.safe_pin_registers[len(self.pinned_register)]
+                        self.pinned_register[statement.name] = self.auto_pin_candidates[statement.name]
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
@@ -3799,6 +4796,15 @@ class Parser:
         if token[0] == "NOT":
             self.eat()
             return BinOp("==", self.parse_primary(), Int(0, line=line), line=line)
+        if token[0] == "MINUS":
+            self.eat()
+            operand = self.parse_primary()
+            # Fold ``-<int>`` to a single negative ``Int`` so ``-1`` and ``-42``
+            # round-trip as literals instead of an addition node.  Runtime
+            # negation still rewrites to ``0 - x`` to reuse the subtract path.
+            if isinstance(operand, Int):
+                return Int(-operand.value, line=line)
+            return BinOp("-", Int(0, line=line), operand, line=line)
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()

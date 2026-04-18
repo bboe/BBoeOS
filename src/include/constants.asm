@@ -8,6 +8,10 @@
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTOR 16
         %assign DIRECTORY_SECTORS 3
+        %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
+        %assign EDIT_BUFFER_SIZE 5200h       ; Gap buffer size (EDIT_KILL_BUFFER - EDIT_BUFFER_BASE)
+        %assign EDIT_KILL_BUFFER 7200h       ; Kill buffer start (7C00h - EDIT_KILL_BUFFER_SIZE)
+        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Kill buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable

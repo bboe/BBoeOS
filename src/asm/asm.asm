@@ -324,16 +324,27 @@ encode_rel8_jump:
         pop bx
         jc .long_form                  ; unknown target -> stay near
 
-        ;; Compute displacement using near instruction size.
-        ;; Near jcc = 4 bytes (0F 8x rel16), near jmp = 3 bytes (E9 rel16).
+        ;; Forward jumps already assume the near size in the target's
+        ;; symbol-table address; shrinking moves the target by the same
+        ;; amount so the displacement is unchanged.  Backward targets,
+        ;; though, are fixed — shrinking brings the post-jump address
+        ;; closer by 1 (jmp) or 2 (jcc) bytes, which may be exactly
+        ;; what a boundary-case `-128` displacement needs.  Pick the
+        ;; post-shrink size to compute against: near size for forward,
+        ;; short size (2) for backward.
         mov dx, [current_address]
-        add dx, 4                      ; assume jcc
+        cmp ax, dx
+        jae .shrink_forward            ; target >= current -> forward
+        add dx, 2                      ; backward: use short size
+        jmp .shrink_check
+        .shrink_forward:
+        add dx, 4                      ; forward: assume jcc (4 bytes)
         push bp
         mov bp, sp
-        cmp byte [bp+2], 0EBh          ; saved opcode: [bp]=old_bp, [bp+2]=opcode
+        cmp byte [bp+2], 0EBh
         pop bp
         jne .shrink_check
-        dec dx                         ; jmp: 3 bytes, not 4
+        dec dx                         ; jmp: 3 bytes
         .shrink_check:
         sub ax, dx
         add ax, 128
@@ -437,6 +448,10 @@ handle_adc:
 ;;; -----------------------------------------------------------------------
 handle_add:
         call skip_ws
+        ;; Detect ``add [mem], <reg>`` (memory destination) up front so
+        ;; the register-first happy path can skip the check.
+        cmp byte [si], '['
+        je .add_mem_dst
         call parse_register    ; AL = reg, AH = size
         push ax                ; save dst reg+size
         call skip_comma
@@ -557,12 +572,47 @@ handle_add:
         call emit_byte_al
         mov al, cl
         jmp emit_byte_al
+        .add_mem_dst:
+        ;; add [disp16], r16: opcode 01 /r with mod=00 r/m=110.
+        mov al, 01h
+        jmp mem_op_reg_emit
+
+;;; -----------------------------------------------------------------------
+;;; mem_op_reg_emit: emit ``<op> [disp16], r16`` given AL = opcode.
+;;; Consumes the remaining source text: ``[disp16], <reg>``.
+;;; -----------------------------------------------------------------------
+mem_op_reg_emit:
+        push ax                        ; save opcode
+        inc si                         ; skip `[`
+        call resolve_value             ; AX = disp16
+        mov dx, ax                     ; stash disp
+        cmp byte [si], ']'
+        jne abort_unknown
+        inc si
+        call skip_comma
+        call parse_register            ; AL = reg, AH = size
+        jc abort_unknown
+        mov bl, al                     ; BL = reg field
+        pop ax                         ; AL = opcode
+        call emit_byte_al
+        mov al, bl
+        shl al, 3
+        or al, 06h                     ; modrm: mod=00, reg=src, rm=110
+        call emit_byte_al
+        mov ax, dx
+        jmp emit_word_ax
 
 ;;; -----------------------------------------------------------------------
 ;;; handle_and: and r, r / and r, imm
 ;;; -----------------------------------------------------------------------
 handle_and:
         call skip_ws
+        ;; ``and [disp16], <reg>`` uses the r/m16 destination form.
+        cmp byte [si], '['
+        jne .and_not_mem_dst
+        mov al, 21h             ; 21 /r (and r/m16, r16)
+        jmp mem_op_reg_emit
+        .and_not_mem_dst:
         call parse_register    ; AL = reg, AH = size
         push ax                ; save dst reg+size
         call skip_comma
@@ -1782,6 +1832,20 @@ handle_pop:
         jmp emit_byte_al
 
 ;;; -----------------------------------------------------------------------
+;;; handle_popa: emit single-byte popa opcode
+;;; -----------------------------------------------------------------------
+handle_popa:
+        mov al, 61h
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
+;;; handle_pusha: emit single-byte pusha opcode
+;;; -----------------------------------------------------------------------
+handle_pusha:
+        mov al, 60h
+        jmp emit_byte_al
+
+;;; -----------------------------------------------------------------------
 ;;; handle_push: push r16 / push ds / push es
 ;;; -----------------------------------------------------------------------
 handle_push:
@@ -1812,7 +1876,19 @@ handle_push:
         .push_imm16:
         pop si
         call resolve_value     ; AX = imm16
+        ;; Prefer the 2-byte sign-extended form `6A imm8` when the
+        ;; value fits in a signed byte (pass-1 references default to
+        ;; 0, which also fits).
         push ax
+        mov dx, ax
+        add dx, 80h
+        cmp dx, 0FFh
+        ja .push_imm16_long
+        mov al, 6Ah            ; push imm8 (sign-extended)
+        call emit_byte_al
+        pop ax
+        jmp emit_byte_al
+        .push_imm16_long:
         mov al, 68h            ; push imm16 opcode
         call emit_byte_al
         pop ax
@@ -1998,6 +2074,12 @@ handle_stosw:
 ;;; -----------------------------------------------------------------------
 handle_sub:
         call skip_ws
+        ;; ``sub [disp16], <reg>`` uses the r/m16 destination form.
+        cmp byte [si], '['
+        jne .sub_check_word
+        mov al, 29h             ; 29 /r (sub r/m16, r16)
+        jmp mem_op_reg_emit
+        .sub_check_word:
         ;; Detect `sub word [disp16], imm` form (only 16-bit mem-imm form
         ;; needed by self-host).
         push si
@@ -4161,7 +4243,9 @@ mnemonic_table:
         dw STR_NOT, handle_not
         dw STR_OR,  handle_or
         dw STR_POP, handle_pop
+        dw STR_POPA, handle_popa
         dw STR_PUSH, handle_push
+        dw STR_PUSHA, handle_pusha
         dw STR_REP, handle_rep
         dw STR_REPNE, handle_repne
         dw STR_RET, handle_ret
@@ -4229,7 +4313,9 @@ STR_OR      db 'or',0
 STR_ORG     db 'org',0
 STR_SHORT   db 'short',0
 STR_POP     db 'pop',0
+STR_POPA    db 'popa',0
 STR_PUSH    db 'push',0
+STR_PUSHA   db 'pusha',0
 STR_REP     db 'rep',0
 STR_REPNE   db 'repne',0
 STR_RET     db 'ret',0

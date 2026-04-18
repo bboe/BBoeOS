@@ -6,6 +6,23 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
+### [2026-04-17](https://github.com/bboe/BBoeOS/compare/9dfd6d8...main)
+
+- Convert `edit` from assembly to C; retire `src/asm/edit.asm`
+- Add `EDIT_BUFFER_BASE`, `EDIT_BUFFER_SIZE`, `EDIT_KILL_BUFFER`, `EDIT_KILL_BUFFER_SIZE` constants (fixed addresses replace the former float-on-`program_end` gap buffer)
+- cc.py fix: `peephole_double_jump` now keeps `.L1:` when other jumps still target it; deleting it stranded the top-of-loop `jCC` that guards `while (cond)` with `break`
+- cc.py fix: `generate_if` restores AX tracking to the post-condition state (not the pre-if state) on the exit-body fall-through path, so a condition that clobbers AX (e.g. `fstat(fd) & FLAG_DIRECTORY`) no longer leaves stale `ax_local` tracking pointing at the pre-if variable
+- cc.py fix: `builtin_fstat` clears AX tracking after the syscall (the syscall overwrites AX but tracking still pointed at the argument local)
+- cc.py codegen: constant-base `Index` / `IndexAssign` fold into `[CONST ± disp + bx]` addressing, so `buf[gap_start - 1]` compiles to `mov bx, [_l_gap_start] / mov al, [EDIT_BUFFER_BASE-1+bx]` instead of the old `mov bx, CONST / push / load index / pop / add / load` sequence. Shrinks edit by 173 bytes, shell by 47, ls/echo/netrecv by 2–6 each
+- cc.py codegen: auto-pin by usage count (body locals before parameters, tiebroken by declaration order). Combined with the next entry, pins the most-used locals onto the cheapest-to-save registers
+- cc.py codegen: pin aggressively and wrap each call with `push`/`pop` for any caller pin the callee clobbers. Pinning is gated by a cost model that only keeps a pin when the local's reference count strictly exceeds the matched register's clobber count. Shrinks edit by 196 bytes, shell by 21, arp/cat/cp/draw/ls by 2–14 each
+- cc.py codegen: register calling convention for user functions whose every call site passes only simple (Int/String/Var) arguments. Pinned params arrive in their assigned registers instead of being pushed and reloaded, with topological ordering (and an AX spill for cycles) to resolve source/target conflicts. Shrinks shell by 35, ping/edit/dns by 11–14 each
+- cc.py codegen: pack the auto-pin pool further. Main gets BP as a fifth slot (zero call-clobber cost since every callee preserves it, gated against BP's 2-byte-per-subscript penalty in real mode). Single-assignment "expression-temporary" vars whose only uses are left-of-cmp against a constant are dropped from the pool — their value already lives in AX through `emit_comparison`'s fast path, so pinning only adds a redundant `mov pin, ax`. Leaf-only `Var ± Int/Var` BinOps qualify as "simple args" so user functions like `buffer_character_at` keep the register calling convention even when a caller passes `offset + i`
+- cc.py codegen: hoist memory-resident locals into AX at the top of `if (var op K) … else if …` dispatch chains so subsequent comparisons collapse from `cmp word [mem], imm` to `cmp ax, imm`; fold all-constant BinOp trees into a single assembler-time expression (so `O_WRONLY + O_CREAT + O_TRUNC` is one `mov al, <expr>` instead of a runtime push/pop chain); and swap ≥3-pin push/pop dances for `pusha`/`popa` around statement-level calls whose return value is discarded
+- cc.py peephole: four new patterns — extend store/reload elimination past AX-preserving instructions (`cmp`/`test`/`Jcc`, non-AX push/pop), fold `mov ax, <reg> / cmp ax, X / jCC` into `cmp <reg>, X / jCC`, fuse `xor reg, reg / push reg` into a single `push 0`, and use `add si, [mem]` in place of the push-ax/compute/pop-ax indexing dance
+- Self-hosted assembler: add `pusha` and `popa` mnemonics so cc.py-emitted programs can be re-assembled by the in-OS assembler
+- Together these shrink edit by 130 bytes (the gap vs `archive/edit.asm` drops from +400 to +270), shell by 57, draw by 24, ping by 18, dns by 16, cp by 10, netrecv by 5, arp by 4, and a handful of 2-byte wins across cat/echo/loop/ls
+
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
 - Convert the shell, `dns`, and `ping` from assembly to C; archive each `.asm` as a same-layout reference
