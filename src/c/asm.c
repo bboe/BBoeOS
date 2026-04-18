@@ -237,6 +237,93 @@ void handle_cld() {
         "call emit_byte_al");
 }
 
+/* Conditional-jump family: each handler loads its rel8 opcode into
+   AL and hands off to ``encode_rel8_jump`` (still in the file-scope
+   asm block), which picks between short (rel8) and near (rel16)
+   encoding per jump based on the pass-1 jump-table bitmap.  Call
+   instead of tail-jump for the same bp-frame reason as the
+   zero-operand handlers.  The mnemonic table aliases STR_JAE to
+   handle_jnc, STR_JE to handle_jz, STR_JNZ to handle_jne, and now
+   STR_JC to handle_jb so the shared-body cases reuse a single C
+   function. */
+void handle_ja() {
+    asm("mov al, 77h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jb() {
+    asm("mov al, 72h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jbe() {
+    asm("mov al, 76h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jg() {
+    asm("mov al, 7Fh\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jge() {
+    asm("mov al, 7Dh\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jl() {
+    asm("mov al, 7Ch\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jle() {
+    asm("mov al, 7Eh\n"
+        "call encode_rel8_jump");
+}
+
+/* ``jmp <label>`` accepts an optional ``short`` keyword that
+   ``match_word`` peels off the front of the operand before handing
+   the real target to ``encode_rel8_jump``.  The extra SI dance
+   (push / pop around match_word) mirrors the retired inline-asm
+   version; keeping it in asm avoids leaking a C local whose
+   register pinning would make the SI shuffle more awkward. */
+void handle_jmp() {
+    asm("push si\n"
+        "call skip_ws\n"
+        "mov di, STR_SHORT\n"
+        "call match_word\n"
+        "jc .hj_no_short\n"
+        "jmp .hj_do_jmp\n"
+        ".hj_no_short:\n"
+        "pop si\n"
+        "push si\n"
+        "call skip_ws\n"
+        ".hj_do_jmp:\n"
+        "pop ax\n"
+        "mov al, 0EBh\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jnc() {
+    asm("mov al, 73h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jne() {
+    asm("mov al, 75h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jns() {
+    asm("mov al, 79h\n"
+        "call encode_rel8_jump");
+}
+
+void handle_jz() {
+    asm("mov al, 74h\n"
+        "call encode_rel8_jump");
+}
+
 void handle_lodsb() {
     asm("mov al, 0ACh\n"
         "call emit_byte_al");
@@ -245,6 +332,11 @@ void handle_lodsb() {
 void handle_lodsw() {
     asm("mov al, 0ADh\n"
         "call emit_byte_al");
+}
+
+void handle_loop() {
+    asm("mov al, 0E2h\n"
+        "call encode_rel8_jump");
 }
 
 void handle_movsb() {
@@ -1665,110 +1757,14 @@ asm(
     "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_ja\n"
+    ";;; Conditional-jump family + handle_loop + handle_jmp live in\n"
+    ";;; cc.py-emitted C functions near the top of src/c/asm.c.  Each\n"
+    ";;; handler loads its rel8 opcode into AL and ``call``s into\n"
+    ";;; ``encode_rel8_jump`` below.  mnemonic_table aliases:\n"
+    ";;; STR_JAE→handle_jnc, STR_JE→handle_jz, STR_JNZ→handle_jne,\n"
+    ";;; STR_JC→handle_jb (the retired asm defined handle_jc as a\n"
+    ";;; duplicate label on handle_jb's body).\n"
     ";;; -----------------------------------------------------------------------\n"
-    "handle_ja:\n"
-    "        mov al, 77h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jb / handle_jc\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jb:\n"
-    "handle_jc:\n"
-    "        mov al, 72h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jbe\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jbe:\n"
-    "        mov al, 76h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jg\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jg:\n"
-    "        mov al, 7Fh\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jge\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jge:\n"
-    "        mov al, 7Dh\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jl\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jl:\n"
-    "        mov al, 7Ch\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jle\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jle:\n"
-    "        mov al, 7Eh\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jnc\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jnc:\n"
-    "        mov al, 73h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jne\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jne:\n"
-    "        mov al, 75h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jns\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jns:\n"
-    "        mov al, 79h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jmp\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jmp:\n"
-    "        ;; Skip optional 'short' keyword\n"
-    "        push si\n"
-    "        call skip_ws\n"
-    "        mov di, STR_SHORT\n"
-    "        call match_word\n"
-    "        jc .no_short\n"
-    "        ;; 'short' matched, SI advanced past it\n"
-    "        jmp .do_jmp\n"
-    "        .no_short:\n"
-    "        pop si\n"
-    "        push si\n"
-    "        call skip_ws\n"
-    "        .do_jmp:\n"
-    "        pop ax                 ; discard saved SI\n"
-    "        mov al, 0EBh\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_jz\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_jz:\n"
-    "        mov al, 74h\n"
-    "        jmp encode_rel8_jump\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; handle_loop\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "handle_loop:\n"
-    "        mov al, 0E2h\n"
-    "        jmp encode_rel8_jump\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; handle_mov\n"
@@ -4452,7 +4448,7 @@ asm(
     "        dw STR_JAE, handle_jnc\n"
     "        dw STR_JB,  handle_jb\n"
     "        dw STR_JBE, handle_jbe\n"
-    "        dw STR_JC,  handle_jc\n"
+    "        dw STR_JC,  handle_jb\n"
     "        dw STR_JE,  handle_jz\n"
     "        dw STR_JG,  handle_jg\n"
     "        dw STR_JGE, handle_jge\n"
