@@ -6,6 +6,10 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
+### [2026-04-18](https://github.com/bboe/BBoeOS/compare/f208689...main)
+
+- cc.py: file-scope `asm("...")` blocks now emit before globals / strings / array data in `generate()`, instead of after.  When a file-scope asm block contains code (for example, `src/c/asm.c`'s wrapped assembler), interleaving its mutable globals with the same 4K page as hot code triggers QEMU's TCG per-page invalidation on every store — a first attempt at migrating the assembler's 33 plain globals to cc.py-declared globals produced byte-identical output but a 2× runtime slowdown on the self-hosting pass loop.  Moving the inline-asm section ahead of the data sections places cc.py's global storage at the binary's tail, clear of any code page, so the future globals migration can land without a perf hit.  Safe no-op for programs that don't use file-scope asm; `asmesc`'s layout shifts (globals now follow the `asmesc_table` block) but the program still prints `value = 7`.  All 27 self-host byte-identity tests pass
+
 ### [2026-04-17](https://github.com/bboe/BBoeOS/compare/9dfd6d8...main)
 
 - cc.py: adjacent string literals concatenate, matching standard C. `"foo" "bar"` folds to `"foobar"` at parse time — `parse_primary` (regular expressions) and `parse_top_level_declaration` (file-scope `asm(...)` argument) both loop on consecutive `STRING` tokens after the first. The headline user is `src/c/asm.c`, which is now regenerated as one `"line\n"` literal per NASM source line concatenated into a single `asm(...)` argument. clang accepts the new form, so `tests/test_cc.py`'s `CC_CHECK_SKIP` gate is dropped and `asm.c` rejoins the syntax-check suite (27 pass, up from 26). The generated binary is byte-identical to the previous phase 1 port (8255 bytes)
