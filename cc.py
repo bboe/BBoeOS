@@ -50,6 +50,8 @@ Preprocessor:
     expanded, cycles rejected.
 
 Builtins:
+    asm(literal)             -- emit NASM source verbatim (escape hatch;
+                                works at statement and file scope)
     checksum(buf, len)       -- 1's-complement checksum (for ICMP/IP)
     close(fd)                -- close a file descriptor
     datetime()               -- return unsigned seconds since 1970-01-01 UTC
@@ -225,6 +227,17 @@ class IndexAssign(Node):
     name: str
     index: Node
     expr: Node
+
+
+@dataclass(slots=True)
+class InlineAsm(Node):
+    """File-scope ``asm("...");`` directive.
+
+    The content is the raw string literal text (still carrying C
+    escape sequences); ``builtin_asm`` decodes and emits it at tail.
+    """
+
+    content: str
 
 
 @dataclass(slots=True)
@@ -482,6 +495,7 @@ class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "asm": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "checksum": frozenset({"ax", "bx", "cx", "si"}),
         "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax", "bx"}),
@@ -1346,6 +1360,8 @@ class CodeGenerator:
         byte-wide element access (``int`` arrays keep word access).
         """
         for declaration in declarations:
+            if isinstance(declaration, InlineAsm):
+                continue
             name = declaration.name
             if name in self.NAMED_CONSTANTS:
                 message = f"global '{name}' shadows a kernel constant"
@@ -1789,6 +1805,25 @@ class CodeGenerator:
         """Clear AX tracking state."""
         self.ax_is_byte = False
         self.ax_local = None
+
+    def builtin_asm(self, arguments: list[Node], /) -> None:
+        r"""Emit an inline-asm string literal verbatim.
+
+        Takes one string literal; C escape sequences (``\n``, ``\t``,
+        ``\\``, ``\x??``) are decoded, and the result is split on
+        newlines and emitted as individual lines so multi-instruction
+        blocks can be written as ``asm("mov ax, 0\nmov es, ax");``.
+        Pinned register values are conservatively assumed clobbered
+        (see ``BUILTIN_CLOBBERS``); AX tracking is invalidated.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="asm")
+        argument = arguments[0]
+        if not isinstance(argument, String):
+            message = "asm() argument must be a string literal"
+            raise CompileError(message, line=argument.line)
+        for line in _decode_string_escapes(argument.content).splitlines():
+            self.emit(line)
+        self.ax_clear()
 
     def builtin_checksum(self, arguments: list[Node], /) -> None:
         """Generate code for the checksum(buf, len) builtin.
@@ -2914,6 +2949,12 @@ class CodeGenerator:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
+        file_scope_asm = [decl for decl in ast.globals if isinstance(decl, InlineAsm)]
+        if file_scope_asm:
+            self.emit(";; --- inline asm ---")
+            for decl in file_scope_asm:
+                for line in _decode_string_escapes(decl.content).splitlines():
+                    self.emit(line)
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
@@ -5228,12 +5269,21 @@ class Parser:
         raise CompileError(message, line=token[2])
 
     def parse_top_level_declaration(self) -> Node:
-        """Parse a function definition or a file-scope variable / array.
+        """Parse a function definition, a file-scope variable / array, or a file-scope ``asm(...)``.
 
         Dispatches on the token after ``type IDENT``: ``(`` drives the
-        function path, any other token means a global declaration.
+        function path, any other token means a global declaration.  A
+        bare ``asm("...");`` at the top level is emitted verbatim into
+        the output's data tail — useful for raw tables and labels.
         """
         line = self.peek()[2]
+        if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
+            self.eat("IDENT")
+            self.eat("LPAREN")
+            string_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("SEMI")
+            return InlineAsm(string_token[1][1:-1], line=line)
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
@@ -5385,6 +5435,34 @@ def apply_defines(
         else:
             result.append((kind, text, line))
     return result
+
+
+def _decode_string_escapes(text: str, /) -> str:
+    r"""Decode every C escape sequence in *text* to its literal character.
+
+    Handles ``\n``/``\t``/``\r``/``\b``/``\0``/``\\``/``\"`` from
+    :data:`CHARACTER_ESCAPES` plus ``\xNN`` hex escapes.  Unknown
+    single-letter escapes are passed through unchanged — the NASM
+    output is the consumer, and treating them as literal escape
+    sequences for the downstream assembler keeps callers from having
+    to double-escape assembler-visible backslashes.
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "x" and i + 3 < len(text):
+                result.append(chr(int(text[i + 2 : i + 4], 16)))
+                i += 4
+                continue
+            if nxt in CHARACTER_ESCAPES:
+                result.append(chr(CHARACTER_ESCAPES[nxt]))
+                i += 2
+                continue
+        result.append(text[i])
+        i += 1
+    return "".join(result)
 
 
 def decode_first_character(text: str, /, *, line: int | None = None) -> int:
