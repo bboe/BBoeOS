@@ -79,6 +79,170 @@ char *include_push_arg;
    index into it directly. */
 char *source_buffer;
 
+/* Invoked through an inline-asm trampoline that stashes SI into
+   ``error_word`` before jumping here (``abort_unknown:`` in the
+   file-scope asm block).  Prints the offending source line from
+   ``line_buffer`` together with the bad token, then exits. */
+void abort_unknown_impl() {
+    asm("push ds\npop es");
+    printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
+           line_buffer, error_word);
+    /* ``exit()`` would be cleaner but clang sees the stdlib prototype
+       via tests/bboeos.h and rejects the zero-argument form.  Jumping
+       to FUNCTION_EXIT keeps cc.py and clang both happy. */
+    asm("jmp FUNCTION_EXIT");
+}
+
+/* Populate ``source_prefix`` with the directory portion of
+   ``source_name`` (everything up to and including the last ``/``).
+   Empty when the source has no directory.  Bounded by the
+   ``source_prefix[32]`` buffer — deeper include paths would overflow
+   silently, which matches the original inline-asm behavior. */
+void compute_source_prefix() {
+    int end = 0;
+    int i = 0;
+    while (source_name[i] != '\0') {
+        if (source_name[i] == '/') {
+            end = i + 1;
+        }
+        i = i + 1;
+    }
+    int j = 0;
+    while (j < end) {
+        source_prefix[j] = source_name[j];
+        j = j + 1;
+    }
+    source_prefix[end] = '\0';
+}
+
+/* Error reporters called while ES is still pointed at the symbol-
+   table segment.  Each resets ES to DS before handing off to cc.py's
+   ``die()`` builtin (which jumps to FUNCTION_DIE with the string
+   preloaded).  ``die_error_pass1_io`` / ``die_error_pass1_iter`` are
+   called from ``run_pass1`` when do_pass signals an I/O error or the
+   jump-size convergence fails to settle; ``die_symbol_overflow`` is
+   the jmp-target of the symbol_set overflow branch. */
+void die_error_pass1_io() {
+    asm("push ds\npop es");
+    die("Error: pass 1 io\n");
+}
+
+void die_error_pass1_iter() {
+    asm("push ds\npop es");
+    die("Error: pass 1 iter\n");
+}
+
+void die_symbol_overflow() {
+    asm("push ds\npop es");
+    die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
+}
+
+/* Emit one byte (AL) into the output stream.  Pass 1 only bumps
+   ``current_address`` / ``output_total``; pass 2 also stores the
+   byte into ``OUTPUT_BUFFER`` at ``output_position``, flushing to
+   ``output_fd`` when the buffer fills.  The inline-asm body
+   preserves the AL-in ABI and references ``OUTPUT_BUFFER`` by its
+   raw ``_program_end + 256`` expression because the ``%define``
+   lives in the file-scope asm block that cc.py emits after every
+   C function.  Clobbers BX only when pass == 2 (saved + restored
+   around the buffer-pointer math). */
+void emit_byte_al() {
+    asm("cmp byte [_g_pass], 2\n"
+        "jne .eba_count_only\n"
+        "push bx\n"
+        "mov bx, [_g_output_position]\n"
+        "mov [_program_end + 256 + bx], al\n"
+        "inc bx\n"
+        "mov [_g_output_position], bx\n"
+        "cmp bx, 512\n"
+        "jb .eba_no_flush\n"
+        "call flush_output\n"
+        ".eba_no_flush:\n"
+        "pop bx\n"
+        ".eba_count_only:\n"
+        "inc word [_g_current_address]\n"
+        "inc word [_g_output_total]");
+}
+
+/* Emit one little-endian word (AX).  Saves the high byte, emits
+   AL, swaps, emits the old AH.  The retired asm used a tail call
+   for the second emit_byte_al; this version uses a regular call
+   so cc.py's ``pop bp / ret`` epilogue can close the bp frame. */
+void emit_word_ax() {
+    asm("push ax\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "xchg al, ah\n"
+        "call emit_byte_al");
+}
+
+/* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
+   output_fd via SYS_IO_WRITE, then reset the position.  No-op when
+   nothing is queued.  Callable from inline asm (``call flush_output``)
+   since cc.py emits the label with the C name.  The body preserves
+   AX / CX / SI / DI so the handler callers that reach flush_output
+   through emit_byte_al don't need to guard those registers at every
+   call site (matches the retired inline-asm flush_output's contract).
+   Uses the ES-safe ``syscall`` wrapper at the tail of the inline
+   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   OUTPUT_BUFFER is ``_program_end + 256`` — NASM folds the raw
+   arithmetic at assembly time. */
+void flush_output() {
+    asm("push ax\n"
+        "push cx\n"
+        "push si\n"
+        "push di\n"
+        "cmp word [_g_output_position], 0\n"
+        "je .fl_done\n"
+        "mov bx, [_g_output_fd]\n"
+        "mov si, _program_end + 256\n"
+        "mov cx, [_g_output_position]\n"
+        "mov ah, SYS_IO_WRITE\n"
+        "call syscall\n"
+        "mov word [_g_output_position], 0\n"
+        ".fl_done:\n"
+        "pop di\n"
+        "pop si\n"
+        "pop cx\n"
+        "pop ax");
+}
+
+/* Convert the ASCII hex digit in CL to its numeric value in place
+   (0..15), or leave CL alone and set CF on a non-hex byte.  Both
+   ``0``-``9`` and ``A``-``F`` / ``a``-``f`` are accepted.  Called by
+   ``parse_number``'s 0x-prefix and ``h``-suffix branches; the CL-in
+   / CL-out / CF-out ABI survives cc.py's bp frame because POP and
+   RET don't touch FLAGS. */
+void hex_digit() {
+    asm("cmp cl, '0'\n"
+        "jb .hd_not_hex\n"
+        "cmp cl, '9'\n"
+        "jbe .hd_digit\n"
+        "cmp cl, 'A'\n"
+        "jb .hd_try_lower\n"
+        "cmp cl, 'F'\n"
+        "jbe .hd_upper\n"
+        ".hd_try_lower:\n"
+        "cmp cl, 'a'\n"
+        "jb .hd_not_hex\n"
+        "cmp cl, 'f'\n"
+        "ja .hd_not_hex\n"
+        "sub cl, 'a' - 10\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_upper:\n"
+        "sub cl, 'A' - 10\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_digit:\n"
+        "sub cl, '0'\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_not_hex:\n"
+        "stc\n"
+        ".hd_end:");
+}
+
 /* Pop the include stack: close the included file, restore the
    parent file's fd / buffer / position / valid fields, and copy the
    saved SOURCE_BUFFER contents back.  Called from do_pass (via
@@ -159,102 +323,29 @@ void include_push() {
         ".ipush_end:");
 }
 
-/* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
-   output_fd via SYS_IO_WRITE, then reset the position.  No-op when
-   nothing is queued.  Callable from inline asm (``call flush_output``)
-   since cc.py emits the label with the C name.  The body preserves
-   AX / CX / SI / DI so the handler callers that reach flush_output
-   through emit_byte_al don't need to guard those registers at every
-   call site (matches the retired inline-asm flush_output's contract).
-   Uses the ES-safe ``syscall`` wrapper at the tail of the inline
-   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``.
-   OUTPUT_BUFFER is ``_program_end + 256`` — NASM folds the raw
-   arithmetic at assembly time. */
-void flush_output() {
-    asm("push ax\n"
-        "push cx\n"
-        "push si\n"
-        "push di\n"
-        "cmp word [_g_output_position], 0\n"
-        "je .fl_done\n"
-        "mov bx, [_g_output_fd]\n"
-        "mov si, _program_end + 256\n"
-        "mov cx, [_g_output_position]\n"
-        "mov ah, SYS_IO_WRITE\n"
+/* Refill SOURCE_BUFFER from the current source_fd via SYS_IO_READ
+   (512-byte chunks).  Returns AX = 0 when a new chunk lands in the
+   buffer (position / valid cursors reset) or AX = 1 on EOF
+   (zero-byte read) or I/O error (AX == -1 back from the syscall).
+   Sole caller is ``read_line``; the pre-C-port CF-return convention
+   gave way to an int return once both ends live in C. */
+int load_src_sector() {
+    asm("mov bx, [_g_source_fd]\n"
+        "mov di, _program_end + 768\n"
+        "mov cx, 512\n"
+        "mov ah, SYS_IO_READ\n"
         "call syscall\n"
-        "mov word [_g_output_position], 0\n"
-        ".fl_done:\n"
-        "pop di\n"
-        "pop si\n"
-        "pop cx\n"
-        "pop ax");
-}
-
-/* Advance SI past any run of ' ' / '\t' at the current source cursor.
-   Called hundreds of times from the instruction handlers; the body is
-   inline asm so cc.py's bp frame is the only overhead (push bp /
-   mov bp, sp at entry, pop bp / ret at exit — neither touches SI or
-   FLAGS, so the handler-side register ABI is preserved). */
-void skip_ws() {
-    asm(".sws_loop:\n"
-        "cmp byte [si], ' '\n"
-        "je .sws_skip\n"
-        "cmp byte [si], 9\n"
-        "je .sws_skip\n"
-        "jmp .sws_end\n"
-        ".sws_skip:\n"
-        "inc si\n"
-        "jmp .sws_loop\n"
-        ".sws_end:");
-}
-
-/* Skip whitespace, a single ``,``, then whitespace — the inter-operand
-   separator every multi-operand handler uses.  No-op if no comma is
-   present (the first call to skip_ws still advances past leading
-   whitespace). */
-void skip_comma() {
-    asm("call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .sc_end\n"
-        "inc si\n"
-        "call skip_ws\n"
-        ".sc_end:");
-}
-
-/* Convert the ASCII hex digit in CL to its numeric value in place
-   (0..15), or leave CL alone and set CF on a non-hex byte.  Both
-   ``0``-``9`` and ``A``-``F`` / ``a``-``f`` are accepted.  Called by
-   ``parse_number``'s 0x-prefix and ``h``-suffix branches; the CL-in
-   / CL-out / CF-out ABI survives cc.py's bp frame because POP and
-   RET don't touch FLAGS. */
-void hex_digit() {
-    asm("cmp cl, '0'\n"
-        "jb .hd_not_hex\n"
-        "cmp cl, '9'\n"
-        "jbe .hd_digit\n"
-        "cmp cl, 'A'\n"
-        "jb .hd_try_lower\n"
-        "cmp cl, 'F'\n"
-        "jbe .hd_upper\n"
-        ".hd_try_lower:\n"
-        "cmp cl, 'a'\n"
-        "jb .hd_not_hex\n"
-        "cmp cl, 'f'\n"
-        "ja .hd_not_hex\n"
-        "sub cl, 'a' - 10\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_upper:\n"
-        "sub cl, 'A' - 10\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_digit:\n"
-        "sub cl, '0'\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_not_hex:\n"
-        "stc\n"
-        ".hd_end:");
+        "cmp ax, -1\n"
+        "je .lss_no_more\n"
+        "test ax, ax\n"
+        "jz .lss_no_more\n"
+        "mov [_g_source_buffer_valid], ax\n"
+        "mov word [_g_source_buffer_position], 0\n"
+        "xor ax, ax\n"
+        "jmp .lss_end\n"
+        ".lss_no_more:\n"
+        "mov ax, 1\n"
+        ".lss_end:");
 }
 
 /* Build a register/register ModR/M byte: AL = reg field, BL = r/m
@@ -265,83 +356,6 @@ void make_modrm_reg_reg() {
     asm("shl al, 3\n"
         "or al, bl\n"
         "or al, 0C0h");
-}
-
-/* Map a register number to its 16-bit addressing ModR/M r/m field.
-   Input AL is a cc.py-style register index (3=bx, 5=bp, 6=si,
-   7=di); output AL is the ModR/M encoding (bx=7, bp=6, si=4,
-   di=5).  Any input that isn't one of the four indexable base
-   registers is treated as bp (rm=6), matching the retired asm. */
-void reg_to_rm() {
-    asm("cmp al, 3\n"
-        "je .rtr_bx\n"
-        "cmp al, 6\n"
-        "je .rtr_si\n"
-        "cmp al, 7\n"
-        "je .rtr_di\n"
-        "mov al, 6\n"
-        "jmp .rtr_end\n"
-        ".rtr_bx:\n"
-        "mov al, 7\n"
-        "jmp .rtr_end\n"
-        ".rtr_si:\n"
-        "mov al, 4\n"
-        "jmp .rtr_end\n"
-        ".rtr_di:\n"
-        "mov al, 5\n"
-        ".rtr_end:");
-}
-
-/* Emit one byte (AL) into the output stream.  Pass 1 only bumps
-   ``current_address`` / ``output_total``; pass 2 also stores the
-   byte into ``OUTPUT_BUFFER`` at ``output_position``, flushing to
-   ``output_fd`` when the buffer fills.  The inline-asm body
-   preserves the AL-in ABI and references ``OUTPUT_BUFFER`` by its
-   raw ``_program_end + 256`` expression because the ``%define``
-   lives in the file-scope asm block that cc.py emits after every
-   C function.  Clobbers BX only when pass == 2 (saved + restored
-   around the buffer-pointer math). */
-void emit_byte_al() {
-    asm("cmp byte [_g_pass], 2\n"
-        "jne .eba_count_only\n"
-        "push bx\n"
-        "mov bx, [_g_output_position]\n"
-        "mov [_program_end + 256 + bx], al\n"
-        "inc bx\n"
-        "mov [_g_output_position], bx\n"
-        "cmp bx, 512\n"
-        "jb .eba_no_flush\n"
-        "call flush_output\n"
-        ".eba_no_flush:\n"
-        "pop bx\n"
-        ".eba_count_only:\n"
-        "inc word [_g_current_address]\n"
-        "inc word [_g_output_total]");
-}
-
-/* Emit one little-endian word (AX).  Saves the high byte, emits
-   AL, swaps, emits the old AH.  The retired asm used a tail call
-   for the second emit_byte_al; this version uses a regular call
-   so cc.py's ``pop bp / ret`` epilogue can close the bp frame. */
-void emit_word_ax() {
-    asm("push ax\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "xchg al, ah\n"
-        "call emit_byte_al");
-}
-
-/* Compute the ES-relative offset of a symbol table entry: input AX
-   = index, output DI = index * SYMBOL_ENTRY (36).  Preserves BX;
-   clobbers AX and DX (MUL writes its high word into DX).  ``mul bx``
-   is shorter than an ``imul ax, bx, 36`` encoding, which is why the
-   retired asm took the BX-save-and-restore detour. */
-void symbol_entry_address() {
-    asm("push bx\n"
-        "mov bx, 36\n"
-        "mul bx\n"
-        "mov di, ax\n"
-        "pop bx");
 }
 
 /* Match a null-terminated keyword pattern at ``DI`` against the
@@ -407,67 +421,6 @@ void match_word() {
         "pop ax");
 }
 
-/* Error reporters called while ES is still pointed at the symbol-
-   table segment.  Each resets ES to DS before handing off to cc.py's
-   ``die()`` builtin (which jumps to FUNCTION_DIE with the string
-   preloaded).  ``die_symbol_overflow`` is the jmp-target of the
-   symbol_set overflow branch; the pass-1 variants are called from
-   ``run_pass1`` when do_pass signals an I/O error or the jump-size
-   convergence fails to settle. */
-void die_symbol_overflow() {
-    asm("push ds\npop es");
-    die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
-}
-
-/* Invoked through an inline-asm trampoline that stashes SI into
-   ``error_word`` before jumping here (``abort_unknown:`` in the
-   file-scope asm block).  Prints the offending source line from
-   ``line_buffer`` together with the bad token, then exits. */
-void abort_unknown_impl() {
-    asm("push ds\npop es");
-    printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
-           line_buffer, error_word);
-    /* ``exit()`` would be cleaner but clang sees the stdlib prototype
-       via tests/bboeos.h and rejects the zero-argument form.  Jumping
-       to FUNCTION_EXIT keeps cc.py and clang both happy. */
-    asm("jmp FUNCTION_EXIT");
-}
-
-void die_error_pass1_io() {
-    asm("push ds\npop es");
-    die("Error: pass 1 io\n");
-}
-
-void die_error_pass1_iter() {
-    asm("push ds\npop es");
-    die("Error: pass 1 iter\n");
-}
-
-/* Refill SOURCE_BUFFER from the current source_fd via SYS_IO_READ
-   (512-byte chunks).  Returns AX = 0 when a new chunk lands in the
-   buffer (position / valid cursors reset) or AX = 1 on EOF
-   (zero-byte read) or I/O error (AX == -1 back from the syscall).
-   Sole caller is ``read_line``; the pre-C-port CF-return convention
-   gave way to an int return once both ends live in C. */
-int load_src_sector() {
-    asm("mov bx, [_g_source_fd]\n"
-        "mov di, _program_end + 768\n"
-        "mov cx, 512\n"
-        "mov ah, SYS_IO_READ\n"
-        "call syscall\n"
-        "cmp ax, -1\n"
-        "je .lss_no_more\n"
-        "test ax, ax\n"
-        "jz .lss_no_more\n"
-        "mov [_g_source_buffer_valid], ax\n"
-        "mov word [_g_source_buffer_position], 0\n"
-        "xor ax, ax\n"
-        "jmp .lss_end\n"
-        ".lss_no_more:\n"
-        "mov ax, 1\n"
-        ".lss_end:");
-}
-
 /* Read one line of source into LINE_BUFFER (null-terminated, at
    most LINE_MAX = 255 chars; over-long lines silently truncate to
    LINE_MAX before the terminating NUL).  Returns 1 on true EOF
@@ -513,10 +466,15 @@ int read_line() {
    run_pass1 / run_pass2 callers check error_flag and invoke
    die_error_pass1_io() as appropriate.
 
-   Written to remain callable from inline asm (``call do_pass``)
-   since run_pass1 / run_pass2 reach it that way — cc.py emits the
-   bare label.  The function has no locals, so no DX-pinned spill
-   cc.py would otherwise wrap the inline-asm blocks with. */
+   Placed after its C-level callees (``include_pop`` and
+   ``read_line``) rather than in strict alphabetical position:
+   cc.py resolves the calls either way via its pre-codegen
+   ``user_functions`` registry, but clang (run by tests/test_cc.py)
+   enforces ISO C99 declare-before-use.  Written to remain callable
+   from inline asm (``call do_pass``) since run_pass1 / run_pass2
+   reach it that way — cc.py emits the bare label.  The function
+   has no locals, so no DX-pinned spill cc.py would otherwise wrap
+   the inline-asm blocks with. */
 void do_pass() {
     current_address = org_value;
     asm("mov si, [_g_source_name]\n"
@@ -550,18 +508,29 @@ void do_pass() {
         ".dp_end:");
 }
 
-/* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
-   from pass 1 are reused (the jump_table in ES is still set), and
-   ``current_address`` resets to the org origin chosen by pass 1.
-   Caller has already opened output_fd. */
-void run_pass2() {
-    pass = 2;
-    current_address = org_value;
-    global_scope = 0xFFFF;
-    jump_index = 0;
-    output_position = 0;
-    output_total = 0;
-    asm("call do_pass");
+/* Map a register number to its 16-bit addressing ModR/M r/m field.
+   Input AL is a cc.py-style register index (3=bx, 5=bp, 6=si,
+   7=di); output AL is the ModR/M encoding (bx=7, bp=6, si=4,
+   di=5).  Any input that isn't one of the four indexable base
+   registers is treated as bp (rm=6), matching the retired asm. */
+void reg_to_rm() {
+    asm("cmp al, 3\n"
+        "je .rtr_bx\n"
+        "cmp al, 6\n"
+        "je .rtr_si\n"
+        "cmp al, 7\n"
+        "je .rtr_di\n"
+        "mov al, 6\n"
+        "jmp .rtr_end\n"
+        ".rtr_bx:\n"
+        "mov al, 7\n"
+        "jmp .rtr_end\n"
+        ".rtr_si:\n"
+        "mov al, 4\n"
+        "jmp .rtr_end\n"
+        ".rtr_di:\n"
+        "mov al, 5\n"
+        ".rtr_end:");
 }
 
 /* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
@@ -608,26 +577,62 @@ void run_pass1() {
     }
 }
 
-/* Populate ``source_prefix`` with the directory portion of
-   ``source_name`` (everything up to and including the last ``/``).
-   Empty when the source has no directory.  Bounded by the
-   ``source_prefix[32]`` buffer — deeper include paths would overflow
-   silently, which matches the original inline-asm behavior. */
-void compute_source_prefix() {
-    int end = 0;
-    int i = 0;
-    while (source_name[i] != '\0') {
-        if (source_name[i] == '/') {
-            end = i + 1;
-        }
-        i = i + 1;
-    }
-    int j = 0;
-    while (j < end) {
-        source_prefix[j] = source_name[j];
-        j = j + 1;
-    }
-    source_prefix[end] = '\0';
+/* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
+   from pass 1 are reused (the jump_table in ES is still set), and
+   ``current_address`` resets to the org origin chosen by pass 1.
+   Caller has already opened output_fd. */
+void run_pass2() {
+    pass = 2;
+    current_address = org_value;
+    global_scope = 0xFFFF;
+    jump_index = 0;
+    output_position = 0;
+    output_total = 0;
+    asm("call do_pass");
+}
+
+/* Skip whitespace, a single ``,``, then whitespace — the inter-operand
+   separator every multi-operand handler uses.  No-op if no comma is
+   present (the first call to skip_ws still advances past leading
+   whitespace). */
+void skip_comma() {
+    asm("call skip_ws\n"
+        "cmp byte [si], ','\n"
+        "jne .sc_end\n"
+        "inc si\n"
+        "call skip_ws\n"
+        ".sc_end:");
+}
+
+/* Advance SI past any run of ' ' / '\t' at the current source cursor.
+   Called hundreds of times from the instruction handlers; the body is
+   inline asm so cc.py's bp frame is the only overhead (push bp /
+   mov bp, sp at entry, pop bp / ret at exit — neither touches SI or
+   FLAGS, so the handler-side register ABI is preserved). */
+void skip_ws() {
+    asm(".sws_loop:\n"
+        "cmp byte [si], ' '\n"
+        "je .sws_skip\n"
+        "cmp byte [si], 9\n"
+        "je .sws_skip\n"
+        "jmp .sws_end\n"
+        ".sws_skip:\n"
+        "inc si\n"
+        "jmp .sws_loop\n"
+        ".sws_end:");
+}
+
+/* Compute the ES-relative offset of a symbol table entry: input AX
+   = index, output DI = index * SYMBOL_ENTRY (36).  Preserves BX;
+   clobbers AX and DX (MUL writes its high word into DX).  ``mul bx``
+   is shorter than an ``imul ax, bx, 36`` encoding, which is why the
+   retired asm took the BX-save-and-restore detour. */
+void symbol_entry_address() {
+    asm("push bx\n"
+        "mov bx, 36\n"
+        "mul bx\n"
+        "mov di, ax\n"
+        "pop bx");
 }
 
 int main(int argc, char *argv[]) {
