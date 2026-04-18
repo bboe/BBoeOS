@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8216      | -37   |
+| asm     | 8253        | 8285      | +32   |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,26 +27,35 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (-37):** Phase 1 port wraps the remaining NASM source in a
+**asm (+32):** Phase 1 port wraps the remaining NASM source in a
 file-scope `asm("...")` block.  The entire driver — parse argv,
 open output, run passes, flush, close, exit — lives in pure C
 `main(int argc, char *argv[])` via cc.py's own `die()` / `open()`
-/ `close()` builtins.  What's still inline: the `%assign` /
-`%define` memory-layout header, per-name `equ _g_<name>` aliases
-for the 33 mutable globals that cc.py now emits at the binary
-tail, and every instruction / directive handler (the ~4 000 lines
-of do_pass + emit_byte_al / parse_operand / resolve_value / the 45+
-`handle_*` mnemonic handlers).  Path-A extractions landed to date:
-33 mutable globals into cc.py file-scope declarations (+11 bytes,
-db→dw widening); `compute_source_prefix`, `run_pass1`, `run_pass2`,
-`flush_output`, `abort_unknown_impl`, three `die_*` helpers, and
-the full `main` into pure C; eight dead `.error_*` labels, thirteen
+/ `close()` builtins, and the per-pass orchestration (open source,
+loop over read_line / parse_line, handle include EOF via
+include_pop, close source) lives in cc.py-emitted `do_pass()` with
+a natural `while (1)` loop over a `read_line_is_eof()` CF-to-int
+bridge.  What's still inline: the `%assign` memory-layout header,
+per-name `equ _g_<name>` aliases for the 33 mutable globals that
+cc.py now emits at the binary tail, and every instruction /
+directive handler (the ~4 000 lines of emit_byte_al / parse_operand
+/ resolve_value / the 45+ `handle_*` mnemonic handlers, plus the
+read_line / parse_line / include leaves that do_pass still calls
+via inline asm).  Path-A extractions landed to date: 33 mutable
+globals into cc.py file-scope declarations (+11 bytes, db→dw
+widening); `compute_source_prefix`, `run_pass1`, `run_pass2`,
+`flush_output`, `abort_unknown_impl`, three `die_*` helpers,
+`include_push`, `include_pop`, `do_pass`, `read_line_is_eof`,
+`load_src_sector`, and the full `main` into pure C; eight dead `.error_*` labels, thirteen
 MESSAGE_* strings, the dead `print_hex_word` helper, the `call_die`
 / `call_exit` / `call_print_character` / `call_print_string` /
-`call_write_stdout` kernel-jump wrappers, and the `abort_unknown`
-asm body all retired along the way.  Follow-up PRs will extract
-the symbol table, emit functions, and each instruction-handler
-family into pure C.
+`call_write_stdout` kernel-jump wrappers, the `abort_unknown` asm
+body, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE `%define`s all
+retired along the way (the 6-byte parent-state triplet moved into
+cc.py-emitted globals; the 512-byte source-buffer copy lives in
+post-binary scratch RAM via a pointer main() initializes).
+Follow-up PRs will extract the symbol table, emit functions, and
+each instruction-handler family into pure C.
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
