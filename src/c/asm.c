@@ -6,6 +6,8 @@
    and each instruction-handler family with pure C one at a time.  The
    original NASM source is preserved under archive/asm.asm. */
 
+#include "asm_layout.h"
+
 /* File-scope globals that back the assembler's mutable state.  cc.py
    emits each as ``_g_<name>`` at the tail of the output; the inline
    asm below declares ``<name> equ _g_<name>`` aliases so every
@@ -147,17 +149,14 @@ void die_symbol_overflow() {
    ``current_address`` / ``output_total``; pass 2 also stores the
    byte into ``OUTPUT_BUFFER`` at ``output_position``, flushing to
    ``output_fd`` when the buffer fills.  The inline-asm body
-   preserves the AL-in ABI and references ``OUTPUT_BUFFER`` by its
-   raw ``_program_end + 256`` expression because the ``%define``
-   lives in the file-scope asm block that cc.py emits after every
-   C function.  Clobbers BX only when pass == 2 (saved + restored
-   around the buffer-pointer math). */
+   preserves the AL-in ABI.  Clobbers BX only when pass == 2 (saved
+   + restored around the buffer-pointer math). */
 void emit_byte_al() {
     asm("cmp byte [_g_pass], 2\n"
         "jne .eba_count_only\n"
         "push bx\n"
         "mov bx, [_g_output_position]\n"
-        "mov [_program_end + 256 + bx], al\n"
+        "mov [OUTPUT_BUFFER + bx], al\n"
         "inc bx\n"
         "mov [_g_output_position], bx\n"
         "cmp bx, 512\n"
@@ -190,9 +189,7 @@ void emit_word_ax() {
    through emit_byte_al don't need to guard those registers at every
    call site (matches the retired inline-asm flush_output's contract).
    Uses the ES-safe ``syscall`` wrapper at the tail of the inline
-   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``.
-   OUTPUT_BUFFER is ``_program_end + 256`` — NASM folds the raw
-   arithmetic at assembly time. */
+   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``. */
 void flush_output() {
     asm("push ax\n"
         "push cx\n"
@@ -201,7 +198,7 @@ void flush_output() {
         "cmp word [_g_output_position], 0\n"
         "je .fl_done\n"
         "mov bx, [_g_output_fd]\n"
-        "mov si, _program_end + 256\n"
+        "mov si, OUTPUT_BUFFER\n"
         "mov cx, [_g_output_position]\n"
         "mov ah, SYS_IO_WRITE\n"
         "call syscall\n"
@@ -271,7 +268,7 @@ void include_pop() {
     asm("push es\n"
         "push ds\npop es\n"
         "mov si, [_g_include_source_save]\n"
-        "mov di, _program_end + 768\n"
+        "mov di, SOURCE_BUFFER\n"
         "mov cx, 256\n"
         "cld\nrep movsw\n"
         "pop es");
@@ -295,7 +292,7 @@ void include_push() {
     include_save_valid = source_buffer_valid;
     asm("push es\n"
         "push ds\npop es\n"
-        "mov si, _program_end + 768\n"
+        "mov si, SOURCE_BUFFER\n"
         "mov di, [_g_include_source_save]\n"
         "mov cx, 256\n"
         "cld\nrep movsw\n"
@@ -337,7 +334,7 @@ void include_push() {
    gave way to an int return once both ends live in C. */
 int load_src_sector() {
     asm("mov bx, [_g_source_fd]\n"
-        "mov di, _program_end + 768\n"
+        "mov di, SOURCE_BUFFER\n"
         "mov cx, 512\n"
         "mov ah, SYS_IO_READ\n"
         "call syscall\n"
@@ -551,12 +548,9 @@ void run_pass1() {
     pass = 1;
     symbol_count = 0;
     org_value = 0;
-    /* Initialize ES:JUMP_TABLE to all-1 (near).  JUMP_TABLE / JUMP_MAX
-       are %assigned inside the file-scope asm block below, which cc.py
-       emits after every function body — so this inline asm has to
-       reproduce them as literals. */
-    asm("mov di, 0F000h\n"
-        "mov cx, 4096\n"
+    /* Initialize ES:JUMP_TABLE to all-1 (near). */
+    asm("mov di, JUMP_TABLE\n"
+        "mov cx, JUMP_MAX\n"
         "mov al, 1\n"
         "cld\n"
         "rep stosb");
@@ -635,7 +629,7 @@ void skip_ws() {
    retired asm took the BX-save-and-restore detour. */
 void symbol_entry_address() {
     asm("push bx\n"
-        "mov bx, 36\n"
+        "mov bx, SYMBOL_ENTRY\n"
         "mul bx\n"
         "mov di, ax\n"
         "pop bx");
@@ -646,15 +640,16 @@ int main(int argc, char *argv[]) {
        safely.  We only switch to SYMBOL_SEGMENT once we're ready to
        run the assembler passes — the handlers index the symbol table
        via ``[es:...]``, which needs ES pointed at that segment. */
-    /* Publish ``_program_end`` (the scratch-buffer base) as a C-visible
-       pointer so abort_unknown_impl can printf the bad source line.
-       ``include_source_save`` lives 1280 bytes past that sentinel —
-       immediately after LINE_BUFFER / OUTPUT_BUFFER / SOURCE_BUFFER —
-       so an %include level saves the 512-byte SOURCE_BUFFER into
-       scratch RAM instead of bloating the binary. */
-    asm("mov word [_g_line_buffer], _program_end\n"
-        "mov word [_g_source_buffer], _program_end + 768\n"
-        "mov word [_g_include_source_save], _program_end + 1280");
+    /* Publish the scratch-buffer bases as C-visible pointers so
+       C code can index ``line_buffer[i]`` / ``source_buffer[i]`` and
+       so abort_unknown_impl can printf the bad source line.
+       ``include_source_save`` lives one SOURCE_BUFFER length past
+       SOURCE_BUFFER — an %include level saves the 512-byte
+       SOURCE_BUFFER into that scratch RAM instead of bloating the
+       binary. */
+    asm("mov word [_g_line_buffer], LINE_BUFFER\n"
+        "mov word [_g_source_buffer], SOURCE_BUFFER\n"
+        "mov word [_g_include_source_save], SOURCE_BUFFER + 512");
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -668,7 +663,7 @@ int main(int argc, char *argv[]) {
     output_fd = fd;
     /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
        handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
-    asm("mov ax, 2000h\n"
+    asm("mov ax, SYMBOL_SEGMENT\n"
         "mov es, ax\n"
         "cld");
     run_pass1();
@@ -689,19 +684,13 @@ int main(int argc, char *argv[]) {
 asm(
     "\n"
     "\n"
-    "        ;; Memory layout. The assembler's scratch buffers live after the\n"
-    "        ;; binary at _program_end (cc.py tail sentinel). The symbol table\n"
-    "        ;; and jump table live in a dedicated ES segment (0x2000, linear\n"
-    "        ;; 0x20000) so they don't compete with segment-0 memory.\n"
-    "        %assign JUMP_MAX      4096      ; max jcc/jmp instructions per source\n"
-    "        %assign JUMP_TABLE    0F000h    ; jump_table offset within ES segment (4096 bytes)\n"
-    "        %assign SYMBOL_ENTRY     36        ; bytes per symbol entry (32 name + 2 val + 1 type + 1 scope)\n"
-    "        %assign SYMBOL_MAX       1706      ; 1706 * 36 = 61416 bytes (0x0000-0xEFF8)\n"
-    "        %assign SYMBOL_NAME_LENGTH  32        ; 31 chars + null\n"
-    "        %assign SYMBOL_SEGMENT   2000h     ; ES segment for symbol table (linear 0x20000)\n"
-    "        %define LINE_BUFFER      _program_end\n"
-    "        %define OUTPUT_BUFFER       LINE_BUFFER + 256\n"
-    "        %define SOURCE_BUFFER       OUTPUT_BUFFER + 512\n"
+    "        ;; Memory layout.  The assembler's scratch buffers live past\n"
+    "        ;; _program_end (cc.py tail sentinel); the symbol table and\n"
+    "        ;; jump table live in a dedicated ES segment (SYMBOL_SEGMENT,\n"
+    "        ;; linear 0x20000) so they don't compete with segment-0\n"
+    "        ;; memory.  Named constants are ``#define``d in\n"
+    "        ;; src/c/asm_layout.h and bridged into NASM ``%define``s by\n"
+    "        ;; cc.py at the top of the generated output.\n"
     "\n"
     "        ;; Historical variable names aliased to cc.py-emitted globals.\n"
     "        ;; The mutable state lives at the tail of the binary as\n"
@@ -773,10 +762,7 @@ asm(
     ";;; emit_byte_al / emit_word_ax live in cc.py-emitted functions\n"
     ";;; near the top of src/c/asm.c.  Handlers still reach them via\n"
     ";;; ``call emit_byte_al`` / ``call emit_word_ax`` and the existing\n"
-    ";;; ``jmp emit_byte_al`` tail positions.  The byte reference to\n"
-    ";;; ``OUTPUT_BUFFER`` inside emit_byte_al is spelled as the raw\n"
-    ";;; ``_program_end + 256`` expression because the ``%define`` is\n"
-    ";;; emitted after every C function.\n"
+    ";;; ``jmp emit_byte_al`` tail positions.\n"
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
@@ -4337,9 +4323,7 @@ asm(
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; symbol_entry_address lives in cc.py-emitted\n"
-    ";;; ``symbol_entry_address`` near the top of src/c/asm.c.  The\n"
-    ";;; SYMBOL_ENTRY multiplier is spelled inline as the literal 36\n"
-    ";;; because the ``%assign`` is emitted after each C function.\n"
+    ";;; ``symbol_entry_address`` near the top of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
