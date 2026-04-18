@@ -83,6 +83,64 @@ void die_usage() {
     die("Usage: asm <source> <output>\n");
 }
 
+/* Pass 2 emits bytes to ``output_fd``.  The jump-size choices
+   from pass 1 are reused (the jump_table in ES is still set), and
+   ``current_address`` resets to the org origin chosen by pass 1.
+   Caller has already opened output_fd. */
+void run_pass2() {
+    pass = 2;
+    current_address = org_value;
+    global_scope = 0xFFFF;
+    jump_index = 0;
+    output_position = 0;
+    output_total = 0;
+    asm("call do_pass");
+}
+
+/* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
+   and lets the instruction handlers mark any jump they can shrink
+   to rel8; loops until no jump changes size.  Convergence is
+   monotonic (shrinking only makes targets closer), so a 100-
+   iteration safety bound is enough to catch any infinite
+   oscillation a buggy handler might introduce.  Always runs at
+   least two iterations so forward references get verified against
+   the symbol table built in iteration 1. */
+void run_pass1() {
+    pass = 1;
+    symbol_count = 0;
+    org_value = 0;
+    /* Initialize ES:JUMP_TABLE to all-1 (near).  JUMP_TABLE / JUMP_MAX
+       are %assigned inside the file-scope asm block below, which cc.py
+       emits after every function body — so this inline asm has to
+       reproduce them as literals. */
+    asm("mov di, 0F000h\n"
+        "mov cx, 4096\n"
+        "mov al, 1\n"
+        "cld\n"
+        "rep stosb");
+    iteration_count = 0;
+    while (1) {
+        changed_flag = 0;
+        current_address = 0;
+        global_scope = 0xFFFF;
+        jump_index = 0;
+        asm("call do_pass");
+        if (error_flag != 0) {
+            die_error_pass1_io();
+        }
+        iteration_count = iteration_count + 1;
+        if (iteration_count >= 100) {
+            die_error_pass1_iter();
+        }
+        if (iteration_count < 2) {
+            continue;
+        }
+        if (changed_flag == 0) {
+            break;
+        }
+    }
+}
+
 /* Populate ``source_prefix`` with the directory portion of
    ``source_name`` (everything up to and including the last ``/``).
    Empty when the source has no directory.  Bounded by the
@@ -195,43 +253,9 @@ asm(
     "        call compute_source_prefix\n"
     "\n"
     "        ;; -- Pass 1: collect labels and converge jump sizes --\n"
-    "        ;; Iterative pass 1: jumps start near (pessimistic) and are\n"
-    "        ;; shrunk to short where they fit. Matches NASM's optimizer:\n"
-    "        ;; shrinking only makes targets closer, so convergence is\n"
-    "        ;; monotonic with no oscillation.\n"
-    "        mov byte [pass], 1\n"
-    "        mov word [symbol_count], 0\n"
-    "        mov word [org_value], 0\n"
-    "        ;; Fill jump_table with 1 (all jumps start near, in ES segment)\n"
-    "        push di\n"
-    "        push cx\n"
-    "        mov di, JUMP_TABLE\n"
-    "        mov cx, JUMP_MAX\n"
-    "        mov al, 1\n"
-    "        cld\n"
-    "        rep stosb\n"
-    "        pop cx\n"
-    "        pop di\n"
-    "        mov word [iteration_count], 0\n"
-    "        .pass1_loop:\n"
-    "        mov byte [changed_flag], 0\n"
-    "        mov word [current_address], 0\n"
-    "        mov word [global_scope], 0FFFFh\n"
-    "        mov word [jump_index], 0\n"
-    "        call do_pass\n"
-    "        test byte [error_flag], 0FFh\n"
-    "        jnz die_error_pass1_io\n"
-    "        inc word [iteration_count]\n"
-    "        ;; Safety bound to catch oscillation.\n"
-    "        cmp word [iteration_count], 100\n"
-    "        jae die_error_pass1_iter\n"
-    "        ;; Always run at least 2 iterations: iter 1 builds the symbol\n"
-    "        ;; table; iter 2 is the first one that can verify forward refs.\n"
-    "        cmp word [iteration_count], 2\n"
-    "        jb .pass1_loop\n"
-    "        ;; Loop while any jump changed size this iteration.\n"
-    "        test byte [changed_flag], 0FFh\n"
-    "        jnz .pass1_loop\n"
+    "        ;; Implementation lives in cc.py-emitted ``run_pass1`` (see\n"
+    "        ;; C definition at the top of src/c/asm.c).\n"
+    "        call run_pass1\n"
     "\n"
     "        ;; -- Open output file for writing --\n"
     "        mov si, [output_name]\n"
@@ -243,14 +267,9 @@ asm(
     "        mov [output_fd], ax\n"
     "\n"
     "        ;; -- Pass 2: emit bytes --\n"
-    "        mov byte [pass], 2\n"
-    "        mov ax, [org_value]\n"
-    "        mov [current_address], ax\n"
-    "        mov word [global_scope], 0FFFFh\n"
-    "        mov word [jump_index], 0\n"
-    "        mov word [output_position], 0\n"
-    "        mov word [output_total], 0\n"
-    "        call do_pass\n"
+    "        ;; Implementation lives in cc.py-emitted ``run_pass2`` (see\n"
+    "        ;; C definition at the top of src/c/asm.c).\n"
+    "        call run_pass2\n"
     "\n"
     "        ;; Flush remaining output\n"
     "        call flush_output\n"
