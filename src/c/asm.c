@@ -292,6 +292,45 @@ void reg_to_rm() {
         ".rtr_end:");
 }
 
+/* Emit one byte (AL) into the output stream.  Pass 1 only bumps
+   ``current_address`` / ``output_total``; pass 2 also stores the
+   byte into ``OUTPUT_BUFFER`` at ``output_position``, flushing to
+   ``output_fd`` when the buffer fills.  The inline-asm body
+   preserves the AL-in ABI and references ``OUTPUT_BUFFER`` by its
+   raw ``_program_end + 256`` expression because the ``%define``
+   lives in the file-scope asm block that cc.py emits after every
+   C function.  Clobbers BX only when pass == 2 (saved + restored
+   around the buffer-pointer math). */
+void emit_byte_al() {
+    asm("cmp byte [_g_pass], 2\n"
+        "jne .eba_count_only\n"
+        "push bx\n"
+        "mov bx, [_g_output_position]\n"
+        "mov [_program_end + 256 + bx], al\n"
+        "inc bx\n"
+        "mov [_g_output_position], bx\n"
+        "cmp bx, 512\n"
+        "jb .eba_no_flush\n"
+        "call flush_output\n"
+        ".eba_no_flush:\n"
+        "pop bx\n"
+        ".eba_count_only:\n"
+        "inc word [_g_current_address]\n"
+        "inc word [_g_output_total]");
+}
+
+/* Emit one little-endian word (AX).  Saves the high byte, emits
+   AL, swaps, emits the old AH.  The retired asm used a tail call
+   for the second emit_byte_al; this version uses a regular call
+   so cc.py's ``pop bp / ret`` epilogue can close the bp frame. */
+void emit_word_ax() {
+    asm("push ax\n"
+        "call emit_byte_al\n"
+        "pop ax\n"
+        "xchg al, ah\n"
+        "call emit_byte_al");
+}
+
 /* Error reporters called while ES is still pointed at the symbol-
    table segment.  Each resets ES to DS before handing off to cc.py's
    ``die()`` builtin (which jumps to FUNCTION_DIE with the string
@@ -644,35 +683,14 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; emit_byte_al: emit byte in AL\n"
+    ";;; emit_byte_al / emit_word_ax live in cc.py-emitted functions\n"
+    ";;; near the top of src/c/asm.c.  Handlers still reach them via\n"
+    ";;; ``call emit_byte_al`` / ``call emit_word_ax`` and the existing\n"
+    ";;; ``jmp emit_byte_al`` tail positions.  The byte reference to\n"
+    ";;; ``OUTPUT_BUFFER`` inside emit_byte_al is spelled as the raw\n"
+    ";;; ``_program_end + 256`` expression because the ``%define`` is\n"
+    ";;; emitted after every C function.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "emit_byte_al:\n"
-    "        cmp byte [pass], 2\n"
-    "        jne .count_only\n"
-    "        push bx\n"
-    "        mov bx, [output_position]\n"
-    "        mov [OUTPUT_BUFFER + bx], al\n"
-    "        inc bx\n"
-    "        mov [output_position], bx\n"
-    "        cmp bx, 512\n"
-    "        jb .no_flush\n"
-    "        call flush_output\n"
-    "        .no_flush:\n"
-    "        pop bx\n"
-    "        .count_only:\n"
-    "        inc word [current_address]\n"
-    "        inc word [output_total]\n"
-    "        ret\n"
-    "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; emit_word_ax: emit 16-bit word in AX (little-endian)\n"
-    ";;; -----------------------------------------------------------------------\n"
-    "emit_word_ax:\n"
-    "        push ax\n"
-    "        call emit_byte_al\n"
-    "        pop ax\n"
-    "        xchg al, ah\n"
-    "        jmp emit_byte_al\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; encode_rel8_jump: AL = opcode, SI points to operand (label name).\n"
