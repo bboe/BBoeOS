@@ -2937,6 +2937,19 @@ class CodeGenerator:
         self.peephole()
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
+        # File-scope ``asm("...")`` blocks are emitted BEFORE globals /
+        # strings / array data.  When the block holds code (for example
+        # the assembler in src/c/asm.c), this keeps the mutable global-
+        # variable section away from the same 4K page as frequently-
+        # executed instructions — QEMU's TCG invalidates per page on
+        # stores, and mixing the two caused a 2x runtime slowdown on
+        # the self-hosted assembler's pass loop.
+        file_scope_asm = [decl for decl in ast.globals if isinstance(decl, InlineAsm)]
+        if file_scope_asm:
+            self.emit(";; --- inline asm ---")
+            for decl in file_scope_asm:
+                for line in _decode_string_escapes(decl.content).splitlines():
+                    self.emit(line)
         self._emit_global_storage()
         if self.strings:
             self.emit(";; --- string literals ---")
@@ -2949,12 +2962,6 @@ class CodeGenerator:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
-        file_scope_asm = [decl for decl in ast.globals if isinstance(decl, InlineAsm)]
-        if file_scope_asm:
-            self.emit(";; --- inline asm ---")
-            for decl in file_scope_asm:
-                for line in _decode_string_escapes(decl.content).splitlines():
-                    self.emit(line)
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
