@@ -221,6 +221,42 @@ void skip_comma() {
         ".sc_end:");
 }
 
+/* Convert the ASCII hex digit in CL to its numeric value in place
+   (0..15), or leave CL alone and set CF on a non-hex byte.  Both
+   ``0``-``9`` and ``A``-``F`` / ``a``-``f`` are accepted.  Called by
+   ``parse_number``'s 0x-prefix and ``h``-suffix branches; the CL-in
+   / CL-out / CF-out ABI survives cc.py's bp frame because POP and
+   RET don't touch FLAGS. */
+void hex_digit() {
+    asm("cmp cl, '0'\n"
+        "jb .hd_not_hex\n"
+        "cmp cl, '9'\n"
+        "jbe .hd_digit\n"
+        "cmp cl, 'A'\n"
+        "jb .hd_try_lower\n"
+        "cmp cl, 'F'\n"
+        "jbe .hd_upper\n"
+        ".hd_try_lower:\n"
+        "cmp cl, 'a'\n"
+        "jb .hd_not_hex\n"
+        "cmp cl, 'f'\n"
+        "ja .hd_not_hex\n"
+        "sub cl, 'a' - 10\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_upper:\n"
+        "sub cl, 'A' - 10\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_digit:\n"
+        "sub cl, '0'\n"
+        "clc\n"
+        "jmp .hd_end\n"
+        ".hd_not_hex:\n"
+        "stc\n"
+        ".hd_end:");
+}
+
 /* Error reporters called while ES is still pointed at the symbol-
    table segment.  Each resets ES to DS before handing off to cc.py's
    ``die()`` builtin (which jumps to FUNCTION_DIE with the string
@@ -2815,37 +2851,9 @@ asm(
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; hex_digit: convert ASCII hex digit in CL to value\n"
-    ";;; Returns value in CL, CF set if not a hex digit\n"
+    ";;; hex_digit lives in cc.py-emitted ``hex_digit`` near the top of\n"
+    ";;; src/c/asm.c.  Handlers still reach it via ``call hex_digit``.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "hex_digit:\n"
-    "        cmp cl, '0'\n"
-    "        jb .not_hex\n"
-    "        cmp cl, '9'\n"
-    "        jbe .digit\n"
-    "        cmp cl, 'A'\n"
-    "        jb .try_lower\n"
-    "        cmp cl, 'F'\n"
-    "        jbe .upper\n"
-    "        .try_lower:\n"
-    "        cmp cl, 'a'\n"
-    "        jb .not_hex\n"
-    "        cmp cl, 'f'\n"
-    "        ja .not_hex\n"
-    "        sub cl, 'a' - 10\n"
-    "        clc\n"
-    "        ret\n"
-    "        .upper:\n"
-    "        sub cl, 'A' - 10\n"
-    "        clc\n"
-    "        ret\n"
-    "        .digit:\n"
-    "        sub cl, '0'\n"
-    "        clc\n"
-    "        ret\n"
-    "        .not_hex:\n"
-    "        stc\n"
-    "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; include_push / include_pop live in cc.py-emitted functions at\n"
