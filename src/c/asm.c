@@ -3063,120 +3063,84 @@ void parse_mnemonic() {
 }
 
 /* Parse a decimal, hex-prefix (``0x``), or hex-suffix (``h``)
-   number at SI.  NASM lets both forms coexist in a single program
-   (and even in a single expression), so the handler peeks ahead
-   to decide: if any digit before the next non-hex char is ``h``
-   the whole thing is hex-suffixed, else decimal.  Result in AX;
-   SI advances past the number.  Caller is responsible for scope
-   (parse_number is only invoked from resolve_value after a
-   digit-prefix test, so no character-literal path here). */
-void parse_number() {
-    asm("push bx\n"
-        "push cx\n"
-        "push dx\n"
-        "cmp byte [si], '0'\n"
-        "jne .pn_not_0x\n"
-        "cmp byte [si+1], 'x'\n"
-        "je .pn_hex_prefix\n"
-        "cmp byte [si+1], 'X'\n"
-        "je .pn_hex_prefix\n"
-        ".pn_not_0x:\n"
-        "push si\n"
-        ".pn_scan_h:\n"
-        "mov al, [si]\n"
-        "cmp al, '0'\n"
-        "jb .pn_scan_h_done\n"
-        "cmp al, '9'\n"
-        "jbe .pn_scan_h_next\n"
-        "cmp al, 'a'\n"
-        "jb .pn_check_upper_hex\n"
-        "cmp al, 'f'\n"
-        "jbe .pn_scan_h_next\n"
-        "cmp al, 'h'\n"
-        "je .pn_is_hex_suffix\n"
-        "jmp .pn_scan_h_done\n"
-        ".pn_check_upper_hex:\n"
-        "cmp al, 'A'\n"
-        "jb .pn_scan_h_done\n"
-        "cmp al, 'F'\n"
-        "jbe .pn_scan_h_next\n"
-        "cmp al, 'h'\n"
-        "je .pn_is_hex_suffix\n"
-        "cmp al, 'H'\n"
-        "je .pn_is_hex_suffix\n"
-        "jmp .pn_scan_h_done\n"
-        ".pn_scan_h_next:\n"
-        "inc si\n"
-        "jmp .pn_scan_h\n"
-        ".pn_scan_h_done:\n"
-        "pop si\n"
-        "jmp .pn_try_decimal\n"
-        ".pn_is_hex_suffix:\n"
-        "pop si\n"
-        "jmp .pn_hex_suffix\n"
-        ".pn_hex_prefix:\n"
-        "add si, 2\n"
-        "xor bx, bx\n"
-        ".pn_hex_p_loop:\n"
-        "mov al, [si]\n"
-        "xor ah, ah\n"
-        "call hex_digit\n"
-        "test ax, ax\n"
-        "js .pn_hex_p_ret\n"
-        "shl bx, 4\n"
-        "or bl, al\n"
-        "inc si\n"
-        "jmp .pn_hex_p_loop\n"
-        ".pn_hex_p_ret:\n"
-        "mov ax, bx\n"
-        "jmp .pn_ret\n"
-        ".pn_hex_suffix:\n"
-        "xor bx, bx\n"
-        ".pn_hex_s_loop:\n"
-        "mov al, [si]\n"
-        "cmp al, 'h'\n"
-        "je .pn_hex_s_end\n"
-        "cmp al, 'H'\n"
-        "je .pn_hex_s_end\n"
-        "xor ah, ah\n"
-        "call hex_digit\n"
-        "test ax, ax\n"
-        "js .pn_hex_s_end\n"
-        "shl bx, 4\n"
-        "or bl, al\n"
-        "inc si\n"
-        "jmp .pn_hex_s_loop\n"
-        ".pn_hex_s_end:\n"
-        "mov ax, bx\n"
-        "cmp byte [si], 'h'\n"
-        "je .pn_skip_h\n"
-        "cmp byte [si], 'H'\n"
-        "je .pn_skip_h\n"
-        "jmp .pn_ret\n"
-        ".pn_skip_h:\n"
-        "inc si\n"
-        "jmp .pn_ret\n"
-        ".pn_try_decimal:\n"
-        "xor ax, ax\n"
-        ".pn_dec_loop:\n"
-        "mov cl, [si]\n"
-        "cmp cl, '0'\n"
-        "jb .pn_ret\n"
-        "cmp cl, '9'\n"
-        "ja .pn_ret\n"
-        "push dx\n"
-        "mov bx, 10\n"
-        "mul bx\n"
-        "pop dx\n"
-        "sub cl, '0'\n"
-        "xor ch, ch\n"
-        "add ax, cx\n"
-        "inc si\n"
-        "jmp .pn_dec_loop\n"
-        ".pn_ret:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx");
+   number at ``source_cursor``.  NASM lets both forms coexist in a
+   single program (and even in a single expression), so the handler
+   peeks ahead to decide: if any digit before the next non-hex char
+   is ``h`` the whole thing is hex-suffixed, else decimal.  Result
+   returns via AX; ``source_cursor`` advances past the number.
+   Sole caller is ``resolve_value`` (after a digit-prefix test), so
+   no character-literal path here.  All comparisons against ASCII
+   classes use numeric decimals because cc.py's
+   ``validate_comparison_types`` rejects ``int`` vs ``Char``
+   mismatch. */
+int parse_number() {
+    int value = 0;
+    char c;
+    int d;
+    /* Hex prefix: 0x.. or 0X.. */
+    c = source_cursor[0];
+    if (c == '0') {
+        c = source_cursor[1];
+        if (c == 'x' || c == 'X') {
+            source_cursor = source_cursor + 2;
+            while (1) {
+                d = hex_digit(source_cursor[0]);
+                if (d < 0) {
+                    return value;
+                }
+                value = (value << 4) | d;
+                source_cursor = source_cursor + 1;
+            }
+        }
+    }
+    /* Peek ahead: scan digits / hex chars, if the terminator is ``h`` or
+       ``H`` the number is hex-suffixed; otherwise it's decimal. */
+    char *saved = source_cursor;
+    int is_hex = 0;
+    while (1) {
+        c = source_cursor[0];
+        if (c >= '0' && c <= '9') {
+            source_cursor = source_cursor + 1;
+        } else if (c >= 'A' && c <= 'F') {
+            source_cursor = source_cursor + 1;
+        } else if (c >= 'a' && c <= 'f') {
+            source_cursor = source_cursor + 1;
+        } else if (c == 'h' || c == 'H') {
+            is_hex = 1;
+            break;
+        } else {
+            break;
+        }
+    }
+    source_cursor = saved;
+    if (is_hex) {
+        while (1) {
+            c = source_cursor[0];
+            if (c == 'h' || c == 'H') {
+                source_cursor = source_cursor + 1;
+                return value;
+            }
+            d = hex_digit(c);
+            if (d < 0) {
+                c = source_cursor[0];
+                if (c == 'h' || c == 'H') {
+                    source_cursor = source_cursor + 1;
+                }
+                return value;
+            }
+            value = (value << 4) | d;
+            source_cursor = source_cursor + 1;
+        }
+    }
+    /* Decimal */
+    while (1) {
+        c = source_cursor[0];
+        if (c < '0' || c > '9') {
+            return value;
+        }
+        value = value * 10 + (c - '0');
+        source_cursor = source_cursor + 1;
+    }
 }
 
 /* Parse a single operand — register, immediate, direct memory
