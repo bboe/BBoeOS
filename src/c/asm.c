@@ -3591,65 +3591,56 @@ void do_pass() {
 }
 
 /* Map a register number to its 16-bit addressing ModR/M r/m field.
-   Input AL is a cc.py-style register index (3=bx, 5=bp, 6=si,
-   7=di); output AL is the ModR/M encoding (bx=7, bp=6, si=4,
-   di=5).  Any input that isn't one of the four indexable base
-   registers is treated as bp (rm=6), matching the retired asm. */
-void reg_to_rm() {
-    asm("cmp al, 3\n"
-        "je .rtr_bx\n"
-        "cmp al, 6\n"
-        "je .rtr_si\n"
-        "cmp al, 7\n"
-        "je .rtr_di\n"
-        "mov al, 6\n"
-        "jmp .rtr_end\n"
-        ".rtr_bx:\n"
-        "mov al, 7\n"
-        "jmp .rtr_end\n"
-        ".rtr_si:\n"
-        "mov al, 4\n"
-        "jmp .rtr_end\n"
-        ".rtr_di:\n"
-        "mov al, 5\n"
-        ".rtr_end:");
+   Input register index in AL (3=bx, 5=bp, 6=si, 7=di); returns the
+   ModR/M encoding in AL (bx=7, bp=6, si=4, di=5).  Any input that
+   isn't one of the four indexable base registers is treated as bp
+   (rm=6), matching the retired asm.
+
+   Fastcall ``regparm(1)`` so the C body reads the parameter
+   naturally.  Inline-asm callers still do ``mov al, X ; call
+   reg_to_rm``; AX arrives with AH carrying whatever junk the
+   caller didn't zero, so the body masks to a byte before the
+   switch to match the old AL-only comparison semantics. */
+__attribute__((regparm(1)))
+int reg_to_rm(int reg) {
+    reg = reg & 0xFF;
+    if (reg == 3) {
+        return 7;
+    }
+    if (reg == 6) {
+        return 4;
+    }
+    if (reg == 7) {
+        return 5;
+    }
+    return 6;
 }
 
 /* Resolve a jump/label operand.  Pass 1: skip past the identifier
    and return ``current_address`` as a placeholder so the handler
    can emit a same-size displacement; pass 2: evaluate the operand
    via resolve_value (which performs the real symbol lookup plus
-   any trailing ``+ offset`` math). */
-void resolve_label() {
-    asm("cmp byte [_g_pass], 1\n"
-        "je .rl_pass1\n"
-        "call resolve_value\n"
-        "jmp .rl_end\n"
-        ".rl_pass1:\n"
-        ".rl_skip_label:\n"
-        "mov al, [si]\n"
-        "cmp al, 'a'\n"
-        "jae .rl_skip_more\n"
-        "cmp al, 'A'\n"
-        "jb .rl_check_d\n"
-        "cmp al, 'Z'\n"
-        "jbe .rl_skip_more\n"
-        ".rl_check_d:\n"
-        "cmp al, '0'\n"
-        "jb .rl_skip_done\n"
-        "cmp al, '9'\n"
-        "ja .rl_check_s\n"
-        ".rl_skip_more:\n"
-        "inc si\n"
-        "jmp .rl_skip_label\n"
-        ".rl_check_s:\n"
-        "cmp al, '_'\n"
-        "je .rl_skip_more\n"
-        "cmp al, '.'\n"
-        "je .rl_skip_more\n"
-        ".rl_skip_done:\n"
-        "mov ax, [_g_current_address]\n"
-        ".rl_end:");
+   any trailing ``+ offset`` math).  Both branches advance
+   ``source_cursor`` past the label.  Returns int (in AX) — the
+   inline-asm callers in ``encode_rel8_jump`` read AX after the
+   call. */
+int resolve_label() {
+    if (pass != 1) {
+        return resolve_value();
+    }
+    while (1) {
+        char c = source_cursor[0];
+        if ((c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '_'
+                || c == '.') {
+            source_cursor = source_cursor + 1;
+        } else {
+            break;
+        }
+    }
+    return current_address;
 }
 
 /* Expression evaluator at SI.  Recognises parenthesised
@@ -3957,17 +3948,18 @@ void skip_comma() {
     }
 }
 
-/* Compute the ES-relative offset of a symbol table entry: input AX
-   = index, output DI = index * SYMBOL_ENTRY (36).  Preserves BX;
-   clobbers AX and DX (MUL writes its high word into DX).  ``mul bx``
-   is shorter than an ``imul ax, bx, 36`` encoding, which is why the
-   retired asm took the BX-save-and-restore detour. */
-void symbol_entry_address() {
-    asm("push bx\n"
-        "mov bx, SYMBOL_ENTRY\n"
-        "mul bx\n"
-        "mov di, ax\n"
-        "pop bx");
+/* Compute the ES-relative offset of a symbol table entry: returns
+   ``index * SYMBOL_ENTRY`` (36) in AX.  Fastcall ``regparm(1)`` so
+   the index arrives in AX directly.  cc.py's multiplication codegen
+   uses ``mul bx`` which clobbers BX; callers that need BX across
+   the call save it on the stack.  The four inline-asm call sites
+   each do ``call symbol_entry_address ; mov di, ax`` now — the old
+   inline body wrote DI internally, the pure-C version returns via
+   AX and leaves the DI move to the caller (2 bytes per site × 4 =
+   8 bytes, offset by the smaller function body). */
+__attribute__((regparm(1)))
+int symbol_entry_address(int index) {
+    return index * SYMBOL_ENTRY;
 }
 
 /* Append a label to the symbol table.  Callers pass SI = name,
@@ -3987,6 +3979,7 @@ void symbol_add() {
         "push bx\n"
         "mov ax, [_g_symbol_count]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov cx, SYMBOL_NAME_LENGTH - 1\n"
         ".sa_copy_name:\n"
         "mov al, [si]\n"
@@ -4004,6 +3997,7 @@ void symbol_add() {
         "jns .sa_pad_name\n"
         "mov ax, [_g_symbol_count]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "pop bx\n"
         "pop ax\n"
         "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
@@ -4030,6 +4024,7 @@ void symbol_add_constant() {
         "push ax\n"
         "mov ax, [_g_last_symbol_index]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1\n"
         "pop ax\n"
         "pop bx");
@@ -4117,6 +4112,7 @@ void symbol_set() {
         "je .ss_add\n"
         "mov ax, [_g_last_symbol_index]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov ax, [_g_symbol_set_value]\n"
         "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
         "pop dx\n"

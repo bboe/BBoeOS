@@ -202,12 +202,20 @@ class Function(Node):
     annotation on the definition (0 = standard cdecl, 1 = first arg
     arrives in AX and is spilled to a local stack slot in the
     prologue).  Only regparm(1) is currently supported.
+
+    ``carry_return`` captures ``__attribute__((carry_return))`` —
+    the function reports its int return via the carry flag instead
+    of AX: ``return 1`` → ``clc`` then epilogue, ``return 0`` →
+    ``stc`` then epilogue.  Callers use it in ``if`` / ``while``
+    conditions, where cc.py dispatches on ``jnc`` (true) / ``jc``
+    (false) directly — no AX round-trip.
     """
 
     name: str
     params: list[Param]
     body: list[Node]
     regparm_count: int = field(default=0, kw_only=True)
+    carry_return: bool = field(default=False, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -393,6 +401,14 @@ JUMP_WHEN_FALSE = {
     ">": "jle",
     ">=": "jl",
     "==": "jne",
+    # Pseudo-operators for ``carry_return`` call conditions.  CF clear
+    # means the call reported ``return 1`` (true); CF set means
+    # ``return 0`` (false).  ``if (foo())`` dispatches through
+    # ``carry`` (jump-false = ``jc``); ``if (foo() == 0)`` through
+    # ``not_carry`` (jump-false = ``jnc``).  No real ``cmp`` runs —
+    # the ``call`` itself leaves CF holding the result.
+    "carry": "jc",
+    "not_carry": "jnc",
 }
 
 JUMP_WHEN_TRUE = {
@@ -402,6 +418,8 @@ JUMP_WHEN_TRUE = {
     ">": "jg",
     ">=": "jge",
     "==": "je",
+    "carry": "jnc",
+    "not_carry": "jc",
 }
 
 KEYWORDS = frozenset({
@@ -654,6 +672,7 @@ class CodeGenerator:
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
         self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in AX
+        self.carry_return_functions: set[str] = set()  # callees that return via CF
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
@@ -886,6 +905,33 @@ class CodeGenerator:
         offset = node.index.value
         self._emit_load_var(vname, register="si")
         return f"byte [si+{offset}]" if offset else "byte [si]"
+
+    def _si_scratch_guard_begin(self, base_var: str | None = None, /) -> bool:
+        """Emit ``push si`` if SI is aliased to a pinned global.
+
+        When an ``asm_register("si")`` global is declared, SI holds the
+        aliased value across the program.  Subscripts on other ``char
+        *`` pointers normally lower to ``mov si, <base> ; mov al,
+        [si]``, which would trash the alias.  This helper emits a
+        ``push si`` guard (returns True) when:
+
+        - an ``asm_register("si")`` global exists, and
+        - the subscript base *isn't* that same global (no clobber
+          happens when ``mov si, si`` is a no-op).
+
+        The caller pairs the guard with :meth:`_si_scratch_guard_end`.
+        """
+        if not any(register == "si" for register in self.register_aliased_globals.values()):
+            return False
+        if base_var is not None and self.register_aliased_globals.get(base_var) == "si":
+            return False
+        self.emit("        push si")
+        return True
+
+    def _si_scratch_guard_end(self, *, guarded: bool) -> None:
+        """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
+        if guarded:
+            self.emit("        pop si")
 
     def _emit_constant_base_index_addr(
         self,
@@ -2727,10 +2773,30 @@ class CodeGenerator:
     def emit_condition(self, *, condition: Node, context: str) -> str:
         """Validate a condition, emit a comparison, and return the operator.
 
+        ``carry_return`` call conditions — ``if (foo())`` / ``while
+        (foo())`` / ``if (foo() == 0)`` where ``foo`` is declared with
+        ``__attribute__((carry_return))`` — skip the ``cmp`` path
+        entirely: the ``call`` itself leaves CF holding the truth
+        value, and the caller dispatches through ``jc`` / ``jnc`` via
+        the synthetic ``"carry"`` / ``"not_carry"`` operators.
+        ``parse_condition`` wraps a bare expression as ``expr != 0``,
+        so the detected shape is always ``BinOp('!=' | '==', Call,
+        Int(0))``.
+
         Raises:
             CompileError: If the condition is not a comparison.
 
         """
+        if (
+            isinstance(condition, BinOp)
+            and condition.op in ("!=", "==")
+            and isinstance(condition.right, Int)
+            and condition.right.value == 0
+            and isinstance(condition.left, Call)
+            and condition.left.name in self.carry_return_functions
+        ):
+            self.generate_call(condition.left, discard_return=True)
+            return "carry" if condition.op == "!=" else "not_carry"
         if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
             message = f"{context} condition must be a comparison, got {condition}"
             raise CompileError(message, line=condition.line)
@@ -3000,6 +3066,8 @@ class CodeGenerator:
                 self.user_functions[function.name] = len(function.params)
                 if function.regparm_count > 0:
                     self.fastcall_functions.add(function.name)
+                if function.carry_return:
+                    self.carry_return_functions.add(function.name)
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
@@ -3346,6 +3414,7 @@ class CodeGenerator:
                     else:
                         self.emit(f"        mov ax, [{addr}]")
                 else:
+                    guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register="si")
                     if is_byte:
                         if offset:
@@ -3357,6 +3426,7 @@ class CodeGenerator:
                         self.emit(f"        mov ax, [si+{offset}]")
                     else:
                         self.emit("        mov ax, [si]")
+                    self._si_scratch_guard_end(guarded=guarded)
             else:
                 is_byte = self._is_byte_var(vname)
                 const_base = self._resolve_constant(vname)
@@ -3375,6 +3445,7 @@ class CodeGenerator:
                         self.emit(f"        mov ax, [{addr}]")
                     self.ax_clear()
                 else:
+                    guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register="si")
                     # If the index is a pinned variable and the access is
                     # byte-sized, load it without clobbering SI.
@@ -3399,6 +3470,7 @@ class CodeGenerator:
                         self.emit("        xor ah, ah")
                     else:
                         self.emit("        mov ax, [si]")
+                    self._si_scratch_guard_end(guarded=guarded)
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
                     self.ax_clear()
@@ -3598,6 +3670,7 @@ class CodeGenerator:
         self.auto_pin_candidates: dict[str, str] = {}
         self.ax_clear()
         self.constant_aliases = {}
+        self.current_carry_return = function.carry_return
         self.elide_frame = name == "main"
         # Frame-elide criteria for non-main functions.  The bp frame
         # becomes dead weight whenever the body makes no BP-relative
@@ -3944,18 +4017,31 @@ class CodeGenerator:
 
         In ``main``, ``return`` maps to ``jmp FUNCTION_EXIT``.  In other
         functions it evaluates the return expression into AX, tears down
-        the stack frame, and emits ``ret``.
+        the stack frame, and emits ``ret``.  For ``carry_return``
+        functions, ``return 1`` / ``return 0`` bypass AX entirely and
+        set CF instead (``clc`` / ``stc``); any other return value is
+        rejected at codegen time.
         """
         if self.elide_frame:
             # main: return [expr]; → exit() (discard return value)
             self.emit("        jmp FUNCTION_EXIT")
-        else:
-            if statement.value is not None:
-                self.generate_expression(statement.value)
+            return
+        if self.current_carry_return:
+            if not isinstance(statement.value, Int) or statement.value.value not in (0, 1):
+                message = "carry_return functions may only ``return 0`` (stc, false) or ``return 1`` (clc, true)"
+                raise CompileError(message, line=statement.line)
+            self.emit("        clc" if statement.value.value == 1 else "        stc")
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
             self.emit("        pop bp")
             self.emit("        ret")
+            return
+        if statement.value is not None:
+            self.generate_expression(statement.value)
+        if self.frame_size > 0:
+            self.emit("        mov sp, bp")
+        self.emit("        pop bp")
+        self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:
         """Generate assembly for a single statement.
@@ -5258,16 +5344,21 @@ class Parser:
         return node
 
     def _parse_attribute(self, *, line: int) -> tuple[str, object]:
-        """Consume a single ``__attribute__((name(arg)))`` directive.
+        """Consume a single ``__attribute__((name(args)))`` directive.
 
         Returns a ``(name, value)`` tuple that the caller dispatches
-        on: ``("regparm", 1)`` for ``regparm(1)`` and ``("asm_register",
-        "si")`` for ``asm_register("si")``.  Only the one value each
-        attribute currently supports is accepted — anything else raises.
+        on.  Supported kinds:
 
-        clang silently accepts regparm on x86 targets; asm_register
-        is unknown to clang and produces a ``-Wunknown-attributes``
-        warning but no error, so the syntax survives ``test_cc.py``.
+        * ``("regparm", 1)`` — first arg arrives in AX (fastcall).
+        * ``("asm_register", "si")`` — file-scope global aliases SI.
+        * ``("carry_return", True)`` — int return is reported via CF
+          (CF clear = 1/true/success, CF set = 0/false/failure); no
+          parenthesised argument list.
+
+        clang silently accepts regparm on x86 targets; asm_register /
+        carry_return are unknown to clang and produce a
+        ``-Wunknown-attributes`` warning (returncode stays 0), so the
+        syntax survives ``test_cc.py``.
         """
         self.eat("IDENT")  # __attribute__
         self.eat("LPAREN")
@@ -5296,6 +5387,10 @@ class Parser:
                 message = f"asm_register('{reg_name}') not supported; only 'si' is implemented"
                 raise CompileError(message, line=line)
             return ("asm_register", reg_name)
+        if attr_name == "carry_return":
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("carry_return", True)
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -5511,10 +5606,13 @@ class Parser:
         # the function parameter list; ``asm_register`` is leading-only.
         regparm_count = 0
         asm_register: str | None = None
+        carry_return = False
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
             if kind == "regparm":
                 regparm_count = value
+            elif kind == "carry_return":
+                carry_return = True
             else:
                 asm_register = value
         type_string = self.parse_type()
@@ -5529,15 +5627,24 @@ class Parser:
             self.eat("RPAREN")
             if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
                 kind, value = self._parse_attribute(line=line)
-                if kind != "regparm":
+                if kind == "regparm":
+                    if regparm_count != 0:
+                        message = "regparm attribute specified twice"
+                        raise CompileError(message, line=line)
+                    regparm_count = value
+                elif kind == "carry_return":
+                    carry_return = True
+                else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
-                if regparm_count != 0:
-                    message = "regparm attribute specified twice"
-                    raise CompileError(message, line=line)
-                regparm_count = value
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
+                raise CompileError(message, line=line)
+            if carry_return and len(parameters) > regparm_count:
+                # Stack-passed args would require an ``add sp, N`` cleanup
+                # after the call, which clobbers CF.  carry_return callees
+                # must arrive via AX only (regparm(1)) or take no args.
+                message = "carry_return functions may not take stack args; use 0 params or regparm(1)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
                 # Function prototype (no body).  cc.py's two-pass
@@ -5550,9 +5657,19 @@ class Parser:
                 self.eat("SEMI")
                 return None
             self.eat("LBRACE")
-            return Function(name, parameters, self.parse_block(), line=line, regparm_count=regparm_count)
+            return Function(
+                name,
+                parameters,
+                self.parse_block(),
+                line=line,
+                regparm_count=regparm_count,
+                carry_return=carry_return,
+            )
         if regparm_count != 0:
             message = "regparm attribute is not valid on global variables"
+            raise CompileError(message, line=line)
+        if carry_return:
+            message = "carry_return attribute is not valid on global variables"
             raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
