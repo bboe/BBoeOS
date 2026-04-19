@@ -110,6 +110,8 @@ int symbol_set_value;
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
+__attribute__((carry_return))
+int match_word_c_str_word();
 int parse_operand_c();
 void parse_mnemonic();
 __attribute__((carry_return))
@@ -420,131 +422,66 @@ void handle_adc() {
    ``.had_end:`` so cc.py's bp frame closes after mem_op_reg_emit
    returns. */
 void handle_add() {
-    asm("call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "jne .had_not_mem_dst\n"
-        "mov al, 01h\n"
-        "call mem_op_reg_emit\n"
-        "jmp .had_end\n"
-        ".had_not_mem_dst:\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .had_rr\n"
-        "cmp byte [_g_op2_type], 2\n"
-        "je .had_rm_direct\n"
-        "cmp byte [_g_op2_type], 3\n"
-        "je .had_rm_reg_disp\n"
-        "mov cx, dx\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .had_r8\n"
-        "jmp .had_r16_imm\n"
-        ".had_rr:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .had_rr8\n"
-        "mov al, 01h\n"
-        "jmp .had_rr_emit\n"
-        ".had_rr8:\n"
-        "mov al, 00h\n"
-        ".had_rr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .had_end\n"
-        ".had_rm_direct:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .had_rm8\n"
-        "mov al, 03h\n"
-        "jmp .had_rm_emit\n"
-        ".had_rm8:\n"
-        "mov al, 02h\n"
-        ".had_rm_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .had_end\n"
-        ".had_rm_reg_disp:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .had_rm_rd8\n"
-        "mov al, 03h\n"
-        "jmp .had_rm_rd_emit\n"
-        ".had_rm_rd8:\n"
-        "mov al, 02h\n"
-        ".had_rm_rd_emit:\n"
-        "call emit_byte_al\n"
-        "push dx\n"
-        "mov al, [_g_op2_register]\n"
-        "call reg_to_rm\n"
-        "or al, 40h\n"
-        "mov ah, bl\n"
-        "shl ah, 3\n"
-        "or al, ah\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .had_end\n"
-        ".had_r16_imm:\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .had_r16_ax_check\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .had_end\n"
-        ".had_r16_ax_check:\n"
-        "test bl, bl\n"
-        "jnz .had_r16_full\n"
-        "mov al, 05h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .had_end\n"
-        ".had_r16_full:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .had_end\n"
-        ".had_r8:\n"
-        "test bl, bl\n"
-        "jnz .had_r8_general\n"
-        "mov al, 04h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .had_end\n"
-        ".had_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        ".had_end:");
+    skip_ws();
+    if (source_cursor[0] == '[') {
+        asm("mov al, 0x01\n"
+            "call mem_op_reg_emit");
+        return;
+    }
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    int size1 = (pr >> 8) & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    if (t2 == 0) {
+        if (size1 == 8) {
+            emit_byte(0x00);
+        } else {
+            emit_byte(0x01);
+        }
+        emit_byte(make_modrm_reg_reg_impl(r2, reg1));
+    } else if (t2 == 2) {
+        if (size1 == 8) {
+            emit_byte(0x02);
+        } else {
+            emit_byte(0x03);
+        }
+        emit_byte((reg1 << 3) | 0x06);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    } else if (t2 == 3) {
+        if (size1 == 8) {
+            emit_byte(0x02);
+        } else {
+            emit_byte(0x03);
+        }
+        emit_byte(reg_to_rm(r2) | 0x40 | (reg1 << 3));
+        emit_byte(v2 & 0xFF);
+    } else if (size1 == 8) {
+        if (reg1 == 0) {
+            emit_byte(0x04);
+        } else {
+            emit_byte(0x80);
+            emit_byte(0xC0 | reg1);
+        }
+        emit_byte(v2 & 0xFF);
+    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(0x83);
+        emit_byte(0xC0 | reg1);
+        emit_byte(v2 & 0xFF);
+    } else if (reg1 == 0) {
+        emit_byte(0x05);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(0xC0 | reg1);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    }
 }
 
 /* ``and r, r`` / ``and r, imm`` / ``and [disp16], r16``.  The
@@ -1661,150 +1598,83 @@ void handle_stosw() {
    Memory-destination call into mem_op_reg_emit uses ``call`` +
    terminal ``.hsu_end:`` so cc.py's bp frame closes. */
 void handle_sub() {
-    asm("call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "jne .hsu_check_word\n"
-        "mov al, 29h\n"
-        "call mem_op_reg_emit\n"
-        "jmp .hsu_end\n"
-        ".hsu_check_word:\n"
-        "push si\n"
-        "mov di, STR_WORD\n"
-        "call match_word\n"
-        "jc .hsu_no_mem\n"
-        "add sp, 2\n"
-        "call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "jne abort_unknown\n"
-        "inc si\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "cmp byte [si], ']'\n"
-        "jne abort_unknown\n"
-        "inc si\n"
-        "call skip_comma\n"
-        "call resolve_value\n"
-        "push ax\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, 2Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, dx\n"
-        "call emit_word_ax\n"
-        "pop ax\n"
-        "call emit_word_ax\n"
-        "jmp .hsu_end\n"
-        ".hsu_no_mem:\n"
-        "pop si\n"
-        "call parse_register\n"
-        "jc abort_unknown\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hsu_rr\n"
-        "cmp byte [_g_op2_type], 2\n"
-        "je .hsu_rm_direct\n"
-        "cmp byte [_g_op2_type], 3\n"
-        "je .hsu_rm_reg_disp\n"
-        "mov cx, dx\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hsu_r8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hsu_r16_full\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hsu_end\n"
-        ".hsu_rr:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hsu_rr8\n"
-        "mov al, 29h\n"
-        "jmp .hsu_rr_emit\n"
-        ".hsu_rr8:\n"
-        "mov al, 28h\n"
-        ".hsu_rr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hsu_end\n"
-        ".hsu_rm_direct:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hsu_rm8\n"
-        "mov al, 2Bh\n"
-        "jmp .hsu_rm_emit\n"
-        ".hsu_rm8:\n"
-        "mov al, 2Ah\n"
-        ".hsu_rm_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hsu_end\n"
-        ".hsu_rm_reg_disp:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hsu_rm_rd8\n"
-        "mov al, 2Bh\n"
-        "jmp .hsu_rm_rd_emit\n"
-        ".hsu_rm_rd8:\n"
-        "mov al, 2Ah\n"
-        ".hsu_rm_rd_emit:\n"
-        "call emit_byte_al\n"
-        "push dx\n"
-        "mov al, [_g_op2_register]\n"
-        "call reg_to_rm\n"
-        "or al, 40h\n"
-        "mov ah, bl\n"
-        "shl ah, 3\n"
-        "or al, ah\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hsu_end\n"
-        ".hsu_r16_full:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E8h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hsu_end\n"
-        ".hsu_r8:\n"
-        "test bl, bl\n"
-        "jnz .hsu_r8_general\n"
-        "mov al, 2Ch\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hsu_end\n"
-        ".hsu_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        ".hsu_end:");
+    skip_ws();
+    if (source_cursor[0] == '[') {
+        asm("mov al, 0x29\n"
+            "call mem_op_reg_emit");
+        return;
+    }
+    if (match_word_c_str_word()) {
+        skip_ws();
+        if (source_cursor[0] != '[') {
+            abort_unknown();
+        }
+        source_cursor = source_cursor + 1;
+        int disp = resolve_value();
+        if (source_cursor[0] != ']') {
+            abort_unknown();
+        }
+        source_cursor = source_cursor + 1;
+        skip_comma();
+        int imm = resolve_value();
+        emit_byte(0x81);
+        emit_byte(0x2E);
+        emit_byte(disp & 0xFF);
+        emit_byte((disp >> 8) & 0xFF);
+        emit_byte(imm & 0xFF);
+        emit_byte((imm >> 8) & 0xFF);
+        return;
+    }
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    int size1 = (pr >> 8) & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    if (t2 == 0) {
+        if (size1 == 8) {
+            emit_byte(0x28);
+        } else {
+            emit_byte(0x29);
+        }
+        emit_byte(make_modrm_reg_reg_impl(r2, reg1));
+    } else if (t2 == 2) {
+        if (size1 == 8) {
+            emit_byte(0x2A);
+        } else {
+            emit_byte(0x2B);
+        }
+        emit_byte((reg1 << 3) | 0x06);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    } else if (t2 == 3) {
+        if (size1 == 8) {
+            emit_byte(0x2A);
+        } else {
+            emit_byte(0x2B);
+        }
+        emit_byte(reg_to_rm(r2) | 0x40 | (reg1 << 3));
+        emit_byte(v2 & 0xFF);
+    } else if (size1 == 8) {
+        if (reg1 == 0) {
+            emit_byte(0x2C);
+        } else {
+            emit_byte(0x80);
+            emit_byte(0xE8 | reg1);
+        }
+        emit_byte(v2 & 0xFF);
+    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(0x83);
+        emit_byte(0xE8 | reg1);
+        emit_byte(v2 & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(0xE8 | reg1);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    }
 }
 
 /* ``test r, r`` / ``test r, imm`` / ``test byte [mem], imm8`` —
@@ -2999,6 +2869,21 @@ int parse_register_optional() {
 int parse_operand_c() {
     asm("call parse_operand\n"
         "mov [_g_parse_operand_value], dx");
+}
+
+/* C-callable ``match_word`` wrapper specialized for ``STR_WORD``.
+   ``match_word`` takes DI = keyword pointer and SI = source cursor;
+   sole caller (``handle_sub``) always matches ``word``, so the
+   wrapper hard-codes ``mov di, STR_WORD`` before the call and
+   reports match / miss through the ``carry_return`` CF — source
+   cursor is either advanced past ``word`` + word-boundary (match)
+   or restored (miss).  Staying specialized keeps the wrapper a
+   3-instruction leaf; a generic ``match_word_c(char *keyword)``
+   would need cc.py to thread the arg through DI instead of AX. */
+__attribute__((carry_return))
+int match_word_c_str_word() {
+    asm("mov di, STR_WORD\n"
+        "call match_word");
 }
 
 /* Linear scan over ``register_table`` (2-char name + reg-num byte
