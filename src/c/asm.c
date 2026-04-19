@@ -68,6 +68,10 @@ int op2_register;
 int op2_type;
 int op2_value;
 int org_value;
+/* ``parse_operand_c`` stashes its DX output here so the C caller
+   can read the displacement / immediate value after the call; AX
+   keeps the packed ``AH = type``, ``AL = reg`` return. */
+int parse_operand_value;
 /* Pointer to the 512-byte output-byte buffer at ``_program_end + 256``
    (= OUTPUT_BUFFER in the asm_layout.h #define).  main() initializes
    it; ``emit_byte`` / ``flush_output`` index into it directly. */
@@ -108,10 +112,13 @@ int symbol_set_value;
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
+int parse_operand_c();
 void parse_mnemonic();
 __attribute__((carry_return))
 int parse_register_c();
 int parse_register_optional();
+__attribute__((regparm(1)))
+int reg_to_rm(int reg);
 int resolve_value();
 void skip_comma();
 void skip_ws();
@@ -930,55 +937,39 @@ void handle_cmp() {
    differs from handle_inc only in the /r-field constant (0x08 vs
    0x00 for reg form, 0x0E vs 0x06 for mod=00 disp16 form). */
 void handle_dec() {
-    asm("call skip_ws\n"
-        "call parse_operand\n"
-        "mov [_g_op1_register], al\n"
-        "cmp ah, 0\n"
-        "jne .hde_mem\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hde_r8\n"
-        "add al, 48h\n"
-        "call emit_byte_al\n"
-        "jmp .hde_end\n"
-        ".hde_r8:\n"
-        "push ax\n"
-        "mov al, 0FEh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0C8h\n"
-        "call emit_byte_al\n"
-        "jmp .hde_end\n"
-        ".hde_mem:\n"
-        "mov al, 0FEh\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hde_mem_op\n"
-        "mov al, 0FFh\n"
-        ".hde_mem_op:\n"
-        "call emit_byte_al\n"
-        "cmp ah, 2\n"
-        "je .hde_mem_direct\n"
-        "push dx\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "or al, 08h\n"
-        "cmp dx, 0\n"
-        "jne .hde_mem_reg_disp\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "jmp .hde_end\n"
-        ".hde_mem_reg_disp:\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hde_end\n"
-        ".hde_mem_direct:\n"
-        "mov al, 0Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, dx\n"
-        "call emit_word_ax\n"
-        ".hde_end:");
+    skip_ws();
+    int po = parse_operand_c();
+    int type = (po >> 8) & 0xFF;
+    int reg = po & 0xFF;
+    int value = parse_operand_value;
+    int size = op1_size;
+    if (type == 0) {
+        if (size == 8) {
+            emit_byte(0xFE);
+            emit_byte(0xC8 | reg);
+        } else {
+            emit_byte(0x48 + reg);
+        }
+    } else {
+        if (size == 8) {
+            emit_byte(0xFE);
+        } else {
+            emit_byte(0xFF);
+        }
+        if (type == 2) {
+            emit_byte(0x0E);
+            emit_byte(value & 0xFF);
+            emit_byte((value >> 8) & 0xFF);
+        } else {
+            int rm = reg_to_rm(reg) | 0x08;
+            if (value == 0) {
+                emit_byte(rm);
+            } else {
+                emit_byte(rm | 0x40);
+                emit_byte(value & 0xFF);
+            }
+        }
+    }
 }
 
 /* ``div r8`` / ``div r16`` — picks F6 or F7, ORs 0xF0 (modrm with
@@ -996,54 +987,39 @@ void handle_div() {
 }
 
 void handle_inc() {
-    asm("call skip_ws\n"
-        "call parse_operand\n"
-        "mov [_g_op1_register], al\n"
-        "cmp ah, 0\n"
-        "jne .hin_mem\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hin_r8\n"
-        "add al, 40h\n"
-        "call emit_byte_al\n"
-        "jmp .hin_end\n"
-        ".hin_r8:\n"
-        "push ax\n"
-        "mov al, 0FEh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "jmp .hin_end\n"
-        ".hin_mem:\n"
-        "mov al, 0FEh\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hin_mem_op\n"
-        "mov al, 0FFh\n"
-        ".hin_mem_op:\n"
-        "call emit_byte_al\n"
-        "cmp ah, 2\n"
-        "je .hin_mem_direct\n"
-        "push dx\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "cmp dx, 0\n"
-        "jne .hin_mem_reg_disp\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "jmp .hin_end\n"
-        ".hin_mem_reg_disp:\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "pop dx\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hin_end\n"
-        ".hin_mem_direct:\n"
-        "mov al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, dx\n"
-        "call emit_word_ax\n"
-        ".hin_end:");
+    skip_ws();
+    int po = parse_operand_c();
+    int type = (po >> 8) & 0xFF;
+    int reg = po & 0xFF;
+    int value = parse_operand_value;
+    int size = op1_size;
+    if (type == 0) {
+        if (size == 8) {
+            emit_byte(0xFE);
+            emit_byte(0xC0 | reg);
+        } else {
+            emit_byte(0x40 + reg);
+        }
+    } else {
+        if (size == 8) {
+            emit_byte(0xFE);
+        } else {
+            emit_byte(0xFF);
+        }
+        if (type == 2) {
+            emit_byte(0x06);
+            emit_byte(value & 0xFF);
+            emit_byte((value >> 8) & 0xFF);
+        } else {
+            int rm = reg_to_rm(reg);
+            if (value == 0) {
+                emit_byte(rm);
+            } else {
+                emit_byte(rm | 0x40);
+                emit_byte(value & 0xFF);
+            }
+        }
+    }
 }
 
 /* ``int <imm8>`` — emits CD imm8.  Uses push/pop AX to shuttle the
@@ -3269,6 +3245,21 @@ int parse_register_optional() {
         "jnc .pro_ok\n"
         "mov ax, -1\n"
         ".pro_ok:");
+}
+
+/* C-callable wrapper around the inline-asm ``parse_operand``.  The
+   retired asm returned three values — AH = type, AL = reg, DX =
+   immediate / displacement — across two registers.  cc.py's return
+   ABI is AX-only, so the wrapper stashes DX into the
+   ``parse_operand_value`` global before falling through to the
+   caller with AX intact.  Pure-C callers write ``int po =
+   parse_operand_c();`` and extract type / reg / value via ``(po >>
+   8) & 0xFF`` / ``po & 0xFF`` / ``parse_operand_value``.  ``op1_size``
+   is set by ``parse_operand`` itself as a side effect; C callers
+   read it through the existing ``int op1_size`` global. */
+int parse_operand_c() {
+    asm("call parse_operand\n"
+        "mov [_g_parse_operand_value], dx");
 }
 
 /* Linear scan over ``register_table`` (2-char name + reg-num byte
