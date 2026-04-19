@@ -5409,6 +5409,10 @@ class Parser:
         globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
             declaration = self.parse_top_level_declaration()
+            if declaration is None:
+                # Function prototype — swallowed by parse_top_level_declaration
+                # for clang's benefit; cc.py doesn't need it in the AST.
+                continue
             if isinstance(declaration, Function):
                 functions.append(declaration)
             else:
@@ -5535,6 +5539,16 @@ class Parser:
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
                 raise CompileError(message, line=line)
+            if self.peek()[0] == "SEMI":
+                # Function prototype (no body).  cc.py's two-pass
+                # function-name resolution doesn't need prototypes, but
+                # clang's ISO C99 declare-before-use rule requires them
+                # when a pure-C caller references a function defined
+                # later in the same translation unit.  Parsed and
+                # swallowed here; ``parse_program`` drops the None
+                # return so nothing lands in the AST.
+                self.eat("SEMI")
+                return None
             self.eat("LBRACE")
             return Function(name, parameters, self.parse_block(), line=line, regparm_count=regparm_count)
         if regparm_count != 0:

@@ -101,6 +101,15 @@ int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
 
+/* Forward declarations for functions defined later in the file that
+   pure-C bodies need to call.  cc.py resolves these via its two-pass
+   ``user_functions`` registry regardless of source order, but clang
+   enforces ISO C99 declare-before-use; the prototypes placate the
+   syntax check without affecting codegen. */
+void parse_mnemonic();
+int resolve_value();
+void skip_ws();
+
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
    mnemonic's SI into ``error_word`` and jumps to
@@ -340,15 +349,27 @@ void flush_output() {
    Placed after its C-level callee (``flush_output``) rather than in
    strict alphabetical position: cc.py resolves the call either way
    via its pre-codegen ``user_functions`` registry, but clang
-   enforces ISO C99 declare-before-use. */
+   enforces ISO C99 declare-before-use.
+
+   SI is preserved across the body via an explicit ``push si`` /
+   ``pop si`` pair around the ``output_buffer[...]`` subscript
+   (cc.py's byte-index codegen uses SI as scratch).  Pure-C
+   handlers that follow an ``emit_byte`` with a ``skip_ws`` or
+   ``parse_mnemonic`` call rely on ``source_cursor`` (the SI alias)
+   surviving the emit — without the guard, every subscript would
+   trash the live cursor.  ``flush_output`` already preserves SI
+   around its own body, so the inner ``flush_output()`` call
+   inside our push/pop bracket composes cleanly. */
 __attribute__((regparm(1)))
 void emit_byte(int v) {
     if (pass == 2) {
+        asm("push si");
         output_buffer[output_position] = v;
         output_position = output_position + 1;
         if (output_position >= 512) {
             flush_output();
         }
+        asm("pop si");
     }
     current_address = current_address + 1;
     output_total = output_total + 1;
@@ -1035,14 +1056,15 @@ void handle_inc() {
 /* ``int <imm8>`` — emits CD imm8.  Uses push/pop AX to shuttle the
    immediate across the emit_byte_al call, since both the opcode
    byte and the immediate byte land in AL. */
+/* ``int <imm8>`` — two-byte encoding (``CD imm8``).  ``resolve_value``
+   returns the immediate in AX and advances source_cursor past the
+   expression; emit_byte preserves SI across its subscript so the
+   inner ``emit_byte(resolve_value())`` composes without spilling
+   through a local (body stays frameless). */
 void handle_int() {
-    asm("call skip_ws\n"
-        "call resolve_value\n"
-        "push ax\n"
-        "mov al, 0CDh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al");
+    skip_ws();
+    emit_byte(0xCD);
+    emit_byte(resolve_value());
 }
 
 /* Conditional-jump family: each handler hands its rel8 opcode off
@@ -1773,20 +1795,22 @@ void handle_pusha() {
 
 /* ``rep`` / ``repne`` prefixes — emit the prefix byte then recurse
    into parse_mnemonic so the following mnemonic's handler appends
-   its own opcode(s).  parse_mnemonic is still in the file-scope asm
-   block; cc.py's bp frame here wraps the call path cleanly. */
+   its own opcode(s).  ``emit_byte`` preserves SI across its body so
+   the subsequent ``skip_ws`` / ``parse_mnemonic`` still see a live
+   ``source_cursor``.  Both handlers' bodies are three statement-
+   level Calls, which qualifies them for ``frameless_calls``
+   elide_frame — no bp frame, ``mov ax, OP ; call emit_byte ; call
+   skip_ws ; call parse_mnemonic ; ret`` exactly. */
 void handle_rep() {
-    asm("mov al, 0F3h\n"
-        "call emit_byte_al\n"
-        "call skip_ws\n"
-        "call parse_mnemonic");
+    emit_byte(0xF3);
+    skip_ws();
+    parse_mnemonic();
 }
 
 void handle_repne() {
-    asm("mov al, 0F2h\n"
-        "call emit_byte_al\n"
-        "call skip_ws\n"
-        "call parse_mnemonic");
+    emit_byte(0xF2);
+    skip_ws();
+    parse_mnemonic();
 }
 
 void handle_ret() {
@@ -3639,8 +3663,13 @@ void resolve_label() {
    itself via ``call resolve_value`` from the paren / operator-RHS
    branches; cc.py's bp frame makes the recursion safe (each frame
    pushes its own BP and the BX/CX/DI save triplet stays
-   stack-balanced). */
-void resolve_value() {
+   stack-balanced).  Signature declares ``int`` so pure-C callers
+   can bind the AX return value (``int v = resolve_value();``); the
+   inline-asm body ends with AX already set, and cc.py emits
+   ``ret`` directly after (naked_asm elide), so the missing C-level
+   ``return`` that clang's -Wreturn-type warns about is harmless —
+   same pattern as ``load_src_sector``. */
+int resolve_value() {
     asm("push bx\n"
         "push cx\n"
         "push di\n"
