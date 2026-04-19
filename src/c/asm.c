@@ -119,6 +119,7 @@ int parse_register_c();
 int parse_register_optional();
 __attribute__((regparm(1)))
 int reg_to_rm(int reg);
+int resolve_label();
 int resolve_value();
 void skip_comma();
 void skip_ws();
@@ -541,38 +542,25 @@ void handle_and() {
    requires a non-zero disp that fits in a signed byte; anything
    else jumps to abort_unknown. */
 void handle_call() {
-    asm("call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "je .hca_indirect\n"
-        "mov al, 0E8h\n"
-        "call emit_byte_al\n"
-        "call resolve_label\n"
-        "mov bx, [_g_current_address]\n"
-        "add bx, 2\n"
-        "sub ax, bx\n"
-        "call emit_word_ax\n"
-        "jmp .hca_end\n"
-        ".hca_indirect:\n"
-        "call parse_operand\n"
-        "cmp ah, 3\n"
-        "jne abort_unknown\n"
-        "test dx, dx\n"
-        "jz abort_unknown\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja abort_unknown\n"
-        "push dx\n"
-        "mov bl, al\n"
-        "mov al, 0FFh\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "call reg_to_rm\n"
-        "or al, 50h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        ".hca_end:");
+    skip_ws();
+    if (source_cursor[0] == '[') {
+        int po = parse_operand_c();
+        int t = (po >> 8) & 0xFF;
+        int r = po & 0xFF;
+        int v = parse_operand_value;
+        if (t != 3 || v == 0 || v < -128 || v > 127) {
+            abort_unknown();
+        }
+        emit_byte(0xFF);
+        emit_byte(reg_to_rm(r) | 0x50);
+        emit_byte(v & 0xFF);
+    } else {
+        emit_byte(0xE8);
+        int target = resolve_label();
+        int delta = target - current_address - 2;
+        emit_byte(delta & 0xFF);
+        emit_byte((delta >> 8) & 0xFF);
+    }
 }
 
 void handle_clc() {
@@ -1264,43 +1252,27 @@ void handle_movsw() {
    isn't needed and isn't emitted by cc.py, so it's omitted here
    too. */
 void handle_movzx() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "mov [_g_op1_register], al\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "mov al, 0Fh\n"
-        "call emit_byte_al\n"
-        "mov al, 0B6h\n"
-        "call emit_byte_al\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hmz_rr\n"
-        "mov al, [_g_op2_register]\n"
-        "call reg_to_rm\n"
-        "mov bl, al\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, bl\n"
-        "cmp word [_g_op2_value], 0\n"
-        "jne .hmz_disp\n"
-        "call emit_byte_al\n"
-        "jmp .hmz_end\n"
-        ".hmz_disp:\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_value]\n"
-        "call emit_byte_al\n"
-        "jmp .hmz_end\n"
-        ".hmz_rr:\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, [_g_op2_register]\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        ".hmz_end:");
+    skip_ws();
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    emit_byte(0x0F);
+    emit_byte(0xB6);
+    if (t2 == 0) {
+        emit_byte(0xC0 | (reg1 << 3) | r2);
+    } else {
+        int modrm = (reg1 << 3) | reg_to_rm(r2);
+        if (v2 != 0) {
+            emit_byte(modrm | 0x40);
+            emit_byte(v2 & 0xFF);
+        } else {
+            emit_byte(modrm);
+        }
+    }
 }
 
 /* Single-operand arithmetic family (``mul`` / ``neg`` / ``not`` on a
@@ -1485,38 +1457,27 @@ void handle_ret() {
    past the abort tail so the epilogue closes cc.py's bp frame; the
    abort paths jmp out to abort_unknown (which never returns). */
 void handle_sbb() {
-    asm("call skip_ws\n"
-        "push si\n"
-        "mov di, STR_WORD\n"
-        "call match_word\n"
-        "jc .hsb_bad\n"
-        "add sp, 2\n"
-        "call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "jne .hsb_bad2\n"
-        "inc si\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "cmp byte [si], ']'\n"
-        "jne .hsb_bad2\n"
-        "inc si\n"
-        "call skip_comma\n"
-        "call resolve_value\n"
-        "mov cl, al\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, 1Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, dx\n"
-        "call emit_word_ax\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hsb_end\n"
-        ".hsb_bad:\n"
-        "pop si\n"
-        ".hsb_bad2:\n"
-        "jmp abort_unknown\n"
-        ".hsb_end:");
+    skip_ws();
+    if (match_word_c_str_word() == 0) {
+        abort_unknown();
+    }
+    skip_ws();
+    if (source_cursor[0] != '[') {
+        abort_unknown();
+    }
+    source_cursor = source_cursor + 1;
+    int disp = resolve_value();
+    if (source_cursor[0] != ']') {
+        abort_unknown();
+    }
+    source_cursor = source_cursor + 1;
+    skip_comma();
+    int imm = resolve_value();
+    emit_byte(0x83);
+    emit_byte(0x1E);
+    emit_byte(disp & 0xFF);
+    emit_byte((disp >> 8) & 0xFF);
+    emit_byte(imm & 0xFF);
 }
 
 void handle_scasb() {
