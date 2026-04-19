@@ -336,11 +336,19 @@ class Var(Node):
 
 @dataclass(slots=True)
 class VarDecl(Node):
-    """Scalar local declaration ``T name [= init];``."""
+    """Scalar local declaration ``T name [= init];``.
+
+    ``asm_register`` captures the ``__attribute__((asm_register("REG")))``
+    annotation on a file-scope declaration — the declared variable is
+    aliased to the named CPU register, so reads compile as the register
+    itself (no ``[_g_name]`` load) and writes compile as a direct
+    ``mov REG, ...``.  ``None`` for ordinary scalars / locals.
+    """
 
     name: str
     type_name: str
     init: Node | None
+    asm_register: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -646,6 +654,7 @@ class CodeGenerator:
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
         self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in AX
+        self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
@@ -954,6 +963,10 @@ class CodeGenerator:
         self.emit(";; --- global data ---")
         for name in sorted(self.global_scalars):
             declaration = self.global_scalars[name]
+            if name in self.register_aliased_globals:
+                # Storage lives in the aliased CPU register, not memory,
+                # so no ``_g_<name>`` label is emitted.
+                continue
             init_expression = "0"
             if declaration.init is not None:
                 init_expression = self._constant_expression(declaration.init)
@@ -981,6 +994,10 @@ class CodeGenerator:
         """
         if name in self.pinned_register:
             self.emit(f"        mov {register}, {self.pinned_register[name]}")
+        elif name in self.register_aliased_globals:
+            source = self.register_aliased_globals[name]
+            if source != register:
+                self.emit(f"        mov {register}, {source}")
         elif name in self.constant_aliases:
             self.emit(f"        mov {register}, {self.constant_aliases[name]}")
         else:
@@ -1129,8 +1146,12 @@ class CodeGenerator:
         Covers frame-based locals (``self.locals``) and file-scope
         scalars (``self.global_scalars``).  Call sites use this to
         decide whether a ``Var`` can be addressed directly via ``[mem]``
-        instead of being loaded into AX first.
+        instead of being loaded into AX first.  Register-aliased globals
+        (``asm_register``) report False because their storage is a CPU
+        register, not a memory slot.
         """
+        if name in self.register_aliased_globals:
+            return False
         return name in self.locals or name in self.global_scalars
 
     @staticmethod
@@ -1191,7 +1212,10 @@ class CodeGenerator:
 
         Local variables shadow globals with the same name (standard C),
         so the local-frame path runs first and only falls through to
-        ``_g_<name>`` when no local slot exists.
+        ``_g_<name>`` when no local slot exists.  Register-aliased
+        globals have no memory address — they live in a CPU register —
+        so this path raises if called on one (caller should have
+        routed through ``register_aliased_globals`` instead).
         """
         if name in self.locals:
             if self.elide_frame:
@@ -1200,6 +1224,9 @@ class CodeGenerator:
             if offset > 0:
                 return f"bp-{offset}"
             return f"bp+{-offset}"
+        if name in self.register_aliased_globals:
+            message = f"register-aliased global '{name}' has no memory address"
+            raise CompileError(message)
         if name in self.global_scalars:
             return f"_g_{name}"
         message = f"no address for '{name}' (not a local or global scalar)"
@@ -1417,6 +1444,11 @@ class CodeGenerator:
                 if declaration.init is not None:
                     for constant in self._collect_constant_references(declaration.init):
                         self.emit_constant_reference(constant)
+                if declaration.asm_register is not None:
+                    if declaration.init is not None:
+                        message = f"register-aliased global '{name}' cannot have a constant initializer (initialize from main() instead)"
+                        raise CompileError(message, line=declaration.line)
+                    self.register_aliased_globals[name] = declaration.asm_register
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int"):
@@ -2816,6 +2848,10 @@ class CodeGenerator:
             source = self.pinned_register[argument.name]
             if source != register:
                 self.emit(f"        mov {register}, {source}")
+        elif isinstance(argument, Var) and argument.name in self.register_aliased_globals:
+            source = self.register_aliased_globals[argument.name]
+            if source != register:
+                self.emit(f"        mov {register}, {source}")
         elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != "ax":
                 self.emit(f"        mov {register}, ax")
@@ -2880,32 +2916,38 @@ class CodeGenerator:
             self.ax_is_byte = False
             self.ax_local = None
             return
+        direct_register: str | None = None
         if name in self.pinned_register:
-            register = self.pinned_register[name]
+            direct_register = self.pinned_register[name]
+        elif name in self.register_aliased_globals:
+            direct_register = self.register_aliased_globals[name]
+        if direct_register is not None:
             if isinstance(expression, Int):
                 if expression.value == 0:
-                    self.emit(f"        xor {register}, {register}")
+                    self.emit(f"        xor {direct_register}, {direct_register}")
                 else:
-                    self.emit(f"        mov {register}, {expression.value}")
+                    self.emit(f"        mov {direct_register}, {expression.value}")
                 return
             if isinstance(expression, String):
                 label = self.new_string_label(expression.content)
-                self.emit(f"        mov {register}, {label}")
+                self.emit(f"        mov {direct_register}, {label}")
                 return
             if isinstance(expression, Var) and expression.name in self.NAMED_CONSTANTS:
-                self.emit(f"        mov {register}, {expression.name}")
+                self.emit(f"        mov {direct_register}, {expression.name}")
+                return
+            if isinstance(expression, Var) and expression.name in self.global_arrays:
+                self.emit(f"        mov {direct_register}, _g_{expression.name}")
                 return
         # Tell nested expression handling that the pinned destination
         # register (if any) will be overwritten at end of this store, so
         # they don't need to push/pop it to preserve the old value.
         previous_store_target = self.store_target_register
-        self.store_target_register = self.pinned_register.get(name)
+        self.store_target_register = direct_register
         self.generate_expression(expression)
         self.store_target_register = previous_store_target
-        if name in self.pinned_register:
-            register = self.pinned_register[name]
-            if register != "ax":
-                self.emit(f"        mov {register}, ax")
+        if direct_register is not None:
+            if direct_register != "ax":
+                self.emit(f"        mov {direct_register}, ax")
         else:
             self.emit(f"        mov [{self._local_address(name)}], ax")
         self.ax_is_byte = False
@@ -3272,6 +3314,8 @@ class CodeGenerator:
                 raise CompileError(message, line=expression.line)
             if vname in self.pinned_register:
                 self.emit(f"        mov ax, {self.pinned_register[vname]}")
+            elif vname in self.register_aliased_globals:
+                self.emit(f"        mov ax, {self.register_aliased_globals[vname]}")
             else:
                 self.emit(f"        mov ax, [{self._local_address(vname)}]")
             self.ax_is_byte = False
@@ -5213,32 +5257,47 @@ class Parser:
             node = self.fold_binop(operator_token[1], node, right)
         return node
 
-    def _parse_regparm_attribute(self, *, line: int) -> int:
-        """Consume ``__attribute__((regparm(N)))`` and return N.
+    def _parse_attribute(self, *, line: int) -> tuple[str, object]:
+        """Consume a single ``__attribute__((name(arg)))`` directive.
 
-        clang silently accepts regparm on x86 targets and ignores it
-        elsewhere, so the syntax survives ``test_cc.py`` without
-        emitting warnings when placed before the return type.  Only
-        ``regparm(1)`` is currently implemented; anything else raises.
+        Returns a ``(name, value)`` tuple that the caller dispatches
+        on: ``("regparm", 1)`` for ``regparm(1)`` and ``("asm_register",
+        "si")`` for ``asm_register("si")``.  Only the one value each
+        attribute currently supports is accepted — anything else raises.
+
+        clang silently accepts regparm on x86 targets; asm_register
+        is unknown to clang and produces a ``-Wunknown-attributes``
+        warning but no error, so the syntax survives ``test_cc.py``.
         """
         self.eat("IDENT")  # __attribute__
         self.eat("LPAREN")
         self.eat("LPAREN")
         attr_name_token = self.eat("IDENT")
         attr_name = attr_name_token[1]
-        if attr_name != "regparm":
-            message = f"unsupported function attribute '{attr_name}'"
-            raise CompileError(message, line=line)
-        self.eat("LPAREN")
-        count_token = self.eat("NUMBER")
-        self.eat("RPAREN")
-        self.eat("RPAREN")
-        self.eat("RPAREN")
-        count = int(count_token[1])
-        if count != 1:
-            message = f"regparm({count}) not supported; only regparm(1) is implemented"
-            raise CompileError(message, line=line)
-        return count
+        if attr_name == "regparm":
+            self.eat("LPAREN")
+            count_token = self.eat("NUMBER")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            count = int(count_token[1])
+            if count != 1:
+                message = f"regparm({count}) not supported; only regparm(1) is implemented"
+                raise CompileError(message, line=line)
+            return ("regparm", count)
+        if attr_name == "asm_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            reg_name = reg_token[1][1:-1]
+            if reg_name != "si":
+                message = f"asm_register('{reg_name}') not supported; only 'si' is implemented"
+                raise CompileError(message, line=line)
+            return ("asm_register", reg_name)
+        message = f"unsupported attribute '{attr_name}'"
+        raise CompileError(message, line=line)
 
     def parse_parameter(self) -> Param:
         """Parse a single function parameter.
@@ -5440,30 +5499,47 @@ class Parser:
             self.eat("RPAREN")
             self.eat("SEMI")
             return InlineAsm(content, line=line)
-        # Optional leading ``__attribute__((regparm(N)))`` on a function
-        # definition — clang accepts this position silently (the
-        # trailing-after-params form emits a GCC-compat warning).  Only
-        # regparm(1) is currently implemented (first arg arrives in AX).
+        # Optional leading ``__attribute__((...))`` directives.
+        # ``regparm(1)`` applies to function definitions (arg 0 in AX);
+        # ``asm_register("REG")`` applies to file-scope VarDecls (the
+        # variable aliases the named CPU register).  Both may appear
+        # before the return type.  ``regparm`` may also appear after
+        # the function parameter list; ``asm_register`` is leading-only.
         regparm_count = 0
-        if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
-            regparm_count = self._parse_regparm_attribute(line=line)
+        asm_register: str | None = None
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "regparm":
+                regparm_count = value
+            else:
+                asm_register = value
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
+            if asm_register is not None:
+                message = "asm_register attribute is not valid on function definitions"
+                raise CompileError(message, line=line)
             self.eat("LPAREN")
             parameters = self.parse_parameters()
             self.eat("RPAREN")
             if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+                kind, value = self._parse_attribute(line=line)
+                if kind != "regparm":
+                    message = f"trailing {kind} attribute is not valid on function definitions"
+                    raise CompileError(message, line=line)
                 if regparm_count != 0:
                     message = "regparm attribute specified twice"
                     raise CompileError(message, line=line)
-                regparm_count = self._parse_regparm_attribute(line=line)
+                regparm_count = value
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
                 raise CompileError(message, line=line)
             self.eat("LBRACE")
             return Function(name, parameters, self.parse_block(), line=line, regparm_count=regparm_count)
+        if regparm_count != 0:
+            message = "regparm attribute is not valid on global variables"
+            raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
         # runtime initializer to imply one.
@@ -5481,11 +5557,14 @@ class Parser:
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
+            if asm_register is not None:
+                message = "asm_register attribute is not valid on arrays"
+                raise CompileError(message, line=line)
             if size_expression is None and init is None:
                 message = f"global array '{name}' needs either a size or an initializer"
                 raise CompileError(message, line=line)
             return ArrayDecl(name, type_string, init, line=line, size=size_expression)
-        return VarDecl(name, type_string, init, line=line)
+        return VarDecl(name, type_string, init, line=line, asm_register=asm_register)
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned long).
