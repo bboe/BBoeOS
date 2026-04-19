@@ -107,7 +107,10 @@ int symbol_set_value;
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
 void parse_mnemonic();
+__attribute__((carry_return))
+int parse_register_c();
 int resolve_value();
+void skip_comma();
 void skip_ws();
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
@@ -391,20 +394,13 @@ void handle_aam() {
 /* ``adc r16, imm8`` — the only form cc.py emits (the checksum-fold
    idiom).  Encoded as 83 /2 ib: sign-extended imm8 into r16. */
 void handle_adc() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop bx\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0D0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al");
+    skip_ws();
+    int pr = parse_register_c();
+    skip_comma();
+    int imm = resolve_value();
+    emit_byte(0x83);
+    emit_byte(0xD0 | (pr & 0xFF));
+    emit_byte(imm);
 }
 
 /* ``add`` has four operand shapes: ``[disp16], r16`` (via
@@ -986,20 +982,14 @@ void handle_dec() {
    /6 reg field) into the register number.  Same shape as
    handle_mul / handle_neg / handle_not above. */
 void handle_div() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "cmp ah, 8\n"
-        "je .hdi_8\n"
-        "mov al, 0F7h\n"
-        "jmp .hdi_emit\n"
-        ".hdi_8:\n"
-        "mov al, 0F6h\n"
-        ".hdi_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0F0h\n"
-        "call emit_byte_al");
+    skip_ws();
+    int pr = parse_register_c();
+    int opcode = 0xF7;
+    if ((pr >> 8) == 8) {
+        opcode = 0xF6;
+    }
+    emit_byte(opcode);
+    emit_byte(0xF0 | (pr & 0xFF));
 }
 
 void handle_inc() {
@@ -1559,54 +1549,36 @@ void handle_movzx() {
    stack around the opcode emit; cc.py's bp frame is outside this
    push/pop so the balance stays clean. */
 void handle_mul() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "cmp ah, 8\n"
-        "je .hmu_8\n"
-        "mov al, 0F7h\n"
-        "jmp .hmu_emit\n"
-        ".hmu_8:\n"
-        "mov al, 0F6h\n"
-        ".hmu_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al");
+    skip_ws();
+    int pr = parse_register_c();
+    int opcode = 0xF7;
+    if ((pr >> 8) == 8) {
+        opcode = 0xF6;
+    }
+    emit_byte(opcode);
+    emit_byte(0xE0 | (pr & 0xFF));
 }
 
 void handle_neg() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "cmp ah, 8\n"
-        "je .hne_8\n"
-        "mov al, 0F7h\n"
-        "jmp .hne_emit\n"
-        ".hne_8:\n"
-        "mov al, 0F6h\n"
-        ".hne_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0D8h\n"
-        "call emit_byte_al");
+    skip_ws();
+    int pr = parse_register_c();
+    int opcode = 0xF7;
+    if ((pr >> 8) == 8) {
+        opcode = 0xF6;
+    }
+    emit_byte(opcode);
+    emit_byte(0xD8 | (pr & 0xFF));
 }
 
 void handle_not() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "cmp ah, 8\n"
-        "je .hno_8\n"
-        "mov al, 0F7h\n"
-        "jmp .hno_emit\n"
-        ".hno_8:\n"
-        "mov al, 0F6h\n"
-        ".hno_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0D0h\n"
-        "call emit_byte_al");
+    skip_ws();
+    int pr = parse_register_c();
+    int opcode = 0xF7;
+    if ((pr >> 8) == 8) {
+        opcode = 0xF6;
+    }
+    emit_byte(opcode);
+    emit_byte(0xD0 | (pr & 0xFF));
 }
 
 /* ``or r, r`` / ``or r, imm`` / ``or r, [disp16]``.  Same /r=1 as
@@ -1867,81 +1839,53 @@ void handle_scasb() {
    handlers differ only in the /r field constant: shl=4 (0xE0), shr=5
    (0xE8). */
 void handle_shl() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call resolve_value\n"
-        "mov cl, al\n"
-        "pop bx\n"
-        "cmp cl, 1\n"
-        "jne .hsl_imm\n"
-        "cmp bh, 8\n"
-        "je .hsl1_8\n"
-        "mov al, 0D1h\n"
-        "jmp .hsl1_emit\n"
-        ".hsl1_8:\n"
-        "mov al, 0D0h\n"
-        ".hsl1_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al\n"
-        "jmp .hsl_end\n"
-        ".hsl_imm:\n"
-        "cmp bh, 8\n"
-        "je .hsl_8\n"
-        "mov al, 0C1h\n"
-        "jmp .hsl_emit\n"
-        ".hsl_8:\n"
-        "mov al, 0C0h\n"
-        ".hsl_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        ".hsl_end:");
+    skip_ws();
+    int pr = parse_register_c();
+    skip_comma();
+    int count = resolve_value();
+    int reg = pr & 0xFF;
+    int size = (pr >> 8) & 0xFF;
+    if (count == 1) {
+        if (size == 8) {
+            emit_byte(0xD0);
+        } else {
+            emit_byte(0xD1);
+        }
+        emit_byte(0xE0 | reg);
+    } else {
+        if (size == 8) {
+            emit_byte(0xC0);
+        } else {
+            emit_byte(0xC1);
+        }
+        emit_byte(0xE0 | reg);
+        emit_byte(count);
+    }
 }
 
 void handle_shr() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call resolve_value\n"
-        "mov cl, al\n"
-        "pop bx\n"
-        "cmp cl, 1\n"
-        "jne .hsr_imm\n"
-        "cmp bh, 8\n"
-        "je .hsr1_8\n"
-        "mov al, 0D1h\n"
-        "jmp .hsr1_emit\n"
-        ".hsr1_8:\n"
-        "mov al, 0D0h\n"
-        ".hsr1_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E8h\n"
-        "call emit_byte_al\n"
-        "jmp .hsr_end\n"
-        ".hsr_imm:\n"
-        "cmp bh, 8\n"
-        "je .hsr_8\n"
-        "mov al, 0C1h\n"
-        "jmp .hsr_emit\n"
-        ".hsr_8:\n"
-        "mov al, 0C0h\n"
-        ".hsr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        ".hsr_end:");
+    skip_ws();
+    int pr = parse_register_c();
+    skip_comma();
+    int count = resolve_value();
+    int reg = pr & 0xFF;
+    int size = (pr >> 8) & 0xFF;
+    if (count == 1) {
+        if (size == 8) {
+            emit_byte(0xD0);
+        } else {
+            emit_byte(0xD1);
+        }
+        emit_byte(0xE8 | reg);
+    } else {
+        if (size == 8) {
+            emit_byte(0xC0);
+        } else {
+            emit_byte(0xC1);
+        }
+        emit_byte(0xE8 | reg);
+        emit_byte(count);
+    }
 }
 
 void handle_stc() {
@@ -3341,6 +3285,19 @@ void parse_operand() {
         "xor dx, dx\n"
         "mov ah, 3\n"
         ".po_end:");
+}
+
+/* C-callable wrapper around the inline-asm ``parse_register``.  Naked-
+   asm body just forwards the call and lets the inner ``parse_register``'s
+   return reach our caller — AX (packed ``AH = size``, ``AL = reg
+   number``) propagates through cc.py's naked ``ret``, so pure-C callers
+   can write ``int pr = parse_register_c();`` and extract the two fields
+   via ``pr & 0xff`` / ``(pr >> 8) & 0xff``.  CF also survives the
+   ``call parse_register ; ret`` sequence; callers that care use the
+   ``if (parse_register_c()) { ... }`` ``carry_return`` dispatch. */
+__attribute__((carry_return))
+int parse_register_c() {
+    asm("call parse_register");
 }
 
 /* Linear scan over ``register_table`` (2-char name + reg-num byte
