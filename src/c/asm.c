@@ -22,8 +22,6 @@
    arrays emit ``times N db 0`` at the binary tail, which is fine for
    the two small fixed-size buffers. */
 int changed_flag;
-int cmp_imm_byte;
-int cmp_op1_size;
 int current_address;
 int equ_space;
 int error_flag;
@@ -559,78 +557,46 @@ void handle_add() {
    handle_xor with the /r field constant swapped for 0xE0 (``/4``)
    and the short AL / AX form using 24/25. */
 void handle_and() {
-    asm("call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "jne .han_not_mem_dst\n"
-        "mov al, 21h\n"
-        "call mem_op_reg_emit\n"
-        "jmp .han_end\n"
-        ".han_not_mem_dst:\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .han_rr\n"
-        "mov cx, [_g_op2_value]\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .han_r8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .han_r16_imm16\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .han_end\n"
-        ".han_r16_imm16:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .han_end\n"
-        ".han_r8:\n"
-        "test bl, bl\n"
-        "jnz .han_r8_general\n"
-        "mov al, 24h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .han_end\n"
-        ".han_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0E0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .han_end\n"
-        ".han_rr:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .han_rr8\n"
-        "mov al, 21h\n"
-        "jmp .han_rr_emit\n"
-        ".han_rr8:\n"
-        "mov al, 20h\n"
-        ".han_rr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        ".han_end:");
+    skip_ws();
+    if (source_cursor[0] == '[') {
+        asm("mov al, 0x21\n"
+            "call mem_op_reg_emit");
+        return;
+    }
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    int size1 = (pr >> 8) & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    if (t2 == 0) {
+        if (size1 == 8) {
+            emit_byte(0x20);
+        } else {
+            emit_byte(0x21);
+        }
+        emit_byte(make_modrm_reg_reg_impl(r2, reg1));
+    } else if (size1 == 8) {
+        if (reg1 == 0) {
+            emit_byte(0x24);
+            emit_byte(v2 & 0xFF);
+        } else {
+            emit_byte(0x80);
+            emit_byte(0xE0 | reg1);
+            emit_byte(v2 & 0xFF);
+        }
+    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(0x83);
+        emit_byte(0xE0 | reg1);
+        emit_byte(v2 & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(0xE0 | reg1);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    }
 }
 
 /* ``call <label>`` (E8 rel16) and ``call [reg+disp8]`` (FF /2) —
@@ -684,249 +650,129 @@ void handle_cld() {
    ``/r`` field is 7 (``0xF8`` register-mode modrm constant, ``0x38``
    for memory-mode reg field, ``0x3E`` for the mod=00 disp16 form).
    Short forms are 3C (AL imm8), 3D (AX imm16), 80 /7 / 81 /7 / 83 /7
-   for the general reg-imm; 38 / 39 for reg-reg; 3A / 3B for
-   reg-mem.  cmp_imm_byte is an auxiliary flag that chooses between
-   a trailing imm8 (for 80/83) and imm16 (for 81) when emitting a
-   reg+disp memory-immediate. */
+   for the general reg-imm; 38 / 39 for reg-reg; 3A / 3B for reg-mem. */
 void handle_cmp() {
-    asm("call skip_ws\n"
-        "call parse_operand\n"
-        "mov [_g_op1_type], ah\n"
-        "mov [_g_op1_register], al\n"
-        "mov [_g_op1_value], dx\n"
-        "mov al, [_g_op1_size]\n"
-        "mov [_g_cmp_op1_size], al\n"
-        "call skip_comma\n"
-        "cmp byte [_g_op1_type], 0\n"
-        "jne .hcm_imm_only\n"
-        "push si\n"
-        "call parse_register\n"
-        "jc .hcm_not_rr\n"
-        "add sp, 2\n"
-        "mov bl, [_g_op1_register]\n"
-        "push ax\n"
-        "cmp byte [_g_cmp_op1_size], 8\n"
-        "je .hcm_rr8\n"
-        "mov al, 39h\n"
-        "jmp .hcm_rr_emit\n"
-        ".hcm_rr8:\n"
-        "mov al, 38h\n"
-        ".hcm_rr_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_not_rr:\n"
-        "pop si\n"
-        "cmp byte [si], '['\n"
-        "jne .hcm_imm_only\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp ah, 2\n"
-        "je .hcm_rm_direct\n"
-        "cmp ah, 3\n"
-        "jne .hcm_imm_only\n"
-        "cmp byte [_g_cmp_op1_size], 8\n"
-        "je .hcm_rmbx8\n"
-        "mov al, 3Bh\n"
-        "jmp .hcm_rmbx_emit\n"
-        ".hcm_rmbx8:\n"
-        "mov al, 3Ah\n"
-        ".hcm_rmbx_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call reg_to_rm\n"
-        "mov bl, al\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, bl\n"
-        "mov dx, [_g_op2_value]\n"
-        "test dx, dx\n"
-        "jz .hcm_rmbx_no_disp\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hcm_rmbx_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_rmbx_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_rmbx_no_disp:\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_rm_direct:\n"
-        "push dx\n"
-        "cmp byte [_g_cmp_op1_size], 8\n"
-        "je .hcm_rm8\n"
-        "mov al, 3Bh\n"
-        "jmp .hcm_rm_emit\n"
-        ".hcm_rm8:\n"
-        "mov al, 3Ah\n"
-        ".hcm_rm_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_imm_only:\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "cmp byte [_g_op1_type], 2\n"
-        "je .hcm_mem_direct\n"
-        "cmp byte [_g_op1_type], 3\n"
-        "je .hcm_mem\n"
-        "cmp byte [_g_op1_type], 0\n"
-        "jne .hcm_done\n"
-        "mov bl, [_g_op1_register]\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hcm_r8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hcm_r16_full\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_r16_full:\n"
-        "test bl, bl\n"
-        "jnz .hcm_r16_general\n"
-        "mov al, 3Dh\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_r16_general:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F8h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_r8:\n"
-        "test bl, bl\n"
-        "jnz .hcm_r8_general\n"
-        "mov al, 3Ch\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_mem:\n"
-        "mov byte [_g_cmp_imm_byte], 0\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hcm_mem8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hcm_mem_word_full\n"
-        "mov al, 83h\n"
-        "mov byte [_g_cmp_imm_byte], 1\n"
-        "jmp .hcm_mem_modrm\n"
-        ".hcm_mem_word_full:\n"
-        "mov al, 81h\n"
-        "jmp .hcm_mem_modrm\n"
-        ".hcm_mem8:\n"
-        "mov al, 80h\n"
-        "mov byte [_g_cmp_imm_byte], 1\n"
-        ".hcm_mem_modrm:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "or al, 38h\n"
-        "mov dx, [_g_op1_value]\n"
-        "test dx, dx\n"
-        "jz .hcm_mem_no_disp\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hcm_mem_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_mem_imm\n"
-        ".hcm_mem_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_mem_imm\n"
-        ".hcm_mem_no_disp:\n"
-        "call emit_byte_al\n"
-        ".hcm_mem_imm:\n"
-        "cmp byte [_g_cmp_imm_byte], 0\n"
-        "jne .hcm_mem_imm8\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_mem_imm8:\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_mem_direct:\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hcm_md8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hcm_md_full\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, 3Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hcm_done\n"
-        ".hcm_md_full:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, 3Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hcm_done\n"
-        ".hcm_md8:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, 3Eh\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        ".hcm_done:");
+    skip_ws();
+    int po = parse_operand_c();
+    int t1 = (po >> 8) & 0xFF;
+    int r1 = po & 0xFF;
+    int v1 = parse_operand_value;
+    int size1 = op1_size;
+    skip_comma();
+    if (t1 == 0) {
+        char *saved = source_cursor;
+        int pr2 = parse_register_optional();
+        if (pr2 >= 0) {
+            if (size1 == 8) {
+                emit_byte(0x38);
+            } else {
+                emit_byte(0x39);
+            }
+            emit_byte(make_modrm_reg_reg_impl(pr2 & 0xFF, r1));
+            return;
+        }
+        source_cursor = saved;
+        if (source_cursor[0] == '[') {
+            int po2 = parse_operand_c();
+            int t2 = (po2 >> 8) & 0xFF;
+            int r2 = po2 & 0xFF;
+            int v2 = parse_operand_value;
+            if (t2 == 2) {
+                if (size1 == 8) {
+                    emit_byte(0x3A);
+                } else {
+                    emit_byte(0x3B);
+                }
+                emit_byte((r1 << 3) | 0x06);
+                emit_byte(v2 & 0xFF);
+                emit_byte((v2 >> 8) & 0xFF);
+                return;
+            }
+            if (t2 == 3) {
+                if (size1 == 8) {
+                    emit_byte(0x3A);
+                } else {
+                    emit_byte(0x3B);
+                }
+                int modrm = (r1 << 3) | reg_to_rm(r2);
+                if (v2 == 0) {
+                    emit_byte(modrm);
+                } else if (v2 >= -128 && v2 <= 127) {
+                    emit_byte(modrm | 0x40);
+                    emit_byte(v2 & 0xFF);
+                } else {
+                    emit_byte(modrm | 0x80);
+                    emit_byte(v2 & 0xFF);
+                    emit_byte((v2 >> 8) & 0xFF);
+                }
+                return;
+            }
+        }
+        int imm = resolve_value();
+        if (size1 == 8) {
+            if (r1 == 0) {
+                emit_byte(0x3C);
+            } else {
+                emit_byte(0x80);
+                emit_byte(0xF8 | r1);
+            }
+            emit_byte(imm & 0xFF);
+        } else if (imm >= -128 && imm <= 127) {
+            emit_byte(0x83);
+            emit_byte(0xF8 | r1);
+            emit_byte(imm & 0xFF);
+        } else if (r1 == 0) {
+            emit_byte(0x3D);
+            emit_byte(imm & 0xFF);
+            emit_byte((imm >> 8) & 0xFF);
+        } else {
+            emit_byte(0x81);
+            emit_byte(0xF8 | r1);
+            emit_byte(imm & 0xFF);
+            emit_byte((imm >> 8) & 0xFF);
+        }
+        return;
+    }
+    if (t1 != 2 && t1 != 3) {
+        return;
+    }
+    int imm = resolve_value();
+    int opcode;
+    int is_imm8;
+    if (size1 == 8) {
+        opcode = 0x80;
+        is_imm8 = 1;
+    } else if (imm >= -128 && imm <= 127) {
+        opcode = 0x83;
+        is_imm8 = 1;
+    } else {
+        opcode = 0x81;
+        is_imm8 = 0;
+    }
+    emit_byte(opcode);
+    if (t1 == 2) {
+        emit_byte(0x3E);
+        emit_byte(v1 & 0xFF);
+        emit_byte((v1 >> 8) & 0xFF);
+    } else {
+        int modrm = reg_to_rm(r1) | 0x38;
+        if (v1 == 0) {
+            emit_byte(modrm);
+        } else if (v1 >= -128 && v1 <= 127) {
+            emit_byte(modrm | 0x40);
+            emit_byte(v1 & 0xFF);
+        } else {
+            emit_byte(modrm | 0x80);
+            emit_byte(v1 & 0xFF);
+            emit_byte((v1 >> 8) & 0xFF);
+        }
+    }
+    if (is_imm8) {
+        emit_byte(imm & 0xFF);
+    } else {
+        emit_byte(imm & 0xFF);
+        emit_byte((imm >> 8) & 0xFF);
+    }
 }
 
 /* ``inc`` / ``dec`` with r8 / r16 / memory destination.  r16 uses
@@ -1567,91 +1413,50 @@ void handle_not() {
    this is handle_xor with /r swapped and one extra op2_type=2
    branch for the direct-memory source form. */
 void handle_or() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hor_rr\n"
-        "cmp byte [_g_op2_type], 2\n"
-        "je .hor_rm_direct\n"
-        "mov cx, dx\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hor_r8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hor_r16_imm16\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hor_end\n"
-        ".hor_r16_imm16:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C8h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hor_end\n"
-        ".hor_r8:\n"
-        "test bl, bl\n"
-        "jnz .hor_r8_general\n"
-        "mov al, 0Ch\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hor_end\n"
-        ".hor_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0C8h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hor_end\n"
-        ".hor_rr:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hor_rr8\n"
-        "mov al, 09h\n"
-        "jmp .hor_rr_emit\n"
-        ".hor_rr8:\n"
-        "mov al, 08h\n"
-        ".hor_rr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hor_end\n"
-        ".hor_rm_direct:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hor_rm8\n"
-        "mov al, 0Bh\n"
-        "jmp .hor_rm_emit\n"
-        ".hor_rm8:\n"
-        "mov al, 0Ah\n"
-        ".hor_rm_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        ".hor_end:");
+    skip_ws();
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    int size1 = (pr >> 8) & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    if (t2 == 0) {
+        if (size1 == 8) {
+            emit_byte(0x08);
+        } else {
+            emit_byte(0x09);
+        }
+        emit_byte(make_modrm_reg_reg_impl(r2, reg1));
+    } else if (t2 == 2) {
+        if (size1 == 8) {
+            emit_byte(0x0A);
+        } else {
+            emit_byte(0x0B);
+        }
+        emit_byte((reg1 << 3) | 0x06);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    } else if (size1 == 8) {
+        if (reg1 == 0) {
+            emit_byte(0x0C);
+            emit_byte(v2 & 0xFF);
+        } else {
+            emit_byte(0x80);
+            emit_byte(0xC8 | reg1);
+            emit_byte(v2 & 0xFF);
+        }
+    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(0x83);
+        emit_byte(0xC8 | reg1);
+        emit_byte(v2 & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(0xC8 | reg1);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    }
 }
 
 /* ``pop`` / ``push`` accept a register (58+reg / 50+reg), segment
@@ -2009,97 +1814,62 @@ void handle_sub() {
    F6/F7 modrm).  Memory destination uses F6 /0 with the op1 info
    already parsed (disp8, disp16, or bare [reg]). */
 void handle_test() {
-    asm("call skip_ws\n"
-        "call parse_operand\n"
-        "mov [_g_op1_type], ah\n"
-        "mov [_g_op1_register], al\n"
-        "mov [_g_op1_value], dx\n"
-        "call skip_comma\n"
-        "cmp byte [_g_op1_type], 0\n"
-        "jne .hte_mem\n"
-        "call skip_ws\n"
-        "call parse_register\n"
-        "jc .hte_r_imm\n"
-        "mov bl, [_g_op1_register]\n"
-        "push ax\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hte_rr8\n"
-        "mov al, 85h\n"
-        "jmp .hte_rr_emit\n"
-        ".hte_rr8:\n"
-        "mov al, 84h\n"
-        ".hte_rr_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hte_end\n"
-        ".hte_r_imm:\n"
-        "call resolve_value\n"
-        "push ax\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "jne .hte_r16_imm\n"
-        "cmp byte [_g_op1_register], 0\n"
-        "jne .hte_r8_general\n"
-        "mov al, 0A8h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "jmp .hte_end\n"
-        ".hte_r8_general:\n"
-        "mov al, 0F6h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "jmp .hte_end\n"
-        ".hte_r16_imm:\n"
-        "cmp byte [_g_op1_register], 0\n"
-        "jne .hte_r16_general\n"
-        "mov al, 0A9h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_word_ax\n"
-        "jmp .hte_end\n"
-        ".hte_r16_general:\n"
-        "mov al, 0F7h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_word_ax\n"
-        "jmp .hte_end\n"
-        ".hte_mem:\n"
-        "call resolve_value\n"
-        "push ax\n"
-        "mov al, 0F6h\n"
-        "call emit_byte_al\n"
-        "cmp byte [_g_op1_type], 2\n"
-        "je .hte_mem_direct\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "cmp word [_g_op1_value], 0\n"
-        "jne .hte_mem_disp\n"
-        "call emit_byte_al\n"
-        "jmp .hte_mem_imm\n"
-        ".hte_mem_disp:\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_byte_al\n"
-        "jmp .hte_mem_imm\n"
-        ".hte_mem_direct:\n"
-        "mov al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        ".hte_mem_imm:\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        ".hte_end:");
+    skip_ws();
+    int po = parse_operand_c();
+    int t1 = (po >> 8) & 0xFF;
+    int r1 = po & 0xFF;
+    int v1 = parse_operand_value;
+    int size1 = op1_size;
+    skip_comma();
+    if (t1 == 0) {
+        skip_ws();
+        int pr2 = parse_register_optional();
+        if (pr2 >= 0) {
+            if (size1 == 8) {
+                emit_byte(0x84);
+            } else {
+                emit_byte(0x85);
+            }
+            emit_byte(make_modrm_reg_reg_impl(pr2 & 0xFF, r1));
+        } else {
+            int imm = resolve_value();
+            if (size1 == 8) {
+                if (r1 == 0) {
+                    emit_byte(0xA8);
+                } else {
+                    emit_byte(0xF6);
+                    emit_byte(0xC0 | r1);
+                }
+                emit_byte(imm & 0xFF);
+            } else {
+                if (r1 == 0) {
+                    emit_byte(0xA9);
+                } else {
+                    emit_byte(0xF7);
+                    emit_byte(0xC0 | r1);
+                }
+                emit_byte(imm & 0xFF);
+                emit_byte((imm >> 8) & 0xFF);
+            }
+        }
+    } else {
+        int imm = resolve_value();
+        emit_byte(0xF6);
+        if (t1 == 2) {
+            emit_byte(0x06);
+            emit_byte(v1 & 0xFF);
+            emit_byte((v1 >> 8) & 0xFF);
+        } else {
+            int rm = reg_to_rm(r1);
+            if (v1 != 0) {
+                emit_byte(0x40 | rm);
+                emit_byte(v1 & 0xFF);
+            } else {
+                emit_byte(rm);
+            }
+        }
+        emit_byte(imm & 0xFF);
+    }
 }
 
 /* ``handle_unknown_word`` — the parse_mnemonic fallback for bare
@@ -2195,72 +1965,41 @@ void handle_xchg() {
    forms, sign-extended ``83 /6 ib`` for r16 when the immediate
    fits in -128..127, else ``81 /6 iw`` (or ``80 /6 ib`` for r8). */
 void handle_xor() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "push ax\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hxo_rr\n"
-        "mov cx, [_g_op2_value]\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hxo_r8\n"
-        "mov ax, cx\n"
-        "add ax, 80h\n"
-        "cmp ax, 0FFh\n"
-        "ja .hxo_r16_imm16\n"
-        "mov al, 83h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hxo_end\n"
-        ".hxo_r16_imm16:\n"
-        "mov al, 81h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F0h\n"
-        "call emit_byte_al\n"
-        "mov ax, cx\n"
-        "call emit_word_ax\n"
-        "jmp .hxo_end\n"
-        ".hxo_r8:\n"
-        "test bl, bl\n"
-        "jnz .hxo_r8_general\n"
-        "mov al, 34h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hxo_end\n"
-        ".hxo_r8_general:\n"
-        "mov al, 80h\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "or al, 0F0h\n"
-        "call emit_byte_al\n"
-        "mov al, cl\n"
-        "call emit_byte_al\n"
-        "jmp .hxo_end\n"
-        ".hxo_rr:\n"
-        "pop bx\n"
-        "cmp bh, 8\n"
-        "je .hxo_rr8\n"
-        "mov al, 31h\n"
-        "jmp .hxo_rr_emit\n"
-        ".hxo_rr8:\n"
-        "mov al, 30h\n"
-        ".hxo_rr_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        ".hxo_end:");
+    skip_ws();
+    int pr = parse_register_c();
+    int reg1 = pr & 0xFF;
+    int size1 = (pr >> 8) & 0xFF;
+    skip_comma();
+    int po = parse_operand_c();
+    int t2 = (po >> 8) & 0xFF;
+    int r2 = po & 0xFF;
+    int v2 = parse_operand_value;
+    if (t2 == 0) {
+        if (size1 == 8) {
+            emit_byte(0x30);
+        } else {
+            emit_byte(0x31);
+        }
+        emit_byte(make_modrm_reg_reg_impl(r2, reg1));
+    } else if (size1 == 8) {
+        if (reg1 == 0) {
+            emit_byte(0x34);
+            emit_byte(v2 & 0xFF);
+        } else {
+            emit_byte(0x80);
+            emit_byte(0xF0 | reg1);
+            emit_byte(v2 & 0xFF);
+        }
+    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(0x83);
+        emit_byte(0xF0 | reg1);
+        emit_byte(v2 & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(0xF0 | reg1);
+        emit_byte(v2 & 0xFF);
+        emit_byte((v2 >> 8) & 0xFF);
+    }
 }
 
 /* Convert an ASCII hex digit to its numeric value.  Returns 0..15
@@ -4090,8 +3829,6 @@ asm(
     "        ;; (char arrays).  See the C declarations at the top of\n"
     "        ;; src/c/asm.c.\n"
     "        changed_flag            equ _g_changed_flag\n"
-    "        cmp_imm_byte            equ _g_cmp_imm_byte\n"
-    "        cmp_op1_size            equ _g_cmp_op1_size\n"
     "        current_address         equ _g_current_address\n"
     "        equ_space               equ _g_equ_space\n"
     "        error_flag              equ _g_error_flag\n"
