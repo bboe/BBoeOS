@@ -112,6 +112,7 @@ __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
 __attribute__((carry_return))
 int match_word_c_str_word();
+void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
 __attribute__((carry_return))
@@ -1560,56 +1561,44 @@ void handle_test() {
    (prologue, work, epilogue) runs in one call frame — cc.py's
    ``push bp / pop bp / ret`` wraps cleanly. */
 void handle_unknown_word() {
-    asm("mov di, si\n"
-        ".huw_skip_word:\n"
-        "mov al, [si]\n"
-        "cmp al, ' '\n"
-        "je .huw_got_bare_label\n"
-        "cmp al, 9\n"
-        "je .huw_got_bare_label\n"
-        "test al, al\n"
-        "jz .huw_done\n"
-        "inc si\n"
-        "jmp .huw_skip_word\n"
-        ".huw_got_bare_label:\n"
-        "mov byte [si], 0\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .huw_bare_pass2\n"
-        "push si\n"
-        "mov si, di\n"
-        "mov ax, [_g_current_address]\n"
-        "cmp byte [di], '.'\n"
-        "je .huw_bare_local\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_set\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "mov [_g_global_scope], ax\n"
-        "jmp .huw_bare_added\n"
-        ".huw_bare_local:\n"
-        "mov bx, [_g_global_scope]\n"
-        "call symbol_set\n"
-        ".huw_bare_added:\n"
-        "pop si\n"
-        "jmp .huw_bare_continue\n"
-        ".huw_bare_pass2:\n"
-        "cmp byte [di], '.'\n"
-        "je .huw_bare_continue\n"
-        "push si\n"
-        "mov si, di\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_lookup\n"
-        "jc .huw_bare_no_scope\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "mov [_g_global_scope], ax\n"
-        ".huw_bare_no_scope:\n"
-        "pop si\n"
-        ".huw_bare_continue:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "cmp byte [si], 0\n"
-        "je .huw_done\n"
-        "call parse_directive\n"
-        ".huw_done:");
+    char *name_start = source_cursor;
+    while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
+        source_cursor = source_cursor + 1;
+    }
+    if (source_cursor[0] == '\0') {
+        return;
+    }
+    char *end_pos = source_cursor;
+    source_cursor[0] = '\0';
+    int is_local = 0;
+    if (name_start[0] == '.') {
+        is_local = 1;
+    }
+    source_cursor = name_start;
+    if (pass == 1) {
+        if (is_local) {
+            asm("mov ax, [_g_current_address]\n"
+                "mov bx, [_g_global_scope]\n"
+                "call symbol_set");
+        } else {
+            asm("mov ax, [_g_current_address]\n"
+                "mov bx, 0xFFFF\n"
+                "call symbol_set");
+            global_scope = last_symbol_index;
+        }
+    } else if (is_local == 0) {
+        asm("mov bx, 0xFFFF\n"
+            "call symbol_lookup\n"
+            "jc .huw_no_update\n"
+            "mov ax, [_g_last_symbol_index]\n"
+            "mov [_g_global_scope], ax\n"
+            ".huw_no_update:");
+    }
+    source_cursor = end_pos + 1;
+    skip_ws();
+    if (source_cursor[0] != '\0') {
+        parse_directive();
+    }
 }
 
 /* ``xchg r, r`` — uses the 90h+reg short form when one operand is
