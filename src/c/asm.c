@@ -79,6 +79,12 @@ char *output_name;
 int output_position;
 int output_total;
 int pass;
+/* ``peek_label_target`` stashes the resolved symbol value here (AX-side
+   of the retired dual AX + CF return).  ``carry_return`` can only
+   signal CF, so the two encode_rel8_jump call sites now read
+   ``peek_label_value`` after the ``jnc`` instead of reading AX directly.
+   Only valid on hit (CF clear); callers branch on CF first. */
+int peek_label_value;
 /* Pointer to the 512-byte source-file read buffer at
    ``_program_end + 768`` (= SOURCE_BUFFER in the old %define).
    main() initializes it; read_line / include_pop / include_push
@@ -261,6 +267,7 @@ void encode_rel8_jump(int opcode) {
         "call peek_label_target\n"
         "pop bx\n"
         "jc .erj_emit_short\n"
+        "mov ax, [_g_peek_label_value]\n"
         "mov dx, [_g_current_address]\n"
         "add dx, 2\n"
         "sub ax, dx\n"
@@ -277,6 +284,7 @@ void encode_rel8_jump(int opcode) {
         "call peek_label_target\n"
         "pop bx\n"
         "jc .erj_long_form\n"
+        "mov ax, [_g_peek_label_value]\n"
         "mov dx, [_g_current_address]\n"
         "cmp ax, dx\n"
         "jae .erj_shrink_forward\n"
@@ -2751,68 +2759,53 @@ void parse_register() {
 
 /* Lookup a label's address without advancing SI.  Used by
    encode_rel8_jump to decide between short and near forms based on
-   the known target distance; CF clear + AX = target on hit, CF set
-   on miss.  Preserves SI / BX / CX / DX / DI via the initial push
-   chain.  Null-terminates the identifier in place for
-   symbol_lookup, then restores the saved delimiter byte. */
-void peek_label_target() {
-    asm("push si\n"
-        "push bx\n"
-        "push cx\n"
-        "push dx\n"
-        "push di\n"
-        "mov di, si\n"
-        ".plt_find_end:\n"
-        "mov al, [di]\n"
-        "cmp al, '.'\n"
-        "je .plt_is_id\n"
-        "cmp al, '_'\n"
-        "je .plt_is_id\n"
-        "cmp al, 'a'\n"
-        "jb .plt_check_upper\n"
-        "cmp al, 'z'\n"
-        "jbe .plt_is_id\n"
-        "jmp .plt_end\n"
-        ".plt_check_upper:\n"
-        "cmp al, 'A'\n"
-        "jb .plt_check_dig\n"
-        "cmp al, 'Z'\n"
-        "jbe .plt_is_id\n"
-        ".plt_check_dig:\n"
-        "cmp al, '0'\n"
-        "jb .plt_end\n"
-        "cmp al, '9'\n"
-        "ja .plt_end\n"
-        ".plt_is_id:\n"
-        "inc di\n"
-        "jmp .plt_find_end\n"
-        ".plt_end:\n"
-        "mov cl, [di]\n"
-        "mov byte [di], 0\n"
-        "push di\n"
-        "cmp byte [si], '.'\n"
-        "jne .plt_global\n"
-        "mov bx, [_g_global_scope]\n"
-        "jmp .plt_lookup\n"
-        ".plt_global:\n"
-        "mov bx, 0FFFFh\n"
-        ".plt_lookup:\n"
-        "mov word [_g_last_symbol_index], 0FFFFh\n"
-        "call symbol_lookup\n"
-        "pop di\n"
-        "mov [di], cl\n"
-        "cmp word [_g_last_symbol_index], 0FFFFh\n"
-        "je .plt_not_found\n"
-        "clc\n"
-        "jmp .plt_ret\n"
-        ".plt_not_found:\n"
-        "stc\n"
-        ".plt_ret:\n"
-        "pop di\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx\n"
-        "pop si");
+   the known target distance.  ``carry_return`` signals miss via CF;
+   on hit the resolved value lands in ``peek_label_value`` (AX-side
+   of the retired dual AX + CF return).  Walks ``source_cursor`` (SI
+   pin) forward through the identifier, null-terminates in place,
+   resets ``source_cursor`` to the name start for the ``symbol_lookup``
+   SI = name ABI, then restores the saved delimiter.  is_local is
+   captured *before* the scan since ``source_cursor[0]`` is cheapest
+   on the SI-pinned global (no scratch-register guard needed). */
+__attribute__((carry_return))
+int peek_label_target() {
+    int is_local = 0;
+    if (source_cursor[0] == '.') {
+        is_local = 1;
+    }
+    char *saved = source_cursor;
+    while (1) {
+        char c = source_cursor[0];
+        if ((c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '_'
+                || c == '.') {
+            source_cursor = source_cursor + 1;
+        } else {
+            break;
+        }
+    }
+    char *end_pos = source_cursor;
+    char delim = source_cursor[0];
+    source_cursor[0] = '\0';
+    source_cursor = saved;
+    if (is_local) {
+        asm("mov bx, [_g_global_scope]\n"
+            "mov word [_g_last_symbol_index], 0xFFFF\n"
+            "call symbol_lookup\n"
+            "mov [_g_peek_label_value], ax");
+    } else {
+        asm("mov bx, 0xFFFF\n"
+            "mov word [_g_last_symbol_index], 0xFFFF\n"
+            "call symbol_lookup\n"
+            "mov [_g_peek_label_value], ax");
+    }
+    end_pos[0] = delim;
+    if (last_symbol_index == 0xFFFF) {
+        return 0;
+    }
+    return 1;
 }
 
 /* Read one line of source into LINE_BUFFER (null-terminated, at
