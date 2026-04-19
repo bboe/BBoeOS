@@ -3620,37 +3620,27 @@ int reg_to_rm(int reg) {
    and return ``current_address`` as a placeholder so the handler
    can emit a same-size displacement; pass 2: evaluate the operand
    via resolve_value (which performs the real symbol lookup plus
-   any trailing ``+ offset`` math). */
-void resolve_label() {
-    asm("cmp byte [_g_pass], 1\n"
-        "je .rl_pass1\n"
-        "call resolve_value\n"
-        "jmp .rl_end\n"
-        ".rl_pass1:\n"
-        ".rl_skip_label:\n"
-        "mov al, [si]\n"
-        "cmp al, 'a'\n"
-        "jae .rl_skip_more\n"
-        "cmp al, 'A'\n"
-        "jb .rl_check_d\n"
-        "cmp al, 'Z'\n"
-        "jbe .rl_skip_more\n"
-        ".rl_check_d:\n"
-        "cmp al, '0'\n"
-        "jb .rl_skip_done\n"
-        "cmp al, '9'\n"
-        "ja .rl_check_s\n"
-        ".rl_skip_more:\n"
-        "inc si\n"
-        "jmp .rl_skip_label\n"
-        ".rl_check_s:\n"
-        "cmp al, '_'\n"
-        "je .rl_skip_more\n"
-        "cmp al, '.'\n"
-        "je .rl_skip_more\n"
-        ".rl_skip_done:\n"
-        "mov ax, [_g_current_address]\n"
-        ".rl_end:");
+   any trailing ``+ offset`` math).  Both branches advance
+   ``source_cursor`` past the label.  Returns int (in AX) — the
+   inline-asm callers in ``encode_rel8_jump`` read AX after the
+   call. */
+int resolve_label() {
+    if (pass != 1) {
+        return resolve_value();
+    }
+    while (1) {
+        char c = source_cursor[0];
+        if ((c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '_'
+                || c == '.') {
+            source_cursor = source_cursor + 1;
+        } else {
+            break;
+        }
+    }
+    return current_address;
 }
 
 /* Expression evaluator at SI.  Recognises parenthesised
