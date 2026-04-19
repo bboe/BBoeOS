@@ -906,6 +906,33 @@ class CodeGenerator:
         self._emit_load_var(vname, register="si")
         return f"byte [si+{offset}]" if offset else "byte [si]"
 
+    def _si_scratch_guard_begin(self, base_var: str | None = None, /) -> bool:
+        """Emit ``push si`` if SI is aliased to a pinned global.
+
+        When an ``asm_register("si")`` global is declared, SI holds the
+        aliased value across the program.  Subscripts on other ``char
+        *`` pointers normally lower to ``mov si, <base> ; mov al,
+        [si]``, which would trash the alias.  This helper emits a
+        ``push si`` guard (returns True) when:
+
+        - an ``asm_register("si")`` global exists, and
+        - the subscript base *isn't* that same global (no clobber
+          happens when ``mov si, si`` is a no-op).
+
+        The caller pairs the guard with :meth:`_si_scratch_guard_end`.
+        """
+        if not any(register == "si" for register in self.register_aliased_globals.values()):
+            return False
+        if base_var is not None and self.register_aliased_globals.get(base_var) == "si":
+            return False
+        self.emit("        push si")
+        return True
+
+    def _si_scratch_guard_end(self, *, guarded: bool) -> None:
+        """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
+        if guarded:
+            self.emit("        pop si")
+
     def _emit_constant_base_index_addr(
         self,
         *,
@@ -3387,6 +3414,7 @@ class CodeGenerator:
                     else:
                         self.emit(f"        mov ax, [{addr}]")
                 else:
+                    guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register="si")
                     if is_byte:
                         if offset:
@@ -3398,6 +3426,7 @@ class CodeGenerator:
                         self.emit(f"        mov ax, [si+{offset}]")
                     else:
                         self.emit("        mov ax, [si]")
+                    self._si_scratch_guard_end(guarded=guarded)
             else:
                 is_byte = self._is_byte_var(vname)
                 const_base = self._resolve_constant(vname)
@@ -3416,6 +3445,7 @@ class CodeGenerator:
                         self.emit(f"        mov ax, [{addr}]")
                     self.ax_clear()
                 else:
+                    guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register="si")
                     # If the index is a pinned variable and the access is
                     # byte-sized, load it without clobbering SI.
@@ -3440,6 +3470,7 @@ class CodeGenerator:
                         self.emit("        xor ah, ah")
                     else:
                         self.emit("        mov ax, [si]")
+                    self._si_scratch_guard_end(guarded=guarded)
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
                     self.ax_clear()
