@@ -106,6 +106,8 @@ int symbol_set_value;
    ``user_functions`` registry regardless of source order, but clang
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
+__attribute__((regparm(1)))
+int make_modrm_reg_reg_impl(int reg, int rm);
 void parse_mnemonic();
 __attribute__((carry_return))
 int parse_register_c();
@@ -1684,29 +1686,17 @@ void handle_or() {
    differences cc.py might introduce if rewritten as C with
    locals. */
 void handle_pop() {
-    asm("call skip_ws\n"
-        "cmp byte [si], 'd'\n"
-        "jne .hpo_not_ds\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .hpo_reg\n"
-        "add si, 2\n"
-        "mov al, 1Fh\n"
-        "call emit_byte_al\n"
-        "jmp .hpo_end\n"
-        ".hpo_not_ds:\n"
-        "cmp byte [si], 'e'\n"
-        "jne .hpo_reg\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .hpo_reg\n"
-        "add si, 2\n"
-        "mov al, 07h\n"
-        "call emit_byte_al\n"
-        "jmp .hpo_end\n"
-        ".hpo_reg:\n"
-        "call parse_register\n"
-        "add al, 58h\n"
-        "call emit_byte_al\n"
-        ".hpo_end:");
+    skip_ws();
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(0x1F);
+    } else if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(0x07);
+    } else {
+        int pr = parse_register_c();
+        emit_byte(0x58 | (pr & 0xFF));
+    }
 }
 
 void handle_popa() {
@@ -2223,38 +2213,24 @@ void handle_unknown_word() {
    AX (16-bit); otherwise emits the 86 / 87 r/m form with the NASM
    operand-order swap (first operand in reg field, second in rm). */
 void handle_xchg() {
-    asm("call skip_ws\n"
-        "call parse_register\n"
-        "mov bl, al\n"
-        "mov bh, ah\n"
-        "call skip_comma\n"
-        "call parse_register\n"
-        "cmp bh, 8\n"
-        "je .hxc_long\n"
-        "cmp bl, 0\n"
-        "je .hxc_short\n"
-        "cmp al, 0\n"
-        "jne .hxc_long\n"
-        "mov al, bl\n"
-        ".hxc_short:\n"
-        "add al, 90h\n"
-        "call emit_byte_al\n"
-        "jmp .hxc_end\n"
-        ".hxc_long:\n"
-        "push ax\n"
-        "cmp bh, 8\n"
-        "je .hxc_8\n"
-        "mov al, 87h\n"
-        "jmp .hxc_emit\n"
-        ".hxc_8:\n"
-        "mov al, 86h\n"
-        ".hxc_emit:\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "xchg al, bl\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        ".hxc_end:");
+    skip_ws();
+    int pr1 = parse_register_c();
+    int reg1 = pr1 & 0xFF;
+    int size1 = (pr1 >> 8) & 0xFF;
+    skip_comma();
+    int pr2 = parse_register_c();
+    int reg2 = pr2 & 0xFF;
+    if (size1 != 8 && reg1 == 0) {
+        emit_byte(0x90 | reg2);
+    } else if (size1 != 8 && reg2 == 0) {
+        emit_byte(0x90 | reg1);
+    } else if (size1 == 8) {
+        emit_byte(0x86);
+        emit_byte(make_modrm_reg_reg_impl(reg1, reg2));
+    } else {
+        emit_byte(0x87);
+        emit_byte(make_modrm_reg_reg_impl(reg1, reg2));
+    }
 }
 
 /* ``xor r, r`` / ``xor r, imm`` — same shape as handle_or / and.
