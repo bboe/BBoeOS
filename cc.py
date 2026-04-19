@@ -196,11 +196,18 @@ class DoWhile(Node):
 
 @dataclass(slots=True)
 class Function(Node):
-    """Function definition: name, parameter list, and body."""
+    """Function definition: name, parameter list, and body.
+
+    ``regparm_count`` captures the ``__attribute__((regparm(N)))``
+    annotation on the definition (0 = standard cdecl, 1 = first arg
+    arrives in AX and is spilled to a local stack slot in the
+    prologue).  Only regparm(1) is currently supported.
+    """
 
     name: str
     params: list[Param]
     body: list[Node]
+    regparm_count: int = field(default=0, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -638,6 +645,7 @@ class CodeGenerator:
         self.store_target_register: str | None = None
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
+        self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in AX
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
@@ -666,9 +674,17 @@ class CodeGenerator:
             if function.name == "main":
                 continue
             self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
-            assignments = self._select_auto_pin_candidates(body=function.body, parameters=function.params)
+            # Fastcall (regparm(1)) param 0 lives in AX on entry and is spilled
+            # to a local stack slot in the prologue; it never becomes a pin
+            # candidate so auto-pin selection skips it entirely.  Params 1..N
+            # of a fastcall function keep the standard stack convention in the
+            # MVP — they don't mix with register_convention.
+            pin_params = function.params[1:] if function.regparm_count > 0 else function.params
+            assignments = self._select_auto_pin_candidates(body=function.body, parameters=pin_params)
             param_pins: dict[int, str] = {}
             for index, param in enumerate(function.params):
+                if function.regparm_count > 0 and index == 0:
+                    continue
                 if param.name in assignments:
                     param_pins[index] = assignments[param.name]
             self.user_function_pin_params[function.name] = param_pins
@@ -692,6 +708,13 @@ class CodeGenerator:
                 visit(statement)
 
         for name, pins in self.user_function_pin_params.items():
+            if name in self.fastcall_functions:
+                # Fastcall and register_convention are mutually exclusive
+                # in the MVP: the former passes arg 0 in AX and the rest
+                # via the standard stack; the latter piggybacks on
+                # auto-pinned params.  Skip the register_convention
+                # promotion so call sites take the fastcall path.
+                continue
             if pins and not has_complex_call.get(name):
                 self.register_convention_functions.add(name)
 
@@ -2933,6 +2956,8 @@ class CodeGenerator:
         for function in ast.functions:
             if function.name != "main":
                 self.user_functions[function.name] = len(function.params)
+                if function.regparm_count > 0:
+                    self.fastcall_functions.add(function.name)
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
@@ -3127,10 +3152,14 @@ class CodeGenerator:
                 for register in saved:
                     self.emit(f"        push {register}")
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
+            is_fastcall = name in self.fastcall_functions
+            fastcall_ax_arg: Node | None = None
             register_args: list[tuple[str, Node]] = []
             stack_args: list[Node] = []
             for index, arg in enumerate(arguments):
-                if index in callee_pins:
+                if is_fastcall and index == 0:
+                    fastcall_ax_arg = arg
+                elif index in callee_pins:
                     register_args.append((callee_pins[index], arg))
                 else:
                     stack_args.append(arg)
@@ -3139,6 +3168,10 @@ class CodeGenerator:
                 self._emit_push_arg(arg)
             # Load register-bound arguments with topological ordering.
             self._emit_register_arg_moves(register_args)
+            # Fastcall arg 0 is loaded last so earlier arg evaluation can't
+            # trash AX while we're assembling the other parameters.
+            if fastcall_ax_arg is not None:
+                self.emit_register_from_argument(argument=fastcall_ax_arg, register="ax")
             self.emit(f"        call {name}")
             if stack_args:
                 self.emit(f"        add sp, {len(stack_args) * 2}")
@@ -3522,20 +3555,29 @@ class CodeGenerator:
         self.ax_clear()
         self.constant_aliases = {}
         self.elide_frame = name == "main"
-        # Naked asm: a non-main function whose body is a single
-        # ``asm("...")`` statement with no parameters.  Skip the
-        # ``push bp / mov bp, sp`` prologue and the ``pop bp``
-        # epilogue, emit only the inline-asm content followed by
-        # ``ret``.  Reclaims ~4 bytes and several cycles per call
-        # on hot-path helpers like ``emit_byte_al`` / ``skip_ws`` /
-        # ``resolve_value`` / ``symbol_lookup`` — the bp frame is
-        # dead weight when the body has no C locals, no parameter
-        # access, and no cc.py codegen that depends on BP.  Inside
-        # a function body, ``asm("...")`` parses as a ``Call`` to
-        # the ``asm`` builtin (not an InlineAsm node — that's only
-        # used for file-scope ``asm(...)`` directives).
+        # Frame-elide criteria for non-main functions.  The bp frame
+        # becomes dead weight whenever the body makes no BP-relative
+        # accesses: no parameters (no ``[bp+N]`` reads), no locals
+        # (no ``[bp-N]`` slots), and no cc.py codegen path that
+        # touches BP.  Inside a function body, ``asm("...")`` parses
+        # as a ``Call`` to the ``asm`` builtin (not an InlineAsm
+        # node — that's only used for file-scope ``asm(...)``
+        # directives).
+        #
+        # ``naked_asm`` covers the hand-coded inline-asm helpers
+        # (``emit_byte_al`` / ``skip_ws`` / ``resolve_value`` /
+        # ``symbol_lookup``).  ``frameless_calls`` covers pure-C
+        # dispatch helpers — handlers like ``handle_clc`` whose
+        # body is ``emit_byte(0xF8);`` or ``handle_aam`` whose body
+        # is two ``emit_byte(...)`` calls.  For those, cc.py's call
+        # codegen emits ``mov ax, N ; call fn`` with no pin save
+        # (no locals means no pinned registers) and no stack-arg
+        # math, so BP is genuinely unused.
         naked_asm = name != "main" and not parameters and len(body) == 1 and isinstance(body[0], Call) and body[0].name == "asm"
-        if naked_asm:
+        frameless_calls = (
+            name != "main" and not parameters and len(body) >= 1 and all(isinstance(stmt, Call) and stmt.name != "asm" for stmt in body)
+        )
+        if naked_asm or frameless_calls:
             self.elide_frame = True
         self.frame_size = 0
         self.live_long_local = None
@@ -3559,6 +3601,11 @@ class CodeGenerator:
             self.variable_arrays.add(global_name)
             self.visible_vars.add(global_name)
 
+        # Fastcall (regparm(1)) routing.  Param 0 arrives in AX and is
+        # spilled to a local stack slot during the prologue; params 1..N
+        # use the standard caller-pushed cdecl layout shifted down by
+        # one slot (caller didn't push arg 0).
+        is_fastcall = name != "main" and function.regparm_count > 0
         # Allocate parameters and record their types.
         for param in parameters:
             if param.name in self.global_scalars or param.name in self.global_arrays:
@@ -3576,15 +3623,33 @@ class CodeGenerator:
             # as fallbacks but parameters will be pinned to registers
             # when safe_pin_registers has room.
             for i, param in enumerate(parameters):
-                self.locals[param.name] = -(4 + i * 2)  # negative = above bp
                 self.variable_types[param.name] = param.type
                 if param.is_array:
                     self.variable_arrays.add(param.name)
+                if is_fastcall and i == 0:
+                    # Param 0 gets a local slot allocated below; it has no
+                    # caller-pushed address.
+                    continue
+                stack_index = i - 1 if is_fastcall else i
+                self.locals[param.name] = -(4 + stack_index * 2)  # negative = above bp
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
-        param_candidates = parameters if name != "main" else []
+        # Exclude fastcall param 0 from auto-pin candidates — it's spilled to
+        # the stack at prologue entry and the body accesses it through that
+        # slot like any other local.
+        if name == "main":
+            param_candidates = []
+        elif is_fastcall:
+            param_candidates = parameters[1:]
+        else:
+            param_candidates = parameters
         self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
+
+        # Reserve a local stack slot for fastcall param 0 before scan_locals
+        # runs so its offset is stable against body-local allocations.
+        if is_fastcall:
+            self.allocate_local(parameters[0].name)
 
         self.scan_locals(body)
 
@@ -3592,7 +3657,9 @@ class CodeGenerator:
         # claimed during scan_locals.  Parameters that don't fit stay on
         # the stack at [bp+N].
         if name != "main":
-            for param in parameters:
+            for i, param in enumerate(parameters):
+                if is_fastcall and i == 0:
+                    continue
                 if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
                     continue
                 self.pinned_register[param.name] = self.auto_pin_candidates[param.name]
@@ -3623,13 +3690,21 @@ class CodeGenerator:
             self.emit("        mov bp, sp")
             if self.frame_size > 0:
                 self.emit(f"        sub sp, {self.frame_size}")
+            if is_fastcall:
+                # Spill AX (the caller-supplied arg 0) into its local slot
+                # so the body can read it through the normal local path.
+                slot = self.locals[parameters[0].name]
+                self.emit(f"        mov [bp-{slot}], ax")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
                 for i, param in enumerate(parameters):
+                    if is_fastcall and i == 0:
+                        continue
                     if param.name in self.pinned_register:
                         register = self.pinned_register[param.name]
-                        self.emit(f"        mov {register}, [bp+{4 + i * 2}]")
+                        stack_index = i - 1 if is_fastcall else i
+                        self.emit(f"        mov {register}, [bp+{4 + stack_index * 2}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -3646,7 +3721,10 @@ class CodeGenerator:
                 for vname in sorted(self.locals):
                     directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
-        elif naked_asm:
+        elif self.elide_frame:
+            # naked_asm and frameless_calls both skip the prologue, so
+            # the epilogue is just ``ret`` — no ``pop bp`` because we
+            # didn't push it.
             self.emit("        ret")
         elif not self.always_exits(body):
             if self.frame_size > 0:
@@ -5135,6 +5213,33 @@ class Parser:
             node = self.fold_binop(operator_token[1], node, right)
         return node
 
+    def _parse_regparm_attribute(self, *, line: int) -> int:
+        """Consume ``__attribute__((regparm(N)))`` and return N.
+
+        clang silently accepts regparm on x86 targets and ignores it
+        elsewhere, so the syntax survives ``test_cc.py`` without
+        emitting warnings when placed before the return type.  Only
+        ``regparm(1)`` is currently implemented; anything else raises.
+        """
+        self.eat("IDENT")  # __attribute__
+        self.eat("LPAREN")
+        self.eat("LPAREN")
+        attr_name_token = self.eat("IDENT")
+        attr_name = attr_name_token[1]
+        if attr_name != "regparm":
+            message = f"unsupported function attribute '{attr_name}'"
+            raise CompileError(message, line=line)
+        self.eat("LPAREN")
+        count_token = self.eat("NUMBER")
+        self.eat("RPAREN")
+        self.eat("RPAREN")
+        self.eat("RPAREN")
+        count = int(count_token[1])
+        if count != 1:
+            message = f"regparm({count}) not supported; only regparm(1) is implemented"
+            raise CompileError(message, line=line)
+        return count
+
     def parse_parameter(self) -> Param:
         """Parse a single function parameter.
 
@@ -5335,6 +5440,13 @@ class Parser:
             self.eat("RPAREN")
             self.eat("SEMI")
             return InlineAsm(content, line=line)
+        # Optional leading ``__attribute__((regparm(N)))`` on a function
+        # definition — clang accepts this position silently (the
+        # trailing-after-params form emits a GCC-compat warning).  Only
+        # regparm(1) is currently implemented (first arg arrives in AX).
+        regparm_count = 0
+        if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            regparm_count = self._parse_regparm_attribute(line=line)
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
@@ -5342,8 +5454,16 @@ class Parser:
             self.eat("LPAREN")
             parameters = self.parse_parameters()
             self.eat("RPAREN")
+            if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+                if regparm_count != 0:
+                    message = "regparm attribute specified twice"
+                    raise CompileError(message, line=line)
+                regparm_count = self._parse_regparm_attribute(line=line)
+            if regparm_count > 0 and not parameters:
+                message = "regparm(1) requires at least one parameter"
+                raise CompileError(message, line=line)
             self.eat("LBRACE")
-            return Function(name, parameters, self.parse_block(), line=line)
+            return Function(name, parameters, self.parse_block(), line=line, regparm_count=regparm_count)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
         # runtime initializer to imply one.
