@@ -49,6 +49,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
     ProgramTest("bits", ["bits"], r"^xor  = 65280$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
+    ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
     ProgramTest("chmod", ["chmod +x hello"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
