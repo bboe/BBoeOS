@@ -913,328 +913,173 @@ void handle_loop() {
    parser sees the original ``es,`` token again; the matched-ES
    path discards the saved SI. */
 void handle_mov() {
-    asm("call skip_ws\n"
-        "cmp byte [si], 'e'\n"
-        "jne .hmv_normal\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .hmv_normal\n"
-        "push si\n"
-        "add si, 2\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hmv_not_segment\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "call parse_operand\n"
-        "pop bx\n"
-        "push ax\n"
-        "mov al, 8Eh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "or al, 0C0h\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_not_segment:\n"
-        "pop si\n"
-        ".hmv_normal:\n"
-        "call parse_operand\n"
-        "mov [_g_op1_type], ah\n"
-        "mov [_g_op1_register], al\n"
-        "mov [_g_op1_value], dx\n"
-        "call skip_comma\n"
-        "call parse_operand\n"
-        "mov [_g_op2_type], ah\n"
-        "mov [_g_op2_register], al\n"
-        "mov [_g_op2_value], dx\n"
-        "mov al, [_g_op1_type]\n"
-        "cmp al, 2\n"
-        "je .hmv_direct_dst\n"
-        "cmp al, 3\n"
-        "je .hmv_mem_dst\n"
-        "cmp al, 0\n"
-        "jne .hmv_done\n"
-        "mov al, [_g_op2_type]\n"
-        "cmp al, 0\n"
-        "je .hmv_rr\n"
-        "cmp al, 1\n"
-        "je .hmv_ri\n"
-        "cmp al, 2\n"
-        "je .hmv_rm_direct\n"
-        "cmp al, 3\n"
-        "je .hmv_rm_bx_disp\n"
-        "jmp abort_unknown\n"
-        ".hmv_rr:\n"
-        "mov al, [_g_op1_register]\n"
-        "mov bl, al\n"
-        "mov al, [_g_op2_register]\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_rr8\n"
-        "push ax\n"
-        "push bx\n"
-        "mov al, 89h\n"
-        "call emit_byte_al\n"
-        "pop bx\n"
-        "pop ax\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_rr8:\n"
-        "push ax\n"
-        "push bx\n"
-        "mov al, 88h\n"
-        "call emit_byte_al\n"
-        "pop bx\n"
-        "pop ax\n"
-        "call make_modrm_reg_reg\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_ri:\n"
-        "mov al, [_g_op1_register]\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_ri8\n"
-        "add al, 0B8h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_ri8:\n"
-        "add al, 0B0h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_value]\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_direct:\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_rm_d8\n"
-        "cmp byte [_g_op1_register], 0\n"
-        "jne .hmv_rm_d16_general\n"
-        "mov al, 0A1h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_d16_general:\n"
-        "mov al, 8Bh\n"
-        "jmp .hmv_rm_d_emit\n"
-        ".hmv_rm_d8:\n"
-        "cmp byte [_g_op1_register], 0\n"
-        "jne .hmv_rm_d8_general\n"
-        "mov al, 0A0h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_d8_general:\n"
-        "mov al, 8Ah\n"
-        ".hmv_rm_d_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_bx_disp:\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_rm_bx8\n"
-        "mov al, 8Bh\n"
-        "jmp .hmv_rm_bx_emit\n"
-        ".hmv_rm_bx8:\n"
-        "mov al, 8Ah\n"
-        ".hmv_rm_bx_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "call reg_to_rm\n"
-        "mov bl, al\n"
-        "mov al, [_g_op1_register]\n"
-        "shl al, 3\n"
-        "or al, bl\n"
-        "cmp word [_g_op2_value], 0\n"
-        "jne .hmv_rm_with_disp\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_with_disp:\n"
-        "mov dx, [_g_op2_value]\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hmv_rm_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_rm_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_mem_dst:\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hmv_mem_dst_reg\n"
-        "cmp byte [_g_op2_type], 1\n"
-        "jne .hmv_done\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_mdi8\n"
-        "mov al, 0C7h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "mov dx, [_g_op1_value]\n"
-        "test dx, dx\n"
-        "jz .hmv_mdi16_emit_modrm\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hmv_mdi16_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_mdi16_imm\n"
-        ".hmv_mdi16_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_mdi16_imm\n"
-        ".hmv_mdi16_emit_modrm:\n"
-        "call emit_byte_al\n"
-        ".hmv_mdi16_imm:\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_mdi8:\n"
-        "mov al, 0C6h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "mov dx, [_g_op1_value]\n"
-        "test dx, dx\n"
-        "jz .hmv_mdi8_emit_modrm\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hmv_mdi8_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_mdi8_imm\n"
-        ".hmv_mdi8_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_mdi8_imm\n"
-        ".hmv_mdi8_emit_modrm:\n"
-        "call emit_byte_al\n"
-        ".hmv_mdi8_imm:\n"
-        "mov al, [_g_op2_value]\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_mem_dst_reg:\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_mem_dst_reg8\n"
-        "mov al, 89h\n"
-        "jmp .hmv_mem_dst_reg_emit\n"
-        ".hmv_mem_dst_reg8:\n"
-        "mov al, 88h\n"
-        ".hmv_mem_dst_reg_emit:\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op1_register]\n"
-        "call reg_to_rm\n"
-        "mov bl, al\n"
-        "mov al, [_g_op2_register]\n"
-        "shl al, 3\n"
-        "or al, bl\n"
-        "mov dx, [_g_op1_value]\n"
-        "test dx, dx\n"
-        "jz .hmv_mds_emit_modrm\n"
-        "mov bx, dx\n"
-        "add bx, 80h\n"
-        "cmp bx, 0FFh\n"
-        "ja .hmv_mds_disp16\n"
-        "or al, 40h\n"
-        "call emit_byte_al\n"
-        "mov al, dl\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_mds_disp16:\n"
-        "or al, 80h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_mds_emit_modrm:\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_direct_dst:\n"
-        "cmp byte [_g_op2_type], 0\n"
-        "je .hmv_dd_reg\n"
-        "cmp byte [_g_op2_type], 1\n"
-        "jne .hmv_done\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_dd8\n"
-        "mov al, 0C7h\n"
-        "call emit_byte_al\n"
-        "mov al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "mov ax, [_g_op2_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_dd8:\n"
-        "mov al, 0C6h\n"
-        "call emit_byte_al\n"
-        "mov al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "mov al, [_g_op2_value]\n"
-        "call emit_byte_al\n"
-        "jmp .hmv_done\n"
-        ".hmv_dd_reg:\n"
-        "cmp byte [_g_op1_size], 8\n"
-        "je .hmv_dd_reg8\n"
-        "cmp byte [_g_op2_register], 0\n"
-        "jne .hmv_dd_reg16_general\n"
-        "mov al, 0A3h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_dd_reg16_general:\n"
-        "mov al, 89h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_dd_reg8:\n"
-        "cmp byte [_g_op2_register], 0\n"
-        "jne .hmv_dd_reg8_general\n"
-        "mov al, 0A2h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        "jmp .hmv_done\n"
-        ".hmv_dd_reg8_general:\n"
-        "mov al, 88h\n"
-        "call emit_byte_al\n"
-        "mov al, [_g_op2_register]\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, [_g_op1_value]\n"
-        "call emit_word_ax\n"
-        ".hmv_done:");
+    skip_ws();
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+        char *saved = source_cursor;
+        source_cursor = source_cursor + 2;
+        skip_ws();
+        if (source_cursor[0] == ',') {
+            source_cursor = source_cursor + 1;
+            skip_ws();
+            int po = parse_operand_c();
+            emit_byte(0x8E);
+            emit_byte(0xC0 | (po & 0xFF));
+            return;
+        }
+        source_cursor = saved;
+    }
+    int po1 = parse_operand_c();
+    int t1 = (po1 >> 8) & 0xFF;
+    int r1 = po1 & 0xFF;
+    int v1 = parse_operand_value;
+    skip_comma();
+    int po2 = parse_operand_c();
+    int t2 = (po2 >> 8) & 0xFF;
+    int r2 = po2 & 0xFF;
+    int v2 = parse_operand_value;
+    int size1 = op1_size;
+    if (t1 == 0) {
+        if (t2 == 0) {
+            if (size1 == 8) {
+                emit_byte(0x88);
+            } else {
+                emit_byte(0x89);
+            }
+            emit_byte(make_modrm_reg_reg_impl(r2, r1));
+            return;
+        }
+        if (t2 == 1) {
+            if (size1 == 8) {
+                emit_byte(0xB0 | r1);
+                emit_byte(v2 & 0xFF);
+            } else {
+                emit_byte(0xB8 | r1);
+                emit_byte(v2 & 0xFF);
+                emit_byte((v2 >> 8) & 0xFF);
+            }
+            return;
+        }
+        if (t2 == 2) {
+            if (size1 == 8 && r1 == 0) {
+                emit_byte(0xA0);
+            } else if (size1 != 8 && r1 == 0) {
+                emit_byte(0xA1);
+            } else {
+                if (size1 == 8) {
+                    emit_byte(0x8A);
+                } else {
+                    emit_byte(0x8B);
+                }
+                emit_byte((r1 << 3) | 0x06);
+            }
+            emit_byte(v2 & 0xFF);
+            emit_byte((v2 >> 8) & 0xFF);
+            return;
+        }
+        if (t2 == 3) {
+            if (size1 == 8) {
+                emit_byte(0x8A);
+            } else {
+                emit_byte(0x8B);
+            }
+            int modrm = (r1 << 3) | reg_to_rm(r2);
+            if (v2 == 0) {
+                emit_byte(modrm);
+            } else if (v2 >= -128 && v2 <= 127) {
+                emit_byte(modrm | 0x40);
+                emit_byte(v2 & 0xFF);
+            } else {
+                emit_byte(modrm | 0x80);
+                emit_byte(v2 & 0xFF);
+                emit_byte((v2 >> 8) & 0xFF);
+            }
+            return;
+        }
+        abort_unknown();
+    }
+    if (t1 == 2) {
+        if (t2 == 0) {
+            if (size1 == 8 && r2 == 0) {
+                emit_byte(0xA2);
+            } else if (size1 != 8 && r2 == 0) {
+                emit_byte(0xA3);
+            } else {
+                if (size1 == 8) {
+                    emit_byte(0x88);
+                } else {
+                    emit_byte(0x89);
+                }
+                emit_byte((r2 << 3) | 0x06);
+            }
+            emit_byte(v1 & 0xFF);
+            emit_byte((v1 >> 8) & 0xFF);
+            return;
+        }
+        if (t2 == 1) {
+            if (size1 == 8) {
+                emit_byte(0xC6);
+            } else {
+                emit_byte(0xC7);
+            }
+            emit_byte(0x06);
+            emit_byte(v1 & 0xFF);
+            emit_byte((v1 >> 8) & 0xFF);
+            if (size1 == 8) {
+                emit_byte(v2 & 0xFF);
+            } else {
+                emit_byte(v2 & 0xFF);
+                emit_byte((v2 >> 8) & 0xFF);
+            }
+            return;
+        }
+        return;
+    }
+    if (t1 == 3) {
+        if (t2 == 0) {
+            if (size1 == 8) {
+                emit_byte(0x88);
+            } else {
+                emit_byte(0x89);
+            }
+            int modrm = (r2 << 3) | reg_to_rm(r1);
+            if (v1 == 0) {
+                emit_byte(modrm);
+            } else if (v1 >= -128 && v1 <= 127) {
+                emit_byte(modrm | 0x40);
+                emit_byte(v1 & 0xFF);
+            } else {
+                emit_byte(modrm | 0x80);
+                emit_byte(v1 & 0xFF);
+                emit_byte((v1 >> 8) & 0xFF);
+            }
+            return;
+        }
+        if (t2 == 1) {
+            if (size1 == 8) {
+                emit_byte(0xC6);
+            } else {
+                emit_byte(0xC7);
+            }
+            int modrm = reg_to_rm(r1);
+            if (v1 == 0) {
+                emit_byte(modrm);
+            } else if (v1 >= -128 && v1 <= 127) {
+                emit_byte(modrm | 0x40);
+                emit_byte(v1 & 0xFF);
+            } else {
+                emit_byte(modrm | 0x80);
+                emit_byte(v1 & 0xFF);
+                emit_byte((v1 >> 8) & 0xFF);
+            }
+            if (size1 == 8) {
+                emit_byte(v2 & 0xFF);
+            } else {
+                emit_byte(v2 & 0xFF);
+                emit_byte((v2 >> 8) & 0xFF);
+            }
+            return;
+        }
+    }
 }
 
 void handle_movsb() {
