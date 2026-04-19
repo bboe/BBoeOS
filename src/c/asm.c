@@ -112,6 +112,8 @@ __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
 __attribute__((carry_return))
 int match_word_c_str_word();
+__attribute__((regparm(1)))
+void mem_op_reg_emit(int opcode);
 void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
@@ -426,8 +428,7 @@ void handle_adc() {
 void handle_add() {
     skip_ws();
     if (source_cursor[0] == '[') {
-        asm("mov al, 0x01\n"
-            "call mem_op_reg_emit");
+        mem_op_reg_emit(0x01);
         return;
     }
     int pr = parse_register_c();
@@ -498,8 +499,7 @@ void handle_add() {
 void handle_and() {
     skip_ws();
     if (source_cursor[0] == '[') {
-        asm("mov al, 0x21\n"
-            "call mem_op_reg_emit");
+        mem_op_reg_emit(0x21);
         return;
     }
     int pr = parse_register_c();
@@ -1407,8 +1407,7 @@ void handle_stosw() {
 void handle_sub() {
     skip_ws();
     if (source_cursor[0] == '[') {
-        asm("mov al, 0x29\n"
-            "call mem_op_reg_emit");
+        mem_op_reg_emit(0x29);
         return;
     }
     if (match_word_c_str_word()) {
@@ -1882,35 +1881,28 @@ void match_word() {
 }
 
 /* Shared helper for the ``<op> [disp16], r16`` memory-destination
-   form (called by handle_add / handle_and / handle_sub).  AL holds
-   the opcode on entry; SI points at ``[``.  Consumes ``[disp16],
-   <reg>`` from the source line, emits ``<opcode> <modrm(mod=00,
-   reg=src, rm=110)> <disp16>``.  Bad structure (missing ``]`` or a
-   non-register source) jumps to abort_unknown; successful path
-   falls through to the cc.py ``pop bp / ret`` epilogue.  The
-   retired asm ended with ``jmp emit_word_ax`` as a tail call; the
-   C version uses ``call emit_word_ax`` so the frame closes
-   cleanly. */
-void mem_op_reg_emit() {
-    asm("push ax\n"
-        "inc si\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "cmp byte [si], ']'\n"
-        "jne abort_unknown\n"
-        "inc si\n"
-        "call skip_comma\n"
-        "call parse_register\n"
-        "jc abort_unknown\n"
-        "mov bl, al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "mov al, bl\n"
-        "shl al, 3\n"
-        "or al, 06h\n"
-        "call emit_byte_al\n"
-        "mov ax, dx\n"
-        "call emit_word_ax");
+   form (called by handle_add / handle_and / handle_sub).  Opcode
+   arrives via ``regparm(1)`` AX; source cursor is at ``[``.  Emits
+   ``<opcode> <modrm(mod=00, reg=src, rm=110)> <disp16>``.  Bad
+   structure (missing ``]`` or a non-register source) calls
+   abort_unknown (which never returns). */
+__attribute__((regparm(1)))
+void mem_op_reg_emit(int opcode) {
+    source_cursor = source_cursor + 1;
+    int disp = resolve_value();
+    if (source_cursor[0] != ']') {
+        abort_unknown();
+    }
+    source_cursor = source_cursor + 1;
+    skip_comma();
+    int pr = parse_register_optional();
+    if (pr < 0) {
+        abort_unknown();
+    }
+    emit_byte(opcode);
+    emit_byte(((pr & 0xFF) << 3) | 0x06);
+    emit_byte(disp & 0xFF);
+    emit_byte((disp >> 8) & 0xFF);
 }
 
 /* Parse ``db`` operands (comma-separated mix of numbers, symbols,
