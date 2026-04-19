@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8773      | +520  |
+| asm     | 8253        | 8830      | +577  |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,56 +27,46 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+520):** Phase 1 port wraps the remaining NASM source in a
-file-scope `asm("...")` block.  The entire driver — parse argv,
-open output, run passes, flush, close, exit — lives in pure C
-`main(int argc, char *argv[])` via cc.py's own `die()` / `open()`
-/ `close()` builtins, and the per-pass orchestration (open source,
-loop over read_line / parse_line, handle include EOF via
-include_pop, close source) lives in cc.py-emitted `do_pass()` with
-a natural `while (1)` loop over `read_line()`.  What's still
-inline: the `equ _g_<name>` aliases for the 33 mutable globals cc.py
-emits at the binary tail, the symbol-table / parse / resolve
-helpers (parse_line, parse_mnemonic, parse_operand, parse_register,
-parse_number, parse_db, parse_directive, resolve_label,
-resolve_value, peek_label_target, symbol_add, symbol_add_constant,
-symbol_lookup, symbol_set), the `abort_unknown` / `syscall`
-trampolines, the mnemonic and register tables, and handle_mov (the
-last remaining instruction handler).  Path-A extractions landed to
-date: 33 mutable globals into cc.py file-scope declarations (+11
-bytes, db→dw widening); memory layout / symbol-shape magic numbers
-(SYMBOL_ENTRY, LINE_BUFFER, OUTPUT_BUFFER, SOURCE_BUFFER, JUMP_TABLE,
-JUMP_MAX, SYMBOL_SEGMENT) into `src/c/asm_layout.h` which cc.py
-bridges to NASM `%define`s; `compute_source_prefix`, `run_pass1`,
+**asm (+577):** Every function lives in pure C now — what's still
+inline is the `equ _g_<name>` aliases for the 33 mutable globals
+cc.py emits at the binary tail, the `abort_unknown` trampoline
+(stashes SI into `_g_error_word` and jumps to
+`abort_unknown_impl`), the `syscall` ES-safe int-30h wrapper, the
+`mnemonic_table` / `register_table` / `STR_*` data tables, and
+the `_program_end` sentinel.  Those are all NASM-only constructs
+(data layout and control-flow idioms cc.py doesn't express), so
+they stay as a trailing `asm("...")` block alongside the C
+functions.  Historical deltas: 33 mutable globals moved into
+cc.py file-scope declarations (+11 bytes, db→dw widening); memory
+layout / symbol-shape magic numbers (SYMBOL_ENTRY, LINE_BUFFER,
+OUTPUT_BUFFER, SOURCE_BUFFER, JUMP_TABLE, JUMP_MAX,
+SYMBOL_SEGMENT) migrated to `src/c/asm_layout.h` which cc.py
+bridges to NASM `%define`s; every function that used to live in
+file-scope asm is now a cc.py-emitted C function with an
+inline-asm body — `compute_source_prefix`, `run_pass1` /
 `run_pass2`, `flush_output`, `abort_unknown_impl`, three `die_*`
-helpers, `include_push`, `include_pop`, `do_pass`, `read_line`,
-`load_src_sector`, `skip_ws`, `skip_comma`, `hex_digit`,
-`make_modrm_reg_reg`, `reg_to_rm`, `emit_byte_al`, `emit_word_ax`,
-`symbol_entry_address`, `match_word`, `mem_op_reg_emit`,
-`encode_rel8_jump`, and the full `main` into pure C; plus the full
-set of instruction handlers except handle_mov: handle_aam / clc /
-cld / lodsb / lodsw / movsb / movsw / popa / pusha / ret / scasb /
-stc / stosb / stosw (zero-operand); handle_ja / jb / jbe / jg / jge
-/ jl / jle / jmp / jnc / jne / jns / jz / loop (conditional jumps,
-with the mnemonic table aliasing STR_JC to handle_jb after the
-duplicate label retired); handle_int / rep / repne; handle_adc /
-mul / neg / not; handle_sbb / shl / shr; handle_call / dec / div /
-inc; handle_movzx / pop / push; handle_test / xchg / xor;
-handle_and / or; handle_unknown_word; handle_sub; handle_add;
-handle_cmp.  Eight dead `.error_*` labels, thirteen
-MESSAGE_* strings, the dead `print_hex_word` helper, the `call_die`
-/ `call_exit` / `call_print_character` / `call_print_string` /
-`call_write_stdout` kernel-jump wrappers, the `abort_unknown` asm
-body, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE `%define`s all
-retired along the way (the 6-byte parent-state triplet moved into
-cc.py-emitted globals; the 512-byte source-buffer copy lives in
-post-binary scratch RAM via a pointer main() initializes).
-Follow-up PRs will extract the symbol table (symbol_add /
-symbol_add_constant / symbol_lookup / symbol_set), parse_* family
-(parse_line / parse_directive / parse_mnemonic / parse_operand /
-parse_register / parse_number / parse_db), resolve_* /
-peek_label_target, and the last remaining instruction handler
-(handle_mov) into pure C.
+helpers, `include_push` / `include_pop`, `do_pass`, `read_line`,
+`load_src_sector`, `skip_ws` / `skip_comma`, `hex_digit`,
+`make_modrm_reg_reg` / `reg_to_rm`, `emit_byte_al` /
+`emit_word_ax`, `symbol_entry_address`, `match_word`,
+`mem_op_reg_emit`, `encode_rel8_jump`, the full `main`, the full
+instruction-handler family (handle_aam / adc / add / and / call /
+clc / cld / cmp / dec / div / inc / int / ja / jb / jbe / jg /
+jge / jl / jle / jmp / jnc / jne / jns / jz / lodsb / lodsw /
+loop / mov / movsb / movsw / movzx / mul / neg / not / or / pop
+/ popa / push / pusha / rep / repne / ret / sbb / scasb / shl /
+shr / stc / stosb / stosw / sub / test / unknown_word / xchg /
+xor), the parse_* family (parse_db / parse_directive / parse_line
+/ parse_mnemonic / parse_number / parse_operand / parse_register),
+peek_label_target / resolve_label / resolve_value, and the
+symbol_* family (symbol_add / symbol_add_constant / symbol_lookup
+/ symbol_set).  Eight dead `.error_*` labels, thirteen MESSAGE_*
+strings, the dead `print_hex_word` helper, five `call_*`
+kernel-jump wrappers, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE
+`%define`s all retired along the way (the 6-byte parent-state
+triplet moved into cc.py-emitted globals; the 512-byte
+source-buffer copy lives in post-binary scratch RAM via a pointer
+main() initializes).
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
