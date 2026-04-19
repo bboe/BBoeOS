@@ -2386,40 +2386,26 @@ void handle_xor() {
         ".hxo_end:");
 }
 
-/* Convert the ASCII hex digit in CL to its numeric value in place
-   (0..15), or leave CL alone and set CF on a non-hex byte.  Both
-   ``0``-``9`` and ``A``-``F`` / ``a``-``f`` are accepted.  Called by
-   ``parse_number``'s 0x-prefix and ``h``-suffix branches; the CL-in
-   / CL-out / CF-out ABI survives cc.py's bp frame because POP and
-   RET don't touch FLAGS. */
-void hex_digit() {
-    asm("cmp cl, '0'\n"
-        "jb .hd_not_hex\n"
-        "cmp cl, '9'\n"
-        "jbe .hd_digit\n"
-        "cmp cl, 'A'\n"
-        "jb .hd_try_lower\n"
-        "cmp cl, 'F'\n"
-        "jbe .hd_upper\n"
-        ".hd_try_lower:\n"
-        "cmp cl, 'a'\n"
-        "jb .hd_not_hex\n"
-        "cmp cl, 'f'\n"
-        "ja .hd_not_hex\n"
-        "sub cl, 'a' - 10\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_upper:\n"
-        "sub cl, 'A' - 10\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_digit:\n"
-        "sub cl, '0'\n"
-        "clc\n"
-        "jmp .hd_end\n"
-        ".hd_not_hex:\n"
-        "stc\n"
-        ".hd_end:");
+/* Convert an ASCII hex digit to its numeric value.  Returns 0..15
+   on success, ``-1`` on a non-hex byte.  ``regparm(1)`` fastcall —
+   the byte arrives in AX (caller zero-extends from AL before the
+   call so AH is clean).  Callers check ``ax < 0`` (``js`` on the
+   sign bit) to detect the not-hex case; the ``-1`` sentinel
+   replaces the CF-return ABI the retired asm used.  4 call sites
+   in ``parse_db``'s ``\x..`` escape handler and ``parse_number``'s
+   hex-prefix / hex-suffix loops. */
+__attribute__((regparm(1)))
+int hex_digit(int c) {
+    if (c >= 48 && c <= 57) {
+        return c - 48;      /* '0'..'9' → 0..9 */
+    }
+    if (c >= 65 && c <= 70) {
+        return c - 55;      /* 'A'..'F' → 10..15 */
+    }
+    if (c >= 97 && c <= 102) {
+        return c - 87;      /* 'a'..'f' → 10..15 */
+    }
+    return -1;
 }
 
 /* Pop the include stack: close the included file, restore the
@@ -2754,15 +2740,16 @@ void parse_db() {
         "jmp .hdb_str_char\n"
         ".hdb_esc_x:\n"
         "inc si\n"
-        "mov cl, [si]\n"
+        "mov al, [si]\n"
+        "xor ah, ah\n"
         "call hex_digit\n"
-        "mov bl, cl\n"
+        "mov bl, al\n"
         "shl bl, 4\n"
         "inc si\n"
-        "mov cl, [si]\n"
+        "mov al, [si]\n"
+        "xor ah, ah\n"
         "call hex_digit\n"
-        "or cl, bl\n"
-        "mov al, cl\n"
+        "or al, bl\n"
         "call emit_byte_al\n"
         "inc si\n"
         "jmp .hdb_str_char\n"
@@ -3129,30 +3116,38 @@ void parse_number() {
         "jmp .pn_hex_suffix\n"
         ".pn_hex_prefix:\n"
         "add si, 2\n"
-        "xor ax, ax\n"
+        "xor bx, bx\n"
         ".pn_hex_p_loop:\n"
-        "mov cl, [si]\n"
+        "mov al, [si]\n"
+        "xor ah, ah\n"
         "call hex_digit\n"
-        "jc .pn_ret\n"
-        "shl ax, 4\n"
-        "or al, cl\n"
+        "test ax, ax\n"
+        "js .pn_hex_p_ret\n"
+        "shl bx, 4\n"
+        "or bl, al\n"
         "inc si\n"
         "jmp .pn_hex_p_loop\n"
+        ".pn_hex_p_ret:\n"
+        "mov ax, bx\n"
+        "jmp .pn_ret\n"
         ".pn_hex_suffix:\n"
-        "xor ax, ax\n"
+        "xor bx, bx\n"
         ".pn_hex_s_loop:\n"
-        "mov cl, [si]\n"
-        "cmp cl, 'h'\n"
+        "mov al, [si]\n"
+        "cmp al, 'h'\n"
         "je .pn_hex_s_end\n"
-        "cmp cl, 'H'\n"
+        "cmp al, 'H'\n"
         "je .pn_hex_s_end\n"
+        "xor ah, ah\n"
         "call hex_digit\n"
-        "jc .pn_hex_s_end\n"
-        "shl ax, 4\n"
-        "or al, cl\n"
+        "test ax, ax\n"
+        "js .pn_hex_s_end\n"
+        "shl bx, 4\n"
+        "or bl, al\n"
         "inc si\n"
         "jmp .pn_hex_s_loop\n"
         ".pn_hex_s_end:\n"
+        "mov ax, bx\n"
         "cmp byte [si], 'h'\n"
         "je .pn_skip_h\n"
         "cmp byte [si], 'H'\n"
