@@ -84,6 +84,16 @@ int pass;
 char *source_buffer;
 int source_buffer_position;
 int source_buffer_valid;
+/* C-level alias for the SI register — the source cursor that every
+   handler / parser function consumes.  Inline-asm bodies still use
+   SI directly (no conflict since it's the same register); pure-C
+   bodies read and advance ``source_cursor`` as a normal ``char *``.
+   No storage is emitted for the global — reads compile as ``mov ax,
+   si`` (or a no-op when the target IS SI), writes as ``mov si, ...``,
+   ``source_cursor = source_cursor + 1`` folds to ``inc si``, and
+   ``source_cursor[0]`` compiles to ``mov al, [si]``. */
+__attribute__((asm_register("si")))
+char *source_cursor;
 int source_fd;
 char *source_name;
 char source_prefix[32];
@@ -3892,31 +3902,30 @@ void run_pass2() {
    separator every multi-operand handler uses.  No-op if no comma is
    present (the first call to skip_ws still advances past leading
    whitespace). */
-void skip_comma() {
-    asm("call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .sc_end\n"
-        "inc si\n"
-        "call skip_ws\n"
-        ".sc_end:");
+/* Advance source_cursor past any run of ' ' / '\t' at the current
+   cursor position.  Called hundreds of times from the instruction
+   handlers; ``source_cursor`` aliases SI through
+   ``__attribute__((asm_register("si")))`` so the loop compiles to
+   ``cmp byte [si], 32 ; je .skip ; cmp byte [si], 9 ; je .skip ;
+   jmp .end ; .skip: inc si ; jmp .loop ; .end:`` — byte-identical
+   to the retired inline-asm body except for cc.py's bp frame.
+
+   Placed before ``skip_comma`` rather than in strict alphabetical
+   position so clang's declare-before-use rule is satisfied; cc.py
+   resolves the order-independent call either way via its
+   pre-codegen ``user_functions`` registry. */
+void skip_ws() {
+    while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
+        source_cursor = source_cursor + 1;
+    }
 }
 
-/* Advance SI past any run of ' ' / '\t' at the current source cursor.
-   Called hundreds of times from the instruction handlers; the body is
-   inline asm so cc.py's bp frame is the only overhead (push bp /
-   mov bp, sp at entry, pop bp / ret at exit — neither touches SI or
-   FLAGS, so the handler-side register ABI is preserved). */
-void skip_ws() {
-    asm(".sws_loop:\n"
-        "cmp byte [si], ' '\n"
-        "je .sws_skip\n"
-        "cmp byte [si], 9\n"
-        "je .sws_skip\n"
-        "jmp .sws_end\n"
-        ".sws_skip:\n"
-        "inc si\n"
-        "jmp .sws_loop\n"
-        ".sws_end:");
+void skip_comma() {
+    skip_ws();
+    if (source_cursor[0] == ',') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+    }
 }
 
 /* Compute the ES-relative offset of a symbol table entry: input AX
