@@ -3555,20 +3555,29 @@ class CodeGenerator:
         self.ax_clear()
         self.constant_aliases = {}
         self.elide_frame = name == "main"
-        # Naked asm: a non-main function whose body is a single
-        # ``asm("...")`` statement with no parameters.  Skip the
-        # ``push bp / mov bp, sp`` prologue and the ``pop bp``
-        # epilogue, emit only the inline-asm content followed by
-        # ``ret``.  Reclaims ~4 bytes and several cycles per call
-        # on hot-path helpers like ``emit_byte_al`` / ``skip_ws`` /
-        # ``resolve_value`` / ``symbol_lookup`` — the bp frame is
-        # dead weight when the body has no C locals, no parameter
-        # access, and no cc.py codegen that depends on BP.  Inside
-        # a function body, ``asm("...")`` parses as a ``Call`` to
-        # the ``asm`` builtin (not an InlineAsm node — that's only
-        # used for file-scope ``asm(...)`` directives).
+        # Frame-elide criteria for non-main functions.  The bp frame
+        # becomes dead weight whenever the body makes no BP-relative
+        # accesses: no parameters (no ``[bp+N]`` reads), no locals
+        # (no ``[bp-N]`` slots), and no cc.py codegen path that
+        # touches BP.  Inside a function body, ``asm("...")`` parses
+        # as a ``Call`` to the ``asm`` builtin (not an InlineAsm
+        # node — that's only used for file-scope ``asm(...)``
+        # directives).
+        #
+        # ``naked_asm`` covers the hand-coded inline-asm helpers
+        # (``emit_byte_al`` / ``skip_ws`` / ``resolve_value`` /
+        # ``symbol_lookup``).  ``frameless_calls`` covers pure-C
+        # dispatch helpers — handlers like ``handle_clc`` whose
+        # body is ``emit_byte(0xF8);`` or ``handle_aam`` whose body
+        # is two ``emit_byte(...)`` calls.  For those, cc.py's call
+        # codegen emits ``mov ax, N ; call fn`` with no pin save
+        # (no locals means no pinned registers) and no stack-arg
+        # math, so BP is genuinely unused.
         naked_asm = name != "main" and not parameters and len(body) == 1 and isinstance(body[0], Call) and body[0].name == "asm"
-        if naked_asm:
+        frameless_calls = (
+            name != "main" and not parameters and len(body) >= 1 and all(isinstance(stmt, Call) and stmt.name != "asm" for stmt in body)
+        )
+        if naked_asm or frameless_calls:
             self.elide_frame = True
         self.frame_size = 0
         self.live_long_local = None
@@ -3712,7 +3721,10 @@ class CodeGenerator:
                 for vname in sorted(self.locals):
                     directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
-        elif naked_asm:
+        elif self.elide_frame:
+            # naked_asm and frameless_calls both skip the prologue, so
+            # the epilogue is just ``ret`` — no ``pop bp`` because we
+            # didn't push it.
             self.emit("        ret")
         elif not self.always_exits(body):
             if self.frame_size > 0:

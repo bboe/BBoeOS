@@ -68,6 +68,10 @@ int op2_register;
 int op2_type;
 int op2_value;
 int org_value;
+/* Pointer to the 512-byte output-byte buffer at ``_program_end + 256``
+   (= OUTPUT_BUFFER in the asm_layout.h #define).  main() initializes
+   it; ``emit_byte`` / ``flush_output`` index into it directly. */
+char *output_buffer;
 int output_fd;
 char *output_name;
 int output_position;
@@ -162,22 +166,20 @@ void die_symbol_overflow() {
    ``output_fd`` when the buffer fills.  The inline-asm body
    preserves the AL-in ABI.  Clobbers BX only when pass == 2 (saved
    + restored around the buffer-pointer math). */
+/* Legacy AL-in thunk: inline-asm callers still do ``mov al, OPCODE ;
+   call emit_byte_al``.  The thunk zero-extends AL to AX (so garbage
+   AH can't leak into ``v``'s local slot during the fastcall spill)
+   and hands off to the pure-C ``emit_byte`` through the standard
+   C calling convention.  ``pusha`` / ``popa`` preserve every
+   register the old inline-asm body guaranteed (and more) at 1 byte
+   each; this is the backwards-compat bridge that lets the handler
+   family migrate to pure C one family at a time without touching
+   every call site in the remaining inline asm. */
 void emit_byte_al() {
-    asm("cmp byte [_g_pass], 2\n"
-        "jne .eba_count_only\n"
-        "push bx\n"
-        "mov bx, [_g_output_position]\n"
-        "mov [OUTPUT_BUFFER + bx], al\n"
-        "inc bx\n"
-        "mov [_g_output_position], bx\n"
-        "cmp bx, 512\n"
-        "jb .eba_no_flush\n"
-        "call flush_output\n"
-        ".eba_no_flush:\n"
-        "pop bx\n"
-        ".eba_count_only:\n"
-        "inc word [_g_current_address]\n"
-        "inc word [_g_output_total]");
+    asm("pusha\n"
+        "mov ah, 0\n"
+        "call emit_byte\n"
+        "popa");
 }
 
 /* Emit one little-endian word (AX).  Saves the high byte, emits
@@ -194,18 +196,21 @@ void emit_word_ax() {
 
 /* Pick between short (rel8) and near (rel16) jump encoding per
    call, using the pass-1 bitmap at ES:JUMP_TABLE indexed by
-   ``jump_index``.  Sole callers are the handle_jXX / handle_loop
-   / handle_jmp C functions above, all of which ``call
-   encode_rel8_jump`` with the opcode in AL and SI on the label
-   operand.  jump_table[idx] = 0 means short, 1 means near.  Pass
-   1 iterates, flipping bits until ``changed_flag`` stops toggling;
-   pass 2 trusts the choices.  Note: the ``.erj_shrink_forward``
-   branch peeks at the saved-AX slot via an inner ``push bp / cmp
-   byte [bp+2], 0EBh / pop bp`` — that offset addresses the
-   outer-function's pushed AX (cc.py's own bp frame sits above
-   it on the stack), same trick the retired inline-asm version
-   used but relative to a different outer frame. */
-void encode_rel8_jump() {
+   ``jump_index``.  Takes the opcode via the ``regparm(1)`` fastcall
+   convention (AX on entry); the body does its own ``push ax`` to
+   save the value across ``skip_ws`` / ``peek_label_target`` calls
+   and later ``pop ax`` to recover it for emission.  SI points at
+   the label operand on entry (inline-asm ABI, inherited from the
+   handler callers).  jump_table[idx] = 0 means short, 1 means near.
+   Pass 1 iterates, flipping bits until ``changed_flag`` stops
+   toggling; pass 2 trusts the choices.  Note: the
+   ``.erj_shrink_forward`` branch peeks at the body's saved-AX slot
+   via an inner ``push bp / cmp byte [bp+2], 0EBh / pop bp`` — the
+   peek is relative to the body's ``push ax``, so cc.py's fastcall
+   prologue (``push bp / mov bp, sp / sub sp, 2 / mov [bp-2], ax``)
+   sits further up the stack and doesn't affect the offset. */
+__attribute__((regparm(1)))
+void encode_rel8_jump(int opcode) {
     asm("push ax\n"
         "call skip_ws\n"
         "mov bx, [_g_jump_index]\n"
@@ -316,21 +321,40 @@ void flush_output() {
         "pop ax");
 }
 
+/* Emit one byte into the output stream.  Pass 1 only bumps
+   current_address / output_total; pass 2 also stores the byte into
+   OUTPUT_BUFFER at output_position, flushing to output_fd when the
+   buffer fills.  Callers load ``v`` into AX via the ``regparm(1)``
+   calling convention; the fastcall prologue spills AX into ``v``'s
+   local slot so the body reads it through the normal local path.
+   Placed after its C-level callee (``flush_output``) rather than in
+   strict alphabetical position: cc.py resolves the call either way
+   via its pre-codegen ``user_functions`` registry, but clang
+   enforces ISO C99 declare-before-use. */
+__attribute__((regparm(1)))
+void emit_byte(int v) {
+    if (pass == 2) {
+        output_buffer[output_position] = v;
+        output_position = output_position + 1;
+        if (output_position >= 512) {
+            flush_output();
+        }
+    }
+    current_address = current_address + 1;
+    output_total = output_total + 1;
+}
+
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
    handler is dispatched through ``mnemonic_table`` (inline-asm tail
    of this file): ``parse_mnemonic`` does an indirect ``call`` on the
-   label, so the cc.py-emitted ``push bp / mov bp, sp`` prologue and
-   ``pop bp / ret`` epilogue produce the same observable effect as
-   the retired ``mov al, OPCODE / jmp emit_byte_al`` inline-asm
-   versions.  Note: tail-jumping to ``emit_byte_al`` from inside a C
-   body would bypass cc.py's epilogue and leak the pushed bp — each
-   body uses ``call emit_byte_al`` + fall-through to the epilogue
-   instead. */
+   label.  Bodies are plain C calls to ``emit_byte``, which uses the
+   ``regparm(1)`` fastcall convention so the call site is ``mov ax,
+   OPCODE ; call emit_byte`` — the same byte count as the retired
+   ``mov al, OPCODE ; call emit_byte_al`` inline form but expressed
+   in pure C. */
 void handle_aam() {
-    asm("mov al, 0D4h\n"
-        "call emit_byte_al\n"
-        "mov al, 0Ah\n"
-        "call emit_byte_al");
+    emit_byte(0xD4);
+    emit_byte(0x0A);
 }
 
 /* ``adc r16, imm8`` — the only form cc.py emits (the checksum-fold
@@ -612,13 +636,11 @@ void handle_call() {
 }
 
 void handle_clc() {
-    asm("mov al, 0F8h\n"
-        "call emit_byte_al");
+    emit_byte(0xF8);
 }
 
 void handle_cld() {
-    asm("mov al, 0FCh\n"
-        "call emit_byte_al");
+    emit_byte(0xFC);
 }
 
 /* ``cmp`` covers r-r, r-imm, r-[mem], [mem]-imm, and [disp16]-imm.
@@ -1013,48 +1035,40 @@ void handle_int() {
         "call emit_byte_al");
 }
 
-/* Conditional-jump family: each handler loads its rel8 opcode into
-   AL and hands off to ``encode_rel8_jump`` (still in the file-scope
-   asm block), which picks between short (rel8) and near (rel16)
-   encoding per jump based on the pass-1 jump-table bitmap.  Call
-   instead of tail-jump for the same bp-frame reason as the
-   zero-operand handlers.  The mnemonic table aliases STR_JAE to
-   handle_jnc, STR_JE to handle_jz, STR_JNZ to handle_jne, and now
-   STR_JC to handle_jb so the shared-body cases reuse a single C
-   function. */
+/* Conditional-jump family: each handler hands its rel8 opcode off
+   to ``encode_rel8_jump`` via the fastcall ``regparm(1)`` convention
+   so the call site compiles as ``mov ax, OP ; call encode_rel8_jump``
+   in pure C.  The shared helper picks between short (rel8) and near
+   (rel16) encoding per jump based on the pass-1 jump-table bitmap.
+   The mnemonic table aliases STR_JAE to handle_jnc, STR_JE to
+   handle_jz, STR_JNZ to handle_jne, and STR_JC to handle_jb so the
+   shared-body cases reuse a single C function. */
 void handle_ja() {
-    asm("mov al, 77h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x77);
 }
 
 void handle_jb() {
-    asm("mov al, 72h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x72);
 }
 
 void handle_jbe() {
-    asm("mov al, 76h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x76);
 }
 
 void handle_jg() {
-    asm("mov al, 7Fh\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x7F);
 }
 
 void handle_jge() {
-    asm("mov al, 7Dh\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x7D);
 }
 
 void handle_jl() {
-    asm("mov al, 7Ch\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x7C);
 }
 
 void handle_jle() {
-    asm("mov al, 7Eh\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x7E);
 }
 
 /* ``jmp <label>`` accepts an optional ``short`` keyword that
@@ -1081,38 +1095,31 @@ void handle_jmp() {
 }
 
 void handle_jnc() {
-    asm("mov al, 73h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x73);
 }
 
 void handle_jne() {
-    asm("mov al, 75h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x75);
 }
 
 void handle_jns() {
-    asm("mov al, 79h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x79);
 }
 
 void handle_jz() {
-    asm("mov al, 74h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0x74);
 }
 
 void handle_lodsb() {
-    asm("mov al, 0ACh\n"
-        "call emit_byte_al");
+    emit_byte(0xAC);
 }
 
 void handle_lodsw() {
-    asm("mov al, 0ADh\n"
-        "call emit_byte_al");
+    emit_byte(0xAD);
 }
 
 void handle_loop() {
-    asm("mov al, 0E2h\n"
-        "call encode_rel8_jump");
+    encode_rel8_jump(0xE2);
 }
 
 /* The most operand-heavy handler: mov has ten shapes.
@@ -1459,13 +1466,11 @@ void handle_mov() {
 }
 
 void handle_movsb() {
-    asm("mov al, 0A4h\n"
-        "call emit_byte_al");
+    emit_byte(0xA4);
 }
 
 void handle_movsw() {
-    asm("mov al, 0A5h\n"
-        "call emit_byte_al");
+    emit_byte(0xA5);
 }
 
 /* ``movzx r16, byte [reg+disp]`` — the only form the self-host uses.
@@ -1701,8 +1706,7 @@ void handle_pop() {
 }
 
 void handle_popa() {
-    asm("mov al, 61h\n"
-        "call emit_byte_al");
+    emit_byte(0x61);
 }
 
 void handle_push() {
@@ -1754,8 +1758,7 @@ void handle_push() {
 }
 
 void handle_pusha() {
-    asm("mov al, 60h\n"
-        "call emit_byte_al");
+    emit_byte(0x60);
 }
 
 /* ``rep`` / ``repne`` prefixes — emit the prefix byte then recurse
@@ -1777,8 +1780,7 @@ void handle_repne() {
 }
 
 void handle_ret() {
-    asm("mov al, 0C3h\n"
-        "call emit_byte_al");
+    emit_byte(0xC3);
 }
 
 /* ``sbb word [disp16], imm8`` — the only form the self-host needs
@@ -1823,8 +1825,7 @@ void handle_sbb() {
 }
 
 void handle_scasb() {
-    asm("mov al, 0AEh\n"
-        "call emit_byte_al");
+    emit_byte(0xAE);
 }
 
 /* ``shl`` / ``shr`` with r8/r16 destination and either a constant 1
@@ -1910,18 +1911,15 @@ void handle_shr() {
 }
 
 void handle_stc() {
-    asm("mov al, 0F9h\n"
-        "call emit_byte_al");
+    emit_byte(0xF9);
 }
 
 void handle_stosb() {
-    asm("mov al, 0AAh\n"
-        "call emit_byte_al");
+    emit_byte(0xAA);
 }
 
 void handle_stosw() {
-    asm("mov al, 0ABh\n"
-        "call emit_byte_al");
+    emit_byte(0xAB);
 }
 
 /* ``sub`` has four operand shapes — ``[disp16], r16`` (via
@@ -4115,6 +4113,7 @@ int main(int argc, char *argv[]) {
        SOURCE_BUFFER into that scratch RAM instead of bloating the
        binary. */
     asm("mov word [_g_line_buffer], LINE_BUFFER\n"
+        "mov word [_g_output_buffer], OUTPUT_BUFFER\n"
         "mov word [_g_source_buffer], SOURCE_BUFFER\n"
         "mov word [_g_include_source_save], SOURCE_BUFFER + 512");
     if (argc != 2) {
