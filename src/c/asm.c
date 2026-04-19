@@ -111,6 +111,8 @@ int symbol_set_value;
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
 __attribute__((carry_return))
+int match_word_c_str_short();
+__attribute__((carry_return))
 int match_word_c_str_word();
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode);
@@ -850,21 +852,16 @@ void handle_jle() {
    (push / pop around match_word) mirrors the retired inline-asm
    version; keeping it in asm avoids leaking a C local whose
    register pinning would make the SI shuffle more awkward. */
+/* ``jmp`` peels an optional ``short`` keyword (the asm's .hj_no_short
+   branch's pop/push/skip_ws restore was a no-op: match_word already
+   rewinds SI on miss, and skip_ws is idempotent) then falls through
+   to ``encode_rel8_jump(0xEB)``, which runs its own skip_ws before
+   consuming the label.  The short-form opcode 0xEB may grow to the
+   long-form 0xE9 rel16 in pass 1 if the target doesn't fit ±128. */
 void handle_jmp() {
-    asm("push si\n"
-        "call skip_ws\n"
-        "mov di, STR_SHORT\n"
-        "call match_word\n"
-        "jc .hj_no_short\n"
-        "jmp .hj_do_jmp\n"
-        ".hj_no_short:\n"
-        "pop si\n"
-        "push si\n"
-        "call skip_ws\n"
-        ".hj_do_jmp:\n"
-        "pop ax\n"
-        "mov al, 0EBh\n"
-        "call encode_rel8_jump");
+    skip_ws();
+    match_word_c_str_short();
+    encode_rel8_jump(0xEB);
 }
 
 void handle_jnc() {
@@ -2656,6 +2653,18 @@ int parse_register_optional() {
 int parse_operand_c() {
     asm("call parse_operand\n"
         "mov [_g_parse_operand_value], dx");
+}
+
+/* C-callable ``match_word`` wrapper specialized for ``STR_SHORT``.
+   Peels the optional ``short`` keyword in ``handle_jmp``; the caller
+   discards the carry_return result because either outcome (``short``
+   consumed or source cursor rewound) falls through to the same
+   encode_rel8_jump path.  Same 3-instruction shape as
+   ``match_word_c_str_word``. */
+__attribute__((carry_return))
+int match_word_c_str_short() {
+    asm("mov di, STR_SHORT\n"
+        "call match_word");
 }
 
 /* C-callable ``match_word`` wrapper specialized for ``STR_WORD``.
