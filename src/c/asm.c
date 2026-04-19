@@ -87,10 +87,21 @@ int symbol_count;
 int symbol_set_scope;
 int symbol_set_value;
 
-/* Invoked through an inline-asm trampoline that stashes SI into
-   ``error_word`` before jumping here (``abort_unknown:`` in the
-   file-scope asm block).  Prints the offending source line from
-   ``line_buffer`` together with the bad token, then exits. */
+/* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
+   ``call``) from dozens of handler sites.  Stashes the offending
+   mnemonic's SI into ``error_word`` and jumps to
+   abort_unknown_impl, which prints and exits.  Naked-asm shape,
+   so cc.py elides the bp frame — the terminal ``jmp`` means the
+   ``ret`` that cc.py appends is dead code (1 byte), same cost as
+   the retired file-scope asm version. */
+void abort_unknown() {
+    asm("mov [_g_error_word], si\n"
+        "jmp abort_unknown_impl");
+}
+
+/* Invoked through ``abort_unknown`` above.  Prints the offending
+   source line from ``line_buffer`` together with the bad token,
+   then exits. */
 void abort_unknown_impl() {
     asm("push ds\npop es");
     printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
@@ -4195,15 +4206,9 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; abort_unknown: stash SI (the offending mnemonic) into a\n"
-    ";;; C-visible global and jump to the pure-C reporter.  Called\n"
-    ";;; from handle_unknown_word and friends when a source line has\n"
-    ";;; no recognized mnemonic or directive after stripping a bare\n"
-    ";;; label.  ``abort_unknown_impl`` does the printf + exit.\n"
+    ";;; abort_unknown lives in a cc.py-emitted C function near the\n"
+    ";;; top of src/c/asm.c.\n"
     ";;; -----------------------------------------------------------------------\n"
-    "abort_unknown:\n"
-    "        mov [_g_error_word], si\n"
-    "        jmp abort_unknown_impl\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; do_pass lives in cc.py-emitted ``do_pass`` at the top of\n"
@@ -4556,7 +4561,11 @@ asm(
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0\n"
-    ";;; for kernel calls, then restore ES before returning.\n"
+    ";;; for kernel calls, then restore ES before returning.  Kept as a\n"
+    ";;; file-scope asm label (not a C function) because ``syscall`` is\n"
+    ";;; a reserved libc symbol and clang's syntax check rejects a user\n"
+    ";;; definition; renaming would touch every ``call syscall`` site in\n"
+    ";;; the inline-asm bodies.\n"
     ";;; -----------------------------------------------------------------------\n"
     "syscall:\n"
     "        push es\n"
