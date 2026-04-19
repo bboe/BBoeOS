@@ -3591,28 +3591,29 @@ void do_pass() {
 }
 
 /* Map a register number to its 16-bit addressing ModR/M r/m field.
-   Input AL is a cc.py-style register index (3=bx, 5=bp, 6=si,
-   7=di); output AL is the ModR/M encoding (bx=7, bp=6, si=4,
-   di=5).  Any input that isn't one of the four indexable base
-   registers is treated as bp (rm=6), matching the retired asm. */
-void reg_to_rm() {
-    asm("cmp al, 3\n"
-        "je .rtr_bx\n"
-        "cmp al, 6\n"
-        "je .rtr_si\n"
-        "cmp al, 7\n"
-        "je .rtr_di\n"
-        "mov al, 6\n"
-        "jmp .rtr_end\n"
-        ".rtr_bx:\n"
-        "mov al, 7\n"
-        "jmp .rtr_end\n"
-        ".rtr_si:\n"
-        "mov al, 4\n"
-        "jmp .rtr_end\n"
-        ".rtr_di:\n"
-        "mov al, 5\n"
-        ".rtr_end:");
+   Input register index in AL (3=bx, 5=bp, 6=si, 7=di); returns the
+   ModR/M encoding in AL (bx=7, bp=6, si=4, di=5).  Any input that
+   isn't one of the four indexable base registers is treated as bp
+   (rm=6), matching the retired asm.
+
+   Fastcall ``regparm(1)`` so the C body reads the parameter
+   naturally.  Inline-asm callers still do ``mov al, X ; call
+   reg_to_rm``; AX arrives with AH carrying whatever junk the
+   caller didn't zero, so the body masks to a byte before the
+   switch to match the old AL-only comparison semantics. */
+__attribute__((regparm(1)))
+int reg_to_rm(int reg) {
+    reg = reg & 0xFF;
+    if (reg == 3) {
+        return 7;
+    }
+    if (reg == 6) {
+        return 4;
+    }
+    if (reg == 7) {
+        return 5;
+    }
+    return 6;
 }
 
 /* Resolve a jump/label operand.  Pass 1: skip past the identifier
