@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 8830      | +577  |
+| asm     | 8253        | 8506      | +253  |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+577):** Every function lives in pure C now — what's still
+**asm (+253):** Every function lives in pure C now — what's still
 inline is the `equ _g_<name>` aliases for the 33 mutable globals
 cc.py emits at the binary tail, the `abort_unknown` trampoline
 (stashes SI into `_g_error_word` and jumps to
@@ -66,7 +66,11 @@ kernel-jump wrappers, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE
 `%define`s all retired along the way (the 6-byte parent-state
 triplet moved into cc.py-emitted globals; the 512-byte
 source-buffer copy lives in post-binary scratch RAM via a pointer
-main() initializes).
+main() initializes).  cc.py now elides the bp frame for functions
+whose body is a single ``asm("...")`` statement with no parameters
+(the vast majority of the ported helpers), so the per-call overhead
+on the hot paths dropped back to the NASM baseline — 324 bytes
+shaved (8830 → 8506) and the self-host runtime recovered to ~9s.
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
