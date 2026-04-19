@@ -111,6 +111,7 @@ int make_modrm_reg_reg_impl(int reg, int rm);
 void parse_mnemonic();
 __attribute__((carry_return))
 int parse_register_c();
+int parse_register_optional();
 int resolve_value();
 void skip_comma();
 void skip_ws();
@@ -1704,51 +1705,31 @@ void handle_popa() {
 }
 
 void handle_push() {
-    asm("call skip_ws\n"
-        "cmp byte [si], 'd'\n"
-        "jne .hpu_not_ds\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .hpu_operand\n"
-        "add si, 2\n"
-        "mov al, 1Eh\n"
-        "call emit_byte_al\n"
-        "jmp .hpu_end\n"
-        ".hpu_not_ds:\n"
-        "cmp byte [si], 'e'\n"
-        "jne .hpu_operand\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .hpu_operand\n"
-        "add si, 2\n"
-        "mov al, 06h\n"
-        "call emit_byte_al\n"
-        "jmp .hpu_end\n"
-        ".hpu_operand:\n"
-        "push si\n"
-        "call parse_register\n"
-        "jc .hpu_imm16\n"
-        "add sp, 2\n"
-        "add al, 50h\n"
-        "call emit_byte_al\n"
-        "jmp .hpu_end\n"
-        ".hpu_imm16:\n"
-        "pop si\n"
-        "call resolve_value\n"
-        "push ax\n"
-        "mov dx, ax\n"
-        "add dx, 80h\n"
-        "cmp dx, 0FFh\n"
-        "ja .hpu_imm16_long\n"
-        "mov al, 6Ah\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "jmp .hpu_end\n"
-        ".hpu_imm16_long:\n"
-        "mov al, 68h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_word_ax\n"
-        ".hpu_end:");
+    skip_ws();
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(0x1E);
+    } else if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(0x06);
+    } else {
+        char *saved = source_cursor;
+        int pr = parse_register_optional();
+        if (pr >= 0) {
+            emit_byte(0x50 | (pr & 0xFF));
+        } else {
+            source_cursor = saved;
+            int value = resolve_value();
+            if (value >= -128 && value <= 127) {
+                emit_byte(0x6A);
+                emit_byte(value & 0xFF);
+            } else {
+                emit_byte(0x68);
+                emit_byte(value & 0xFF);
+                emit_byte((value >> 8) & 0xFF);
+            }
+        }
+    }
 }
 
 void handle_pusha() {
@@ -3274,6 +3255,20 @@ void parse_operand() {
 __attribute__((carry_return))
 int parse_register_c() {
     asm("call parse_register");
+}
+
+/* C-callable ``parse_register`` variant that reports failure via a
+   ``-1`` sentinel instead of CF.  Callers that need both the parsed
+   AX (packed ``AH = size``, ``AL = reg number``) and the
+   success / failure signal can't use ``parse_register_c`` because
+   the carry_return dispatch discards AX.  Packed return values land
+   in ``0x0800 .. 0x1007`` (reg 0..7, size 8 or 16), so ``-1``
+   (``0xFFFF``) is a safe sentinel — callers check ``if (pr >= 0)``. */
+int parse_register_optional() {
+    asm("call parse_register\n"
+        "jnc .pro_ok\n"
+        "mov ax, -1\n"
+        ".pro_ok:");
 }
 
 /* Linear scan over ``register_table`` (2-char name + reg-num byte
