@@ -3958,17 +3958,18 @@ void skip_comma() {
     }
 }
 
-/* Compute the ES-relative offset of a symbol table entry: input AX
-   = index, output DI = index * SYMBOL_ENTRY (36).  Preserves BX;
-   clobbers AX and DX (MUL writes its high word into DX).  ``mul bx``
-   is shorter than an ``imul ax, bx, 36`` encoding, which is why the
-   retired asm took the BX-save-and-restore detour. */
-void symbol_entry_address() {
-    asm("push bx\n"
-        "mov bx, SYMBOL_ENTRY\n"
-        "mul bx\n"
-        "mov di, ax\n"
-        "pop bx");
+/* Compute the ES-relative offset of a symbol table entry: returns
+   ``index * SYMBOL_ENTRY`` (36) in AX.  Fastcall ``regparm(1)`` so
+   the index arrives in AX directly.  cc.py's multiplication codegen
+   uses ``mul bx`` which clobbers BX; callers that need BX across
+   the call save it on the stack.  The four inline-asm call sites
+   each do ``call symbol_entry_address ; mov di, ax`` now — the old
+   inline body wrote DI internally, the pure-C version returns via
+   AX and leaves the DI move to the caller (2 bytes per site × 4 =
+   8 bytes, offset by the smaller function body). */
+__attribute__((regparm(1)))
+int symbol_entry_address(int index) {
+    return index * SYMBOL_ENTRY;
 }
 
 /* Append a label to the symbol table.  Callers pass SI = name,
@@ -3988,6 +3989,7 @@ void symbol_add() {
         "push bx\n"
         "mov ax, [_g_symbol_count]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov cx, SYMBOL_NAME_LENGTH - 1\n"
         ".sa_copy_name:\n"
         "mov al, [si]\n"
@@ -4005,6 +4007,7 @@ void symbol_add() {
         "jns .sa_pad_name\n"
         "mov ax, [_g_symbol_count]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "pop bx\n"
         "pop ax\n"
         "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
@@ -4031,6 +4034,7 @@ void symbol_add_constant() {
         "push ax\n"
         "mov ax, [_g_last_symbol_index]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1\n"
         "pop ax\n"
         "pop bx");
@@ -4118,6 +4122,7 @@ void symbol_set() {
         "je .ss_add\n"
         "mov ax, [_g_last_symbol_index]\n"
         "call symbol_entry_address\n"
+        "mov di, ax\n"
         "mov ax, [_g_symbol_set_value]\n"
         "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
         "pop dx\n"
