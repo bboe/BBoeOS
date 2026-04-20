@@ -125,4 +125,9 @@ extern char STR_SHORT[];
 extern char STR_TIMES[];
 extern char STR_WORD[];
 
+/* Register table (defined in src/c/asm.c's trailing asm block): 4-byte
+   packed entries of name[2] + reg + size, zero-terminated.  Exposed as
+   a NAMED_CONSTANT so parse_register can walk it from pure C. */
+extern char register_table[];
+
 #endif

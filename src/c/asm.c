@@ -130,7 +130,7 @@ void mem_op_reg_emit(int opcode);
 void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
-__attribute__((carry_return))
+int parse_register();
 int parse_register_c();
 int parse_register_optional();
 __attribute__((regparm(1)))
@@ -2456,31 +2456,22 @@ int parse_operand() {
     return 2 << 8;                      /* type=2 (direct mem) */
 }
 
-/* C-callable wrapper around the inline-asm ``parse_register``.  Naked-
-   asm body just forwards the call and lets the inner ``parse_register``'s
-   return reach our caller — AX (packed ``AH = size``, ``AL = reg
-   number``) propagates through cc.py's naked ``ret``, so pure-C callers
-   can write ``int pr = parse_register_c();`` and extract the two fields
-   via ``pr & 0xff`` / ``(pr >> 8) & 0xff``.  CF also survives the
-   ``call parse_register ; ret`` sequence; callers that care use the
-   ``if (parse_register_c()) { ... }`` ``carry_return`` dispatch. */
-__attribute__((carry_return))
+/* Forwarding wrapper retained for source compatibility with ``_c``-
+   suffixed callers that predated the pure-C ``parse_register`` port.
+   Returns the packed ``(size << 8) | reg`` value on match with
+   ``source_cursor`` advanced +2, or ``-1`` on miss.  Callers that
+   assume success treat ``-1`` as garbage (same undefined-AX outcome
+   the pre-port asm produced). */
 int parse_register_c() {
-    asm("call parse_register");
+    return parse_register();
 }
 
-/* C-callable ``parse_register`` variant that reports failure via a
-   ``-1`` sentinel instead of CF.  Callers that need both the parsed
-   AX (packed ``AH = size``, ``AL = reg number``) and the
-   success / failure signal can't use ``parse_register_c`` because
-   the carry_return dispatch discards AX.  Packed return values land
-   in ``0x0800 .. 0x1007`` (reg 0..7, size 8 or 16), so ``-1``
-   (``0xFFFF``) is a safe sentinel — callers check ``if (pr >= 0)``. */
+/* Forwarding wrapper for callers that explicitly check the ``-1``
+   miss sentinel (``if (pr >= 0)``).  Identical to ``parse_register_c``
+   now that the underlying function uses a sentinel return instead of
+   CF; kept as a separate name so the call sites still document intent. */
 int parse_register_optional() {
-    asm("call parse_register\n"
-        "jnc .pro_ok\n"
-        "mov ax, -1\n"
-        ".pro_ok:");
+    return parse_register();
 }
 
 /* C-callable wrapper around the inline-asm ``parse_operand``.  The
@@ -2552,71 +2543,45 @@ int match_word_c_str_word() {
         "call match_word");
 }
 
-/* Linear scan over ``register_table`` (2-char name + reg-num byte
-   + size byte, zero-terminated entry).  Case-insensitive match
-   with a word-boundary check on the next character.  Returns AL =
-   reg number, AH = size (8 or 16), CF clear on match; CF set +
-   SI unchanged on miss.  BX / CX / DI preserved via push chain. */
-void parse_register() {
-    asm("push bx\n"
-        "push cx\n"
-        "push di\n"
-        "mov bx, register_table\n"
-        ".pr_try_reg:\n"
-        "mov di, bx\n"
-        "cmp byte [di], 0\n"
-        "je .pr_not_reg\n"
-        "mov al, [si]\n"
-        "cmp al, 'A'\n"
-        "jb .pr_no_lower1\n"
-        "cmp al, 'Z'\n"
-        "ja .pr_no_lower1\n"
-        "or al, 20h\n"
-        ".pr_no_lower1:\n"
-        "cmp al, [di]\n"
-        "jne .pr_next_reg\n"
-        "mov al, [si+1]\n"
-        "cmp al, 'A'\n"
-        "jb .pr_no_lower2\n"
-        "cmp al, 'Z'\n"
-        "ja .pr_no_lower2\n"
-        "or al, 20h\n"
-        ".pr_no_lower2:\n"
-        "cmp al, [di+1]\n"
-        "jne .pr_next_reg\n"
-        "mov al, [si+2]\n"
-        "cmp al, 'a'\n"
-        "jb .pr_check_upper\n"
-        "cmp al, 'z'\n"
-        "jbe .pr_next_reg\n"
-        "jmp .pr_reg_match\n"
-        ".pr_check_upper:\n"
-        "cmp al, 'A'\n"
-        "jb .pr_check_digit\n"
-        "cmp al, 'Z'\n"
-        "jbe .pr_next_reg\n"
-        ".pr_check_digit:\n"
-        "cmp al, '0'\n"
-        "jb .pr_reg_match\n"
-        "cmp al, '9'\n"
-        "jbe .pr_next_reg\n"
-        "cmp al, '_'\n"
-        "je .pr_next_reg\n"
-        ".pr_reg_match:\n"
-        "mov al, [bx+2]\n"
-        "mov ah, [bx+3]\n"
-        "add si, 2\n"
-        "clc\n"
-        "jmp .pr_end\n"
-        ".pr_next_reg:\n"
-        "add bx, 4\n"
-        "jmp .pr_try_reg\n"
-        ".pr_not_reg:\n"
-        "stc\n"
-        ".pr_end:\n"
-        "pop di\n"
-        "pop cx\n"
-        "pop bx");
+/* Linear scan over ``register_table`` (4 bytes per entry: 2 chars,
+   reg-num byte, size byte; zero-terminated).  Case-insensitive
+   match with an identifier-boundary check on ``source_cursor[2]``.
+   Returns ``(size << 8) | reg`` on match with ``source_cursor``
+   advanced past the 2-char name, or ``-1`` on miss with
+   ``source_cursor`` unchanged.  cc.py resolves ``register_table``
+   through NAMED_CONSTANTS to the data-table label in the tail
+   inline-asm block. */
+int parse_register() {
+    char *entry = register_table;
+    while (entry[0] != '\0') {
+        char a = source_cursor[0];
+        if (a >= 'A' && a <= 'Z') {
+            a = a + 32;
+        }
+        if (a != entry[0]) {
+            entry = entry + 4;
+            continue;
+        }
+        a = source_cursor[1];
+        if (a >= 'A' && a <= 'Z') {
+            a = a + 32;
+        }
+        if (a != entry[1]) {
+            entry = entry + 4;
+            continue;
+        }
+        a = source_cursor[2];
+        if ((a >= 'a' && a <= 'z')
+                || (a >= 'A' && a <= 'Z')
+                || (a >= '0' && a <= '9')
+                || a == '_') {
+            entry = entry + 4;
+            continue;
+        }
+        source_cursor = source_cursor + 2;
+        return (entry[3] << 8) | entry[2];
+    }
+    return -1;
 }
 
 /* Lookup a label's address without advancing SI.  Used by

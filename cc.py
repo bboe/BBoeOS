@@ -597,6 +597,7 @@ class CodeGenerator:
         "O_RDONLY",
         "O_TRUNC",
         "O_WRONLY",
+        "register_table",
         "SECTOR_BUFFER",
         "SOCK_DGRAM",
         "SOCK_RAW",
