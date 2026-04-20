@@ -99,7 +99,7 @@ int main(int argc, char *argv[]) {
     printf("Querying %s...\n", argv[0]);
 
     /* Build DNS query in SECTOR_BUFFER (safe during networking) */
-    char *query = SECTOR_BUFFER;
+    uint8_t *query = SECTOR_BUFFER;
     /* Header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1 */
     query[0] = 0;
     query[1] = 1;
@@ -115,14 +115,14 @@ int main(int argc, char *argv[]) {
     query[11] = 0;
 
     /* Encode domain into QNAME starting at offset 12 */
-    char *qname = query + 12;
+    uint8_t *qname = query + 12;
     int name_length = encode_domain(argv[0], qname);
     if (name_length == 0) {
         die("DNS query failed\n");
     }
 
     /* QTYPE = A (0x0001), QCLASS = IN (0x0001) */
-    char *after_name = qname + name_length;
+    uint8_t *after_name = qname + name_length;
     after_name[0] = 0;
     after_name[1] = 1;
     after_name[2] = 0;
@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
     int query_length = 12 + name_length + 4;
 
     /* Send query via UDP socket */
-    char *dns_ip = BUFFER + 6;
+    uint8_t *dns_ip = BUFFER + 6;
     dns_ip[0] = 10;
     dns_ip[1] = 0;
     dns_ip[2] = 2;
@@ -147,7 +147,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Receive response into SECTOR_BUFFER (reuse query buffer) */
-    char *response = SECTOR_BUFFER;
+    uint8_t *response = SECTOR_BUFFER;
     int received = 0;
     int tries = 30000;
     while (tries > 0) {
@@ -183,7 +183,7 @@ int main(int argc, char *argv[]) {
         offset = skip_name(response, offset);
 
         /* Read TYPE and RDLENGTH via a single base pointer */
-        char *record = response + offset;
+        uint8_t *record = response + offset;
         int type_high = record[0];
         int type_low = record[1];
         int rdlength = record[9];
@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
         if (type_high == 0 && type_low == 1) {
             /* A record */
             printf("%s is at ", name_buf);
-            char *ip_address = record + 10;
+            uint8_t *ip_address = record + 10;
             print_ip(ip_address);
             putchar('\n');
             found_address = 1;

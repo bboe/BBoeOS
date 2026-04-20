@@ -12,7 +12,7 @@ int main(int argc, char *argv[]) {
         close(source_fd);
         die("File already exists\n");
     }
-    char *buffer = SECTOR_BUFFER;
+    uint8_t *buffer = SECTOR_BUFFER;
     int bytes;
     do {
         bytes = read(source_fd, buffer, 512);

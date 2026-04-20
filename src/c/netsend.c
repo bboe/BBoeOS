@@ -1,5 +1,5 @@
 int main() {
-    char *mac_buffer = BUFFER;
+    uint8_t *mac_buffer = BUFFER;
     if (mac(mac_buffer)) {
         die("No NIC found\n");
     }
