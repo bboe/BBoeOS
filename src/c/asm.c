@@ -107,8 +107,6 @@ int source_fd;
 char *source_name;
 char source_prefix[32];
 int symbol_count;
-int symbol_set_scope;
-int symbol_set_value;
 
 /* Forward declarations for functions defined later in the file that
    pure-C bodies need to call.  cc.py resolves these via its two-pass
@@ -142,9 +140,11 @@ void skip_ws();
 __attribute__((regparm(1)))
 void symbol_add(int value, int scope);
 __attribute__((regparm(1)))
-void symbol_add_constant_c(int value);
+void symbol_add_constant(int value);
 __attribute__((regparm(1)))
 int symbol_lookup(int scope);
+__attribute__((regparm(1)))
+void symbol_set(int value, int scope);
 __attribute__((regparm(1)))
 void symbol_set_global(int value);
 __attribute__((regparm(1)))
@@ -2034,7 +2034,7 @@ void parse_directive() {
             int value = resolve_value();
             if (pass == 1) {
                 source_cursor = name;
-                symbol_add_constant_c(value);
+                symbol_add_constant(value);
             }
             return;
         }
@@ -2197,7 +2197,7 @@ void parse_line() {
             int value = resolve_value();
             if (pass == 1) {
                 source_cursor = label_start;
-                symbol_add_constant_c(value);
+                symbol_add_constant(value);
             }
             space_pos[0] = ' ';
             return;
@@ -2979,20 +2979,6 @@ void symbol_add(int value, int scope) {
     symbol_count = symbol_count + 1;
 }
 
-/* C-callable wrapper around ``symbol_add_constant`` for the common
-   ``name = source_cursor, scope = 0xFFFF`` call shape used by
-   parse_line's equ path.  Naked-asm thunk: the regparm(1) ``value``
-   arrives in AX and is forwarded untouched to symbol_add_constant;
-   BX gets the hard-coded 0xFFFF scope; SI must be set to the name
-   pointer by the caller (parse_line writes ``source_cursor =
-   label_start;`` immediately before the call). */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_add_constant_c(int value) {
-    asm("mov bx, 0xFFFF\n"
-        "call symbol_add_constant");
-}
-
 /* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
    take ``value`` via ``regparm(1)`` AX; SI = name is pre-loaded by
    the caller through ``source_cursor``.  Factored out so the
@@ -3002,32 +2988,29 @@ void symbol_add_constant_c(int value) {
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_global(int value) {
-    asm("mov bx, 0xFFFF\n"
-        "call symbol_set");
+    asm("push word 0xFFFF\n"
+        "call symbol_set\n"
+        "add sp, 2");
 }
 
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_local(int value) {
-    asm("mov bx, [_g_global_scope]\n"
-        "call symbol_set");
+    asm("push word [_g_global_scope]\n"
+        "call symbol_set\n"
+        "add sp, 2");
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
    so pass-1 code that tells labels from %assigns can skip the
    relocation step).  Delegates the add / update logic to
-   symbol_set, then rewrites the type byte. */
-void symbol_add_constant() {
-    asm("push bx\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_set\n"
-        "push ax\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1\n"
-        "pop ax\n"
-        "pop bx");
+   symbol_set, then rewrites the type byte.  Takes value via
+   regparm(1); source_cursor supplies the name via its SI pin. */
+__attribute__((regparm(1)))
+void symbol_add_constant(int value) {
+    symbol_set(value, 0xFFFF);
+    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 2;
+    far_write8(offset, 1);
 }
 
 /* Linear scan of the symbol table at ES:0..EFF8.  Each entry is
@@ -3085,46 +3068,20 @@ int symbol_lookup(int scope) {
     return 0;
 }
 
-/* Update or add.  SI = name (null-terminated), AX = value, BX =
-   scope.  Looks up the entry first; if present, updates the value
-   in place; otherwise calls symbol_add.  Stashes AX / BX in
-   symbol_set_value / symbol_set_scope globals so the symbol_lookup
-   call in between doesn't lose them.  Sets last_symbol_index to
-   the entry's (new or existing) index. */
-void symbol_set() {
-    asm("mov [_g_symbol_set_value], ax\n"
-        "mov [_g_symbol_set_scope], bx\n"
-        "push di\n"
-        "push cx\n"
-        "push dx\n"
-        "mov word [_g_last_symbol_index], 0FFFFh\n"
-        "mov ax, bx\n"
-        "call symbol_lookup\n"
-        "cmp word [_g_last_symbol_index], 0FFFFh\n"
-        "je .ss_add\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov ax, [_g_symbol_set_value]\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop di\n"
-        "jmp .ss_end\n"
-        ".ss_add:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop di\n"
-        "push word [_g_symbol_set_scope]\n"
-        "mov ax, [_g_symbol_set_value]\n"
-        "call symbol_add\n"
-        "add sp, 2\n"
-        "push ax\n"
-        "mov ax, [_g_symbol_count]\n"
-        "dec ax\n"
-        "mov [_g_last_symbol_index], ax\n"
-        "pop ax\n"
-        ".ss_end:");
+/* Update or add.  SI = name via source_cursor pin, value via
+   regparm(1) AX, scope on the stack.  Runs a symbol_lookup first;
+   if the name exists in the table, overwrites the value word in
+   place; otherwise appends via symbol_add and caches the new
+   entry's index in last_symbol_index. */
+__attribute__((regparm(1)))
+void symbol_set(int value, int scope) {
+    symbol_lookup(scope);
+    if (last_symbol_index == 0xFFFF) {
+        symbol_add(value, scope);
+        last_symbol_index = symbol_count - 1;
+    } else {
+        far_write16(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
+    }
 }
 
 int main(int argc, char *argv[]) {
