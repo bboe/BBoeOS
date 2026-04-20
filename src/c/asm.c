@@ -117,6 +117,8 @@ int symbol_set_value;
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
 __attribute__((carry_return))
+int match_word_c_str_equ();
+__attribute__((carry_return))
 int match_word_c_str_short();
 __attribute__((carry_return))
 int match_word_c_str_word();
@@ -134,6 +136,8 @@ int resolve_label();
 int resolve_value();
 void skip_comma();
 void skip_ws();
+__attribute__((regparm(1)))
+void symbol_add_constant_c(int value);
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -2153,112 +2157,87 @@ void parse_directive() {
    (``.``-prefixed) labels are scoped correctly.  Anything else
    falls through to parse_directive. */
 void parse_line() {
-    asm("push ax\n"
-        "push bx\n"
-        "push cx\n"
-        "push dx\n"
-        "push si\n"
-        "push di\n"
-        "mov si, LINE_BUFFER\n"
-        "call skip_ws\n"
-        "cmp byte [si], 0\n"
-        "je .hpl_done\n"
-        "cmp byte [si], ';'\n"
-        "je .hpl_done\n"
-        "cmp byte [si], '%'\n"
-        "je .hpl_check_directive\n"
-        "push si\n"
-        ".hpl_scan_colon:\n"
-        "mov al, [si]\n"
-        "test al, al\n"
-        "jz .hpl_no_label\n"
-        "cmp al, ':'\n"
-        "je .hpl_found_label\n"
-        "cmp al, ' '\n"
-        "je .hpl_check_equ\n"
-        "cmp al, 9\n"
-        "je .hpl_check_equ\n"
-        "inc si\n"
-        "jmp .hpl_scan_colon\n"
-        ".hpl_check_equ:\n"
-        "mov [_g_equ_space], si\n"
-        "call skip_ws\n"
-        "mov di, STR_EQU\n"
-        "call match_word\n"
-        "jc .hpl_not_equ\n"
-        "pop di\n"
-        "mov bx, [_g_equ_space]\n"
-        "mov byte [bx], 0\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .hpl_equ_done\n"
-        "push si\n"
-        "mov si, di\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_add_constant\n"
-        "pop si\n"
-        ".hpl_equ_done:\n"
-        "mov bx, [_g_equ_space]\n"
-        "mov byte [bx], ' '\n"
-        "jmp .hpl_done\n"
-        ".hpl_not_equ:\n"
-        "mov si, [_g_equ_space]\n"
-        "jmp .hpl_no_label\n"
-        ".hpl_found_label:\n"
-        "mov byte [si], 0\n"
-        "pop di\n"
-        "push si\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .hpl_skip_add_label\n"
-        "cmp byte [di], '.'\n"
-        "je .hpl_local_label\n"
-        "push di\n"
-        "mov si, di\n"
-        "mov ax, [_g_current_address]\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_set\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "mov [_g_global_scope], ax\n"
-        "pop di\n"
-        "jmp .hpl_skip_add_label\n"
-        ".hpl_local_label:\n"
-        "mov si, di\n"
-        "mov ax, [_g_current_address]\n"
-        "mov bx, [_g_global_scope]\n"
-        "call symbol_set\n"
-        ".hpl_skip_add_label:\n"
-        "cmp byte [_g_pass], 2\n"
-        "jne .hpl_after_label\n"
-        "cmp byte [di], '.'\n"
-        "je .hpl_after_label\n"
-        "mov si, di\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_lookup\n"
-        "jc .hpl_after_label\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "mov [_g_global_scope], ax\n"
-        ".hpl_after_label:\n"
-        "pop si\n"
-        "mov byte [si], ':'\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "cmp byte [si], 0\n"
-        "je .hpl_done\n"
-        "cmp byte [si], ';'\n"
-        "je .hpl_done\n"
-        "jmp .hpl_check_directive\n"
-        ".hpl_no_label:\n"
-        "pop si\n"
-        ".hpl_check_directive:\n"
-        "call parse_directive\n"
-        ".hpl_done:\n"
-        "pop di\n"
-        "pop si\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx\n"
-        "pop ax");
+    source_cursor = line_buffer;
+    skip_ws();
+    if (source_cursor[0] == '\0' || source_cursor[0] == ';') {
+        return;
+    }
+    if (source_cursor[0] == '%') {
+        parse_directive();
+        return;
+    }
+    char *label_start = source_cursor;
+    while (1) {
+        char c = source_cursor[0];
+        if (c == '\0') {
+            source_cursor = label_start;
+            parse_directive();
+            return;
+        }
+        if (c == ':') {
+            /* ``LABEL:`` — null-terminate the name, add or refresh the
+               symbol table entry, restore the colon, and let
+               parse_directive take a crack at any trailing content. */
+            char *colon_pos = source_cursor;
+            source_cursor[0] = '\0';
+            int is_local = 0;
+            if (label_start[0] == '.') {
+                is_local = 1;
+            }
+            source_cursor = label_start;
+            if (pass == 1) {
+                if (is_local) {
+                    asm("mov ax, [_g_current_address]\n"
+                        "mov bx, [_g_global_scope]\n"
+                        "call symbol_set");
+                } else {
+                    asm("mov ax, [_g_current_address]\n"
+                        "mov bx, 0xFFFF\n"
+                        "call symbol_set");
+                    global_scope = last_symbol_index;
+                }
+            } else if (is_local == 0) {
+                asm("mov bx, 0xFFFF\n"
+                    "call symbol_lookup\n"
+                    "jc .pl_no_update\n"
+                    "mov ax, [_g_last_symbol_index]\n"
+                    "mov [_g_global_scope], ax\n"
+                    ".pl_no_update:");
+            }
+            colon_pos[0] = ':';
+            source_cursor = colon_pos + 1;
+            skip_ws();
+            if (source_cursor[0] == '\0' || source_cursor[0] == ';') {
+                return;
+            }
+            parse_directive();
+            return;
+        }
+        if (c == ' ' || c == '\t') {
+            /* ``NAME equ VALUE`` — whitespace after the name is the
+               entry point to the equ-or-not decision.  If it's not equ,
+               fall back to parse_directive with source_cursor rewound
+               to label_start (so directives like ``db .. equ`` unknown
+               mnemonics still have their original token visible). */
+            char *space_pos = source_cursor;
+            skip_ws();
+            if (match_word_c_str_equ() == 0) {
+                source_cursor = label_start;
+                parse_directive();
+                return;
+            }
+            space_pos[0] = '\0';
+            skip_ws();
+            int value = resolve_value();
+            if (pass == 1) {
+                source_cursor = label_start;
+                symbol_add_constant_c(value);
+            }
+            space_pos[0] = ' ';
+            return;
+        }
+        source_cursor = source_cursor + 1;
+    }
 }
 
 /* Instruction dispatcher: linear scan over mnemonic_table
@@ -2614,6 +2593,16 @@ int parse_register_optional() {
 int parse_operand_c() {
     asm("call parse_operand\n"
         "mov [_g_parse_operand_value], dx");
+}
+
+/* C-callable ``match_word`` wrapper specialized for ``STR_EQU``.
+   ``parse_line``'s NAME-equ-VALUE detection: peels the ``equ``
+   keyword after the whitespace following the name.  Same
+   3-instruction shape as the other ``match_word_c_str_*`` wrappers. */
+__attribute__((carry_return))
+int match_word_c_str_equ() {
+    asm("mov di, STR_EQU\n"
+        "call match_word");
 }
 
 /* C-callable ``match_word`` wrapper specialized for ``STR_SHORT``.
@@ -3266,6 +3255,19 @@ void symbol_add() {
         ".sa_overflow:\n"
         "jmp die_symbol_overflow\n"
         ".sa_end:");
+}
+
+/* C-callable wrapper around ``symbol_add_constant`` for the common
+   ``name = source_cursor, scope = 0xFFFF`` call shape used by
+   parse_line's equ path.  Naked-asm thunk: the regparm(1) ``value``
+   arrives in AX and is forwarded untouched to symbol_add_constant;
+   BX gets the hard-coded 0xFFFF scope; SI must be set to the name
+   pointer by the caller (parse_line writes ``source_cursor =
+   label_start;`` immediately before the call). */
+__attribute__((regparm(1)))
+void symbol_add_constant_c(int value) {
+    asm("mov bx, 0xFFFF\n"
+        "call symbol_add_constant");
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1

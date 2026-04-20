@@ -3909,7 +3909,14 @@ class CodeGenerator:
                 self.ax_clear()
 
     def generate_index_assign(self, statement: IndexAssign, /) -> None:
-        """Generate assembly for ``name[index] = expr;``."""
+        """Generate assembly for ``name[index] = expr;``.
+
+        When the base pointer lives in memory (not a named constant) and
+        a different ``asm_register("si")`` global is active, loading the
+        base into SI would clobber that alias — the SI scratch guard
+        wraps the store with ``push si`` / ``pop si`` to preserve the
+        pinned value.  Matches the read-side guard in generate_expression.
+        """
         self.ax_clear()
         name = statement.name
         is_byte = self._is_byte_var(name)
@@ -3921,13 +3928,16 @@ class CodeGenerator:
             const_base = self._resolve_constant(name)
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
+                guarded = False
             else:
+                guarded = self._si_scratch_guard_begin(name)
                 self._emit_load_var(name, register="si")
                 addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
             else:
                 self.emit(f"        mov word [{addr}], {statement.expr.value}")
+            self._si_scratch_guard_end(guarded=guarded)
         elif isinstance(statement.index, Int):
             # Constant index, variable value.
             offset = statement.index.value * (1 if is_byte else 2)
@@ -3935,13 +3945,16 @@ class CodeGenerator:
             const_base = self._resolve_constant(name)
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
+                guarded = False
             else:
+                guarded = self._si_scratch_guard_begin(name)
                 self._emit_load_var(name, register="si")
                 addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov [{addr}], al")
             else:
                 self.emit(f"        mov [{addr}], ax")
+            self._si_scratch_guard_end(guarded=guarded)
         else:
             const_base = self._resolve_constant(name)
             if const_base is not None:
@@ -3960,6 +3973,9 @@ class CodeGenerator:
                 self.ax_clear()
             else:
                 # Variable index: compute address in SI, then store.
+                # Guard goes OUTSIDE the push/pop ax pair so the pop
+                # order matches the push order (push ax..., pop ax, pop si).
+                guarded = self._si_scratch_guard_begin(name)
                 self.generate_expression(statement.expr)
                 self.emit("        push ax")
                 self._emit_load_var(name, register="si")
@@ -3985,6 +4001,7 @@ class CodeGenerator:
                     self.emit("        mov [si], al")
                 else:
                     self.emit("        mov [si], ax")
+                self._si_scratch_guard_end(guarded=guarded)
 
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
