@@ -129,8 +129,6 @@ void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
 int parse_register();
-int parse_register_c();
-int parse_register_optional();
 __attribute__((regparm(1)))
 int reg_to_rm(int reg);
 int resolve_label();
@@ -426,7 +424,7 @@ void handle_aam() {
    idiom).  Encoded as 83 /2 ib: sign-extended imm8 into r16. */
 void handle_adc() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     skip_comma();
     int imm = resolve_value();
     emit_byte(0x83);
@@ -448,7 +446,7 @@ void handle_add() {
         mem_op_reg_emit(0x01);
         return;
     }
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     int size1 = (pr >> 8) & 0xFF;
     skip_comma();
@@ -519,7 +517,7 @@ void handle_and() {
         mem_op_reg_emit(0x21);
         return;
     }
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     int size1 = (pr >> 8) & 0xFF;
     skip_comma();
@@ -604,7 +602,7 @@ void handle_cmp() {
     skip_comma();
     if (t1 == 0) {
         char *saved = source_cursor;
-        int pr2 = parse_register_optional();
+        int pr2 = parse_register();
         if (pr2 >= 0) {
             if (size1 == 8) {
                 emit_byte(0x38);
@@ -766,7 +764,7 @@ void handle_dec() {
    handle_mul / handle_neg / handle_not above. */
 void handle_div() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int opcode = 0xF7;
     if ((pr >> 8) == 8) {
         opcode = 0xF6;
@@ -1111,7 +1109,7 @@ void handle_movsw() {
    too. */
 void handle_movzx() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     skip_comma();
     int po = parse_operand_c();
@@ -1142,7 +1140,7 @@ void handle_movzx() {
    push/pop so the balance stays clean. */
 void handle_mul() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int opcode = 0xF7;
     if ((pr >> 8) == 8) {
         opcode = 0xF6;
@@ -1153,7 +1151,7 @@ void handle_mul() {
 
 void handle_neg() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int opcode = 0xF7;
     if ((pr >> 8) == 8) {
         opcode = 0xF6;
@@ -1164,7 +1162,7 @@ void handle_neg() {
 
 void handle_not() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int opcode = 0xF7;
     if ((pr >> 8) == 8) {
         opcode = 0xF6;
@@ -1181,7 +1179,7 @@ void handle_not() {
    branch for the direct-memory source form. */
 void handle_or() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     int size1 = (pr >> 8) & 0xFF;
     skip_comma();
@@ -1243,7 +1241,7 @@ void handle_pop() {
         source_cursor = source_cursor + 2;
         emit_byte(0x07);
     } else {
-        int pr = parse_register_c();
+        int pr = parse_register();
         emit_byte(0x58 | (pr & 0xFF));
     }
 }
@@ -1262,7 +1260,7 @@ void handle_push() {
         emit_byte(0x06);
     } else {
         char *saved = source_cursor;
-        int pr = parse_register_optional();
+        int pr = parse_register();
         if (pr >= 0) {
             emit_byte(0x50 | (pr & 0xFF));
         } else {
@@ -1348,7 +1346,7 @@ void handle_scasb() {
    (0xE8). */
 void handle_shl() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     skip_comma();
     int count = resolve_value();
     int reg = pr & 0xFF;
@@ -1373,7 +1371,7 @@ void handle_shl() {
 
 void handle_shr() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     skip_comma();
     int count = resolve_value();
     int reg = pr & 0xFF;
@@ -1443,7 +1441,7 @@ void handle_sub() {
         emit_byte((imm >> 8) & 0xFF);
         return;
     }
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     int size1 = (pr >> 8) & 0xFF;
     skip_comma();
@@ -1511,7 +1509,7 @@ void handle_test() {
     skip_comma();
     if (t1 == 0) {
         skip_ws();
-        int pr2 = parse_register_optional();
+        int pr2 = parse_register();
         if (pr2 >= 0) {
             if (size1 == 8) {
                 emit_byte(0x84);
@@ -1617,11 +1615,11 @@ void handle_unknown_word() {
    operand-order swap (first operand in reg field, second in rm). */
 void handle_xchg() {
     skip_ws();
-    int pr1 = parse_register_c();
+    int pr1 = parse_register();
     int reg1 = pr1 & 0xFF;
     int size1 = (pr1 >> 8) & 0xFF;
     skip_comma();
-    int pr2 = parse_register_c();
+    int pr2 = parse_register();
     int reg2 = pr2 & 0xFF;
     if (size1 != 8 && reg1 == 0) {
         emit_byte(0x90 | reg2);
@@ -1642,7 +1640,7 @@ void handle_xchg() {
    fits in -128..127, else ``81 /6 iw`` (or ``80 /6 ib`` for r8). */
 void handle_xor() {
     skip_ws();
-    int pr = parse_register_c();
+    int pr = parse_register();
     int reg1 = pr & 0xFF;
     int size1 = (pr >> 8) & 0xFF;
     skip_comma();
@@ -1885,7 +1883,7 @@ void mem_op_reg_emit(int opcode) {
     }
     source_cursor = source_cursor + 1;
     skip_comma();
-    int pr = parse_register_optional();
+    int pr = parse_register();
     if (pr < 0) {
         abort_unknown();
     }
@@ -2345,7 +2343,7 @@ int parse_operand() {
     }
     if (source_cursor[0] != '[') {
         /* Register or immediate. */
-        int pr = parse_register_optional();
+        int pr = parse_register();
         if (pr >= 0) {
             op1_size = (pr >> 8) & 0xFF;
             return pr & 0xFF;           /* type=0 (reg), reg in low byte */
@@ -2364,7 +2362,7 @@ int parse_operand() {
         skip_ws();
     }
     /* Try ``[reg...]`` form (register first inside brackets). */
-    int pr = parse_register_optional();
+    int pr = parse_register();
     if (pr >= 0) {
         int reg = pr & 0xFF;
         skip_ws();
@@ -2410,7 +2408,7 @@ int parse_operand() {
         char *reg_pos = end - 2;
         char *saved = source_cursor;
         source_cursor = reg_pos;
-        int pr2 = parse_register_optional();
+        int pr2 = parse_register();
         source_cursor = saved;
         if (pr2 >= 0) {
             char *back = reg_pos;
@@ -2447,24 +2445,6 @@ int parse_operand() {
     }
     parse_operand_value = disp;
     return 2 << 8;                      /* type=2 (direct mem) */
-}
-
-/* Forwarding wrapper retained for source compatibility with ``_c``-
-   suffixed callers that predated the pure-C ``parse_register`` port.
-   Returns the packed ``(size << 8) | reg`` value on match with
-   ``source_cursor`` advanced +2, or ``-1`` on miss.  Callers that
-   assume success treat ``-1`` as garbage (same undefined-AX outcome
-   the pre-port asm produced). */
-int parse_register_c() {
-    return parse_register();
-}
-
-/* Forwarding wrapper for callers that explicitly check the ``-1``
-   miss sentinel (``if (pr >= 0)``).  Identical to ``parse_register_c``
-   now that the underlying function uses a sentinel return instead of
-   CF; kept as a separate name so the call sites still document intent. */
-int parse_register_optional() {
-    return parse_register();
 }
 
 /* C-callable wrapper around the inline-asm ``parse_operand``.  The
