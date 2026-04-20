@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 10817     | +2564 |
+| asm     | 8253        | 10879     | +2626 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1245      | +324  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+2564):** Every ``handle_*`` and every function lives in pure C
+**asm (+2626):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `equ _g_<name>` aliases for the 33 mutable globals
 cc.py emits at the binary tail, the `abort_unknown` trampoline

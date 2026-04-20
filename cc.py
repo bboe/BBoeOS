@@ -371,9 +371,11 @@ ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
 CHARACTER_ESCAPES = {
     '"': 0x22,
+    "'": 0x27,
     "0": 0x00,
     "\\": 0x5C,
     "b": 0x08,
+    "e": 0x1B,
     "n": 0x0A,
     "r": 0x0D,
     "t": 0x09,

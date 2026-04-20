@@ -1911,134 +1911,87 @@ void mem_op_reg_emit(int opcode) {
 }
 
 /* Parse ``db`` operands (comma-separated mix of numbers, symbols,
-   char/backtick strings).  SI on the first operand; emits each
-   byte via emit_byte_al, advancing SI.  Backtick strings support
-   the ``\\n`` / ``\\0`` / ``\\t`` / ``\\r`` / ``\\e`` / ``\\x??``
-   escape set; unknown escapes emit a bare backslash followed by
-   the escape character.  Single-quoted multi-byte strings (``'foo'``)
-   are handled by the dedicated .hdb_squote path — single-char
-   ``'c'`` literals delegate to resolve_value. */
+   char/backtick strings).  ``source_cursor`` starts at the first
+   operand and advances past each byte; ``emit_byte`` handles the
+   pass-1 address bump and pass-2 buffer write.  Backtick strings
+   support the ``\n`` / ``\0`` / ``\t`` / ``\r`` / ``\e`` / ``\\``
+   / ``\x??`` escape set; any other ``\c`` emits a literal backslash
+   followed by ``c`` (matching NASM's own unknown-escape behaviour).
+   Single-quoted multi-byte strings (``'foo'``) are copied verbatim;
+   single-char ``'c'`` literals fall through to resolve_value since
+   the distinguishing byte at offset +2 tells the two apart. */
 void parse_db() {
-    asm(".hdb_next_item:\n"
-        "call skip_ws\n"
-        "cmp byte [si], 0\n"
-        "je .hdb_done\n"
-        "cmp byte [si], ';'\n"
-        "je .hdb_done\n"
-        "cmp byte [si], '`'\n"
-        "je .hdb_string\n"
-        "cmp byte [si], 27h\n"
-        "jne .hdb_value\n"
-        "cmp byte [si+2], 27h\n"
-        "je .hdb_value\n"
-        "jmp .hdb_squote\n"
-        ".hdb_value:\n"
-        "call resolve_value\n"
-        "call emit_byte_al\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hdb_done\n"
-        "inc si\n"
-        "jmp .hdb_next_item\n"
-        ".hdb_squote:\n"
-        "inc si\n"
-        ".hdb_sq_char:\n"
-        "mov al, [si]\n"
-        "cmp al, 27h\n"
-        "je .hdb_sq_end\n"
-        "test al, al\n"
-        "jz .hdb_done\n"
-        "call emit_byte_al\n"
-        "inc si\n"
-        "jmp .hdb_sq_char\n"
-        ".hdb_sq_end:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hdb_done\n"
-        "inc si\n"
-        "jmp .hdb_next_item\n"
-        ".hdb_string:\n"
-        "inc si\n"
-        ".hdb_str_char:\n"
-        "mov al, [si]\n"
-        "cmp al, '`'\n"
-        "je .hdb_str_end\n"
-        "cmp al, 0\n"
-        "je .hdb_done\n"
-        "cmp al, '\\'\n"
-        "je .hdb_str_escape\n"
-        "call emit_byte_al\n"
-        "inc si\n"
-        "jmp .hdb_str_char\n"
-        ".hdb_str_escape:\n"
-        "inc si\n"
-        "mov al, [si]\n"
-        "cmp al, 'n'\n"
-        "je .hdb_esc_n\n"
-        "cmp al, '0'\n"
-        "je .hdb_esc_0\n"
-        "cmp al, 't'\n"
-        "je .hdb_esc_t\n"
-        "cmp al, '\\'\n"
-        "je .hdb_esc_bs\n"
-        "cmp al, 'r'\n"
-        "je .hdb_esc_r\n"
-        "cmp al, 'e'\n"
-        "je .hdb_esc_e\n"
-        "cmp al, 'x'\n"
-        "je .hdb_esc_x\n"
-        "push ax\n"
-        "mov al, '\\'\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "inc si\n"
-        "jmp .hdb_str_char\n"
-        ".hdb_esc_n:\n"
-        "mov al, 0Ah\n"
-        "jmp .hdb_esc_emit\n"
-        ".hdb_esc_0:\n"
-        "mov al, 0\n"
-        "jmp .hdb_esc_emit\n"
-        ".hdb_esc_t:\n"
-        "mov al, 09h\n"
-        "jmp .hdb_esc_emit\n"
-        ".hdb_esc_r:\n"
-        "mov al, 0Dh\n"
-        "jmp .hdb_esc_emit\n"
-        ".hdb_esc_e:\n"
-        "mov al, 1Bh\n"
-        "jmp .hdb_esc_emit\n"
-        ".hdb_esc_bs:\n"
-        "mov al, '\\'\n"
-        ".hdb_esc_emit:\n"
-        "call emit_byte_al\n"
-        "inc si\n"
-        "jmp .hdb_str_char\n"
-        ".hdb_esc_x:\n"
-        "inc si\n"
-        "mov al, [si]\n"
-        "xor ah, ah\n"
-        "call hex_digit\n"
-        "mov bl, al\n"
-        "shl bl, 4\n"
-        "inc si\n"
-        "mov al, [si]\n"
-        "xor ah, ah\n"
-        "call hex_digit\n"
-        "or al, bl\n"
-        "call emit_byte_al\n"
-        "inc si\n"
-        "jmp .hdb_str_char\n"
-        ".hdb_str_end:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hdb_done\n"
-        "inc si\n"
-        "jmp .hdb_next_item\n"
-        ".hdb_done:");
+    while (1) {
+        skip_ws();
+        if (source_cursor[0] == '\0' || source_cursor[0] == ';') {
+            return;
+        }
+        if (source_cursor[0] == '`') {
+            source_cursor = source_cursor + 1;
+            while (1) {
+                char c = source_cursor[0];
+                if (c == '`') {
+                    source_cursor = source_cursor + 1;
+                    break;
+                }
+                if (c == '\0') {
+                    return;
+                }
+                if (c == '\\') {
+                    source_cursor = source_cursor + 1;
+                    char esc = source_cursor[0];
+                    if (esc == 'n') {
+                        emit_byte('\n');
+                    } else if (esc == '0') {
+                        emit_byte('\0');
+                    } else if (esc == 't') {
+                        emit_byte('\t');
+                    } else if (esc == 'r') {
+                        emit_byte('\r');
+                    } else if (esc == 'e') {
+                        emit_byte('\e');
+                    } else if (esc == '\\') {
+                        emit_byte('\\');
+                    } else if (esc == 'x') {
+                        source_cursor = source_cursor + 1;
+                        int hi = hex_digit(source_cursor[0]);
+                        source_cursor = source_cursor + 1;
+                        int lo = hex_digit(source_cursor[0]);
+                        emit_byte((hi << 4) | lo);
+                    } else {
+                        emit_byte('\\');
+                        emit_byte(esc);
+                    }
+                    source_cursor = source_cursor + 1;
+                } else {
+                    emit_byte(c);
+                    source_cursor = source_cursor + 1;
+                }
+            }
+        } else if (source_cursor[0] == '\'' && source_cursor[2] != '\'') {
+            source_cursor = source_cursor + 1;
+            while (1) {
+                char c = source_cursor[0];
+                if (c == '\'') {
+                    source_cursor = source_cursor + 1;
+                    break;
+                }
+                if (c == '\0') {
+                    return;
+                }
+                emit_byte(c);
+                source_cursor = source_cursor + 1;
+            }
+        } else {
+            int v = resolve_value();
+            emit_byte(v);
+        }
+        skip_ws();
+        if (source_cursor[0] != ',') {
+            return;
+        }
+        source_cursor = source_cursor + 1;
+    }
 }
 
 /* Directive dispatcher: ``%assign`` / ``%define`` (both bind NAME
