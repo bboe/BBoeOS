@@ -124,8 +124,12 @@ __attribute__((regparm(1)))
 void mnemonic_dispatch_at(int index);
 __attribute__((regparm(1)))
 char *mnemonic_keyword_at(int index);
+__attribute__((regparm(1)))
+void emit_byte(int v);
 void parse_directive();
 int parse_operand_c();
+__attribute__((carry_return))
+int peek_label_target();
 void parse_mnemonic();
 int parse_register();
 void close_source();
@@ -280,87 +284,69 @@ void emit_word_ax() {
    sits further up the stack and doesn't affect the offset. */
 __attribute__((regparm(1)))
 void encode_rel8_jump(int opcode) {
-    asm("push ax\n"
-        "call skip_ws\n"
-        "mov bx, [_g_jump_index]\n"
-        "inc word [_g_jump_index]\n"
-        "cmp byte [es:JUMP_TABLE + bx], 0\n"
-        "jne .erj_try_shrink\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .erj_emit_short\n"
-        "push bx\n"
-        "call peek_label_target\n"
-        "pop bx\n"
-        "jc .erj_emit_short\n"
-        "mov ax, [_g_peek_label_value]\n"
-        "mov dx, [_g_current_address]\n"
-        "add dx, 2\n"
-        "sub ax, dx\n"
-        "add ax, 128\n"
-        "cmp ax, 256\n"
-        "jb .erj_emit_short\n"
-        "mov byte [es:JUMP_TABLE + bx], 1\n"
-        "mov byte [_g_changed_flag], 1\n"
-        "jmp .erj_long_form\n"
-        ".erj_try_shrink:\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .erj_long_form\n"
-        "push bx\n"
-        "call peek_label_target\n"
-        "pop bx\n"
-        "jc .erj_long_form\n"
-        "mov ax, [_g_peek_label_value]\n"
-        "mov dx, [_g_current_address]\n"
-        "cmp ax, dx\n"
-        "jae .erj_shrink_forward\n"
-        "add dx, 2\n"
-        "jmp .erj_shrink_check\n"
-        ".erj_shrink_forward:\n"
-        "add dx, 4\n"
-        "push bp\n"
-        "mov bp, sp\n"
-        "cmp byte [bp+2], 0EBh\n"
-        "pop bp\n"
-        "jne .erj_shrink_check\n"
-        "dec dx\n"
-        ".erj_shrink_check:\n"
-        "sub ax, dx\n"
-        "add ax, 128\n"
-        "cmp ax, 256\n"
-        "jae .erj_long_form\n"
-        "mov byte [es:JUMP_TABLE + bx], 0\n"
-        "mov byte [_g_changed_flag], 1\n"
-        "jmp .erj_emit_short\n"
-        ".erj_long_form:\n"
-        "pop ax\n"
-        "cmp al, 0EBh\n"
-        "je .erj_long_jmp\n"
-        "add al, 10h\n"
-        "push ax\n"
-        "mov al, 0Fh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "jmp .erj_long_emit_disp\n"
-        ".erj_long_jmp:\n"
-        "mov al, 0E9h\n"
-        "call emit_byte_al\n"
-        ".erj_long_emit_disp:\n"
-        "call resolve_label\n"
-        "mov bx, [_g_current_address]\n"
-        "add bx, 2\n"
-        "sub ax, bx\n"
-        "call emit_word_ax\n"
-        "jmp .erj_end\n"
-        ".erj_emit_short:\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "call resolve_label\n"
-        "mov bx, [_g_current_address]\n"
-        "inc bx\n"
-        "sub ax, bx\n"
-        "call emit_byte_al\n"
-        ".erj_end:");
+    skip_ws();
+    int bx = jump_index;
+    jump_index = jump_index + 1;
+    int current_size = far_read8(JUMP_TABLE + bx);
+    int use_short = 1;
+    if (current_size == 0) {
+        /* Currently short; check whether the target is still in
+           range for pass 1 -- if the distance grew out of
+           rel8, flip the bit to long and set changed_flag so
+           the pass-1 convergence loop runs another iteration. */
+        if (pass == 1) {
+            if (peek_label_target()) {
+                int rel = peek_label_value - (current_address + 2);
+                if (rel < -128 || rel > 127) {
+                    far_write8(JUMP_TABLE + bx, 1);
+                    changed_flag = 1;
+                    use_short = 0;
+                }
+            }
+        }
+    } else {
+        /* Currently long; attempt to shrink in pass 1 if the
+           target has moved into rel8 range.  Forward jumps need
+           an extra +4/-1 correction because the 4-byte near form
+           straddles the comparison point (and the ``jmp rel8``
+           0xEB opcode shrinks to 2 bytes rather than 3). */
+        use_short = 0;
+        if (pass == 1) {
+            if (peek_label_target()) {
+                int target = peek_label_value;
+                int base = current_address;
+                if (target >= base) {
+                    base = base + 4;
+                    if (opcode == 0xEB) {
+                        base = base - 1;
+                    }
+                } else {
+                    base = base + 2;
+                }
+                int rel = target - base;
+                if (rel >= -128 && rel <= 127) {
+                    far_write8(JUMP_TABLE + bx, 0);
+                    changed_flag = 1;
+                    use_short = 1;
+                }
+            }
+        }
+    }
+    if (use_short) {
+        emit_byte(opcode);
+        int disp = resolve_label() - (current_address + 1);
+        emit_byte(disp);
+    } else {
+        if (opcode == 0xEB) {
+            emit_byte(0xE9);
+        } else {
+            emit_byte(0x0F);
+            emit_byte(opcode + 0x10);
+        }
+        int disp = resolve_label() - (current_address + 2);
+        emit_byte(disp);
+        emit_byte(disp >> 8);
+    }
 }
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
