@@ -346,30 +346,23 @@ void encode_rel8_jump(int opcode) {
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
    output_fd via SYS_IO_WRITE, then reset the position.  No-op when
    nothing is queued.  Callable from inline asm (``call flush_output``)
-   since cc.py emits the label with the C name.  The body preserves
-   AX / CX / SI / DI so the handler callers that reach flush_output
-   through emit_byte_al don't need to guard those registers at every
-   call site (matches the retired inline-asm flush_output's contract).
-   Uses the ES-safe ``syscall`` wrapper at the tail of the inline
-   asm block so ES=SYMBOL_SEGMENT survives the ``int 30h``. */
+   since cc.py emits the label with the C name.  Uses the ES-safe
+   ``syscall`` wrapper so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   The retired asm preserved AX / CX / SI / DI so transitive callers
+   reaching here through ``emit_byte_al``'s ``pusha`` didn't need
+   per-register guards; ``emit_byte_al`` still does the ``pusha`` /
+   ``popa`` externally, so the C body can let cc.py's calling
+   convention handle clobber. */
 void flush_output() {
-    asm("push ax\n"
-        "push cx\n"
-        "push si\n"
-        "push di\n"
-        "cmp word [_g_output_position], 0\n"
-        "je .fl_done\n"
-        "mov bx, [_g_output_fd]\n"
+    if (output_position == 0) {
+        return;
+    }
+    asm("mov bx, [_g_output_fd]\n"
         "mov si, OUTPUT_BUFFER\n"
         "mov cx, [_g_output_position]\n"
         "mov ah, SYS_IO_WRITE\n"
-        "call syscall\n"
-        "mov word [_g_output_position], 0\n"
-        ".fl_done:\n"
-        "pop di\n"
-        "pop si\n"
-        "pop cx\n"
-        "pop ax");
+        "call syscall");
+    output_position = 0;
 }
 
 /* Emit one byte into the output stream.  Pass 1 only bumps
