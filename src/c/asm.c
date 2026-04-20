@@ -118,15 +118,13 @@ __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
 __attribute__((regparm(1)))
 __attribute__((carry_return))
-int match_word_c(char *keyword);
-__attribute__((carry_return))
-int match_word_c_str_equ();
-__attribute__((carry_return))
-int match_word_c_str_short();
-__attribute__((carry_return))
-int match_word_c_str_word();
+int match_word(char *keyword);
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode);
+__attribute__((regparm(1)))
+void mnemonic_dispatch_at(int index);
+__attribute__((regparm(1)))
+char *mnemonic_keyword_at(int index);
 void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
@@ -877,7 +875,7 @@ void handle_jle() {
    long-form 0xE9 rel16 in pass 1 if the target doesn't fit ±128. */
 void handle_jmp() {
     skip_ws();
-    match_word_c_str_short();
+    match_word(STR_SHORT);
     encode_rel8_jump(0xEB);
 }
 
@@ -1318,7 +1316,7 @@ void handle_ret() {
    abort paths jmp out to abort_unknown (which never returns). */
 void handle_sbb() {
     skip_ws();
-    if (match_word_c_str_word() == 0) {
+    if (match_word(STR_WORD) == 0) {
         abort_unknown();
     }
     skip_ws();
@@ -1424,7 +1422,7 @@ void handle_sub() {
         mem_op_reg_emit(0x29);
         return;
     }
-    if (match_word_c_str_word()) {
+    if (match_word(STR_WORD)) {
         skip_ws();
         if (source_cursor[0] != '[') {
             abort_unknown();
@@ -1831,67 +1829,45 @@ void make_modrm_reg_reg() {
         "add sp, 2");
 }
 
-/* Match a null-terminated keyword pattern at ``DI`` against the
-   source cursor at ``SI``, case-insensitively, with the word
-   boundary also validated (the character right after the matched
-   span must not be alphanumeric or ``_``).  On success SI advances
-   past the matched text and CF is clear; on failure SI is rewound
-   to its entry value and CF is set.  AX and BX are preserved.
-   Used by parse_operand (``byte`` / ``word`` prefixes) and
-   parse_mnemonic (directive lookup). */
-void match_word() {
-    asm("push ax\n"
-        "push bx\n"
-        "mov bx, si\n"
-        ".mw_loop:\n"
-        "mov al, [di]\n"
-        "test al, al\n"
-        "jz .mw_check_end\n"
-        "mov ah, [si]\n"
-        "cmp al, 'A'\n"
-        "jb .mw_no_low1\n"
-        "cmp al, 'Z'\n"
-        "ja .mw_no_low1\n"
-        "or al, 20h\n"
-        ".mw_no_low1:\n"
-        "cmp ah, 'A'\n"
-        "jb .mw_no_low2\n"
-        "cmp ah, 'Z'\n"
-        "ja .mw_no_low2\n"
-        "or ah, 20h\n"
-        ".mw_no_low2:\n"
-        "cmp al, ah\n"
-        "jne .mw_fail\n"
-        "inc si\n"
-        "inc di\n"
-        "jmp .mw_loop\n"
-        ".mw_check_end:\n"
-        "mov al, [si]\n"
-        "cmp al, 'a'\n"
-        "jb .mw_ok1\n"
-        "cmp al, 'z'\n"
-        "jbe .mw_fail\n"
-        ".mw_ok1:\n"
-        "cmp al, 'A'\n"
-        "jb .mw_ok2\n"
-        "cmp al, 'Z'\n"
-        "jbe .mw_fail\n"
-        ".mw_ok2:\n"
-        "cmp al, '0'\n"
-        "jb .mw_ok3\n"
-        "cmp al, '9'\n"
-        "jbe .mw_fail\n"
-        ".mw_ok3:\n"
-        "cmp al, '_'\n"
-        "je .mw_fail\n"
-        "clc\n"
-        "jmp .mw_end\n"
-        ".mw_fail:\n"
-        "mov si, bx\n"
-        "stc\n"
-        ".mw_end:\n"
-        "pop bx\n"
-        "pop ax");
+/* Case-insensitive match of ``keyword`` (null-terminated, all
+   lowercase in the assembler's keyword / mnemonic tables) against
+   the token at ``source_cursor``, followed by an identifier-boundary
+   check on the next source character (must not be alphanumeric
+   or ``_``).  On match ``source_cursor`` advances past the keyword
+   and the carry_return signals success (CF clear); on miss
+   ``source_cursor`` rewinds to its entry value and the carry_return
+   signals failure (CF set).  Since keyword strings are always
+   lowercase, only the source side gets case-folded.  Used by
+   parse_operand (``byte`` / ``word`` prefixes), parse_directive
+   (``%assign`` / ``%include`` / ``org`` / ``times`` / ``db`` /
+   ``dw`` / ``dd``), parse_mnemonic (instruction dispatch), and
+   the callers that specialize on ``STR_EQU`` / ``STR_SHORT`` /
+   ``STR_WORD``. */
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int match_word(char *keyword) {
+    char *saved = source_cursor;
+    while (keyword[0] != '\0') {
+        char s = source_cursor[0];
+        if (s >= 'A' && s <= 'Z') {
+            s = s + 32;
+        }
+        if (s != keyword[0]) {
+            source_cursor = saved;
+            return 0;
+        }
+        source_cursor = source_cursor + 1;
+        keyword = keyword + 1;
+    }
+    char s = source_cursor[0];
+    if ((s >= 'a' && s <= 'z')
+            || (s >= 'A' && s <= 'Z')
+            || (s >= '0' && s <= '9')
+            || s == '_') {
+        source_cursor = saved;
+        return 0;
+    }
+    return 1;
 }
 
 /* Shared helper for the ``<op> [disp16], r16`` memory-destination
@@ -2015,9 +1991,9 @@ void parse_directive() {
     if (source_cursor[0] == '%') {
         source_cursor = source_cursor + 1;
         int matched_assign = 0;
-        if (match_word_c(STR_ASSIGN)) {
+        if (match_word(STR_ASSIGN)) {
             matched_assign = 1;
-        } else if (match_word_c(STR_DEFINE)) {
+        } else if (match_word(STR_DEFINE)) {
             matched_assign = 1;
         }
         if (matched_assign) {
@@ -2039,7 +2015,7 @@ void parse_directive() {
             }
             return;
         }
-        if (match_word_c(STR_INCLUDE) == 0) {
+        if (match_word(STR_INCLUDE) == 0) {
             return;
         }
         skip_ws();
@@ -2059,18 +2035,18 @@ void parse_directive() {
         include_push();
         return;
     }
-    if (match_word_c(STR_ORG)) {
+    if (match_word(STR_ORG)) {
         skip_ws();
         int addr = resolve_value();
         org_value = addr;
         current_address = addr;
         return;
     }
-    if (match_word_c(STR_TIMES)) {
+    if (match_word(STR_TIMES)) {
         skip_ws();
         int count = resolve_value();
         skip_ws();
-        if (match_word_c(STR_DB) == 0) {
+        if (match_word(STR_DB) == 0) {
             return;
         }
         skip_ws();
@@ -2082,12 +2058,12 @@ void parse_directive() {
         }
         return;
     }
-    if (match_word_c(STR_DB)) {
+    if (match_word(STR_DB)) {
         skip_ws();
         parse_db();
         return;
     }
-    if (match_word_c(STR_DW)) {
+    if (match_word(STR_DW)) {
         skip_ws();
         while (1) {
             int v = resolve_value();
@@ -2101,7 +2077,7 @@ void parse_directive() {
             skip_ws();
         }
     }
-    if (match_word_c(STR_DD)) {
+    if (match_word(STR_DD)) {
         skip_ws();
         while (1) {
             int v = resolve_value();
@@ -2194,7 +2170,7 @@ void parse_line() {
                mnemonics still have their original token visible). */
             char *space_pos = source_cursor;
             skip_ws();
-            if (match_word_c_str_equ() == 0) {
+            if (match_word(STR_EQU) == 0) {
                 source_cursor = label_start;
                 parse_directive();
                 return;
@@ -2213,36 +2189,53 @@ void parse_line() {
     }
 }
 
-/* Instruction dispatcher: linear scan over mnemonic_table
-   (``dw <str>, <handler>`` pairs, terminated by 0) trying each
-   mnemonic against SI via match_word.  On match, indirect-call
-   through the handler pointer at [bx+2].  Unknown mnemonic falls
-   back to handle_unknown_word so bare labels (``USAGE db ...``
-   without a colon) still work. */
-void parse_mnemonic() {
-    asm("push ax\n"
-        "push bx\n"
-        "push cx\n"
-        "push dx\n"
+/* Fetch the keyword pointer from ``mnemonic_table[index]`` (each
+   entry is 4 bytes: keyword-pointer + handler-pointer, terminated
+   by a 2-byte zero).  Returns ``NULL`` when the caller has walked
+   past the terminator.  Compact naked-asm body because cc.py has
+   no syntax for reading a 16-bit pointer out of a packed data
+   table; factoring this out keeps ``parse_mnemonic`` pure C. */
+__attribute__((regparm(1)))
+char *mnemonic_keyword_at(int index) {
+    asm("shl ax, 2\n"
         "mov bx, mnemonic_table\n"
-        ".hpm_try_next:\n"
-        "mov di, [bx]\n"
-        "test di, di\n"
-        "jz .hpm_unknown\n"
-        "call match_word\n"
-        "jc .hpm_next_entry\n"
-        "call [bx+2]\n"
-        "jmp .hpm_done\n"
-        ".hpm_next_entry:\n"
-        "add bx, 4\n"
-        "jmp .hpm_try_next\n"
-        ".hpm_unknown:\n"
-        "call handle_unknown_word\n"
-        ".hpm_done:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx\n"
-        "pop ax");
+        "add bx, ax\n"
+        "mov ax, [bx]");
+}
+
+/* Invoke the handler pointer in ``mnemonic_table[index]`` (at
+   offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
+   has no C analogue cc.py emits, so this tiny wrapper pairs with
+   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C. */
+__attribute__((regparm(1)))
+void mnemonic_dispatch_at(int index) {
+    asm("shl ax, 2\n"
+        "mov bx, mnemonic_table\n"
+        "add bx, ax\n"
+        "call [bx+2]");
+}
+
+/* Instruction dispatcher: linear scan over ``mnemonic_table``
+   trying each keyword against the source cursor via ``match_word``.
+   On match, invoke the matching handler.  Walking past the
+   2-byte zero terminator (``mnemonic_keyword_at`` returns NULL)
+   falls through to ``handle_unknown_word`` so bare labels
+   (``USAGE db ...`` without a colon) still reach their
+   symbol-table branch. */
+void parse_mnemonic() {
+    int index = 0;
+    while (1) {
+        char *keyword = mnemonic_keyword_at(index);
+        if (keyword == NULL) {
+            handle_unknown_word();
+            return;
+        }
+        if (match_word(keyword)) {
+            mnemonic_dispatch_at(index);
+            return;
+        }
+        index = index + 1;
+    }
 }
 
 /* Parse a decimal, hex-prefix (``0x``), or hex-suffix (``h``)
@@ -2343,10 +2336,10 @@ int parse_operand() {
     skip_ws();
     /* ``byte`` / ``word`` size prefix — match_word already rewinds
        ``source_cursor`` on miss, so no manual backtrack needed. */
-    if (match_word_c(STR_BYTE)) {
+    if (match_word(STR_BYTE)) {
         op1_size = 8;
         skip_ws();
-    } else if (match_word_c(STR_WORD)) {
+    } else if (match_word(STR_WORD)) {
         op1_size = 16;
         skip_ws();
     }
@@ -2486,61 +2479,6 @@ int parse_register_optional() {
    read it through the existing ``int op1_size`` global. */
 int parse_operand_c() {
     return parse_operand();
-}
-
-/* Generic C-callable ``match_word`` wrapper.  Takes the keyword
-   pointer via ``regparm(1)`` AX and threads it into DI before
-   invoking ``match_word`` (which reads DI = keyword and SI = source
-   cursor).  Carry propagates to the caller through the naked ``ret``
-   — same shape as the specialized ``match_word_c_str_*`` wrappers
-   but parameterized.  Callers pass ``STR_*`` constants (registered
-   in cc.py's NAMED_CONSTANTS so they resolve to the inline-asm
-   label addresses at assembly time).  Used by ``parse_directive``
-   to try each ``%assign`` / ``%define`` / ``%include`` / ``org`` /
-   ``times`` / ``db`` / ``dw`` / ``dd`` keyword in sequence without
-   needing eight per-keyword shims. */
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int match_word_c(char *keyword) {
-    asm("mov di, ax\n"
-        "call match_word");
-}
-
-/* C-callable ``match_word`` wrapper specialized for ``STR_EQU``.
-   ``parse_line``'s NAME-equ-VALUE detection: peels the ``equ``
-   keyword after the whitespace following the name.  Same
-   3-instruction shape as the other ``match_word_c_str_*`` wrappers. */
-__attribute__((carry_return))
-int match_word_c_str_equ() {
-    asm("mov di, STR_EQU\n"
-        "call match_word");
-}
-
-/* C-callable ``match_word`` wrapper specialized for ``STR_SHORT``.
-   Peels the optional ``short`` keyword in ``handle_jmp``; the caller
-   discards the carry_return result because either outcome (``short``
-   consumed or source cursor rewound) falls through to the same
-   encode_rel8_jump path.  Same 3-instruction shape as
-   ``match_word_c_str_word``. */
-__attribute__((carry_return))
-int match_word_c_str_short() {
-    asm("mov di, STR_SHORT\n"
-        "call match_word");
-}
-
-/* C-callable ``match_word`` wrapper specialized for ``STR_WORD``.
-   ``match_word`` takes DI = keyword pointer and SI = source cursor;
-   sole caller (``handle_sub``) always matches ``word``, so the
-   wrapper hard-codes ``mov di, STR_WORD`` before the call and
-   reports match / miss through the ``carry_return`` CF — source
-   cursor is either advanced past ``word`` + word-boundary (match)
-   or restored (miss).  Staying specialized keeps the wrapper a
-   3-instruction leaf; a generic ``match_word_c(char *keyword)``
-   would need cc.py to thread the arg through DI instead of AX. */
-__attribute__((carry_return))
-int match_word_c_str_word() {
-    asm("mov di, STR_WORD\n"
-        "call match_word");
 }
 
 /* Linear scan over ``register_table`` (4 bytes per entry: 2 chars,
