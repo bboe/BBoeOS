@@ -3648,8 +3648,16 @@ class CodeGenerator:
                 else:
                     self.division_remainder = (left, right)
             elif operator in JUMP_WHEN_FALSE:
+                # Booleanize the comparison: AX = 1 if ``left <op> right``,
+                # else 0.  ``mov ax, 0`` preserves the flags set by ``cmp``
+                # (unlike ``xor ax, ax``), so the jump-when-false branch
+                # reads the right condition.
+                skip_label = f".bool_{self.new_label()}"
                 self.emit("        cmp ax, cx")
                 self.emit("        mov ax, 0")
+                self.emit(f"        {JUMP_WHEN_FALSE[operator]} {skip_label}")
+                self.emit("        inc ax")
+                self.emit(f"{skip_label}:")
             else:
                 message = f"unknown operator: {operator}"
                 raise CompileError(message, line=expression.line)

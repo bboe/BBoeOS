@@ -2769,10 +2769,7 @@ void parse_register() {
    on the SI-pinned global (no scratch-register guard needed). */
 __attribute__((carry_return))
 int peek_label_target() {
-    int is_local = 0;
-    if (source_cursor[0] == '.') {
-        is_local = 1;
-    }
+    int is_local = (source_cursor[0] == '.');
     char *saved = source_cursor;
     while (1) {
         char c = source_cursor[0];
