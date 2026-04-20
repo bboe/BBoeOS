@@ -43,8 +43,8 @@ int skip_name(char *buf, int offset) {
     }
 }
 
-int resolve_dns(char *domain, char *target) {
-    char *query = SECTOR_BUFFER;
+int resolve_dns(char *domain, uint8_t *target) {
+    uint8_t *query = SECTOR_BUFFER;
     /* DNS header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1, rest zero. */
     memcpy(query, "\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
     int name_length = encode_domain(domain, query + 12);
@@ -88,9 +88,9 @@ int resolve_dns(char *domain, char *target) {
     int offset = skip_name(query, 12) + 4;
     while (answer_count) {
         offset = skip_name(query, offset);
-        char *record = query + offset;
+        uint8_t *record = query + offset;
         int rdlength = record[9];
-        if (record[0] == '\0' && record[1] == '\x01') {
+        if (record[0] == 0 && record[1] == 1) {
             memcpy(target, record + 10, 4);
             return 0;
         }
@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
     if (argc != 1) {
         die("Usage: ping <ip|hostname>\n");
     }
-    char *target_ip = BUFFER;
+    uint8_t *target_ip = BUFFER;
     if (parse_ip(argv[0], target_ip)) {
         if (resolve_dns(argv[0], target_ip)) {
             die("Could not resolve hostname\n");
@@ -124,7 +124,7 @@ int main(int argc, char *argv[]) {
         die("Socket error\n");
     }
 
-    char *packet = SECTOR_BUFFER;
+    uint8_t *packet = SECTOR_BUFFER;
     int seq = 1;
     int count = 4;
     while (count) {

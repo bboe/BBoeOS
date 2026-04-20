@@ -3,13 +3,13 @@ int main(int argc, char *argv[]) {
         die("usage: arp <ip>\n");
     }
 
-    char *target_ip = BUFFER;
+    uint8_t *target_ip = BUFFER;
     int error = parse_ip(argv[0], target_ip);
     if (error) {
         die("usage: arp <ip>\n");
     }
 
-    char *my_mac = BUFFER + 4;
+    uint8_t *my_mac = BUFFER + 4;
     error = mac(my_mac);
     if (error) {
         die("No NIC found\n");
@@ -26,7 +26,7 @@ int main(int argc, char *argv[]) {
 
     write(fd, arp_frame, 60);
 
-    char *receive_buffer = BUFFER + 128;
+    uint8_t *receive_buffer = BUFFER + 128;
     int tries = 30000;
     while (tries > 0) {
         int bytes = read(fd, receive_buffer, 128);

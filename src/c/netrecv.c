@@ -1,5 +1,5 @@
 int main() {
-    char *mac_buffer = BUFFER;
+    uint8_t *mac_buffer = BUFFER;
     int error = mac(mac_buffer);
     if (error) {
         die("No NIC found\n");
@@ -14,7 +14,7 @@ int main() {
     write(fd, arp_frame, 60);
     printf("ARP sent, waiting for reply...\n");
 
-    char *receive_buffer = BUFFER + 128;
+    uint8_t *receive_buffer = BUFFER + 128;
     int bytes = 0;
     int tries = 30000;
     while (tries > 0) {

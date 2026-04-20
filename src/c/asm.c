@@ -74,7 +74,7 @@ int parse_operand_value;
 /* Pointer to the 512-byte output-byte buffer at ``_program_end + 256``
    (= OUTPUT_BUFFER in the asm_layout.h #define).  main() initializes
    it; ``emit_byte`` / ``flush_output`` index into it directly. */
-char *output_buffer;
+uint8_t *output_buffer;
 int output_fd;
 char *output_name;
 int output_position;

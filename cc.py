@@ -9,7 +9,7 @@ Grammar:
     function_declaration := type IDENT '(' parameters? ')' '{' statement* '}'
     global_declaration   := type IDENT ('[' expression? ']')?
                           ('=' (expression | '{' expression_list '}'))? ';'
-    type                 := 'void' | 'int' | 'char' '*'
+    type                 := 'void' | 'int' | 'char' '*' | 'uint8_t' '*'
     statement            := variable_declaration | assign_statement | do_while_statement
                           | while_statement | call_statement
     variable_declaration := type IDENT ('[' ']')? '=' (expression
@@ -444,6 +444,7 @@ KEYWORDS = frozenset({
     "long",
     "return",
     "sizeof",
+    "uint8_t",
     "unsigned",
     "void",
     "while",
@@ -510,7 +511,7 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UINT8_T", "UNSIGNED", "VOID"})
 
 
 def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
@@ -682,6 +683,14 @@ class CodeGenerator:
     #: Registers available for auto-pinning, in allocation order.
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
+    #: Byte-element type names.  ``uint8_t`` shares the ``char``
+    #: codegen path (byte array stride, ``mov al`` / ``xor ah, ah``
+    #: zero-extend load) but is classified as ``integer`` for
+    #: comparison type-checking, so ``uint8_t b; if (b == 0x45)``
+    #: works without pretending the literal is a character.
+    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
+    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
+
     TYPE_SIZES: ClassVar[dict[str, int]] = {
         # ``char`` locals share the word-sized store/load codepaths
         # the rest of codegen uses (``mov [addr], ax`` / ``mov ax,
@@ -690,9 +699,13 @@ class CodeGenerator:
         # ``mov byte`` / ``mov al`` codepath in every emitter — not
         # done because the savings are small (mainly the ``xor ah,
         # ah`` zero-extend) and the duplication isn't worth it.
+        # ``uint8_t`` is a byte-valued numeric type sharing the
+        # ``char`` storage / indexing path.
         "char": 2,
         "char*": 2,
         "int": 2,
+        "uint8_t": 2,
+        "uint8_t*": 2,
         "unsigned long": 4,
         "void": 0,
     }
@@ -1132,9 +1145,9 @@ class CodeGenerator:
             self.emit(f"_g_{name}: dw {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
-            stride = 1 if declaration.type_name == "char" else 2
+            stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
             if declaration.init is not None:
-                directive = "db" if declaration.type_name == "char" else "dw"
+                directive = "db" if declaration.type_name in self.BYTE_TYPES else "dw"
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
                     for element in declaration.init.elements
@@ -1245,20 +1258,21 @@ class CodeGenerator:
             and isinstance(node.index, Int)
             and node.name not in self.array_labels
             and node.name in self.visible_vars
-            and self.variable_types.get(node.name) in ("char", "char*")
+            and self.variable_types.get(node.name) in self.BYTE_SCALAR_TYPES
         )
 
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.
 
-        Covers plain ``char`` / ``char *`` scalars and file-scope ``char``
-        arrays (declared ``char NAME[SIZE];``).  Locally-declared arrays
-        and ``int``-typed globals keep word-sized element access — only
-        the explicit ``char`` array path widens to byte semantics.
+        Covers ``char`` / ``uint8_t`` scalars and pointers, and
+        file-scope byte-element arrays (``char NAME[SIZE];`` or
+        ``uint8_t NAME[SIZE];``).  Locally-declared arrays and
+        ``int``-typed globals keep word-sized element access — only
+        the explicit byte-typed path widens to byte semantics.
         """
         if name in self.global_byte_arrays:
             return True
-        return name not in self.variable_arrays and self.variable_types.get(name) in ("char", "char*")
+        return name not in self.variable_arrays and self.variable_types.get(name) in self.BYTE_SCALAR_TYPES
 
     def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
         """Check if ``statement`` is a compile-time constant alias.
@@ -1583,8 +1597,9 @@ class CodeGenerator:
         """Record file-scope declarations and validate their shapes.
 
         Scalars are stashed in :attr:`global_scalars`; arrays in
-        :attr:`global_arrays`.  ``char`` arrays are additionally tracked
-        in :attr:`global_byte_arrays` so :meth:`_is_byte_var` reports
+        :attr:`global_arrays`.  Byte-element arrays (``char`` or
+        ``uint8_t``) are additionally tracked in
+        :attr:`global_byte_arrays` so :meth:`_is_byte_var` reports
         byte-wide element access (``int`` arrays keep word access).
         """
         for declaration in declarations:
@@ -1620,10 +1635,10 @@ class CodeGenerator:
                     self.register_aliased_globals[name] = declaration.asm_register
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
-                if declaration.type_name not in ("char", "int"):
-                    message = f"global array '{name}' must have element type 'char' or 'int'"
+                if declaration.type_name not in ("char", "int", "uint8_t"):
+                    message = f"global array '{name}' must have element type 'char', 'int', or 'uint8_t'"
                     raise CompileError(message, line=declaration.line)
-                if declaration.type_name == "char":
+                if declaration.type_name in self.BYTE_TYPES:
                     self.global_byte_arrays.add(name)
                 if declaration.size is not None:
                     if self._constant_expression(declaration.size) is None:
@@ -1968,7 +1983,10 @@ class CodeGenerator:
         ``"integer"``.  Every AST node that can legally appear inside
         a comparison must classify into one of the four buckets;
         anything else raises ``CompileError`` so no operand silently
-        slips through the type check.
+        slips through the type check.  ``uint8_t`` values are byte-sized
+        like ``char`` but classify as ``integer`` so they compose freely
+        with integer literals — ``char`` stays restricted to catch
+        ``c == 0`` typos.
         """
         if isinstance(node, Char):
             return "char"
@@ -1977,14 +1995,15 @@ class CodeGenerator:
         if isinstance(node, String):
             return "pointer"
         if isinstance(node, Index):
-            if self.variable_types.get(node.name) in ("char", "char*"):
+            variable_type = self.variable_types.get(node.name)
+            if variable_type in ("char", "char*"):
                 return "char"
             return "integer"
         if isinstance(node, Var):
             if node.name == "NULL":
                 return "null"
             variable_type = self.variable_types.get(node.name)
-            if variable_type == "char*":
+            if variable_type in ("char*", "uint8_t*"):
                 return "pointer"
             if variable_type == "char":
                 return "char"
@@ -3690,7 +3709,7 @@ class CodeGenerator:
             vname = expression.name
             if vname in self.global_arrays:
                 declaration = self.global_arrays[vname]
-                stride = 1 if declaration.type_name == "char" else 2
+                stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
                 if declaration.init is not None:
                     size = len(declaration.init.elements) * stride
                     self.emit(f"        mov ax, {size}")
@@ -5238,7 +5257,10 @@ class CodeGenerator:
         literals (so ``c != 0`` and ``c < 32`` are rejected — use
         ``c != '\0'`` and ``c < ' '``).  Comparing a pointer to a
         non-``NULL`` integer (``if (p == 0)``) is a common C bug, so
-        the compiler requires the explicit ``NULL`` spelling.
+        the compiler requires the explicit ``NULL`` spelling.  A
+        ``Char`` literal may appear opposite a ``uint8_t`` / ``int``
+        operand — it's just a small integer, and forcing hex spelling
+        there hurts readability (``byte >= '\xC0'`` stays legal).
         """
         left_type = self._type_of_operand(left)
         right_type = self._type_of_operand(right)
@@ -5255,10 +5277,10 @@ class CodeGenerator:
         if right_type == "null" and left_type not in ("pointer", "null"):
             message = f"NULL compared to non-pointer: {left} vs {right}"
             raise CompileError(message, line=line)
-        if left_type == "char" and right_type != "char":
+        if left_type == "char" and right_type != "char" and not isinstance(left, Char):
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
-        if right_type == "char" and left_type != "char":
+        if right_type == "char" and left_type != "char" and not isinstance(right, Char):
             message = f"char compared to non-char: {left} vs {right}"
             raise CompileError(message, line=line)
 
@@ -6010,7 +6032,7 @@ class Parser:
         return VarDecl(name, type_string, init, line=line, asm_register=asm_register)
 
     def parse_type(self) -> str:
-        """Parse a type specifier (void, int, char, char*, unsigned long).
+        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, unsigned long).
 
         An optional leading ``const`` is accepted and discarded — the C
         subset has no notion of const-ness but tolerating the keyword
@@ -6041,6 +6063,12 @@ class Parser:
                 self.eat()
                 return "char*"
             return "char"
+        if token[0] == "UINT8_T":
+            self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "uint8_t*"
+            return "uint8_t"
         if token[0] == "UNSIGNED":
             self.eat()
             if self.peek()[0] != "LONG":
