@@ -163,8 +163,9 @@ void abort_unknown() {
 /* Restore ES=DS so cc.py's ``die`` / ``printf`` / ``close`` builtins
    (which jmp/int-30h into the kernel expecting ES=0) work correctly
    from code paths where ES has been pointed at SYMBOL_SEGMENT for
-   the symbol table.  Naked-asm shape — cc.py elides the bp frame
-   so the call-site cost is just the 3-byte ``call restore_es``. */
+   the symbol table.  ``always_inline`` splices the 2-byte body at
+   every call site, saving the 3-byte ``call`` + 1-byte shared ``ret``. */
+__attribute__((always_inline))
 void restore_es() {
     asm("push ds\npop es");
 }
