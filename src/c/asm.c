@@ -157,11 +157,20 @@ void abort_unknown() {
         "jmp abort_unknown_impl");
 }
 
+/* Restore ES=DS so cc.py's ``die`` / ``printf`` / ``close`` builtins
+   (which jmp/int-30h into the kernel expecting ES=0) work correctly
+   from code paths where ES has been pointed at SYMBOL_SEGMENT for
+   the symbol table.  Naked-asm shape — cc.py elides the bp frame
+   so the call-site cost is just the 3-byte ``call restore_es``. */
+void restore_es() {
+    asm("push ds\npop es");
+}
+
 /* Invoked through ``abort_unknown`` above.  Prints the offending
    source line from ``line_buffer`` together with the bad token,
    then exits. */
 void abort_unknown_impl() {
-    asm("push ds\npop es");
+    restore_es();
     printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
            line_buffer, error_word);
     /* ``exit()`` would be cleaner but clang sees the stdlib prototype
@@ -200,17 +209,17 @@ void compute_source_prefix() {
    jump-size convergence fails to settle; ``die_symbol_overflow`` is
    the jmp-target of the symbol_set overflow branch. */
 void die_error_pass1_io() {
-    asm("push ds\npop es");
+    restore_es();
     die("Error: pass 1 io\n");
 }
 
 void die_error_pass1_iter() {
-    asm("push ds\npop es");
+    restore_es();
     die("Error: pass 1 iter\n");
 }
 
 void die_symbol_overflow() {
-    asm("push ds\npop es");
+    restore_es();
     die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
 }
 
@@ -3161,8 +3170,7 @@ int main(int argc, char *argv[]) {
     flush_output();
     /* Restore ES=DS before the cc.py close() builtin (kernel expects
        ES=DS on int 30h). */
-    asm("push ds\n"
-        "pop es");
+    restore_es();
     if (close(output_fd) < 0) {
         die("Error: directory write failed\n");
     }
