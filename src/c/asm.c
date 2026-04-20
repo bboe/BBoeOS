@@ -2434,16 +2434,10 @@ int parse_operand() {
                     plus[0] = '\0';
                     int disp = resolve_value();
                     plus[0] = '+';
-                    /* Compute next-cursor before assigning to source_cursor
-                       so cc.py doesn't hit its ``source_cursor = X ; if
-                       (source_cursor[0] == Y) source_cursor = source_cursor
-                       + 1;`` codegen bug where the post-increment's store
-                       back to SI gets dropped. */
-                    char *next = close;
-                    if (close[0] == ']') {
-                        next = close + 1;
+                    source_cursor = close;
+                    if (source_cursor[0] == ']') {
+                        source_cursor = source_cursor + 1;
                     }
-                    source_cursor = next;
                     parse_operand_value = disp;
                     return (3 << 8) | (pr2 & 0xFF);
                 }
