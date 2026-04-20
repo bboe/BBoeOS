@@ -1778,29 +1778,37 @@ void include_push() {
         ".ipush_end:");
 }
 
-/* Refill SOURCE_BUFFER from the current source_fd via SYS_IO_READ
-   (512-byte chunks).  Returns AX = 0 when a new chunk lands in the
-   buffer (position / valid cursors reset) or AX = 1 on EOF
-   (zero-byte read) or I/O error (AX == -1 back from the syscall).
-   Sole caller is ``read_line``; the pre-C-port CF-return convention
-   gave way to an int return once both ends live in C. */
-int load_src_sector() {
+/* Naked-asm helper that invokes ``SYS_IO_READ`` on ``source_fd``
+   filling ``SOURCE_BUFFER`` with up to 512 bytes; uses the ES-safe
+   ``syscall`` wrapper so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   Returns AX = bytes read, or -1 on error.  Factored as its own
+   function so ``load_src_sector``'s C body can receive the result
+   via the standard return-in-AX convention — cc.py has no syntax
+   for binding an inline ``call syscall``'s AX return to a C local. */
+int read_source_sector() {
     asm("mov bx, [_g_source_fd]\n"
         "mov di, SOURCE_BUFFER\n"
         "mov cx, 512\n"
         "mov ah, SYS_IO_READ\n"
-        "call syscall\n"
-        "cmp ax, -1\n"
-        "je .lss_no_more\n"
-        "test ax, ax\n"
-        "jz .lss_no_more\n"
-        "mov [_g_source_buffer_valid], ax\n"
-        "mov word [_g_source_buffer_position], 0\n"
-        "xor ax, ax\n"
-        "jmp .lss_end\n"
-        ".lss_no_more:\n"
-        "mov ax, 1\n"
-        ".lss_end:");
+        "call syscall");
+}
+
+/* Refill SOURCE_BUFFER from the current source_fd via
+   ``read_source_sector``.  Returns 0 when a new chunk lands in the
+   buffer (position / valid cursors reset) or 1 on EOF (zero-byte
+   read) or I/O error (-1 back from the syscall).  Sole caller is
+   ``read_line``. */
+int load_src_sector() {
+    int bytes = read_source_sector();
+    if (bytes == 0) {
+        return 1;
+    }
+    if (bytes == -1) {
+        return 1;
+    }
+    source_buffer_valid = bytes;
+    source_buffer_position = 0;
+    return 0;
 }
 
 /* Build a register/register ModR/M byte.  Two entry points:
