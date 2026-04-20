@@ -130,4 +130,9 @@ extern char STR_WORD[];
    a NAMED_CONSTANT so parse_register can walk it from pure C. */
 extern char register_table[];
 
+/* End-of-program sentinel label (emitted by cc.py at the binary tail).
+   Scratch buffers in asm.c's main() sit immediately past it — LINE_BUFFER
+   / OUTPUT_BUFFER / SOURCE_BUFFER all expand to _program_end + N. */
+extern char _program_end[];
+
 #endif
