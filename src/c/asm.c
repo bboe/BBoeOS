@@ -1804,28 +1804,15 @@ int load_src_sector() {
     return 0;
 }
 
-/* Build a register/register ModR/M byte.  Two entry points:
-
-     - ``make_modrm_reg_reg_impl(reg, rm)``: pure-C ``regparm(1)`` —
-       reg in AX, rm on stack; returns ``0xC0 | (reg << 3) | rm`` in
-       AX.  Inline-asm callers don't use this directly.
-
-     - ``make_modrm_reg_reg``: legacy label.  ~7 inline-asm callers
-       set AL = reg field and BL = r/m field; thunk pushes BX (carries
-       BL as the stack-passed ``rm``), calls the impl, and cleans up
-       the pushed word.  AL on return is the modrm byte — ``add sp,
-       2`` doesn't touch AL. */
+/* Build a register/register ModR/M byte.  ``regparm(1)`` — reg in
+   AX, rm on stack; returns ``0xC0 | (reg << 3) | rm`` in AX.
+   Previous legacy ``make_modrm_reg_reg`` thunk (AL/BL in, modrm out)
+   retired with its ~7 inline-asm callers. */
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm) {
     reg = reg & 0xFF;
     rm = rm & 0xFF;
     return 0xC0 | (reg << 3) | rm;
-}
-
-void make_modrm_reg_reg() {
-    asm("push bx\n"
-        "call make_modrm_reg_reg_impl\n"
-        "add sp, 2");
 }
 
 /* Case-insensitive match of ``keyword`` (null-terminated, all
