@@ -140,6 +140,8 @@ int resolve_value();
 void skip_comma();
 void skip_ws();
 __attribute__((regparm(1)))
+void symbol_add(int value, int scope);
+__attribute__((regparm(1)))
 void symbol_add_constant_c(int value);
 __attribute__((regparm(1)))
 int symbol_lookup(int scope);
@@ -2941,48 +2943,40 @@ int symbol_entry_address(int index) {
    SYMBOL_NAME_LENGTH (value, type=0, scope byte).  Overflow jumps
    to die_symbol_overflow — silently corrupting past the table
    would clobber LINE_BUFFER which lives immediately after. */
-void symbol_add() {
-    asm("cmp word [_g_symbol_count], SYMBOL_MAX\n"
-        "jae .sa_overflow\n"
-        "push cx\n"
-        "push di\n"
-        "push si\n"
-        "push ax\n"
-        "push bx\n"
-        "mov ax, [_g_symbol_count]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov cx, SYMBOL_NAME_LENGTH - 1\n"
-        ".sa_copy_name:\n"
-        "mov al, [si]\n"
-        "test al, al\n"
-        "jz .sa_pad_name\n"
-        "mov [es:di], al\n"
-        "inc si\n"
-        "inc di\n"
-        "dec cx\n"
-        "jnz .sa_copy_name\n"
-        ".sa_pad_name:\n"
-        "mov byte [es:di], 0\n"
-        "inc di\n"
-        "dec cx\n"
-        "jns .sa_pad_name\n"
-        "mov ax, [_g_symbol_count]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "pop bx\n"
-        "pop ax\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
-        "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 0\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH+3], bl\n"
-        "inc word [_g_symbol_count]\n"
-        "pop si\n"
-        "pop di\n"
-        "pop cx\n"
-        "jmp .sa_end\n"
-        ".sa_overflow:\n"
-        "jmp die_symbol_overflow\n"
-        ".sa_end:");
+__attribute__((regparm(1)))
+void symbol_add(int value, int scope) {
+    if (symbol_count >= SYMBOL_MAX) {
+        die_symbol_overflow();
+    }
+    int entry = symbol_entry_address(symbol_count);
+    /* Copy up to SYMBOL_NAME_LENGTH - 1 chars from source_cursor
+       into the entry's name field, then zero-fill the remainder
+       through offset SYMBOL_NAME_LENGTH - 1.  source_cursor is
+       SI-pinned; advance it in-place and restore at the end so the
+       inner read compiles to ``mov al, [si]`` (the variable-offset
+       ``source_cursor[n]`` subscript would force a destructive
+       ``add si, <reg>`` — same hazard symbol_lookup's inner loop
+       dodges). */
+    char *saved = source_cursor;
+    int n = 0;
+    while (n < SYMBOL_NAME_LENGTH - 1) {
+        int src = source_cursor[0];
+        if (src == 0) {
+            break;
+        }
+        far_write8(entry + n, src);
+        source_cursor = source_cursor + 1;
+        n = n + 1;
+    }
+    while (n < SYMBOL_NAME_LENGTH) {
+        far_write8(entry + n, 0);
+        n = n + 1;
+    }
+    source_cursor = saved;
+    far_write16(entry + SYMBOL_NAME_LENGTH, value);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 2, 0);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 3, scope & 0xFF);
+    symbol_count = symbol_count + 1;
 }
 
 /* C-callable wrapper around ``symbol_add_constant`` for the common
@@ -3121,9 +3115,10 @@ void symbol_set() {
         "pop dx\n"
         "pop cx\n"
         "pop di\n"
+        "push word [_g_symbol_set_scope]\n"
         "mov ax, [_g_symbol_set_value]\n"
-        "mov bx, [_g_symbol_set_scope]\n"
         "call symbol_add\n"
+        "add sp, 2\n"
         "push ax\n"
         "mov ax, [_g_symbol_count]\n"
         "dec ax\n"
