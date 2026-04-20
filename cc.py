@@ -4826,8 +4826,19 @@ class CodeGenerator:
             continue
 
     def _dedup_register_reloads(self, register: str, /) -> None:
+        """Skip ``mov {register}, <src>`` when ``<src>`` already reached this register.
+
+        The tracked source goes stale on anything that changes either
+        the register itself (direct clobber) or the source register
+        when ``<src>`` is register-sourced — e.g. ``mov si, ax / inc
+        ax / mov si, ax`` is NOT a redundant reload because ``inc ax``
+        makes the second ``mov si, ax`` store a different value.
+        Memory / immediate sources stay stable until the destination
+        register is clobbered.
+        """
         value: str | None = None
         result: list[str] = []
+        # Instructions that clobber the destination register directly.
         clobber_prefixes = (
             f"add {register}",
             "call ",
@@ -4842,6 +4853,32 @@ class CodeGenerator:
             "xchg",
             f"xor {register}",
         )
+        # Register-modifying mnemonics we care about as SOURCE clobbers.
+        # ``mov <reg>, X`` is handled below alongside the other writers.
+        source_clobber_ops = (
+            "add ",
+            "and ",
+            "dec ",
+            "div ",
+            "idiv ",
+            "imul ",
+            "inc ",
+            "mov ",
+            "mul ",
+            "neg ",
+            "not ",
+            "or ",
+            "rcl ",
+            "rcr ",
+            "rol ",
+            "ror ",
+            "sal ",
+            "sar ",
+            "shl ",
+            "shr ",
+            "sub ",
+            "xor ",
+        )
         for line in self.lines:
             stripped = line.strip()
             if stripped.startswith(f"mov {register}, "):
@@ -4851,6 +4888,18 @@ class CodeGenerator:
                 value = source
             elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
                 value = None
+            elif value is not None and "[" not in value:
+                # Source is a register or immediate.  Check whether this
+                # instruction writes to the source register, invalidating
+                # the stored value.  e.g. ``mov si, ax / inc ax`` — the
+                # tracked ``ax`` in SI no longer matches the current AX.
+                for op in source_clobber_ops:
+                    if not stripped.startswith(op):
+                        continue
+                    target = stripped[len(op) :].split(",", 1)[0].strip()
+                    if target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]):
+                        value = None
+                    break
             result.append(line)
         self.lines = result
 
