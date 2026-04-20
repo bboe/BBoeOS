@@ -127,6 +127,10 @@ __attribute__((carry_return))
 int match_word_c_str_word();
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode);
+__attribute__((regparm(1)))
+void mnemonic_dispatch_at(int index);
+__attribute__((regparm(1)))
+char *mnemonic_keyword_at(int index);
 void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
@@ -2213,36 +2217,53 @@ void parse_line() {
     }
 }
 
-/* Instruction dispatcher: linear scan over mnemonic_table
-   (``dw <str>, <handler>`` pairs, terminated by 0) trying each
-   mnemonic against SI via match_word.  On match, indirect-call
-   through the handler pointer at [bx+2].  Unknown mnemonic falls
-   back to handle_unknown_word so bare labels (``USAGE db ...``
-   without a colon) still work. */
-void parse_mnemonic() {
-    asm("push ax\n"
-        "push bx\n"
-        "push cx\n"
-        "push dx\n"
+/* Fetch the keyword pointer from ``mnemonic_table[index]`` (each
+   entry is 4 bytes: keyword-pointer + handler-pointer, terminated
+   by a 2-byte zero).  Returns ``NULL`` when the caller has walked
+   past the terminator.  Compact naked-asm body because cc.py has
+   no syntax for reading a 16-bit pointer out of a packed data
+   table; factoring this out keeps ``parse_mnemonic`` pure C. */
+__attribute__((regparm(1)))
+char *mnemonic_keyword_at(int index) {
+    asm("shl ax, 2\n"
         "mov bx, mnemonic_table\n"
-        ".hpm_try_next:\n"
-        "mov di, [bx]\n"
-        "test di, di\n"
-        "jz .hpm_unknown\n"
-        "call match_word\n"
-        "jc .hpm_next_entry\n"
-        "call [bx+2]\n"
-        "jmp .hpm_done\n"
-        ".hpm_next_entry:\n"
-        "add bx, 4\n"
-        "jmp .hpm_try_next\n"
-        ".hpm_unknown:\n"
-        "call handle_unknown_word\n"
-        ".hpm_done:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx\n"
-        "pop ax");
+        "add bx, ax\n"
+        "mov ax, [bx]");
+}
+
+/* Invoke the handler pointer in ``mnemonic_table[index]`` (at
+   offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
+   has no C analogue cc.py emits, so this tiny wrapper pairs with
+   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C. */
+__attribute__((regparm(1)))
+void mnemonic_dispatch_at(int index) {
+    asm("shl ax, 2\n"
+        "mov bx, mnemonic_table\n"
+        "add bx, ax\n"
+        "call [bx+2]");
+}
+
+/* Instruction dispatcher: linear scan over ``mnemonic_table``
+   trying each keyword against the source cursor via ``match_word_c``.
+   On match, invoke the matching handler.  Walking past the
+   2-byte zero terminator (``mnemonic_keyword_at`` returns NULL)
+   falls through to ``handle_unknown_word`` so bare labels
+   (``USAGE db ...`` without a colon) still reach their
+   symbol-table branch. */
+void parse_mnemonic() {
+    int index = 0;
+    while (1) {
+        char *keyword = mnemonic_keyword_at(index);
+        if (keyword == NULL) {
+            handle_unknown_word();
+            return;
+        }
+        if (match_word_c(keyword)) {
+            mnemonic_dispatch_at(index);
+            return;
+        }
+        index = index + 1;
+    }
 }
 
 /* Parse a decimal, hex-prefix (``0x``), or hex-suffix (``h``)
