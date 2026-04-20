@@ -2618,7 +2618,7 @@ void do_pass() {
             include_pop();
             continue;
         }
-        asm("call parse_line");
+        parse_line();
     }
     asm("mov bx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
@@ -2842,7 +2842,7 @@ void run_pass1() {
         current_address = 0;
         global_scope = 0xFFFF;
         jump_index = 0;
-        asm("call do_pass");
+        do_pass();
         if (error_flag != 0) {
             die_error_pass1_io();
         }
@@ -2870,7 +2870,7 @@ void run_pass2() {
     jump_index = 0;
     output_position = 0;
     output_total = 0;
-    asm("call do_pass");
+    do_pass();
 }
 
 /* Skip whitespace, a single ``,``, then whitespace — the inter-operand
@@ -3153,7 +3153,7 @@ int main(int argc, char *argv[]) {
     run_pass2();
     /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
        it preserves ES=SYMBOL_SEGMENT across the write. */
-    asm("call flush_output");
+    flush_output();
     /* Restore ES=DS before the cc.py close() builtin (kernel expects
        ES=DS on int 30h). */
     asm("push ds\n"

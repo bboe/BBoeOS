@@ -6,6 +6,8 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
 
+- asm.c: replace 4 ``asm("call X");`` blocks with direct C calls.  ``do_pass`` calls ``parse_line()`` directly, ``run_pass1`` / ``run_pass2`` call ``do_pass()`` directly, and ``main`` calls ``flush_output()`` directly.  All four callees are pure C; cc.py resolves the call through its user_functions registry, so the generated ``call X`` sequence is byte-identical to the explicit asm form.  Binary unchanged (11655 bytes).  Self-host test still byte-identical on all 31 static programs
+
 - asm.c: retire the 31 archaeological ``<name> equ _g_<name>`` aliases in the tail asm block.  With every handler now pure C and the remaining inline-asm blocks all using the explicit ``_g_<name>`` form directly, no source-level reference relied on the bare-name aliases.  The alias block + surrounding explanatory comments retire; binary size unchanged (aliases are NASM-time constructs).  Verified by grep: zero occurrences of each bare name inside double-quoted ``asm(...)`` content — every hit was either the alias definition itself or prose.  Self-host test still byte-identical on all 31 static programs
 
 - asm.c: remove dead ``make_modrm_reg_reg`` thunk.  The "legacy label" whose ~7 inline-asm callers pushed BX as the stack-passed ``rm`` has zero remaining callers after every handler migrated to calling ``make_modrm_reg_reg_impl`` from pure C; the 4-instruction thunk body + surrounding docstring retire.  Binary shrinks 8 bytes (11663 → 11655)
