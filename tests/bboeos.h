@@ -109,4 +109,19 @@ void video_mode(int mode);
 /* ARP frame template (included from arp_frame.asm by cc.py) */
 extern char arp_frame[];
 
+/* Assembler keyword strings (defined in src/c/asm.c's trailing asm block).
+   Exposed as NAMED_CONSTANTS in cc.py so match_word_c(STR_X) can pass
+   the keyword address through AX without per-keyword wrappers. */
+extern char STR_ASSIGN[];
+extern char STR_DB[];
+extern char STR_DD[];
+extern char STR_DEFINE[];
+extern char STR_DW[];
+extern char STR_EQU[];
+extern char STR_INCLUDE[];
+extern char STR_ORG[];
+extern char STR_SHORT[];
+extern char STR_TIMES[];
+extern char STR_WORD[];
+
 #endif

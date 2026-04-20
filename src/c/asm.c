@@ -116,6 +116,9 @@ int symbol_set_value;
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int reg, int rm);
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int match_word_c(char *keyword);
 __attribute__((carry_return))
 int match_word_c_str_equ();
 __attribute__((carry_return))
@@ -2007,144 +2010,112 @@ void parse_db() {
    with the shared STR_* constants (still in the file-scope asm
    block's data section). */
 void parse_directive() {
-    asm("push ax\n"
-        "push bx\n"
-        "push cx\n"
-        "push dx\n"
-        "cmp byte [si], '%'\n"
-        "jne .hpd_not_percent\n"
-        "inc si\n"
-        "mov di, STR_ASSIGN\n"
-        "call match_word\n"
-        "jnc .hpd_do_assign\n"
-        "mov di, STR_DEFINE\n"
-        "call match_word\n"
-        "jc .hpd_try_include\n"
-        ".hpd_do_assign:\n"
-        "call skip_ws\n"
-        "mov di, si\n"
-        ".hpd_skip_name:\n"
-        "cmp byte [si], ' '\n"
-        "je .hpd_got_name\n"
-        "cmp byte [si], 9\n"
-        "je .hpd_got_name\n"
-        "cmp byte [si], 0\n"
-        "je .hpd_done\n"
-        "inc si\n"
-        "jmp .hpd_skip_name\n"
-        ".hpd_got_name:\n"
-        "mov byte [si], 0\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "push di\n"
-        "call resolve_value\n"
-        "pop di\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .hpd_done\n"
-        "push si\n"
-        "mov si, di\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_add_constant\n"
-        "pop si\n"
-        "jmp .hpd_done\n"
-        ".hpd_try_include:\n"
-        "mov di, STR_INCLUDE\n"
-        "call match_word\n"
-        "jc .hpd_done\n"
-        "call skip_ws\n"
-        "cmp byte [si], '\"'\n"
-        "je .hpd_inc_quote\n"
-        "jmp .hpd_done\n"
-        ".hpd_inc_quote:\n"
-        "inc si\n"
-        "mov di, si\n"
-        ".hpd_find_close_quote:\n"
-        "cmp byte [si], '\"'\n"
-        "je .hpd_got_inc_name\n"
-        "cmp byte [si], 0\n"
-        "je .hpd_done\n"
-        "inc si\n"
-        "jmp .hpd_find_close_quote\n"
-        ".hpd_got_inc_name:\n"
-        "mov byte [si], 0\n"
-        "mov si, di\n"
-        "call include_push\n"
-        "jmp .hpd_done\n"
-        ".hpd_not_percent:\n"
-        "mov di, STR_ORG\n"
-        "call match_word\n"
-        "jc .hpd_try_times\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov [_g_org_value], ax\n"
-        "mov [_g_current_address], ax\n"
-        "jmp .hpd_done\n"
-        ".hpd_try_times:\n"
-        "mov di, STR_TIMES\n"
-        "call match_word\n"
-        "jc .hpd_try_db\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "call skip_ws\n"
-        "mov di, STR_DB\n"
-        "call match_word\n"
-        "jc .hpd_done\n"
-        "call skip_ws\n"
-        "mov dx, si\n"
-        ".hpd_times_loop:\n"
-        "test cx, cx\n"
-        "jz .hpd_done\n"
-        "mov si, dx\n"
-        "push cx\n"
-        "call parse_db\n"
-        "pop cx\n"
-        "dec cx\n"
-        "jmp .hpd_times_loop\n"
-        ".hpd_try_db:\n"
-        "mov di, STR_DB\n"
-        "call match_word\n"
-        "jc .hpd_try_dw\n"
-        "call skip_ws\n"
-        "call parse_db\n"
-        "jmp .hpd_done\n"
-        ".hpd_try_dw:\n"
-        "mov di, STR_DW\n"
-        "call match_word\n"
-        "jc .hpd_try_dd\n"
-        "call skip_ws\n"
-        ".hpd_dw_next:\n"
-        "call resolve_value\n"
-        "call emit_word_ax\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hpd_done\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "jmp .hpd_dw_next\n"
-        ".hpd_try_dd:\n"
-        "mov di, STR_DD\n"
-        "call match_word\n"
-        "jc .hpd_try_mnemonic\n"
-        "call skip_ws\n"
-        ".hpd_dd_next:\n"
-        "call resolve_value\n"
-        "call emit_word_ax\n"
-        "xor ax, ax\n"
-        "call emit_word_ax\n"
-        "call skip_ws\n"
-        "cmp byte [si], ','\n"
-        "jne .hpd_done\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "jmp .hpd_dd_next\n"
-        ".hpd_try_mnemonic:\n"
-        "call parse_mnemonic\n"
-        ".hpd_done:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop bx\n"
-        "pop ax");
+    if (source_cursor[0] == '%') {
+        source_cursor = source_cursor + 1;
+        int matched_assign = 0;
+        if (match_word_c(STR_ASSIGN)) {
+            matched_assign = 1;
+        } else if (match_word_c(STR_DEFINE)) {
+            matched_assign = 1;
+        }
+        if (matched_assign) {
+            skip_ws();
+            char *name = source_cursor;
+            while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
+                source_cursor = source_cursor + 1;
+            }
+            if (source_cursor[0] == '\0') {
+                return;
+            }
+            source_cursor[0] = '\0';
+            source_cursor = source_cursor + 1;
+            skip_ws();
+            int value = resolve_value();
+            if (pass == 1) {
+                source_cursor = name;
+                symbol_add_constant_c(value);
+            }
+            return;
+        }
+        if (match_word_c(STR_INCLUDE) == 0) {
+            return;
+        }
+        skip_ws();
+        if (source_cursor[0] != '"') {
+            return;
+        }
+        source_cursor = source_cursor + 1;
+        char *fname = source_cursor;
+        while (source_cursor[0] != '"') {
+            if (source_cursor[0] == '\0') {
+                return;
+            }
+            source_cursor = source_cursor + 1;
+        }
+        source_cursor[0] = '\0';
+        source_cursor = fname;
+        include_push();
+        return;
+    }
+    if (match_word_c(STR_ORG)) {
+        skip_ws();
+        int addr = resolve_value();
+        org_value = addr;
+        current_address = addr;
+        return;
+    }
+    if (match_word_c(STR_TIMES)) {
+        skip_ws();
+        int count = resolve_value();
+        skip_ws();
+        if (match_word_c(STR_DB) == 0) {
+            return;
+        }
+        skip_ws();
+        char *saved = source_cursor;
+        while (count != 0) {
+            source_cursor = saved;
+            parse_db();
+            count = count - 1;
+        }
+        return;
+    }
+    if (match_word_c(STR_DB)) {
+        skip_ws();
+        parse_db();
+        return;
+    }
+    if (match_word_c(STR_DW)) {
+        skip_ws();
+        while (1) {
+            int v = resolve_value();
+            emit_byte(v & 0xFF);
+            emit_byte((v >> 8) & 0xFF);
+            skip_ws();
+            if (source_cursor[0] != ',') {
+                return;
+            }
+            source_cursor = source_cursor + 1;
+            skip_ws();
+        }
+    }
+    if (match_word_c(STR_DD)) {
+        skip_ws();
+        while (1) {
+            int v = resolve_value();
+            emit_byte(v & 0xFF);
+            emit_byte((v >> 8) & 0xFF);
+            emit_byte(0);
+            emit_byte(0);
+            skip_ws();
+            if (source_cursor[0] != ',') {
+                return;
+            }
+            source_cursor = source_cursor + 1;
+            skip_ws();
+        }
+    }
+    parse_mnemonic();
 }
 
 /* Top-level line dispatcher.  Starts at LINE_BUFFER, strips
@@ -2593,6 +2564,24 @@ int parse_register_optional() {
 int parse_operand_c() {
     asm("call parse_operand\n"
         "mov [_g_parse_operand_value], dx");
+}
+
+/* Generic C-callable ``match_word`` wrapper.  Takes the keyword
+   pointer via ``regparm(1)`` AX and threads it into DI before
+   invoking ``match_word`` (which reads DI = keyword and SI = source
+   cursor).  Carry propagates to the caller through the naked ``ret``
+   — same shape as the specialized ``match_word_c_str_*`` wrappers
+   but parameterized.  Callers pass ``STR_*`` constants (registered
+   in cc.py's NAMED_CONSTANTS so they resolve to the inline-asm
+   label addresses at assembly time).  Used by ``parse_directive``
+   to try each ``%assign`` / ``%define`` / ``%include`` / ``org`` /
+   ``times`` / ``db`` / ``dw`` / ``dd`` keyword in sequence without
+   needing eight per-keyword shims. */
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int match_word_c(char *keyword) {
+    asm("mov di, ax\n"
+        "call match_word");
 }
 
 /* C-callable ``match_word`` wrapper specialized for ``STR_EQU``.
