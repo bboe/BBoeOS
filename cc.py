@@ -209,6 +209,13 @@ class Function(Node):
     ``stc`` then epilogue.  Callers use it in ``if`` / ``while``
     conditions, where cc.py dispatches on ``jnc`` (true) / ``jc``
     (false) directly — no AX round-trip.
+
+    ``always_inline`` captures ``__attribute__((always_inline))`` —
+    the function must have a single ``asm("...")`` body and zero or
+    one (regparm(1)) parameter.  At each C-level call site, cc.py
+    splices the body text in place of ``call X`` (with local label
+    uniquification); no free-standing function body is emitted, so
+    there's nothing for inline-asm ``call X`` to resolve against.
     """
 
     name: str
@@ -216,6 +223,7 @@ class Function(Node):
     body: list[Node]
     regparm_count: int = field(default=0, kw_only=True)
     carry_return: bool = field(default=False, kw_only=True)
+    always_inline: bool = field(default=False, kw_only=True)
 
 
 @dataclass(slots=True)
@@ -688,11 +696,56 @@ class CodeGenerator:
         self.user_functions: dict[str, int] = {}  # name → param count
         self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in AX
         self.carry_return_functions: set[str] = set()  # callees that return via CF
+        self.inline_bodies: dict[str, str] = {}  # always_inline callees: name → raw asm body
+        self.inline_call_counter: int = 0  # per-inline-site label-uniquification suffix
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
+
+    def _register_inline_body(self, function: Function, /) -> None:
+        """Record an ``always_inline`` function's asm body for splicing.
+
+        The function must have a single ``asm("...")`` statement as its
+        entire body.  The raw string (unescaped) is stored; each call
+        site pastes it in place of ``call <name>``.  Stack parameters
+        are already blocked at parse time (``always_inline`` requires
+        0 or regparm(1) params), so callers never need a ``add sp, N``
+        cleanup that would fall between the inlined body and the
+        following code.
+        """
+        body = function.body
+        if len(body) != 1 or not isinstance(body[0], Call) or body[0].name != "asm":
+            message = f"always_inline function '{function.name}' must have a single asm() body"
+            raise CompileError(message, line=function.line)
+        asm_arg = body[0].args[0]
+        if not isinstance(asm_arg, String):
+            message = f"always_inline function '{function.name}' asm() body must be a string literal"
+            raise CompileError(message, line=function.line)
+        self.inline_bodies[function.name] = asm_arg.content
+
+    def _emit_inline_body(self, name: str, /) -> None:
+        """Emit the stored body for an ``always_inline`` function.
+
+        Local labels (``.foo:`` / ``.bar:``) are renamed with a
+        per-call-site suffix so that multiple inline sites of the
+        same function don't produce duplicate labels.  The asm text
+        is emitted line-by-line with the same indentation style cc.py
+        uses for file-scope inline-asm blocks.
+        """
+        body = _decode_string_escapes(self.inline_bodies[name])
+        self.inline_call_counter += 1
+        suffix = f"_inl{self.inline_call_counter}"
+        label_pattern = re.compile(r"^\s*(\.\w+)\s*:", re.MULTILINE)
+        labels = {match.group(1) for match in label_pattern.finditer(body)}
+        for label in labels:
+            new_label = f"{label}{suffix}"
+            body = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(label)}(?![A-Za-z0-9_])", new_label, body)
+        self.emit(f";; --- inline {name} ---")
+        for line in body.splitlines():
+            if line:
+                self.emit(line if line.startswith((" ", "\t", ".")) else f"        {line}")
 
     def _analyze_user_function_conventions(self, functions: list[Node], /) -> None:
         """Pre-compute each user function's pinned-param register map.
@@ -3096,6 +3149,8 @@ class CodeGenerator:
                     self.fastcall_functions.add(function.name)
                 if function.carry_return:
                     self.carry_return_functions.add(function.name)
+                if function.always_inline:
+                    self._register_inline_body(function)
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
         # Emit main first so execution starts at PROGRAM_BASE.
@@ -3310,7 +3365,10 @@ class CodeGenerator:
             # trash AX while we're assembling the other parameters.
             if fastcall_ax_arg is not None:
                 self.emit_register_from_argument(argument=fastcall_ax_arg, register="ax")
-            self.emit(f"        call {name}")
+            if name in self.inline_bodies:
+                self._emit_inline_body(name)
+            else:
+                self.emit(f"        call {name}")
             if stack_args:
                 self.emit(f"        add sp, {len(stack_args) * 2}")
             if use_pusha:
@@ -3699,6 +3757,10 @@ class CodeGenerator:
     def generate_function(self, function: Function, /) -> None:
         """Generate assembly for a single function definition."""
         name = function.name
+        if function.always_inline:
+            # No free-standing body; the function has been recorded in
+            # ``inline_bodies`` and will be spliced at each call site.
+            return
         parameters = function.params
         body = function.body
         self.array_labels = {}
@@ -5462,6 +5524,8 @@ class Parser:
         * ``("carry_return", True)`` — int return is reported via CF
           (CF clear = 1/true/success, CF set = 0/false/failure); no
           parenthesised argument list.
+        * ``("always_inline", True)`` — inline the single-asm-body
+          function at every C-level call site; no free-standing body.
 
         clang silently accepts regparm on x86 targets; asm_register /
         carry_return are unknown to clang and produce a
@@ -5499,6 +5563,10 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("carry_return", True)
+        if attr_name == "always_inline":
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("always_inline", True)
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -5715,12 +5783,15 @@ class Parser:
         regparm_count = 0
         asm_register: str | None = None
         carry_return = False
+        always_inline = False
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
             if kind == "regparm":
                 regparm_count = value
             elif kind == "carry_return":
                 carry_return = True
+            elif kind == "always_inline":
+                always_inline = True
             else:
                 asm_register = value
         type_string = self.parse_type()
@@ -5733,7 +5804,7 @@ class Parser:
             self.eat("LPAREN")
             parameters = self.parse_parameters()
             self.eat("RPAREN")
-            if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
                 kind, value = self._parse_attribute(line=line)
                 if kind == "regparm":
                     if regparm_count != 0:
@@ -5742,6 +5813,8 @@ class Parser:
                     regparm_count = value
                 elif kind == "carry_return":
                     carry_return = True
+                elif kind == "always_inline":
+                    always_inline = True
                 else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
@@ -5753,6 +5826,11 @@ class Parser:
                 # after the call, which clobbers CF.  carry_return callees
                 # must arrive via AX only (regparm(1)) or take no args.
                 message = "carry_return functions may not take stack args; use 0 params or regparm(1)"
+                raise CompileError(message, line=line)
+            if always_inline and len(parameters) > regparm_count:
+                # Inlining splices the body in place; stack args would
+                # need a caller-side cleanup that doesn't exist.
+                message = "always_inline functions may not take stack args; use 0 params or regparm(1)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
                 # Function prototype (no body).  cc.py's two-pass
@@ -5772,12 +5850,16 @@ class Parser:
                 line=line,
                 regparm_count=regparm_count,
                 carry_return=carry_return,
+                always_inline=always_inline,
             )
         if regparm_count != 0:
             message = "regparm attribute is not valid on global variables"
             raise CompileError(message, line=line)
         if carry_return:
             message = "carry_return attribute is not valid on global variables"
+            raise CompileError(message, line=line)
+        if always_inline:
+            message = "always_inline attribute is not valid on global variables"
             raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
