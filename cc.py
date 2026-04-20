@@ -904,20 +904,27 @@ class CodeGenerator:
             current = else_body[0]
         return target if chain_length >= 2 else None
 
-    def _emit_byte_index_si(self, node: Index, /) -> str:
+    def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
 
-        Returns the NASM memory operand (e.g. ``byte [si+12]`` or
-        ``byte [si]``) suitable for use in a ``cmp`` instruction.
-        Prefers direct addressing when the base is a constant.
+        Returns ``(operand, guarded)`` where *operand* is the NASM
+        memory operand (e.g. ``byte [si+12]`` or ``byte [si]``)
+        suitable for use in a ``cmp`` instruction, and *guarded* is
+        True when an SI-scratch guard (``push si``) was emitted —
+        callers must pair it with :meth:`_si_scratch_guard_end` after
+        the operand is consumed, else SI = aliased-source_cursor gets
+        clobbered by the base load.  Prefers direct addressing when
+        the base is a constant (no guard needed).
         """
         direct = self._byte_index_direct(node)
         if direct is not None:
-            return f"byte [{direct}]"
+            return (f"byte [{direct}]", False)
         vname = node.name
         offset = node.index.value
+        guarded = self._si_scratch_guard_begin(vname)
         self._emit_load_var(vname, register="si")
-        return f"byte [si+{offset}]" if offset else "byte [si]"
+        operand = f"byte [si+{offset}]" if offset else "byte [si]"
+        return (operand, guarded)
 
     def _si_scratch_guard_begin(self, base_var: str | None = None, /) -> bool:
         """Emit ``push si`` if SI is aliased to a pinned global.
@@ -1820,10 +1827,11 @@ class CodeGenerator:
                     b_lit = b_right.value if isinstance(b_right, Int) else None
                     if a_lit is not None and b_lit is not None:
                         self.validate_comparison_types(a_left, a_right)
-                        operand = self._emit_byte_index_si(a_left)
+                        operand, guarded = self._emit_byte_index_si(a_left)
                         word_mem = operand.replace("byte ", "word ")
                         word_val = (b_lit << 8) | a_lit
                         self.emit(f"        cmp {word_mem}, 0x{word_val:04x}")
+                        self._si_scratch_guard_end(guarded=guarded)
                         self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
                         i += 2
                         continue
@@ -1835,12 +1843,14 @@ class CodeGenerator:
                         and b_right.index.value == a_right.index.value + 1
                     ):
                         self.validate_comparison_types(a_left, a_right)
-                        left_operand = self._emit_byte_index_si(a_left)
+                        left_operand, left_guarded = self._emit_byte_index_si(a_left)
                         left_mem = left_operand.replace("byte ", "word ")
                         self.emit(f"        mov ax, {left_mem.removeprefix('word ')}")
-                        right_operand = self._emit_byte_index_si(a_right)
+                        self._si_scratch_guard_end(guarded=left_guarded)
+                        right_operand, right_guarded = self._emit_byte_index_si(a_right)
                         right_mem = right_operand.replace("byte ", "word ")
                         self.emit(f"        cmp ax, {right_mem.removeprefix('word ')}")
+                        self._si_scratch_guard_end(guarded=right_guarded)
                         self.emit(f"        {JUMP_WHEN_FALSE['==']} {fail_label}")
                         i += 2
                         continue
@@ -2724,11 +2734,12 @@ class CodeGenerator:
             # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
             # the zero-extend into AX.
             if self._is_byte_index(left):
-                operand = self._emit_byte_index_si(left)
+                operand, guarded = self._emit_byte_index_si(left)
                 if is_zero:
                     self.emit(f"        cmp {operand}, 0")
                 else:
                     self.emit(f"        cmp {operand}, {literal}")
+                self._si_scratch_guard_end(guarded=guarded)
                 return
             self.generate_expression(left)
             if is_zero:
@@ -2741,12 +2752,14 @@ class CodeGenerator:
             # compare directly against the right byte in memory.  Saves
             # the zero-extend, push/pop, and CX round-trip.
             if self._is_byte_index(left) and self._is_byte_index(right):
-                left_operand = self._emit_byte_index_si(left)
+                left_operand, left_guarded = self._emit_byte_index_si(left)
                 left_mem = left_operand.removeprefix("byte ")
                 self.emit(f"        mov al, {left_mem}")
-                right_operand = self._emit_byte_index_si(right)
+                self._si_scratch_guard_end(guarded=left_guarded)
+                right_operand, right_guarded = self._emit_byte_index_si(right)
                 right_mem = right_operand.removeprefix("byte ")
                 self.emit(f"        cmp al, {right_mem}")
+                self._si_scratch_guard_end(guarded=right_guarded)
                 return
             # Fast path: right is a pinned register variable.  Compare
             # AX against it directly, skipping the CX load and any
@@ -4174,6 +4187,12 @@ class CodeGenerator:
         self.emit(f"{end_label}:")
         self.loop_continue_labels.pop()
         self.loop_end_labels.pop()
+        # A ``break`` can exit the loop with AX holding a value other
+        # than the one the final iteration's ``ax_local`` tracking
+        # would predict (e.g. ``break`` inside ``char *prev = end - 1;
+        # if (prev[0] != ' ') break;`` leaves AX = prev, not end).
+        # Invalidate ax_local so downstream code reloads from memory.
+        self.ax_clear()
 
     def new_label(self) -> int:
         """Allocate and return a new unique label index.
