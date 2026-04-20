@@ -141,6 +141,8 @@ void skip_comma();
 void skip_ws();
 __attribute__((regparm(1)))
 void symbol_add_constant_c(int value);
+__attribute__((regparm(1)))
+int symbol_lookup_c(int scope);
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -2894,206 +2896,125 @@ int resolve_label() {
    ``return`` that clang's -Wreturn-type warns about is harmless —
    same pattern as ``load_src_sector``. */
 int resolve_value() {
-    asm("push bx\n"
-        "push cx\n"
-        "push di\n"
-        "call skip_ws\n"
-        "cmp byte [si], '('\n"
-        "je .rv_paren\n"
-        "cmp byte [si], 27h\n"
-        "je .rv_char_literal\n"
-        "cmp byte [si], '`'\n"
-        "je .rv_backtick_literal\n"
-        "cmp byte [si], '$'\n"
-        "jne .rv_not_dollar\n"
-        "inc si\n"
-        "mov ax, [_g_current_address]\n"
-        "jmp .rv_check_expr\n"
-        ".rv_not_dollar:\n"
-        "mov al, [si]\n"
-        "cmp al, '0'\n"
-        "jb .rv_try_symbol\n"
-        "cmp al, '9'\n"
-        "ja .rv_try_symbol\n"
-        "call parse_number\n"
-        "jmp .rv_check_expr\n"
-        ".rv_paren:\n"
-        "inc si\n"
-        "call resolve_value\n"
-        "call skip_ws\n"
-        "cmp byte [si], ')'\n"
-        "jne .rv_check_expr\n"
-        "inc si\n"
-        "jmp .rv_check_expr\n"
-        ".rv_char_literal:\n"
-        "inc si\n"
-        "xor ah, ah\n"
-        "mov al, [si]\n"
-        "inc si\n"
-        "cmp byte [si], 27h\n"
-        "jne .rv_check_expr\n"
-        "inc si\n"
-        "jmp .rv_check_expr\n"
-        ".rv_backtick_literal:\n"
-        "inc si\n"
-        "xor ah, ah\n"
-        "mov al, [si]\n"
-        "cmp al, '\\'\n"
-        "jne .rv_bt_plain\n"
-        "inc si\n"
-        "mov al, [si]\n"
-        "cmp al, 'n'\n"
-        "je .rv_bt_n\n"
-        "cmp al, '0'\n"
-        "je .rv_bt_0\n"
-        "cmp al, 't'\n"
-        "je .rv_bt_t\n"
-        "cmp al, 'r'\n"
-        "je .rv_bt_r\n"
-        "jmp .rv_bt_skip_close\n"
-        ".rv_bt_n:\n"
-        "mov al, 0Ah\n"
-        "jmp .rv_bt_skip_close\n"
-        ".rv_bt_0:\n"
-        "xor al, al\n"
-        "jmp .rv_bt_skip_close\n"
-        ".rv_bt_t:\n"
-        "mov al, 09h\n"
-        "jmp .rv_bt_skip_close\n"
-        ".rv_bt_r:\n"
-        "mov al, 0Dh\n"
-        ".rv_bt_skip_close:\n"
-        ".rv_bt_plain:\n"
-        "inc si\n"
-        "cmp byte [si], '`'\n"
-        "jne .rv_check_expr\n"
-        "inc si\n"
-        "jmp .rv_check_expr\n"
-        ".rv_try_symbol:\n"
-        "mov di, si\n"
-        ".rv_find_end:\n"
-        "mov al, [si]\n"
-        "cmp al, '.'\n"
-        "je .rv_is_ident\n"
-        "cmp al, '_'\n"
-        "je .rv_is_ident\n"
-        "cmp al, 'a'\n"
-        "jae .rv_is_ident\n"
-        "cmp al, 'A'\n"
-        "jb .rv_check_digit\n"
-        "cmp al, 'Z'\n"
-        "jbe .rv_is_ident\n"
-        ".rv_check_digit:\n"
-        "cmp al, '0'\n"
-        "jb .rv_end_ident\n"
-        "cmp al, '9'\n"
-        "ja .rv_end_ident\n"
-        ".rv_is_ident:\n"
-        "inc si\n"
-        "jmp .rv_find_end\n"
-        ".rv_end_ident:\n"
-        "mov cl, [si]\n"
-        "mov byte [si], 0\n"
-        "push cx\n"
-        "push si\n"
-        "mov si, di\n"
-        "cmp byte [si], '.'\n"
-        "jne .rv_global_lookup\n"
-        "mov bx, [_g_global_scope]\n"
-        "jmp .rv_do_lookup\n"
-        ".rv_global_lookup:\n"
-        "mov bx, 0FFFFh\n"
-        ".rv_do_lookup:\n"
-        "call symbol_lookup\n"
-        "pop si\n"
-        "pop cx\n"
-        "mov [si], cl\n"
-        ".rv_check_expr:\n"
-        "call skip_ws\n"
-        "cmp byte [si], '+'\n"
-        "je .rv_expr_add\n"
-        "cmp byte [si], '-'\n"
-        "je .rv_expr_sub\n"
-        "cmp byte [si], '*'\n"
-        "je .rv_expr_mul\n"
-        "cmp byte [si], '/'\n"
-        "je .rv_expr_div\n"
-        "cmp byte [si], '&'\n"
-        "je .rv_expr_and\n"
-        "cmp byte [si], '|'\n"
-        "je .rv_expr_or\n"
-        "cmp byte [si], '^'\n"
-        "je .rv_expr_xor\n"
-        ".rv_expr_done:\n"
-        "pop di\n"
-        "pop cx\n"
-        "pop bx\n"
-        "jmp .rv_end\n"
-        ".rv_expr_add:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "add ax, cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_sub:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "sub ax, cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_mul:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "mul cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_div:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "xor dx, dx\n"
-        "div cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_and:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "and ax, cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_or:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "or ax, cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_expr_xor:\n"
-        "inc si\n"
-        "push ax\n"
-        "call skip_ws\n"
-        "call resolve_value\n"
-        "mov cx, ax\n"
-        "pop ax\n"
-        "xor ax, cx\n"
-        "jmp .rv_expr_done\n"
-        ".rv_end:");
+    skip_ws();
+    int value;
+    char first = source_cursor[0];
+    if (first == '(') {
+        source_cursor = source_cursor + 1;
+        value = resolve_value();
+        skip_ws();
+        if (source_cursor[0] == ')') {
+            source_cursor = source_cursor + 1;
+        }
+    } else if (first == '\'') {
+        source_cursor = source_cursor + 1;
+        value = source_cursor[0];
+        source_cursor = source_cursor + 1;
+        if (source_cursor[0] == '\'') {
+            source_cursor = source_cursor + 1;
+        }
+    } else if (first == '`') {
+        source_cursor = source_cursor + 1;
+        char c = source_cursor[0];
+        if (c == '\\') {
+            source_cursor = source_cursor + 1;
+            char esc = source_cursor[0];
+            if (esc == 'n') {
+                value = '\n';
+            } else if (esc == '0') {
+                value = '\0';
+            } else if (esc == 't') {
+                value = '\t';
+            } else if (esc == 'r') {
+                value = '\r';
+            } else {
+                value = esc;
+            }
+        } else {
+            value = c;
+        }
+        source_cursor = source_cursor + 1;
+        if (source_cursor[0] == '`') {
+            source_cursor = source_cursor + 1;
+        }
+    } else if (first == '$') {
+        source_cursor = source_cursor + 1;
+        value = current_address;
+    } else if (first >= '0' && first <= '9') {
+        value = parse_number();
+    } else {
+        /* Symbol path: scan identifier, null-term, symbol_lookup with
+           scope = global_scope for locals (``.``-prefixed) or 0xFFFF
+           for globals.  Restore the delimiter byte before returning
+           so the original source line stays intact for pass 2. */
+        char *name_start = source_cursor;
+        while (1) {
+            char c = source_cursor[0];
+            if (c == '.' || c == '_' || c >= 'a'
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')) {
+                source_cursor = source_cursor + 1;
+            } else {
+                break;
+            }
+        }
+        char *end_pos = source_cursor;
+        char delim = source_cursor[0];
+        source_cursor[0] = '\0';
+        int scope = 0xFFFF;
+        if (name_start[0] == '.') {
+            scope = global_scope;
+        }
+        source_cursor = name_start;
+        value = symbol_lookup_c(scope);
+        end_pos[0] = delim;
+        source_cursor = end_pos;
+    }
+    /* Operator chain: right-associative via recursion (the retired
+       asm dispatches to per-operator tails that each recurse into
+       resolve_value for the RHS, then fall through to the shared
+       ``.rv_expr_done`` epilogue).  Flat precedence — NASM's
+       constant-expression lowering parenthesises every subtree
+       before we see it, so the grouping still comes out right. */
+    skip_ws();
+    char op = source_cursor[0];
+    if (op == '+') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value + rhs;
+    } else if (op == '-') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value - rhs;
+    } else if (op == '*') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value * rhs;
+    } else if (op == '/') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value / rhs;
+    } else if (op == '&') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value & rhs;
+    } else if (op == '|') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value | rhs;
+    } else if (op == '^') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        int rhs = resolve_value();
+        value = value ^ rhs;
+    }
+    return value;
 }
 
 /* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
@@ -3274,6 +3195,21 @@ void symbol_add_constant() {
         "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1\n"
         "pop ax\n"
         "pop bx");
+}
+
+/* C-callable ``symbol_lookup`` wrapper.  ``scope`` arrives via
+   ``regparm(1)`` AX and is threaded into BX; SI = name is pre-loaded
+   by the caller (pinned ``source_cursor``).  Returns AX = value
+   (0 on miss in either pass; symbol_lookup's pass-1 forward-reference
+   behavior returns 0 / CF clear, pass-2 miss returns 0 / CF set — both
+   paths leave AX = 0).  Callers that care about hit / miss read
+   ``last_symbol_index`` (symbol_lookup sets it to 0xFFFF on miss, else
+   the entry's index); pure-C ``resolve_value`` treats both pass-1 and
+   pass-2 misses as value = 0, matching the retired inline-asm body. */
+__attribute__((regparm(1)))
+int symbol_lookup_c(int scope) {
+    asm("mov bx, ax\n"
+        "call symbol_lookup");
 }
 
 /* Linear scan of the symbol table.  Callers pass SI = name, BX =
