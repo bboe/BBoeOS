@@ -73,6 +73,13 @@ void die(const char *message) __attribute__((noreturn));
 /* Execute a filesystem program. On success never returns; on failure
    returns an ERROR_* code (e.g. ERROR_NOT_EXECUTE, ERROR_NOT_FOUND). */
 int exec(const char *name);
+/* Far-memory accessors for the symbol-segment data in real-mode asm.c.
+   Compile to ``[es:<offset>]`` memory accesses; will retarget to flat
+   ``[<offset>]`` loads/stores when the OS ports to protected mode. */
+int far_read16(int offset);
+int far_read8(int offset);
+void far_write16(int offset, int value);
+void far_write8(int offset, int value);
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */

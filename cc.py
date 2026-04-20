@@ -546,6 +546,10 @@ class CodeGenerator:
         "die": frozenset(),
         "exec": frozenset({"ax", "si"}),
         "exit": frozenset(),
+        "far_read16": frozenset({"ax", "bx"}),
+        "far_read8": frozenset({"ax", "bx"}),
+        "far_write16": frozenset({"ax", "bx"}),
+        "far_write8": frozenset({"ax", "bx"}),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getchar": frozenset({"ax"}),
         "mac": frozenset({"ax", "di"}),
@@ -2116,6 +2120,80 @@ class CodeGenerator:
         """Generate code for the exit() builtin."""
         self._check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp FUNCTION_EXIT")
+
+    def builtin_far_read16(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_read16(offset)`` builtin.
+
+        Reads a 16-bit word at ``ES:offset``.  In real mode, emits
+        ``mov bx, <offset> / mov ax, [es:bx]``.  This is the paired
+        read half of the far-memory accessors used by asm.c's symbol
+        table (which lives in SYMBOL_SEGMENT rather than DS).  When
+        the OS later moves to protected mode with a flat address
+        space, this builtin can emit a plain ``mov ax, [<offset>]``
+        without touching C callers.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="far_read16")
+        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit("        mov ax, [es:bx]")
+        self.ax_clear()
+
+    def builtin_far_read8(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_read8(offset)`` builtin.
+
+        Reads a byte at ``ES:offset`` zero-extended into AX.  Emits
+        ``mov bx, <offset> / mov al, [es:bx] / xor ah, ah`` in real
+        mode; protected-mode retargeting would drop the ES prefix
+        and leave the byte load unchanged.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="far_read8")
+        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit("        mov al, [es:bx]")
+        self.emit("        xor ah, ah")
+        self.ax_clear()
+
+    def builtin_far_write16(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_write16(offset, value)`` builtin.
+
+        Stores a 16-bit word to ``ES:offset``.  When the value is a
+        constant, emits ``mov bx, <offset> / mov word [es:bx],
+        <value>`` (single store).  For register / local / expression
+        values, the value lands in AX first (pushed if the offset
+        eval could clobber it) and stores via ``mov [es:bx], ax``.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="far_write16")
+        offset_argument, value_argument = arguments
+        if isinstance(value_argument, Int):
+            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit(f"        mov word [es:bx], {value_argument.value & 0xFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_argument, register="ax")
+            self.emit("        push ax")
+            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit("        pop ax")
+            self.emit("        mov [es:bx], ax")
+        self.ax_clear()
+
+    def builtin_far_write8(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_write8(offset, value)`` builtin.
+
+        Stores a byte to ``ES:offset``.  Shape mirrors
+        :meth:`builtin_far_write16`: constant values compile to a
+        single ``mov byte [es:bx], <value>`` store; non-constant
+        values route through AX with a push/pop guard around the
+        offset evaluation.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="far_write8")
+        offset_argument, value_argument = arguments
+        if isinstance(value_argument, Int):
+            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit(f"        mov byte [es:bx], {value_argument.value & 0xFF}")
+        else:
+            self.emit_register_from_argument(argument=value_argument, register="ax")
+            self.emit("        push ax")
+            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit("        pop ax")
+            self.emit("        mov [es:bx], al")
+        self.ax_clear()
 
     def builtin_fstat(self, arguments: list[Node], /) -> None:
         """Generate code for the fstat() builtin.

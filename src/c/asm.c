@@ -142,7 +142,7 @@ void skip_ws();
 __attribute__((regparm(1)))
 void symbol_add_constant_c(int value);
 __attribute__((regparm(1)))
-int symbol_lookup_c(int scope);
+int symbol_lookup(int scope);
 __attribute__((regparm(1)))
 void symbol_set_global(int value);
 __attribute__((regparm(1)))
@@ -1603,7 +1603,7 @@ void handle_unknown_word() {
             global_scope = last_symbol_index;
         }
     } else if (is_local == 0) {
-        symbol_lookup_c(0xFFFF);
+        symbol_lookup(0xFFFF);
         if (last_symbol_index != 0xFFFF) {
             global_scope = last_symbol_index;
         }
@@ -2163,7 +2163,7 @@ void parse_line() {
                     global_scope = last_symbol_index;
                 }
             } else if (is_local == 0) {
-                symbol_lookup_c(0xFFFF);
+                symbol_lookup(0xFFFF);
                 if (last_symbol_index != 0xFFFF) {
                     global_scope = last_symbol_index;
                 }
@@ -2554,9 +2554,9 @@ int peek_label_target() {
     source_cursor = saved;
     last_symbol_index = 0xFFFF;
     if (is_local) {
-        peek_label_value = symbol_lookup_c(global_scope);
+        peek_label_value = symbol_lookup(global_scope);
     } else {
-        peek_label_value = symbol_lookup_c(0xFFFF);
+        peek_label_value = symbol_lookup(0xFFFF);
     }
     end_pos[0] = delim;
     if (last_symbol_index == 0xFFFF) {
@@ -2784,7 +2784,7 @@ int resolve_value() {
             scope = global_scope;
         }
         source_cursor = name_start;
-        value = symbol_lookup_c(scope);
+        value = symbol_lookup(scope);
         end_pos[0] = delim;
         source_cursor = end_pos;
     }
@@ -3036,84 +3036,59 @@ void symbol_add_constant() {
         "pop bx");
 }
 
-/* C-callable ``symbol_lookup`` wrapper.  ``scope`` arrives via
-   ``regparm(1)`` AX and is threaded into BX; SI = name is pre-loaded
-   by the caller (pinned ``source_cursor``).  Returns AX = value
-   (0 on miss in either pass; symbol_lookup's pass-1 forward-reference
-   behavior returns 0 / CF clear, pass-2 miss returns 0 / CF set — both
-   paths leave AX = 0).  Callers that care about hit / miss read
-   ``last_symbol_index`` (symbol_lookup sets it to 0xFFFF on miss, else
-   the entry's index); pure-C ``resolve_value`` treats both pass-1 and
-   pass-2 misses as value = 0, matching the retired inline-asm body. */
+/* Linear scan of the symbol table at ES:0..EFF8.  Each entry is
+   SYMBOL_ENTRY (36) bytes: 32-char null-padded name, 2-byte value,
+   1-byte type, 1-byte scope.  Caller passes scope via regparm(1) AX
+   (low byte is compared against the entry's scope byte; 0xFFFF
+   selects globals since the low byte stored is 0xFF).  Name pointer
+   is ``source_cursor`` (SI-pinned).  On hit: returns AX = value,
+   sets ``last_symbol_index`` to the entry index.  On miss: returns
+   AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF return — all
+   remaining callers test ``last_symbol_index`` for hit/miss.
+   Accesses the symbol segment via ``far_read8`` / ``far_read16``
+   builtins so the body stays pure C (the [es:...] prefix is emitted
+   by cc.py when the builtin expands). */
 __attribute__((regparm(1)))
-__attribute__((always_inline))
-int symbol_lookup_c(int scope) {
-    asm("mov bx, ax\n"
-        "call symbol_lookup");
-}
-
-/* Linear scan of the symbol table.  Callers pass SI = name, BX =
-   wanted scope (0xFFFF for global).  Returns AX = value, CF clear,
-   ``last_symbol_index`` = entry's index on hit; CF set on miss
-   (pass 1 returns 0 / CF clear so forward references don't abort
-   parsing before the symbol is defined).  Body preserves the
-   entry-index push/pop discipline the retired asm used so callers
-   that pass SI / DI as live data don't need to guard them. */
-void symbol_lookup() {
-    asm("push cx\n"
-        "push dx\n"
-        "push di\n"
-        "mov cx, [_g_symbol_count]\n"
-        "test cx, cx\n"
-        "jz .sl_not_found\n"
-        "xor di, di\n"
-        "xor dx, dx\n"
-        ".sl_search:\n"
-        "push ax\n"
-        "mov al, [es:di+SYMBOL_NAME_LENGTH+3]\n"
-        "cmp al, bl\n"
-        "pop ax\n"
-        "jne .sl_next\n"
-        "push si\n"
-        "push di\n"
-        "push cx\n"
-        ".sl_cmp_name:\n"
-        "mov al, [si]\n"
-        "cmp al, [es:di]\n"
-        "jne .sl_no_match\n"
-        "test al, al\n"
-        "jz .sl_name_match\n"
-        "inc si\n"
-        "inc di\n"
-        "jmp .sl_cmp_name\n"
-        ".sl_name_match:\n"
-        "pop cx\n"
-        "pop di\n"
-        "pop si\n"
-        "mov ax, [es:di+SYMBOL_NAME_LENGTH]\n"
-        "mov [_g_last_symbol_index], dx\n"
-        "clc\n"
-        "jmp .sl_end\n"
-        ".sl_no_match:\n"
-        "pop cx\n"
-        "pop di\n"
-        "pop si\n"
-        ".sl_next:\n"
-        "add di, SYMBOL_ENTRY\n"
-        "inc dx\n"
-        "loop .sl_search\n"
-        ".sl_not_found:\n"
-        "xor ax, ax\n"
-        "cmp byte [_g_pass], 1\n"
-        "je .sl_pass1_ok\n"
-        "stc\n"
-        "jmp .sl_end\n"
-        ".sl_pass1_ok:\n"
-        "clc\n"
-        ".sl_end:\n"
-        "pop di\n"
-        "pop dx\n"
-        "pop cx");
+int symbol_lookup(int scope) {
+    int count = symbol_count;
+    int entry = 0;
+    int index = 0;
+    char *saved = source_cursor;
+    last_symbol_index = 0xFFFF;
+    while (index < count) {
+        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 3);
+        if (entry_scope == (scope & 0xFF)) {
+            /* Walk source_cursor (= SI) and an entry cursor in
+               parallel.  Reading ``source_cursor[0]`` lowers to a
+               clean ``mov al, [si]``; the variable-offset subscript
+               ``source_cursor[n]`` would force cc.py to ``add si,
+               <reg>`` and wreck the SI alias.  Restore source_cursor
+               from ``saved`` before returning or continuing. */
+            int name_offset = 0;
+            int mismatch = 0;
+            while (1) {
+                int src = source_cursor[0];
+                int ent = far_read8(entry + name_offset);
+                if (src != ent) {
+                    mismatch = 1;
+                    break;
+                }
+                if (src == 0) {
+                    break;
+                }
+                source_cursor = source_cursor + 1;
+                name_offset = name_offset + 1;
+            }
+            source_cursor = saved;
+            if (mismatch == 0) {
+                last_symbol_index = index;
+                return far_read16(entry + SYMBOL_NAME_LENGTH);
+            }
+        }
+        entry = entry + SYMBOL_ENTRY;
+        index = index + 1;
+    }
+    return 0;
 }
 
 /* Update or add.  SI = name (null-terminated), AX = value, BX =
@@ -3129,6 +3104,7 @@ void symbol_set() {
         "push cx\n"
         "push dx\n"
         "mov word [_g_last_symbol_index], 0FFFFh\n"
+        "mov ax, bx\n"
         "call symbol_lookup\n"
         "cmp word [_g_last_symbol_index], 0FFFFh\n"
         "je .ss_add\n"
