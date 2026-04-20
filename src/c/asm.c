@@ -1590,12 +1590,10 @@ void handle_unknown_word() {
             global_scope = last_symbol_index;
         }
     } else if (is_local == 0) {
-        asm("mov bx, 0xFFFF\n"
-            "call symbol_lookup\n"
-            "jc .huw_no_update\n"
-            "mov ax, [_g_last_symbol_index]\n"
-            "mov [_g_global_scope], ax\n"
-            ".huw_no_update:");
+        symbol_lookup_c(0xFFFF);
+        if (last_symbol_index != 0xFFFF) {
+            global_scope = last_symbol_index;
+        }
     }
     source_cursor = end_pos + 1;
     skip_ws();
@@ -2133,12 +2131,10 @@ void parse_line() {
                     global_scope = last_symbol_index;
                 }
             } else if (is_local == 0) {
-                asm("mov bx, 0xFFFF\n"
-                    "call symbol_lookup\n"
-                    "jc .pl_no_update\n"
-                    "mov ax, [_g_last_symbol_index]\n"
-                    "mov [_g_global_scope], ax\n"
-                    ".pl_no_update:");
+                symbol_lookup_c(0xFFFF);
+                if (last_symbol_index != 0xFFFF) {
+                    global_scope = last_symbol_index;
+                }
             }
             colon_pos[0] = ':';
             source_cursor = colon_pos + 1;
@@ -2521,16 +2517,11 @@ int peek_label_target() {
     char delim = source_cursor[0];
     source_cursor[0] = '\0';
     source_cursor = saved;
+    last_symbol_index = 0xFFFF;
     if (is_local) {
-        asm("mov bx, [_g_global_scope]\n"
-            "mov word [_g_last_symbol_index], 0xFFFF\n"
-            "call symbol_lookup\n"
-            "mov [_g_peek_label_value], ax");
+        peek_label_value = symbol_lookup_c(global_scope);
     } else {
-        asm("mov bx, 0xFFFF\n"
-            "mov word [_g_last_symbol_index], 0xFFFF\n"
-            "call symbol_lookup\n"
-            "mov [_g_peek_label_value], ax");
+        peek_label_value = symbol_lookup_c(0xFFFF);
     }
     end_pos[0] = delim;
     if (last_symbol_index == 0xFFFF) {
