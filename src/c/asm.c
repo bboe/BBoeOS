@@ -130,6 +130,9 @@ void parse_directive();
 int parse_operand_c();
 void parse_mnemonic();
 int parse_register();
+void close_source();
+__attribute__((regparm(1)))
+int open_file_ro(char *path);
 __attribute__((regparm(1)))
 int reg_to_rm(int reg);
 int resolve_label();
@@ -1711,10 +1714,33 @@ int hex_digit(int c) {
    Keeping every asm() block SP-balanced is required because cc.py
    wraps each inline block with ``push dx / pop dx`` to preserve the
    local pinned to DX. */
-void include_pop() {
+/* Close the current ``source_fd`` via the ES-safe ``syscall`` wrapper.
+   Factored so ``do_pass`` and ``include_pop`` share one inline-asm
+   block instead of each open-coding the 3-instruction SYS_IO_CLOSE
+   sequence. */
+void close_source() {
     asm("mov bx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
         "call syscall");
+}
+
+/* Open ``path`` read-only via SYS_IO_OPEN (through the ES-safe
+   ``syscall`` wrapper).  Returns the fd on success, or -1 on error
+   (CF set by the syscall).  Takes the path pointer via regparm(1)
+   AX; the body threads it into SI for the syscall. */
+__attribute__((regparm(1)))
+int open_file_ro(char *path) {
+    asm("mov si, ax\n"
+        "mov al, O_RDONLY\n"
+        "mov ah, SYS_IO_OPEN\n"
+        "call syscall\n"
+        "jnc .ofr_ok\n"
+        "mov ax, -1\n"
+        ".ofr_ok:");
+}
+
+void include_pop() {
+    close_source();
     source_fd = include_save_fd;
     source_buffer_position = include_save_position;
     source_buffer_valid = include_save_valid;
@@ -1764,19 +1790,14 @@ void include_push() {
         k = k + 1;
     }
     include_path[j] = '\0';
-    asm("mov si, _g_include_path\n"
-        "mov al, O_RDONLY\n"
-        "mov ah, SYS_IO_OPEN\n"
-        "call syscall\n"
-        "jc .ipush_err\n"
-        "mov [_g_source_fd], ax\n"
-        "mov word [_g_source_buffer_position], 0\n"
-        "mov word [_g_source_buffer_valid], 0\n"
-        "inc word [_g_include_depth]\n"
-        "jmp .ipush_end\n"
-        ".ipush_err:\n"
-        "mov byte [_g_error_flag], 1\n"
-        ".ipush_end:");
+    source_fd = open_file_ro(include_path);
+    if (source_fd == -1) {
+        error_flag = 1;
+        return;
+    }
+    source_buffer_position = 0;
+    source_buffer_valid = 0;
+    include_depth = include_depth + 1;
 }
 
 /* Naked-asm helper that invokes ``SYS_IO_READ`` on ``source_fd``
@@ -2591,17 +2612,11 @@ int read_line() {
    the inline-asm blocks with. */
 void do_pass() {
     current_address = org_value;
-    asm("mov si, [_g_source_name]\n"
-        "mov al, O_RDONLY\n"
-        "mov ah, SYS_IO_OPEN\n"
-        "call syscall\n"
-        "jc .dp_open_fail\n"
-        "mov [_g_source_fd], ax\n"
-        "jmp .dp_open_ok\n"
-        ".dp_open_fail:\n"
-        "mov byte [_g_error_flag], 1\n"
-        "jmp .dp_end\n"
-        ".dp_open_ok:");
+    source_fd = open_file_ro(source_name);
+    if (source_fd == -1) {
+        error_flag = 1;
+        return;
+    }
     source_buffer_position = 0;
     source_buffer_valid = 0;
     include_depth = 0;
@@ -2616,10 +2631,7 @@ void do_pass() {
         }
         parse_line();
     }
-    asm("mov bx, [_g_source_fd]\n"
-        "mov ah, SYS_IO_CLOSE\n"
-        "call syscall\n"
-        ".dp_end:");
+    close_source();
 }
 
 /* Map a register number to its 16-bit addressing ModR/M r/m field.
