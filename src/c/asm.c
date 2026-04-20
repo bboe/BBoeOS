@@ -1718,7 +1718,8 @@ int hex_digit(int c) {
 /* Close the current ``source_fd`` via the ES-safe ``syscall`` wrapper.
    Factored so ``do_pass`` and ``include_pop`` share one inline-asm
    block instead of each open-coding the 3-instruction SYS_IO_CLOSE
-   sequence. */
+   sequence.  Inlined at both call sites via always_inline. */
+__attribute__((always_inline))
 void close_source() {
     asm("mov bx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
@@ -1728,8 +1729,11 @@ void close_source() {
 /* Open ``path`` read-only via SYS_IO_OPEN (through the ES-safe
    ``syscall`` wrapper).  Returns the fd on success, or -1 on error
    (CF set by the syscall).  Takes the path pointer via regparm(1)
-   AX; the body threads it into SI for the syscall. */
+   AX; the body threads it into SI for the syscall.  Inlined at both
+   call sites via always_inline; the internal ``.ofr_ok`` label gets
+   per-site uniquified. */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 int open_file_ro(char *path) {
     asm("mov si, ax\n"
         "mov al, O_RDONLY\n"
@@ -1808,6 +1812,7 @@ void include_push() {
    function so ``load_src_sector``'s C body can receive the result
    via the standard return-in-AX convention — cc.py has no syntax
    for binding an inline ``call syscall``'s AX return to a C local. */
+__attribute__((always_inline))
 int read_source_sector() {
     asm("mov bx, [_g_source_fd]\n"
         "mov di, SOURCE_BUFFER\n"
@@ -2206,6 +2211,7 @@ void parse_line() {
    no syntax for reading a 16-bit pointer out of a packed data
    table; factoring this out keeps ``parse_mnemonic`` pure C. */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 char *mnemonic_keyword_at(int index) {
     asm("shl ax, 2\n"
         "mov bx, mnemonic_table\n"
@@ -2216,8 +2222,10 @@ char *mnemonic_keyword_at(int index) {
 /* Invoke the handler pointer in ``mnemonic_table[index]`` (at
    offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
    has no C analogue cc.py emits, so this tiny wrapper pairs with
-   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C. */
+   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C.
+   Inlined at its single call site — no body overhead. */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 void mnemonic_dispatch_at(int index) {
     asm("shl ax, 2\n"
         "mov bx, mnemonic_table\n"
@@ -2985,6 +2993,7 @@ void symbol_add() {
    pointer by the caller (parse_line writes ``source_cursor =
    label_start;`` immediately before the call). */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 void symbol_add_constant_c(int value) {
     asm("mov bx, 0xFFFF\n"
         "call symbol_add_constant");
@@ -2997,12 +3006,14 @@ void symbol_add_constant_c(int value) {
    and ``parse_line`` don't need to open-code BX-setup ``call
    symbol_set`` inline. */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 void symbol_set_global(int value) {
     asm("mov bx, 0xFFFF\n"
         "call symbol_set");
 }
 
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 void symbol_set_local(int value) {
     asm("mov bx, [_g_global_scope]\n"
         "call symbol_set");
@@ -3035,6 +3046,7 @@ void symbol_add_constant() {
    the entry's index); pure-C ``resolve_value`` treats both pass-1 and
    pass-2 misses as value = 0, matching the retired inline-asm body. */
 __attribute__((regparm(1)))
+__attribute__((always_inline))
 int symbol_lookup_c(int scope) {
     asm("mov bx, ax\n"
         "call symbol_lookup");
