@@ -604,6 +604,7 @@ class CodeGenerator:
         "STDIN",
         "STDOUT",
         "STR_ASSIGN",
+        "STR_BYTE",
         "STR_DB",
         "STR_DD",
         "STR_DEFINE",

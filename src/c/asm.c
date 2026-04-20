@@ -2339,191 +2339,127 @@ int parse_number() {
    3=mem_bx_disp); AL = register number (for reg / mem_bx_disp);
    DX = value (imm or disp).  Updates [op1_size] on register /
    byte/word-prefix paths. */
-void parse_operand() {
-    asm("call skip_ws\n"
-        "push si\n"
-        "mov di, STR_BYTE\n"
-        "call match_word\n"
-        "jc .po_no_byte_prefix\n"
-        "add sp, 2\n"
-        "mov byte [_g_op1_size], 8\n"
-        "call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "je .po_mem_operand\n"
-        "jmp .po_try_register\n"
-        ".po_no_byte_prefix:\n"
-        "pop si\n"
-        "push si\n"
-        "mov di, STR_WORD\n"
-        "call match_word\n"
-        "jc .po_no_word_prefix\n"
-        "add sp, 2\n"
-        "mov byte [_g_op1_size], 16\n"
-        "call skip_ws\n"
-        "cmp byte [si], '['\n"
-        "je .po_mem_operand\n"
-        "jmp .po_try_register\n"
-        ".po_no_word_prefix:\n"
-        "pop si\n"
-        "cmp byte [si], '['\n"
-        "je .po_mem_operand\n"
-        ".po_try_register:\n"
-        "push si\n"
-        "call parse_register\n"
-        "jnc .po_is_reg\n"
-        "pop si\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "mov ah, 1\n"
-        "xor al, al\n"
-        "jmp .po_end\n"
-        ".po_is_reg:\n"
-        "add sp, 2\n"
-        "mov [_g_op1_size], ah\n"
-        "mov ah, 0\n"
-        "jmp .po_end\n"
-        ".po_mem_operand:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "cmp byte [si], 'e'\n"
-        "jne .po_memory_no_segment\n"
-        "cmp byte [si+1], 's'\n"
-        "jne .po_memory_no_segment\n"
-        "cmp byte [si+2], ':'\n"
-        "jne .po_memory_no_segment\n"
-        "push ax\n"
-        "mov al, 26h\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "add si, 3\n"
-        "call skip_ws\n"
-        ".po_memory_no_segment:\n"
-        "push si\n"
-        "call parse_register\n"
-        "jnc .po_mem_with_reg\n"
-        "pop si\n"
-        "push si\n"
-        "mov di, si\n"
-        ".po_mem_find_close:\n"
-        "mov al, [di]\n"
-        "cmp al, ']'\n"
-        "je .po_mem_close_found\n"
-        "test al, al\n"
-        "jz .po_mem_close_found\n"
-        "inc di\n"
-        "jmp .po_mem_find_close\n"
-        ".po_mem_close_found:\n"
-        ".po_mem_back_ws:\n"
-        "cmp di, si\n"
-        "jbe .po_mem_no_disp_reg\n"
-        "mov al, [di-1]\n"
-        "cmp al, ' '\n"
-        "jne .po_mem_check_reg\n"
-        "dec di\n"
-        "jmp .po_mem_back_ws\n"
-        ".po_mem_check_reg:\n"
-        "mov bx, di\n"
-        "sub bx, si\n"
-        "cmp bx, 2\n"
-        "jb .po_mem_no_disp_reg\n"
-        "mov bx, di\n"
-        "sub bx, 2\n"
-        "push si\n"
-        "mov si, bx\n"
-        "call parse_register\n"
-        "pop si\n"
-        "jc .po_mem_no_disp_reg\n"
-        "push ax\n"
-        ".po_mem_back_plus_ws:\n"
-        "cmp bx, si\n"
-        "jbe .po_mem_pop_no_dr\n"
-        "mov dl, [bx-1]\n"
-        "cmp dl, ' '\n"
-        "jne .po_mem_check_plus\n"
-        "dec bx\n"
-        "jmp .po_mem_back_plus_ws\n"
-        ".po_mem_check_plus:\n"
-        "cmp byte [bx-1], '+'\n"
-        "jne .po_mem_pop_no_dr\n"
-        "dec bx\n"
-        "mov byte [bx], 0\n"
-        "push bx\n"
-        "push di\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "pop di\n"
-        "pop bx\n"
-        "mov byte [bx], '+'\n"
-        "mov si, di\n"
-        "cmp byte [si], ']'\n"
-        "jne .po_mem_dr_set\n"
-        "inc si\n"
-        ".po_mem_dr_set:\n"
-        "pop ax\n"
-        "add sp, 2\n"
-        "mov ah, 3\n"
-        "jmp .po_end\n"
-        ".po_mem_pop_no_dr:\n"
-        "pop ax\n"
-        ".po_mem_no_disp_reg:\n"
-        "pop si\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        ".po_find_close:\n"
-        "cmp byte [si], ']'\n"
-        "je .po_found_close\n"
-        "cmp byte [si], 0\n"
-        "je .po_found_close\n"
-        "inc si\n"
-        "jmp .po_find_close\n"
-        ".po_found_close:\n"
-        "cmp byte [si], ']'\n"
-        "jne .po_mem_done\n"
-        "inc si\n"
-        ".po_mem_done:\n"
-        "mov ah, 2\n"
-        "xor al, al\n"
-        "jmp .po_end\n"
-        ".po_mem_with_reg:\n"
-        "add sp, 2\n"
-        "call skip_ws\n"
-        "cmp byte [si], '+'\n"
-        "je .po_mem_with_reg_pos\n"
-        "cmp byte [si], '-'\n"
-        "je .po_mem_with_reg_neg\n"
-        "jmp .po_mem_reg_only\n"
-        ".po_mem_with_reg_pos:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "push ax\n"
-        "call resolve_value\n"
-        "mov dx, ax\n"
-        "pop ax\n"
-        "jmp .po_mem_with_reg_close\n"
-        ".po_mem_with_reg_neg:\n"
-        "inc si\n"
-        "call skip_ws\n"
-        "push ax\n"
-        "call resolve_value\n"
-        "neg ax\n"
-        "mov dx, ax\n"
-        "pop ax\n"
-        ".po_mem_with_reg_close:\n"
-        "call skip_ws\n"
-        "cmp byte [si], ']'\n"
-        "jne .po_mem_bx_done\n"
-        "inc si\n"
-        ".po_mem_bx_done:\n"
-        "mov ah, 3\n"
-        "jmp .po_end\n"
-        ".po_mem_reg_only:\n"
-        "cmp byte [si], ']'\n"
-        "jne .po_mem_bx_done2\n"
-        "inc si\n"
-        ".po_mem_bx_done2:\n"
-        "xor dx, dx\n"
-        "mov ah, 3\n"
-        ".po_end:");
+int parse_operand() {
+    skip_ws();
+    /* ``byte`` / ``word`` size prefix — match_word already rewinds
+       ``source_cursor`` on miss, so no manual backtrack needed. */
+    if (match_word_c(STR_BYTE)) {
+        op1_size = 8;
+        skip_ws();
+    } else if (match_word_c(STR_WORD)) {
+        op1_size = 16;
+        skip_ws();
+    }
+    if (source_cursor[0] != '[') {
+        /* Register or immediate. */
+        int pr = parse_register_optional();
+        if (pr >= 0) {
+            op1_size = (pr >> 8) & 0xFF;
+            return pr & 0xFF;           /* type=0 (reg), reg in low byte */
+        }
+        int imm = resolve_value();
+        parse_operand_value = imm;
+        return 1 << 8;                  /* type=1 (imm) */
+    }
+    /* Memory operand starting at ``[``. */
+    source_cursor = source_cursor + 1;
+    skip_ws();
+    /* ``[es:...]`` segment override: emit 0x26 prefix, skip past. */
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's' && source_cursor[2] == ':') {
+        emit_byte(0x26);
+        source_cursor = source_cursor + 3;
+        skip_ws();
+    }
+    /* Try ``[reg...]`` form (register first inside brackets). */
+    int pr = parse_register_optional();
+    if (pr >= 0) {
+        int reg = pr & 0xFF;
+        skip_ws();
+        int disp = 0;
+        if (source_cursor[0] == '+') {
+            source_cursor = source_cursor + 1;
+            skip_ws();
+            disp = resolve_value();
+        } else if (source_cursor[0] == '-') {
+            source_cursor = source_cursor + 1;
+            skip_ws();
+            int v = resolve_value();
+            disp = 0 - v;
+        }
+        skip_ws();
+        if (source_cursor[0] == ']') {
+            source_cursor = source_cursor + 1;
+        }
+        parse_operand_value = disp;
+        return (3 << 8) | reg;          /* type=3 (reg+disp) */
+    }
+    /* Not ``[reg...]``: could be ``[disp]`` or ``[disp+reg]``.
+       Scan forward to ``]`` (or NUL), then scan backwards over
+       trailing whitespace to find the end of the bracket contents. */
+    char *bracket_start = source_cursor;
+    char *close = source_cursor;
+    while (close[0] != ']' && close[0] != '\0') {
+        close = close + 1;
+    }
+    char *end = close;
+    while (end > bracket_start) {
+        char *prev = end - 1;
+        if (prev[0] != ' ') {
+            break;
+        }
+        end = prev;
+    }
+    /* Try to parse a 2-char register at ``end-2`` — this catches the
+       ``[disp + reg]`` NASM dialect.  The register must be preceded
+       by ``+`` (with optional whitespace).  On match, null-terminate
+       just before the ``+``, resolve the displacement, then restore. */
+    if (end - bracket_start >= 2) {
+        char *reg_pos = end - 2;
+        char *saved = source_cursor;
+        source_cursor = reg_pos;
+        int pr2 = parse_register_optional();
+        source_cursor = saved;
+        if (pr2 >= 0) {
+            char *back = reg_pos;
+            while (back > bracket_start) {
+                char *pb = back - 1;
+                if (pb[0] != ' ') {
+                    break;
+                }
+                back = pb;
+            }
+            if (back > bracket_start) {
+                char *plus = back - 1;
+                if (plus[0] == '+') {
+                    plus[0] = '\0';
+                    int disp = resolve_value();
+                    plus[0] = '+';
+                    /* Compute next-cursor before assigning to source_cursor
+                       so cc.py doesn't hit its ``source_cursor = X ; if
+                       (source_cursor[0] == Y) source_cursor = source_cursor
+                       + 1;`` codegen bug where the post-increment's store
+                       back to SI gets dropped. */
+                    char *next = close;
+                    if (close[0] == ']') {
+                        next = close + 1;
+                    }
+                    source_cursor = next;
+                    parse_operand_value = disp;
+                    return (3 << 8) | (pr2 & 0xFF);
+                }
+            }
+        }
+    }
+    /* Plain ``[disp16]``. */
+    int disp = resolve_value();
+    while (source_cursor[0] != ']' && source_cursor[0] != '\0') {
+        source_cursor = source_cursor + 1;
+    }
+    if (source_cursor[0] == ']') {
+        source_cursor = source_cursor + 1;
+    }
+    parse_operand_value = disp;
+    return 2 << 8;                      /* type=2 (direct mem) */
 }
 
 /* C-callable wrapper around the inline-asm ``parse_register``.  Naked-
@@ -2564,8 +2500,7 @@ int parse_register_optional() {
    is set by ``parse_operand`` itself as a side effect; C callers
    read it through the existing ``int op1_size`` global. */
 int parse_operand_c() {
-    asm("call parse_operand\n"
-        "mov [_g_parse_operand_value], dx");
+    return parse_operand();
 }
 
 /* Generic C-callable ``match_word`` wrapper.  Takes the keyword
