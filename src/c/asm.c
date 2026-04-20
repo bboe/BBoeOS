@@ -140,6 +140,10 @@ __attribute__((regparm(1)))
 void symbol_add_constant_c(int value);
 __attribute__((regparm(1)))
 int symbol_lookup_c(int scope);
+__attribute__((regparm(1)))
+void symbol_set_global(int value);
+__attribute__((regparm(1)))
+void symbol_set_local(int value);
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -1580,22 +1584,16 @@ void handle_unknown_word() {
     source_cursor = name_start;
     if (pass == 1) {
         if (is_local) {
-            asm("mov ax, [_g_current_address]\n"
-                "mov bx, [_g_global_scope]\n"
-                "call symbol_set");
+            symbol_set_local(current_address);
         } else {
-            asm("mov ax, [_g_current_address]\n"
-                "mov bx, 0xFFFF\n"
-                "call symbol_set");
+            symbol_set_global(current_address);
             global_scope = last_symbol_index;
         }
     } else if (is_local == 0) {
-        asm("mov bx, 0xFFFF\n"
-            "call symbol_lookup\n"
-            "jc .huw_no_update\n"
-            "mov ax, [_g_last_symbol_index]\n"
-            "mov [_g_global_scope], ax\n"
-            ".huw_no_update:");
+        symbol_lookup_c(0xFFFF);
+        if (last_symbol_index != 0xFFFF) {
+            global_scope = last_symbol_index;
+        }
     }
     source_cursor = end_pos + 1;
     skip_ws();
@@ -2123,22 +2121,16 @@ void parse_line() {
             source_cursor = label_start;
             if (pass == 1) {
                 if (is_local) {
-                    asm("mov ax, [_g_current_address]\n"
-                        "mov bx, [_g_global_scope]\n"
-                        "call symbol_set");
+                    symbol_set_local(current_address);
                 } else {
-                    asm("mov ax, [_g_current_address]\n"
-                        "mov bx, 0xFFFF\n"
-                        "call symbol_set");
+                    symbol_set_global(current_address);
                     global_scope = last_symbol_index;
                 }
             } else if (is_local == 0) {
-                asm("mov bx, 0xFFFF\n"
-                    "call symbol_lookup\n"
-                    "jc .pl_no_update\n"
-                    "mov ax, [_g_last_symbol_index]\n"
-                    "mov [_g_global_scope], ax\n"
-                    ".pl_no_update:");
+                symbol_lookup_c(0xFFFF);
+                if (last_symbol_index != 0xFFFF) {
+                    global_scope = last_symbol_index;
+                }
             }
             colon_pos[0] = ':';
             source_cursor = colon_pos + 1;
@@ -2521,16 +2513,11 @@ int peek_label_target() {
     char delim = source_cursor[0];
     source_cursor[0] = '\0';
     source_cursor = saved;
+    last_symbol_index = 0xFFFF;
     if (is_local) {
-        asm("mov bx, [_g_global_scope]\n"
-            "mov word [_g_last_symbol_index], 0xFFFF\n"
-            "call symbol_lookup\n"
-            "mov [_g_peek_label_value], ax");
+        peek_label_value = symbol_lookup_c(global_scope);
     } else {
-        asm("mov bx, 0xFFFF\n"
-            "mov word [_g_last_symbol_index], 0xFFFF\n"
-            "call symbol_lookup\n"
-            "mov [_g_peek_label_value], ax");
+        peek_label_value = symbol_lookup_c(0xFFFF);
     }
     end_pos[0] = delim;
     if (last_symbol_index == 0xFFFF) {
@@ -2618,7 +2605,7 @@ void do_pass() {
             include_pop();
             continue;
         }
-        asm("call parse_line");
+        parse_line();
     }
     asm("mov bx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
@@ -2842,7 +2829,7 @@ void run_pass1() {
         current_address = 0;
         global_scope = 0xFFFF;
         jump_index = 0;
-        asm("call do_pass");
+        do_pass();
         if (error_flag != 0) {
             die_error_pass1_io();
         }
@@ -2870,7 +2857,7 @@ void run_pass2() {
     jump_index = 0;
     output_position = 0;
     output_total = 0;
-    asm("call do_pass");
+    do_pass();
 }
 
 /* Skip whitespace, a single ``,``, then whitespace — the inter-operand
@@ -2979,6 +2966,24 @@ __attribute__((regparm(1)))
 void symbol_add_constant_c(int value) {
     asm("mov bx, 0xFFFF\n"
         "call symbol_add_constant");
+}
+
+/* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
+   take ``value`` via ``regparm(1)`` AX; SI = name is pre-loaded by
+   the caller through ``source_cursor``.  Factored out so the
+   identical "global" / "local" dispatches in ``handle_unknown_word``
+   and ``parse_line`` don't need to open-code BX-setup ``call
+   symbol_set`` inline. */
+__attribute__((regparm(1)))
+void symbol_set_global(int value) {
+    asm("mov bx, 0xFFFF\n"
+        "call symbol_set");
+}
+
+__attribute__((regparm(1)))
+void symbol_set_local(int value) {
+    asm("mov bx, [_g_global_scope]\n"
+        "call symbol_set");
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
@@ -3153,7 +3158,7 @@ int main(int argc, char *argv[]) {
     run_pass2();
     /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
        it preserves ES=SYMBOL_SEGMENT across the write. */
-    asm("call flush_output");
+    flush_output();
     /* Restore ES=DS before the cc.py close() builtin (kernel expects
        ES=DS on int 30h). */
     asm("push ds\n"
