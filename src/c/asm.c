@@ -1730,7 +1730,7 @@ void include_pop() {
    ``include_push_arg`` before cc.py's codegen gets a chance to
    clobber SI. */
 void include_push() {
-    asm("mov [_g_include_push_arg], si");
+    include_push_arg = source_cursor;
     include_save_fd = source_fd;
     include_save_position = source_buffer_position;
     include_save_valid = source_buffer_valid;
