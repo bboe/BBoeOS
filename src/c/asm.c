@@ -107,8 +107,6 @@ int source_fd;
 char *source_name;
 char source_prefix[32];
 int symbol_count;
-int symbol_set_scope;
-int symbol_set_value;
 
 /* Forward declarations for functions defined later in the file that
    pure-C bodies need to call.  cc.py resolves these via its two-pass
@@ -126,8 +124,12 @@ __attribute__((regparm(1)))
 void mnemonic_dispatch_at(int index);
 __attribute__((regparm(1)))
 char *mnemonic_keyword_at(int index);
+__attribute__((regparm(1)))
+void emit_byte(int v);
 void parse_directive();
 int parse_operand_c();
+__attribute__((carry_return))
+int peek_label_target();
 void parse_mnemonic();
 int parse_register();
 void close_source();
@@ -140,9 +142,13 @@ int resolve_value();
 void skip_comma();
 void skip_ws();
 __attribute__((regparm(1)))
-void symbol_add_constant_c(int value);
+void symbol_add(int value, int scope);
 __attribute__((regparm(1)))
-int symbol_lookup_c(int scope);
+void symbol_add_constant(int value);
+__attribute__((regparm(1)))
+int symbol_lookup(int scope);
+__attribute__((regparm(1)))
+void symbol_set(int value, int scope);
 __attribute__((regparm(1)))
 void symbol_set_global(int value);
 __attribute__((regparm(1)))
@@ -278,87 +284,69 @@ void emit_word_ax() {
    sits further up the stack and doesn't affect the offset. */
 __attribute__((regparm(1)))
 void encode_rel8_jump(int opcode) {
-    asm("push ax\n"
-        "call skip_ws\n"
-        "mov bx, [_g_jump_index]\n"
-        "inc word [_g_jump_index]\n"
-        "cmp byte [es:JUMP_TABLE + bx], 0\n"
-        "jne .erj_try_shrink\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .erj_emit_short\n"
-        "push bx\n"
-        "call peek_label_target\n"
-        "pop bx\n"
-        "jc .erj_emit_short\n"
-        "mov ax, [_g_peek_label_value]\n"
-        "mov dx, [_g_current_address]\n"
-        "add dx, 2\n"
-        "sub ax, dx\n"
-        "add ax, 128\n"
-        "cmp ax, 256\n"
-        "jb .erj_emit_short\n"
-        "mov byte [es:JUMP_TABLE + bx], 1\n"
-        "mov byte [_g_changed_flag], 1\n"
-        "jmp .erj_long_form\n"
-        ".erj_try_shrink:\n"
-        "cmp byte [_g_pass], 1\n"
-        "jne .erj_long_form\n"
-        "push bx\n"
-        "call peek_label_target\n"
-        "pop bx\n"
-        "jc .erj_long_form\n"
-        "mov ax, [_g_peek_label_value]\n"
-        "mov dx, [_g_current_address]\n"
-        "cmp ax, dx\n"
-        "jae .erj_shrink_forward\n"
-        "add dx, 2\n"
-        "jmp .erj_shrink_check\n"
-        ".erj_shrink_forward:\n"
-        "add dx, 4\n"
-        "push bp\n"
-        "mov bp, sp\n"
-        "cmp byte [bp+2], 0EBh\n"
-        "pop bp\n"
-        "jne .erj_shrink_check\n"
-        "dec dx\n"
-        ".erj_shrink_check:\n"
-        "sub ax, dx\n"
-        "add ax, 128\n"
-        "cmp ax, 256\n"
-        "jae .erj_long_form\n"
-        "mov byte [es:JUMP_TABLE + bx], 0\n"
-        "mov byte [_g_changed_flag], 1\n"
-        "jmp .erj_emit_short\n"
-        ".erj_long_form:\n"
-        "pop ax\n"
-        "cmp al, 0EBh\n"
-        "je .erj_long_jmp\n"
-        "add al, 10h\n"
-        "push ax\n"
-        "mov al, 0Fh\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "jmp .erj_long_emit_disp\n"
-        ".erj_long_jmp:\n"
-        "mov al, 0E9h\n"
-        "call emit_byte_al\n"
-        ".erj_long_emit_disp:\n"
-        "call resolve_label\n"
-        "mov bx, [_g_current_address]\n"
-        "add bx, 2\n"
-        "sub ax, bx\n"
-        "call emit_word_ax\n"
-        "jmp .erj_end\n"
-        ".erj_emit_short:\n"
-        "pop ax\n"
-        "call emit_byte_al\n"
-        "call resolve_label\n"
-        "mov bx, [_g_current_address]\n"
-        "inc bx\n"
-        "sub ax, bx\n"
-        "call emit_byte_al\n"
-        ".erj_end:");
+    skip_ws();
+    int bx = jump_index;
+    jump_index = jump_index + 1;
+    int current_size = far_read8(JUMP_TABLE + bx);
+    int use_short = 1;
+    if (current_size == 0) {
+        /* Currently short; check whether the target is still in
+           range for pass 1 -- if the distance grew out of
+           rel8, flip the bit to long and set changed_flag so
+           the pass-1 convergence loop runs another iteration. */
+        if (pass == 1) {
+            if (peek_label_target()) {
+                int rel = peek_label_value - (current_address + 2);
+                if (rel < -128 || rel > 127) {
+                    far_write8(JUMP_TABLE + bx, 1);
+                    changed_flag = 1;
+                    use_short = 0;
+                }
+            }
+        }
+    } else {
+        /* Currently long; attempt to shrink in pass 1 if the
+           target has moved into rel8 range.  Forward jumps need
+           an extra +4/-1 correction because the 4-byte near form
+           straddles the comparison point (and the ``jmp rel8``
+           0xEB opcode shrinks to 2 bytes rather than 3). */
+        use_short = 0;
+        if (pass == 1) {
+            if (peek_label_target()) {
+                int target = peek_label_value;
+                int base = current_address;
+                if (target >= base) {
+                    base = base + 4;
+                    if (opcode == 0xEB) {
+                        base = base - 1;
+                    }
+                } else {
+                    base = base + 2;
+                }
+                int rel = target - base;
+                if (rel >= -128 && rel <= 127) {
+                    far_write8(JUMP_TABLE + bx, 0);
+                    changed_flag = 1;
+                    use_short = 1;
+                }
+            }
+        }
+    }
+    if (use_short) {
+        emit_byte(opcode);
+        int disp = resolve_label() - (current_address + 1);
+        emit_byte(disp);
+    } else {
+        if (opcode == 0xEB) {
+            emit_byte(0xE9);
+        } else {
+            emit_byte(0x0F);
+            emit_byte(opcode + 0x10);
+        }
+        int disp = resolve_label() - (current_address + 2);
+        emit_byte(disp);
+        emit_byte(disp >> 8);
+    }
 }
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
@@ -1603,7 +1591,7 @@ void handle_unknown_word() {
             global_scope = last_symbol_index;
         }
     } else if (is_local == 0) {
-        symbol_lookup_c(0xFFFF);
+        symbol_lookup(0xFFFF);
         if (last_symbol_index != 0xFFFF) {
             global_scope = last_symbol_index;
         }
@@ -2032,7 +2020,7 @@ void parse_directive() {
             int value = resolve_value();
             if (pass == 1) {
                 source_cursor = name;
-                symbol_add_constant_c(value);
+                symbol_add_constant(value);
             }
             return;
         }
@@ -2163,7 +2151,7 @@ void parse_line() {
                     global_scope = last_symbol_index;
                 }
             } else if (is_local == 0) {
-                symbol_lookup_c(0xFFFF);
+                symbol_lookup(0xFFFF);
                 if (last_symbol_index != 0xFFFF) {
                     global_scope = last_symbol_index;
                 }
@@ -2195,7 +2183,7 @@ void parse_line() {
             int value = resolve_value();
             if (pass == 1) {
                 source_cursor = label_start;
-                symbol_add_constant_c(value);
+                symbol_add_constant(value);
             }
             space_pos[0] = ' ';
             return;
@@ -2554,9 +2542,9 @@ int peek_label_target() {
     source_cursor = saved;
     last_symbol_index = 0xFFFF;
     if (is_local) {
-        peek_label_value = symbol_lookup_c(global_scope);
+        peek_label_value = symbol_lookup(global_scope);
     } else {
-        peek_label_value = symbol_lookup_c(0xFFFF);
+        peek_label_value = symbol_lookup(0xFFFF);
     }
     end_pos[0] = delim;
     if (last_symbol_index == 0xFFFF) {
@@ -2784,7 +2772,7 @@ int resolve_value() {
             scope = global_scope;
         }
         source_cursor = name_start;
-        value = symbol_lookup_c(scope);
+        value = symbol_lookup(scope);
         end_pos[0] = delim;
         source_cursor = end_pos;
     }
@@ -2941,62 +2929,40 @@ int symbol_entry_address(int index) {
    SYMBOL_NAME_LENGTH (value, type=0, scope byte).  Overflow jumps
    to die_symbol_overflow — silently corrupting past the table
    would clobber LINE_BUFFER which lives immediately after. */
-void symbol_add() {
-    asm("cmp word [_g_symbol_count], SYMBOL_MAX\n"
-        "jae .sa_overflow\n"
-        "push cx\n"
-        "push di\n"
-        "push si\n"
-        "push ax\n"
-        "push bx\n"
-        "mov ax, [_g_symbol_count]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov cx, SYMBOL_NAME_LENGTH - 1\n"
-        ".sa_copy_name:\n"
-        "mov al, [si]\n"
-        "test al, al\n"
-        "jz .sa_pad_name\n"
-        "mov [es:di], al\n"
-        "inc si\n"
-        "inc di\n"
-        "dec cx\n"
-        "jnz .sa_copy_name\n"
-        ".sa_pad_name:\n"
-        "mov byte [es:di], 0\n"
-        "inc di\n"
-        "dec cx\n"
-        "jns .sa_pad_name\n"
-        "mov ax, [_g_symbol_count]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "pop bx\n"
-        "pop ax\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
-        "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 0\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH+3], bl\n"
-        "inc word [_g_symbol_count]\n"
-        "pop si\n"
-        "pop di\n"
-        "pop cx\n"
-        "jmp .sa_end\n"
-        ".sa_overflow:\n"
-        "jmp die_symbol_overflow\n"
-        ".sa_end:");
-}
-
-/* C-callable wrapper around ``symbol_add_constant`` for the common
-   ``name = source_cursor, scope = 0xFFFF`` call shape used by
-   parse_line's equ path.  Naked-asm thunk: the regparm(1) ``value``
-   arrives in AX and is forwarded untouched to symbol_add_constant;
-   BX gets the hard-coded 0xFFFF scope; SI must be set to the name
-   pointer by the caller (parse_line writes ``source_cursor =
-   label_start;`` immediately before the call). */
 __attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_add_constant_c(int value) {
-    asm("mov bx, 0xFFFF\n"
-        "call symbol_add_constant");
+void symbol_add(int value, int scope) {
+    if (symbol_count >= SYMBOL_MAX) {
+        die_symbol_overflow();
+    }
+    int entry = symbol_entry_address(symbol_count);
+    /* Copy up to SYMBOL_NAME_LENGTH - 1 chars from source_cursor
+       into the entry's name field, then zero-fill the remainder
+       through offset SYMBOL_NAME_LENGTH - 1.  source_cursor is
+       SI-pinned; advance it in-place and restore at the end so the
+       inner read compiles to ``mov al, [si]`` (the variable-offset
+       ``source_cursor[n]`` subscript would force a destructive
+       ``add si, <reg>`` — same hazard symbol_lookup's inner loop
+       dodges). */
+    char *saved = source_cursor;
+    int n = 0;
+    while (n < SYMBOL_NAME_LENGTH - 1) {
+        int src = source_cursor[0];
+        if (src == 0) {
+            break;
+        }
+        far_write8(entry + n, src);
+        source_cursor = source_cursor + 1;
+        n = n + 1;
+    }
+    while (n < SYMBOL_NAME_LENGTH) {
+        far_write8(entry + n, 0);
+        n = n + 1;
+    }
+    source_cursor = saved;
+    far_write16(entry + SYMBOL_NAME_LENGTH, value);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 2, 0);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 3, scope & 0xFF);
+    symbol_count = symbol_count + 1;
 }
 
 /* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
@@ -3008,152 +2974,100 @@ void symbol_add_constant_c(int value) {
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_global(int value) {
-    asm("mov bx, 0xFFFF\n"
-        "call symbol_set");
+    asm("push word 0xFFFF\n"
+        "call symbol_set\n"
+        "add sp, 2");
 }
 
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_local(int value) {
-    asm("mov bx, [_g_global_scope]\n"
-        "call symbol_set");
+    asm("push word [_g_global_scope]\n"
+        "call symbol_set\n"
+        "add sp, 2");
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
    so pass-1 code that tells labels from %assigns can skip the
    relocation step).  Delegates the add / update logic to
-   symbol_set, then rewrites the type byte. */
-void symbol_add_constant() {
-    asm("push bx\n"
-        "mov bx, 0FFFFh\n"
-        "call symbol_set\n"
-        "push ax\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov byte [es:di+SYMBOL_NAME_LENGTH+2], 1\n"
-        "pop ax\n"
-        "pop bx");
-}
-
-/* C-callable ``symbol_lookup`` wrapper.  ``scope`` arrives via
-   ``regparm(1)`` AX and is threaded into BX; SI = name is pre-loaded
-   by the caller (pinned ``source_cursor``).  Returns AX = value
-   (0 on miss in either pass; symbol_lookup's pass-1 forward-reference
-   behavior returns 0 / CF clear, pass-2 miss returns 0 / CF set — both
-   paths leave AX = 0).  Callers that care about hit / miss read
-   ``last_symbol_index`` (symbol_lookup sets it to 0xFFFF on miss, else
-   the entry's index); pure-C ``resolve_value`` treats both pass-1 and
-   pass-2 misses as value = 0, matching the retired inline-asm body. */
+   symbol_set, then rewrites the type byte.  Takes value via
+   regparm(1); source_cursor supplies the name via its SI pin. */
 __attribute__((regparm(1)))
-__attribute__((always_inline))
-int symbol_lookup_c(int scope) {
-    asm("mov bx, ax\n"
-        "call symbol_lookup");
+void symbol_add_constant(int value) {
+    symbol_set(value, 0xFFFF);
+    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 2;
+    far_write8(offset, 1);
 }
 
-/* Linear scan of the symbol table.  Callers pass SI = name, BX =
-   wanted scope (0xFFFF for global).  Returns AX = value, CF clear,
-   ``last_symbol_index`` = entry's index on hit; CF set on miss
-   (pass 1 returns 0 / CF clear so forward references don't abort
-   parsing before the symbol is defined).  Body preserves the
-   entry-index push/pop discipline the retired asm used so callers
-   that pass SI / DI as live data don't need to guard them. */
-void symbol_lookup() {
-    asm("push cx\n"
-        "push dx\n"
-        "push di\n"
-        "mov cx, [_g_symbol_count]\n"
-        "test cx, cx\n"
-        "jz .sl_not_found\n"
-        "xor di, di\n"
-        "xor dx, dx\n"
-        ".sl_search:\n"
-        "push ax\n"
-        "mov al, [es:di+SYMBOL_NAME_LENGTH+3]\n"
-        "cmp al, bl\n"
-        "pop ax\n"
-        "jne .sl_next\n"
-        "push si\n"
-        "push di\n"
-        "push cx\n"
-        ".sl_cmp_name:\n"
-        "mov al, [si]\n"
-        "cmp al, [es:di]\n"
-        "jne .sl_no_match\n"
-        "test al, al\n"
-        "jz .sl_name_match\n"
-        "inc si\n"
-        "inc di\n"
-        "jmp .sl_cmp_name\n"
-        ".sl_name_match:\n"
-        "pop cx\n"
-        "pop di\n"
-        "pop si\n"
-        "mov ax, [es:di+SYMBOL_NAME_LENGTH]\n"
-        "mov [_g_last_symbol_index], dx\n"
-        "clc\n"
-        "jmp .sl_end\n"
-        ".sl_no_match:\n"
-        "pop cx\n"
-        "pop di\n"
-        "pop si\n"
-        ".sl_next:\n"
-        "add di, SYMBOL_ENTRY\n"
-        "inc dx\n"
-        "loop .sl_search\n"
-        ".sl_not_found:\n"
-        "xor ax, ax\n"
-        "cmp byte [_g_pass], 1\n"
-        "je .sl_pass1_ok\n"
-        "stc\n"
-        "jmp .sl_end\n"
-        ".sl_pass1_ok:\n"
-        "clc\n"
-        ".sl_end:\n"
-        "pop di\n"
-        "pop dx\n"
-        "pop cx");
+/* Linear scan of the symbol table at ES:0..EFF8.  Each entry is
+   SYMBOL_ENTRY (36) bytes: 32-char null-padded name, 2-byte value,
+   1-byte type, 1-byte scope.  Caller passes scope via regparm(1) AX
+   (low byte is compared against the entry's scope byte; 0xFFFF
+   selects globals since the low byte stored is 0xFF).  Name pointer
+   is ``source_cursor`` (SI-pinned).  On hit: returns AX = value,
+   sets ``last_symbol_index`` to the entry index.  On miss: returns
+   AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF return — all
+   remaining callers test ``last_symbol_index`` for hit/miss.
+   Accesses the symbol segment via ``far_read8`` / ``far_read16``
+   builtins so the body stays pure C (the [es:...] prefix is emitted
+   by cc.py when the builtin expands). */
+__attribute__((regparm(1)))
+int symbol_lookup(int scope) {
+    int count = symbol_count;
+    int entry = 0;
+    int index = 0;
+    char *saved = source_cursor;
+    last_symbol_index = 0xFFFF;
+    while (index < count) {
+        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 3);
+        if (entry_scope == (scope & 0xFF)) {
+            /* Walk source_cursor (= SI) and an entry cursor in
+               parallel.  Reading ``source_cursor[0]`` lowers to a
+               clean ``mov al, [si]``; the variable-offset subscript
+               ``source_cursor[n]`` would force cc.py to ``add si,
+               <reg>`` and wreck the SI alias.  Restore source_cursor
+               from ``saved`` before returning or continuing. */
+            int name_offset = 0;
+            int mismatch = 0;
+            while (1) {
+                int src = source_cursor[0];
+                int ent = far_read8(entry + name_offset);
+                if (src != ent) {
+                    mismatch = 1;
+                    break;
+                }
+                if (src == 0) {
+                    break;
+                }
+                source_cursor = source_cursor + 1;
+                name_offset = name_offset + 1;
+            }
+            source_cursor = saved;
+            if (mismatch == 0) {
+                last_symbol_index = index;
+                return far_read16(entry + SYMBOL_NAME_LENGTH);
+            }
+        }
+        entry = entry + SYMBOL_ENTRY;
+        index = index + 1;
+    }
+    return 0;
 }
 
-/* Update or add.  SI = name (null-terminated), AX = value, BX =
-   scope.  Looks up the entry first; if present, updates the value
-   in place; otherwise calls symbol_add.  Stashes AX / BX in
-   symbol_set_value / symbol_set_scope globals so the symbol_lookup
-   call in between doesn't lose them.  Sets last_symbol_index to
-   the entry's (new or existing) index. */
-void symbol_set() {
-    asm("mov [_g_symbol_set_value], ax\n"
-        "mov [_g_symbol_set_scope], bx\n"
-        "push di\n"
-        "push cx\n"
-        "push dx\n"
-        "mov word [_g_last_symbol_index], 0FFFFh\n"
-        "call symbol_lookup\n"
-        "cmp word [_g_last_symbol_index], 0FFFFh\n"
-        "je .ss_add\n"
-        "mov ax, [_g_last_symbol_index]\n"
-        "call symbol_entry_address\n"
-        "mov di, ax\n"
-        "mov ax, [_g_symbol_set_value]\n"
-        "mov [es:di+SYMBOL_NAME_LENGTH], ax\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop di\n"
-        "jmp .ss_end\n"
-        ".ss_add:\n"
-        "pop dx\n"
-        "pop cx\n"
-        "pop di\n"
-        "mov ax, [_g_symbol_set_value]\n"
-        "mov bx, [_g_symbol_set_scope]\n"
-        "call symbol_add\n"
-        "push ax\n"
-        "mov ax, [_g_symbol_count]\n"
-        "dec ax\n"
-        "mov [_g_last_symbol_index], ax\n"
-        "pop ax\n"
-        ".ss_end:");
+/* Update or add.  SI = name via source_cursor pin, value via
+   regparm(1) AX, scope on the stack.  Runs a symbol_lookup first;
+   if the name exists in the table, overwrites the value word in
+   place; otherwise appends via symbol_add and caches the new
+   entry's index in last_symbol_index. */
+__attribute__((regparm(1)))
+void symbol_set(int value, int scope) {
+    symbol_lookup(scope);
+    if (last_symbol_index == 0xFFFF) {
+        symbol_add(value, scope);
+        last_symbol_index = symbol_count - 1;
+    } else {
+        far_write16(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
+    }
 }
 
 int main(int argc, char *argv[]) {
