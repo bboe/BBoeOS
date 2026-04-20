@@ -29,15 +29,17 @@ source is kept here for reference.
 
 **asm (+3402):** Every ``handle_*`` and every function lives in pure C
 now — what's still
-inline is the `equ _g_<name>` aliases for the 33 mutable globals
-cc.py emits at the binary tail, the `abort_unknown` trampoline
-(stashes SI into `_g_error_word` and jumps to
-`abort_unknown_impl`), the `syscall` ES-safe int-30h wrapper, the
-`mnemonic_table` / `register_table` / `STR_*` data tables, and
-the `_program_end` sentinel.  Those are all NASM-only constructs
-(data layout and control-flow idioms cc.py doesn't express), so
-they stay as a trailing `asm("...")` block alongside the C
-functions.  Historical deltas: 33 mutable globals moved into
+inline is the `abort_unknown` trampoline (stashes SI into
+`_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
+ES-safe int-30h wrapper, the `mnemonic_table` / `register_table` /
+`STR_*` data tables, and the `_program_end` sentinel.  Those are
+all NASM-only constructs (data layout and control-flow idioms
+cc.py doesn't express), so they stay as a trailing `asm("...")`
+block alongside the C functions.  The 31 archaeological
+`<name> equ _g_<name>` aliases also retired: with every handler
+now pure C (and the handful of remaining inline-asm blocks using
+the explicit `_g_<name>` form), no inline-asm referred to the
+bare names.  Historical deltas: 33 mutable globals moved into
 cc.py file-scope declarations (+11 bytes, db→dw widening); memory
 layout / symbol-shape magic numbers (SYMBOL_ENTRY, LINE_BUFFER,
 OUTPUT_BUFFER, SOURCE_BUFFER, JUMP_TABLE, JUMP_MAX,
