@@ -595,6 +595,7 @@ class CodeGenerator:
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
         "EXEC_ARG",
+        "_program_end",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",
         "IPPROTO_ICMP",
@@ -5993,19 +5994,31 @@ def apply_defines(
     can use any token sequence (numbers, char literals, parenthesized
     expressions).  The substituted tokens inherit the line number of
     the original IDENT so diagnostics point at the use site, not the
-    define site.  No recursive expansion or function-like macros.
+    define site.  Substitution iterates to fixed point so ``#define
+    B (A + 1)`` followed by ``#define A _program_end`` expands ``B`` to
+    ``(_program_end + 1)`` in one pass rather than leaving the inner
+    ``A`` untouched.  No function-like macros; an iteration cap
+    (``MAX_ROUNDS``) guards against accidental self-reference cycles.
     """
     if not defines:
         return tokens
-    result: list[tuple[str, str, int]] = []
-    for kind, text, line in tokens:
-        if kind == "IDENT" and text in defines:
-            value_tokens = tokenize(defines[text])
-            for value_kind, value_text, _ in value_tokens[:-1]:  # drop trailing EOF
-                result.append((value_kind, value_text, line))
-        else:
-            result.append((kind, text, line))
-    return result
+    max_rounds = 16
+    for _ in range(max_rounds):
+        result: list[tuple[str, str, int]] = []
+        changed = False
+        for kind, text, line in tokens:
+            if kind == "IDENT" and text in defines:
+                value_tokens = tokenize(defines[text])
+                for value_kind, value_text, _drop in value_tokens[:-1]:  # drop trailing EOF
+                    result.append((value_kind, value_text, line))
+                changed = True
+            else:
+                result.append((kind, text, line))
+        if not changed:
+            return result
+        tokens = result
+    message = f"#define expansion exceeded {max_rounds} rounds; cycle?"
+    raise CompileError(message)
 
 
 def _decode_string_escapes(text: str, /) -> str:

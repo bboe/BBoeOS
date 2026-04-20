@@ -3168,10 +3168,10 @@ int main(int argc, char *argv[]) {
        SOURCE_BUFFER — an %include level saves the 512-byte
        SOURCE_BUFFER into that scratch RAM instead of bloating the
        binary. */
-    asm("mov word [_g_line_buffer], LINE_BUFFER\n"
-        "mov word [_g_output_buffer], OUTPUT_BUFFER\n"
-        "mov word [_g_source_buffer], SOURCE_BUFFER\n"
-        "mov word [_g_include_source_save], SOURCE_BUFFER + 512");
+    line_buffer = LINE_BUFFER;
+    output_buffer = OUTPUT_BUFFER;
+    source_buffer = SOURCE_BUFFER;
+    include_source_save = SOURCE_BUFFER + 512;
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
