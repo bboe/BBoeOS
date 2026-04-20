@@ -140,6 +140,10 @@ __attribute__((regparm(1)))
 void symbol_add_constant_c(int value);
 __attribute__((regparm(1)))
 int symbol_lookup_c(int scope);
+__attribute__((regparm(1)))
+void symbol_set_global(int value);
+__attribute__((regparm(1)))
+void symbol_set_local(int value);
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -1580,13 +1584,9 @@ void handle_unknown_word() {
     source_cursor = name_start;
     if (pass == 1) {
         if (is_local) {
-            asm("mov ax, [_g_current_address]\n"
-                "mov bx, [_g_global_scope]\n"
-                "call symbol_set");
+            symbol_set_local(current_address);
         } else {
-            asm("mov ax, [_g_current_address]\n"
-                "mov bx, 0xFFFF\n"
-                "call symbol_set");
+            symbol_set_global(current_address);
             global_scope = last_symbol_index;
         }
     } else if (is_local == 0) {
@@ -2121,13 +2121,9 @@ void parse_line() {
             source_cursor = label_start;
             if (pass == 1) {
                 if (is_local) {
-                    asm("mov ax, [_g_current_address]\n"
-                        "mov bx, [_g_global_scope]\n"
-                        "call symbol_set");
+                    symbol_set_local(current_address);
                 } else {
-                    asm("mov ax, [_g_current_address]\n"
-                        "mov bx, 0xFFFF\n"
-                        "call symbol_set");
+                    symbol_set_global(current_address);
                     global_scope = last_symbol_index;
                 }
             } else if (is_local == 0) {
@@ -2970,6 +2966,24 @@ __attribute__((regparm(1)))
 void symbol_add_constant_c(int value) {
     asm("mov bx, 0xFFFF\n"
         "call symbol_add_constant");
+}
+
+/* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
+   take ``value`` via ``regparm(1)`` AX; SI = name is pre-loaded by
+   the caller through ``source_cursor``.  Factored out so the
+   identical "global" / "local" dispatches in ``handle_unknown_word``
+   and ``parse_line`` don't need to open-code BX-setup ``call
+   symbol_set`` inline. */
+__attribute__((regparm(1)))
+void symbol_set_global(int value) {
+    asm("mov bx, 0xFFFF\n"
+        "call symbol_set");
+}
+
+__attribute__((regparm(1)))
+void symbol_set_local(int value) {
+    asm("mov bx, [_g_global_scope]\n"
+        "call symbol_set");
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
