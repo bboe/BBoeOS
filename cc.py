@@ -578,6 +578,39 @@ class CodeGenerator:
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
+    #: Invocation sequence for each kernel syscall cc.py builtins issue.
+    #: ``_emit_syscall(name)`` looks up the tuple and emits one line per
+    #: entry.  This is the single choke point when retargeting the OS
+    #: to a different kernel ABI (e.g., real-mode ``int 30h`` →
+    #: protected-mode ``SYSCALL`` / ``SYSENTER``): only this table needs
+    #: editing — every builtin that touches the kernel flows through
+    #: ``_emit_syscall``.  Syscall-specific argument loading and return
+    #: handling (``xor ah, ah`` after EXEC, CF-to-int normalization in
+    #: ``emit_error_syscall_tail``, etc.) stay in the per-builtin
+    #: methods since they depend on the builtin's C semantics, not on
+    #: the underlying kernel entry mechanism.
+    SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
+        "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
+        "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
+        "FS_MKDIR": ("mov ah, SYS_FS_MKDIR", "int 30h"),
+        "FS_RENAME": ("mov ah, SYS_FS_RENAME", "int 30h"),
+        "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
+        "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
+        "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
+        "IO_READ": ("mov ah, SYS_IO_READ", "int 30h"),
+        "IO_WRITE": ("mov ah, SYS_IO_WRITE", "int 30h"),
+        "NET_MAC": ("mov ah, SYS_NET_MAC", "int 30h"),
+        "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),
+        "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
+        "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
+        "REBOOT": ("mov ah, SYS_REBOOT", "int 30h"),
+        "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
+        "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
+        "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
+        "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
+        "VIDEO_MODE": ("mov ah, SYS_VIDEO_MODE", "int 30h"),
+    }
+
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename"})
 
     #: Identifiers that resolve to NASM kernel constants rather than
@@ -1130,9 +1163,19 @@ class CodeGenerator:
             self.emit(f"        mov {register}, [{self._local_address(name)}]")
 
     def _emit_syscall(self, name: str, /) -> None:
-        """Emit ``mov ah, SYS_<NAME> / int 30h``."""
-        self.emit(f"        mov ah, SYS_{name}")
-        self.emit("        int 30h")
+        """Emit the invocation sequence for a named kernel syscall.
+
+        Looks up :attr:`SYSCALL_SEQUENCES` and emits one instruction per
+        entry.  This is the only path by which cc.py-generated C code
+        reaches the kernel, so retargeting the OS to a different ABI
+        (e.g., protected-mode ``syscall`` / ``sysenter``) is done by
+        editing that table — no per-builtin edits required.
+        """
+        if name not in self.SYSCALL_SEQUENCES:
+            message = f"unknown syscall: {name!r}"
+            raise CompileError(message)
+        for instruction in self.SYSCALL_SEQUENCES[name]:
+            self.emit(f"        {instruction}")
 
     @staticmethod
     def _extract_local_label(line: str, /) -> str | None:
