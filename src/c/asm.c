@@ -59,15 +59,11 @@ int last_symbol_index;
    ``_program_end`` (main() initializes it).  read_line fills it
    null-terminated; abort_unknown_impl prints it. */
 char *line_buffer;
-int op1_register;
 /* Kept ``int`` — hot-path readers (``int size1 = op1_size;``) bind
    the value into an ``int`` local, which under byte-slot codegen
    pays a ``xor ah, ah`` per load with no matching store-side win. */
 int op1_size;
-int op1_type;
 int op1_value;
-int op2_register;
-int op2_type;
 int op2_value;
 int org_value;
 /* ``parse_operand_c`` stashes its DX output here so the C caller
@@ -422,14 +418,22 @@ void handle_aam() {
     emit_byte(0x0A);
 }
 
-/* ``adc r16, imm8`` — the only form cc.py emits (the checksum-fold
-   idiom).  Encoded as 83 /2 ib: sign-extended imm8 into r16. */
+/* ``adc r16, imm8`` (83 /2 ib, sign-extended) — the checksum-fold
+   idiom (``adc bx, 0``).  ``adc r8, imm8`` (80 /2 ib) — the
+   high-byte carry propagate in cc.py's byte-compound-assign split
+   (``add al, [mem] / adc ah, 0``).  The upper byte of ``pr``
+   carries the register width (8 or 16): test that directly against
+   0x0800 to branch between the byte and word opcodes. */
 void handle_adc() {
     skip_ws();
     int pr = parse_register();
     skip_comma();
     int imm = resolve_value();
-    emit_byte(0x83);
+    if ((pr & 0xFF00) == 0x0800) {
+        emit_byte(0x80);
+    } else {
+        emit_byte(0x83);
+    }
     emit_byte(0xD0 | (pr & 0xFF));
     emit_byte(imm);
 }
