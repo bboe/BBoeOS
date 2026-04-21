@@ -133,6 +133,8 @@ __attribute__((regparm(1)))
 void emit_modrm_disp(int modrm, int disp);
 __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp);
+__attribute__((regparm(1)))
+void emit_alu_binop(int rfield);
 void parse_directive();
 int parse_operand();
 __attribute__((carry_return))
@@ -456,18 +458,36 @@ void handle_adc() {
     emit_byte(imm);
 }
 
-/* ``add`` has four operand shapes: ``[disp16], r16`` (via
-   mem_op_reg_emit with opcode 01), reg/reg (00/01 modrm),
-   reg/[mem] (02/03 modrm with direct disp16 or reg+disp8), and
-   reg/imm (04/05 short AL / AX / 80 / 81 / 83 /0 by imm size and
-   register).  /r field is 0 so modrm constants are 0xC0 for
-   register mode.  The ``add [disp16], r16`` entry uses call +
-   ``.had_end:`` so cc.py's bp frame closes after mem_op_reg_emit
-   returns. */
-void handle_add() {
+/* The ALU binop family (``add`` /0, ``or`` /1, ``and`` /4, ``sub`` /5,
+   ``xor`` /6) all share one encoding shape: the /r field drives every
+   opcode in the instruction, so one body parametrized on ``rfield``
+   replaces five near-identical handlers.
+
+   Opcode derivations from ``rfield``:
+     - r/r byte:       rfield * 8           (00 / 08 / 20 / 28 / 30)
+     - r/mem byte:     rfield * 8 | 2       (02 / 0A / 22 / 2A / 32)
+     - AL imm8 short:  rfield * 8 | 4       (04 / 0C / 24 / 2C / 34)
+     - AX imm16 short: rfield * 8 | 5       (05 / 0D / 25 / 2D / 35)
+     - [mem], r16:     rfield * 8 | 1       (01 / 09 / 21 / 29 / 31)
+     - 80 /r modrm:    0xC0 | (rfield * 8)  (C0 / C8 / E0 / E8 / F0)
+
+   The five retired handlers differed only in which optional forms
+   they accepted (add/sub covered the most; xor/and the fewest).  The
+   shared helper is a strict superset: any operand shape the retired
+   handlers accepted is preserved byte-identically, and a handful of
+   shapes that were silently mis-encoded (e.g. ``or ax, imm16`` went
+   through ``81 /1 iw`` instead of the ``0D iw`` short form) now match
+   NASM.  asm.asm doesn't exercise those previously-broken shapes, so
+   test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
+   the call for the ``sub word [disp16], imm16`` form that only it
+   uses. */
+__attribute__((regparm(1)))
+void emit_alu_binop(int rfield) {
     skip_ws();
+    int op_rr = rfield << 3;
+    int modrm_base = 0xC0 | op_rr;
     if (source_cursor[0] == '[') {
-        mem_op_reg_emit(0x01);
+        mem_op_reg_emit(op_rr | 1);
         return;
     }
     int packed_register = parse_register();
@@ -479,76 +499,43 @@ void handle_add() {
     int register2_id = packed_operand & 0xFF;
     int value2 = parse_operand_value;
     if (type2 == 0) {
-        emit_sized(0x00, size1);
+        emit_sized(op_rr, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
     } else if (type2 == 2) {
-        emit_sized(0x02, size1);
+        emit_sized(op_rr | 2, size1);
         emit_modrm_direct(register1_id, value2);
     } else if (type2 == 3) {
-        emit_sized(0x02, size1);
+        emit_sized(op_rr | 2, size1);
         emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
         emit_byte(value2 & 0xFF);
     } else if (size1 == 8) {
         if (register1_id == 0) {
-            emit_byte(0x04);
+            emit_byte(op_rr | 4);
         } else {
             emit_byte(0x80);
-            emit_byte(0xC0 | register1_id);
+            emit_byte(modrm_base | register1_id);
         }
         emit_byte(value2 & 0xFF);
     } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
-        emit_byte(0xC0 | register1_id);
+        emit_byte(modrm_base | register1_id);
         emit_byte(value2 & 0xFF);
     } else if (register1_id == 0) {
-        emit_byte(0x05);
+        emit_byte(op_rr | 5);
         emit_word(value2);
     } else {
         emit_byte(0x81);
-        emit_byte(0xC0 | register1_id);
+        emit_byte(modrm_base | register1_id);
         emit_word(value2);
     }
 }
 
-/* ``and r, r`` / ``and r, imm`` / ``and [disp16], r16``.  The
-   memory-destination form delegates to ``mem_op_reg_emit``.  Reg-reg
-   / reg-imm dispatch mirrors handle_xor with the /r field constant
-   swapped for 0xE0 (``/4``) and the short AL / AX form using 24/25. */
+void handle_add() {
+    emit_alu_binop(0);
+}
+
 void handle_and() {
-    skip_ws();
-    if (source_cursor[0] == '[') {
-        mem_op_reg_emit(0x21);
-        return;
-    }
-    int packed_register = parse_register();
-    int register1_id = packed_register & 0xFF;
-    int size1 = (packed_register >> 8) & 0xFF;
-    skip_comma();
-    int packed_operand = parse_operand();
-    int type2 = (packed_operand >> 8) & 0xFF;
-    int register2_id = packed_operand & 0xFF;
-    int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(0x20, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (size1 == 8) {
-        if (register1_id == 0) {
-            emit_byte(0x24);
-            emit_byte(value2 & 0xFF);
-        } else {
-            emit_byte(0x80);
-            emit_byte(0xE0 | register1_id);
-            emit_byte(value2 & 0xFF);
-        }
-    } else if (value2 >= -128 && value2 <= 127) {
-        emit_byte(0x83);
-        emit_byte(0xE0 | register1_id);
-        emit_byte(value2 & 0xFF);
-    } else {
-        emit_byte(0x81);
-        emit_byte(0xE0 | register1_id);
-        emit_word(value2);
-    }
+    emit_alu_binop(4);
 }
 
 /* ``call <label>`` (E8 rel16) and ``call [reg+disp8]`` (FF /2) —
@@ -1017,46 +1004,8 @@ void handle_not() {
     unary_f6f7(0xD0);
 }
 
-/* ``or r, r`` / ``or r, imm`` / ``or r, [disp16]``.  Same /r=1 as
-   the retired asm (0xC8 modrm); reg-reg uses 08/09; reg-imm uses
-   0C short AL / 83 /1 ib sign-extended / 81 /1 iw / 80 /1 ib;
-   reg-[disp16] uses 0A/0B with modrm mod=00 rm=110.  Structurally
-   this is handle_xor with /r swapped and one extra op2_type=2
-   branch for the direct-memory source form. */
 void handle_or() {
-    skip_ws();
-    int packed_register = parse_register();
-    int register1_id = packed_register & 0xFF;
-    int size1 = (packed_register >> 8) & 0xFF;
-    skip_comma();
-    int packed_operand = parse_operand();
-    int type2 = (packed_operand >> 8) & 0xFF;
-    int register2_id = packed_operand & 0xFF;
-    int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(0x08, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (type2 == 2) {
-        emit_sized(0x0A, size1);
-        emit_modrm_direct(register1_id, value2);
-    } else if (size1 == 8) {
-        if (register1_id == 0) {
-            emit_byte(0x0C);
-            emit_byte(value2 & 0xFF);
-        } else {
-            emit_byte(0x80);
-            emit_byte(0xC8 | register1_id);
-            emit_byte(value2 & 0xFF);
-        }
-    } else if (value2 >= -128 && value2 <= 127) {
-        emit_byte(0x83);
-        emit_byte(0xC8 | register1_id);
-        emit_byte(value2 & 0xFF);
-    } else {
-        emit_byte(0x81);
-        emit_byte(0xC8 | register1_id);
-        emit_word(value2);
-    }
+    emit_alu_binop(1);
 }
 
 /* ``pop`` / ``push`` accept a register (58+reg / 50+reg), segment
@@ -1207,20 +1156,12 @@ void handle_stosw() {
     emit_byte(0xAB);
 }
 
-/* ``sub`` has four operand shapes — ``[disp16], r16`` (via
-   mem_op_reg_emit with opcode 29), ``word [disp16], imm16`` (a
-   dedicated 81 /5 iw path), reg/reg (28/29 modrm), and reg/imm
-   with the /r=5 constant (0xE8).  reg-reg / reg-imm dispatch
-   mirrors handle_xor but without the AX / AL short forms (sub
-   has 2C/2D short forms but the self-host never emits them).
-   Memory-destination call into mem_op_reg_emit uses ``call`` +
-   terminal ``.hsu_end:`` so cc.py's bp frame closes. */
+/* ``sub`` supports the shared ALU binop grammar plus one bespoke
+   form that only sub uses — ``sub word [disp16], imm16`` (the
+   dedicated 81 /5 iw path, the TCP-checksum update idiom in
+   asm.asm).  The wrapper peels off that path before delegating. */
 void handle_sub() {
     skip_ws();
-    if (source_cursor[0] == '[') {
-        mem_op_reg_emit(0x29);
-        return;
-    }
     if (match_word(STR_WORD)) {
         skip_ws();
         if (source_cursor[0] != '[') {
@@ -1240,41 +1181,7 @@ void handle_sub() {
         emit_word(imm);
         return;
     }
-    int packed_register = parse_register();
-    int register1_id = packed_register & 0xFF;
-    int size1 = (packed_register >> 8) & 0xFF;
-    skip_comma();
-    int packed_operand = parse_operand();
-    int type2 = (packed_operand >> 8) & 0xFF;
-    int register2_id = packed_operand & 0xFF;
-    int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(0x28, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (type2 == 2) {
-        emit_sized(0x2A, size1);
-        emit_modrm_direct(register1_id, value2);
-    } else if (type2 == 3) {
-        emit_sized(0x2A, size1);
-        emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
-        emit_byte(value2 & 0xFF);
-    } else if (size1 == 8) {
-        if (register1_id == 0) {
-            emit_byte(0x2C);
-        } else {
-            emit_byte(0x80);
-            emit_byte(0xE8 | register1_id);
-        }
-        emit_byte(value2 & 0xFF);
-    } else if (value2 >= -128 && value2 <= 127) {
-        emit_byte(0x83);
-        emit_byte(0xE8 | register1_id);
-        emit_byte(value2 & 0xFF);
-    } else {
-        emit_byte(0x81);
-        emit_byte(0xE8 | register1_id);
-        emit_word(value2);
-    }
+    emit_alu_binop(5);
 }
 
 /* ``test r, r`` / ``test r, imm`` / ``test byte [mem], imm8`` —
@@ -1406,41 +1313,8 @@ void handle_xchg() {
     }
 }
 
-/* ``xor r, r`` / ``xor r, imm`` — same shape as handle_or / and.
-   reg-reg uses 30/31 modrm; reg-imm prefers 34/35 short AX/AL
-   forms, sign-extended ``83 /6 ib`` for r16 when the immediate
-   fits in -128..127, else ``81 /6 iw`` (or ``80 /6 ib`` for r8). */
 void handle_xor() {
-    skip_ws();
-    int packed_register = parse_register();
-    int register1_id = packed_register & 0xFF;
-    int size1 = (packed_register >> 8) & 0xFF;
-    skip_comma();
-    int packed_operand = parse_operand();
-    int type2 = (packed_operand >> 8) & 0xFF;
-    int register2_id = packed_operand & 0xFF;
-    int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(0x30, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (size1 == 8) {
-        if (register1_id == 0) {
-            emit_byte(0x34);
-            emit_byte(value2 & 0xFF);
-        } else {
-            emit_byte(0x80);
-            emit_byte(0xF0 | register1_id);
-            emit_byte(value2 & 0xFF);
-        }
-    } else if (value2 >= -128 && value2 <= 127) {
-        emit_byte(0x83);
-        emit_byte(0xF0 | register1_id);
-        emit_byte(value2 & 0xFF);
-    } else {
-        emit_byte(0x81);
-        emit_byte(0xF0 | register1_id);
-        emit_word(value2);
-    }
+    emit_alu_binop(6);
 }
 
 /* Convert an ASCII hex digit to its numeric value.  Returns 0..15
