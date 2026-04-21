@@ -8,14 +8,14 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 9359      | +1106 |
+| asm     | 8253        | 9342      | +1089 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1091      | +367  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2238      | +261  |
+| edit    | 1977        | 2226      | +249  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 161       | +26   |
 | mkdir   | 123         | 127       | +4    |
@@ -24,10 +24,10 @@ source is kept here for reference.
 | netrecv | 334         | 375       | +41   |
 | netsend | 187         | 216       | +29   |
 | ping    | 1019        | 1184      | +165  |
-| shell   | 921         | 1219      | +298  |
+| shell   | 921         | 1217      | +296  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+1106):** Every ``handle_*`` and every function lives in pure C
+**asm (+1089):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `abort_unknown` trampoline (stashes SI into
 `_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
@@ -94,7 +94,7 @@ compiler also generates word-sized loads with `xor ah,ah`
 zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+261):** Both versions implement the same gap-buffer /
+**edit (+249):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -177,7 +177,7 @@ ICMP echo template) use ``memcpy`` from short string-literal
 constants instead of per-byte assignments, which collapses each
 ~8 × ``mov byte [...], imm`` burst into a single ``rep movsb``.
 
-**shell (+324):** The archived ``shell.asm`` has been edited so
+**shell (+296):** The archived ``shell.asm`` has been edited so
 that both versions share the same scratch layout — ``SECTOR_BUFFER
 + 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
 exec path — instead of carrying ~290 bytes of zero-initialized

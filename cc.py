@@ -4807,19 +4807,30 @@ class CodeGenerator:
             continue
 
     def peephole_dead_ah(self) -> None:
-        """Drop ``xor ah, ah`` when the following instruction doesn't read AH.
+        """Drop ``xor ah, ah`` when no intervening instruction reads AH.
 
         The zero-extension after ``mov al, [mem]`` is dead whenever the
-        next instruction either overwrites AH (``mov ah, X``) or
-        consumes only AL (``cmp al, imm``, ``test al, al``, ``mov
-        [addr], al``, ``or al, al``).  Byte-scalar global loads
-        unconditionally emit the ``xor`` so the load is safe under
-        later word-sized arithmetic; this peephole reclaims the two
-        bytes on the common compare-and-branch path.  ``xor ah, ah``
-        itself sets flags (ZF=1, CF=0), but any consumer we elide
-        against either sets its own flags (``cmp``, ``test``, ``or``)
-        or doesn't use flags (``mov``), so dropping the xor never
-        changes the observable control-flow.
+        *first non-AX-preserving* instruction after it either
+        overwrites AH (``mov ah, X``) or consumes only AL (``cmp al,
+        imm``, ``test al, al``, ``mov [addr], al``, ``or al, al``).
+        Byte-scalar global loads unconditionally emit the ``xor`` so
+        the load is safe under later word-sized arithmetic; this
+        peephole reclaims the two bytes on the common
+        compare-and-branch path.
+
+        Scans forward across AX-preserving instructions (register-to-
+        register moves not touching AX, pushes/pops of non-AX regs,
+        ``cmp`` / ``test`` on non-AX operands, ``clc`` / ``stc`` /
+        ``cld``) so that patterns like ``xor ah, ah ; pop si ;
+        test ax, ax`` fold the whole trio.  Stops at any control flow
+        (``jmp`` / ``call`` / Jcc / ``ret`` / label), since the
+        consumer might be reached along a different path where AH
+        isn't zero.
+
+        ``xor ah, ah`` itself sets flags (ZF=1, CF=0), but any consumer
+        we elide against either sets its own flags (``cmp``, ``test``,
+        ``or``) or doesn't use flags (``mov``), so dropping the xor
+        never changes observable control-flow.
         """
         al_only_prefixes = (
             "mov [",  # mov [addr], al
@@ -4832,38 +4843,82 @@ class CodeGenerator:
             "sub al,",
             "mov ah, ",
         )
+        # AX-preserving skip list — instructions that don't touch AX
+        # (including AH) and don't transfer control.  Any instruction
+        # not recognized here aborts the scan conservatively.
+        ax_preserving_pushpop = {f"{op} {reg}" for op in ("push", "pop") for reg in ("bx", "cx", "dx", "si", "di", "bp")}
+        ax_preserving_prefixes = ("cmp ", "test ")  # cmp/test on non-AX also fine since they don't write AX
+        ax_preserving_exact = {"clc", "stc", "cld"}
+
+        def is_ax_preserving(stmt: str) -> bool:
+            if stmt in ax_preserving_pushpop or stmt in ax_preserving_exact:
+                return True
+            # ``mov <non-AX reg>, ...`` preserves AX.
+            match = re.match(r"mov\s+(bx|cx|dx|si|di|bp|bh|bl|ch|cl|dh|dl|sp|ss|es|ds|cs|fs|gs),", stmt)
+            if match:
+                return True
+            # ``(add|sub|and|or|xor|inc|dec|shl|shr|neg|not) <non-AX reg>``.
+            match = re.match(r"(add|sub|and|or|xor|inc|dec|shl|shr|neg|not)\s+(bx|cx|dx|si|di|bp|b[hl]|c[hl]|d[hl])", stmt)
+            if match:
+                return True
+            # ``mov [mem], <non-AX>`` — a store that doesn't read AX.
+            match = re.match(r"mov\s+\[[^\]]+\],\s*(bx|cx|dx|si|di|bp|\d+|0x[0-9a-fA-F]+)", stmt)
+            if match:
+                return True
+            # ``(inc|dec|add|sub|and|or|xor) word|byte [mem]`` — memory
+            # arithmetic not involving AX.
+            match = re.match(r"(add|sub|and|or|xor|inc|dec)\s+(word|byte)\s+\[", stmt)
+            if match:
+                return True
+            if any(stmt.startswith(prefix) for prefix in ax_preserving_prefixes):
+                # ``cmp al, X`` / ``test al, X`` would itself be the
+                # AL-only consumer we're looking for, not a skip.  Also
+                # ``cmp ax, X`` / ``test ax, X`` read AH, so the scan
+                # aborts conservatively in both cases.
+                return not stmt.startswith(("cmp al,", "test al,", "cmp ax", "test ax"))
+            return False
+
         i = 0
         while i < len(self.lines) - 1:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            if a == "xor ah, ah":
-                # Word op on AX that only inspects AL because AH is
-                # known zero — rewrite to the byte form so peephole_dead_ah
-                # can drop the xor.  ``test ax, ax`` → ``test al, al``
-                # and ``cmp ax, K`` → ``cmp al, K`` when K fits in a
-                # byte.  Byte form is 1 byte shorter; the dropped xor
-                # reclaims another 2 bytes per site.
-                if b == "test ax, ax":
-                    self.lines[i + 1] = self.lines[i + 1].replace("test ax, ax", "test al, al")
-                    b = "test al, al"
-                elif b.startswith("cmp ax, "):
-                    operand = b[len("cmp ax, ") :]
-                    try:
-                        value = int(operand, 0)
-                    except ValueError:
-                        value = None
-                    if value is not None and 0 <= value <= 255:
-                        self.lines[i + 1] = self.lines[i + 1].replace("cmp ax, ", "cmp al, ", 1)
-                        b = f"cmp al, {operand}"
-                if b.startswith(al_only_prefixes):
-                    # For ``mov [addr], al`` we must verify the source
-                    # operand is actually ``al`` (not ``ax``) — the
-                    # prefix match would otherwise catch word stores.
-                    if b.startswith("mov [") and not b.endswith(", al"):
-                        i += 1
-                        continue
-                    del self.lines[i]
+            if self.lines[i].strip() != "xor ah, ah":
+                i += 1
+                continue
+            # Scan forward past AX-preserving instructions to the first
+            # real consumer.
+            j = i + 1
+            while j < len(self.lines) and is_ax_preserving(self.lines[j].strip()):
+                j += 1
+            if j >= len(self.lines):
+                i += 1
+                continue
+            b = self.lines[j].strip()
+            # Word op on AX that only inspects AL because AH is known
+            # zero — rewrite to the byte form so the xor becomes dead.
+            # ``test ax, ax`` → ``test al, al`` and ``cmp ax, K`` →
+            # ``cmp al, K`` when K fits in a byte.  Byte form is 1 byte
+            # shorter; the dropped xor reclaims another 2 bytes per
+            # site.
+            if b == "test ax, ax":
+                self.lines[j] = self.lines[j].replace("test ax, ax", "test al, al")
+                b = "test al, al"
+            elif b.startswith("cmp ax, "):
+                operand = b[len("cmp ax, ") :]
+                try:
+                    value = int(operand, 0)
+                except ValueError:
+                    value = None
+                if value is not None and 0 <= value <= 255:
+                    self.lines[j] = self.lines[j].replace("cmp ax, ", "cmp al, ", 1)
+                    b = f"cmp al, {operand}"
+            if b.startswith(al_only_prefixes):
+                # For ``mov [addr], al`` verify the source operand is
+                # actually ``al`` (not ``ax``) — the prefix match would
+                # otherwise catch word stores.
+                if b.startswith("mov [") and not b.endswith(", al"):
+                    i += 1
                     continue
+                del self.lines[i]
+                continue
             i += 1
 
     def peephole_redundant_byte_mask(self) -> None:
