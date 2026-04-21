@@ -138,6 +138,7 @@ boot_shell:
         jmp .shell_halt
 
 %include "ansi.asm"
+%include "ata.asm"
 %include "fd.asm"
 %include "io.asm"
 %include "net.asm"

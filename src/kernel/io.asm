@@ -199,30 +199,6 @@ find_file:
         clc
         ret
 
-lba_to_chs:
-        ;; Convert 1-based logical sector to CHS using detected geometry
-        ;; Input: AX = logical sector (1-based, 16-bit)
-        ;; Output: CH = cylinder low 8 bits, CL bits 0-5 = sector (1-based)
-        ;;         CL bits 6-7 = cylinder bits 8-9, DH = head
-        ;; Clobbers: AX
-        push bx
-        dec ax                  ; 0-based LBA
-        xor dx, dx
-        mov bl, [sectors_per_track]
-        xor bh, bh
-        div bx                  ; AX = track (LBA/spt), DX = sector_in_track
-        mov cl, dl
-        inc cl                  ; CL = 1-based sector (low 6 bits)
-        xor dx, dx
-        mov bl, [heads_per_cylinder]
-        div bx                  ; AX = cylinder, DX = head
-        mov ch, al              ; CH = cylinder low 8 bits
-        shl ah, 6               ; encode cyl bits 8-9 into CL bits 6-7
-        or cl, ah
-        mov dh, dl              ; DH = head
-        pop bx
-        ret
-
 load_file:
         ;; Load file sectors into memory
         ;; Input: BX = pointer to directory entry in SECTOR_BUFFER
@@ -255,23 +231,6 @@ load_file:
         .lf_loaded:
         clc
         .lf_done:
-        ret
-
-read_sector:
-        ;; Read one sector into SECTOR_BUFFER
-        ;; Input: AX = logical sector number (1-based, 16-bit)
-        ;; Sets carry flag on error
-        push bx
-        push cx
-        push dx
-        call lba_to_chs         ; CH/CL/DH set; AX clobbered
-        mov dl, [boot_disk]
-        mov bx, SECTOR_BUFFER
-        mov ax, 0201h
-        int 13h
-        pop dx
-        pop cx
-        pop bx
         ret
 
 scan_directory_entries:
@@ -427,19 +386,3 @@ scan_directory_entries:
         pop di
         ret
 
-write_sector:
-        ;; Write SECTOR_BUFFER to one sector on disk
-        ;; Input: AX = logical sector number (1-based, 16-bit)
-        ;; Sets carry flag on error
-        push bx
-        push cx
-        push dx
-        call lba_to_chs
-        mov dl, [boot_disk]
-        mov bx, SECTOR_BUFFER
-        mov ax, 0301h
-        int 13h
-        pop dx
-        pop cx
-        pop bx
-        ret
