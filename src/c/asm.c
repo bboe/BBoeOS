@@ -144,6 +144,8 @@ __attribute__((regparm(1)))
 int open_file_ro(char *path);
 __attribute__((regparm(1)))
 int reg_to_rm(int register_id);
+__attribute__((regparm(1)))
+void unary_f6f7(int modrm_base);
 int resolve_label();
 int resolve_value();
 void skip_comma();
@@ -709,18 +711,8 @@ void handle_dec() {
     }
 }
 
-/* ``div r8`` / ``div r16`` — picks F6 or F7, ORs 0xF0 (modrm with
-   /6 reg field) into the register number.  Same shape as
-   handle_mul / handle_neg / handle_not above. */
 void handle_div() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xF0 | (packed_register & 0xFF));
+    unary_f6f7(0xF0);
 }
 
 void handle_inc() {
@@ -1012,14 +1004,13 @@ void handle_movzx() {
     }
 }
 
-/* Single-operand arithmetic family (``mul`` / ``neg`` / ``not`` on a
-   r8 or r16).  Each handler picks opcode F6 (byte) or F7 (word) based
-   on the register's width and ORs the /r field constant (4 for mul,
-   3 for neg, 2 for not) into a register-mode ModR/M byte (C0 | (n<<3)
-   | rm).  The C bodies stash the parsed AX (AL=reg, AH=size) on the
-   stack around the opcode emit; cc.py's bp frame is outside this
-   push/pop so the balance stays clean. */
-void handle_mul() {
+/* Single-operand F6/F7-family handlers (``mul`` / ``neg`` / ``not``
+   / ``div`` on a r8 or r16).  Emits F6 (byte) or F7 (word) followed
+   by a register-mode ModR/M byte whose /r field is baked into
+   ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
+   div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
+__attribute__((regparm(1)))
+void unary_f6f7(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     int opcode = 0xF7;
@@ -1027,29 +1018,19 @@ void handle_mul() {
         opcode = 0xF6;
     }
     emit_byte(opcode);
-    emit_byte(0xE0 | (packed_register & 0xFF));
+    emit_byte(modrm_base | (packed_register & 0xFF));
+}
+
+void handle_mul() {
+    unary_f6f7(0xE0);
 }
 
 void handle_neg() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xD8 | (packed_register & 0xFF));
+    unary_f6f7(0xD8);
 }
 
 void handle_not() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xD0 | (packed_register & 0xFF));
+    unary_f6f7(0xD0);
 }
 
 /* ``or r, r`` / ``or r, imm`` / ``or r, [disp16]``.  Same /r=1 as
