@@ -176,6 +176,19 @@ __attribute__((regparm(1)))
 void symbol_set_global(int value);
 __attribute__((regparm(1)))
 void symbol_set_local(int value);
+__attribute__((regparm(1)))
+void define_label_here(int is_local);
+__attribute__((regparm(1)))
+void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
+__attribute__((regparm(1)))
+void emit_modrm_disp8(int rm, int disp);
+__attribute__((regparm(1)))
+void emit_sized_imm(int value, int size);
+__attribute__((regparm(1)))
+int lookup_ident_here(int advance);
+__attribute__((regparm(1)))
+int match_seg_ds_es(int ds_opcode, int es_opcode);
+int parse_rhs();
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -232,6 +245,30 @@ void compute_source_prefix() {
         j = j + 1;
     }
     source_prefix[end] = '\0';
+}
+
+/* Define the label at ``source_cursor`` as pointing at ``current_address``.
+   Shared by ``parse_line``'s ``LABEL:`` branch and ``handle_unknown_word``'s
+   bare-label fallback.  Pass 1 registers the symbol (global or local by
+   the ``.`` prefix, captured by the caller); pass 2 re-resolves globals
+   so ``global_scope`` tracks the enclosing label for subsequent locals.
+   Callers arrange ``source_cursor`` = name (SI-pinned ABI shared with
+   every ``symbol_*`` entry point). */
+__attribute__((regparm(1)))
+void define_label_here(int is_local) {
+    if (pass == 1) {
+        if (is_local) {
+            symbol_set_local(current_address);
+        } else {
+            symbol_set_global(current_address);
+            global_scope = last_symbol_index;
+        }
+    } else if (is_local == 0) {
+        symbol_lookup(0xFFFF);
+        if (last_symbol_index != 0xFFFF) {
+            global_scope = last_symbol_index;
+        }
+    }
 }
 
 /* Error reporters called while ES is still pointed at the symbol-
@@ -412,6 +449,19 @@ void emit_sized(int base, int size) {
     }
 }
 
+/* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
+   word otherwise.  Used for the ``[mem], imm`` tail shared by two of
+   ``handle_mov``'s branches (the other imm tails already fit
+   ``emit_byte`` / ``emit_word`` directly). */
+__attribute__((regparm(1)))
+void emit_sized_imm(int value, int size) {
+    if (size == 8) {
+        emit_byte(value & 0xFF);
+    } else {
+        emit_word(value);
+    }
+}
+
 /* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
    displacement magnitude.  ``modrm`` is the mod=00 base (rm / reg
    fields already set); the helper ORs in 0x40 for disp8 and 0x80
@@ -435,6 +485,22 @@ __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp) {
     emit_byte((reg << 3) | 0x06);
     emit_word(disp);
+}
+
+/* Narrower sibling of ``emit_modrm_disp`` for the handlers that only
+   accept disp8 (``inc_dec_handler``, ``handle_movzx``, ``handle_test``'s
+   memory-dest branch).  ``disp == 0`` emits a bare ModR/M; a non-zero
+   ``disp`` emits ``modrm | 0x40`` followed by the low byte.  Unlike
+   ``emit_modrm_disp``, no disp16 fallback — the asm sources these
+   handlers see never exceed ±128. */
+__attribute__((regparm(1)))
+void emit_modrm_disp8(int rm, int disp) {
+    if (disp == 0) {
+        emit_byte(rm);
+    } else {
+        emit_byte(rm | 0x40);
+        emit_byte(disp & 0xFF);
+    }
 }
 
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
@@ -473,6 +539,40 @@ void handle_adc() {
     adc_sbb_handler(0xD0);
 }
 
+/* ``<op> reg, imm`` shared by ``emit_alu_binop`` and ``handle_cmp``.
+   ``op_rr`` is ``rfield << 3`` (add=0x00, or=0x08, and=0x20, sub=0x28,
+   xor=0x30, cmp=0x38); ``modrm_base = 0xC0 | op_rr`` covers the
+   register-mode ModR/M constants.  Four encodings picked by size /
+   range / AL-or-AX:
+     - r8:           80 /r ib, or AL short 04+op_rr / 0C / 24 / 2C / 34 / 3C
+     - r16, imm8:    83 /r ib (sign-extended)
+     - AX, imm16:    05+op_rr / 0D / 25 / 2D / 35 / 3D short form
+     - r16, imm16:   81 /r iw */
+__attribute__((regparm(1)))
+void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
+    int modrm_base = 0xC0 | op_rr;
+    if (size == 8) {
+        if (reg == 0) {
+            emit_byte(op_rr | 4);
+        } else {
+            emit_byte(0x80);
+            emit_byte(modrm_base | reg);
+        }
+        emit_byte(imm & 0xFF);
+    } else if (imm >= -128 && imm <= 127) {
+        emit_byte(0x83);
+        emit_byte(modrm_base | reg);
+        emit_byte(imm & 0xFF);
+    } else if (reg == 0) {
+        emit_byte(op_rr | 5);
+        emit_word(imm);
+    } else {
+        emit_byte(0x81);
+        emit_byte(modrm_base | reg);
+        emit_word(imm);
+    }
+}
+
 /* The ALU binop family (``add`` /0, ``or`` /1, ``and`` /4, ``sub`` /5,
    ``xor`` /6) all share one encoding shape: the /r field drives every
    opcode in the instruction, so one body parametrized on ``rfield``
@@ -500,7 +600,6 @@ __attribute__((regparm(1)))
 void emit_alu_binop(int rfield) {
     skip_ws();
     int op_rr = rfield << 3;
-    int modrm_base = 0xC0 | op_rr;
     if (source_cursor[0] == '[') {
         mem_op_reg_emit(op_rr | 1);
         return;
@@ -523,25 +622,8 @@ void emit_alu_binop(int rfield) {
         emit_sized(op_rr | 2, size1);
         emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
         emit_byte(value2 & 0xFF);
-    } else if (size1 == 8) {
-        if (register1_id == 0) {
-            emit_byte(op_rr | 4);
-        } else {
-            emit_byte(0x80);
-            emit_byte(modrm_base | register1_id);
-        }
-        emit_byte(value2 & 0xFF);
-    } else if (value2 >= -128 && value2 <= 127) {
-        emit_byte(0x83);
-        emit_byte(modrm_base | register1_id);
-        emit_byte(value2 & 0xFF);
-    } else if (register1_id == 0) {
-        emit_byte(op_rr | 5);
-        emit_word(value2);
     } else {
-        emit_byte(0x81);
-        emit_byte(modrm_base | register1_id);
-        emit_word(value2);
+        emit_alu_reg_imm(op_rr, register1_id, size1, value2);
     }
 }
 
@@ -600,14 +682,12 @@ void handle_cmp() {
     int size1 = op1_size;
     skip_comma();
     if (type1 == 0) {
-        char *saved = source_cursor;
         int packed_register2 = parse_register();
         if (packed_register2 >= 0) {
             emit_sized(0x38, size1);
             emit_byte(make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
             return;
         }
-        source_cursor = saved;
         if (source_cursor[0] == '[') {
             int packed_operand2 = parse_operand();
             int type2 = (packed_operand2 >> 8) & 0xFF;
@@ -626,26 +706,7 @@ void handle_cmp() {
             }
         }
         int imm = resolve_value();
-        if (size1 == 8) {
-            if (register1_id == 0) {
-                emit_byte(0x3C);
-            } else {
-                emit_byte(0x80);
-                emit_byte(0xF8 | register1_id);
-            }
-            emit_byte(imm & 0xFF);
-        } else if (imm >= -128 && imm <= 127) {
-            emit_byte(0x83);
-            emit_byte(0xF8 | register1_id);
-            emit_byte(imm & 0xFF);
-        } else if (register1_id == 0) {
-            emit_byte(0x3D);
-            emit_word(imm);
-        } else {
-            emit_byte(0x81);
-            emit_byte(0xF8 | register1_id);
-            emit_word(imm);
-        }
+        emit_alu_reg_imm(0x38, register1_id, size1, imm);
         return;
     }
     if (type1 != 2 && type1 != 3) {
@@ -709,13 +770,7 @@ void inc_dec_handler(int rfield) {
             emit_byte(0x06 | reg_shift);
             emit_word(value);
         } else {
-            int rm = reg_to_rm(register_id) | reg_shift;
-            if (value == 0) {
-                emit_byte(rm);
-            } else {
-                emit_byte(rm | 0x40);
-                emit_byte(value & 0xFF);
-            }
+            emit_modrm_disp8(reg_to_rm(register_id) | reg_shift, value);
         }
     }
 }
@@ -922,11 +977,7 @@ void handle_mov() {
             emit_sized(0xC6, size1);
             emit_byte(0x06);
             emit_word(value1);
-            if (size1 == 8) {
-                emit_byte(value2 & 0xFF);
-            } else {
-                emit_word(value2);
-            }
+            emit_sized_imm(value2, size1);
             return;
         }
         return;
@@ -942,11 +993,7 @@ void handle_mov() {
             emit_sized(0xC6, size1);
             int modrm = reg_to_rm(register1_id);
             emit_modrm_disp(modrm, value1);
-            if (size1 == 8) {
-                emit_byte(value2 & 0xFF);
-            } else {
-                emit_word(value2);
-            }
+            emit_sized_imm(value2, size1);
             return;
         }
     }
@@ -980,13 +1027,7 @@ void handle_movzx() {
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else {
-        int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-        if (value2 != 0) {
-            emit_byte(modrm | 0x40);
-            emit_byte(value2 & 0xFF);
-        } else {
-            emit_byte(modrm);
-        }
+        emit_modrm_disp8((register1_id << 3) | reg_to_rm(register2_id), value2);
     }
 }
 
@@ -1033,16 +1074,11 @@ void handle_or() {
    locals. */
 void handle_pop() {
     skip_ws();
-    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
-        emit_byte(0x1F);
-    } else if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
-        emit_byte(0x07);
-    } else {
-        int packed_register = parse_register();
-        emit_byte(0x58 | (packed_register & 0xFF));
+    if (match_seg_ds_es(0x1F, 0x07)) {
+        return;
     }
+    int packed_register = parse_register();
+    emit_byte(0x58 | (packed_register & 0xFF));
 }
 
 void handle_popa() {
@@ -1051,28 +1087,21 @@ void handle_popa() {
 
 void handle_push() {
     skip_ws();
-    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
-        emit_byte(0x1E);
-    } else if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
-        emit_byte(0x06);
+    if (match_seg_ds_es(0x1E, 0x06)) {
+        return;
+    }
+    int packed_register = parse_register();
+    if (packed_register >= 0) {
+        emit_byte(0x50 | (packed_register & 0xFF));
+        return;
+    }
+    int value = resolve_value();
+    if (value >= -128 && value <= 127) {
+        emit_byte(0x6A);
+        emit_byte(value & 0xFF);
     } else {
-        char *saved = source_cursor;
-        int packed_register = parse_register();
-        if (packed_register >= 0) {
-            emit_byte(0x50 | (packed_register & 0xFF));
-        } else {
-            source_cursor = saved;
-            int value = resolve_value();
-            if (value >= -128 && value <= 127) {
-                emit_byte(0x6A);
-                emit_byte(value & 0xFF);
-            } else {
-                emit_byte(0x68);
-                emit_word(value);
-            }
-        }
+        emit_byte(0x68);
+        emit_word(value);
     }
 }
 
@@ -1229,13 +1258,7 @@ void handle_test() {
             emit_byte(0x06);
             emit_word(value1);
         } else {
-            int rm = reg_to_rm(register1_id);
-            if (value1 != 0) {
-                emit_byte(0x40 | rm);
-                emit_byte(value1 & 0xFF);
-            } else {
-                emit_byte(rm);
-            }
+            emit_modrm_disp8(reg_to_rm(register1_id), value1);
         }
         emit_byte(imm & 0xFF);
     }
@@ -1267,19 +1290,7 @@ void handle_unknown_word() {
         is_local = 1;
     }
     source_cursor = name_start;
-    if (pass == 1) {
-        if (is_local) {
-            symbol_set_local(current_address);
-        } else {
-            symbol_set_global(current_address);
-            global_scope = last_symbol_index;
-        }
-    } else if (is_local == 0) {
-        symbol_lookup(0xFFFF);
-        if (last_symbol_index != 0xFFFF) {
-            global_scope = last_symbol_index;
-        }
-    }
+    define_label_here(is_local);
     source_cursor = end_pos + 1;
     skip_ws();
     if (source_cursor[0] != '\0') {
@@ -1497,6 +1508,35 @@ int load_src_sector() {
     return 0;
 }
 
+/* Resolve the identifier at ``source_cursor`` — scan an identifier-
+   with-dot span, null-terminate it in place, pick the scope by the
+   leading ``.`` prefix, call ``symbol_lookup``, then restore the
+   delimiter byte.  ``advance`` picks whether ``source_cursor`` ends
+   up past the identifier (1, used by ``resolve_value``'s symbol
+   branch) or rewound to the name start (0, used by
+   ``peek_label_target``).  ``last_symbol_index`` carries the
+   hit/miss signal (0xFFFF on miss) so both callers can branch on it
+   without a separate return code. */
+__attribute__((regparm(1)))
+int lookup_ident_here(int advance) {
+    char *name_start = source_cursor;
+    scan_ident_dot();
+    char *end_pos = source_cursor;
+    char delim = end_pos[0];
+    end_pos[0] = '\0';
+    int scope = 0xFFFF;
+    if (name_start[0] == '.') {
+        scope = global_scope;
+    }
+    source_cursor = name_start;
+    int value = symbol_lookup(scope);
+    end_pos[0] = delim;
+    if (advance) {
+        source_cursor = end_pos;
+    }
+    return value;
+}
+
 /* Build a register/register ModR/M byte.  ``regparm(1)`` — reg in
    AX, rm on stack; returns ``0xC0 | (reg << 3) | rm`` in AX.
    Previous legacy ``make_modrm_reg_reg`` thunk (AL/BL in, modrm out)
@@ -1506,6 +1546,27 @@ int make_modrm_reg_reg_impl(int register_id, int rm) {
     register_id = register_id & 0xFF;
     rm = rm & 0xFF;
     return 0xC0 | (register_id << 3) | rm;
+}
+
+/* Peek the 2-char segment register (``ds`` or ``es``) at
+   ``source_cursor`` and emit the corresponding push / pop opcode
+   (caller supplies the pair: push ds = 0x1E, push es = 0x06,
+   pop ds = 0x1F, pop es = 0x07).  On match ``source_cursor``
+   advances past the token and the helper returns 1; on miss it
+   leaves the cursor alone and returns 0. */
+__attribute__((regparm(1)))
+int match_seg_ds_es(int ds_opcode, int es_opcode) {
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(ds_opcode);
+        return 1;
+    }
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+        source_cursor = source_cursor + 2;
+        emit_byte(es_opcode);
+        return 1;
+    }
+    return 0;
 }
 
 /* Case-insensitive match of ``keyword`` (null-terminated, all
@@ -1807,19 +1868,7 @@ void parse_line() {
                 is_local = 1;
             }
             source_cursor = label_start;
-            if (pass == 1) {
-                if (is_local) {
-                    symbol_set_local(current_address);
-                } else {
-                    symbol_set_global(current_address);
-                    global_scope = last_symbol_index;
-                }
-            } else if (is_local == 0) {
-                symbol_lookup(0xFFFF);
-                if (last_symbol_index != 0xFFFF) {
-                    global_scope = last_symbol_index;
-                }
-            }
+            define_label_here(is_local);
             colon_pos[0] = ':';
             source_cursor = colon_pos + 1;
             skip_ws();
@@ -2158,32 +2207,27 @@ int parse_register() {
     return -1;
 }
 
+/* Shared RHS step for ``resolve_value``'s operator chain — advance past
+   the operator byte, skip whitespace, and recurse.  Factored so the
+   7 operator arms each collapse to ``value = value OP parse_rhs();``. */
+int parse_rhs() {
+    source_cursor = source_cursor + 1;
+    skip_ws();
+    return resolve_value();
+}
+
 /* Lookup a label's address without advancing SI.  Used by
    encode_rel8_jump to decide between short and near forms based on
    the known target distance.  ``carry_return`` signals miss via CF;
    on hit the resolved value lands in ``peek_label_value`` (AX-side
-   of the retired dual AX + CF return).  Walks ``source_cursor`` (SI
-   pin) forward through the identifier, null-terminates in place,
-   resets ``source_cursor`` to the name start for the ``symbol_lookup``
-   SI = name ABI, then restores the saved delimiter.  is_local is
-   captured *before* the scan since ``source_cursor[0]`` is cheapest
-   on the SI-pinned global (no scratch-register guard needed). */
+   of the retired dual AX + CF return).  Delegates identifier scan /
+   null-term / symbol lookup / delim restore to ``lookup_ident_here``
+   with ``advance = 0`` so source_cursor stays on the name.
+   ``last_symbol_index`` is reset by ``symbol_lookup`` (so the explicit
+   pre-clear retired with the refactor). */
 __attribute__((carry_return))
 int peek_label_target() {
-    int is_local = (source_cursor[0] == '.');
-    char *saved = source_cursor;
-    scan_ident_dot();
-    char *end_pos = source_cursor;
-    char delim = source_cursor[0];
-    source_cursor[0] = '\0';
-    source_cursor = saved;
-    last_symbol_index = 0xFFFF;
-    if (is_local) {
-        peek_label_value = symbol_lookup(global_scope);
-    } else {
-        peek_label_value = symbol_lookup(0xFFFF);
-    }
-    end_pos[0] = delim;
+    peek_label_value = lookup_ident_here(0);
     if (last_symbol_index == 0xFFFF) {
         return 0;
     }
@@ -2375,67 +2419,32 @@ int resolve_value() {
     } else if (first >= '0' && first <= '9') {
         value = parse_number();
     } else {
-        /* Symbol path: scan identifier, null-term, symbol_lookup with
-           scope = global_scope for locals (``.``-prefixed) or 0xFFFF
-           for globals.  Restore the delimiter byte before returning
-           so the original source line stays intact for pass 2. */
-        char *name_start = source_cursor;
-        scan_ident_dot();
-        char *end_pos = source_cursor;
-        char delim = source_cursor[0];
-        source_cursor[0] = '\0';
-        int scope = 0xFFFF;
-        if (name_start[0] == '.') {
-            scope = global_scope;
-        }
-        source_cursor = name_start;
-        value = symbol_lookup(scope);
-        end_pos[0] = delim;
-        source_cursor = end_pos;
+        /* Symbol path: shared with peek_label_target via
+           ``lookup_ident_here(1)`` — advance=1 moves source_cursor past
+           the identifier so the operator-chain tail starts on the next
+           non-ident byte. */
+        value = lookup_ident_here(1);
     }
-    /* Operator chain: right-associative via recursion (the retired
-       asm dispatches to per-operator tails that each recurse into
-       resolve_value for the RHS, then fall through to the shared
-       ``.rv_expr_done`` epilogue).  Flat precedence — NASM's
-       constant-expression lowering parenthesises every subtree
-       before we see it, so the grouping still comes out right. */
+    /* Operator chain (flat precedence, right-associative via recursion
+       in ``parse_rhs``).  NASM's constant-expression lowering
+       parenthesises every subtree, so flat precedence still produces
+       the intended grouping. */
     skip_ws();
     char op = source_cursor[0];
     if (op == '+') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value + rhs;
+        value = value + parse_rhs();
     } else if (op == '-') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value - rhs;
+        value = value - parse_rhs();
     } else if (op == '*') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value * rhs;
+        value = value * parse_rhs();
     } else if (op == '/') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value / rhs;
+        value = value / parse_rhs();
     } else if (op == '&') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value & rhs;
+        value = value & parse_rhs();
     } else if (op == '|') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value | rhs;
+        value = value | parse_rhs();
     } else if (op == '^') {
-        source_cursor = source_cursor + 1;
-        skip_ws();
-        int rhs = resolve_value();
-        value = value ^ rhs;
+        value = value ^ parse_rhs();
     }
     return value;
 }
