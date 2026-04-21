@@ -143,7 +143,13 @@ void close_source();
 __attribute__((regparm(1)))
 int open_file_ro(char *path);
 __attribute__((regparm(1)))
+void inc_dec_handler(int rfield);
+__attribute__((regparm(1)))
 int reg_to_rm(int register_id);
+__attribute__((regparm(1)))
+void shift_handler(int modrm_base);
+__attribute__((regparm(1)))
+void unary_f6f7(int modrm_base);
 int resolve_label();
 int resolve_value();
 void skip_comma();
@@ -675,30 +681,33 @@ void handle_cmp() {
    the 40+reg / 48+reg one-byte forms; r8 and memory use FE/FF with
    a /0 (inc) or /1 (dec) reg field.  Memory dispatch mirrors the
    three parse_operand op2 types: 0=reg (handled above), 2=direct
-   disp16, 3=reg+disp8 (or bare reg when disp == 0).  handle_dec
-   differs from handle_inc only in the /r-field constant (0x08 vs
-   0x00 for reg form, 0x0E vs 0x06 for mod=00 disp16 form). */
-void handle_dec() {
+   disp16, 3=reg+disp8 (or bare reg when disp == 0).  ``rfield`` is
+   the /r constant (0 inc, 1 dec); the helper shifts it into position
+   and ORs it into every register / modrm byte that carries the
+   inc-vs-dec distinction. */
+__attribute__((regparm(1)))
+void inc_dec_handler(int rfield) {
     skip_ws();
     int packed_operand = parse_operand();
     int type = (packed_operand >> 8) & 0xFF;
     int register_id = packed_operand & 0xFF;
     int value = parse_operand_value;
     int size = op1_size;
+    int reg_shift = rfield << 3;
     if (type == 0) {
         if (size == 8) {
             emit_byte(0xFE);
-            emit_byte(0xC8 | register_id);
+            emit_byte(0xC0 | reg_shift | register_id);
         } else {
-            emit_byte(0x48 + register_id);
+            emit_byte(0x40 | reg_shift | register_id);
         }
     } else {
         emit_sized(0xFE, size);
         if (type == 2) {
-            emit_byte(0x0E);
+            emit_byte(0x06 | reg_shift);
             emit_word(value);
         } else {
-            int rm = reg_to_rm(register_id) | 0x08;
+            int rm = reg_to_rm(register_id) | reg_shift;
             if (value == 0) {
                 emit_byte(rm);
             } else {
@@ -709,49 +718,16 @@ void handle_dec() {
     }
 }
 
-/* ``div r8`` / ``div r16`` — picks F6 or F7, ORs 0xF0 (modrm with
-   /6 reg field) into the register number.  Same shape as
-   handle_mul / handle_neg / handle_not above. */
+void handle_dec() {
+    inc_dec_handler(1);
+}
+
 void handle_div() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xF0 | (packed_register & 0xFF));
+    unary_f6f7(0xF0);
 }
 
 void handle_inc() {
-    skip_ws();
-    int packed_operand = parse_operand();
-    int type = (packed_operand >> 8) & 0xFF;
-    int register_id = packed_operand & 0xFF;
-    int value = parse_operand_value;
-    int size = op1_size;
-    if (type == 0) {
-        if (size == 8) {
-            emit_byte(0xFE);
-            emit_byte(0xC0 | register_id);
-        } else {
-            emit_byte(0x40 + register_id);
-        }
-    } else {
-        emit_sized(0xFE, size);
-        if (type == 2) {
-            emit_byte(0x06);
-            emit_word(value);
-        } else {
-            int rm = reg_to_rm(register_id);
-            if (value == 0) {
-                emit_byte(rm);
-            } else {
-                emit_byte(rm | 0x40);
-                emit_byte(value & 0xFF);
-            }
-        }
-    }
+    inc_dec_handler(0);
 }
 
 /* ``int <imm8>`` — two-byte encoding (``CD imm8``).  ``resolve_value``
@@ -1012,14 +988,13 @@ void handle_movzx() {
     }
 }
 
-/* Single-operand arithmetic family (``mul`` / ``neg`` / ``not`` on a
-   r8 or r16).  Each handler picks opcode F6 (byte) or F7 (word) based
-   on the register's width and ORs the /r field constant (4 for mul,
-   3 for neg, 2 for not) into a register-mode ModR/M byte (C0 | (n<<3)
-   | rm).  The C bodies stash the parsed AX (AL=reg, AH=size) on the
-   stack around the opcode emit; cc.py's bp frame is outside this
-   push/pop so the balance stays clean. */
-void handle_mul() {
+/* Single-operand F6/F7-family handlers (``mul`` / ``neg`` / ``not``
+   / ``div`` on a r8 or r16).  Emits F6 (byte) or F7 (word) followed
+   by a register-mode ModR/M byte whose /r field is baked into
+   ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
+   div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
+__attribute__((regparm(1)))
+void unary_f6f7(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     int opcode = 0xF7;
@@ -1027,29 +1002,19 @@ void handle_mul() {
         opcode = 0xF6;
     }
     emit_byte(opcode);
-    emit_byte(0xE0 | (packed_register & 0xFF));
+    emit_byte(modrm_base | (packed_register & 0xFF));
+}
+
+void handle_mul() {
+    unary_f6f7(0xE0);
 }
 
 void handle_neg() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xD8 | (packed_register & 0xFF));
+    unary_f6f7(0xD8);
 }
 
 void handle_not() {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(0xD0 | (packed_register & 0xFF));
+    unary_f6f7(0xD0);
 }
 
 /* ``or r, r`` / ``or r, imm`` / ``or r, [disp16]``.  Same /r=1 as
@@ -1202,9 +1167,10 @@ void handle_scasb() {
 
 /* ``shl`` / ``shr`` with r8/r16 destination and either a constant 1
    (short D0/D1 form) or imm8 shift count (C0/C1 imm8 form).  The two
-   handlers differ only in the /r field constant: shl=4 (0xE0), shr=5
-   (0xE8). */
-void handle_shl() {
+   handlers share one body; ``modrm_base`` carries the /r field (0xE0
+   for shl, 0xE8 for shr). */
+__attribute__((regparm(1)))
+void shift_handler(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     skip_comma();
@@ -1213,29 +1179,20 @@ void handle_shl() {
     int size = (packed_register >> 8) & 0xFF;
     if (count == 1) {
         emit_sized(0xD0, size);
-        emit_byte(0xE0 | register_id);
+        emit_byte(modrm_base | register_id);
     } else {
         emit_sized(0xC0, size);
-        emit_byte(0xE0 | register_id);
+        emit_byte(modrm_base | register_id);
         emit_byte(count);
     }
 }
 
+void handle_shl() {
+    shift_handler(0xE0);
+}
+
 void handle_shr() {
-    skip_ws();
-    int packed_register = parse_register();
-    skip_comma();
-    int count = resolve_value();
-    int register_id = packed_register & 0xFF;
-    int size = (packed_register >> 8) & 0xFF;
-    if (count == 1) {
-        emit_sized(0xD0, size);
-        emit_byte(0xE8 | register_id);
-    } else {
-        emit_sized(0xC0, size);
-        emit_byte(0xE8 | register_id);
-        emit_byte(count);
-    }
+    shift_handler(0xE8);
 }
 
 void handle_stc() {
