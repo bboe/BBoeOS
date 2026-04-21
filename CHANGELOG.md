@@ -6,6 +6,10 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.6.0...main)
 
+### Tooling
+- Self-hosted assembler (`src/c/asm.c`): protected-mode extension (phase 5).  `parse_register` accepts the `e`-prefixed 32-bit general register file (eax / ecx / edx / ebx / esp / ebp / esi / edi); a dedicated `parse_creg` handles cr0..cr7; `emit_sized` prepends the 0x66 operand-size prefix for 32-bit widths; new `emit_dword` emits little-endian imm32 / disp32.  `handle_mov` gains `mov crN, r32` / `mov r32, crN` (0F 22 /r, 0F 20 /r) and `mov r32, imm32` with the 0x66 prefix; `emit_alu_reg_imm` extends to 32-bit operand size for the `or eax, 1` style encodings.  New `handle_lgdt` / `handle_lidt` (0F 01 /2, /3) and `jmp dword SEL:OFS` (0x66 0xEA ptr16:32) round out the pmode bootstrap encodings.  `static/pmode_sm.asm` exercises the full set against NASM; byte-identical on the self-host test
+
+
 ## [0.6.0](https://github.com/bboe/BBoeOS/compare/0.5.0...0.6.0) (2026-04-21)
 
 ### Networking

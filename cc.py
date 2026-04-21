@@ -658,6 +658,7 @@ class CodeGenerator:
         "STR_DD",
         "STR_DEFINE",
         "STR_DW",
+        "STR_DWORD",
         "STR_EQU",
         "STR_INCLUDE",
         "STR_ORG",
