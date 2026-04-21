@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 9479      | +1226 |
+| asm     | 8253        | 9464      | +1211 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1219      | +298  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+1226):** Every ``handle_*`` and every function lives in pure C
+**asm (+1211):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `abort_unknown` trampoline (stashes SI into
 `_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`

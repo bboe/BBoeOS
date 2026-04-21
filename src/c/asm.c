@@ -1331,19 +1331,10 @@ void handle_xor() {
 __attribute__((regparm(1)))
 __attribute__((carry_return))
 int is_ident_char(int c) {
-    if (c >= 'a' && c <= 'z') {
-        return 1;
-    }
-    if (c >= 'A' && c <= 'Z') {
-        return 1;
-    }
-    if (c >= '0' && c <= '9') {
-        return 1;
-    }
-    if (c == '_') {
-        return 1;
-    }
-    return 0;
+    return (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9')
+            || c == '_';
 }
 
 /* Scan source_cursor forward through an identifier-with-dot span — the
