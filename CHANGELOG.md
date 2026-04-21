@@ -6,7 +6,7 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.6.0...main)
 
-## [0.6.0](https://github.com/bboe/BBoeOS/compare/5156ae9...0.6.0) (2026-04-21)
+## [0.6.0](https://github.com/bboe/BBoeOS/compare/0.5.0...0.6.0) (2026-04-21)
 
 ### Networking
 - ICMP sockets via `(SOCK_DGRAM, IPPROTO_ICMP)`; ICMP echo requests now live in userspace
@@ -30,7 +30,7 @@ at the time.
 - cc.py: `peephole_dead_ah` scans forward across AX-preserving instructions (register moves not touching AX, pushes/pops of non-AX regs, `cmp` / `test` on non-AX operands) to find the AL-only consumer of a zero-extended byte load.  Catches patterns like `xor ah, ah ; pop si ; test ax, ax` that were previously missed because the immediate-neighbor check stopped at `pop si`.  31 bytes off across asm / edit / shell
 - Host-side C compiler (`cc.py`): feature and codegen work in support of the above — file-scope globals, inline `asm(...)` escape, `#include` directive, `regparm(1)` / `carry_return` / `always_inline` / `asm_register` attributes, `uint8_t` type with byte-codegen for byte-typed globals and body locals, `far_read8/16` / `far_write8/16` builtins, new user-callable builtins (`checksum`, `ticks`, `exec`, `reboot`, `shutdown`, `set_exec_arg`), and many peephole / calling-convention improvements
 
-## [0.5.0](https://github.com/bboe/BBoeOS/compare/a0a0980...5156ae9) (2026-04-16)
+## [0.5.0](https://github.com/bboe/BBoeOS/compare/0.4.0...0.5.0) (2026-04-16)
 
 ### [2026-04-16](https://github.com/bboe/BBoeOS/compare/84a1efe...5156ae9)
 
@@ -172,13 +172,13 @@ at the time.
 
 - Automatic `\n` to `\r\n` conversion — strings no longer need `\r\n`
 
-## [0.4.0](https://github.com/bboe/BBoeOS/compare/6ca690e...a0a0980) (2026-03-28)
+## [0.4.0](https://github.com/bboe/BBoeOS/compare/0.3.0...0.4.0) (2026-03-28)
 
 ### [2026-03-28](https://github.com/bboe/BBoeOS/compare/6ca690e...a0a0980)
 
 - General cleanup across the project
 
-## [0.3.0](https://github.com/bboe/BBoeOS/compare/f2af0a6...6ca690e) (2026-03-27)
+## [0.3.0](https://github.com/bboe/BBoeOS/compare/0.2.0...0.3.0) (2026-03-27)
 
 ### [2026-03-27](https://github.com/bboe/BBoeOS/compare/f2af0a6...6ca690e)
 
@@ -195,7 +195,7 @@ at the time.
 - Load shell as a program from filesystem
 - Extract programs (`draw`, `date`, `uptime`, `cat`, `ls`) from kernel into standalone executables
 
-## [0.2.0](https://github.com/bboe/BBoeOS/compare/4ec1217...f2af0a6) (2018-08-12)
+## [0.2.0](https://github.com/bboe/BBoeOS/compare/0.1.0...0.2.0) (2018-08-12)
 
 ### [2018-08-12](https://github.com/bboe/BBoeOS/compare/4ec1217...f2af0a6)
 
@@ -203,7 +203,7 @@ at the time.
 - Proper backspace handling at the command prompt
 - Fix bug where short `g` matched `graphics`
 
-## [0.1.0](https://github.com/bboe/BBoeOS/compare/1e2a995...4ec1217) (2018-07-27)
+## [0.1.0](https://github.com/bboe/BBoeOS/compare/0.0.3dev...0.1.0) (2018-07-27)
 
 ### [2018-07-29](https://github.com/bboe/BBoeOS/compare/95a9a1a...4ec1217)
 
@@ -216,7 +216,7 @@ at the time.
 - Extract code into functions and protect most registers
 - Update version string to 0.1.0
 
-## [0.0.3dev](https://github.com/bboe/BBoeOS/compare/21f5d53...1e2a995) (2018-07-26)
+## [0.0.3dev](https://github.com/bboe/BBoeOS/compare/0.0.2dev...0.0.3dev) (2018-07-26)
 
 ### [2018-07-26](https://github.com/bboe/BBoeOS/compare/21f5d53...1e2a995)
 
@@ -227,7 +227,7 @@ at the time.
 - Echo typed commands
 - Detect whether something was entered
 
-## [0.0.2dev](https://github.com/bboe/BBoeOS/compare/99f9894...21f5d53) (2018-07-26)
+## [0.0.2dev](https://github.com/bboe/BBoeOS/compare/99f9894...0.0.2dev) (2018-07-26)
 
 ### [2018-07-26](https://github.com/bboe/BBoeOS/compare/99f9894...21f5d53)
 
