@@ -1351,15 +1351,8 @@ int is_ident_char(int c) {
    Advances source_cursor past the last matching byte.  Three callers:
    peek_label_target, resolve_label, resolve_value's symbol path. */
 void scan_ident_dot() {
-    while (1) {
-        char c = source_cursor[0];
-        if (is_ident_char(c)) {
-            source_cursor = source_cursor + 1;
-        } else if (c == '.') {
-            source_cursor = source_cursor + 1;
-        } else {
-            return;
-        }
+    while (is_ident_char(source_cursor[0]) || source_cursor[0] == '.') {
+        source_cursor = source_cursor + 1;
     }
 }
 
