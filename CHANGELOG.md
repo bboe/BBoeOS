@@ -14,6 +14,7 @@ at the time.
 ### Userspace programs
 - Rewrite `shell`, `dns`, `ping`, `edit`, and `asm` (the self-hosted assembler) in C; `arp` / `netinit` / `netrecv` / `netsend` join them
 - `edit` moves its gap buffer to fixed addresses — new `EDIT_BUFFER_BASE` / `EDIT_BUFFER_SIZE` / `EDIT_KILL_BUFFER` / `EDIT_KILL_BUFFER_SIZE` constants replace the former float-on-`program_end` layout
+- `edit.c`: lift `gap_start` / `gap_end` to file-scope globals and factor 10 copies of the gap-buffer cursor-move idiom into `gap_move_left` / `gap_move_right` helpers
 
 ### Tooling
 - Self-hosted assembler (`src/c/asm.c`): NASM → pure C migration completed in this cycle — every `handle_*` mnemonic handler, every `parse_*` stage, the symbol table, the include / file-I/O machinery, and the driver loop all live in C.  A trailing file-scope `asm(...)` block retains only the kernel-syscall wrapper, the mnemonic / register data tables, and the `STR_*` keyword strings.  The in-OS assembler also picked up `pusha` / `popa` / `lodsw` / `adc` / `not` so cc.py-emitted programs can be re-assembled in-place

@@ -15,7 +15,7 @@ source is kept here for reference.
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1091      | +367  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2228      | +251  |
+| edit    | 1977        | 2238      | +261  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 161       | +26   |
 | mkdir   | 123         | 127       | +4    |
@@ -94,7 +94,7 @@ compiler also generates word-sized loads with `xor ah,ah`
 zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+280):** Both versions implement the same gap-buffer /
+**edit (+261):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
