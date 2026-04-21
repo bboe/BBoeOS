@@ -147,6 +147,8 @@ int open_file_ro(char *path);
 __attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
 __attribute__((regparm(1)))
+void parse_d_values(int extra_zeros);
+__attribute__((regparm(1)))
 __attribute__((carry_return))
 int is_ident_char(int c);
 void scan_ident_dot();
@@ -1759,34 +1761,36 @@ void parse_directive() {
         return;
     }
     if (match_word(STR_DW)) {
-        skip_ws();
-        while (1) {
-            int value = resolve_value();
-            emit_word(value);
-            skip_ws();
-            if (source_cursor[0] != ',') {
-                return;
-            }
-            source_cursor = source_cursor + 1;
-            skip_ws();
-        }
+        parse_d_values(0);
+        return;
     }
     if (match_word(STR_DD)) {
-        skip_ws();
-        while (1) {
-            int value = resolve_value();
-            emit_word(value);
-            emit_byte(0);
-            emit_byte(0);
-            skip_ws();
-            if (source_cursor[0] != ',') {
-                return;
-            }
-            source_cursor = source_cursor + 1;
-            skip_ws();
-        }
+        parse_d_values(1);
+        return;
     }
     parse_mnemonic();
+}
+
+/* Shared body for ``dw`` / ``dd`` directives — ``dw`` is
+   ``parse_d_values(0)`` and ``dd`` is ``parse_d_values(1)`` (the
+   extra zero word past the 16-bit value).  Comma-separated
+   operand list; each operand evaluates via resolve_value. */
+__attribute__((regparm(1)))
+void parse_d_values(int extra_word) {
+    skip_ws();
+    while (1) {
+        int value = resolve_value();
+        emit_word(value);
+        if (extra_word != 0) {
+            emit_word(0);
+        }
+        skip_ws();
+        if (source_cursor[0] != ',') {
+            return;
+        }
+        source_cursor = source_cursor + 1;
+        skip_ws();
+    }
 }
 
 /* Top-level line dispatcher.  Starts at LINE_BUFFER, strips
