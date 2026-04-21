@@ -4626,6 +4626,7 @@ class CodeGenerator:
         self.peephole_fold_zero_save()
         self.peephole_compare_through_register()
         self.peephole_dead_ah()
+        self.peephole_redundant_byte_mask()
         self.peephole_unused_cld()
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
@@ -4756,15 +4757,76 @@ class CodeGenerator:
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a == "xor ah, ah" and b.startswith(al_only_prefixes):
-                # For ``mov [addr], al`` we must verify the source
-                # operand is actually ``al`` (not ``ax``) — the
-                # prefix match would otherwise catch word stores.
-                if b.startswith("mov [") and not b.endswith(", al"):
-                    i += 1
+            if a == "xor ah, ah":
+                # Word op on AX that only inspects AL because AH is
+                # known zero — rewrite to the byte form so peephole_dead_ah
+                # can drop the xor.  ``test ax, ax`` → ``test al, al``
+                # and ``cmp ax, K`` → ``cmp al, K`` when K fits in a
+                # byte.  Byte form is 1 byte shorter; the dropped xor
+                # reclaims another 2 bytes per site.
+                if b == "test ax, ax":
+                    self.lines[i + 1] = self.lines[i + 1].replace("test ax, ax", "test al, al")
+                    b = "test al, al"
+                elif b.startswith("cmp ax, "):
+                    operand = b[len("cmp ax, ") :]
+                    try:
+                        value = int(operand, 0)
+                    except ValueError:
+                        value = None
+                    if value is not None and 0 <= value <= 255:
+                        self.lines[i + 1] = self.lines[i + 1].replace("cmp ax, ", "cmp al, ", 1)
+                        b = f"cmp al, {operand}"
+                if b.startswith(al_only_prefixes):
+                    # For ``mov [addr], al`` we must verify the source
+                    # operand is actually ``al`` (not ``ax``) — the
+                    # prefix match would otherwise catch word stores.
+                    if b.startswith("mov [") and not b.endswith(", al"):
+                        i += 1
+                        continue
+                    del self.lines[i]
                     continue
-                del self.lines[i]
-                continue
+            i += 1
+
+    def peephole_redundant_byte_mask(self) -> None:
+        """Drop ``and ax, 255`` when AX is provably zero-extended from a byte.
+
+        The C expression ``byte_local & 0xFF`` (or any wider mask whose
+        low byte saturates the byte operand) codegens as ``mov al,
+        [X] / xor ah, ah / and ax, 255``.  The zero-extend has already
+        cleared AH, so the mask is a no-op on the value.  Dropping it
+        saves 4 bytes per site — there are 106+ sites in asm.c from
+        the ``emit_byte(x & 0xFF)`` idiom alone.
+
+        The ``and`` does set flags, though: ZF = (AL == 0), unlike the
+        preceding ``xor`` which always leaves ZF=1 (AH=0).  So the
+        drop is only safe when the following instruction doesn't
+        consume flags — walk forward to confirm.  Conservative
+        allowlist: ``mov`` / ``call`` / ``push`` / ``pop`` / ``shl`` /
+        ``shr`` / ``ret`` don't read flags; conditional jumps
+        (``j*`` except ``jmp``) and ``adc`` / ``sbb`` / ``rcl`` /
+        ``rcr`` do.  Anything else: bail.
+        """
+        flag_safe_prefixes = (
+            "mov ",
+            "call ",
+            "push ",
+            "pop ",
+            "shl ",
+            "shr ",
+            "ret",
+            "int ",
+            "lea ",
+        )
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "xor ah, ah" and b == "and ax, 255":
+                # Look past the mask at what actually consumes the value.
+                follower = self.lines[i + 2].strip() if i + 2 < len(self.lines) else ""
+                if follower.startswith(flag_safe_prefixes):
+                    del self.lines[i + 1]
+                    continue
             i += 1
 
     def peephole_dead_code(self) -> None:
