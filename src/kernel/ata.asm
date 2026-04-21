@@ -99,7 +99,7 @@ ata_wait_drq:
         pop dx
         ret
 
-read_sector:
+ata_read_sector:
         ;; Input:  AX = 1-based logical sector number.
         ;; Output: SECTOR_BUFFER filled with 512 bytes.  CF=1 on error.
         push ax
@@ -129,7 +129,7 @@ read_sector:
         pop ax
         ret
 
-write_sector:
+ata_write_sector:
         ;; Input:  AX = 1-based logical sector number; SECTOR_BUFFER holds
         ;;         the 512 bytes to write.
         ;; Output: CF=1 on error.
