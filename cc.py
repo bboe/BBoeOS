@@ -3932,8 +3932,14 @@ class CodeGenerator:
                     self.emit(f"        shr ax, {shift}")
                 self.ax_clear()
                 return
-            # Fast path for ``+``/``-`` with a stack-resident right operand:
-            # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
+            # Fast path for ``+`` / ``-`` with a stack-resident right
+            # operand: ``add ax, [mem]`` is shorter than ``mov cx,
+            # [mem] / add ax, cx``.  Logical ops could take the same
+            # shape, but expanding handle_and / handle_or / handle_xor
+            # in the self-host assembler to accept ``r, [reg+disp]``
+            # costs more bytes in asm.c than the ~74 bytes reclaimed
+            # across the 37 eligible callsites, so those stay on the
+            # CX fallback path.
             if (
                 operator in ("+", "-")
                 and isinstance(right, Var)
@@ -3948,22 +3954,31 @@ class CodeGenerator:
                 self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
-            # Byte-scalar right operand for ``+``: a word-sized ``add
-            # ax, [mem]`` would read the adjacent byte into the high
-            # byte, so split into ``add al, [mem] / adc ah, 0``.  The
-            # byte-wide op on AL with the carry propagate on AH
-            # matches word-add semantics for an unsigned-byte addend:
-            # its high byte is known zero, so adding zero to AH and
-            # folding in the carry out of AL produces the same 16-bit
-            # sum as a word add would.  5 bytes vs 11+ bytes of the
-            # CX fallback.  ``-`` is not included — its symmetric
-            # split needs ``sbb ah, 0`` which the self-host
-            # assembler's minimal handle_sbb doesn't yet accept, and
-            # no current caller hits the byte-local subtract path.
-            if operator == "+" and isinstance(right, Var) and self._is_byte_scalar(right.name) and right.name not in self.variable_arrays:
+            # Byte-scalar right operand for ``+`` / ``-``: a word-
+            # sized ``add ax, [mem]`` / ``sub ax, [mem]`` would read
+            # the adjacent byte into the high byte, so split into
+            # ``add al, [mem] / adc ah, 0`` (or ``sub`` / ``sbb``).
+            # The byte-wide op on AL with the carry / borrow propagate
+            # on AH matches word semantics for an unsigned-byte
+            # operand: its high byte is known zero, so adding or
+            # subtracting zero from AH and folding in the carry /
+            # borrow out of AL produces the same 16-bit result as
+            # the word op would.  5 bytes vs 11+ bytes of the CX
+            # fallback.
+            if (
+                operator in ("+", "-")
+                and isinstance(right, Var)
+                and self._is_byte_scalar(right.name)
+                and right.name not in self.variable_arrays
+            ):
                 self.generate_expression(left)
-                self.emit(f"        add al, [{self._local_address(right.name)}]")
-                self.emit("        adc ah, 0")
+                address = self._local_address(right.name)
+                if operator == "+":
+                    self.emit(f"        add al, [{address}]")
+                    self.emit("        adc ah, 0")
+                else:
+                    self.emit(f"        sub al, [{address}]")
+                    self.emit("        sbb ah, 0")
                 self.ax_clear()
                 return
             # Fast path for ``+``/``-``/``&``/``|``/``^`` with a
