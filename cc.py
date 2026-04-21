@@ -79,6 +79,7 @@ Usage: cc.py <input.c> [output.asm]
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from dataclasses import dataclass, field, fields
@@ -680,7 +681,13 @@ class CodeGenerator:
         "arp_frame": "arp_frame.asm",
     }
 
-    #: Registers available for auto-pinning, in allocation order.
+    #: Registers available for auto-pinning, in allocation order.  Kept
+    #: at the 16-bit names in both modes for now — in 32-bit mode these
+    #: refer to the lower halves of the corresponding E-registers, which
+    #: works transparently with the existing ``mov ax, <pool>`` accumulator
+    #: patterns.  Widening to E-registers would require rewriting those
+    #: patterns to use EAX throughout; deferred to the later pass that
+    #: widens arithmetic and stack frames together.
     REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
     #: Byte-element type names.  ``uint8_t`` shares the ``char``
@@ -692,27 +699,33 @@ class CodeGenerator:
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
-        # Per-type ALLOCATION sizes for parameters (each arrives as a
-        # full word, pushed by the caller) and for unsigned longs.
-        # Byte-typed BODY LOCALS are an exception: :meth:`scan_locals`
-        # overrides to size=1 and tracks them in
-        # :attr:`byte_scalar_locals`, so their load / store / compare
-        # paths emit ``mov al, [addr] / xor ah, ah`` / ``mov [addr],
-        # al`` / ``cmp byte [addr], imm`` (same shape as byte-scalar
-        # globals).  ``sizeof(char)`` folds to this table value at
-        # compile time — kept at 2 so ``sizeof`` stays word-sized
-        # everywhere; ``uint8_t`` shares the ``char`` storage /
-        # indexing path.
-        "char": 2,
+        # Standard C-semantic sizes: what ``sizeof(T)`` returns, what a
+        # body local of type T allocates on the stack.  Byte-typed body
+        # locals already get a 1-byte slot via the :attr:`BYTE_TYPES`
+        # override in :meth:`scan_locals`; parameters don't read this
+        # table at all (they use the hard-coded cdecl push-slot width
+        # in the prologue math).
+        "char": 1,
         "char*": 2,
         "int": 2,
-        "uint8_t": 2,
+        "uint8_t": 1,
         "uint8_t*": 2,
         "unsigned long": 4,
         "void": 0,
     }
+    #: 32-bit flavour: int and pointers widen to 4; byte types stay at 1
+    #: so ``sizeof(char) == 1`` regardless of target mode.
+    TYPE_SIZES_32: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "char*": 4,
+        "int": 4,
+        "uint8_t": 1,
+        "uint8_t*": 4,
+        "unsigned long": 4,
+        "void": 0,
+    }
 
-    def __init__(self, *, defines: dict[str, str] | None = None) -> None:
+    def __init__(self, *, defines: dict[str, str] | None = None, bits: int = 16) -> None:
         """Initialize code generator state.
 
         ``defines`` is the ``#define`` table the preprocessor collected.
@@ -721,7 +734,20 @@ class CodeGenerator:
         scan for C macros) can reference the same symbolic names that
         C code uses — otherwise every use inside an ``asm(...)`` string
         would have to spell the literal.
+
+        ``bits`` selects the target CPU mode (16 or 32).  In 32-bit mode
+        the preamble emits ``[bits 32]`` and the :attr:`TYPE_SIZES` and
+        :attr:`REGISTER_POOL` tables widen to pmode-appropriate values.
+        This PR lays down the plumbing; fuller codegen widening
+        (arithmetic, stack frame layout, peepholes, syscall registers)
+        follows in the kernel-widening PR that flips pmode on.
         """
+        if bits not in (16, 32):
+            message = f"unsupported bits={bits}; expected 16 or 32"
+            raise ValueError(message)
+        self.bits: int = bits
+        if bits == 32:
+            self.TYPE_SIZES = self.TYPE_SIZES_32
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
@@ -3391,6 +3417,8 @@ class CodeGenerator:
             The complete assembly source as a string.
 
         """
+        if self.bits == 32:
+            self.emit("        [bits 32]")
         self.emit("        org 0600h")
         self.emit()
         self.emit('%include "constants.asm"')
@@ -6782,25 +6810,32 @@ def main() -> int:
         Exit code (0 for success, 1 for usage or compilation error).
 
     """
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: cc.py <input.c> [output.asm]", file=sys.stderr)
-        return 1
+    parser = argparse.ArgumentParser(description="Compile a C source file to NASM.")
+    parser.add_argument("input", help="input .c file")
+    parser.add_argument("output", nargs="?", help="output .asm file (default stdout)")
+    parser.add_argument(
+        "--bits",
+        type=int,
+        choices=(16, 32),
+        default=16,
+        help="target CPU mode for emitted assembly (default 16)",
+    )
+    arguments = parser.parse_args()
 
-    input_path = sys.argv[1]
     try:
-        source = Path(input_path).read_text(encoding="utf-8")
-        source, defines = preprocess(source, include_base=Path(input_path).parent)
+        source = Path(arguments.input).read_text(encoding="utf-8")
+        source, defines = preprocess(source, include_base=Path(arguments.input).parent)
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        output = CodeGenerator(defines=defines).generate(ast)
+        output = CodeGenerator(defines=defines, bits=arguments.bits).generate(ast)
     except CompileError as error:
-        location = f"{input_path}:{error.line}" if error.line else input_path
+        location = f"{arguments.input}:{error.line}" if error.line else arguments.input
         print(f"{location}: error: {error.message}", file=sys.stderr)
         return 1
 
-    if len(sys.argv) == 3:
-        Path(sys.argv[2]).write_text(output, encoding="utf-8")
+    if arguments.output is not None:
+        Path(arguments.output).write_text(output, encoding="utf-8")
     else:
         sys.stdout.write(output)
     return 0
