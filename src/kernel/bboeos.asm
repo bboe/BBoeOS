@@ -119,6 +119,7 @@ clear_screen:
         jmp near shared_write_stdout
 
 boot_shell:
+        call ps2_init           ; mask BIOS IRQ 1 before anyone reads keys
         call fd_init
         ;; Load shell program from filesystem
         mov si, SHELL_NAME
@@ -143,6 +144,7 @@ boot_shell:
 %include "fd.asm"
 %include "io.asm"
 %include "net.asm"
+%include "ps2.asm"
 %include "syscall.asm"
 %include "system.asm"
 %include "vga.asm"

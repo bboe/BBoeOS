@@ -398,12 +398,10 @@ fd_read:
         pop dx
         test al, 01h
         jnz .rcon_serial
-        mov ah, 01h
-        int 16h
+        call ps2_check
         jz .rcon_poll
         ;; Keyboard key ready
-        mov ah, 00h
-        int 16h                 ; AL = ASCII, AH = scan code
+        call ps2_read           ; AL = ASCII, AH = scan code
         test al, al
         jz .rcon_extended       ; AL=0 means extended key
         ;; Normal ASCII key — store 1 byte
