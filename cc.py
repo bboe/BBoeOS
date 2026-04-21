@@ -692,19 +692,17 @@ class CodeGenerator:
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
-        # Byte-typed locals still get a full word slot on the stack —
-        # local load/store goes through the shared ``mov [addr], ax``
-        # / ``mov ax, [addr]`` codepaths that every emitter uses, and
-        # splitting those would require parallel byte and word
-        # variants across the whole compiler.  Byte-typed GLOBALS
-        # have been split: storage is ``db``, loads emit ``mov al,
-        # [_g_name]`` + ``xor ah, ah``, stores emit ``mov [_g_name],
-        # al``, compares use ``cmp byte [mem], imm``.  Extending the
-        # split to locals is a follow-up — each byte-local would
-        # save 1 byte of stack but the call-site changes ripple
-        # across the peephole pipeline.  ``uint8_t`` shares the
-        # ``char`` storage / indexing path on both sides of that
-        # split.
+        # Per-type ALLOCATION sizes for parameters (each arrives as a
+        # full word, pushed by the caller) and for unsigned longs.
+        # Byte-typed BODY LOCALS are an exception: :meth:`scan_locals`
+        # overrides to size=1 and tracks them in
+        # :attr:`byte_scalar_locals`, so their load / store / compare
+        # paths emit ``mov al, [addr] / xor ah, ah`` / ``mov [addr],
+        # al`` / ``cmp byte [addr], imm`` (same shape as byte-scalar
+        # globals).  ``sizeof(char)`` folds to this table value at
+        # compile time — kept at 2 so ``sizeof`` stays word-sized
+        # everywhere; ``uint8_t`` shares the ``char`` storage /
+        # indexing path.
         "char": 2,
         "char*": 2,
         "int": 2,
@@ -729,6 +727,7 @@ class CodeGenerator:
         self.arrays: list[tuple[str, list[str]]] = []
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
+        self.byte_scalar_locals: set[str] = set()
         self.constant_aliases: dict[str, str] = {}
         self.defines: dict[str, str] = dict(defines) if defines else {}
 
@@ -1104,7 +1103,7 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.pinned_register[index.name]}")
             if not is_byte:
                 self.emit("        add si, si")
-        elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar_global(index.name):
+        elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
             self.emit(f"        mov si, [{self._local_address(index.name)}]")
             if not is_byte:
                 self.emit("        add si, si")
@@ -1282,22 +1281,41 @@ class CodeGenerator:
     def _is_byte_scalar_global(self, name: str, /) -> bool:
         """Return True if *name* is a byte-typed (``char`` / ``uint8_t``) scalar global.
 
-        Byte-scalar globals store as a single ``db`` cell and use
-        ``mov al, [_g_<name>]`` / ``mov [_g_<name>], al`` for their
-        load / store paths, so the compare and fast-path emitters
-        must avoid their word-sized variants (``cmp ax, [_g_<name>]``,
-        ``cmp word [_g_<name>], imm``) which would read a spurious
-        byte from the next global into the high byte.  Register-
-        aliased globals live in a CPU register rather than memory, so
-        they stay out of this set — storage is not a ``db`` cell.
-        Locals keep their current word-slot codegen in this slice;
-        byte-scalar locals are a follow-up.
+        Byte-scalar globals store as a single ``db`` cell at
+        ``_g_<name>``; load and store go through the byte-wide path
+        shared with byte-scalar locals (see :meth:`_is_byte_scalar`).
+        Register-aliased globals live in a CPU register rather than
+        memory, so they stay out of this set — storage is not a
+        ``db`` cell.
         """
         if name not in self.global_scalars:
             return False
         if name in self.register_aliased_globals:
             return False
         return self.variable_types.get(name) in self.BYTE_TYPES
+
+    def _is_byte_scalar_local(self, name: str, /) -> bool:
+        """Return True if *name* is a byte-typed scalar local with a 1-byte slot.
+
+        Populated by :meth:`scan_locals` — only non-parameter body
+        locals whose type is in :attr:`BYTE_TYPES` and which weren't
+        routed into a pinned register qualify.  Parameters keep their
+        word slots (caller pushes a full word) and pinned locals
+        aren't in :attr:`locals` at all.
+        """
+        return name in self.byte_scalar_locals
+
+    def _is_byte_scalar(self, name: str, /) -> bool:
+        """Return True for any byte-wide memory scalar (global or local).
+
+        Collapses the global / local check used by every fast-path
+        gate that must bail when the operand's storage is a single
+        byte — the word-sized forms (``cmp ax, [addr]``,
+        ``cmp word [addr], imm``, ``add ax, [addr]``, ``mov <r16>,
+        [addr]``) would read the adjacent byte into the high byte
+        and silently corrupt the result.
+        """
+        return self._is_byte_scalar_global(name) or self._is_byte_scalar_local(name)
 
     def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
         """Check if ``statement`` is a compile-time constant alias.
@@ -1554,7 +1572,16 @@ class CodeGenerator:
         elif isinstance(arg, Var) and arg.name in self.global_arrays:
             self.emit(f"        mov {target}, _g_{arg.name}")
         elif isinstance(arg, Var):
-            self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
+            if self._is_byte_scalar(arg.name):
+                # Byte-scalar source into a word target: byte-load +
+                # zero-extend, then shuttle into the target if it
+                # isn't AX already.
+                self.emit(f"        mov al, [{self._local_address(arg.name)}]")
+                self.emit("        xor ah, ah")
+                if target != "ax":
+                    self.emit(f"        mov {target}, ax")
+            else:
+                self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
         elif isinstance(arg, BinOp):
             # ``_is_simple_arg`` only admits BinOp(+/-, leaf, leaf), and
             # the topological scheduler in ``_emit_register_arg_moves``
@@ -2629,7 +2656,7 @@ class CodeGenerator:
         elif (
             isinstance(dport_argument, Var)
             and self._is_memory_scalar(dport_argument.name)
-            and not self._is_byte_scalar_global(dport_argument.name)
+            and not self._is_byte_scalar(dport_argument.name)
         ):
             self.emit(f"        mov bp, [{self._local_address(dport_argument.name)}]")
         else:
@@ -2930,7 +2957,7 @@ class CodeGenerator:
             source_register = self.pinned_register[right.name]
             if source_register != "cx":
                 self.emit(f"        mov cx, {source_register}")
-        elif isinstance(right, Var) and self._is_memory_scalar(right.name) and not self._is_byte_scalar_global(right.name):
+        elif isinstance(right, Var) and self._is_memory_scalar(right.name) and not self._is_byte_scalar(right.name):
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self._local_address(right.name)}]")
         else:
@@ -2967,10 +2994,10 @@ class CodeGenerator:
                 return
             # Memory-backed local compared to a constant: fuse into a
             # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
-            # byte-scalar globals whose storage is a single ``db`` cell)
-            # so we skip the ``mov ax, [L]`` load.  Safe because the
-            # flags are consumed by the next conditional jump and AX's
-            # prior value was not promised.
+            # byte-scalar locals / globals whose storage is a single
+            # ``db`` cell) so we skip the ``mov ax, [L]`` load.  Safe
+            # because the flags are consumed by the next conditional
+            # jump and AX's prior value was not promised.
             if (
                 isinstance(left, Var)
                 and self._is_memory_scalar(left.name)
@@ -2979,7 +3006,7 @@ class CodeGenerator:
                 and self.variable_types.get(left.name) != "unsigned long"
             ):
                 address = self._local_address(left.name)
-                width = "byte" if self._is_byte_scalar_global(left.name) else "word"
+                width = "byte" if self._is_byte_scalar(left.name) else "word"
                 if is_zero:
                     self.emit(f"        cmp {width} [{address}], 0")
                 else:
@@ -3028,8 +3055,8 @@ class CodeGenerator:
                     self.emit(f"        cmp ax, {source}")
                     return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
-            # skips the CX load entirely.  Byte-scalar globals bail out
-            # — their storage is a single ``db`` cell and a word-sized
+            # skips the CX load entirely.  Byte-scalar locals / globals
+            # bail out — their storage is a single byte and a word-sized
             # ``cmp ax, [mem]`` would read the adjacent byte into the
             # high comparison byte.
             if (
@@ -3038,7 +3065,7 @@ class CodeGenerator:
                 and right.name not in self.pinned_register
                 and right.name not in self.variable_arrays
                 and self.variable_types.get(right.name) != "unsigned long"
-                and not self._is_byte_scalar_global(right.name)
+                and not self._is_byte_scalar(right.name)
             ):
                 self.generate_expression(left)
                 self.emit(f"        cmp ax, [{self._local_address(right.name)}]")
@@ -3209,7 +3236,16 @@ class CodeGenerator:
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
             self.emit(f"        mov {register}, _g_{argument.name}")
         elif isinstance(argument, Var) and self._is_memory_scalar(argument.name):
-            self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
+            if self._is_byte_scalar(argument.name):
+                # Byte-scalar source into a word register: load via AL
+                # and zero-extend so the high byte is clean, then move
+                # into the target (or stop if target is already ax).
+                self.emit(f"        mov al, [{self._local_address(argument.name)}]")
+                self.emit("        xor ah, ah")
+                if register != "ax":
+                    self.emit(f"        mov {register}, ax")
+            else:
+                self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
@@ -3299,16 +3335,25 @@ class CodeGenerator:
         if direct_register is not None:
             if direct_register != "ax":
                 self.emit(f"        mov {direct_register}, ax")
-        elif self._is_byte_scalar_global(name):
-            # Byte-scalar globals store as ``db`` cells; the source
-            # value is either already byte-valued (``ax_is_byte``) or
-            # sits in AX's low byte (wider operands truncate to 8 bits
-            # on store).  Either way, writing AL alone leaves the
-            # neighbouring byte untouched.
-            self.emit(f"        mov [_g_{name}], al")
+            self.ax_is_byte = False
+        elif self._is_byte_scalar(name):
+            # Byte-scalar locals and globals store as a single byte;
+            # the source value is either already byte-valued
+            # (``ax_is_byte``) or sits in AX's low byte (wider
+            # operands truncate to 8 bits on store).  Either way,
+            # writing AL alone leaves the neighbouring byte untouched.
+            self.emit(f"        mov [{self._local_address(name)}], al")
+            # AL still holds the stored byte but AH may be stale: the
+            # store is itself an AL-only consumer, which lets
+            # :meth:`peephole_dead_ah` drop the zero-extend emitted by a
+            # preceding byte load.  Mark AX as byte-valued so downstream
+            # compare / test paths emit ``cmp al`` / ``test al`` and
+            # don't read the high byte.  Any promotion to a full word
+            # goes through the Var-load path which re-issues the load.
+            self.ax_is_byte = True
         else:
             self.emit(f"        mov [{self._local_address(name)}], ax")
-        self.ax_is_byte = False
+            self.ax_is_byte = False
         self.ax_local = name
         # ``mov ax, D / <op> ax, ... / mov D, ax`` sequences are fused
         # by the late peephole passes into a single ``<op> D, ...`` (or
@@ -3683,16 +3728,17 @@ class CodeGenerator:
             elif vname in self.register_aliased_globals:
                 self.emit(f"        mov ax, {self.register_aliased_globals[vname]}")
                 self.ax_is_byte = False
-            elif self._is_byte_scalar_global(vname):
-                # Byte-scalar globals store as ``db`` cells; load only
-                # the low byte, then zero-extend so any downstream
-                # arithmetic on AX reads a clean word.  The compare
-                # fast path still picks up ``ax_is_byte`` to use
-                # ``cmp al`` / ``test al`` and skip the redundant
-                # high-byte compare; a peephole later collapses the
-                # paired ``xor ah, ah`` before a ``cmp al`` when the
-                # high byte is provably unused.
-                self.emit(f"        mov al, [_g_{vname}]")
+            elif self._is_byte_scalar(vname):
+                # Byte-scalar locals and globals store as a single
+                # byte; load only the low byte, then zero-extend so
+                # any downstream arithmetic on AX reads a clean word.
+                # The compare fast path still picks up ``ax_is_byte``
+                # to use ``cmp al`` / ``test al`` and skip the
+                # redundant high-byte compare; a peephole later
+                # collapses the paired ``xor ah, ah`` before a ``cmp
+                # al`` (or any other AL-only consumer) when the high
+                # byte is provably unused.
+                self.emit(f"        mov al, [{self._local_address(vname)}]")
                 self.emit("        xor ah, ah")
                 self.ax_is_byte = True
             else:
@@ -3861,12 +3907,16 @@ class CodeGenerator:
                 # Loading the high byte directly avoids one instruction
                 # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
                 # an ALU op on a shift that's really a byte-select.
+                # Byte-scalar locals / globals have no high byte — their
+                # storage is a single ``db`` cell, so bail to the general
+                # shift path (which loads zero).
                 if (
                     shift == 8
                     and isinstance(left, Var)
                     and self._is_memory_scalar(left.name)
                     and left.name not in self.pinned_register
                     and left.name not in self.array_labels
+                    and not self._is_byte_scalar(left.name)
                 ):
                     self.emit(f"        mov al, [{self._local_address(left.name)}+1]")
                     self.emit("        xor ah, ah")
@@ -3884,6 +3934,12 @@ class CodeGenerator:
                 return
             # Fast path for ``+``/``-`` with a stack-resident right operand:
             # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
+            # Byte-scalar locals / globals bail — a word-sized ``add ax,
+            # [mem]`` would read the adjacent byte as the high byte, and
+            # the byte-width split (``add al, [mem] / adc ah, 0``) isn't
+            # yet supported by the self-host assembler's handle_add /
+            # handle_adc (only ``r16, imm8`` / ``r/m16, r16`` today).
+            # Lifting that is part of the asm.c byte-mnemonic follow-up.
             if (
                 operator in ("+", "-")
                 and isinstance(right, Var)
@@ -3891,6 +3947,7 @@ class CodeGenerator:
                 and right.name not in self.pinned_register
                 and right.name not in self.variable_arrays
                 and self.variable_types.get(right.name) != "unsigned long"
+                and not self._is_byte_scalar(right.name)
             ):
                 self.generate_expression(left)
                 mnemonic = "add" if operator == "+" else "sub"
@@ -4019,6 +4076,7 @@ class CodeGenerator:
         )
         if naked_asm or frameless_calls:
             self.elide_frame = True
+        self.byte_scalar_locals = set()
         self.frame_size = 0
         self.live_long_local = None
         self.locals = {}
@@ -4159,7 +4217,12 @@ class CodeGenerator:
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 for vname in sorted(self.locals):
-                    directive = "dd 0" if self.variable_types.get(vname) == "unsigned long" else "dw 0"
+                    if self.variable_types.get(vname) == "unsigned long":
+                        directive = "dd 0"
+                    elif vname in self.byte_scalar_locals:
+                        directive = "db 0"
+                    else:
+                        directive = "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
         elif self.elide_frame:
             # naked_asm and frameless_calls both skip the prologue, so
@@ -4189,8 +4252,8 @@ class CodeGenerator:
         condition, body, else_body = statement.cond, statement.body, statement.else_body
         chain_var = self._dispatch_chain_var(statement)
         if chain_var is not None and chain_var != self.ax_local:
-            if self._is_byte_scalar_global(chain_var):
-                self.emit(f"        mov al, [_g_{chain_var}]")
+            if self._is_byte_scalar(chain_var):
+                self.emit(f"        mov al, [{self._local_address(chain_var)}]")
                 self.emit("        xor ah, ah")
                 self.ax_is_byte = True
             else:
@@ -5492,11 +5555,21 @@ class CodeGenerator:
                 if statement.name in self.virtual_long_locals:
                     continue
                 size = self.TYPE_SIZES[statement.type_name]
+                # Byte-typed scalar body locals get a 1-byte slot; track
+                # them so load / store / compare paths use the byte-wide
+                # codegen shared with byte-scalar globals.  Parameters
+                # arrive as words on the stack and keep their 2-byte
+                # slot, so the byte-local split only fires in
+                # :meth:`scan_locals`.
+                if statement.type_name in self.BYTE_TYPES:
+                    size = 1
+                    self.byte_scalar_locals.add(statement.name)
                 self.allocate_local(statement.name, size=size)
-                # Skip the init store for top-level main locals with an Int(0)
-                # initializer: the `dw 0` declaration already zeros the cell,
-                # and main re-runs from a fresh image each exec.
-                if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size == 2:
+                # Skip the init store for top-level main locals with an
+                # Int(0) initializer: the ``dw 0`` (or ``db 0`` for
+                # byte locals) declaration already zeros the cell, and
+                # main re-runs from a fresh image each exec.
+                if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size in (1, 2):
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
