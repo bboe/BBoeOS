@@ -135,8 +135,10 @@ __attribute__((regparm(1)))
 void emit_sized_imm(int value, int size);
 __attribute__((regparm(1)))
 void emit_word(int value);
+void flush_output();
 __attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
+void include_pop();
 __attribute__((regparm(1)))
 __attribute__((carry_return))
 int is_ident_char(int c);
@@ -160,16 +162,22 @@ int open_file_ro(char *path);
 __attribute__((regparm(1)))
 void parse_d_values(int extra_zeros);
 void parse_directive();
+void parse_line();
 void parse_mnemonic();
 int parse_operand();
 int parse_register();
 int parse_rhs();
 __attribute__((carry_return))
 int peek_label_target();
+int read_line();
+int read_source_sector();
 __attribute__((regparm(1)))
 int reg_to_rm(int register_id);
 int resolve_label();
 int resolve_value();
+void restore_es();
+void run_pass1();
+void run_pass2();
 void scan_ident_dot();
 __attribute__((regparm(1)))
 void shift_handler(int modrm_base);
@@ -179,6 +187,8 @@ __attribute__((regparm(1)))
 void symbol_add(int value, int scope);
 __attribute__((regparm(1)))
 void symbol_add_constant(int value);
+__attribute__((regparm(1)))
+int symbol_entry_address(int index);
 __attribute__((regparm(1)))
 int symbol_lookup(int scope);
 __attribute__((regparm(1)))
@@ -202,16 +212,6 @@ void abort_unknown() {
         "jmp abort_unknown_impl");
 }
 
-/* Restore ES=DS so cc.py's ``die`` / ``printf`` / ``close`` builtins
-   (which jmp/int-30h into the kernel expecting ES=0) work correctly
-   from code paths where ES has been pointed at SYMBOL_SEGMENT for
-   the symbol table.  ``always_inline`` splices the 2-byte body at
-   every call site, saving the 3-byte ``call`` + 1-byte shared ``ret``. */
-__attribute__((always_inline))
-void restore_es() {
-    asm("push ds\npop es");
-}
-
 /* Invoked through ``abort_unknown`` above.  Prints the offending
    source line from ``line_buffer`` together with the bad token,
    then exits. */
@@ -223,6 +223,39 @@ void abort_unknown_impl() {
        via tests/bboeos.h and rejects the zero-argument form.  Jumping
        to FUNCTION_EXIT keeps cc.py and clang both happy. */
     asm("jmp FUNCTION_EXIT");
+}
+
+/* Shared body for ``adc`` (/2, modrm base 0xD0) and ``sbb`` (/3,
+   modrm base 0xD8) — the r, imm form only.  r8 uses 80 /r ib, r16
+   uses 83 /r ib (sign-extended).  adc carries the checksum-fold
+   idiom (``adc bx, 0``); sbb carries the byte-borrow propagate
+   cc.py's byte-compound-``-``-assign split emits (``sub al, [mem] /
+   sbb ah, 0``).  No r,r / [mem] / mem-dst forms — the self-host
+   never needs them. */
+__attribute__((regparm(1)))
+void adc_sbb_handler(int modrm_base) {
+    skip_ws();
+    int packed_register = parse_register();
+    skip_comma();
+    int imm = resolve_value();
+    if ((packed_register >> 8) == 8) {
+        emit_byte(0x80);
+    } else {
+        emit_byte(0x83);
+    }
+    emit_byte(modrm_base | (packed_register & 0xFF));
+    emit_byte(imm);
+}
+
+/* Close the current ``source_fd`` via the ES-safe ``syscall`` wrapper.
+   Factored so ``do_pass`` and ``include_pop`` share one inline-asm
+   block instead of each open-coding the 3-instruction SYS_IO_CLOSE
+   sequence.  Inlined at both call sites via always_inline. */
+__attribute__((always_inline))
+void close_source() {
+    asm("mov bx, [_g_source_fd]\n"
+        "mov ah, SYS_IO_CLOSE\n"
+        "call syscall");
 }
 
 /* Populate ``source_prefix`` with the directory portion of
@@ -291,6 +324,238 @@ void die_error_pass1_iter() {
 void die_symbol_overflow() {
     restore_es();
     die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
+}
+
+/* Run one full pass over the source file: open it, reset the
+   per-pass buffer cursors, and loop through read_line / parse_line
+   until every line (including those from %included files, via
+   include_pop on inner EOF) has been processed.  On open failure
+   the pass exits immediately with error_flag raised; the enclosing
+   run_pass1 / run_pass2 callers check error_flag and invoke
+   die_error_pass1_io() as appropriate.  Callable from inline asm
+   (``call do_pass``) since run_pass1 / run_pass2 reach it that way
+   — cc.py emits the bare label.  The function has no locals, so
+   no DX-pinned spill cc.py would otherwise wrap the inline-asm
+   blocks with. */
+void do_pass() {
+    current_address = org_value;
+    source_fd = open_file_ro(source_name);
+    if (source_fd == -1) {
+        error_flag = 1;
+        return;
+    }
+    source_buffer_position = 0;
+    source_buffer_valid = 0;
+    include_depth = 0;
+    global_scope = 0xFFFF;
+    while (1) {
+        if (read_line() != 0) {
+            if (include_depth == 0) {
+                break;
+            }
+            include_pop();
+            continue;
+        }
+        parse_line();
+    }
+    close_source();
+}
+
+/* The ALU binop family (``add`` /0, ``or`` /1, ``and`` /4, ``sub`` /5,
+   ``xor`` /6) all share one encoding shape: the /r field drives every
+   opcode in the instruction, so one body parametrized on ``rfield``
+   replaces five near-identical handlers.
+
+   Opcode derivations from ``rfield``:
+     - r/r byte:       rfield * 8           (00 / 08 / 20 / 28 / 30)
+     - r/mem byte:     rfield * 8 | 2       (02 / 0A / 22 / 2A / 32)
+     - AL imm8 short:  rfield * 8 | 4       (04 / 0C / 24 / 2C / 34)
+     - AX imm16 short: rfield * 8 | 5       (05 / 0D / 25 / 2D / 35)
+     - [mem], r16:     rfield * 8 | 1       (01 / 09 / 21 / 29 / 31)
+     - 80 /r modrm:    0xC0 | (rfield * 8)  (C0 / C8 / E0 / E8 / F0)
+
+   The five retired handlers differed only in which optional forms
+   they accepted (add/sub covered the most; xor/and the fewest).  The
+   shared helper is a strict superset: any operand shape the retired
+   handlers accepted is preserved byte-identically, and a handful of
+   shapes that were silently mis-encoded (e.g. ``or ax, imm16`` went
+   through ``81 /1 iw`` instead of the ``0D iw`` short form) now match
+   NASM.  asm.asm doesn't exercise those previously-broken shapes, so
+   test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
+   the call for the ``sub word [disp16], imm16`` form that only it
+   uses. */
+__attribute__((regparm(1)))
+void emit_alu_binop(int rfield) {
+    skip_ws();
+    int op_rr = rfield << 3;
+    if (source_cursor[0] == '[') {
+        mem_op_reg_emit(op_rr | 1);
+        return;
+    }
+    int packed_register = parse_register();
+    int register1_id = packed_register & 0xFF;
+    int size1 = (packed_register >> 8) & 0xFF;
+    skip_comma();
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(op_rr, size1);
+        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
+    } else if (type2 == 2) {
+        emit_sized(op_rr | 2, size1);
+        emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 3) {
+        emit_sized(op_rr | 2, size1);
+        emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
+        emit_byte(value2 & 0xFF);
+    } else {
+        emit_alu_reg_imm(op_rr, register1_id, size1, value2);
+    }
+}
+
+/* ``<op> reg, imm`` shared by ``emit_alu_binop`` and ``handle_cmp``.
+   ``op_rr`` is ``rfield << 3`` (add=0x00, or=0x08, and=0x20, sub=0x28,
+   xor=0x30, cmp=0x38); ``modrm_base = 0xC0 | op_rr`` covers the
+   register-mode ModR/M constants.  Four encodings picked by size /
+   range / AL-or-AX:
+     - r8:           80 /r ib, or AL short 04+op_rr / 0C / 24 / 2C / 34 / 3C
+     - r16, imm8:    83 /r ib (sign-extended)
+     - AX, imm16:    05+op_rr / 0D / 25 / 2D / 35 / 3D short form
+     - r16, imm16:   81 /r iw */
+__attribute__((regparm(1)))
+void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
+    int modrm_base = 0xC0 | op_rr;
+    if (size == 8) {
+        if (reg == 0) {
+            emit_byte(op_rr | 4);
+        } else {
+            emit_byte(0x80);
+            emit_byte(modrm_base | reg);
+        }
+        emit_byte(imm & 0xFF);
+    } else if (imm >= -128 && imm <= 127) {
+        emit_byte(0x83);
+        emit_byte(modrm_base | reg);
+        emit_byte(imm & 0xFF);
+    } else if (reg == 0) {
+        emit_byte(op_rr | 5);
+        emit_word(imm);
+    } else {
+        emit_byte(0x81);
+        emit_byte(modrm_base | reg);
+        emit_word(imm);
+    }
+}
+
+/* Emit one byte into the output stream.  Pass 1 only bumps
+   current_address / output_total; pass 2 also stores the byte into
+   OUTPUT_BUFFER at output_position, flushing to output_fd when the
+   buffer fills.  Callers load ``value`` into AX via the ``regparm(1)``
+   calling convention; the fastcall prologue spills AX into ``value``'s
+   local slot so the body reads it through the normal local path.
+
+   SI is preserved across the body via an explicit ``push si`` /
+   ``pop si`` pair around the ``output_buffer[...]`` subscript
+   (cc.py's byte-index codegen uses SI as scratch).  Pure-C
+   handlers that follow an ``emit_byte`` with a ``skip_ws`` or
+   ``parse_mnemonic`` call rely on ``source_cursor`` (the SI alias)
+   surviving the emit — without the guard, every subscript would
+   trash the live cursor.  ``flush_output`` already preserves SI
+   around its own body, so the inner ``flush_output()`` call
+   inside our push/pop bracket composes cleanly. */
+__attribute__((regparm(1)))
+void emit_byte(int value) {
+    if (pass == 2) {
+        asm("push si");
+        output_buffer[output_position] = value;
+        output_position = output_position + 1;
+        if (output_position >= 512) {
+            flush_output();
+        }
+        asm("pop si");
+    }
+    current_address = current_address + 1;
+    output_total = output_total + 1;
+}
+
+/* Emit the ``[disp16]`` direct-memory ModR/M form: ``(reg << 3) | 0x06``
+   plus a 2-byte disp16. */
+__attribute__((regparm(1)))
+void emit_modrm_direct(int reg, int disp) {
+    emit_byte((reg << 3) | 0x06);
+    emit_word(disp);
+}
+
+/* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
+   displacement magnitude.  ``modrm`` is the mod=00 base (rm / reg
+   fields already set); the helper ORs in 0x40 for disp8 and 0x80
+   for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
+__attribute__((regparm(1)))
+void emit_modrm_disp(int modrm, int disp) {
+    if (disp == 0) {
+        emit_byte(modrm);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_byte(modrm | 0x40);
+        emit_byte(disp);
+    } else {
+        emit_byte(modrm | 0x80);
+        emit_word(disp);
+    }
+}
+
+/* Narrower sibling of ``emit_modrm_disp`` for the handlers that only
+   accept disp8 (``inc_dec_handler``, ``handle_movzx``, ``handle_test``'s
+   memory-dest branch).  ``disp == 0`` emits a bare ModR/M; a non-zero
+   ``disp`` emits ``modrm | 0x40`` followed by the low byte.  Unlike
+   ``emit_modrm_disp``, no disp16 fallback — the asm sources these
+   handlers see never exceed ±128. */
+__attribute__((regparm(1)))
+void emit_modrm_disp8(int rm, int disp) {
+    if (disp == 0) {
+        emit_byte(rm);
+    } else {
+        emit_byte(rm | 0x40);
+        emit_byte(disp & 0xFF);
+    }
+}
+
+/* Emit ``base`` for an 8-bit operand size, ``base + 1`` otherwise.
+   Collapses the ``if (size == 8) emit_byte(X); else emit_byte(X+1);``
+   split that every ALU / mov / cmp / test handler carries. */
+__attribute__((regparm(1)))
+void emit_sized(int base, int size) {
+    if (size == 8) {
+        emit_byte(base);
+    } else {
+        emit_byte(base + 1);
+    }
+}
+
+/* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
+   word otherwise.  Used for the ``[mem], imm`` tail shared by two of
+   ``handle_mov``'s branches (the other imm tails already fit
+   ``emit_byte`` / ``emit_word`` directly). */
+__attribute__((regparm(1)))
+void emit_sized_imm(int value, int size) {
+    if (size == 8) {
+        emit_byte(value & 0xFF);
+    } else {
+        emit_word(value);
+    }
+}
+
+/* ``emit_byte(value); emit_byte(value >> 8);`` — the low/high byte pair used
+   for every ``disp16`` / ``imm16`` in the instruction handlers.
+   ``regparm(1)`` puts ``value`` in AX so the call site compiles to
+   ``mov ax, value ; call emit_word``.  ``emit_byte`` masks to a byte on
+   store, so no ``& 0xFF`` guard is needed before passing the raw
+   value. */
+__attribute__((regparm(1)))
+void emit_word(int value) {
+    emit_byte(value);
+    emit_byte(value >> 8);
 }
 
 /* Pick between short (rel8) and near (rel16) jump encoding per
@@ -390,119 +655,6 @@ void flush_output() {
     output_position = 0;
 }
 
-/* Emit one byte into the output stream.  Pass 1 only bumps
-   current_address / output_total; pass 2 also stores the byte into
-   OUTPUT_BUFFER at output_position, flushing to output_fd when the
-   buffer fills.  Callers load ``value`` into AX via the ``regparm(1)``
-   calling convention; the fastcall prologue spills AX into ``value``'s
-   local slot so the body reads it through the normal local path.
-   Placed after its C-level callee (``flush_output``) rather than in
-   strict alphabetical position: cc.py resolves the call either way
-   via its pre-codegen ``user_functions`` registry, but clang
-   enforces ISO C99 declare-before-use.
-
-   SI is preserved across the body via an explicit ``push si`` /
-   ``pop si`` pair around the ``output_buffer[...]`` subscript
-   (cc.py's byte-index codegen uses SI as scratch).  Pure-C
-   handlers that follow an ``emit_byte`` with a ``skip_ws`` or
-   ``parse_mnemonic`` call rely on ``source_cursor`` (the SI alias)
-   surviving the emit — without the guard, every subscript would
-   trash the live cursor.  ``flush_output`` already preserves SI
-   around its own body, so the inner ``flush_output()`` call
-   inside our push/pop bracket composes cleanly. */
-__attribute__((regparm(1)))
-void emit_byte(int value) {
-    if (pass == 2) {
-        asm("push si");
-        output_buffer[output_position] = value;
-        output_position = output_position + 1;
-        if (output_position >= 512) {
-            flush_output();
-        }
-        asm("pop si");
-    }
-    current_address = current_address + 1;
-    output_total = output_total + 1;
-}
-
-/* ``emit_byte(value); emit_byte(value >> 8);`` — the low/high byte pair used
-   for every ``disp16`` / ``imm16`` in the instruction handlers.
-   ``regparm(1)`` puts ``value`` in AX so the call site compiles to
-   ``mov ax, value ; call emit_word``.  ``emit_byte`` masks to a byte on
-   store, so no ``& 0xFF`` guard is needed before passing the raw
-   value. */
-__attribute__((regparm(1)))
-void emit_word(int value) {
-    emit_byte(value);
-    emit_byte(value >> 8);
-}
-
-/* Emit ``base`` for an 8-bit operand size, ``base + 1`` otherwise.
-   Collapses the ``if (size == 8) emit_byte(X); else emit_byte(X+1);``
-   split that every ALU / mov / cmp / test handler carries. */
-__attribute__((regparm(1)))
-void emit_sized(int base, int size) {
-    if (size == 8) {
-        emit_byte(base);
-    } else {
-        emit_byte(base + 1);
-    }
-}
-
-/* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
-   word otherwise.  Used for the ``[mem], imm`` tail shared by two of
-   ``handle_mov``'s branches (the other imm tails already fit
-   ``emit_byte`` / ``emit_word`` directly). */
-__attribute__((regparm(1)))
-void emit_sized_imm(int value, int size) {
-    if (size == 8) {
-        emit_byte(value & 0xFF);
-    } else {
-        emit_word(value);
-    }
-}
-
-/* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
-   displacement magnitude.  ``modrm`` is the mod=00 base (rm / reg
-   fields already set); the helper ORs in 0x40 for disp8 and 0x80
-   for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
-__attribute__((regparm(1)))
-void emit_modrm_disp(int modrm, int disp) {
-    if (disp == 0) {
-        emit_byte(modrm);
-    } else if (disp >= -128 && disp <= 127) {
-        emit_byte(modrm | 0x40);
-        emit_byte(disp);
-    } else {
-        emit_byte(modrm | 0x80);
-        emit_word(disp);
-    }
-}
-
-/* Emit the ``[disp16]`` direct-memory ModR/M form: ``(reg << 3) | 0x06``
-   plus a 2-byte disp16. */
-__attribute__((regparm(1)))
-void emit_modrm_direct(int reg, int disp) {
-    emit_byte((reg << 3) | 0x06);
-    emit_word(disp);
-}
-
-/* Narrower sibling of ``emit_modrm_disp`` for the handlers that only
-   accept disp8 (``inc_dec_handler``, ``handle_movzx``, ``handle_test``'s
-   memory-dest branch).  ``disp == 0`` emits a bare ModR/M; a non-zero
-   ``disp`` emits ``modrm | 0x40`` followed by the low byte.  Unlike
-   ``emit_modrm_disp``, no disp16 fallback — the asm sources these
-   handlers see never exceed ±128. */
-__attribute__((regparm(1)))
-void emit_modrm_disp8(int rm, int disp) {
-    if (disp == 0) {
-        emit_byte(rm);
-    } else {
-        emit_byte(rm | 0x40);
-        emit_byte(disp & 0xFF);
-    }
-}
-
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
    handler is dispatched through ``mnemonic_table`` (inline-asm tail
    of this file): ``parse_mnemonic`` does an indirect ``call`` on the
@@ -513,118 +665,8 @@ void handle_aam() {
     emit_byte(0x0A);
 }
 
-/* Shared body for ``adc`` (/2, modrm base 0xD0) and ``sbb`` (/3,
-   modrm base 0xD8) — the r, imm form only.  r8 uses 80 /r ib, r16
-   uses 83 /r ib (sign-extended).  adc carries the checksum-fold
-   idiom (``adc bx, 0``); sbb carries the byte-borrow propagate
-   cc.py's byte-compound-``-``-assign split emits (``sub al, [mem] /
-   sbb ah, 0``).  No r,r / [mem] / mem-dst forms — the self-host
-   never needs them. */
-__attribute__((regparm(1)))
-void adc_sbb_handler(int modrm_base) {
-    skip_ws();
-    int packed_register = parse_register();
-    skip_comma();
-    int imm = resolve_value();
-    if ((packed_register >> 8) == 8) {
-        emit_byte(0x80);
-    } else {
-        emit_byte(0x83);
-    }
-    emit_byte(modrm_base | (packed_register & 0xFF));
-    emit_byte(imm);
-}
-
 void handle_adc() {
     adc_sbb_handler(0xD0);
-}
-
-/* ``<op> reg, imm`` shared by ``emit_alu_binop`` and ``handle_cmp``.
-   ``op_rr`` is ``rfield << 3`` (add=0x00, or=0x08, and=0x20, sub=0x28,
-   xor=0x30, cmp=0x38); ``modrm_base = 0xC0 | op_rr`` covers the
-   register-mode ModR/M constants.  Four encodings picked by size /
-   range / AL-or-AX:
-     - r8:           80 /r ib, or AL short 04+op_rr / 0C / 24 / 2C / 34 / 3C
-     - r16, imm8:    83 /r ib (sign-extended)
-     - AX, imm16:    05+op_rr / 0D / 25 / 2D / 35 / 3D short form
-     - r16, imm16:   81 /r iw */
-__attribute__((regparm(1)))
-void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
-    int modrm_base = 0xC0 | op_rr;
-    if (size == 8) {
-        if (reg == 0) {
-            emit_byte(op_rr | 4);
-        } else {
-            emit_byte(0x80);
-            emit_byte(modrm_base | reg);
-        }
-        emit_byte(imm & 0xFF);
-    } else if (imm >= -128 && imm <= 127) {
-        emit_byte(0x83);
-        emit_byte(modrm_base | reg);
-        emit_byte(imm & 0xFF);
-    } else if (reg == 0) {
-        emit_byte(op_rr | 5);
-        emit_word(imm);
-    } else {
-        emit_byte(0x81);
-        emit_byte(modrm_base | reg);
-        emit_word(imm);
-    }
-}
-
-/* The ALU binop family (``add`` /0, ``or`` /1, ``and`` /4, ``sub`` /5,
-   ``xor`` /6) all share one encoding shape: the /r field drives every
-   opcode in the instruction, so one body parametrized on ``rfield``
-   replaces five near-identical handlers.
-
-   Opcode derivations from ``rfield``:
-     - r/r byte:       rfield * 8           (00 / 08 / 20 / 28 / 30)
-     - r/mem byte:     rfield * 8 | 2       (02 / 0A / 22 / 2A / 32)
-     - AL imm8 short:  rfield * 8 | 4       (04 / 0C / 24 / 2C / 34)
-     - AX imm16 short: rfield * 8 | 5       (05 / 0D / 25 / 2D / 35)
-     - [mem], r16:     rfield * 8 | 1       (01 / 09 / 21 / 29 / 31)
-     - 80 /r modrm:    0xC0 | (rfield * 8)  (C0 / C8 / E0 / E8 / F0)
-
-   The five retired handlers differed only in which optional forms
-   they accepted (add/sub covered the most; xor/and the fewest).  The
-   shared helper is a strict superset: any operand shape the retired
-   handlers accepted is preserved byte-identically, and a handful of
-   shapes that were silently mis-encoded (e.g. ``or ax, imm16`` went
-   through ``81 /1 iw`` instead of the ``0D iw`` short form) now match
-   NASM.  asm.asm doesn't exercise those previously-broken shapes, so
-   test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
-   the call for the ``sub word [disp16], imm16`` form that only it
-   uses. */
-__attribute__((regparm(1)))
-void emit_alu_binop(int rfield) {
-    skip_ws();
-    int op_rr = rfield << 3;
-    if (source_cursor[0] == '[') {
-        mem_op_reg_emit(op_rr | 1);
-        return;
-    }
-    int packed_register = parse_register();
-    int register1_id = packed_register & 0xFF;
-    int size1 = (packed_register >> 8) & 0xFF;
-    skip_comma();
-    int packed_operand = parse_operand();
-    int type2 = (packed_operand >> 8) & 0xFF;
-    int register2_id = packed_operand & 0xFF;
-    int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(op_rr, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (type2 == 2) {
-        emit_sized(op_rr | 2, size1);
-        emit_modrm_direct(register1_id, value2);
-    } else if (type2 == 3) {
-        emit_sized(op_rr | 2, size1);
-        emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
-        emit_byte(value2 & 0xFF);
-    } else {
-        emit_alu_reg_imm(op_rr, register1_id, size1, value2);
-    }
 }
 
 void handle_add() {
@@ -737,41 +779,6 @@ void handle_cmp() {
         emit_byte(imm & 0xFF);
     } else {
         emit_word(imm);
-    }
-}
-
-/* ``inc`` / ``dec`` with r8 / r16 / memory destination.  r16 uses
-   the 40+reg / 48+reg one-byte forms; r8 and memory use FE/FF with
-   a /0 (inc) or /1 (dec) reg field.  Memory dispatch mirrors the
-   three parse_operand op2 types: 0=reg (handled above), 2=direct
-   disp16, 3=reg+disp8 (or bare reg when disp == 0).  ``rfield`` is
-   the /r constant (0 inc, 1 dec); the helper shifts it into position
-   and ORs it into every register / modrm byte that carries the
-   inc-vs-dec distinction. */
-__attribute__((regparm(1)))
-void inc_dec_handler(int rfield) {
-    skip_ws();
-    int packed_operand = parse_operand();
-    int type = (packed_operand >> 8) & 0xFF;
-    int register_id = packed_operand & 0xFF;
-    int value = parse_operand_value;
-    int size = op1_size;
-    int reg_shift = rfield << 3;
-    if (type == 0) {
-        if (size == 8) {
-            emit_byte(0xFE);
-            emit_byte(0xC0 | reg_shift | register_id);
-        } else {
-            emit_byte(0x40 | reg_shift | register_id);
-        }
-    } else {
-        emit_sized(0xFE, size);
-        if (type == 2) {
-            emit_byte(0x06 | reg_shift);
-            emit_word(value);
-        } else {
-            emit_modrm_disp8(reg_to_rm(register_id) | reg_shift, value);
-        }
     }
 }
 
@@ -1031,23 +1038,6 @@ void handle_movzx() {
     }
 }
 
-/* Single-operand F6/F7-family handlers (``mul`` / ``neg`` / ``not``
-   / ``div`` on a r8 or r16).  Emits F6 (byte) or F7 (word) followed
-   by a register-mode ModR/M byte whose /r field is baked into
-   ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
-   div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
-__attribute__((regparm(1)))
-void unary_f6f7(int modrm_base) {
-    skip_ws();
-    int packed_register = parse_register();
-    int opcode = 0xF7;
-    if ((packed_register >> 8) == 8) {
-        opcode = 0xF6;
-    }
-    emit_byte(opcode);
-    emit_byte(modrm_base | (packed_register & 0xFF));
-}
-
 void handle_mul() {
     unary_f6f7(0xE0);
 }
@@ -1139,28 +1129,6 @@ void handle_sbb() {
 
 void handle_scasb() {
     emit_byte(0xAE);
-}
-
-/* ``shl`` / ``shr`` with r8/r16 destination and either a constant 1
-   (short D0/D1 form) or imm8 shift count (C0/C1 imm8 form).  The two
-   handlers share one body; ``modrm_base`` carries the /r field (0xE0
-   for shl, 0xE8 for shr). */
-__attribute__((regparm(1)))
-void shift_handler(int modrm_base) {
-    skip_ws();
-    int packed_register = parse_register();
-    skip_comma();
-    int count = resolve_value();
-    int register_id = packed_register & 0xFF;
-    int size = (packed_register >> 8) & 0xFF;
-    if (count == 1) {
-        emit_sized(0xD0, size);
-        emit_byte(modrm_base | register_id);
-    } else {
-        emit_sized(0xC0, size);
-        emit_byte(modrm_base | register_id);
-        emit_byte(count);
-    }
 }
 
 void handle_shl() {
@@ -1326,30 +1294,6 @@ void handle_xor() {
     emit_alu_binop(6);
 }
 
-/* Classify an ASCII byte as an identifier character — ``[a-zA-Z0-9_]``.
-   The ``.`` prefix that marks local labels is NOT an ident char for
-   our purposes; label-scan loops add it via an explicit ``|| c == '.'``
-   next to the call.  ``regparm(1)`` + ``carry_return`` so cc.py lowers
-   ``if (is_ident_char(c))`` to ``mov ax, c ; call is_ident_char ; jc/jnc``. */
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int is_ident_char(int c) {
-    return (c >= 'a' && c <= 'z')
-            || (c >= 'A' && c <= 'Z')
-            || (c >= '0' && c <= '9')
-            || c == '_';
-}
-
-/* Scan source_cursor forward through an identifier-with-dot span — the
-   character class every label / symbol parser uses (``[a-zA-Z0-9_.]``).
-   Advances source_cursor past the last matching byte.  Three callers:
-   peek_label_target, resolve_label, resolve_value's symbol path. */
-void scan_ident_dot() {
-    while (is_ident_char(source_cursor[0]) || source_cursor[0] == '.') {
-        source_cursor = source_cursor + 1;
-    }
-}
-
 /* Convert an ASCII hex digit to its numeric value.  Returns 0..15
    on success, ``-1`` on a non-hex byte.  ``regparm(1)`` fastcall —
    the byte arrives in AX (caller zero-extends from AL before the
@@ -1372,6 +1316,41 @@ int hex_digit(int c) {
     return -1;
 }
 
+/* ``inc`` / ``dec`` with r8 / r16 / memory destination.  r16 uses
+   the 40+reg / 48+reg one-byte forms; r8 and memory use FE/FF with
+   a /0 (inc) or /1 (dec) reg field.  Memory dispatch mirrors the
+   three parse_operand op2 types: 0=reg (handled above), 2=direct
+   disp16, 3=reg+disp8 (or bare reg when disp == 0).  ``rfield`` is
+   the /r constant (0 inc, 1 dec); the helper shifts it into position
+   and ORs it into every register / modrm byte that carries the
+   inc-vs-dec distinction. */
+__attribute__((regparm(1)))
+void inc_dec_handler(int rfield) {
+    skip_ws();
+    int packed_operand = parse_operand();
+    int type = (packed_operand >> 8) & 0xFF;
+    int register_id = packed_operand & 0xFF;
+    int value = parse_operand_value;
+    int size = op1_size;
+    int reg_shift = rfield << 3;
+    if (type == 0) {
+        if (size == 8) {
+            emit_byte(0xFE);
+            emit_byte(0xC0 | reg_shift | register_id);
+        } else {
+            emit_byte(0x40 | reg_shift | register_id);
+        }
+    } else {
+        emit_sized(0xFE, size);
+        if (type == 2) {
+            emit_byte(0x06 | reg_shift);
+            emit_word(value);
+        } else {
+            emit_modrm_disp8(reg_to_rm(register_id) | reg_shift, value);
+        }
+    }
+}
+
 /* Pop the include stack: close the included file, restore the
    parent file's fd / buffer / position / valid fields, and copy the
    saved SOURCE_BUFFER contents back.  Called from do_pass (via
@@ -1384,35 +1363,6 @@ int hex_digit(int c) {
    Keeping every asm() block SP-balanced is required because cc.py
    wraps each inline block with ``push dx / pop dx`` to preserve the
    local pinned to DX. */
-/* Close the current ``source_fd`` via the ES-safe ``syscall`` wrapper.
-   Factored so ``do_pass`` and ``include_pop`` share one inline-asm
-   block instead of each open-coding the 3-instruction SYS_IO_CLOSE
-   sequence.  Inlined at both call sites via always_inline. */
-__attribute__((always_inline))
-void close_source() {
-    asm("mov bx, [_g_source_fd]\n"
-        "mov ah, SYS_IO_CLOSE\n"
-        "call syscall");
-}
-
-/* Open ``path`` read-only via SYS_IO_OPEN (through the ES-safe
-   ``syscall`` wrapper).  Returns the fd on success, or -1 on error
-   (CF set by the syscall).  Takes the path pointer via regparm(1)
-   AX; the body threads it into SI for the syscall.  Inlined at both
-   call sites via always_inline; the internal ``.ofr_ok`` label gets
-   per-site uniquified. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-int open_file_ro(char *path) {
-    asm("mov si, ax\n"
-        "mov al, O_RDONLY\n"
-        "mov ah, SYS_IO_OPEN\n"
-        "call syscall\n"
-        "jnc .ofr_ok\n"
-        "mov ax, -1\n"
-        ".ofr_ok:");
-}
-
 void include_pop() {
     close_source();
     source_fd = include_save_fd;
@@ -1474,20 +1424,18 @@ void include_push() {
     include_depth = include_depth + 1;
 }
 
-/* Naked-asm helper that invokes ``SYS_IO_READ`` on ``source_fd``
-   filling ``SOURCE_BUFFER`` with up to 512 bytes; uses the ES-safe
-   ``syscall`` wrapper so ES=SYMBOL_SEGMENT survives the ``int 30h``.
-   Returns AX = bytes read, or -1 on error.  Factored as its own
-   function so ``load_src_sector``'s C body can receive the result
-   via the standard return-in-AX convention — cc.py has no syntax
-   for binding an inline ``call syscall``'s AX return to a C local. */
-__attribute__((always_inline))
-int read_source_sector() {
-    asm("mov bx, [_g_source_fd]\n"
-        "mov di, SOURCE_BUFFER\n"
-        "mov cx, 512\n"
-        "mov ah, SYS_IO_READ\n"
-        "call syscall");
+/* Classify an ASCII byte as an identifier character — ``[a-zA-Z0-9_]``.
+   The ``.`` prefix that marks local labels is NOT an ident char for
+   our purposes; label-scan loops add it via an explicit ``|| c == '.'``
+   next to the call.  ``regparm(1)`` + ``carry_return`` so cc.py lowers
+   ``if (is_ident_char(c))`` to ``mov ax, c ; call is_ident_char ; jc/jnc``. */
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int is_ident_char(int c) {
+    return (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9')
+            || c == '_';
 }
 
 /* Refill SOURCE_BUFFER from the current source_fd via
@@ -1535,6 +1483,52 @@ int lookup_ident_here(int advance) {
         source_cursor = end_pos;
     }
     return value;
+}
+
+int main(int argc, char *argv[]) {
+    /* ES starts at DS (kernel convention) so die() / open() run
+       safely.  We only switch to SYMBOL_SEGMENT once we're ready to
+       run the assembler passes — the handlers index the symbol table
+       via ``[es:...]``, which needs ES pointed at that segment. */
+    /* Publish the scratch-buffer bases as C-visible pointers so
+       C code can index ``line_buffer[i]`` / ``source_buffer[i]`` and
+       so abort_unknown_impl can printf the bad source line.
+       ``include_source_save`` lives one SOURCE_BUFFER length past
+       SOURCE_BUFFER — an %include level saves the 512-byte
+       SOURCE_BUFFER into that scratch RAM instead of bloating the
+       binary. */
+    line_buffer = LINE_BUFFER;
+    output_buffer = OUTPUT_BUFFER;
+    source_buffer = SOURCE_BUFFER;
+    include_source_save = SOURCE_BUFFER + 512;
+    if (argc != 2) {
+        die("Usage: asm <source> <output>\n");
+    }
+    source_name = argv[0];
+    output_name = argv[1];
+    compute_source_prefix();
+    int fd = open(output_name, O_WRONLY + O_CREAT + O_TRUNC, FLAG_EXECUTE);
+    if (fd < 0) {
+        die("Error: cannot create output\n");
+    }
+    output_fd = fd;
+    /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
+       handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
+    asm("mov ax, SYMBOL_SEGMENT\n"
+        "mov es, ax\n"
+        "cld");
+    run_pass1();
+    run_pass2();
+    /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
+       it preserves ES=SYMBOL_SEGMENT across the write. */
+    flush_output();
+    /* Restore ES=DS before the cc.py close() builtin (kernel expects
+       ES=DS on int 30h). */
+    restore_es();
+    if (close(output_fd) < 0) {
+        die("Error: directory write failed\n");
+    }
+    die("OK\n");
 }
 
 /* Build a register/register ModR/M byte.  ``regparm(1)`` — reg in
@@ -1627,6 +1621,75 @@ void mem_op_reg_emit(int opcode) {
     }
     emit_byte(opcode);
     emit_modrm_direct(packed_register & 0xFF, disp);
+}
+
+/* Invoke the handler pointer in ``mnemonic_table[index]`` (at
+   offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
+   has no C analogue cc.py emits, so this tiny wrapper pairs with
+   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C.
+   Inlined at its single call site — no body overhead. */
+__attribute__((regparm(1)))
+__attribute__((always_inline))
+void mnemonic_dispatch_at(int index) {
+    asm("shl ax, 2\n"
+        "mov bx, mnemonic_table\n"
+        "add bx, ax\n"
+        "call [bx+2]");
+}
+
+/* Fetch the keyword pointer from ``mnemonic_table[index]`` (each
+   entry is 4 bytes: keyword-pointer + handler-pointer, terminated
+   by a 2-byte zero).  Returns ``NULL`` when the caller has walked
+   past the terminator.  Compact naked-asm body because cc.py has
+   no syntax for reading a 16-bit pointer out of a packed data
+   table; factoring this out keeps ``parse_mnemonic`` pure C. */
+__attribute__((regparm(1)))
+__attribute__((always_inline))
+char *mnemonic_keyword_at(int index) {
+    asm("shl ax, 2\n"
+        "mov bx, mnemonic_table\n"
+        "add bx, ax\n"
+        "mov ax, [bx]");
+}
+
+/* Open ``path`` read-only via SYS_IO_OPEN (through the ES-safe
+   ``syscall`` wrapper).  Returns the fd on success, or -1 on error
+   (CF set by the syscall).  Takes the path pointer via regparm(1)
+   AX; the body threads it into SI for the syscall.  Inlined at both
+   call sites via always_inline; the internal ``.ofr_ok`` label gets
+   per-site uniquified. */
+__attribute__((regparm(1)))
+__attribute__((always_inline))
+int open_file_ro(char *path) {
+    asm("mov si, ax\n"
+        "mov al, O_RDONLY\n"
+        "mov ah, SYS_IO_OPEN\n"
+        "call syscall\n"
+        "jnc .ofr_ok\n"
+        "mov ax, -1\n"
+        ".ofr_ok:");
+}
+
+/* Shared body for ``dw`` / ``dd`` directives — ``dw`` is
+   ``parse_d_values(0)`` and ``dd`` is ``parse_d_values(1)`` (the
+   extra zero word past the 16-bit value).  Comma-separated
+   operand list; each operand evaluates via resolve_value. */
+__attribute__((regparm(1)))
+void parse_d_values(int extra_word) {
+    skip_ws();
+    while (1) {
+        int value = resolve_value();
+        emit_word(value);
+        if (extra_word != 0) {
+            emit_word(0);
+        }
+        skip_ws();
+        if (source_cursor[0] != ',') {
+            return;
+        }
+        source_cursor = source_cursor + 1;
+        skip_ws();
+    }
 }
 
 /* Parse ``db`` operands (comma-separated mix of numbers, symbols,
@@ -1808,28 +1871,6 @@ void parse_directive() {
     parse_mnemonic();
 }
 
-/* Shared body for ``dw`` / ``dd`` directives — ``dw`` is
-   ``parse_d_values(0)`` and ``dd`` is ``parse_d_values(1)`` (the
-   extra zero word past the 16-bit value).  Comma-separated
-   operand list; each operand evaluates via resolve_value. */
-__attribute__((regparm(1)))
-void parse_d_values(int extra_word) {
-    skip_ws();
-    while (1) {
-        int value = resolve_value();
-        emit_word(value);
-        if (extra_word != 0) {
-            emit_word(0);
-        }
-        skip_ws();
-        if (source_cursor[0] != ',') {
-            return;
-        }
-        source_cursor = source_cursor + 1;
-        skip_ws();
-    }
-}
-
 /* Top-level line dispatcher.  Starts at LINE_BUFFER, strips
    leading whitespace, returns if the line is empty or a ``;``
    comment.  Recognises three label shapes: ``%`` directive (no
@@ -1903,35 +1944,6 @@ void parse_line() {
         }
         source_cursor = source_cursor + 1;
     }
-}
-
-/* Fetch the keyword pointer from ``mnemonic_table[index]`` (each
-   entry is 4 bytes: keyword-pointer + handler-pointer, terminated
-   by a 2-byte zero).  Returns ``NULL`` when the caller has walked
-   past the terminator.  Compact naked-asm body because cc.py has
-   no syntax for reading a 16-bit pointer out of a packed data
-   table; factoring this out keeps ``parse_mnemonic`` pure C. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-char *mnemonic_keyword_at(int index) {
-    asm("shl ax, 2\n"
-        "mov bx, mnemonic_table\n"
-        "add bx, ax\n"
-        "mov ax, [bx]");
-}
-
-/* Invoke the handler pointer in ``mnemonic_table[index]`` (at
-   offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
-   has no C analogue cc.py emits, so this tiny wrapper pairs with
-   ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C.
-   Inlined at its single call site — no body overhead. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void mnemonic_dispatch_at(int index) {
-    asm("shl ax, 2\n"
-        "mov bx, mnemonic_table\n"
-        "add bx, ax\n"
-        "call [bx+2]");
 }
 
 /* Instruction dispatcher: linear scan over ``mnemonic_table``
@@ -2271,45 +2283,20 @@ int read_line() {
     return 0;
 }
 
-/* Run one full pass over the source file: open it, reset the
-   per-pass buffer cursors, and loop through read_line / parse_line
-   until every line (including those from %included files, via
-   include_pop on inner EOF) has been processed.  On open failure
-   the pass exits immediately with error_flag raised; the enclosing
-   run_pass1 / run_pass2 callers check error_flag and invoke
-   die_error_pass1_io() as appropriate.
-
-   Placed after its C-level callees (``include_pop`` and
-   ``read_line``) rather than in strict alphabetical position:
-   cc.py resolves the calls either way via its pre-codegen
-   ``user_functions`` registry, but clang (run by tests/test_cc.py)
-   enforces ISO C99 declare-before-use.  Written to remain callable
-   from inline asm (``call do_pass``) since run_pass1 / run_pass2
-   reach it that way — cc.py emits the bare label.  The function
-   has no locals, so no DX-pinned spill cc.py would otherwise wrap
-   the inline-asm blocks with. */
-void do_pass() {
-    current_address = org_value;
-    source_fd = open_file_ro(source_name);
-    if (source_fd == -1) {
-        error_flag = 1;
-        return;
-    }
-    source_buffer_position = 0;
-    source_buffer_valid = 0;
-    include_depth = 0;
-    global_scope = 0xFFFF;
-    while (1) {
-        if (read_line() != 0) {
-            if (include_depth == 0) {
-                break;
-            }
-            include_pop();
-            continue;
-        }
-        parse_line();
-    }
-    close_source();
+/* Naked-asm helper that invokes ``SYS_IO_READ`` on ``source_fd``
+   filling ``SOURCE_BUFFER`` with up to 512 bytes; uses the ES-safe
+   ``syscall`` wrapper so ES=SYMBOL_SEGMENT survives the ``int 30h``.
+   Returns AX = bytes read, or -1 on error.  Factored as its own
+   function so ``load_src_sector``'s C body can receive the result
+   via the standard return-in-AX convention — cc.py has no syntax
+   for binding an inline ``call syscall``'s AX return to a C local. */
+__attribute__((always_inline))
+int read_source_sector() {
+    asm("mov bx, [_g_source_fd]\n"
+        "mov di, SOURCE_BUFFER\n"
+        "mov cx, 512\n"
+        "mov ah, SYS_IO_READ\n"
+        "call syscall");
 }
 
 /* Map a register number to its 16-bit addressing ModR/M r/m field.
@@ -2449,6 +2436,16 @@ int resolve_value() {
     return value;
 }
 
+/* Restore ES=DS so cc.py's ``die`` / ``printf`` / ``close`` builtins
+   (which jmp/int-30h into the kernel expecting ES=0) work correctly
+   from code paths where ES has been pointed at SYMBOL_SEGMENT for
+   the symbol table.  ``always_inline`` splices the 2-byte body at
+   every call site, saving the 3-byte ``call`` + 1-byte shared ``ret``. */
+__attribute__((always_inline))
+void restore_es() {
+    asm("push ds\npop es");
+}
+
 /* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
    and lets the instruction handlers mark any jump they can shrink
    to rel8; loops until no jump changes size.  Convergence is
@@ -2504,28 +2501,42 @@ void run_pass2() {
     do_pass();
 }
 
-/* Skip whitespace, a single ``,``, then whitespace — the inter-operand
-   separator every multi-operand handler uses.  No-op if no comma is
-   present (the first call to skip_ws still advances past leading
-   whitespace). */
-/* Advance source_cursor past any run of ' ' / '\t' at the current
-   cursor position.  Called hundreds of times from the instruction
-   handlers; ``source_cursor`` aliases SI through
-   ``__attribute__((asm_register("si")))`` so the loop compiles to
-   ``cmp byte [si], 32 ; je .skip ; cmp byte [si], 9 ; je .skip ;
-   jmp .end ; .skip: inc si ; jmp .loop ; .end:`` — byte-identical
-   to the retired inline-asm body except for cc.py's bp frame.
-
-   Placed before ``skip_comma`` rather than in strict alphabetical
-   position so clang's declare-before-use rule is satisfied; cc.py
-   resolves the order-independent call either way via its
-   pre-codegen ``user_functions`` registry. */
-void skip_ws() {
-    while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
+/* Scan source_cursor forward through an identifier-with-dot span — the
+   character class every label / symbol parser uses (``[a-zA-Z0-9_.]``).
+   Advances source_cursor past the last matching byte.  Three callers:
+   peek_label_target, resolve_label, resolve_value's symbol path. */
+void scan_ident_dot() {
+    while (is_ident_char(source_cursor[0]) || source_cursor[0] == '.') {
         source_cursor = source_cursor + 1;
     }
 }
 
+/* ``shl`` / ``shr`` with r8/r16 destination and either a constant 1
+   (short D0/D1 form) or imm8 shift count (C0/C1 imm8 form).  The two
+   handlers share one body; ``modrm_base`` carries the /r field (0xE0
+   for shl, 0xE8 for shr). */
+__attribute__((regparm(1)))
+void shift_handler(int modrm_base) {
+    skip_ws();
+    int packed_register = parse_register();
+    skip_comma();
+    int count = resolve_value();
+    int register_id = packed_register & 0xFF;
+    int size = (packed_register >> 8) & 0xFF;
+    if (count == 1) {
+        emit_sized(0xD0, size);
+        emit_byte(modrm_base | register_id);
+    } else {
+        emit_sized(0xC0, size);
+        emit_byte(modrm_base | register_id);
+        emit_byte(count);
+    }
+}
+
+/* Skip whitespace, a single ``,``, then whitespace — the inter-operand
+   separator every multi-operand handler uses.  No-op if no comma is
+   present (the first call to skip_ws still advances past leading
+   whitespace). */
 void skip_comma() {
     skip_ws();
     if (source_cursor[0] == ',') {
@@ -2534,18 +2545,17 @@ void skip_comma() {
     }
 }
 
-/* Compute the ES-relative offset of a symbol table entry: returns
-   ``index * SYMBOL_ENTRY`` (36) in AX.  Fastcall ``regparm(1)`` so
-   the index arrives in AX directly.  cc.py's multiplication codegen
-   uses ``mul bx`` which clobbers BX; callers that need BX across
-   the call save it on the stack.  The four inline-asm call sites
-   each do ``call symbol_entry_address ; mov di, ax`` now — the old
-   inline body wrote DI internally, the pure-C version returns via
-   AX and leaves the DI move to the caller (2 bytes per site × 4 =
-   8 bytes, offset by the smaller function body). */
-__attribute__((regparm(1)))
-int symbol_entry_address(int index) {
-    return index * SYMBOL_ENTRY;
+/* Advance source_cursor past any run of ' ' / '\t' at the current
+   cursor position.  Called hundreds of times from the instruction
+   handlers; ``source_cursor`` aliases SI through
+   ``__attribute__((asm_register("si")))`` so the loop compiles to
+   ``cmp byte [si], 32 ; je .skip ; cmp byte [si], 9 ; je .skip ;
+   jmp .end ; .skip: inc si ; jmp .loop ; .end:`` — byte-identical
+   to the retired inline-asm body except for cc.py's bp frame. */
+void skip_ws() {
+    while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
+        source_cursor = source_cursor + 1;
+    }
 }
 
 /* Append a label to the symbol table.  Callers pass SI = name,
@@ -2591,28 +2601,6 @@ void symbol_add(int value, int scope) {
     symbol_count = symbol_count + 1;
 }
 
-/* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
-   take ``value`` via ``regparm(1)`` AX; SI = name is pre-loaded by
-   the caller through ``source_cursor``.  Factored out so the
-   identical "global" / "local" dispatches in ``handle_unknown_word``
-   and ``parse_line`` don't need to open-code BX-setup ``call
-   symbol_set`` inline. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_set_global(int value) {
-    asm("push word 0xFFFF\n"
-        "call symbol_set\n"
-        "add sp, 2");
-}
-
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_set_local(int value) {
-    asm("push word [_g_global_scope]\n"
-        "call symbol_set\n"
-        "add sp, 2");
-}
-
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
    so pass-1 code that tells labels from %assigns can skip the
    relocation step).  Delegates the add / update logic to
@@ -2623,6 +2611,20 @@ void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
     int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 2;
     far_write8(offset, 1);
+}
+
+/* Compute the ES-relative offset of a symbol table entry: returns
+   ``index * SYMBOL_ENTRY`` (36) in AX.  Fastcall ``regparm(1)`` so
+   the index arrives in AX directly.  cc.py's multiplication codegen
+   uses ``mul bx`` which clobbers BX; callers that need BX across
+   the call save it on the stack.  The four inline-asm call sites
+   each do ``call symbol_entry_address ; mov di, ax`` now — the old
+   inline body wrote DI internally, the pure-C version returns via
+   AX and leaves the DI move to the caller (2 bytes per site × 4 =
+   8 bytes, offset by the smaller function body). */
+__attribute__((regparm(1)))
+int symbol_entry_address(int index) {
+    return index * SYMBOL_ENTRY;
 }
 
 /* Linear scan of the symbol table at ES:0..EFF8.  Each entry is
@@ -2696,50 +2698,43 @@ void symbol_set(int value, int scope) {
     }
 }
 
-int main(int argc, char *argv[]) {
-    /* ES starts at DS (kernel convention) so die() / open() run
-       safely.  We only switch to SYMBOL_SEGMENT once we're ready to
-       run the assembler passes — the handlers index the symbol table
-       via ``[es:...]``, which needs ES pointed at that segment. */
-    /* Publish the scratch-buffer bases as C-visible pointers so
-       C code can index ``line_buffer[i]`` / ``source_buffer[i]`` and
-       so abort_unknown_impl can printf the bad source line.
-       ``include_source_save`` lives one SOURCE_BUFFER length past
-       SOURCE_BUFFER — an %include level saves the 512-byte
-       SOURCE_BUFFER into that scratch RAM instead of bloating the
-       binary. */
-    line_buffer = LINE_BUFFER;
-    output_buffer = OUTPUT_BUFFER;
-    source_buffer = SOURCE_BUFFER;
-    include_source_save = SOURCE_BUFFER + 512;
-    if (argc != 2) {
-        die("Usage: asm <source> <output>\n");
+/* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
+   take ``value`` via ``regparm(1)`` AX; SI = name is pre-loaded by
+   the caller through ``source_cursor``.  Factored out so the
+   identical "global" / "local" dispatches in ``handle_unknown_word``
+   and ``parse_line`` don't need to open-code BX-setup ``call
+   symbol_set`` inline. */
+__attribute__((regparm(1)))
+__attribute__((always_inline))
+void symbol_set_global(int value) {
+    asm("push word 0xFFFF\n"
+        "call symbol_set\n"
+        "add sp, 2");
+}
+
+__attribute__((regparm(1)))
+__attribute__((always_inline))
+void symbol_set_local(int value) {
+    asm("push word [_g_global_scope]\n"
+        "call symbol_set\n"
+        "add sp, 2");
+}
+
+/* Single-operand F6/F7-family handlers (``mul`` / ``neg`` / ``not``
+   / ``div`` on a r8 or r16).  Emits F6 (byte) or F7 (word) followed
+   by a register-mode ModR/M byte whose /r field is baked into
+   ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
+   div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
+__attribute__((regparm(1)))
+void unary_f6f7(int modrm_base) {
+    skip_ws();
+    int packed_register = parse_register();
+    int opcode = 0xF7;
+    if ((packed_register >> 8) == 8) {
+        opcode = 0xF6;
     }
-    source_name = argv[0];
-    output_name = argv[1];
-    compute_source_prefix();
-    int fd = open(output_name, O_WRONLY + O_CREAT + O_TRUNC, FLAG_EXECUTE);
-    if (fd < 0) {
-        die("Error: cannot create output\n");
-    }
-    output_fd = fd;
-    /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
-       handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
-    asm("mov ax, SYMBOL_SEGMENT\n"
-        "mov es, ax\n"
-        "cld");
-    run_pass1();
-    run_pass2();
-    /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
-       it preserves ES=SYMBOL_SEGMENT across the write. */
-    flush_output();
-    /* Restore ES=DS before the cc.py close() builtin (kernel expects
-       ES=DS on int 30h). */
-    restore_es();
-    if (close(output_fd) < 0) {
-        die("Error: directory write failed\n");
-    }
-    die("OK\n");
+    emit_byte(opcode);
+    emit_byte(modrm_base | (packed_register & 0xFF));
 }
 
 asm(
