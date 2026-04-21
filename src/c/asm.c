@@ -117,6 +117,8 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
 void emit_byte(int value);
 __attribute__((regparm(1)))
+void emit_dword(int value);
+__attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp);
 __attribute__((regparm(1)))
 void emit_sized(int base, int size);
@@ -140,6 +142,7 @@ int open_file_ro(char *path);
 void parse_directive();
 void parse_line();
 void parse_mnemonic();
+int parse_creg();
 int parse_operand();
 int parse_register();
 __attribute__((carry_return))
@@ -408,16 +411,30 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
             emit_byte(modrm_base | reg);
         }
         emit_byte(imm & 0xFF);
-    } else if (imm >= -128 && imm <= 127) {
+        return;
+    }
+    /* size == 16 or 32 — 32-bit widens via the 0x66 operand-size
+       prefix, and the imm16 tail grows to imm32 (emit_dword).  The
+       sign-extended ``83 /r ib`` shape is identical between 16 and
+       32 bits — only the prefix distinguishes them. */
+    if (size == 32) {
+        emit_byte(0x66);
+    }
+    if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
         emit_byte(modrm_base | reg);
         emit_byte(imm & 0xFF);
-    } else if (reg == 0) {
+        return;
+    }
+    if (reg == 0) {
         emit_byte(op_rr | 5);
-        emit_word(imm);
     } else {
         emit_byte(0x81);
         emit_byte(modrm_base | reg);
+    }
+    if (size == 32) {
+        emit_dword(imm);
+    } else {
         emit_word(imm);
     }
 }
@@ -496,14 +513,35 @@ void emit_modrm_disp8(int rm, int disp) {
 
 /* Emit ``base`` for an 8-bit operand size, ``base + 1`` otherwise.
    Collapses the ``if (size == 8) emit_byte(X); else emit_byte(X+1);``
-   split that every ALU / mov / cmp / test handler carries. */
+   split that every ALU / mov / cmp / test handler carries.
+   Size=32 adds the 0x66 operand-size prefix before the 16-bit
+   opcode byte, widening the same encoding to 32-bit in the
+   default-bits-16 environment the self-host emits into. */
 __attribute__((regparm(1)))
 void emit_sized(int base, int size) {
     if (size == 8) {
         emit_byte(base);
-    } else {
-        emit_byte(base + 1);
+        return;
     }
+    if (size == 32) {
+        emit_byte(0x66);
+    }
+    emit_byte(base + 1);
+}
+
+/* Emit a little-endian dword — the 32-bit companion to ``emit_word``.
+   Used by the pmode-specific paths that widen imm16 / disp16 to
+   imm32 / disp32 behind a 0x66 operand-size prefix. */
+__attribute__((regparm(1)))
+void emit_dword(int value) {
+    emit_byte(value);
+    emit_byte(value >> 8);
+    /* cc.py's 16-bit codegen can't reach bits above 15 from a
+       single ``int`` — write the upper half as zeros, which matches
+       every 32-bit address the self-host needs to emit (all labels
+       live below 64 KB). */
+    emit_byte(0);
+    emit_byte(0);
 }
 
 /* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
@@ -828,6 +866,27 @@ void handle_jle() {
    long-form 0xE9 rel16 in pass 1 if the target doesn't fit ±128. */
 void handle_jmp() {
     skip_ws();
+    /* ``jmp dword <selector>:<label>`` — far jmp with a 32-bit
+       offset.  Emits the operand-size prefix 0x66 so the EA opcode
+       reads a dword offset instead of the default word offset,
+       followed by the fixed ptr16:32 immediate tail.  The label
+       resolves via ``resolve_label`` so pass 1 places a same-size
+       placeholder (instruction width is constant at 8 bytes). */
+    if (match_word(STR_DWORD)) {
+        skip_ws();
+        int selector = resolve_value();
+        skip_ws();
+        if (source_cursor[0] == ':') {
+            source_cursor = source_cursor + 1;
+            skip_ws();
+        }
+        int offset = resolve_label();
+        emit_byte(0x66);
+        emit_byte(0xEA);
+        emit_dword(offset);
+        emit_word(selector);
+        return;
+    }
     match_word(STR_SHORT);
     encode_rel8_jump(0xEB);
 }
@@ -846,6 +905,29 @@ void handle_jns() {
 
 void handle_jz() {
     encode_rel8_jump(0x74);
+}
+
+/* ``lgdt [mem]`` / ``lidt [mem]`` — load the GDT / IDT descriptor
+   register from a 6-byte memory operand.  Both are pmode bootstrap
+   essentials.  Encoded as ``0F 01 /r`` with reg field 2 for lgdt
+   and 3 for lidt; the shared ``emit_modrm_direct`` helper packs
+   the reg field into mod=00 rm=110 (direct disp16) for the only
+   memory shape we need.  The self-host never sees the ``[reg+disp]``
+   forms of these instructions. */
+void handle_lgdt() {
+    skip_ws();
+    parse_operand();
+    emit_byte(0x0F);
+    emit_byte(0x01);
+    emit_modrm_direct(2, parse_operand_value);
+}
+
+void handle_lidt() {
+    skip_ws();
+    parse_operand();
+    emit_byte(0x0F);
+    emit_byte(0x01);
+    emit_modrm_direct(3, parse_operand_value);
 }
 
 void handle_lodsb() {
@@ -880,6 +962,21 @@ void handle_loop() {
    path discards the saved SI. */
 void handle_mov() {
     skip_ws();
+    /* ``mov crN, r32`` — the protected-mode entry-and-exit pair.
+       Emits 0F 22 /r with the control register in the reg field
+       and the 32-bit GPR in the rm field.  Must come before the
+       ``es`` segment-register probe below so the cr-prefixed
+       destination is matched first; ``es`` can never start with
+       'c' so there's no overlap the other direction. */
+    int creg_dst = parse_creg();
+    if (creg_dst >= 0) {
+        skip_comma();
+        int packed_register = parse_register();
+        emit_byte(0x0F);
+        emit_byte(0x22);
+        emit_byte(0xC0 | (creg_dst << 3) | (packed_register & 0xFF));
+        return;
+    }
     if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
         char *saved = source_cursor;
         source_cursor = source_cursor + 2;
@@ -898,12 +995,40 @@ void handle_mov() {
     int type1 = (packed_operand1 >> 8) & 0xFF;
     int register1_id = packed_operand1 & 0xFF;
     int value1 = parse_operand_value;
+    int op1_parsed_size = op1_size;
     skip_comma();
+    /* ``mov r32, crN`` — companion of the cr-as-destination path.
+       Emits 0F 20 /r.  Only legal when op1 is a 32-bit GPR; for
+       any other op1 shape fall through to the general parse path
+       below so the source operand can still be an identifier
+       that happens to start with 'c' or 'C'.  The cr probe has to
+       happen before ``parse_operand`` touches the second operand
+       (cr0 is not in ``register_table`` and would be consumed as
+       a symbol). */
+    if (type1 == 0 && op1_parsed_size == 32) {
+        int creg_src = parse_creg();
+        if (creg_src >= 0) {
+            emit_byte(0x0F);
+            emit_byte(0x20);
+            emit_byte(0xC0 | (creg_src << 3) | register1_id);
+            return;
+        }
+    }
     int packed_operand2 = parse_operand();
     int type2 = (packed_operand2 >> 8) & 0xFF;
     int register2_id = packed_operand2 & 0xFF;
     int value2 = parse_operand_value;
+    /* Legacy sizing rule: ``mov [mem], reg`` doesn't set op1_size
+       during op1 parse (direct-memory operands carry no size), so
+       the width is read from op1_size after op2's register parse
+       has set it.  Register-first shapes captured the correct
+       size in op1_parsed_size above — use that so a subsequent
+       op2 parse (e.g. ``mov ax, [disp]``) can't clobber the
+       width when both operands disagree. */
     int size1 = op1_size;
+    if (type1 == 0) {
+        size1 = op1_parsed_size;
+    }
     if (type1 == 0) {
         if (type2 == 0) {
             emit_sized(0x88, size1);
@@ -914,6 +1039,10 @@ void handle_mov() {
             if (size1 == 8) {
                 emit_byte(0xB0 | register1_id);
                 emit_byte(value2 & 0xFF);
+            } else if (size1 == 32) {
+                emit_byte(0x66);
+                emit_byte(0xB8 | register1_id);
+                emit_dword(value2);
             } else {
                 emit_byte(0xB8 | register1_id);
                 emit_word(value2);
@@ -2164,6 +2293,18 @@ int parse_operand() {
    through NAMED_CONSTANTS to the data-table label in the tail
    inline-asm block. */
 int parse_register() {
+    char *saved = source_cursor;
+    int size_bump = 0;
+    char first = source_cursor[0];
+    if (first == 'e' || first == 'E') {
+        /* ``e``-prefix opens the 32-bit register file (eax..edi).
+           Tentatively advance past the ``e`` and scan the 2-char
+           table with size_bump = 16; on miss (not a real 32-bit
+           reg, e.g. a user identifier starting with ``e``) we
+           rewind the cursor so callers see no change. */
+        source_cursor = source_cursor + 1;
+        size_bump = 16;
+    }
     char *entry = register_table;
     while (entry[0] != '\0') {
         char a = source_cursor[0];
@@ -2186,10 +2327,46 @@ int parse_register() {
             entry = entry + 4;
             continue;
         }
+        int size = entry[3];
+        /* ``e`` only applies to 16-bit table entries — ``eal``
+           isn't a real mnemonic, so skip 8-bit matches in that
+           case and keep scanning. */
+        if (size_bump != 0 && size != 16) {
+            entry = entry + 4;
+            continue;
+        }
         source_cursor = source_cursor + 2;
-        return (entry[3] << 8) | entry[2];
+        return ((size + size_bump) << 8) | entry[2];
     }
+    source_cursor = saved;
     return -1;
+}
+
+/* Parse a control register name (``cr0``..``cr7``) at
+   ``source_cursor``.  Returns the register number on match with
+   ``source_cursor`` advanced past the token; returns -1 on miss
+   with the cursor untouched.  Control registers live outside the
+   general register file — they only appear in ``mov crN, r32`` /
+   ``mov r32, crN`` in this assembler, so no size / encoding is
+   packed into the return value. */
+int parse_creg() {
+    char a = source_cursor[0];
+    char b = source_cursor[1];
+    char c = source_cursor[2];
+    if (a != 'c' && a != 'C') {
+        return -1;
+    }
+    if (b != 'r' && b != 'R') {
+        return -1;
+    }
+    if (c < '0' || c > '7') {
+        return -1;
+    }
+    if (is_ident_char(source_cursor[3])) {
+        return -1;
+    }
+    source_cursor = source_cursor + 3;
+    return c - '0';
 }
 
 /* Shared RHS step for ``resolve_value``'s operator chain — advance past
@@ -2767,6 +2944,8 @@ asm(
     "        dw STR_JNS, handle_jns\n"
     "        dw STR_JNZ, handle_jne\n"
     "        dw STR_JZ,  handle_jz\n"
+    "        dw STR_LGDT, handle_lgdt\n"
+    "        dw STR_LIDT, handle_lidt\n"
     "        dw STR_LODSB, handle_lodsb\n"
     "        dw STR_LODSW, handle_lodsw\n"
     "        dw STR_LOOP, handle_loop\n"
@@ -2835,6 +3014,9 @@ asm(
     "STR_JNS     db 'jns',0\n"
     "STR_JNZ     db 'jnz',0\n"
     "STR_JZ      db 'jz',0\n"
+    "STR_DWORD   db 'dword',0\n"
+    "STR_LGDT    db 'lgdt',0\n"
+    "STR_LIDT    db 'lidt',0\n"
     "STR_LODSB   db 'lodsb',0\n"
     "STR_LODSW   db 'lodsw',0\n"
     "STR_LOOP    db 'loop',0\n"

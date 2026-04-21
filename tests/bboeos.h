@@ -126,6 +126,7 @@ extern char STR_DB[];
 extern char STR_DD[];
 extern char STR_DEFINE[];
 extern char STR_DW[];
+extern char STR_DWORD[];
 extern char STR_EQU[];
 extern char STR_INCLUDE[];
 extern char STR_ORG[];
