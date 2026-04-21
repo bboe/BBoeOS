@@ -4,7 +4,9 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/5156ae9...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.6.0...main)
+
+## [0.6.0](https://github.com/bboe/BBoeOS/compare/5156ae9...0.6.0) (2026-04-21)
 
 ### Networking
 - ICMP sockets via `(SOCK_DGRAM, IPPROTO_ICMP)`; ICMP echo requests now live in userspace
