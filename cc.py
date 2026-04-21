@@ -4463,10 +4463,28 @@ class CodeGenerator:
             self.emit("        jmp FUNCTION_EXIT")
             return
         if self.current_carry_return:
-            if not isinstance(statement.value, Int) or statement.value.value not in (0, 1):
-                message = "carry_return functions may only ``return 0`` (stc, false) or ``return 1`` (clc, true)"
-                raise CompileError(message, line=statement.line)
-            self.emit("        clc" if statement.value.value == 1 else "        stc")
+            value = statement.value
+            if isinstance(value, Int) and value.value in (0, 1):
+                self.emit("        clc" if value.value == 1 else "        stc")
+                if self.frame_size > 0:
+                    self.emit("        mov sp, bp")
+                self.emit("        pop bp")
+                self.emit("        ret")
+                return
+            # Bool-valued expression: evaluate it into the CF via the
+            # condition machinery, then tear down the frame.  ``return
+            # a || b`` and similar desugar to ``if (expr) { clc; ret; }
+            # stc; ret;`` — same two-leg shape the hand-written if
+            # pattern produces.
+            true_label = f".cret_{self.new_label()}"
+            self.emit_condition_true_jump(condition=value, success_label=true_label, context="return")
+            self.emit("        stc")
+            if self.frame_size > 0:
+                self.emit("        mov sp, bp")
+            self.emit("        pop bp")
+            self.emit("        ret")
+            self.emit(f"{true_label}:")
+            self.emit("        clc")
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
             self.emit("        pop bp")
