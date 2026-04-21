@@ -3570,7 +3570,38 @@ class CodeGenerator:
         if saved is not None:
             self.visible_vars = saved
 
-    def generate_call(self, statement: Call, /, *, discard_return: bool = False) -> None:
+    def _is_tail_call_eligible(self, call: Call, /) -> bool:
+        """Check whether a tail-call replacement (``jmp`` for ``call; ret``) is safe.
+
+        Safe when:
+        - ``elide_frame`` is True (no ``pop bp; ret`` teardown to emit).
+        - callee is a user function (not a builtin with its own shape).
+        - callee isn't an inline-asm splice target (we'd need the body
+          inlined, not a jmp).
+        - no pinned registers need saving at this call site — we'd
+          never get a chance to restore them after the jmp.
+        - no stack args — we can't ``add sp, N`` after a jmp either.
+        """
+        if not self.elide_frame:
+            return False
+        if call.name not in self.user_functions:
+            return False
+        if call.name in self.inline_bodies:
+            return False
+        clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
+        if self._pinned_registers_to_save(clobbers):
+            return False
+        callee_pins = self.user_function_pin_params.get(call.name, {}) if call.name in self.register_convention_functions else {}
+        is_fastcall = call.name in self.fastcall_functions
+        for index in range(len(call.args)):
+            if is_fastcall and index == 0:
+                continue
+            if index in callee_pins:
+                continue
+            return False  # stack arg — can't clean up after a jmp
+        return True
+
+    def generate_call(self, statement: Call, /, *, discard_return: bool = False, tail_call: bool = False) -> None:
         """Generate code for a function call statement.
 
         When *discard_return* is True (the call is at statement level
@@ -3580,6 +3611,15 @@ class CodeGenerator:
         2 bytes instead of 2 * N.  Pusha/popa restores AX too, so the
         return value would be lost; only the discard case can take
         this shortcut.
+
+        When *tail_call* is True, the call is in tail position (the
+        last statement of a frameless function body).  Emits ``jmp
+        name`` instead of ``call name; ret`` and skips the
+        register-save wrappers (the caller is about to return so
+        there's nothing to restore).  Tail-call eligibility is
+        pre-validated by ``_is_tail_call_eligible``; assumes no stack
+        args, no inline-splice target, and no pinned registers would
+        need saving at this call site.
 
         Raises:
             CompileError: If the called function is not a known builtin
@@ -3596,11 +3636,12 @@ class CodeGenerator:
             clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
             saved = self._pinned_registers_to_save(clobbers)
             use_pusha = discard_return and len(saved) >= 3
-            if use_pusha:
-                self.emit("        pusha")
-            else:
-                for register in saved:
-                    self.emit(f"        push {register}")
+            if not tail_call:
+                if use_pusha:
+                    self.emit("        pusha")
+                else:
+                    for register in saved:
+                        self.emit(f"        push {register}")
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
             fastcall_ax_arg: Node | None = None
@@ -3622,6 +3663,14 @@ class CodeGenerator:
             # trash AX while we're assembling the other parameters.
             if fastcall_ax_arg is not None:
                 self.emit_register_from_argument(argument=fastcall_ax_arg, register="ax")
+            if tail_call:
+                # Tail call: jmp instead of call; no stack cleanup (ruled
+                # out by _is_tail_call_eligible) and no register restore
+                # (skipped above).  Function's own ``ret`` is elided at
+                # generate_function's epilogue.
+                self.emit(f"        jmp {name}")
+                self.ax_clear()
+                return
             if name in self.inline_bodies:
                 self._emit_inline_body(name)
             else:
@@ -4239,7 +4288,15 @@ class CodeGenerator:
         # Fuse trailing printf() calls into die() since main exits implicitly.
         if name == "main":
             body = self.fuse_trailing_printf(body)
-        self.generate_body(body)
+        # Tail-call: if the last statement is a statement-level user-
+        # function call that qualifies, emit everything before it as
+        # usual and lower the trailing call as ``jmp`` (no ``ret``).
+        tail_call_last = name != "main" and body and isinstance(body[-1], Call) and self._is_tail_call_eligible(body[-1])
+        if tail_call_last:
+            self.generate_body(body[:-1])
+            self.generate_call(body[-1], tail_call=True)
+        else:
+            self.generate_body(body)
 
         if name == "main":
             self.emit("        jmp FUNCTION_EXIT")
@@ -4252,6 +4309,9 @@ class CodeGenerator:
                     else:
                         directive = "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
+        elif tail_call_last:
+            # The tail ``jmp`` already transferred control; no ``ret`` needed.
+            pass
         elif self.elide_frame:
             # naked_asm and frameless_calls both skip the prologue, so
             # the epilogue is just ``ret`` — no ``pop bp`` because we
