@@ -692,15 +692,19 @@ class CodeGenerator:
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
     TYPE_SIZES: ClassVar[dict[str, int]] = {
-        # ``char`` locals share the word-sized store/load codepaths
-        # the rest of codegen uses (``mov [addr], ax`` / ``mov ax,
-        # [addr]`` plus ``xor ah, ah``), so each char gets a full
-        # word.  Switching to byte slots would require a parallel
-        # ``mov byte`` / ``mov al`` codepath in every emitter — not
-        # done because the savings are small (mainly the ``xor ah,
-        # ah`` zero-extend) and the duplication isn't worth it.
-        # ``uint8_t`` is a byte-valued numeric type sharing the
-        # ``char`` storage / indexing path.
+        # Byte-typed locals still get a full word slot on the stack —
+        # local load/store goes through the shared ``mov [addr], ax``
+        # / ``mov ax, [addr]`` codepaths that every emitter uses, and
+        # splitting those would require parallel byte and word
+        # variants across the whole compiler.  Byte-typed GLOBALS
+        # have been split: storage is ``db``, loads emit ``mov al,
+        # [_g_name]`` + ``xor ah, ah``, stores emit ``mov [_g_name],
+        # al``, compares use ``cmp byte [mem], imm``.  Extending the
+        # split to locals is a follow-up — each byte-local would
+        # save 1 byte of stack but the call-site changes ripple
+        # across the peephole pipeline.  ``uint8_t`` shares the
+        # ``char`` storage / indexing path on both sides of that
+        # split.
         "char": 2,
         "char*": 2,
         "int": 2,
@@ -1100,7 +1104,7 @@ class CodeGenerator:
             self.emit(f"        mov si, {self.pinned_register[index.name]}")
             if not is_byte:
                 self.emit("        add si, si")
-        elif isinstance(index, Var) and self._is_memory_scalar(index.name):
+        elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar_global(index.name):
             self.emit(f"        mov si, [{self._local_address(index.name)}]")
             if not is_byte:
                 self.emit("        add si, si")
@@ -1142,7 +1146,8 @@ class CodeGenerator:
             init_expression = "0"
             if declaration.init is not None:
                 init_expression = self._constant_expression(declaration.init)
-            self.emit(f"_g_{name}: dw {init_expression}")
+            directive = "db" if self._is_byte_scalar_global(name) else "dw"
+            self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
@@ -1273,6 +1278,26 @@ class CodeGenerator:
         if name in self.global_byte_arrays:
             return True
         return name not in self.variable_arrays and self.variable_types.get(name) in self.BYTE_SCALAR_TYPES
+
+    def _is_byte_scalar_global(self, name: str, /) -> bool:
+        """Return True if *name* is a byte-typed (``char`` / ``uint8_t``) scalar global.
+
+        Byte-scalar globals store as a single ``db`` cell and use
+        ``mov al, [_g_<name>]`` / ``mov [_g_<name>], al`` for their
+        load / store paths, so the compare and fast-path emitters
+        must avoid their word-sized variants (``cmp ax, [_g_<name>]``,
+        ``cmp word [_g_<name>], imm``) which would read a spurious
+        byte from the next global into the high byte.  Register-
+        aliased globals live in a CPU register rather than memory, so
+        they stay out of this set — storage is not a ``db`` cell.
+        Locals keep their current word-slot codegen in this slice;
+        byte-scalar locals are a follow-up.
+        """
+        if name not in self.global_scalars:
+            return False
+        if name in self.register_aliased_globals:
+            return False
+        return self.variable_types.get(name) in self.BYTE_TYPES
 
     def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
         """Check if ``statement`` is a compile-time constant alias.
@@ -1543,22 +1568,49 @@ class CodeGenerator:
             raise CompileError(message, line=getattr(arg, "line", None))
 
     def _peephole_will_strand_ax(self) -> bool:
-        """Return True if the last three emitted lines form a fusion target.
+        """Return True if the last emitted lines form a fusion target.
 
         :meth:`peephole_memory_arithmetic` collapses
         ``mov ax, D / <op> ax, ... / mov D, ax`` into ``<op> D, ...`` when
         source and destination match (passes 2 and 3); :meth:`peephole_register_arithmetic`
         pushes the computation directly into a pin-eligible destination
-        register when it differs from the source.  Both leave AX holding
-        something other than the new stored value, so the ``ax_local``
-        tracking the caller just set (pointing at the store's destination
-        local) would mislead later reads into skipping a reload and
-        picking up stale contents.
+        register when it differs from the source.
+        :meth:`peephole_memory_arithmetic_byte` collapses the 4-line
+        byte-scalar-global shape (``mov al, [mem] / xor ah, ah / <op>
+        ax, ... / mov [mem], al``) into ``<op> byte [mem], ...``.
+        All three leave AX holding something other than the new
+        stored value, so the ``ax_local`` tracking the caller just
+        set (pointing at the store's destination local) would
+        mislead later reads into skipping a reload and picking up
+        stale contents.
 
         The caller — :meth:`emit_store_local` — consults this after the
-        final ``mov <D>, ax`` has been emitted; if we report True it
-        clears its own tracking instead of guessing at peephole time.
+        final ``mov <D>, ax`` (or ``mov [_g_X], al`` for byte globals)
+        has been emitted; if we report True it clears its own
+        tracking instead of guessing at peephole time.
         """
+        # Byte-global fusion: last 4 lines are ``mov al, [mem] / xor
+        # ah, ah / <op> ax, ... / mov [mem], al`` and the two mem refs
+        # match — peephole_memory_arithmetic_byte will delete all four.
+        if len(self.lines) >= 4:
+            first = self.lines[-4].strip()
+            second = self.lines[-3].strip()
+            third = self.lines[-2].strip()
+            last = self.lines[-1].strip()
+            if (
+                first.startswith("mov al, [")
+                and first.endswith("]")
+                and second == "xor ah, ah"
+                and last.startswith("mov [")
+                and last.endswith(", al")
+            ):
+                source = first[len("mov al, ") :]
+                destination = last[len("mov ") : -len(", al")].strip()
+                if source == destination:
+                    if third in ("inc ax", "dec ax"):
+                        return True
+                    if third.startswith(("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, ")):
+                        return True
         if len(self.lines) < 3:
             return False
         first = self.lines[-3].strip()
@@ -2574,7 +2626,11 @@ class CodeGenerator:
             self.emit(f"        mov bp, {dport_argument.name}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
             self.emit(f"        mov bp, {self.pinned_register[dport_argument.name]}")
-        elif isinstance(dport_argument, Var) and self._is_memory_scalar(dport_argument.name):
+        elif (
+            isinstance(dport_argument, Var)
+            and self._is_memory_scalar(dport_argument.name)
+            and not self._is_byte_scalar_global(dport_argument.name)
+        ):
             self.emit(f"        mov bp, [{self._local_address(dport_argument.name)}]")
         else:
             self.generate_expression(dport_argument)
@@ -2874,7 +2930,7 @@ class CodeGenerator:
             source_register = self.pinned_register[right.name]
             if source_register != "cx":
                 self.emit(f"        mov cx, {source_register}")
-        elif isinstance(right, Var) and self._is_memory_scalar(right.name):
+        elif isinstance(right, Var) and self._is_memory_scalar(right.name) and not self._is_byte_scalar_global(right.name):
             self.generate_expression(left)
             self.emit(f"        mov cx, [{self._local_address(right.name)}]")
         else:
@@ -2910,9 +2966,11 @@ class CodeGenerator:
                     self.emit(f"        cmp {register}, {literal}")
                 return
             # Memory-backed local compared to a constant: fuse into a
-            # direct ``cmp word [L], imm`` so we skip the ``mov ax, [L]``
-            # load.  Safe because the flags are consumed by the next
-            # conditional jump and AX's prior value was not promised.
+            # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
+            # byte-scalar globals whose storage is a single ``db`` cell)
+            # so we skip the ``mov ax, [L]`` load.  Safe because the
+            # flags are consumed by the next conditional jump and AX's
+            # prior value was not promised.
             if (
                 isinstance(left, Var)
                 and self._is_memory_scalar(left.name)
@@ -2921,10 +2979,11 @@ class CodeGenerator:
                 and self.variable_types.get(left.name) != "unsigned long"
             ):
                 address = self._local_address(left.name)
+                width = "byte" if self._is_byte_scalar_global(left.name) else "word"
                 if is_zero:
-                    self.emit(f"        cmp word [{address}], 0")
+                    self.emit(f"        cmp {width} [{address}], 0")
                 else:
-                    self.emit(f"        cmp word [{address}], {literal}")
+                    self.emit(f"        cmp {width} [{address}], {literal}")
                 return
             # Byte-indexed variable compared to a constant: fuse into
             # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
@@ -2969,13 +3028,17 @@ class CodeGenerator:
                     self.emit(f"        cmp ax, {source}")
                     return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
-            # skips the CX load entirely.
+            # skips the CX load entirely.  Byte-scalar globals bail out
+            # — their storage is a single ``db`` cell and a word-sized
+            # ``cmp ax, [mem]`` would read the adjacent byte into the
+            # high comparison byte.
             if (
                 isinstance(right, Var)
                 and self._is_memory_scalar(right.name)
                 and right.name not in self.pinned_register
                 and right.name not in self.variable_arrays
                 and self.variable_types.get(right.name) != "unsigned long"
+                and not self._is_byte_scalar_global(right.name)
             ):
                 self.generate_expression(left)
                 self.emit(f"        cmp ax, [{self._local_address(right.name)}]")
@@ -3236,6 +3299,13 @@ class CodeGenerator:
         if direct_register is not None:
             if direct_register != "ax":
                 self.emit(f"        mov {direct_register}, ax")
+        elif self._is_byte_scalar_global(name):
+            # Byte-scalar globals store as ``db`` cells; the source
+            # value is either already byte-valued (``ax_is_byte``) or
+            # sits in AX's low byte (wider operands truncate to 8 bits
+            # on store).  Either way, writing AL alone leaves the
+            # neighbouring byte untouched.
+            self.emit(f"        mov [_g_{name}], al")
         else:
             self.emit(f"        mov [{self._local_address(name)}], ax")
         self.ax_is_byte = False
@@ -3609,11 +3679,25 @@ class CodeGenerator:
                 raise CompileError(message, line=expression.line)
             if vname in self.pinned_register:
                 self.emit(f"        mov ax, {self.pinned_register[vname]}")
+                self.ax_is_byte = False
             elif vname in self.register_aliased_globals:
                 self.emit(f"        mov ax, {self.register_aliased_globals[vname]}")
+                self.ax_is_byte = False
+            elif self._is_byte_scalar_global(vname):
+                # Byte-scalar globals store as ``db`` cells; load only
+                # the low byte, then zero-extend so any downstream
+                # arithmetic on AX reads a clean word.  The compare
+                # fast path still picks up ``ax_is_byte`` to use
+                # ``cmp al`` / ``test al`` and skip the redundant
+                # high-byte compare; a peephole later collapses the
+                # paired ``xor ah, ah`` before a ``cmp al`` when the
+                # high byte is provably unused.
+                self.emit(f"        mov al, [_g_{vname}]")
+                self.emit("        xor ah, ah")
+                self.ax_is_byte = True
             else:
                 self.emit(f"        mov ax, [{self._local_address(vname)}]")
-            self.ax_is_byte = False
+                self.ax_is_byte = False
             self.ax_local = vname
         elif isinstance(expression, Index):
             self.ax_clear()
@@ -4105,9 +4189,14 @@ class CodeGenerator:
         condition, body, else_body = statement.cond, statement.body, statement.else_body
         chain_var = self._dispatch_chain_var(statement)
         if chain_var is not None and chain_var != self.ax_local:
-            self.emit(f"        mov ax, [{self._local_address(chain_var)}]")
+            if self._is_byte_scalar_global(chain_var):
+                self.emit(f"        mov al, [_g_{chain_var}]")
+                self.emit("        xor ah, ah")
+                self.ax_is_byte = True
+            else:
+                self.emit(f"        mov ax, [{self._local_address(chain_var)}]")
+                self.ax_is_byte = False
             self.ax_local = chain_var
-            self.ax_is_byte = False
         label_index = self.new_label()
         if else_body is not None:
             self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
@@ -4438,6 +4527,7 @@ class CodeGenerator:
         self.peephole_jump_next()
         self.peephole_label_forwarding()
         self.peephole_memory_arithmetic()
+        self.peephole_memory_arithmetic_byte()
         self.peephole_store_reload()
         self.peephole_dx_to_memory()
         self.peephole_constant_to_register()
@@ -4547,16 +4637,42 @@ class CodeGenerator:
             continue
 
     def peephole_dead_ah(self) -> None:
-        """Drop ``xor ah, ah`` when the next instruction writes AH.
+        """Drop ``xor ah, ah`` when the following instruction doesn't read AH.
 
-        The zero-extension after ``mov al, [mem]`` is dead when the
-        following statement immediately loads a new value into AH.
+        The zero-extension after ``mov al, [mem]`` is dead whenever the
+        next instruction either overwrites AH (``mov ah, X``) or
+        consumes only AL (``cmp al, imm``, ``test al, al``, ``mov
+        [addr], al``, ``or al, al``).  Byte-scalar global loads
+        unconditionally emit the ``xor`` so the load is safe under
+        later word-sized arithmetic; this peephole reclaims the two
+        bytes on the common compare-and-branch path.  ``xor ah, ah``
+        itself sets flags (ZF=1, CF=0), but any consumer we elide
+        against either sets its own flags (``cmp``, ``test``, ``or``)
+        or doesn't use flags (``mov``), so dropping the xor never
+        changes the observable control-flow.
         """
+        al_only_prefixes = (
+            "mov [",  # mov [addr], al
+            "cmp al,",
+            "test al,",
+            "or al,",
+            "and al,",
+            "xor al,",
+            "add al,",
+            "sub al,",
+            "mov ah, ",
+        )
         i = 0
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a == "xor ah, ah" and b.startswith("mov ah, "):
+            if a == "xor ah, ah" and b.startswith(al_only_prefixes):
+                # For ``mov [addr], al`` we must verify the source
+                # operand is actually ``al`` (not ``ax``) — the
+                # prefix match would otherwise catch word stores.
+                if b.startswith("mov [") and not b.endswith(", al"):
+                    i += 1
+                    continue
                 del self.lines[i]
                 continue
             i += 1
@@ -4964,6 +5080,151 @@ class CodeGenerator:
             self.lines[i] = f"        mov ax, {rhs}"
             self.lines[i + 1] = f"        {operator} {source}, ax"
             del self.lines[i + 2]
+            continue
+
+    def peephole_memory_arithmetic_byte(self) -> None:
+        """Fuse byte-global load / modify / store into memory-direct byte ops.
+
+        Byte-scalar globals load via ``mov al, [_g_X] / xor ah, ah`` and
+        store via ``mov [_g_X], al``; a compound-assign emits:
+
+            mov al, [_g_X]
+            xor ah, ah
+            inc ax           (or: add|sub|and|or|xor ax, imm16,
+                              or: mov cx, imm16 / add|sub ax, cx)
+            mov [_g_X], al
+
+        The low byte of the AX-width op is identical to the
+        corresponding AL-width op on the same low byte (addition /
+        subtraction / bitwise all ignore the high byte when the result
+        is truncated to AL on store), so the whole sequence collapses
+        to a single memory-direct byte instruction:
+
+            inc byte [_g_X]              4 bytes (FE 06 xxxx)
+            dec byte [_g_X]              4 bytes
+            add|sub byte [_g_X], imm8    5 bytes (80 /N xxxx imm8)
+            and|or|xor byte [_g_X], imm8 5 bytes
+
+        Byte-width ops require the immediate to fit in 8 bits —
+        bitwise masks wider than a byte would lose their high-byte
+        effect when narrowed.  For ``add`` / ``sub`` any 16-bit
+        immediate truncates cleanly to imm8 for the low-byte result
+        (carry into AH is discarded on store), so those fuse
+        regardless of the original ``mov cx, <imm>`` width.
+
+        Saves 4-5 bytes per compound-assign site on a byte-scalar
+        global — the reason cc.py can keep ``include_depth`` /
+        ``iteration_count`` / similar arithmetic-heavy byte globals
+        as ``uint8_t`` without regressing binary size.
+        """
+
+        def fits_imm8(literal: str, /) -> bool:
+            try:
+                value = int(literal, 0)
+            except ValueError:
+                return False
+            return -128 <= value <= 255
+
+        # 4-line pattern without CX intermediate:
+        #   mov al, [mem] / xor ah, ah / <op> ax, <imm|reg> / mov [mem], al
+        single_imm_ops = {"add", "sub", "and", "or", "xor"}
+        i = 0
+        while i < len(self.lines) - 3:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            d = self.lines[i + 3].strip()
+            if not a.startswith("mov al, ["):
+                i += 1
+                continue
+            source = a[len("mov al, ") :]
+            if not (source.startswith("[") and source.endswith("]")):
+                i += 1
+                continue
+            if b != "xor ah, ah":
+                i += 1
+                continue
+            if d != f"mov {source}, al":
+                i += 1
+                continue
+            if c == "inc ax":
+                self.lines[i] = f"        inc byte {source}"
+                del self.lines[i + 1 : i + 4]
+                continue
+            if c == "dec ax":
+                self.lines[i] = f"        dec byte {source}"
+                del self.lines[i + 1 : i + 4]
+                continue
+            op_name: str | None = None
+            operand: str | None = None
+            for op in single_imm_ops:
+                prefix = f"{op} ax, "
+                if c.startswith(prefix):
+                    op_name = op
+                    operand = c[len(prefix) :]
+                    break
+            if op_name is None:
+                i += 1
+                continue
+            if operand.startswith("["):
+                i += 1
+                continue
+            # Bitwise masks narrowed to byte can silently drop
+            # high-byte effect; only fuse when the literal fits in 8
+            # bits.  add/sub truncate cleanly so any imm is OK.
+            if op_name in ("and", "or", "xor") and not fits_imm8(operand):
+                i += 1
+                continue
+            if op_name == "add" and operand == "1":
+                self.lines[i] = f"        inc byte {source}"
+            elif op_name == "sub" and operand == "1":
+                self.lines[i] = f"        dec byte {source}"
+            else:
+                # NASM accepts the wider literal for add/sub byte; it
+                # assembles the low 8 bits since the destination is
+                # byte-sized.
+                self.lines[i] = f"        {op_name} byte {source}, {operand}"
+            del self.lines[i + 1 : i + 4]
+            continue
+
+        # 5-line pattern with CX intermediate (matches the codegen shape
+        # before peephole_memory_arithmetic fuses the CX-mov):
+        #   mov al, [mem] / xor ah, ah / mov cx, <imm> / (add|sub) ax, cx
+        #   / mov [mem], al
+        i = 0
+        while i < len(self.lines) - 4:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            d = self.lines[i + 3].strip()
+            e = self.lines[i + 4].strip()
+            if not a.startswith("mov al, ["):
+                i += 1
+                continue
+            source = a[len("mov al, ") :]
+            if not (source.startswith("[") and source.endswith("]")):
+                i += 1
+                continue
+            if b != "xor ah, ah":
+                i += 1
+                continue
+            if not (c.startswith("mov cx, ") and not c.endswith("]")):
+                i += 1
+                continue
+            if d not in {"add ax, cx", "sub ax, cx"}:
+                i += 1
+                continue
+            if e != f"mov {source}, al":
+                i += 1
+                continue
+            immediate = c[len("mov cx, ") :]
+            operator = "add" if d == "add ax, cx" else "sub"
+            if immediate == "1":
+                instruction = "inc" if operator == "add" else "dec"
+                self.lines[i] = f"        {instruction} byte {source}"
+            else:
+                self.lines[i] = f"        {operator} byte {source}, {immediate}"
+            del self.lines[i + 1 : i + 5]
             continue
 
     def peephole_redundant_bx(self) -> None:
