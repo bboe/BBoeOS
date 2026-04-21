@@ -147,6 +147,12 @@ int open_file_ro(char *path);
 __attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
 __attribute__((regparm(1)))
+void parse_d_values(int extra_zeros);
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int is_ident_char(int c);
+void scan_ident_dot();
+__attribute__((regparm(1)))
 int reg_to_rm(int register_id);
 __attribute__((regparm(1)))
 void shift_handler(int modrm_base);
@@ -1317,6 +1323,30 @@ void handle_xor() {
     emit_alu_binop(6);
 }
 
+/* Classify an ASCII byte as an identifier character — ``[a-zA-Z0-9_]``.
+   The ``.`` prefix that marks local labels is NOT an ident char for
+   our purposes; label-scan loops add it via an explicit ``|| c == '.'``
+   next to the call.  ``regparm(1)`` + ``carry_return`` so cc.py lowers
+   ``if (is_ident_char(c))`` to ``mov ax, c ; call is_ident_char ; jc/jnc``. */
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int is_ident_char(int c) {
+    return (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9')
+            || c == '_';
+}
+
+/* Scan source_cursor forward through an identifier-with-dot span — the
+   character class every label / symbol parser uses (``[a-zA-Z0-9_.]``).
+   Advances source_cursor past the last matching byte.  Three callers:
+   peek_label_target, resolve_label, resolve_value's symbol path. */
+void scan_ident_dot() {
+    while (is_ident_char(source_cursor[0]) || source_cursor[0] == '.') {
+        source_cursor = source_cursor + 1;
+    }
+}
+
 /* Convert an ASCII hex digit to its numeric value.  Returns 0..15
    on success, ``-1`` on a non-hex byte.  ``regparm(1)`` fastcall —
    the byte arrives in AX (caller zero-extends from AL before the
@@ -1516,11 +1546,7 @@ int match_word(char *keyword) {
         source_cursor = source_cursor + 1;
         keyword = keyword + 1;
     }
-    char s = source_cursor[0];
-    if ((s >= 'a' && s <= 'z')
-            || (s >= 'A' && s <= 'Z')
-            || (s >= '0' && s <= '9')
-            || s == '_') {
+    if (is_ident_char(source_cursor[0])) {
         source_cursor = saved;
         return 0;
     }
@@ -1719,34 +1745,36 @@ void parse_directive() {
         return;
     }
     if (match_word(STR_DW)) {
-        skip_ws();
-        while (1) {
-            int value = resolve_value();
-            emit_word(value);
-            skip_ws();
-            if (source_cursor[0] != ',') {
-                return;
-            }
-            source_cursor = source_cursor + 1;
-            skip_ws();
-        }
+        parse_d_values(0);
+        return;
     }
     if (match_word(STR_DD)) {
-        skip_ws();
-        while (1) {
-            int value = resolve_value();
-            emit_word(value);
-            emit_byte(0);
-            emit_byte(0);
-            skip_ws();
-            if (source_cursor[0] != ',') {
-                return;
-            }
-            source_cursor = source_cursor + 1;
-            skip_ws();
-        }
+        parse_d_values(1);
+        return;
     }
     parse_mnemonic();
+}
+
+/* Shared body for ``dw`` / ``dd`` directives — ``dw`` is
+   ``parse_d_values(0)`` and ``dd`` is ``parse_d_values(1)`` (the
+   extra zero word past the 16-bit value).  Comma-separated
+   operand list; each operand evaluates via resolve_value. */
+__attribute__((regparm(1)))
+void parse_d_values(int extra_word) {
+    skip_ws();
+    while (1) {
+        int value = resolve_value();
+        emit_word(value);
+        if (extra_word != 0) {
+            emit_word(0);
+        }
+        skip_ws();
+        if (source_cursor[0] != ',') {
+            return;
+        }
+        source_cursor = source_cursor + 1;
+        skip_ws();
+    }
 }
 
 /* Top-level line dispatcher.  Starts at LINE_BUFFER, strips
@@ -2128,11 +2156,7 @@ int parse_register() {
             entry = entry + 4;
             continue;
         }
-        a = source_cursor[2];
-        if ((a >= 'a' && a <= 'z')
-                || (a >= 'A' && a <= 'Z')
-                || (a >= '0' && a <= '9')
-                || a == '_') {
+        if (is_ident_char(source_cursor[2])) {
             entry = entry + 4;
             continue;
         }
@@ -2156,18 +2180,7 @@ __attribute__((carry_return))
 int peek_label_target() {
     int is_local = (source_cursor[0] == '.');
     char *saved = source_cursor;
-    while (1) {
-        char c = source_cursor[0];
-        if ((c >= 'a' && c <= 'z')
-                || (c >= 'A' && c <= 'Z')
-                || (c >= '0' && c <= '9')
-                || c == '_'
-                || c == '.') {
-            source_cursor = source_cursor + 1;
-        } else {
-            break;
-        }
-    }
+    scan_ident_dot();
     char *end_pos = source_cursor;
     char delim = source_cursor[0];
     source_cursor[0] = '\0';
@@ -2301,18 +2314,7 @@ int resolve_label() {
     if (pass != 1) {
         return resolve_value();
     }
-    while (1) {
-        char c = source_cursor[0];
-        if ((c >= 'a' && c <= 'z')
-                || (c >= 'A' && c <= 'Z')
-                || (c >= '0' && c <= '9')
-                || c == '_'
-                || c == '.') {
-            source_cursor = source_cursor + 1;
-        } else {
-            break;
-        }
-    }
+    scan_ident_dot();
     return current_address;
 }
 
@@ -2386,16 +2388,7 @@ int resolve_value() {
            for globals.  Restore the delimiter byte before returning
            so the original source line stays intact for pass 2. */
         char *name_start = source_cursor;
-        while (1) {
-            char c = source_cursor[0];
-            if (c == '.' || c == '_' || c >= 'a'
-                    || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9')) {
-                source_cursor = source_cursor + 1;
-            } else {
-                break;
-            }
-        }
+        scan_ident_dot();
         char *end_pos = source_cursor;
         char delim = source_cursor[0];
         source_cursor[0] = '\0';

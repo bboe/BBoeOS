@@ -3091,17 +3091,21 @@ class CodeGenerator:
         entirely: the ``call`` itself leaves CF holding the truth
         value, and the caller dispatches through ``jc`` / ``jnc`` via
         the synthetic ``"carry"`` / ``"not_carry"`` operators.
-        ``parse_condition`` wraps a bare expression as ``expr != 0``,
-        so the detected shape is always ``BinOp('!=' | '==', Call,
-        Int(0))``.
-
-        Raises:
-            CompileError: If the condition is not a comparison.
-
+        ``parse_condition`` wraps a top-level bare expression as ``expr
+        != 0``, and inside ``&&`` / ``||`` this routine does the same
+        wrapping for leaf operands (so ``while (foo() || x == 0)`` and
+        ``if (foo() && bar())`` desugar the bare-call legs into the
+        same ``BinOp('!=', Call, Int(0))`` shape the top-level form
+        uses).
         """
+        if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
+            # Wrap a bare expression (Call / Var / Index / ...) as ``expr != 0``
+            # so the rest of the routine sees the same shape the top-level
+            # parser already emits.  Reaches here from && / || recursion
+            # where leaf operands haven't been run through parse_condition.
+            condition = BinOp("!=", condition, Int(0, line=condition.line), line=condition.line)
         if (
-            isinstance(condition, BinOp)
-            and condition.op in ("!=", "==")
+            condition.op in ("!=", "==")
             and isinstance(condition.right, Int)
             and condition.right.value == 0
             and isinstance(condition.left, Call)
@@ -3109,9 +3113,6 @@ class CodeGenerator:
         ):
             self.generate_call(condition.left, discard_return=True)
             return "carry" if condition.op == "!=" else "not_carry"
-        if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
-            message = f"{context} condition must be a comparison, got {condition}"
-            raise CompileError(message, line=condition.line)
         self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
         return condition.op
@@ -4462,10 +4463,28 @@ class CodeGenerator:
             self.emit("        jmp FUNCTION_EXIT")
             return
         if self.current_carry_return:
-            if not isinstance(statement.value, Int) or statement.value.value not in (0, 1):
-                message = "carry_return functions may only ``return 0`` (stc, false) or ``return 1`` (clc, true)"
-                raise CompileError(message, line=statement.line)
-            self.emit("        clc" if statement.value.value == 1 else "        stc")
+            value = statement.value
+            if isinstance(value, Int) and value.value in (0, 1):
+                self.emit("        clc" if value.value == 1 else "        stc")
+                if self.frame_size > 0:
+                    self.emit("        mov sp, bp")
+                self.emit("        pop bp")
+                self.emit("        ret")
+                return
+            # Bool-valued expression: evaluate it into the CF via the
+            # condition machinery, then tear down the frame.  ``return
+            # a || b`` and similar desugar to ``if (expr) { clc; ret; }
+            # stc; ret;`` — same two-leg shape the hand-written if
+            # pattern produces.
+            true_label = f".cret_{self.new_label()}"
+            self.emit_condition_true_jump(condition=value, success_label=true_label, context="return")
+            self.emit("        stc")
+            if self.frame_size > 0:
+                self.emit("        mov sp, bp")
+            self.emit("        pop bp")
+            self.emit("        ret")
+            self.emit(f"{true_label}:")
+            self.emit("        clc")
             if self.frame_size > 0:
                 self.emit("        mov sp, bp")
             self.emit("        pop bp")
