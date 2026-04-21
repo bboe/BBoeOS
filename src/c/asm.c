@@ -145,6 +145,8 @@ int open_file_ro(char *path);
 __attribute__((regparm(1)))
 int reg_to_rm(int register_id);
 __attribute__((regparm(1)))
+void shift_handler(int modrm_base);
+__attribute__((regparm(1)))
 void unary_f6f7(int modrm_base);
 int resolve_label();
 int resolve_value();
@@ -1183,9 +1185,10 @@ void handle_scasb() {
 
 /* ``shl`` / ``shr`` with r8/r16 destination and either a constant 1
    (short D0/D1 form) or imm8 shift count (C0/C1 imm8 form).  The two
-   handlers differ only in the /r field constant: shl=4 (0xE0), shr=5
-   (0xE8). */
-void handle_shl() {
+   handlers share one body; ``modrm_base`` carries the /r field (0xE0
+   for shl, 0xE8 for shr). */
+__attribute__((regparm(1)))
+void shift_handler(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     skip_comma();
@@ -1194,29 +1197,20 @@ void handle_shl() {
     int size = (packed_register >> 8) & 0xFF;
     if (count == 1) {
         emit_sized(0xD0, size);
-        emit_byte(0xE0 | register_id);
+        emit_byte(modrm_base | register_id);
     } else {
         emit_sized(0xC0, size);
-        emit_byte(0xE0 | register_id);
+        emit_byte(modrm_base | register_id);
         emit_byte(count);
     }
 }
 
+void handle_shl() {
+    shift_handler(0xE0);
+}
+
 void handle_shr() {
-    skip_ws();
-    int packed_register = parse_register();
-    skip_comma();
-    int count = resolve_value();
-    int register_id = packed_register & 0xFF;
-    int size = (packed_register >> 8) & 0xFF;
-    if (count == 1) {
-        emit_sized(0xD0, size);
-        emit_byte(0xE8 | register_id);
-    } else {
-        emit_sized(0xC0, size);
-        emit_byte(0xE8 | register_id);
-        emit_byte(count);
-    }
+    shift_handler(0xE8);
 }
 
 void handle_stc() {
