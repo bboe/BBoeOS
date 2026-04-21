@@ -145,6 +145,7 @@ boot_shell:
 %include "net.asm"
 %include "syscall.asm"
 %include "system.asm"
+%include "vga.asm"
 
 ;;; -----------------------------------------------------------------------
 ;;; Kernel shared functions (called via jump table at 0x7E00)

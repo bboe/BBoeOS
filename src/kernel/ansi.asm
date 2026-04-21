@@ -23,9 +23,7 @@ put_character:
         push ax
         mov al, 0Dh
         call serial_character
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
+        call vga_teletype       ; CR on screen
         pop ax
 
 .serial:
@@ -40,10 +38,7 @@ put_character:
         ;; STATE_NORMAL
         cmp al, 1Bh
         je .enter_esc
-        mov ah, 0Eh
-        xor bh, bh
-        mov bl, [ansi_fg]
-        int 10h
+        call vga_teletype       ; uses [ansi_fg] as attribute
         jmp .done
 
 .csi_command:
@@ -78,9 +73,7 @@ put_character:
 
 .cursor_back:
         push bx
-        mov ah, 03h
-        xor bx, bx
-        int 10h
+        call vga_get_cursor
         pop cx
         movzx ax, dh
         push dx
@@ -94,21 +87,15 @@ put_character:
         mov bx, 80
         div bx
         mov dh, al
-        mov ah, 02h
-        xor bx, bx
-        int 10h
+        call vga_set_cursor
         jmp .done
 
 .cursor_forward:
         push bx
-        mov ah, 03h
-        xor bx, bx
-        int 10h
+        call vga_get_cursor
         pop cx
         add dl, cl
-        mov ah, 02h
-        xor bx, bx
-        int 10h
+        call vga_set_cursor
         jmp .done
 
 .cursor_position:
@@ -122,24 +109,18 @@ put_character:
 .cp_have_col:
         dec bx
         mov dl, bl
-        mov ah, 02h
-        xor bx, bx
-        int 10h
+        call vga_set_cursor
         jmp .done
 
 .cursor_up:
         push bx
-        mov ah, 03h
-        xor bx, bx
-        int 10h                 ; DH=row, DL=col
+        call vga_get_cursor     ; DH=row, DL=col
         pop cx
         sub dh, cl
         jnb .cursor_up_set
         xor dh, dh
 .cursor_up_set:
-        mov ah, 02h
-        xor bx, bx
-        int 10h
+        call vga_set_cursor
         jmp .done
 
 .done:
@@ -170,10 +151,8 @@ put_character:
         jnz .sgr_fg_check
         ;; Reset
         mov byte [ansi_fg], 7
-        mov ah, 0Bh
-        mov bh, 0
-        mov bl, 0
-        int 10h
+        xor al, al              ; overscan colour = 0
+        call vga_set_bg
         jmp .done
 .sgr_fg_check:
         cmp ax, 38
@@ -189,10 +168,7 @@ put_character:
         cmp word [ansi_params+2], 5
         jne .done
         mov ax, [ansi_params+4]
-        mov ah, 0Bh
-        mov bh, 0
-        mov bl, al
-        int 10h
+        call vga_set_bg         ; AL = colour
         jmp .done
 
 .state_csi:
@@ -220,13 +196,9 @@ put_character:
         ;; Not CSI: emit ESC then char
         push ax
         mov al, 1Bh
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
+        call vga_teletype
         pop ax
-        mov ah, 0Eh
-        xor bx, bx
-        int 10h
+        call vga_teletype
         mov byte [ansi_state], 0
         jmp .done
 
@@ -234,11 +206,8 @@ put_character:
         ;; ESC[<N>@ — write char code N at cursor with ansi_fg color,
         ;; no cursor advance and no scroll.  BX holds the decoded N.
         mov al, bl
-        xor bh, bh
         mov bl, [ansi_fg]
-        mov ah, 09h
-        mov cx, 1
-        int 10h
+        call vga_write_attribute
         jmp .done
 
         ;; Parser state (stage 2)
