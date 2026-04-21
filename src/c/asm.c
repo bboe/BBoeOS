@@ -145,6 +145,8 @@ void close_source();
 __attribute__((regparm(1)))
 int open_file_ro(char *path);
 __attribute__((regparm(1)))
+void adc_sbb_handler(int modrm_base);
+__attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
 __attribute__((regparm(1)))
 void parse_d_values(int extra_zeros);
@@ -445,12 +447,15 @@ void handle_aam() {
     emit_byte(0x0A);
 }
 
-/* ``adc r16, imm8`` (83 /2 ib, sign-extended) — the checksum-fold
-   idiom (``adc bx, 0``).  ``adc r8, imm8`` (80 /2 ib) — the
-   high-byte carry propagate in cc.py's byte-compound-assign split
-   (``add al, [mem] / adc ah, 0``).  ``packed_register >> 8`` yields
-   the register width (8 or 16), selecting the byte or word opcode. */
-void handle_adc() {
+/* Shared body for ``adc`` (/2, modrm base 0xD0) and ``sbb`` (/3,
+   modrm base 0xD8) — the r, imm form only.  r8 uses 80 /r ib, r16
+   uses 83 /r ib (sign-extended).  adc carries the checksum-fold
+   idiom (``adc bx, 0``); sbb carries the byte-borrow propagate
+   cc.py's byte-compound-``-``-assign split emits (``sub al, [mem] /
+   sbb ah, 0``).  No r,r / [mem] / mem-dst forms — the self-host
+   never needs them. */
+__attribute__((regparm(1)))
+void adc_sbb_handler(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     skip_comma();
@@ -460,8 +465,12 @@ void handle_adc() {
     } else {
         emit_byte(0x83);
     }
-    emit_byte(0xD0 | (packed_register & 0xFF));
+    emit_byte(modrm_base | (packed_register & 0xFF));
     emit_byte(imm);
+}
+
+void handle_adc() {
+    adc_sbb_handler(0xD0);
 }
 
 /* The ALU binop family (``add`` /0, ``or`` /1, ``and`` /4, ``sub`` /5,
@@ -1095,25 +1104,8 @@ void handle_ret() {
     emit_byte(0xC3);
 }
 
-/* ``sbb r8, imm8`` (80 /3 ib) — the byte-borrow propagate emitted
-   by cc.py's byte-compound-``-``-assign split (``sub al, [mem] /
-   sbb ah, 0``).  ``sbb r16, imm8`` (83 /3 ib, sign-extended) — kept
-   for parity with handle_adc even though no current caller emits
-   it.  The retired ``sbb word [disp16], imm8`` TCP-checksum form
-   is gone: nothing in the live tree assembles it, so keeping the
-   dispatch was ~45 bytes of dead code. */
 void handle_sbb() {
-    skip_ws();
-    int packed_register = parse_register();
-    skip_comma();
-    int imm = resolve_value();
-    if ((packed_register >> 8) == 8) {
-        emit_byte(0x80);
-    } else {
-        emit_byte(0x83);
-    }
-    emit_byte(0xD8 | (packed_register & 0xFF));
-    emit_byte(imm);
+    adc_sbb_handler(0xD8);
 }
 
 void handle_scasb() {
