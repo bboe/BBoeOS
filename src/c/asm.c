@@ -1312,34 +1312,25 @@ void handle_ret() {
     emit_byte(0xC3);
 }
 
-/* ``sbb word [disp16], imm8`` — the only form the self-host needs
-   (TCP checksum carry fold).  Requires the ``word`` keyword; the
-   match_word gate restores SI on failure so the fall-through to
-   abort_unknown prints the original token.  The success path jumps
-   past the abort tail so the epilogue closes cc.py's bp frame; the
-   abort paths jmp out to abort_unknown (which never returns). */
+/* ``sbb r8, imm8`` (80 /3 ib) — the byte-borrow propagate emitted
+   by cc.py's byte-compound-``-``-assign split (``sub al, [mem] /
+   sbb ah, 0``).  ``sbb r16, imm8`` (83 /3 ib, sign-extended) — kept
+   for parity with handle_adc even though no current caller emits
+   it.  The retired ``sbb word [disp16], imm8`` TCP-checksum form
+   is gone: nothing in the live tree assembles it, so keeping the
+   dispatch was ~45 bytes of dead code. */
 void handle_sbb() {
     skip_ws();
-    if (match_word(STR_WORD) == 0) {
-        abort_unknown();
-    }
-    skip_ws();
-    if (source_cursor[0] != '[') {
-        abort_unknown();
-    }
-    source_cursor = source_cursor + 1;
-    int disp = resolve_value();
-    if (source_cursor[0] != ']') {
-        abort_unknown();
-    }
-    source_cursor = source_cursor + 1;
+    int pr = parse_register();
     skip_comma();
     int imm = resolve_value();
-    emit_byte(0x83);
-    emit_byte(0x1E);
-    emit_byte(disp & 0xFF);
-    emit_byte((disp >> 8) & 0xFF);
-    emit_byte(imm & 0xFF);
+    if ((pr & 0xFF00) == 0x0800) {
+        emit_byte(0x80);
+    } else {
+        emit_byte(0x83);
+    }
+    emit_byte(0xD8 | (pr & 0xFF));
+    emit_byte(imm);
 }
 
 void handle_scasb() {
