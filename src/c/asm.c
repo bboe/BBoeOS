@@ -113,37 +113,19 @@ int symbol_count;
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
-void adc_sbb_handler(int modrm_base);
-void close_source();
-__attribute__((regparm(1)))
-void define_label_here(int is_local);
-__attribute__((regparm(1)))
-void emit_alu_binop(int rfield);
-__attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
 void emit_byte(int value);
 __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp);
 __attribute__((regparm(1)))
-void emit_modrm_disp(int modrm, int disp);
-__attribute__((regparm(1)))
-void emit_modrm_disp8(int rm, int disp);
-__attribute__((regparm(1)))
 void emit_sized(int base, int size);
-__attribute__((regparm(1)))
-void emit_sized_imm(int value, int size);
 __attribute__((regparm(1)))
 void emit_word(int value);
 void flush_output();
 __attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
 void include_pop();
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int is_ident_char(int c);
-__attribute__((regparm(1)))
-int lookup_ident_here(int advance);
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int register_id, int rm);
 __attribute__((regparm(1)))
@@ -154,19 +136,12 @@ int match_word(char *keyword);
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode);
 __attribute__((regparm(1)))
-void mnemonic_dispatch_at(int index);
-__attribute__((regparm(1)))
-char *mnemonic_keyword_at(int index);
-__attribute__((regparm(1)))
 int open_file_ro(char *path);
-__attribute__((regparm(1)))
-void parse_d_values(int extra_zeros);
 void parse_directive();
 void parse_line();
 void parse_mnemonic();
 int parse_operand();
 int parse_register();
-int parse_rhs();
 __attribute__((carry_return))
 int peek_label_target();
 int read_line();
@@ -183,8 +158,6 @@ __attribute__((regparm(1)))
 void shift_handler(int modrm_base);
 void skip_comma();
 void skip_ws();
-__attribute__((regparm(1)))
-void symbol_add(int value, int scope);
 __attribute__((regparm(1)))
 void symbol_add_constant(int value);
 __attribute__((regparm(1)))
