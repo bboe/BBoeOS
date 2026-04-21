@@ -22,15 +22,15 @@
    on-disk image stays the same size as the NASM layout; ``char[N]``
    arrays emit ``times N db 0`` at the binary tail, which is fine for
    the two small fixed-size buffers. */
-int changed_flag;
+uint8_t changed_flag;
 int current_address;
 int equ_space;
-int error_flag;
+uint8_t error_flag;
 /* abort_unknown stores the offending mnemonic's SI into
    ``error_word`` before jumping to the pure-C reporter. */
 char *error_word;
 int global_scope = 0xFFFF;
-int include_depth;
+uint8_t include_depth;
 char include_path[32];
 /* Bridge for include_push's SI input (pointer to the raw include
    filename parsed out of the source line).  cc.py has no syntax for
@@ -52,7 +52,7 @@ int include_save_valid;
    binary; the scratch address keeps the on-disk size the same as
    the NASM layout. */
 char *include_source_save;
-int iteration_count;
+uint8_t iteration_count;
 int jump_index;
 int last_symbol_index;
 /* Pointer to the 256-byte line-accumulation buffer at
@@ -60,6 +60,9 @@ int last_symbol_index;
    null-terminated; abort_unknown_impl prints it. */
 char *line_buffer;
 int op1_register;
+/* Kept ``int`` — hot-path readers (``int size1 = op1_size;``) bind
+   the value into an ``int`` local, which under byte-slot codegen
+   pays a ``xor ah, ah`` per load with no matching store-side win. */
 int op1_size;
 int op1_type;
 int op1_value;
@@ -79,7 +82,7 @@ int output_fd;
 char *output_name;
 int output_position;
 int output_total;
-int pass;
+uint8_t pass;
 /* ``peek_label_target`` stashes the resolved symbol value here (AX-side
    of the retired dual AX + CF return).  ``carry_return`` can only
    signal CF, so the two encode_rel8_jump call sites now read
