@@ -540,8 +540,7 @@ void emit_dword(int value) {
        single ``int`` — write the upper half as zeros, which matches
        every 32-bit address the self-host needs to emit (all labels
        live below 64 KB). */
-    emit_byte(0);
-    emit_byte(0);
+    emit_word(0);
 }
 
 /* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
@@ -672,8 +671,7 @@ void flush_output() {
    label.  ``emit_byte`` uses the ``regparm(1)`` fastcall convention
    so each call site compiles to ``mov ax, OPCODE ; call emit_byte``. */
 void handle_aam() {
-    emit_byte(0xD4);
-    emit_byte(0x0A);
+    emit_word(0x0AD4);
 }
 
 void handle_adc() {
@@ -881,8 +879,7 @@ void handle_jmp() {
             skip_ws();
         }
         int offset = resolve_label();
-        emit_byte(0x66);
-        emit_byte(0xEA);
+        emit_word(0xEA66);
         emit_dword(offset);
         emit_word(selector);
         return;
@@ -917,16 +914,14 @@ void handle_jz() {
 void handle_lgdt() {
     skip_ws();
     parse_operand();
-    emit_byte(0x0F);
-    emit_byte(0x01);
+    emit_word(0x010F);
     emit_modrm_direct(2, parse_operand_value);
 }
 
 void handle_lidt() {
     skip_ws();
     parse_operand();
-    emit_byte(0x0F);
-    emit_byte(0x01);
+    emit_word(0x010F);
     emit_modrm_direct(3, parse_operand_value);
 }
 
@@ -972,8 +967,7 @@ void handle_mov() {
     if (creg_dst >= 0) {
         skip_comma();
         int packed_register = parse_register();
-        emit_byte(0x0F);
-        emit_byte(0x22);
+        emit_word(0x220F);
         emit_byte(0xC0 | (creg_dst << 3) | (packed_register & 0xFF));
         return;
     }
@@ -1008,8 +1002,7 @@ void handle_mov() {
     if (type1 == 0 && op1_parsed_size == 32) {
         int creg_src = parse_creg();
         if (creg_src >= 0) {
-            emit_byte(0x0F);
-            emit_byte(0x20);
+            emit_word(0x200F);
             emit_byte(0xC0 | (creg_src << 3) | register1_id);
             return;
         }
@@ -1131,8 +1124,7 @@ void handle_movzx() {
     int type2 = (packed_operand >> 8) & 0xFF;
     int register2_id = packed_operand & 0xFF;
     int value2 = parse_operand_value;
-    emit_byte(0x0F);
-    emit_byte(0xB6);
+    emit_word(0xB60F);
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else {
@@ -1272,8 +1264,7 @@ void handle_sub() {
         source_cursor = source_cursor + 1;
         skip_comma();
         int imm = resolve_value();
-        emit_byte(0x81);
-        emit_byte(0x2E);
+        emit_word(0x2E81);
         emit_word(disp);
         emit_word(imm);
         return;
