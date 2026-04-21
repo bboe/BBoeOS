@@ -4089,8 +4089,8 @@ class CodeGenerator:
         # directives).
         #
         # ``naked_asm`` covers the hand-coded inline-asm helpers
-        # (``emit_byte_al`` / ``skip_ws`` / ``resolve_value`` /
-        # ``symbol_lookup``).  ``frameless_calls`` covers pure-C
+        # (``abort_unknown`` / ``restore_es`` / ``close_source`` /
+        # ``read_source_sector``).  ``frameless_calls`` covers pure-C
         # dispatch helpers — handlers like ``handle_clc`` whose
         # body is ``emit_byte(0xF8);`` or ``handle_aam`` whose body
         # is two ``emit_byte(...)`` calls.  For those, cc.py's call

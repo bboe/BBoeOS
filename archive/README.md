@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 11549     | +3296 |
+| asm     | 8253        | 11522     | +3269 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1219      | +298  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+3589):** Every ``handle_*`` and every function lives in pure C
+**asm (+3269):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `abort_unknown` trampoline (stashes SI into
 `_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
@@ -50,8 +50,7 @@ inline-asm body — `compute_source_prefix`, `run_pass1` /
 `run_pass2`, `flush_output`, `abort_unknown_impl`, three `die_*`
 helpers, `include_push` / `include_pop`, `do_pass`, `read_line`,
 `load_src_sector`, `skip_ws` / `skip_comma`, `hex_digit`,
-`make_modrm_reg_reg` / `reg_to_rm`, `emit_byte_al` /
-`emit_word_ax`, `symbol_entry_address`, `match_word`,
+`make_modrm_reg_reg` / `reg_to_rm`, `symbol_entry_address`, `match_word`,
 `mem_op_reg_emit`, `encode_rel8_jump`, the full `main`, the full
 instruction-handler family (handle_aam / adc / add / and / call /
 clc / cld / cmp / dec / div / inc / int / ja / jb / jbe / jg /
@@ -69,7 +68,10 @@ kernel-jump wrappers, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE
 `%define`s all retired along the way (the 6-byte parent-state
 triplet moved into cc.py-emitted globals; the 512-byte
 source-buffer copy lives in post-binary scratch RAM via a pointer
-main() initializes).  cc.py now elides the bp frame for functions
+main() initializes).  The ``emit_byte_al`` / ``emit_word_ax``
+bridge thunks and the ``parse_operand_c`` forwarder also retired
+once every handler was pure C (no inline-asm caller left the
+bridges had to feed).  cc.py now elides the bp frame for functions
 whose body is a single ``asm("...")`` statement with no parameters
 (the vast majority of the ported helpers), so the per-call overhead
 on the hot paths dropped back to the NASM baseline — 324 bytes
