@@ -66,9 +66,9 @@ int op1_size;
 int op1_value;
 int op2_value;
 int org_value;
-/* ``parse_operand_c`` stashes its DX output here so the C caller
-   can read the displacement / immediate value after the call; AX
-   keeps the packed ``AH = type``, ``AL = reg`` return. */
+/* ``parse_operand`` returns the packed ``(type << 8) | reg`` in AX
+   and stashes the displacement / immediate here for the caller to
+   read after the call — cc.py's return ABI is AX-only. */
 int parse_operand_value;
 /* Pointer to the 512-byte output-byte buffer at ``_program_end + 256``
    (= OUTPUT_BUFFER in the asm_layout.h #define).  main() initializes
@@ -126,7 +126,7 @@ char *mnemonic_keyword_at(int index);
 __attribute__((regparm(1)))
 void emit_byte(int v);
 void parse_directive();
-int parse_operand_c();
+int parse_operand();
 __attribute__((carry_return))
 int peek_label_target();
 void parse_mnemonic();
@@ -232,40 +232,6 @@ void die_symbol_overflow() {
     die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
 }
 
-/* Emit one byte (AL) into the output stream.  Pass 1 only bumps
-   ``current_address`` / ``output_total``; pass 2 also stores the
-   byte into ``OUTPUT_BUFFER`` at ``output_position``, flushing to
-   ``output_fd`` when the buffer fills.  The inline-asm body
-   preserves the AL-in ABI.  Clobbers BX only when pass == 2 (saved
-   + restored around the buffer-pointer math). */
-/* Legacy AL-in thunk: inline-asm callers still do ``mov al, OPCODE ;
-   call emit_byte_al``.  The thunk zero-extends AL to AX (so garbage
-   AH can't leak into ``v``'s local slot during the fastcall spill)
-   and hands off to the pure-C ``emit_byte`` through the standard
-   C calling convention.  ``pusha`` / ``popa`` preserve every
-   register the old inline-asm body guaranteed (and more) at 1 byte
-   each; this is the backwards-compat bridge that lets the handler
-   family migrate to pure C one family at a time without touching
-   every call site in the remaining inline asm. */
-void emit_byte_al() {
-    asm("pusha\n"
-        "mov ah, 0\n"
-        "call emit_byte\n"
-        "popa");
-}
-
-/* Emit one little-endian word (AX).  Saves the high byte, emits
-   AL, swaps, emits the old AH.  The retired asm used a tail call
-   for the second emit_byte_al; this version uses a regular call
-   so cc.py's ``pop bp / ret`` epilogue can close the bp frame. */
-void emit_word_ax() {
-    asm("push ax\n"
-        "call emit_byte_al\n"
-        "pop ax\n"
-        "xchg al, ah\n"
-        "call emit_byte_al");
-}
-
 /* Pick between short (rel8) and near (rel16) jump encoding per
    call, using the pass-1 bitmap at ES:JUMP_TABLE indexed by
    ``jump_index``.  Takes the opcode via the ``regparm(1)`` fastcall
@@ -350,14 +316,8 @@ void encode_rel8_jump(int opcode) {
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
    output_fd via SYS_IO_WRITE, then reset the position.  No-op when
-   nothing is queued.  Callable from inline asm (``call flush_output``)
-   since cc.py emits the label with the C name.  Uses the ES-safe
-   ``syscall`` wrapper so ES=SYMBOL_SEGMENT survives the ``int 30h``.
-   The retired asm preserved AX / CX / SI / DI so transitive callers
-   reaching here through ``emit_byte_al``'s ``pusha`` didn't need
-   per-register guards; ``emit_byte_al`` still does the ``pusha`` /
-   ``popa`` externally, so the C body can let cc.py's calling
-   convention handle clobber. */
+   nothing is queued.  Uses the ES-safe ``syscall`` wrapper so
+   ES=SYMBOL_SEGMENT survives the ``int 30h``. */
 void flush_output() {
     if (output_position == 0) {
         return;
@@ -408,11 +368,8 @@ void emit_byte(int v) {
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
    handler is dispatched through ``mnemonic_table`` (inline-asm tail
    of this file): ``parse_mnemonic`` does an indirect ``call`` on the
-   label.  Bodies are plain C calls to ``emit_byte``, which uses the
-   ``regparm(1)`` fastcall convention so the call site is ``mov ax,
-   OPCODE ; call emit_byte`` — the same byte count as the retired
-   ``mov al, OPCODE ; call emit_byte_al`` inline form but expressed
-   in pure C. */
+   label.  ``emit_byte`` uses the ``regparm(1)`` fastcall convention
+   so each call site compiles to ``mov ax, OPCODE ; call emit_byte``. */
 void handle_aam() {
     emit_byte(0xD4);
     emit_byte(0x0A);
@@ -455,7 +412,7 @@ void handle_add() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -508,14 +465,9 @@ void handle_add() {
 }
 
 /* ``and r, r`` / ``and r, imm`` / ``and [disp16], r16``.  The
-   memory-destination form tail-calls into mem_op_reg_emit (still
-   a file-scope asm label) via ``call`` — the retired asm used
-   ``jmp mem_op_reg_emit`` but that would strand cc.py's pushed
-   bp here; the call lets emit_word_ax inside mem_op_reg_emit
-   return into our body so the ``jmp .han_end`` path can close
-   the epilogue cleanly.  Reg-reg / reg-imm dispatch mirrors
-   handle_xor with the /r field constant swapped for 0xE0 (``/4``)
-   and the short AL / AX form using 24/25. */
+   memory-destination form delegates to ``mem_op_reg_emit``.  Reg-reg
+   / reg-imm dispatch mirrors handle_xor with the /r field constant
+   swapped for 0xE0 (``/4``) and the short AL / AX form using 24/25. */
 void handle_and() {
     skip_ws();
     if (source_cursor[0] == '[') {
@@ -526,7 +478,7 @@ void handle_and() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -565,7 +517,7 @@ void handle_and() {
 void handle_call() {
     skip_ws();
     if (source_cursor[0] == '[') {
-        int po = parse_operand_c();
+        int po = parse_operand();
         int t = (po >> 8) & 0xFF;
         int r = po & 0xFF;
         int v = parse_operand_value;
@@ -599,7 +551,7 @@ void handle_cld() {
    for the general reg-imm; 38 / 39 for reg-reg; 3A / 3B for reg-mem. */
 void handle_cmp() {
     skip_ws();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t1 = (po >> 8) & 0xFF;
     int register1_id = po & 0xFF;
     int v1 = parse_operand_value;
@@ -619,7 +571,7 @@ void handle_cmp() {
         }
         source_cursor = saved;
         if (source_cursor[0] == '[') {
-            int po2 = parse_operand_c();
+            int po2 = parse_operand();
             int t2 = (po2 >> 8) & 0xFF;
             int register2_id = po2 & 0xFF;
             int v2 = parse_operand_value;
@@ -730,7 +682,7 @@ void handle_cmp() {
    0x00 for reg form, 0x0E vs 0x06 for mod=00 disp16 form). */
 void handle_dec() {
     skip_ws();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int type = (po >> 8) & 0xFF;
     int register_id = po & 0xFF;
     int value = parse_operand_value;
@@ -780,7 +732,7 @@ void handle_div() {
 
 void handle_inc() {
     skip_ws();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int type = (po >> 8) & 0xFF;
     int register_id = po & 0xFF;
     int value = parse_operand_value;
@@ -814,9 +766,6 @@ void handle_inc() {
     }
 }
 
-/* ``int <imm8>`` — emits CD imm8.  Uses push/pop AX to shuttle the
-   immediate across the emit_byte_al call, since both the opcode
-   byte and the immediate byte land in AL. */
 /* ``int <imm8>`` — two-byte encoding (``CD imm8``).  ``resolve_value``
    returns the immediate in AX and advances source_cursor past the
    expression; emit_byte preserves SI across its subscript so the
@@ -937,19 +886,19 @@ void handle_mov() {
         if (source_cursor[0] == ',') {
             source_cursor = source_cursor + 1;
             skip_ws();
-            int po = parse_operand_c();
+            int po = parse_operand();
             emit_byte(0x8E);
             emit_byte(0xC0 | (po & 0xFF));
             return;
         }
         source_cursor = saved;
     }
-    int po1 = parse_operand_c();
+    int po1 = parse_operand();
     int t1 = (po1 >> 8) & 0xFF;
     int register1_id = po1 & 0xFF;
     int v1 = parse_operand_value;
     skip_comma();
-    int po2 = parse_operand_c();
+    int po2 = parse_operand();
     int t2 = (po2 >> 8) & 0xFF;
     int register2_id = po2 & 0xFF;
     int v2 = parse_operand_value;
@@ -1117,7 +1066,7 @@ void handle_movzx() {
     int packed_register = parse_register();
     int register1_id = packed_register & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -1188,7 +1137,7 @@ void handle_or() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -1441,7 +1390,7 @@ void handle_sub() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -1497,7 +1446,7 @@ void handle_sub() {
    already parsed (disp8, disp16, or bare [reg]). */
 void handle_test() {
     skip_ws();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t1 = (po >> 8) & 0xFF;
     int register1_id = po & 0xFF;
     int v1 = parse_operand_value;
@@ -1634,7 +1583,7 @@ void handle_xor() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand_c();
+    int po = parse_operand();
     int t2 = (po >> 8) & 0xFF;
     int register2_id = po & 0xFF;
     int v2 = parse_operand_value;
@@ -2331,10 +2280,12 @@ int parse_number() {
    detected by scanning backwards from ``]`` for a trailing
    register preceded by ``+``; it's rewritten in-place to
    ``[disp]`` for resolve_value (with the ``+`` restored
-   afterwards).  Returns AH = type (0=reg, 1=imm, 2=mem_direct,
-   3=mem_bx_disp); AL = register number (for reg / mem_bx_disp);
-   DX = value (imm or disp).  Updates [op1_size] on register /
-   byte/word-prefix paths. */
+   afterwards).  Returns the packed ``(type << 8) | reg`` in AX
+   — type is 0=reg, 1=imm, 2=mem_direct, 3=mem_reg_disp, and reg
+   carries the register number for the reg / mem_reg_disp forms.
+   The displacement / immediate lands in ``parse_operand_value``
+   (cc.py's return ABI is AX-only).  Updates ``op1_size`` on
+   register / byte/word-prefix paths. */
 int parse_operand() {
     skip_ws();
     /* ``byte`` / ``word`` size prefix — match_word already rewinds
@@ -2450,20 +2401,6 @@ int parse_operand() {
     }
     parse_operand_value = disp;
     return 2 << 8;                      /* type=2 (direct mem) */
-}
-
-/* C-callable wrapper around the inline-asm ``parse_operand``.  The
-   retired asm returned three values — AH = type, AL = reg, DX =
-   immediate / displacement — across two registers.  cc.py's return
-   ABI is AX-only, so the wrapper stashes DX into the
-   ``parse_operand_value`` global before falling through to the
-   caller with AX intact.  Pure-C callers write ``int po =
-   parse_operand_c();`` and extract type / reg / value via ``(po >>
-   8) & 0xFF`` / ``po & 0xFF`` / ``parse_operand_value``.  ``op1_size``
-   is set by ``parse_operand`` itself as a side effect; C callers
-   read it through the existing ``int op1_size`` global. */
-int parse_operand_c() {
-    return parse_operand();
 }
 
 /* Linear scan over ``register_table`` (4 bytes per entry: 2 chars,
