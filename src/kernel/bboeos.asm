@@ -117,6 +117,10 @@ clear_screen:
 
 boot_shell:
         call ps2_init           ; mask BIOS IRQ 1 before anyone reads keys
+        cmp byte [boot_disk], 80h
+        jae .post_fdc
+        call fdc_init           ; reset, motor, recalibrate drive A:
+        .post_fdc:
         call fd_init
         ;; Load shell program from filesystem
         mov si, SHELL_NAME
@@ -138,7 +142,9 @@ boot_shell:
         jmp .shell_halt
 
 %include "ansi.asm"
+%include "ata.asm"
 %include "fd.asm"
+%include "fdc.asm"
 %include "io.asm"
 %include "net.asm"
 %include "ps2.asm"
