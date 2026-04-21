@@ -583,8 +583,7 @@ syscall_handler:
         push ecx
         push esi
 
-        mov ah, 04h
-        int 1Ah                 ; CH=century BCD, CL=year BCD, DH=month BCD, DL=day BCD
+        call rtc_read_date      ; CH=century BCD, CL=year BCD, DH=month BCD, DL=day BCD
         mov al, ch
         call .bcd_to_bin
         movzx si, al            ; SI = century
@@ -601,8 +600,7 @@ syscall_handler:
         call .bcd_to_bin
         mov [epoch_day], al
 
-        mov ah, 02h
-        int 1Ah                 ; CH=hours BCD, CL=minutes BCD, DH=seconds BCD
+        call rtc_read_time      ; CH=hours BCD, CL=minutes BCD, DH=seconds BCD
         mov al, ch
         call .bcd_to_bin
         mov [epoch_hours], al
@@ -726,15 +724,8 @@ syscall_handler:
         dw 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
 
         .rtc_sleep:
-        ;; Busy-wait for CX milliseconds via BIOS INT 15h AH=86h
-        ;; which takes CX:DX = microseconds.  CX ms * 1000 = us.
-        mov ax, cx
-        mov cx, 1000
-        mul cx                  ; DX:AX = ms * 1000 (microseconds)
-        mov cx, dx
-        mov dx, ax
-        mov ah, 86h
-        int 15h
+        ;; Busy-wait for CX milliseconds via the native PIT tick counter.
+        call rtc_sleep_ms
         jmp .iret_done
 
         .rtc_uptime:
@@ -923,17 +914,9 @@ uptime_seconds:
         ;; 32-bit result; EAX holds the full value).  Preserves ECX, EDX.
         push ecx
         push edx
-        xor ah, ah
-        int 1Ah                 ; CX:DX = current ticks since midnight
-        movzx eax, cx
-        shl eax, 16
-        or ax, dx
-        movzx ecx, word [boot_ticks_high]
-        shl ecx, 16
-        or cx, [boot_ticks_low]
-        sub eax, ecx            ; EAX = elapsed ticks
+        call rtc_tick_read      ; EAX = ticks since boot
         xor edx, edx
-        mov ecx, 18
+        mov ecx, TICKS_PER_SECOND
         div ecx                 ; EAX = elapsed seconds
         pop edx
         pop ecx

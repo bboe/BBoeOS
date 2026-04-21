@@ -58,10 +58,7 @@ start:
         cmp al, STAGE2_SECTORS
         jne .error
 
-        xor ah, ah
-        int 1Ah                 ; CX:DX = ticks since midnight
-        mov [boot_ticks_low], dx
-        mov [boot_ticks_high], cx
+        call rtc_tick_init      ; install IRQ 0 handler, zero system_ticks
         call install_syscalls
         call network_initialize ; probe NIC once; sets net_present on success
         jmp boot_shell
@@ -145,6 +142,7 @@ boot_shell:
 %include "io.asm"
 %include "net.asm"
 %include "ps2.asm"
+%include "rtc.asm"
 %include "syscall.asm"
 %include "system.asm"
 %include "vga.asm"
@@ -694,8 +692,6 @@ shared_write_stdout:
         ret
 
         ;; Values
-        boot_ticks_high  dw 0
-        boot_ticks_low   dw 0
         epoch_year       dw 0
         epoch_month      db 0
         epoch_day        db 0
