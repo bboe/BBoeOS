@@ -59,15 +59,11 @@ int last_symbol_index;
    ``_program_end`` (main() initializes it).  read_line fills it
    null-terminated; abort_unknown_impl prints it. */
 char *line_buffer;
-int op1_register;
 /* Kept ``int`` — hot-path readers (``int size1 = op1_size;``) bind
    the value into an ``int`` local, which under byte-slot codegen
    pays a ``xor ah, ah`` per load with no matching store-side win. */
 int op1_size;
-int op1_type;
 int op1_value;
-int op2_register;
-int op2_type;
 int op2_value;
 int org_value;
 /* ``parse_operand_c`` stashes its DX output here so the C caller
