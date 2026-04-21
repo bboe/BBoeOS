@@ -124,7 +124,15 @@ void mnemonic_dispatch_at(int index);
 __attribute__((regparm(1)))
 char *mnemonic_keyword_at(int index);
 __attribute__((regparm(1)))
-void emit_byte(int v);
+void emit_byte(int value);
+__attribute__((regparm(1)))
+void emit_word(int value);
+__attribute__((regparm(1)))
+void emit_sized(int base, int size);
+__attribute__((regparm(1)))
+void emit_modrm_disp(int modrm, int disp);
+__attribute__((regparm(1)))
+void emit_modrm_direct(int reg, int disp);
 void parse_directive();
 int parse_operand();
 __attribute__((carry_return))
@@ -309,8 +317,7 @@ void encode_rel8_jump(int opcode) {
             emit_byte(opcode + 0x10);
         }
         int disp = resolve_label() - (current_address + 2);
-        emit_byte(disp);
-        emit_byte(disp >> 8);
+        emit_word(disp);
     }
 }
 
@@ -333,8 +340,8 @@ void flush_output() {
 /* Emit one byte into the output stream.  Pass 1 only bumps
    current_address / output_total; pass 2 also stores the byte into
    OUTPUT_BUFFER at output_position, flushing to output_fd when the
-   buffer fills.  Callers load ``v`` into AX via the ``regparm(1)``
-   calling convention; the fastcall prologue spills AX into ``v``'s
+   buffer fills.  Callers load ``value`` into AX via the ``regparm(1)``
+   calling convention; the fastcall prologue spills AX into ``value``'s
    local slot so the body reads it through the normal local path.
    Placed after its C-level callee (``flush_output``) rather than in
    strict alphabetical position: cc.py resolves the call either way
@@ -351,10 +358,10 @@ void flush_output() {
    around its own body, so the inner ``flush_output()`` call
    inside our push/pop bracket composes cleanly. */
 __attribute__((regparm(1)))
-void emit_byte(int v) {
+void emit_byte(int value) {
     if (pass == 2) {
         asm("push si");
-        output_buffer[output_position] = v;
+        output_buffer[output_position] = value;
         output_position = output_position + 1;
         if (output_position >= 512) {
             flush_output();
@@ -363,6 +370,55 @@ void emit_byte(int v) {
     }
     current_address = current_address + 1;
     output_total = output_total + 1;
+}
+
+/* ``emit_byte(value); emit_byte(value >> 8);`` — the low/high byte pair used
+   for every ``disp16`` / ``imm16`` in the instruction handlers.
+   ``regparm(1)`` puts ``value`` in AX so the call site compiles to
+   ``mov ax, value ; call emit_word``.  ``emit_byte`` masks to a byte on
+   store, so no ``& 0xFF`` guard is needed before passing the raw
+   value. */
+__attribute__((regparm(1)))
+void emit_word(int value) {
+    emit_byte(value);
+    emit_byte(value >> 8);
+}
+
+/* Emit ``base`` for an 8-bit operand size, ``base + 1`` otherwise.
+   Collapses the ``if (size == 8) emit_byte(X); else emit_byte(X+1);``
+   split that every ALU / mov / cmp / test handler carries. */
+__attribute__((regparm(1)))
+void emit_sized(int base, int size) {
+    if (size == 8) {
+        emit_byte(base);
+    } else {
+        emit_byte(base + 1);
+    }
+}
+
+/* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
+   displacement magnitude.  ``modrm`` is the mod=00 base (rm / reg
+   fields already set); the helper ORs in 0x40 for disp8 and 0x80
+   for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
+__attribute__((regparm(1)))
+void emit_modrm_disp(int modrm, int disp) {
+    if (disp == 0) {
+        emit_byte(modrm);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_byte(modrm | 0x40);
+        emit_byte(disp);
+    } else {
+        emit_byte(modrm | 0x80);
+        emit_word(disp);
+    }
+}
+
+/* Emit the ``[disp16]`` direct-memory ModR/M form: ``(reg << 3) | 0x06``
+   plus a 2-byte disp16. */
+__attribute__((regparm(1)))
+void emit_modrm_direct(int reg, int disp) {
+    emit_byte((reg << 3) | 0x06);
+    emit_word(disp);
 }
 
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
@@ -412,34 +468,20 @@ void handle_add() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
-    if (t2 == 0) {
-        if (size1 == 8) {
-            emit_byte(0x00);
-        } else {
-            emit_byte(0x01);
-        }
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(0x00, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (t2 == 2) {
-        if (size1 == 8) {
-            emit_byte(0x02);
-        } else {
-            emit_byte(0x03);
-        }
-        emit_byte((register1_id << 3) | 0x06);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
-    } else if (t2 == 3) {
-        if (size1 == 8) {
-            emit_byte(0x02);
-        } else {
-            emit_byte(0x03);
-        }
+    } else if (type2 == 2) {
+        emit_sized(0x02, size1);
+        emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 3) {
+        emit_sized(0x02, size1);
         emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else if (size1 == 8) {
         if (register1_id == 0) {
             emit_byte(0x04);
@@ -447,20 +489,18 @@ void handle_add() {
             emit_byte(0x80);
             emit_byte(0xC0 | register1_id);
         }
-        emit_byte(v2 & 0xFF);
-    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(value2 & 0xFF);
+    } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
         emit_byte(0xC0 | register1_id);
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else if (register1_id == 0) {
         emit_byte(0x05);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     } else {
         emit_byte(0x81);
         emit_byte(0xC0 | register1_id);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     }
 }
 
@@ -478,35 +518,30 @@ void handle_and() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
-    if (t2 == 0) {
-        if (size1 == 8) {
-            emit_byte(0x20);
-        } else {
-            emit_byte(0x21);
-        }
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(0x20, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
     } else if (size1 == 8) {
         if (register1_id == 0) {
             emit_byte(0x24);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         } else {
             emit_byte(0x80);
             emit_byte(0xE0 | register1_id);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         }
-    } else if (v2 >= -128 && v2 <= 127) {
+    } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
         emit_byte(0xE0 | register1_id);
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else {
         emit_byte(0x81);
         emit_byte(0xE0 | register1_id);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     }
 }
 
@@ -517,22 +552,21 @@ void handle_and() {
 void handle_call() {
     skip_ws();
     if (source_cursor[0] == '[') {
-        int po = parse_operand();
-        int t = (po >> 8) & 0xFF;
-        int r = po & 0xFF;
-        int v = parse_operand_value;
-        if (t != 3 || v == 0 || v < -128 || v > 127) {
+        int packed_operand = parse_operand();
+        int type = (packed_operand >> 8) & 0xFF;
+        int register_id = packed_operand & 0xFF;
+        int value = parse_operand_value;
+        if (type != 3 || value == 0 || value < -128 || value > 127) {
             abort_unknown();
         }
         emit_byte(0xFF);
-        emit_byte(reg_to_rm(r) | 0x50);
-        emit_byte(v & 0xFF);
+        emit_byte(reg_to_rm(register_id) | 0x50);
+        emit_byte(value & 0xFF);
     } else {
         emit_byte(0xE8);
         int target = resolve_label();
         int delta = target - current_address - 2;
-        emit_byte(delta & 0xFF);
-        emit_byte((delta >> 8) & 0xFF);
+        emit_word(delta);
     }
 }
 
@@ -551,58 +585,35 @@ void handle_cld() {
    for the general reg-imm; 38 / 39 for reg-reg; 3A / 3B for reg-mem. */
 void handle_cmp() {
     skip_ws();
-    int po = parse_operand();
-    int t1 = (po >> 8) & 0xFF;
-    int register1_id = po & 0xFF;
-    int v1 = parse_operand_value;
+    int packed_operand = parse_operand();
+    int type1 = (packed_operand >> 8) & 0xFF;
+    int register1_id = packed_operand & 0xFF;
+    int value1 = parse_operand_value;
     int size1 = op1_size;
     skip_comma();
-    if (t1 == 0) {
+    if (type1 == 0) {
         char *saved = source_cursor;
         int packed_register2 = parse_register();
         if (packed_register2 >= 0) {
-            if (size1 == 8) {
-                emit_byte(0x38);
-            } else {
-                emit_byte(0x39);
-            }
+            emit_sized(0x38, size1);
             emit_byte(make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
             return;
         }
         source_cursor = saved;
         if (source_cursor[0] == '[') {
-            int po2 = parse_operand();
-            int t2 = (po2 >> 8) & 0xFF;
-            int register2_id = po2 & 0xFF;
-            int v2 = parse_operand_value;
-            if (t2 == 2) {
-                if (size1 == 8) {
-                    emit_byte(0x3A);
-                } else {
-                    emit_byte(0x3B);
-                }
-                emit_byte((register1_id << 3) | 0x06);
-                emit_byte(v2 & 0xFF);
-                emit_byte((v2 >> 8) & 0xFF);
+            int packed_operand2 = parse_operand();
+            int type2 = (packed_operand2 >> 8) & 0xFF;
+            int register2_id = packed_operand2 & 0xFF;
+            int value2 = parse_operand_value;
+            if (type2 == 2) {
+                emit_sized(0x3A, size1);
+                emit_modrm_direct(register1_id, value2);
                 return;
             }
-            if (t2 == 3) {
-                if (size1 == 8) {
-                    emit_byte(0x3A);
-                } else {
-                    emit_byte(0x3B);
-                }
+            if (type2 == 3) {
+                emit_sized(0x3A, size1);
                 int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-                if (v2 == 0) {
-                    emit_byte(modrm);
-                } else if (v2 >= -128 && v2 <= 127) {
-                    emit_byte(modrm | 0x40);
-                    emit_byte(v2 & 0xFF);
-                } else {
-                    emit_byte(modrm | 0x80);
-                    emit_byte(v2 & 0xFF);
-                    emit_byte((v2 >> 8) & 0xFF);
-                }
+                emit_modrm_disp(modrm, value2);
                 return;
             }
         }
@@ -621,17 +632,15 @@ void handle_cmp() {
             emit_byte(imm & 0xFF);
         } else if (register1_id == 0) {
             emit_byte(0x3D);
-            emit_byte(imm & 0xFF);
-            emit_byte((imm >> 8) & 0xFF);
+            emit_word(imm);
         } else {
             emit_byte(0x81);
             emit_byte(0xF8 | register1_id);
-            emit_byte(imm & 0xFF);
-            emit_byte((imm >> 8) & 0xFF);
+            emit_word(imm);
         }
         return;
     }
-    if (t1 != 2 && t1 != 3) {
+    if (type1 != 2 && type1 != 3) {
         return;
     }
     int imm = resolve_value();
@@ -648,28 +657,17 @@ void handle_cmp() {
         is_imm8 = 0;
     }
     emit_byte(opcode);
-    if (t1 == 2) {
+    if (type1 == 2) {
         emit_byte(0x3E);
-        emit_byte(v1 & 0xFF);
-        emit_byte((v1 >> 8) & 0xFF);
+        emit_word(value1);
     } else {
         int modrm = reg_to_rm(register1_id) | 0x38;
-        if (v1 == 0) {
-            emit_byte(modrm);
-        } else if (v1 >= -128 && v1 <= 127) {
-            emit_byte(modrm | 0x40);
-            emit_byte(v1 & 0xFF);
-        } else {
-            emit_byte(modrm | 0x80);
-            emit_byte(v1 & 0xFF);
-            emit_byte((v1 >> 8) & 0xFF);
-        }
+        emit_modrm_disp(modrm, value1);
     }
     if (is_imm8) {
         emit_byte(imm & 0xFF);
     } else {
-        emit_byte(imm & 0xFF);
-        emit_byte((imm >> 8) & 0xFF);
+        emit_word(imm);
     }
 }
 
@@ -682,9 +680,9 @@ void handle_cmp() {
    0x00 for reg form, 0x0E vs 0x06 for mod=00 disp16 form). */
 void handle_dec() {
     skip_ws();
-    int po = parse_operand();
-    int type = (po >> 8) & 0xFF;
-    int register_id = po & 0xFF;
+    int packed_operand = parse_operand();
+    int type = (packed_operand >> 8) & 0xFF;
+    int register_id = packed_operand & 0xFF;
     int value = parse_operand_value;
     int size = op1_size;
     if (type == 0) {
@@ -695,15 +693,10 @@ void handle_dec() {
             emit_byte(0x48 + register_id);
         }
     } else {
-        if (size == 8) {
-            emit_byte(0xFE);
-        } else {
-            emit_byte(0xFF);
-        }
+        emit_sized(0xFE, size);
         if (type == 2) {
             emit_byte(0x0E);
-            emit_byte(value & 0xFF);
-            emit_byte((value >> 8) & 0xFF);
+            emit_word(value);
         } else {
             int rm = reg_to_rm(register_id) | 0x08;
             if (value == 0) {
@@ -732,9 +725,9 @@ void handle_div() {
 
 void handle_inc() {
     skip_ws();
-    int po = parse_operand();
-    int type = (po >> 8) & 0xFF;
-    int register_id = po & 0xFF;
+    int packed_operand = parse_operand();
+    int type = (packed_operand >> 8) & 0xFF;
+    int register_id = packed_operand & 0xFF;
     int value = parse_operand_value;
     int size = op1_size;
     if (type == 0) {
@@ -745,15 +738,10 @@ void handle_inc() {
             emit_byte(0x40 + register_id);
         }
     } else {
-        if (size == 8) {
-            emit_byte(0xFE);
-        } else {
-            emit_byte(0xFF);
-        }
+        emit_sized(0xFE, size);
         if (type == 2) {
             emit_byte(0x06);
-            emit_byte(value & 0xFF);
-            emit_byte((value >> 8) & 0xFF);
+            emit_word(value);
         } else {
             int rm = reg_to_rm(register_id);
             if (value == 0) {
@@ -886,161 +874,100 @@ void handle_mov() {
         if (source_cursor[0] == ',') {
             source_cursor = source_cursor + 1;
             skip_ws();
-            int po = parse_operand();
+            int packed_operand = parse_operand();
             emit_byte(0x8E);
-            emit_byte(0xC0 | (po & 0xFF));
+            emit_byte(0xC0 | (packed_operand & 0xFF));
             return;
         }
         source_cursor = saved;
     }
-    int po1 = parse_operand();
-    int t1 = (po1 >> 8) & 0xFF;
-    int register1_id = po1 & 0xFF;
-    int v1 = parse_operand_value;
+    int packed_operand1 = parse_operand();
+    int type1 = (packed_operand1 >> 8) & 0xFF;
+    int register1_id = packed_operand1 & 0xFF;
+    int value1 = parse_operand_value;
     skip_comma();
-    int po2 = parse_operand();
-    int t2 = (po2 >> 8) & 0xFF;
-    int register2_id = po2 & 0xFF;
-    int v2 = parse_operand_value;
+    int packed_operand2 = parse_operand();
+    int type2 = (packed_operand2 >> 8) & 0xFF;
+    int register2_id = packed_operand2 & 0xFF;
+    int value2 = parse_operand_value;
     int size1 = op1_size;
-    if (t1 == 0) {
-        if (t2 == 0) {
-            if (size1 == 8) {
-                emit_byte(0x88);
-            } else {
-                emit_byte(0x89);
-            }
+    if (type1 == 0) {
+        if (type2 == 0) {
+            emit_sized(0x88, size1);
             emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
             return;
         }
-        if (t2 == 1) {
+        if (type2 == 1) {
             if (size1 == 8) {
                 emit_byte(0xB0 | register1_id);
-                emit_byte(v2 & 0xFF);
+                emit_byte(value2 & 0xFF);
             } else {
                 emit_byte(0xB8 | register1_id);
-                emit_byte(v2 & 0xFF);
-                emit_byte((v2 >> 8) & 0xFF);
+                emit_word(value2);
             }
             return;
         }
-        if (t2 == 2) {
+        if (type2 == 2) {
             if (size1 == 8 && register1_id == 0) {
                 emit_byte(0xA0);
             } else if (size1 != 8 && register1_id == 0) {
                 emit_byte(0xA1);
             } else {
-                if (size1 == 8) {
-                    emit_byte(0x8A);
-                } else {
-                    emit_byte(0x8B);
-                }
+                emit_sized(0x8A, size1);
                 emit_byte((register1_id << 3) | 0x06);
             }
-            emit_byte(v2 & 0xFF);
-            emit_byte((v2 >> 8) & 0xFF);
+            emit_word(value2);
             return;
         }
-        if (t2 == 3) {
-            if (size1 == 8) {
-                emit_byte(0x8A);
-            } else {
-                emit_byte(0x8B);
-            }
+        if (type2 == 3) {
+            emit_sized(0x8A, size1);
             int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-            if (v2 == 0) {
-                emit_byte(modrm);
-            } else if (v2 >= -128 && v2 <= 127) {
-                emit_byte(modrm | 0x40);
-                emit_byte(v2 & 0xFF);
-            } else {
-                emit_byte(modrm | 0x80);
-                emit_byte(v2 & 0xFF);
-                emit_byte((v2 >> 8) & 0xFF);
-            }
+            emit_modrm_disp(modrm, value2);
             return;
         }
         abort_unknown();
     }
-    if (t1 == 2) {
-        if (t2 == 0) {
+    if (type1 == 2) {
+        if (type2 == 0) {
             if (size1 == 8 && register2_id == 0) {
                 emit_byte(0xA2);
             } else if (size1 != 8 && register2_id == 0) {
                 emit_byte(0xA3);
             } else {
-                if (size1 == 8) {
-                    emit_byte(0x88);
-                } else {
-                    emit_byte(0x89);
-                }
+                emit_sized(0x88, size1);
                 emit_byte((register2_id << 3) | 0x06);
             }
-            emit_byte(v1 & 0xFF);
-            emit_byte((v1 >> 8) & 0xFF);
+            emit_word(value1);
             return;
         }
-        if (t2 == 1) {
-            if (size1 == 8) {
-                emit_byte(0xC6);
-            } else {
-                emit_byte(0xC7);
-            }
+        if (type2 == 1) {
+            emit_sized(0xC6, size1);
             emit_byte(0x06);
-            emit_byte(v1 & 0xFF);
-            emit_byte((v1 >> 8) & 0xFF);
+            emit_word(value1);
             if (size1 == 8) {
-                emit_byte(v2 & 0xFF);
+                emit_byte(value2 & 0xFF);
             } else {
-                emit_byte(v2 & 0xFF);
-                emit_byte((v2 >> 8) & 0xFF);
+                emit_word(value2);
             }
             return;
         }
         return;
     }
-    if (t1 == 3) {
-        if (t2 == 0) {
-            if (size1 == 8) {
-                emit_byte(0x88);
-            } else {
-                emit_byte(0x89);
-            }
+    if (type1 == 3) {
+        if (type2 == 0) {
+            emit_sized(0x88, size1);
             int modrm = (register2_id << 3) | reg_to_rm(register1_id);
-            if (v1 == 0) {
-                emit_byte(modrm);
-            } else if (v1 >= -128 && v1 <= 127) {
-                emit_byte(modrm | 0x40);
-                emit_byte(v1 & 0xFF);
-            } else {
-                emit_byte(modrm | 0x80);
-                emit_byte(v1 & 0xFF);
-                emit_byte((v1 >> 8) & 0xFF);
-            }
+            emit_modrm_disp(modrm, value1);
             return;
         }
-        if (t2 == 1) {
-            if (size1 == 8) {
-                emit_byte(0xC6);
-            } else {
-                emit_byte(0xC7);
-            }
+        if (type2 == 1) {
+            emit_sized(0xC6, size1);
             int modrm = reg_to_rm(register1_id);
-            if (v1 == 0) {
-                emit_byte(modrm);
-            } else if (v1 >= -128 && v1 <= 127) {
-                emit_byte(modrm | 0x40);
-                emit_byte(v1 & 0xFF);
-            } else {
-                emit_byte(modrm | 0x80);
-                emit_byte(v1 & 0xFF);
-                emit_byte((v1 >> 8) & 0xFF);
-            }
+            emit_modrm_disp(modrm, value1);
             if (size1 == 8) {
-                emit_byte(v2 & 0xFF);
+                emit_byte(value2 & 0xFF);
             } else {
-                emit_byte(v2 & 0xFF);
-                emit_byte((v2 >> 8) & 0xFF);
+                emit_word(value2);
             }
             return;
         }
@@ -1066,19 +993,19 @@ void handle_movzx() {
     int packed_register = parse_register();
     int register1_id = packed_register & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
     emit_byte(0x0F);
     emit_byte(0xB6);
-    if (t2 == 0) {
+    if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else {
         int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-        if (v2 != 0) {
+        if (value2 != 0) {
             emit_byte(modrm | 0x40);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         } else {
             emit_byte(modrm);
         }
@@ -1137,44 +1064,33 @@ void handle_or() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
-    if (t2 == 0) {
-        if (size1 == 8) {
-            emit_byte(0x08);
-        } else {
-            emit_byte(0x09);
-        }
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(0x08, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (t2 == 2) {
-        if (size1 == 8) {
-            emit_byte(0x0A);
-        } else {
-            emit_byte(0x0B);
-        }
-        emit_byte((register1_id << 3) | 0x06);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+    } else if (type2 == 2) {
+        emit_sized(0x0A, size1);
+        emit_modrm_direct(register1_id, value2);
     } else if (size1 == 8) {
         if (register1_id == 0) {
             emit_byte(0x0C);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         } else {
             emit_byte(0x80);
             emit_byte(0xC8 | register1_id);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         }
-    } else if (v2 >= -128 && v2 <= 127) {
+    } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
         emit_byte(0xC8 | register1_id);
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else {
         emit_byte(0x81);
         emit_byte(0xC8 | register1_id);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     }
 }
 
@@ -1225,8 +1141,7 @@ void handle_push() {
                 emit_byte(value & 0xFF);
             } else {
                 emit_byte(0x68);
-                emit_byte(value & 0xFF);
-                emit_byte((value >> 8) & 0xFF);
+                emit_word(value);
             }
         }
     }
@@ -1297,18 +1212,10 @@ void handle_shl() {
     int register_id = packed_register & 0xFF;
     int size = (packed_register >> 8) & 0xFF;
     if (count == 1) {
-        if (size == 8) {
-            emit_byte(0xD0);
-        } else {
-            emit_byte(0xD1);
-        }
+        emit_sized(0xD0, size);
         emit_byte(0xE0 | register_id);
     } else {
-        if (size == 8) {
-            emit_byte(0xC0);
-        } else {
-            emit_byte(0xC1);
-        }
+        emit_sized(0xC0, size);
         emit_byte(0xE0 | register_id);
         emit_byte(count);
     }
@@ -1322,18 +1229,10 @@ void handle_shr() {
     int register_id = packed_register & 0xFF;
     int size = (packed_register >> 8) & 0xFF;
     if (count == 1) {
-        if (size == 8) {
-            emit_byte(0xD0);
-        } else {
-            emit_byte(0xD1);
-        }
+        emit_sized(0xD0, size);
         emit_byte(0xE8 | register_id);
     } else {
-        if (size == 8) {
-            emit_byte(0xC0);
-        } else {
-            emit_byte(0xC1);
-        }
+        emit_sized(0xC0, size);
         emit_byte(0xE8 | register_id);
         emit_byte(count);
     }
@@ -1380,44 +1279,28 @@ void handle_sub() {
         int imm = resolve_value();
         emit_byte(0x81);
         emit_byte(0x2E);
-        emit_byte(disp & 0xFF);
-        emit_byte((disp >> 8) & 0xFF);
-        emit_byte(imm & 0xFF);
-        emit_byte((imm >> 8) & 0xFF);
+        emit_word(disp);
+        emit_word(imm);
         return;
     }
     int packed_register = parse_register();
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
-    if (t2 == 0) {
-        if (size1 == 8) {
-            emit_byte(0x28);
-        } else {
-            emit_byte(0x29);
-        }
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(0x28, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (t2 == 2) {
-        if (size1 == 8) {
-            emit_byte(0x2A);
-        } else {
-            emit_byte(0x2B);
-        }
-        emit_byte((register1_id << 3) | 0x06);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
-    } else if (t2 == 3) {
-        if (size1 == 8) {
-            emit_byte(0x2A);
-        } else {
-            emit_byte(0x2B);
-        }
+    } else if (type2 == 2) {
+        emit_sized(0x2A, size1);
+        emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 3) {
+        emit_sized(0x2A, size1);
         emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else if (size1 == 8) {
         if (register1_id == 0) {
             emit_byte(0x2C);
@@ -1425,16 +1308,15 @@ void handle_sub() {
             emit_byte(0x80);
             emit_byte(0xE8 | register1_id);
         }
-        emit_byte(v2 & 0xFF);
-    } else if (v2 >= -128 && v2 <= 127) {
+        emit_byte(value2 & 0xFF);
+    } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
         emit_byte(0xE8 | register1_id);
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else {
         emit_byte(0x81);
         emit_byte(0xE8 | register1_id);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     }
 }
 
@@ -1446,21 +1328,17 @@ void handle_sub() {
    already parsed (disp8, disp16, or bare [reg]). */
 void handle_test() {
     skip_ws();
-    int po = parse_operand();
-    int t1 = (po >> 8) & 0xFF;
-    int register1_id = po & 0xFF;
-    int v1 = parse_operand_value;
+    int packed_operand = parse_operand();
+    int type1 = (packed_operand >> 8) & 0xFF;
+    int register1_id = packed_operand & 0xFF;
+    int value1 = parse_operand_value;
     int size1 = op1_size;
     skip_comma();
-    if (t1 == 0) {
+    if (type1 == 0) {
         skip_ws();
         int packed_register2 = parse_register();
         if (packed_register2 >= 0) {
-            if (size1 == 8) {
-                emit_byte(0x84);
-            } else {
-                emit_byte(0x85);
-            }
+            emit_sized(0x84, size1);
             emit_byte(make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
         } else {
             int imm = resolve_value();
@@ -1479,22 +1357,20 @@ void handle_test() {
                     emit_byte(0xF7);
                     emit_byte(0xC0 | register1_id);
                 }
-                emit_byte(imm & 0xFF);
-                emit_byte((imm >> 8) & 0xFF);
+                emit_word(imm);
             }
         }
     } else {
         int imm = resolve_value();
         emit_byte(0xF6);
-        if (t1 == 2) {
+        if (type1 == 2) {
             emit_byte(0x06);
-            emit_byte(v1 & 0xFF);
-            emit_byte((v1 >> 8) & 0xFF);
+            emit_word(value1);
         } else {
             int rm = reg_to_rm(register1_id);
-            if (v1 != 0) {
+            if (value1 != 0) {
                 emit_byte(0x40 | rm);
-                emit_byte(v1 & 0xFF);
+                emit_byte(value1 & 0xFF);
             } else {
                 emit_byte(rm);
             }
@@ -1583,35 +1459,30 @@ void handle_xor() {
     int register1_id = packed_register & 0xFF;
     int size1 = (packed_register >> 8) & 0xFF;
     skip_comma();
-    int po = parse_operand();
-    int t2 = (po >> 8) & 0xFF;
-    int register2_id = po & 0xFF;
-    int v2 = parse_operand_value;
-    if (t2 == 0) {
-        if (size1 == 8) {
-            emit_byte(0x30);
-        } else {
-            emit_byte(0x31);
-        }
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    if (type2 == 0) {
+        emit_sized(0x30, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
     } else if (size1 == 8) {
         if (register1_id == 0) {
             emit_byte(0x34);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         } else {
             emit_byte(0x80);
             emit_byte(0xF0 | register1_id);
-            emit_byte(v2 & 0xFF);
+            emit_byte(value2 & 0xFF);
         }
-    } else if (v2 >= -128 && v2 <= 127) {
+    } else if (value2 >= -128 && value2 <= 127) {
         emit_byte(0x83);
         emit_byte(0xF0 | register1_id);
-        emit_byte(v2 & 0xFF);
+        emit_byte(value2 & 0xFF);
     } else {
         emit_byte(0x81);
         emit_byte(0xF0 | register1_id);
-        emit_byte(v2 & 0xFF);
-        emit_byte((v2 >> 8) & 0xFF);
+        emit_word(value2);
     }
 }
 
@@ -1845,9 +1716,7 @@ void mem_op_reg_emit(int opcode) {
         abort_unknown();
     }
     emit_byte(opcode);
-    emit_byte(((packed_register & 0xFF) << 3) | 0x06);
-    emit_byte(disp & 0xFF);
-    emit_byte((disp >> 8) & 0xFF);
+    emit_modrm_direct(packed_register & 0xFF, disp);
 }
 
 /* Parse ``db`` operands (comma-separated mix of numbers, symbols,
@@ -1923,8 +1792,8 @@ void parse_db() {
                 source_cursor = source_cursor + 1;
             }
         } else {
-            int v = resolve_value();
-            emit_byte(v);
+            int value = resolve_value();
+            emit_byte(value);
         }
         skip_ws();
         if (source_cursor[0] != ',') {
@@ -2021,9 +1890,8 @@ void parse_directive() {
     if (match_word(STR_DW)) {
         skip_ws();
         while (1) {
-            int v = resolve_value();
-            emit_byte(v & 0xFF);
-            emit_byte((v >> 8) & 0xFF);
+            int value = resolve_value();
+            emit_word(value);
             skip_ws();
             if (source_cursor[0] != ',') {
                 return;
@@ -2035,9 +1903,8 @@ void parse_directive() {
     if (match_word(STR_DD)) {
         skip_ws();
         while (1) {
-            int v = resolve_value();
-            emit_byte(v & 0xFF);
-            emit_byte((v >> 8) & 0xFF);
+            int value = resolve_value();
+            emit_word(value);
             emit_byte(0);
             emit_byte(0);
             skip_ws();
@@ -2330,8 +2197,8 @@ int parse_operand() {
         } else if (source_cursor[0] == '-') {
             source_cursor = source_cursor + 1;
             skip_ws();
-            int v = resolve_value();
-            disp = 0 - v;
+            int value = resolve_value();
+            disp = 0 - value;
         }
         skip_ws();
         if (source_cursor[0] == ']') {
@@ -2630,7 +2497,7 @@ int resolve_label() {
    branches; cc.py's bp frame makes the recursion safe (each frame
    pushes its own BP and the BX/CX/DI save triplet stays
    stack-balanced).  Signature declares ``int`` so pure-C callers
-   can bind the AX return value (``int v = resolve_value();``); the
+   can bind the AX return value (``int value = resolve_value();``); the
    inline-asm body ends with AX already set, and cc.py emits
    ``ret`` directly after (naked_asm elide), so the missing C-level
    ``return`` that clang's -Wreturn-type warns about is harmless —
