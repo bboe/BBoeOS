@@ -418,14 +418,22 @@ void handle_aam() {
     emit_byte(0x0A);
 }
 
-/* ``adc r16, imm8`` — the only form cc.py emits (the checksum-fold
-   idiom).  Encoded as 83 /2 ib: sign-extended imm8 into r16. */
+/* ``adc r16, imm8`` (83 /2 ib, sign-extended) — the checksum-fold
+   idiom (``adc bx, 0``).  ``adc r8, imm8`` (80 /2 ib) — the
+   high-byte carry propagate in cc.py's byte-compound-assign split
+   (``add al, [mem] / adc ah, 0``).  The upper byte of ``pr``
+   carries the register width (8 or 16): test that directly against
+   0x0800 to branch between the byte and word opcodes. */
 void handle_adc() {
     skip_ws();
     int pr = parse_register();
     skip_comma();
     int imm = resolve_value();
-    emit_byte(0x83);
+    if ((pr & 0xFF00) == 0x0800) {
+        emit_byte(0x80);
+    } else {
+        emit_byte(0x83);
+    }
     emit_byte(0xD0 | (pr & 0xFF));
     emit_byte(imm);
 }

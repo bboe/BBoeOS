@@ -3934,12 +3934,6 @@ class CodeGenerator:
                 return
             # Fast path for ``+``/``-`` with a stack-resident right operand:
             # ``add ax, [mem]`` is shorter than ``mov cx, [mem] / add ax, cx``.
-            # Byte-scalar locals / globals bail — a word-sized ``add ax,
-            # [mem]`` would read the adjacent byte as the high byte, and
-            # the byte-width split (``add al, [mem] / adc ah, 0``) isn't
-            # yet supported by the self-host assembler's handle_add /
-            # handle_adc (only ``r16, imm8`` / ``r/m16, r16`` today).
-            # Lifting that is part of the asm.c byte-mnemonic follow-up.
             if (
                 operator in ("+", "-")
                 and isinstance(right, Var)
@@ -3952,6 +3946,24 @@ class CodeGenerator:
                 self.generate_expression(left)
                 mnemonic = "add" if operator == "+" else "sub"
                 self.emit(f"        {mnemonic} ax, [{self._local_address(right.name)}]")
+                self.ax_clear()
+                return
+            # Byte-scalar right operand for ``+``: a word-sized ``add
+            # ax, [mem]`` would read the adjacent byte into the high
+            # byte, so split into ``add al, [mem] / adc ah, 0``.  The
+            # byte-wide op on AL with the carry propagate on AH
+            # matches word-add semantics for an unsigned-byte addend:
+            # its high byte is known zero, so adding zero to AH and
+            # folding in the carry out of AL produces the same 16-bit
+            # sum as a word add would.  5 bytes vs 11+ bytes of the
+            # CX fallback.  ``-`` is not included — its symmetric
+            # split needs ``sbb ah, 0`` which the self-host
+            # assembler's minimal handle_sbb doesn't yet accept, and
+            # no current caller hits the byte-local subtract path.
+            if operator == "+" and isinstance(right, Var) and self._is_byte_scalar(right.name) and right.name not in self.variable_arrays:
+                self.generate_expression(left)
+                self.emit(f"        add al, [{self._local_address(right.name)}]")
+                self.emit("        adc ah, 0")
                 self.ax_clear()
                 return
             # Fast path for ``+``/``-``/``&``/``|``/``^`` with a
