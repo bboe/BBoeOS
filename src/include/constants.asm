@@ -77,6 +77,7 @@
         %assign SYS_FS_CHMOD  00h
         %assign SYS_FS_MKDIR  01h
         %assign SYS_FS_RENAME 02h
+        %assign SYS_FS_UNLINK 03h
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error

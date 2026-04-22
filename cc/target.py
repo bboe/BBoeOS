@@ -131,6 +131,7 @@ class X86CodegenTarget(CodegenTarget):
         "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
         "FS_MKDIR": ("mov ah, SYS_FS_MKDIR", "int 30h"),
         "FS_RENAME": ("mov ah, SYS_FS_RENAME", "int 30h"),
+        "FS_UNLINK": ("mov ah, SYS_FS_UNLINK", "int 30h"),
         "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
         "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
         "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),

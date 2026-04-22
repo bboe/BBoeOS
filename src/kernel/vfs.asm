@@ -7,6 +7,7 @@
 ;;; vfs_chmod:              SI=path, AL=mode → CF on error, AL=error code
 ;;; vfs_commit_write_sec:   SI=fd_entry → CF on disk error (write SECTOR_BUFFER to cached sector)
 ;;; vfs_create:             SI=path → vfs_found_*, CF on error
+;;; vfs_delete:             SI=path → CF on error, AL=error code
 ;;; vfs_find:               SI=path → vfs_found_*, CF if not found
 ;;; vfs_init:               detect filesystem; swap pointers to ext2 if magic matches
 ;;; vfs_load:               DI=dest → CF (loads file using vfs_found_inode+vfs_found_size)
@@ -22,6 +23,7 @@
 vfs_chmod_fn              dw bbfs_chmod
 vfs_commit_write_sec_fn   dw bbfs_commit_write_sec  ; SI=fd_entry → CF on err
 vfs_create_fn             dw bbfs_create
+vfs_delete_fn             dw bbfs_delete
 vfs_find_fn               dw bbfs_find
 vfs_load_fn               dw bbfs_load
 vfs_mkdir_fn              dw bbfs_mkdir
@@ -42,6 +44,7 @@ vfs_found_type     db 0     ; FD_TYPE_FILE or FD_TYPE_DIRECTORY
 vfs_chmod:             jmp [vfs_chmod_fn]
 vfs_commit_write_sec:  jmp [vfs_commit_write_sec_fn]
 vfs_create:            jmp [vfs_create_fn]
+vfs_delete:            jmp [vfs_delete_fn]
 vfs_find:              jmp [vfs_find_fn]
 vfs_load:              jmp [vfs_load_fn]
 vfs_mkdir:             jmp [vfs_mkdir_fn]
@@ -64,6 +67,7 @@ vfs_init:
         mov word [vfs_chmod_fn], ext2_chmod
         mov word [vfs_commit_write_sec_fn], ext2_commit_write_sec
         mov word [vfs_create_fn], ext2_create
+        mov word [vfs_delete_fn], ext2_delete
         mov word [vfs_mkdir_fn], ext2_mkdir
         mov word [vfs_prepare_write_sec_fn], ext2_prepare_write_sec
         mov word [vfs_rename_fn], ext2_rename

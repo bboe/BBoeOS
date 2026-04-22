@@ -20,6 +20,8 @@ syscall_handler:
         je .fs_mkdir
         cmp ah, SYS_FS_RENAME  ; fs_rename
         je .fs_rename
+        cmp ah, SYS_FS_UNLINK  ; fs_unlink
+        je .fs_unlink
 
         cmp ah, SYS_IO_CLOSE   ; io_close
         je .io_close
