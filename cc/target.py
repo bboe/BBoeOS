@@ -45,9 +45,9 @@ class CodegenTarget(ABC):
     #: Counter / shift register name (``"cx"`` / ``"ecx"``).
     count_register: str
     #: Base-pointer register name.
-    bp_register: str
+    base_register: str
     #: Stack-pointer register name.
-    sp_register: str
+    stack_register: str
     #: NASM size keyword for the native integer width (``"word"`` / ``"dword"``).
     word_size: str
     #: ``sizeof(int)`` in bytes.
@@ -159,13 +159,13 @@ class X86CodegenTarget16(X86CodegenTarget):
     """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
 
     acc = "ax"
-    bp_register = "bp"
+    base_register = "bp"
     bx_register = "bx"
     count_register = "cx"
     di_register = "di"
     dx_register = "dx"
     si_register = "si"
-    sp_register = "sp"
+    stack_register = "sp"
     word_size = "word"
     int_size = 2
     param_slot_base = 4
@@ -196,13 +196,13 @@ class X86CodegenTarget32(X86CodegenTarget):
     """32-bit flat-pmode x86 target (BBoeOS ring-0 protected mode)."""
 
     acc = "eax"
-    bp_register = "ebp"
+    base_register = "ebp"
     bx_register = "ebx"
     count_register = "ecx"
     di_register = "edi"
     dx_register = "edx"
     si_register = "esi"
-    sp_register = "esp"
+    stack_register = "esp"
     word_size = "dword"
     int_size = 4
     param_slot_base = 8

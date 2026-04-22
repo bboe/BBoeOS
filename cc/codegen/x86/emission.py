@@ -373,7 +373,7 @@ class EmissionMixin:
             else:
                 self.emit(f"        call {name}")
             if stack_args:
-                self.emit(f"        add {self.target.sp_register}, {len(stack_args) * self.target.int_size}")
+                self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             if use_pusha:
                 self.emit("        popa")
             else:
@@ -1063,15 +1063,15 @@ class EmissionMixin:
 
         self.emit(f"{name}:")
         if not self.elide_frame:
-            self.emit(f"        push {self.target.bp_register}")
-            self.emit(f"        mov {self.target.bp_register}, {self.target.sp_register}")
+            self.emit(f"        push {self.target.base_register}")
+            self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
             if self.frame_size > 0:
-                self.emit(f"        sub {self.target.sp_register}, {self.frame_size}")
+                self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
             if is_fastcall:
                 # Spill AX (the caller-supplied arg 0) into its local slot
                 # so the body can read it through the normal local path.
                 slot = self.locals[parameters[0].name]
-                self.emit(f"        mov [{self.target.bp_register}-{slot}], {self.target.acc}")
+                self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
@@ -1082,7 +1082,7 @@ class EmissionMixin:
                         register = self.pinned_register[param.name]
                         stack_index = i - 1 if is_fastcall else i
                         offset = self.target.param_slot_base + stack_index * self.target.int_size
-                        self.emit(f"        mov {register}, [{self.target.bp_register}+{offset}]")
+                        self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
 
         # IR path: register string literals discovered during IR building.
         self._ir_string_map: dict[str, str] = {}
@@ -1134,8 +1134,8 @@ class EmissionMixin:
             # Tail-call optimization is not yet applied on the IR path.
             if not self.elide_frame and not self._always_exits_ir(ir_body):
                 if self.frame_size > 0:
-                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-                self.emit(f"        pop {self.target.bp_register}")
+                    self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+                self.emit(f"        pop {self.target.base_register}")
                 self.emit("        ret")
             elif self.elide_frame:
                 self.emit("        ret")
@@ -1149,8 +1149,8 @@ class EmissionMixin:
             self.emit("        ret")
         elif not self.always_exits(body):
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
         self.emit()
 
@@ -1332,9 +1332,9 @@ class EmissionMixin:
                     self.emit(f"        mov {self.target.dx_register}, [{address}+2]")
             else:
                 low_offset = self.locals[vname]
-                self.emit(f"        mov {self.target.acc}, [{self.target.bp_register}-{low_offset}]")
+                self.emit(f"        mov {self.target.acc}, [{self.target.base_register}-{low_offset}]")
                 if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov {self.target.dx_register}, [{self.target.bp_register}-{low_offset - 2}]")
+                    self.emit(f"        mov {self.target.dx_register}, [{self.target.base_register}-{low_offset - 2}]")
             self.ax_is_byte = False
             self.ax_local = None
             return
@@ -1360,8 +1360,8 @@ class EmissionMixin:
             if isinstance(value, Int) and value.value in (0, 1):
                 self.emit("        clc" if value.value == 1 else "        stc")
                 if self.frame_size > 0:
-                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-                self.emit(f"        pop {self.target.bp_register}")
+                    self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+                self.emit(f"        pop {self.target.base_register}")
                 self.emit("        ret")
                 return
             # Bool-valued expression: evaluate it into the CF via the
@@ -1373,21 +1373,21 @@ class EmissionMixin:
             self.emit_condition_true_jump(condition=value, context="return", success_label=true_label)
             self.emit("        stc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
             self.emit(f"{true_label}:")
             self.emit("        clc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
             return
         if statement.value is not None:
             self.generate_expression(statement.value)
         if self.frame_size > 0:
-            self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-        self.emit(f"        pop {self.target.bp_register}")
+            self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+        self.emit(f"        pop {self.target.base_register}")
         self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:

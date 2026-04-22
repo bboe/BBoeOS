@@ -594,8 +594,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 return f"_l_{name}"
             offset = self.locals[name]
             if offset > 0:
-                return f"{self.target.bp_register}-{offset}"
-            return f"{self.target.bp_register}+{-offset}"
+                return f"{self.target.base_register}-{offset}"
+            return f"{self.target.base_register}+{-offset}"
         if name in self.register_aliased_globals:
             message = f"register-aliased global '{name}' has no memory address"
             raise CompileError(message)
@@ -1228,7 +1228,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         in the pool so no extra exclusion is needed for subscript
         presence.
         """
-        pool = (*self.target.register_pool, self.target.bp_register) if self.elide_frame else self.target.register_pool
+        pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
         def visit(node: Node) -> None:
@@ -1831,9 +1831,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        mov [{address}+2], {self.target.dx_register}")
             else:
                 low_offset = self.locals[name]
-                self.emit(f"        mov [{self.target.bp_register}-{low_offset}], {self.target.acc}")
+                self.emit(f"        mov [{self.target.base_register}-{low_offset}], {self.target.acc}")
                 if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov [{self.target.bp_register}-{low_offset - 2}], {self.target.dx_register}")
+                    self.emit(f"        mov [{self.target.base_register}-{low_offset - 2}], {self.target.dx_register}")
             self.ax_is_byte = False
             self.ax_local = None
             return

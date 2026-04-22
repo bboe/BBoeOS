@@ -448,7 +448,7 @@ class BuiltinsMixin:
         self.emit(f"        push {label}")
         self.emit("        call FUNCTION_PRINTF")
         stack_size = len(arguments) * self.target.int_size
-        self.emit(f"        add {self.target.sp_register}, {stack_size}")
+        self.emit(f"        add {self.target.stack_register}, {stack_size}")
 
     def builtin_putchar(self, arguments: list[Node], /) -> None:
         """Generate code for the putchar() builtin."""
@@ -540,24 +540,24 @@ class BuiltinsMixin:
         self.emit_register_from_argument(argument=len_argument, register=self.target.count_register)
         self.emit_register_from_argument(argument=ip_argument, register=self.target.di_register)
         self.emit_register_from_argument(argument=sport_argument, register=self.target.dx_register)
-        self.emit(f"        push {self.target.bp_register}")
+        self.emit(f"        push {self.target.base_register}")
         if isinstance(dport_argument, Int):
-            self.emit(f"        mov {self.target.bp_register}, {dport_argument.value}")
+            self.emit(f"        mov {self.target.base_register}, {dport_argument.value}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.NAMED_CONSTANTS:
-            self.emit(f"        mov {self.target.bp_register}, {dport_argument.name}")
+            self.emit(f"        mov {self.target.base_register}, {dport_argument.name}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
-            self.emit(f"        mov {self.target.bp_register}, {self.pinned_register[dport_argument.name]}")
+            self.emit(f"        mov {self.target.base_register}, {self.pinned_register[dport_argument.name]}")
         elif (
             isinstance(dport_argument, Var)
             and self._is_memory_scalar(dport_argument.name)
             and not self._is_byte_scalar(dport_argument.name)
         ):
-            self.emit(f"        mov {self.target.bp_register}, [{self._local_address(dport_argument.name)}]")
+            self.emit(f"        mov {self.target.base_register}, [{self._local_address(dport_argument.name)}]")
         else:
             self.generate_expression(dport_argument)
-            self.emit(f"        mov {self.target.bp_register}, {self.target.acc}")
+            self.emit(f"        mov {self.target.base_register}, {self.target.acc}")
         self._emit_syscall("NET_SENDTO")
-        self.emit(f"        pop {self.target.bp_register}")
+        self.emit(f"        pop {self.target.base_register}")
         # Normalize the CF error signal into AX = -1 so callers can
         # check the return value with ``< 0``.
         label_index = self.new_label()
