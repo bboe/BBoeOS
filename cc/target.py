@@ -70,7 +70,7 @@ class CodegenTarget(ABC):
         """Memory-operand string for ``far_read*/far_write*`` builtins."""
 
     @staticmethod
-    def loword(reg: str) -> str:
+    def low_word(reg: str) -> str:
         """Return the low-word alias of *reg*, or *reg* unchanged.
 
         Default is the identity — correct for ISAs with no sub-register
@@ -111,7 +111,7 @@ class X86CodegenTarget(CodegenTarget):
     syscall_sequences = SYSCALL_SEQUENCES
 
     @staticmethod
-    def loword(reg: str) -> str:
+    def low_word(reg: str) -> str:
         """Return the 16-bit low-word alias of *reg*, or *reg* unchanged."""
         return EREG_LOW_WORD.get(reg, reg)
 

@@ -559,21 +559,21 @@ class EmissionMixin:
                     # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                         ireg = self.pinned_register[index_expression.name]
-                        self.emit(f"        add si, {self.target.loword(ireg)}")
+                        self.emit(f"        add si, {self.target.low_word(ireg)}")
                     elif isinstance(index_expression, (Var, Int)):
                         # Simple Var/Int load doesn't touch SI, so skip the
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                        self.emit(f"        add si, {self.target.loword(self.target.acc)}")
+                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
                     else:
                         self.emit("        push si")
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
                         self.emit("        pop si")
-                        self.emit(f"        add si, {self.target.loword(self.target.acc)}")
+                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
                     if is_byte:
                         self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
@@ -1280,14 +1280,14 @@ class EmissionMixin:
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                    self.emit(f"        add si, {self.target.loword(self.target.acc)}")
+                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
                 else:
                     self.emit("        push si")
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
                     self.emit("        pop si")
-                    self.emit(f"        add si, {self.target.loword(self.target.acc)}")
+                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
                 self.emit(f"        pop {self.target.acc}")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
