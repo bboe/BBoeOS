@@ -27,3 +27,10 @@
 #define LINE_BUFFER         _bss_end
 #define OUTPUT_BUFFER       (LINE_BUFFER + 256)
 #define SOURCE_BUFFER       (OUTPUT_BUFFER + 512)
+
+/* Macro table sizes.  16 macros × 16-byte names fits idt.asm's three
+   macros with room to spare; the 2 KB body buffer holds the raw
+   source lines between ``%macro`` and ``%endmacro``. */
+#define MACRO_BODY_BUFFER_SIZE  2048
+#define MACRO_MAX               16
+#define MACRO_NAME_LEN          16
