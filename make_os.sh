@@ -1,5 +1,16 @@
 #!/bin/sh
 
+FS_TYPE=bbfs
+IMAGE=drive.img
+for arg in "$@"; do
+    case "$arg" in
+        --ext2) FS_TYPE=ext2 ;;
+        --bbfs) FS_TYPE=bbfs ;;
+        -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
+        *) IMAGE="$arg" ;;
+    esac
+done
+
 nasm -f bin -i src/include/ -i src/kernel/ -o os.bin src/kernel/bboeos.asm
 if [ $? -ne 0 ]; then
     exit 1
@@ -22,9 +33,17 @@ for src in src/c/*.c; do
     rm "$tmpdir/$name.asm"
 done
 
-IMAGE="${1:-drive.img}"
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
+
+if [ "$FS_TYPE" = "ext2" ]; then
+    EXT2_START=$(python3 -c "from add_file import read_assign; print(read_assign('EXT2_START_SECTOR'))")
+    mke2fs -b 1024 -t ext2 -m 0 -E offset=$((EXT2_START * 512)) "$IMAGE" $(( (2880 - EXT2_START) / 2 ))
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+fi
+
 ./add_file.py --image "$IMAGE" --mkdir bin
 for bin in "$tmpdir"/*; do
     ./add_file.py --image "$IMAGE" -x -d bin "$bin"

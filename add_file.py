@@ -6,23 +6,33 @@ from __future__ import annotations
 import argparse
 import pathlib
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 CONSTANTS_PATH = "src/include/constants.asm"
 ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
+EXT2_MAGIC = 0xEF53
+EXT2_SB_MAGIC_OFFSET = 56  # s_magic field offset within superblock
+EXT2_SB_PARTITION_OFFSET = 1024  # superblock offset within ext2 partition
 FILENAME_MAX = 24
 FLAG_DIRECTORY = 0x02
 FLAG_EXECUTE = 0x01
+MAX_RESOLVE_DEPTH = 16
 NAME_FIELD = 25
 OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
+_DD = shutil.which("dd") or "dd"
+_DEBUGFS = shutil.which("debugfs") or "debugfs"
 
 
 def add_file(
@@ -52,6 +62,17 @@ def add_file(
         raise SystemExit(message)
     file_size = len(file_data)
 
+    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
+        ext2_add_file(
+            executable=executable,
+            ext2_start_sector=ext2_start_sector,
+            file_path=file_path,
+            image_path=image_path,
+            subdirectory=subdirectory,
+        )
+        return
+
     directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
@@ -73,8 +94,7 @@ def add_file(
 
     entry_offset = find_free_entry(directory_sectors=directory_sectors, filename=filename, image=image, parent_offset=parent_offset)
     if entry_offset is None:
-        location = subdirectory or "root directory"
-        message = f"Error: '{location}' is full"
+        message = f"Error: '{subdirectory or 'root directory'}' is full"
         raise SystemExit(message)
 
     next_data_sector = compute_next_data_sector(directory_sector=directory_sector, directory_sectors=directory_sectors, image=image)
@@ -161,6 +181,113 @@ def entry_end_sector(*, entry_offset: int, image: bytearray) -> int:
     size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
     sectors_used = (size + SECTOR_SIZE - 1) // SECTOR_SIZE
     return start + sectors_used
+
+
+def detect_fs_type(*, ext2_start_sector: int, image_path: str) -> str:
+    """Return "ext2" if the image has a valid ext2 superblock magic, else "bbfs".
+
+    Returns
+    -------
+    str
+        ``"ext2"`` or ``"bbfs"``.
+
+    """
+    offset = ext2_start_sector * SECTOR_SIZE + EXT2_SB_PARTITION_OFFSET + EXT2_SB_MAGIC_OFFSET
+    magic_size = struct.calcsize("<H")
+    try:
+        with pathlib.Path(image_path).open("rb") as f:
+            f.seek(offset)
+            data = f.read(magic_size)
+        (magic,) = struct.unpack("<H", data)
+    except (OSError, struct.error):
+        return "bbfs"
+    else:
+        return "ext2" if magic == EXT2_MAGIC else "bbfs"
+
+
+@contextmanager
+def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str, None, None]:
+    """Extract the ext2 partition to a temp file, yield its path, splice it back.
+
+    Yields
+    ------
+    str
+        Path to the temporary file containing only the ext2 partition.
+
+    """
+    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as f:
+        tmp = pathlib.Path(f.name)
+    try:
+        subprocess.run(
+            [_DD, f"if={image_path}", f"of={tmp}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
+            check=True,
+        )
+        yield str(tmp)
+        subprocess.run(
+            [_DD, f"if={tmp}", f"of={image_path}", "bs=512", f"seek={ext2_start_sector}", "conv=notrunc", "status=none"],
+            check=True,
+        )
+    finally:
+        tmp.unlink()
+
+
+def ext2_add_file(
+    *,
+    executable: bool,
+    ext2_start_sector: int,
+    file_path: str,
+    image_path: str,
+    subdirectory: str | None,
+) -> None:
+    """Add a file to an ext2 partition via debugfs.
+
+    Raises
+    ------
+    SystemExit
+        If debugfs reports an error writing the file.
+
+    """
+    filename = pathlib.Path(file_path).name
+    dest = f"/{subdirectory}/{filename}" if subdirectory else f"/{filename}"
+    with _ext2_partition(ext2_start_sector=ext2_start_sector, image_path=image_path) as tmp:
+        result = subprocess.run(
+            [_DEBUGFS, "-w", "-R", f"write {file_path} {dest}", tmp],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = f"Error: debugfs write failed:\n{result.stderr.decode()}"
+            raise SystemExit(message)
+        if executable:
+            subprocess.run(
+                [_DEBUGFS, "-w", "-R", f"set_inode_field {dest} mode 0100755", tmp],
+                check=True,
+                capture_output=True,
+            )
+    file_size = pathlib.Path(file_path).stat().st_size
+    relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
+    print(f"Added '{relative_path}' ({file_size} bytes) [ext2]")
+
+
+def ext2_make_directory(*, dirname: str, ext2_start_sector: int, image_path: str) -> None:
+    """Create a directory in an ext2 partition via debugfs.
+
+    Raises
+    ------
+    SystemExit
+        If debugfs reports an error creating the directory.
+
+    """
+    with _ext2_partition(ext2_start_sector=ext2_start_sector, image_path=image_path) as tmp:
+        result = subprocess.run(
+            [_DEBUGFS, "-w", "-R", f"mkdir /{dirname}", tmp],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = f"Error: debugfs mkdir failed:\n{result.stderr.decode()}"
+            raise SystemExit(message)
+    print(f"Created directory '{dirname}' [ext2]")
 
 
 def find_free_entry(
@@ -305,6 +432,11 @@ def make_directory(*, dirname: str, image_path: str) -> None:
             message,
         )
 
+    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
+        ext2_make_directory(dirname=dirname, ext2_start_sector=ext2_start_sector, image_path=image_path)
+        return
+
     directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
@@ -341,25 +473,37 @@ def make_directory(*, dirname: str, image_path: str) -> None:
 def read_assign(name: str, /) -> int:
     """Return the integer value of a `%assign NAME VALUE` line in constants.asm.
 
+    Symbolic references (where VALUE is itself a constant name) are resolved
+    recursively up to ``MAX_RESOLVE_DEPTH`` levels.
+
     Returns
     -------
     int
         The parsed integer value.
 
-    Raises
-    ------
-    SystemExit
-        If the name is not found in constants.asm.
-
     """
-    pattern = re.compile(rf"^\s*%assign\s+{re.escape(name)}\s+(\S+)")
+    pattern = re.compile(r"^\s*%assign\s+(\w+)\s+(\S+)")
+    assigns: dict[str, str] = {}
     with pathlib.Path(CONSTANTS_PATH).open(encoding="utf-8") as file:
         for line in file:
-            match = pattern.match(line)
-            if match:
-                return int(match.group(1), 0)
-    message = f"Error: {name} not found in {CONSTANTS_PATH}"
-    raise SystemExit(message)
+            m = pattern.match(line)
+            if m:
+                assigns[m.group(1)] = m.group(2)
+
+    def resolve(key: str, depth: int = 0) -> int:
+        if depth > MAX_RESOLVE_DEPTH:
+            message = f"Error: circular reference resolving {key} in {CONSTANTS_PATH}"
+            raise SystemExit(message)
+        val = assigns.get(key)
+        if val is None:
+            message = f"Error: {key} not found in {CONSTANTS_PATH}"
+            raise SystemExit(message)
+        try:
+            return int(val, 0)
+        except ValueError:
+            return resolve(val, depth + 1)
+
+    return resolve(name)
 
 
 def save_image(*, image: bytearray, image_path: str) -> None:
