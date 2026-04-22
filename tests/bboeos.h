@@ -140,8 +140,11 @@ extern char STR_WORD[];
 extern char register_table[];
 
 /* End-of-program sentinel label (emitted by cc.py at the binary tail).
-   Scratch buffers in asm.c's main() sit immediately past it — LINE_BUFFER
-   / OUTPUT_BUFFER / SOURCE_BUFFER all expand to _program_end + N. */
+   _bss_end follows immediately after any BSS variables; when there are none
+   it equals _program_end.  Scratch buffers in asm.c's main() sit past
+   _bss_end — LINE_BUFFER / OUTPUT_BUFFER / SOURCE_BUFFER expand to
+   _bss_end + N. */
+extern char _bss_end[];
 extern char _program_end[];
 
 #endif

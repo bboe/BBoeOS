@@ -27,6 +27,7 @@
         jmp .iret_cf
         .exec_run:
         call fd_init
+        call bss_setup
         jmp PROGRAM_BASE
 
         .sys_exit:

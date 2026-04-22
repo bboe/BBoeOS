@@ -92,26 +92,9 @@ fd_write_file:
         .wf_loop:
         cmp word [fd_rw_left], 0
         je .wf_done
-        ;; Compute sector and offset from fd_pos
         mov si, [fd_rw_descriptor_pointer]
-        call fd_pos_to_sector   ; AX = sector, BX = offset within sector
-        ;; If offset != 0, need read-modify-write (partial sector start)
-        test bx, bx
-        jz .wf_no_read
-        ;; Also need read-modify-write if writing less than a full sector
-        ;; from the start.  But check offset first — if offset is 0 and
-        ;; count >= 512, we can skip the read entirely.
-        call read_sector
+        call vfs_prepare_write_sec  ; SI=fd_entry → SECTOR_BUFFER ready, BX=byte offset
         jc .wf_disk_err
-        jmp .wf_copy
-        .wf_no_read:
-        ;; Offset is 0.  If writing >= 512 bytes, skip read.
-        cmp word [fd_rw_left], 512
-        jae .wf_copy
-        ;; Writing < 512 bytes at offset 0 — might need existing data
-        ;; for the tail of the sector.  But for new files written
-        ;; sequentially, the tail is garbage anyway.  Skip the read.
-        .wf_copy:
         ;; Chunk = min(512 - offset, bytes_left)
         mov cx, 512
         sub cx, bx              ; CX = space in sector
@@ -130,11 +113,8 @@ fd_write_file:
         rep movsb
         pop cx
         pop si
-        ;; Recompute sector number (read_sector may have clobbered AX)
-        mov si, [fd_rw_descriptor_pointer]
-        call fd_pos_to_sector   ; AX = sector
         ;; Write the sector
-        call write_sector
+        call vfs_commit_write_sec
         jc .wf_disk_err
         ;; Update bookkeeping
         add [fd_rw_done], cx

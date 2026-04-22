@@ -140,11 +140,16 @@ class EmissionMixin:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
+        self._emit_bss_trailer()
         # Sentinel label at the very end so inline asm can address the
         # first byte past the loaded image (scratch buffers, heap bases,
         # etc.).  Zero bytes, so it does not affect programs that ignore
         # it.
         self.emit("_program_end:")
+        # BSS EQUs and _bss_end come *after* _program_end: so they are
+        # never forward references — the self-hosted assembler cannot
+        # resolve forward EQU references.
+        self._emit_bss_equs()
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
