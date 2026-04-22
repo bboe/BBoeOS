@@ -31,6 +31,12 @@
         jmp .iret_cf
 
 
+        .fs_rmdir:
+        ;; Remove an empty directory: SI = name
+        call vfs_rmdir          ; SI=name → CF, AL=error code
+        jmp .iret_cf
+
+
         .fs_unlink:
         ;; Delete a file: SI = filename
         call .check_shell

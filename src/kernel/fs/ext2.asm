@@ -4,6 +4,7 @@
 ;;; ext2_chmod:    SI=path, AL=mode → CF on error, AL=error code
 ;;; ext2_delete:   SI=path → CF on error, AL=error code
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
+;;; ext2_rmdir:    SI=path → CF on error, AL=error code
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
 ;;; ext2_mkdir:    SI=path → AX=inode, CF on error, AL=error code
@@ -19,6 +20,7 @@
 ;;; ext2_names_match:       SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
 ;;; ext2_read_blk_sec:      AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
 ;;; ext2_read_inode:        AX=inode-number; BX=pointer into SECTOR_BUFFER
+;;; ext2_check_dir_empty:   AX=block; CF if non-dot entry found
 ;;; ext2_remove_dir_entry:  AX=dir-inode, SI=name; CF on error
 ;;; ext2_resolve_path:      SI=path → AX=parent-inode, SI=basename; CF if parent not found
 ;;; ext2_search_dir:        AX=dir-inode, SI=name; AX=found-inode, CF=not-found
@@ -1457,6 +1459,239 @@ ext2_rename:
         stc
         ret
 
+ext2_check_dir_empty:
+        ;; Scan all sectors of ext2 directory block AX for entries other than '.' and '..'
+        ;; Output: CF clear if only . / .. found; CF set if any other live entry exists
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov [ext2_rdr_cde_blk], ax
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov dx, 1
+        shl dx, cl                      ; DX = sectors_per_block
+        xor bx, bx                      ; BX = sector index
+        .ecde_next_sec:
+        cmp bx, dx
+        jae .ecde_empty
+        push dx
+        mov ax, [ext2_rdr_cde_blk]
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER; BX unchanged
+        pop dx
+        jc .ecde_err
+        mov si, SECTOR_BUFFER
+        .ecde_entry:
+        mov di, si
+        sub di, SECTOR_BUFFER
+        cmp di, 512
+        jae .ecde_next_sec2
+        mov cx, [si + EXT2_DIRENT_REC_LEN]
+        cmp cx, EXT2_DIRENT_NAME        ; < 8 is invalid
+        jb .ecde_next_sec2
+        mov ax, [si + EXT2_DIRENT_INODE]
+        test ax, ax
+        jz .ecde_advance                ; deleted entry: skip
+        xor ah, ah
+        mov al, [si + EXT2_DIRENT_NAME_LEN]
+        cmp al, 1
+        jne .ecde_check_dotdot
+        cmp byte [si + EXT2_DIRENT_NAME], '.'
+        je .ecde_advance                ; "." entry: skip
+        jmp .ecde_not_empty
+        .ecde_check_dotdot:
+        cmp al, 2
+        jne .ecde_not_empty
+        cmp byte [si + EXT2_DIRENT_NAME], '.'
+        jne .ecde_not_empty
+        cmp byte [si + EXT2_DIRENT_NAME + 1], '.'
+        jne .ecde_not_empty
+        .ecde_advance:
+        add si, cx
+        jmp .ecde_entry
+        .ecde_next_sec2:
+        inc bx
+        jmp .ecde_next_sec
+        .ecde_not_empty:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+        .ecde_empty:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .ecde_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
+ext2_rmdir:
+        ;; Remove a directory that contains only '.' and '..'.
+        ;; Frees data blocks, frees inode, removes directory entry from parent.
+        ;; Input:  SI = path
+        ;; Output: CF clear on success; CF set, AL = error code on failure
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        call ext2_resolve_path          ; AX=parent_inode, SI=basename; CF if not found
+        jc .erdr_not_found
+        mov [ext2_rdr_parent_inode], ax
+        mov [ext2_rdr_name], si
+        call ext2_search_dir            ; AX=dir_inode; CF if not found
+        jc .erdr_not_found
+        mov [ext2_rdr_inode], ax
+        call ext2_read_inode            ; BX = inode ptr in SECTOR_BUFFER
+        ;; Must be a directory
+        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        jz .erdr_not_found
+        ;; Save block pointers (direct 0-11 + indirect 12)
+        push si
+        lea si, [bx + EXT2_INODE_BLOCK]
+        mov di, ext2_rdr_blks
+        mov cx, 13
+        cld
+        .erdr_save_blks:
+        mov ax, [si]
+        stosw
+        add si, 4
+        dec cx
+        jnz .erdr_save_blks
+        pop si
+        ;; Check each direct block for non-./.. entries
+        mov bx, ext2_rdr_blks
+        .erdr_check_blk:
+        mov ax, [bx]
+        test ax, ax
+        jz .erdr_checked
+        push bx
+        call ext2_check_dir_empty       ; AX=block; CF if non-empty entry found
+        pop bx
+        jc .erdr_not_empty
+        add bx, 2
+        cmp bx, ext2_rdr_blks + 24     ; past 12 direct blocks?
+        jb .erdr_check_blk
+        .erdr_checked:
+        ;; Directory is empty: free direct blocks 0-11
+        mov bx, ext2_rdr_blks
+        mov cx, 12
+        .erdr_free_direct:
+        mov ax, [bx]
+        test ax, ax
+        jz .erdr_next_direct
+        push bx
+        push cx
+        call ext2_free_block            ; AX = block number; CF on error
+        pop cx
+        pop bx
+        jc .erdr_err
+        .erdr_next_direct:
+        add bx, 2
+        dec cx
+        jnz .erdr_free_direct
+        ;; Free indirect block and all blocks it references (i_block[12])
+        mov ax, [ext2_rdr_blks + 24]   ; 12 direct × 2 bytes each = offset 24
+        test ax, ax
+        jz .erdr_free_inode
+        mov [ext2_rdr_ind_blk], ax
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov bx, 1
+        shl bx, cl
+        mov [ext2_rdr_ind_secs], bx
+        xor bx, bx
+        .erdr_ind_next_sec:
+        cmp bx, [ext2_rdr_ind_secs]
+        jae .erdr_ind_blk_done
+        push bx
+        mov ax, [ext2_rdr_ind_blk]
+        call ext2_read_blk_sec
+        pop bx
+        jc .erdr_err
+        push bx
+        mov si, SECTOR_BUFFER
+        mov cx, 128
+        .erdr_ind_ptr:
+        mov ax, [si]
+        test ax, ax
+        jz .erdr_ind_ptr_next
+        push cx
+        push si
+        call ext2_free_block
+        pop si
+        pop cx
+        jc .erdr_err_ind
+        .erdr_ind_ptr_next:
+        add si, 4
+        dec cx
+        jnz .erdr_ind_ptr
+        pop bx
+        inc bx
+        jmp .erdr_ind_next_sec
+        .erdr_ind_blk_done:
+        mov ax, [ext2_rdr_ind_blk]
+        call ext2_free_block
+        jc .erdr_err
+        .erdr_free_inode:
+        mov ax, [ext2_rdr_inode]
+        call ext2_free_inode
+        jc .erdr_err
+        mov ax, [ext2_rdr_parent_inode]
+        mov si, [ext2_rdr_name]
+        call ext2_remove_dir_entry
+        jc .erdr_err
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .erdr_not_found:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .erdr_not_empty:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_EMPTY
+        stc
+        ret
+        .erdr_err_ind:
+        add sp, 2                       ; discard saved BX (sector counter)
+        .erdr_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
 ext2_update_size:
         ;; Write fd position back to inode i_size (32-bit).
         ;; Grows i_size if position > current size; on shrink, frees orphaned blocks.
@@ -2061,6 +2296,13 @@ ext2_resolve_path:
         ext2_rd_outbuf         dw 0
         ext2_rd_rec_len        dw 0
         ext2_rde_name          dw 0     ; ext2_remove_dir_entry: pointer to name string
+        ext2_rdr_blks          times 13 dw 0  ; ext2_rmdir: saved block pointers
+        ext2_rdr_cde_blk       dw 0     ; ext2_check_dir_empty: block number
+        ext2_rdr_ind_blk       dw 0     ; ext2_rmdir: indirect block number
+        ext2_rdr_ind_secs      dw 0     ; ext2_rmdir: sectors_per_block for indirect scan
+        ext2_rdr_inode         dw 0     ; ext2_rmdir: inode number to free
+        ext2_rdr_name          dw 0     ; ext2_rmdir: pointer to basename
+        ext2_rdr_parent_inode  dw 0     ; ext2_rmdir: parent directory inode
         ext2_rn_new_dir        dw 0     ; ext2_rename: new parent dir inode
         ext2_rn_new_name       dw 0     ; ext2_rename: pointer to new basename
         ext2_rn_new_path       dw 0     ; ext2_rename: pointer to new full path

@@ -78,6 +78,7 @@ class CodeGeneratorBase:
         "EDIT_KILL_BUFFER",
         "EDIT_KILL_BUFFER_SIZE",
         "ERROR_EXISTS",
+        "ERROR_NOT_EMPTY",
         "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",

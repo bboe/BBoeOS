@@ -7,7 +7,7 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR 26
+        %assign DIRECTORY_SECTOR 28
         %assign DIRECTORY_SECTORS 3
         %assign EXT2_START_SECTOR DIRECTORY_SECTOR  ; ext2 partition base (same as bbfs start)
         %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
@@ -16,6 +16,7 @@
         %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Kill buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
+        %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found
         %assign ERROR_PROTECTED 05h     ; Rename/chmod error: file is protected
@@ -77,7 +78,8 @@
         %assign SYS_FS_CHMOD  00h
         %assign SYS_FS_MKDIR  01h
         %assign SYS_FS_RENAME 02h
-        %assign SYS_FS_UNLINK 03h
+        %assign SYS_FS_RMDIR  03h
+        %assign SYS_FS_UNLINK 04h
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
