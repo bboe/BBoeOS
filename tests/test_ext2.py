@@ -9,8 +9,9 @@ shared image.
 Programs that read file content via `io_read` (e.g. `cat`) exercise the
 `vfs_read_sec` function pointer, which routes through `ext2_read_sec` to
 translate byte positions to ext2 block lookups.  Programs that list directory
-contents via `fd_read_dir` (e.g. `ls`) are excluded because directory reads
-are still bbfs-only.
+contents via `fd_read_dir` (e.g. `ls`) exercise the `vfs_read_dir_fn` function
+pointer, which routes through `ext2_read_dir` to translate ext2 variable-length
+directory entries into the fixed 32-byte bbfs format.
 
 Usage:
     ./test_ext2.py            # run the full suite
@@ -52,6 +53,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("cat_large", ["cat src/asm.asm"], r"org 0600h", timeout=30.0),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
+    ProgramTest("ls", ["ls bin"], r"hello\*"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 
