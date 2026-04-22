@@ -350,48 +350,54 @@ fd_pos_to_sector:
         ret
 
 ;;; -----------------------------------------------------------------------
-;;; fd_read: Dispatch read to the backend for this fd type
+;;; fd_read / fd_write: Table-driven dispatch via fd_ops.
+;;;
+;;; fd_ops is a flat table of (read_fn, write_fn) word pairs indexed by
+;;; FD_TYPE_*.  A zero entry means the operation is unsupported for that
+;;; type.  Adding a new fd type requires only a new row in fd_ops — the
+;;; dispatch functions need no changes.
 ;;; -----------------------------------------------------------------------
 fd_read:
         call fd_lookup
-        jc .read_err
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        je .to_console
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
-        je .to_dir
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
-        je .to_file
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_NET
-        je .to_net
-        .read_err:
+        jc .err
+        xor bh, bh
+        mov bl, [si+FD_OFFSET_TYPE]
+        shl bx, 2               ; * 4: each ops entry is two words
+        mov ax, [fd_ops+bx]     ; read_fn
+        test ax, ax
+        jz .err
+        jmp ax
+        .err:
         mov ax, -1
         stc
         ret
-        .to_console: jmp fd_read_console
-        .to_dir:     jmp fd_read_dir
-        .to_file:    jmp fd_read_file
-        .to_net:     jmp fd_read_net
 
-;;; -----------------------------------------------------------------------
-;;; fd_write: Dispatch write to the backend for this fd type
-;;; -----------------------------------------------------------------------
 fd_write:
-        mov [fd_write_buffer], si  ; save user buffer before fd_lookup clobbers SI
+        mov [fd_write_buffer], si
         call fd_lookup
-        jc .wr_err
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        je .to_console
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
-        je .to_file
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_NET
-        je .to_net
-        .wr_err:
+        jc .err
+        xor bh, bh
+        mov bl, [si+FD_OFFSET_TYPE]
+        shl bx, 2               ; * 4: each ops entry is two words
+        mov ax, [fd_ops+bx+2]   ; write_fn
+        test ax, ax
+        jz .err
+        jmp ax
+        .err:
         mov ax, -1
         stc
         ret
-        .to_console: jmp fd_write_console
-        .to_file:    jmp fd_write_file
-        .to_net:     jmp fd_write_net
+
+        ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
+        ;; A zero entry means unsupported for that type.
+fd_ops:
+        dw 0,               0                ; FD_TYPE_FREE (0)
+        dw fd_read_file,    fd_write_file     ; FD_TYPE_FILE (1)
+        dw fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (2)
+        dw fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (3)
+        dw fd_read_net,     fd_write_net      ; FD_TYPE_NET (4)
+        dw 0,               0                 ; FD_TYPE_UDP (5)
+        dw 0,               0                 ; FD_TYPE_ICMP (6)
 
         ;; Variables
         fd_open_fd    dw 0
@@ -403,5 +409,5 @@ fd_write:
         fd_write_buffer dw 0
 
 %include "fd/console.asm"
-%include "fd/file.asm"
+%include "fd/fs.asm"
 %include "fd/net.asm"
