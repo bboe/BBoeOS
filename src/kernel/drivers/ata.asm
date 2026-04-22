@@ -4,8 +4,8 @@
 ;;; Replaces the INT 13h-based sector I/O that fs.asm used to do.  Talks
 ;;; to the primary IDE controller at 0x1F0..0x1F7 in LBA28 PIO mode.  The
 ;;; caller-facing surface is unchanged:
-;;;     read_sector   AX = 1-based LBA; fills SECTOR_BUFFER; CF on error.
-;;;     write_sector  AX = 1-based LBA; writes SECTOR_BUFFER; CF on error.
+;;;     read_sector   AX = 0-based LBA; fills SECTOR_BUFFER; CF on error.
+;;;     write_sector  AX = 0-based LBA; writes SECTOR_BUFFER; CF on error.
 ;;; One sector at a time — matches the existing filesystem layer.
 ;;;
 ;;; Stage 1 MBR still uses INT 13h to load stage 2.  That's intentional:
@@ -100,7 +100,7 @@ ata_wait_drq:
         ret
 
 ata_read_sector:
-        ;; Input:  AX = 1-based logical sector number.
+        ;; Input:  AX = 0-based logical sector number.
         ;; Output: SECTOR_BUFFER filled with 512 bytes.  CF=1 on error.
         push ax
         push bx
@@ -108,7 +108,6 @@ ata_read_sector:
         push dx
         push di
 
-        dec ax                          ; ATA LBA is 0-based
         mov bl, ATA_CMD_READ
         call ata_issue
         call ata_wait_drq
@@ -130,7 +129,7 @@ ata_read_sector:
         ret
 
 ata_write_sector:
-        ;; Input:  AX = 1-based logical sector number; SECTOR_BUFFER holds
+        ;; Input:  AX = 0-based logical sector number; SECTOR_BUFFER holds
         ;;         the 512 bytes to write.
         ;; Output: CF=1 on error.
         push ax
@@ -139,7 +138,6 @@ ata_write_sector:
         push dx
         push si
 
-        dec ax
         mov bl, ATA_CMD_WRITE
         call ata_issue
         call ata_wait_drq

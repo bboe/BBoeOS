@@ -170,7 +170,7 @@ def compare_drive_output(
     if entry is None:
         return False, "output file not found on drive"
     _flags, start_sector, size = entry
-    output_data = image[(start_sector - 1) * SECTOR_SIZE :][:size]
+    output_data = image[start_sector * SECTOR_SIZE :][:size]
     output_binary.write_bytes(output_data)
     if output_data == reference_bytes:
         return True, ""

@@ -143,8 +143,8 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
     assert asm is not None, "src/asm.asm not found"
     _, source_sector, source_size = asm
 
-    big_data = image[(big_sector - 1) * SECTOR_SIZE :][:big_size]
-    source_data = image[(source_sector - 1) * SECTOR_SIZE :][:source_size]
+    big_data = image[big_sector * SECTOR_SIZE :][:big_size]
+    source_data = image[source_sector * SECTOR_SIZE :][:source_size]
     assert big_size == source_size, f"size {big_size} != {source_size}"
     assert big_data == source_data, "copied data does not match source"
 
@@ -189,8 +189,8 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
     )
     _, cat_sector, cat_size = cat
     assert file_size == cat_size
-    h_data = image[(file_sector - 1) * SECTOR_SIZE :][:file_size]
-    cat_data = image[(cat_sector - 1) * SECTOR_SIZE :][:cat_size]
+    h_data = image[file_sector * SECTOR_SIZE :][:file_size]
+    cat_data = image[cat_sector * SECTOR_SIZE :][:cat_size]
     assert h_data == cat_data, "subdirectory copy data mismatch"
 
 
@@ -243,8 +243,8 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     )
     _, cat_sector, cat_size = cat
     assert moved_size == cat_size
-    moved_data = image[(moved_sector - 1) * SECTOR_SIZE :][:moved_size]
-    cat_data = image[(cat_sector - 1) * SECTOR_SIZE :][:cat_size]
+    moved_data = image[moved_sector * SECTOR_SIZE :][:moved_size]
+    cat_data = image[cat_sector * SECTOR_SIZE :][:cat_size]
     assert moved_data == cat_data, "moved data mismatch"
 
 
@@ -267,7 +267,7 @@ def test_make_directory_high_sector(*, directory_sector: int, directory_sectors:
     assert flags & FLAG_DIRECTORY, "hi is not a directory"
     assert hi_sector > 255, f"expected sector > 255, got {hi_sector}"
     # The two-sector directory must be zero-filled.
-    subdirectory_data = image[(hi_sector - 1) * SECTOR_SIZE :][: directory_sectors * SECTOR_SIZE]
+    subdirectory_data = image[hi_sector * SECTOR_SIZE :][: directory_sectors * SECTOR_SIZE]
     assert subdirectory_data == b"\x00" * len(subdirectory_data), "subdirectory not zero-filled"
 
 
@@ -327,8 +327,8 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
     _, s2_sector, s2_size = s2
     _, original_sector, original_size = original
     assert s2_size == original_size
-    s2_data = image[(s2_sector - 1) * SECTOR_SIZE :][:s2_size]
-    original_data = image[(original_sector - 1) * SECTOR_SIZE :][:original_size]
+    s2_data = image[s2_sector * SECTOR_SIZE :][:s2_size]
+    original_data = image[original_sector * SECTOR_SIZE :][:original_size]
     assert s2_data == original_data, "copy data mismatch"
 
 

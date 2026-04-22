@@ -8,6 +8,7 @@
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTOR 20
         %assign DIRECTORY_SECTORS 3
+        %assign EXT2_START_SECTOR DIRECTORY_SECTOR  ; ext2 partition base (same as bbfs start)
         %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
         %assign EDIT_BUFFER_SIZE 5200h       ; Gap buffer size (EDIT_KILL_BUFFER - EDIT_BUFFER_BASE)
         %assign EDIT_KILL_BUFFER 7200h       ; Kill buffer start (7C00h - EDIT_KILL_BUFFER_SIZE)
