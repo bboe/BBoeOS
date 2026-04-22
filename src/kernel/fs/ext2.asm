@@ -28,9 +28,9 @@
 %assign EXT2_BGD_INODE_TABLE      8
 
 ;;; Inode field offsets
+%assign EXT2_INODE_BLOCK          40
 %assign EXT2_INODE_MODE           0
 %assign EXT2_INODE_SIZE_LO        4
-%assign EXT2_INODE_BLOCK          40
 
 ;;; Directory entry field offsets
 %assign EXT2_DIRENT_INODE         0
