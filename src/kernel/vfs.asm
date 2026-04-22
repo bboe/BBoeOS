@@ -61,7 +61,7 @@ vfs_init:
         mov word [vfs_load_fn], ext2_load
         mov word [vfs_read_dir_fn], ext2_read_dir
         mov word [vfs_read_sec_fn], ext2_read_sec
-        mov word [vfs_chmod_fn], ext2_readonly
+        mov word [vfs_chmod_fn], ext2_chmod
         mov word [vfs_commit_write_sec_fn], ext2_commit_write_sec
         mov word [vfs_create_fn], ext2_create
         mov word [vfs_mkdir_fn], ext2_mkdir
