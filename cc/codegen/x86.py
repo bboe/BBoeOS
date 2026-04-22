@@ -425,87 +425,6 @@ class X86CodeGenerator(CodeGeneratorBase):
             message = f"undefined variable: {name}"
             raise CompileError(message, line=line)
 
-    def _collect_constant_references(self, node: Node, /) -> set[str]:
-        """Return every NAMED_CONSTANT name referenced inside *node*.
-
-        Used by callers of :meth:`_constant_expression` to register
-        ``%include`` requirements for constants that need them.  Only
-        descends through the same node shapes :meth:`_constant_expression`
-        accepts, so the result matches what was actually inlined.
-        """
-        if isinstance(node, Var) and node.name in self.NAMED_CONSTANTS:
-            return {node.name}
-        if isinstance(node, BinaryOperation):
-            return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
-        return set()
-
-    def _constant_expression(self, init: Node, /) -> str | None:
-        """Return a NASM constant expression if *init* is compile-time resolvable.
-
-        Recognizes integer literals, ``NAMED_CONSTANT`` references,
-        constant aliases, and arbitrarily-nested ``+``/``-``/``*``
-        combinations of those.  Returns a NASM expression string (e.g.
-        ``"BUFFER"``, ``"(BUFFER+128)"``, or
-        ``"((O_WRONLY+O_CREAT)+O_TRUNC)"``) that the assembler folds at
-        link time, or ``None`` if any leaf is not constant.
-        """
-        if isinstance(init, Int):
-            return str(init.value)
-        if isinstance(init, Var):
-            if init.name in self.NAMED_CONSTANTS:
-                return init.name
-            if init.name in self.constant_aliases:
-                return self.constant_aliases[init.name]
-            return None
-        if isinstance(init, BinaryOperation) and init.operation in ("+", "-", "*", "&", "|", "^"):
-            left = self._constant_expression(init.left)
-            right = self._constant_expression(init.right)
-            if left is not None and right is not None:
-                return f"({left}{init.operation}{right})"
-        return None
-
-    def _dispatch_chain_var(self, statement: If, /) -> str | None:
-        """Return the local var name shared by an if-else dispatch chain.
-
-        A chain is two or more nested ``if (var operation literal) … else if
-        (var operation literal) …`` clauses on the same memory-resident
-        local, where each comparison is one of ``==``/``!=``/``<``/
-        ``<=``/``>``/``>=`` and the variable always sits on the left.
-        Pinned vars, constant aliases, and array bases are excluded —
-        their compares already avoid the memory operand.
-
-        Returns the variable's name when hoisting it into AX would
-        let two or more comparisons collapse to ``cmp ax, imm``.
-        Returns ``None`` for unrelated ifs and single comparisons
-        (where the hoist would only break even).
-        """
-        target: str | None = None
-        chain_length = 0
-        current: Node | None = statement
-        while isinstance(current, If):
-            condition = current.cond
-            if not (isinstance(condition, BinaryOperation) and condition.operation in ("==", "!=", "<", "<=", ">", ">=")):
-                break
-            if not (isinstance(condition.left, Var) and isinstance(condition.right, Int)):
-                break
-            name = condition.left.name
-            if not self._is_memory_scalar(name):
-                break
-            if name in self.pinned_register or name in self.constant_aliases or name in self.variable_arrays:
-                break
-            if self.variable_types.get(name) == "unsigned long":
-                break
-            if target is None:
-                target = name
-            elif target != name:
-                break
-            chain_length += 1
-            else_body = current.else_body
-            if else_body is None or len(else_body) != 1:
-                break
-            current = else_body[0]
-        return target if chain_length >= 2 else None
-
     def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
 
@@ -740,107 +659,6 @@ class X86CodeGenerator(CodeGeneratorBase):
             and self._is_modulo_of(base=left, expression=remainder_left)
             and remainder_left.right.value % right.value == 0
         )
-
-    def _index_cache_key(self, expression: Node, /) -> tuple[str, int] | None:
-        """Return the register cache key for an index expression, or None."""
-        if isinstance(expression, Index) and isinstance(expression.index, Int) and expression.name in self.array_labels:
-            return (self.array_labels[expression.name], expression.index.value * 2)
-        return None
-
-    def _is_byte_eq(self, node: Node, /) -> bool:
-        """Check if a node is ``byte_index == <something>``."""
-        return isinstance(node, BinaryOperation) and node.operation == "==" and self._is_byte_index(node.left)
-
-    def _is_byte_index(self, node: Node, /) -> bool:
-        """Check if a node is a constant-subscript byte index."""
-        return (
-            isinstance(node, Index)
-            and isinstance(node.index, Int)
-            and node.name not in self.array_labels
-            and node.name in self.visible_vars
-            and self.variable_types.get(node.name) in self.BYTE_SCALAR_TYPES
-        )
-
-    def _is_byte_var(self, name: str, /) -> bool:
-        """Return True if *name* is a byte-sized element source.
-
-        Covers ``char`` / ``uint8_t`` scalars and pointers, and
-        file-scope byte-element arrays (``char NAME[SIZE];`` or
-        ``uint8_t NAME[SIZE];``).  Locally-declared arrays and
-        ``int``-typed globals keep word-sized element access — only
-        the explicit byte-typed path widens to byte semantics.
-        """
-        if name in self.global_byte_arrays:
-            return True
-        return name not in self.variable_arrays and self.variable_types.get(name) in self.BYTE_SCALAR_TYPES
-
-    def _is_byte_scalar_global(self, name: str, /) -> bool:
-        """Return True if *name* is a byte-typed (``char`` / ``uint8_t``) scalar global.
-
-        Byte-scalar globals store as a single ``db`` cell at
-        ``_g_<name>``; load and store go through the byte-wide path
-        shared with byte-scalar locals (see :meth:`_is_byte_scalar`).
-        Register-aliased globals live in a CPU register rather than
-        memory, so they stay out of this set — storage is not a
-        ``db`` cell.
-        """
-        if name not in self.global_scalars:
-            return False
-        if name in self.register_aliased_globals:
-            return False
-        return self.variable_types.get(name) in self.BYTE_TYPES
-
-    def _is_byte_scalar_local(self, name: str, /) -> bool:
-        """Return True if *name* is a byte-typed scalar local with a 1-byte slot.
-
-        Populated by :meth:`scan_locals` — only non-parameter body
-        locals whose type is in :attr:`BYTE_TYPES` and which weren't
-        routed into a pinned register qualify.  Parameters keep their
-        word slots (caller pushes a full word) and pinned locals
-        aren't in :attr:`locals` at all.
-        """
-        return name in self.byte_scalar_locals
-
-    def _is_byte_scalar(self, name: str, /) -> bool:
-        """Return True for any byte-wide memory scalar (global or local).
-
-        Collapses the global / local check used by every fast-path
-        gate that must bail when the operand's storage is a single
-        byte — the word-sized forms (``cmp ax, [addr]``,
-        ``cmp word [addr], imm``, ``add ax, [addr]``, ``mov <r16>,
-        [addr]``) would read the adjacent byte into the high byte
-        and silently corrupt the result.
-        """
-        return self._is_byte_scalar_global(name) or self._is_byte_scalar_local(name)
-
-    def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:
-        """Check if ``statement`` is a compile-time constant alias.
-
-        True when the local is initialized from a ``NAMED_CONSTANT``
-        or ``NAMED_CONSTANT +/- Int`` and never reassigned in ``body``.
-        Such locals can be replaced with the underlying constant
-        expression directly, skipping the memory slot, the initial
-        store, and every reload.
-        """
-        if statement.type_name == "unsigned long":
-            return False
-        if self._constant_expression(statement.init) is None:
-            return False
-        return not any(self._name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
-
-    def _is_memory_scalar(self, name: str, /) -> bool:
-        """Return True when *name* is a memory-resident scalar.
-
-        Covers frame-based locals (``self.locals``) and file-scope
-        scalars (``self.global_scalars``).  Call sites use this to
-        decide whether a ``Var`` can be addressed directly via ``[mem]``
-        instead of being loaded into AX first.  Register-aliased globals
-        (``asm_register``) report False because their storage is a CPU
-        register, not a memory slot.
-        """
-        if name in self.register_aliased_globals:
-            return False
-        return name in self.locals or name in self.global_scalars
 
     def _local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local or global scalar.
@@ -1157,24 +975,6 @@ class X86CodeGenerator(CodeGeneratorBase):
                 message = f"unexpected top-level declaration: {type(declaration).__name__}"
                 raise CompileError(message, line=declaration.line)
 
-    def _resolve_constant(self, name: str, /) -> str | None:
-        """Return the NASM constant expression for *name*, or ``None``.
-
-        Checks :attr:`constant_aliases` first, then
-        :attr:`NAMED_CONSTANTS`, then file-scope arrays (whose
-        ``_g_<name>`` label is itself a fixed address).  Used wherever
-        the code needs to distinguish compile-time-constant bases from
-        runtime variables.
-        """
-        alias = self.constant_aliases.get(name)
-        if alias is not None:
-            return alias
-        if name in self.NAMED_CONSTANTS:
-            return name
-        if name in self.global_arrays:
-            return f"_g_{name}"
-        return None
-
     def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> dict[str, str]:
         """Choose locals/parameters to auto-pin and match them to registers.
 
@@ -1464,46 +1264,6 @@ class X86CodeGenerator(CodeGeneratorBase):
             # Not fusible — emit normally
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
-
-    def _type_of_operand(self, node: Node, /) -> str:
-        """Classify an operand for comparison type-checking.
-
-        Returns one of ``"pointer"``, ``"null"``, ``"char"``, or
-        ``"integer"``.  Every AST node that can legally appear inside
-        a comparison must classify into one of the four buckets;
-        anything else raises ``CompileError`` so no operand silently
-        slips through the type check.  ``uint8_t`` values are byte-sized
-        like ``char`` but classify as ``integer`` so they compose freely
-        with integer literals — ``char`` stays restricted to catch
-        ``c == 0`` typos.
-        """
-        if isinstance(node, Char):
-            return "char"
-        if isinstance(node, Int):
-            return "integer"
-        if isinstance(node, String):
-            return "pointer"
-        if isinstance(node, Index):
-            variable_type = self.variable_types.get(node.name)
-            if variable_type in ("char", "char*"):
-                return "char"
-            return "integer"
-        if isinstance(node, Var):
-            if node.name == "NULL":
-                return "null"
-            variable_type = self.variable_types.get(node.name)
-            if variable_type in ("char*", "uint8_t*"):
-                return "pointer"
-            if variable_type == "char":
-                return "char"
-            if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
-                return "integer"
-            message = f"undefined operand: {node.name}"
-            raise CompileError(message, line=node.line)
-        if isinstance(node, (BinaryOperation, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
-            return "integer"
-        message = f"cannot classify operand type for comparison: {type(node).__name__}"
-        raise CompileError(message, line=node.line)
 
     def allocate_local(self, name: str, /, *, size: int = 2) -> int:
         """Allocate a local variable on the stack frame.
