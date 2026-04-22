@@ -57,7 +57,7 @@ def add_file(
     image = load_image(image_path)
 
     if subdirectory is None:
-        parent_offset = (directory_sector - 1) * SECTOR_SIZE
+        parent_offset = (directory_sector) * SECTOR_SIZE
     else:
         subdirectory_entry_offset = find_subdirectory_entry(
             directory_sector=directory_sector,
@@ -69,7 +69,7 @@ def add_file(
             message = f"Error: directory '{subdirectory}' not found"
             raise SystemExit(message)
         parent_start = struct.unpack_from("<H", image, subdirectory_entry_offset + OFFSET_SECTOR)[0]
-        parent_offset = (parent_start - 1) * SECTOR_SIZE
+        parent_offset = (parent_start) * SECTOR_SIZE
 
     entry_offset = find_free_entry(directory_sectors=directory_sectors, filename=filename, image=image, parent_offset=parent_offset)
     if entry_offset is None:
@@ -103,7 +103,7 @@ def find_entry(
         ``(flags, start_sector, size)`` if found, else ``None``.
 
     """
-    base = (directory_start_sector - 1) * SECTOR_SIZE
+    base = (directory_start_sector) * SECTOR_SIZE
     target = name.encode()
     for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
         if image[entry_offset] == 0:
@@ -133,14 +133,14 @@ def compute_next_data_sector(
 
     """
     next_sector = directory_sector + directory_sectors
-    for entry_offset in iter_entries(base_offset=(directory_sector - 1) * SECTOR_SIZE, sector_count=directory_sectors):
+    for entry_offset in iter_entries(base_offset=(directory_sector) * SECTOR_SIZE, sector_count=directory_sectors):
         if image[entry_offset] == 0:
             continue
         next_sector = max(next_sector, entry_end_sector(entry_offset=entry_offset, image=image))
         flags = image[entry_offset + OFFSET_FLAGS]
         if flags & FLAG_DIRECTORY:
             subdirectory_start = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-            subdirectory_offset = (subdirectory_start - 1) * SECTOR_SIZE
+            subdirectory_offset = (subdirectory_start) * SECTOR_SIZE
             for subdirectory_entry_offset in iter_entries(base_offset=subdirectory_offset, sector_count=directory_sectors):
                 if image[subdirectory_entry_offset] == 0:
                     continue
@@ -208,7 +208,7 @@ def find_subdirectory_entry(
         Byte offset of the matching directory entry, or None.
 
     """
-    for entry_offset in iter_entries(base_offset=(directory_sector - 1) * SECTOR_SIZE, sector_count=directory_sectors):
+    for entry_offset in iter_entries(base_offset=(directory_sector) * SECTOR_SIZE, sector_count=directory_sectors):
         if image[entry_offset] == 0:
             continue
         entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode()
@@ -309,7 +309,7 @@ def make_directory(*, dirname: str, image_path: str) -> None:
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
-    parent_offset = (directory_sector - 1) * SECTOR_SIZE
+    parent_offset = (directory_sector) * SECTOR_SIZE
     entry_offset = find_free_entry(directory_sectors=directory_sectors, filename=dirname, image=image, parent_offset=parent_offset)
     if entry_offset is None:
         message = "Error: root directory is full"
@@ -326,7 +326,7 @@ def make_directory(*, dirname: str, image_path: str) -> None:
         size=directory_bytes,
         start_sector=next_data_sector,
     )
-    data_offset = (next_data_sector - 1) * SECTOR_SIZE
+    data_offset = (next_data_sector) * SECTOR_SIZE
     if data_offset + directory_bytes > len(image):
         message = f"Error: directory would extend past end of image (need {data_offset + directory_bytes} bytes)"
         raise SystemExit(
@@ -376,7 +376,7 @@ def write_data(*, data: bytes, image: bytearray, start_sector: int) -> None:
         If the data would extend past the end of the image.
 
     """
-    data_offset = (start_sector - 1) * SECTOR_SIZE
+    data_offset = (start_sector) * SECTOR_SIZE
     if data_offset + len(data) > len(image):
         message = f"Error: data would extend past end of image (need {data_offset + len(data)} bytes)"
         raise SystemExit(

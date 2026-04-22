@@ -13,8 +13,8 @@
 ;;; Surface (parallel to ata.asm):
 ;;;     fdc_init          install IRQ 6 handler, reset, SPECIFY, motor on,
 ;;;                       recalibrate drive 0.  Called once.
-;;;     fdc_read_sector   AX = 1-based LBA; fills SECTOR_BUFFER; CF err.
-;;;     fdc_write_sector  AX = 1-based LBA; writes SECTOR_BUFFER; CF err.
+;;;     fdc_read_sector   AX = 0-based LBA; fills SECTOR_BUFFER; CF err.
+;;;     fdc_write_sector  AX = 0-based LBA; writes SECTOR_BUFFER; CF err.
 ;;; ------------------------------------------------------------------------
 
         FDC_DOR                 equ 3F2h
@@ -241,14 +241,13 @@ fdc_lba_to_chs:
         ret
 
 fdc_read_sector:
-        ;; Input:  AX = 1-based LBA.
+        ;; Input:  AX = 0-based LBA.
         ;; Output: SECTOR_BUFFER filled via DMA.  CF=0 on success.
         push ax
         push bx
         push cx
         push dx
 
-        dec ax
         call fdc_lba_to_chs
         call fdc_seek
 
@@ -339,13 +338,12 @@ fdc_wait_irq:
         ret
 
 fdc_write_sector:
-        ;; Input: AX = 1-based LBA.  CF=0 on success.
+        ;; Input: AX = 0-based LBA.  CF=0 on success.
         push ax
         push bx
         push cx
         push dx
 
-        dec ax
         call fdc_lba_to_chs
         call fdc_seek
 

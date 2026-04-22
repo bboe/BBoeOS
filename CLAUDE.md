@@ -26,14 +26,14 @@ Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h
 - **Disk buffer** at `0xE000` for filesystem reads.
 - **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
 - **Resident kernel** (stage 1 MBR + stage 2) lives in segment 0 from `0x7C00` up through (roughly) `0xE000`, where the disk and NIC buffers begin. Programs loaded at `PROGRAM_BASE` (`0x0600`) may allocate working buffers in segment 0, but everything between `0x7C00` and `0xEE00` is off-limits — overwriting it corrupts the live kernel and the next `int 30h` jumps into trashed code.
-- Stage 2 sector count is derived from `DIRECTORY_SECTOR` via `%assign stage2_sectors (DIRECTORY_SECTOR - 2)`.
+- Stage 2 sector count is derived from `DIRECTORY_SECTOR` via `%assign stage2_sectors (DIRECTORY_SECTOR - 1)`.
 
 ### Filesystem
 
 Trivial read-only filesystem on the floppy disk:
 
-- **Sector 1**: MBR (stage 1)
-- **Sectors 2 to DIRECTORY_SECTOR-1**: Stage 2
+- **Sector 0**: MBR (stage 1)
+- **Sectors 1 to DIRECTORY_SECTOR-1**: Stage 2
 - **Sectors DIRECTORY_SECTOR to DIRECTORY_SECTOR+2**: File table / root directory (`DIRECTORY_SECTORS` = 3 sectors, 48 entries x 32 bytes)
 - **Sectors DIRECTORY_SECTOR+2 onward**: File data
 
@@ -96,7 +96,7 @@ renumbering is source-compatible — just rebuild.
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
 - `src/kernel/arch/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
 - `src/kernel/arch/pmode.asm` — 16→32-bit protected-mode entry, GDT (not yet wired in)
-- `src/kernel/drivers/ata.asm`, `src/kernel/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs.asm`'s `read_sector`/`write_sector` dispatch
+- `src/kernel/drivers/ata.asm`, `src/kernel/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
 - `src/kernel/drivers/ps2.asm` — PS/2 keyboard driver: `ps2_init`, `ps2_check`, `ps2_read`
 - `src/kernel/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
 - `src/kernel/drivers/vga.asm` — VGA text mode helpers
