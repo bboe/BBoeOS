@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 11763     | +3510 |
+| asm     | 8253        | 11835     | +3582 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 226       | -42   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1324      | +403  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+3510):** Every ``handle_*`` and every function lives in pure C
+**asm (+3582):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `abort_unknown` trampoline (stashes SI into
 `_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
@@ -85,7 +85,9 @@ and the ``parse_line`` bracket-directive handler (11547 → 11681).  Phase
 ``current_address & (n-1)``) for GDT/IDT descriptor alignment
 (11681 → 11735).  Phase 5.3 routed ``handle_push`` / ``handle_pop``
 of 32-bit registers through ``emit_operand_size_prefix`` so the
-0x66 prefix tracks the current bits mode (11735 → 11763).
+0x66 prefix tracks the current bits mode (11735 → 11763).  Phase
+5.4 added the ``push [word|dword] imm`` size-token form, widening
+the imm tail to dword when requested (11763 → 11835).
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base

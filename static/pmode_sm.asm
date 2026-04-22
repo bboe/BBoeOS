@@ -47,6 +47,14 @@ pm_entry_32:
         pop  ebx
         push ax
         pop  bx
+        ;; push <size> imm — size forces the push width.  imm8 short
+        ;; form (0x6A ib) still applies when the value fits ±128
+        ;; regardless of operand size; only the prefix reflects the
+        ;; push width.
+        push dword 0
+        push dword 0x1234
+        push word 0
+        push word 0x1234
 [bits 16]
 pm16_back:
         mov ax, 0x5678
@@ -54,6 +62,9 @@ pm16_back:
         push ax
         pop  ecx
         pop  bx
+        push dword 0
+        push dword 0x1234
+        push 0x1234
 
         ;; align N pads current_address to a multiple of N with zero
         ;; bytes — exercises the STR_ALIGN directive added in phase 5.2.

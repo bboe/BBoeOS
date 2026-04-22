@@ -1207,10 +1207,27 @@ void handle_push() {
         emit_byte(0x50 | (packed_register & 0xFF));
         return;
     }
+    /* ``push [word|dword] imm`` — the size token forces the push width.
+       Without a token the width defaults to the current bits mode
+       so ``push 0`` under bits=32 pushes a dword.  The imm8 short
+       form (0x6A) still applies when the value fits ±128 regardless
+       of operand size; otherwise the imm tail widens to match. */
+    int size = default_bits;
+    if (match_word(STR_WORD)) {
+        size = 16;
+        skip_ws();
+    } else if (match_word(STR_DWORD)) {
+        size = 32;
+        skip_ws();
+    }
     int value = resolve_value();
+    emit_operand_size_prefix(size);
     if (value >= -128 && value <= 127) {
         emit_byte(0x6A);
         emit_byte(value & 0xFF);
+    } else if (size == 32) {
+        emit_byte(0x68);
+        emit_dword(value);
     } else {
         emit_byte(0x68);
         emit_word(value);
