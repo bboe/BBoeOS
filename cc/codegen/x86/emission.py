@@ -494,8 +494,7 @@ class EmissionMixin:
                 # collapses the paired ``xor ah, ah`` before a ``cmp
                 # al`` (or any other AL-only consumer) when the high
                 # byte is provably unused.
-                self.emit(f"        mov al, [{self._local_address(vname)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(vname)}]")
                 self.ax_is_byte = True
             else:
                 self.emit(f"        mov {self.target.acc}, [{self._local_address(vname)}]")
@@ -522,8 +521,7 @@ class EmissionMixin:
                 if const_base is not None:
                     addr = f"{const_base}+{offset}" if offset else const_base
                     if is_byte:
-                        self.emit(f"        mov al, [{addr}]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{addr}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                 else:
@@ -531,11 +529,8 @@ class EmissionMixin:
                     self._emit_load_var(vname, register=self.target.si_register)
                     si = self.target.si_register
                     if is_byte:
-                        if offset:
-                            self.emit(f"        mov al, [{si}+{offset}]")
-                        else:
-                            self.emit(f"        mov al, [{si}]")
-                        self.emit("        xor ah, ah")
+                        mem = f"[{si}+{offset}]" if offset else f"[{si}]"
+                        self.emit_byte_load_zx(mem)
                     elif offset:
                         self.emit(f"        mov {self.target.acc}, [{si}+{offset}]")
                     else:
@@ -553,8 +548,7 @@ class EmissionMixin:
                         preserve_ax=False,
                     )
                     if is_byte:
-                        self.emit(f"        mov al, [{addr}]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{addr}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                     self.ax_clear()
@@ -582,8 +576,7 @@ class EmissionMixin:
                         self.emit(f"        pop {si}")
                         self.emit(f"        add {si}, {self.target.acc}")
                     if is_byte:
-                        self.emit(f"        mov al, [{si}]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{si}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
@@ -678,8 +671,7 @@ class EmissionMixin:
                     and left.name not in self.array_labels
                     and not self._is_byte_scalar(left.name)
                 ):
-                    self.emit(f"        mov al, [{self._local_address(left.name)}+1]")
-                    self.emit("        xor ah, ah")
+                    self.emit_byte_load_zx(f"[{self._local_address(left.name)}+1]")
                     self.ax_clear()
                     return
                 # Fast path: shr r, imm — one instruction, no CX scratch.
@@ -1174,8 +1166,7 @@ class EmissionMixin:
         chain_var = self._dispatch_chain_var(statement)
         if chain_var is not None and chain_var != self.ax_local:
             if self._is_byte_scalar(chain_var):
-                self.emit(f"        mov al, [{self._local_address(chain_var)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(chain_var)}]")
                 self.ax_is_byte = True
             else:
                 self.emit(f"        mov {self.target.acc}, [{self._local_address(chain_var)}]")

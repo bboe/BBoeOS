@@ -718,8 +718,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # Byte-scalar source into a word target: byte-load +
                 # zero-extend, then shuttle into the target if it
                 # isn't acc already.
-                self.emit(f"        mov al, [{self._local_address(arg.name)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(arg.name)}]")
                 if target != self.target.acc:
                     source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {target}, {source}")
@@ -1294,6 +1293,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 continue
             self.virtual_long_locals.add(name)
 
+    def emit_accumulator_zx_from_al(self) -> None:
+        """Zero-extend AL (byte result) to the target accumulator.
+
+        16-bit real mode: ``xor ah, ah`` — clears AH, leaving AX = AL.
+        32-bit flat pmode: ``movzx eax, al`` — clears bits 8-31,
+        leaving EAX = AL.  Used after syscalls and byte-returning
+        builtins (``exec`` / ``chmod`` / the carry-flag normalize path
+        in ``emit_error_syscall_tail``) where the kernel ABI delivers
+        the result in AL but the caller's code expects a full
+        accumulator-width integer.
+        """
+        if self.target.int_size == 2:
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, al")
+
     def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
@@ -1384,6 +1399,29 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.generate_expression(right)
             self.emit(f"        mov {self.target.count_register}, {self.target.acc}")
             self.emit(f"        pop {self.target.acc}")
+
+    def emit_byte_load_zx(self, mem_operand: str, /) -> None:
+        """Load a byte from *mem_operand* into the accumulator, zero-extended.
+
+        On 16-bit real mode, emits ``mov al, <mem> / xor ah, ah`` — the
+        cheap 3-byte + 2-byte sequence the 8086 / early peepholes
+        (``peephole_dead_ah``, ``peephole_redundant_byte_mask``) expect
+        and can fuse through.  On 32-bit flat pmode, emits ``movzx eax,
+        byte <mem>`` so bits 16-31 of EAX stay clean — the old
+        ``mov al / xor ah, ah`` pair would leave EAX's upper word
+        whatever the caller last wrote to it, and a downstream
+        ``test eax, eax`` would read stale bits.
+
+        ``mem_operand`` is the bracket-enclosed memory reference
+        (``[addr]`` / ``[bp-4]`` / ``[si+12]`` / …) — callers don't
+        include the ``byte`` size prefix; this helper adds it in the
+        32-bit branch.
+        """
+        if self.target.int_size == 2:
+            self.emit(f"        mov al, {mem_operand}")
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, byte {mem_operand}")
 
     def emit_comparison(self, left: Node, right: Node, /) -> None:
         """Generate a comparison, leaving flags set for a conditional jump.
@@ -1615,7 +1653,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
         if preserve_al:
-            self.emit("        xor ah, ah")
+            self.emit_accumulator_zx_from_al()
         else:
             self.emit(f"        mov {self.target.acc}, 1")
         self.emit(f"        jmp .done_{label_index}")
@@ -1702,8 +1740,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # into the target (or stop if target is already acc).
                 # AX gets clobbered even when the final target is not
                 # AX, so we must refresh the tracking either way.
-                self.emit(f"        mov al, [{self._local_address(argument.name)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(argument.name)}]")
                 if register != self.target.acc:
                     source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {register}, {source}")

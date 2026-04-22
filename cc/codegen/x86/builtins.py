@@ -146,7 +146,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="exec")
         self.emit_si_from_argument(arguments[0])
         self._emit_syscall("EXEC")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_exit(self, arguments: list[Node], /) -> None:
@@ -181,7 +181,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="far_read8")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
         self.emit(f"        mov al, {self.target.far_ref(self.target.bx_register)}")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_far_write16(self, arguments: list[Node], /) -> None:
@@ -241,7 +241,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="fstat")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
         self._emit_syscall("IO_FSTAT")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_getchar(self, arguments: list[Node], /) -> None:
@@ -252,7 +252,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=0, name="getchar")
         self.emit("        call FUNCTION_GET_CHARACTER")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_mac(
