@@ -461,14 +461,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
     def _emit_global_storage(self) -> None:
         """Emit ``_g_<name>`` data cells for every initialized global, once at tail.
 
-        Scalars lay out as a single ``dw``/``db`` with the constant initializer.
-        Initialized arrays use ``db``/``dw`` literals matching the element type.
-        Zero-initialized globals (no initializer) are deferred to BSS: they are
-        collected in ``self.bss_vars`` and emitted by ``_emit_bss_trailer`` as
-        EQU definitions pointing past the binary end.
+        Scalars lay out as a single ``dw`` / ``dd`` cell (target's native
+        int width) / ``db`` (byte scalars) with the constant initializer.
+        Initialized arrays use ``db`` / ``dw`` / ``dd`` literals matching
+        the element type.  Zero-initialized globals (no initializer) are
+        deferred to BSS: they are collected in ``self.bss_vars`` and
+        emitted by ``_emit_bss_trailer`` as EQU definitions pointing past
+        the binary end.
         """
         if not self.global_scalars and not self.global_arrays:
             return
+        int_directive = "dd" if self.target.int_size == 4 else "dw"
         self.emit(";; --- global data ---")
         for name in sorted(self.global_scalars):
             declaration = self.global_scalars[name]
@@ -477,17 +480,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # so no ``_g_<name>`` label is emitted.
                 continue
             if declaration.init is None:
-                stride = 1 if self._is_byte_scalar_global(name) else 2
+                stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 self.bss_vars.append((name, str(stride)))
             else:
                 init_expression = self._constant_expression(declaration.init)
-                directive = "db" if self._is_byte_scalar_global(name) else "dw"
+                directive = "db" if self._is_byte_scalar_global(name) else int_directive
                 self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
-            stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
+            is_byte = declaration.type_name in self.BYTE_TYPES
+            stride = 1 if is_byte else self.target.int_size
             if declaration.init is not None:
-                directive = "db" if declaration.type_name in self.BYTE_TYPES else "dw"
+                directive = "db" if is_byte else int_directive
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
                     for element in declaration.init.elements
@@ -1162,17 +1166,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
-    def allocate_local(self, name: str, /, *, size: int = 2) -> int:
+    def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.
 
         Args:
             name: local variable name.
-            size: slot size in bytes (2 for ints/pointers, 4 for unsigned long).
+            size: slot size in bytes.  Defaults to the target's native
+                integer width (2 on 16-bit real mode, 4 on 32-bit flat
+                pmode) so plain ``int`` / pointer locals pick up the
+                right width without caller-side branching.  Pass ``1``
+                explicitly for byte-typed scalars and ``4`` for
+                ``unsigned long`` pairs.
 
         Returns:
             The current frame size after allocation.
 
         """
+        if size is None:
+            size = self.target.int_size
         self.frame_size += size
         self.locals[name] = self.frame_size
         return self.frame_size

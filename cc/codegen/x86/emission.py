@@ -1116,13 +1116,18 @@ class EmissionMixin:
         if name == "main":
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
+                # Plain int / pointer locals get the target's native
+                # integer width (``dw`` / ``dd``); ``unsigned long``
+                # always stays 4 bytes (``dd``) regardless of mode;
+                # byte-scalar locals always stay 1 byte (``db``).
+                int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
                 for vname in sorted(self.locals):
                     if self.variable_types.get(vname) == "unsigned long":
                         directive = "dd 0"
                     elif vname in self.byte_scalar_locals:
                         directive = "db 0"
                     else:
-                        directive = "dw 0"
+                        directive = int_directive
                     self.emit(f"_l_{vname}: {directive}")
         elif ir_body is not None:
             # IR path: generate epilogue unless the body always exits.
