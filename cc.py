@@ -376,6 +376,516 @@ class While(Node):
     body: list[Node]
 
 
+# ---------------------------------------------------------------------------
+# Three-address code (TAC) intermediate representation
+# ---------------------------------------------------------------------------
+# An IRValue operand is either an integer constant or a name (variable, temp,
+# or string label).  TAC instructions always have at most one operator and
+# one destination, with simple operands on the right-hand side.
+
+IRValue = int | str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRBinaryOperation:
+    """destination = left operation right — arithmetic or bitwise binary operation."""
+
+    destination: str
+    operation: str
+    left: IRValue
+    right: IRValue
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRCopy:
+    """destination = source — scalar assignment."""
+
+    destination: str
+    source: IRValue
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRCall:
+    """destination = name(args) — call expression; destination is None to discard return."""
+
+    destination: str | None
+    name: str
+    args: tuple[IRValue, ...]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRIndex:
+    """destination = base[index] — array / pointer read."""
+
+    destination: str
+    base: str
+    index: IRValue
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRIndexAssign:
+    """base[index] = source — array / pointer write."""
+
+    base: str
+    index: IRValue
+    source: IRValue
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRLabel:
+    """A branch target label."""
+
+    name: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRJump:
+    """Unconditional jump."""
+
+    target: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRBranchFalse:
+    """Jump to *target* when the condition ``left operation right`` is FALSE."""
+
+    left: IRValue
+    operation: str
+    right: IRValue
+    target: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRCarryBranch:
+    """Call a ``carry_return`` function, then branch on the carry flag.
+
+    ``__attribute__((carry_return))`` functions report their boolean
+    return in CF (clear = true, set = false).  When such a call is used
+    directly as an ``if`` / ``while`` condition, lowering the call to a
+    value temp and comparing it against zero would lose the CF — we'd
+    test whatever happens to be in AX.  ``IRCarryBranch`` keeps the
+    call and the branch together so the lowering emits the tight
+    ``call X / jc target`` (when=``set``) or ``jnc target``
+    (when=``clear``) that the AST ``emit_condition`` shortcut
+    produces.  ``call_ast`` holds the original :class:`Call` so
+    ``generate_call`` can set up arguments (regparm / stack) the same
+    way a direct AST-path call would.
+    """
+
+    call_ast: Call
+    target: str
+    when: str  # "set" → ``jc``, "clear" → ``jnc``
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRReturn:
+    """Function return, optionally with a value."""
+
+    value: IRValue | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRInlineAsm:
+    """Pass-through inline-asm block."""
+
+    content: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IRBlock:
+    """Escape hatch: lower this AST node via the existing statement codegen."""
+
+    node: Node
+
+
+IRInstruction = (
+    IRBinaryOperation
+    | IRCopy
+    | IRCall
+    | IRIndex
+    | IRIndexAssign
+    | IRLabel
+    | IRJump
+    | IRBranchFalse
+    | IRCarryBranch
+    | IRReturn
+    | IRInlineAsm
+    | IRBlock
+)
+
+
+@dataclass(kw_only=True, slots=True)
+class IRFunction:
+    """IR form of a single function; ``ast_node`` is kept for frame setup."""
+
+    ast_node: Function
+    body: list[IRInstruction]
+    strings: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass(kw_only=True, slots=True)
+class IRProgram:
+    """IR for an entire translation unit."""
+
+    functions: list[IRFunction]
+    globals: list[Node]
+
+
+def _is_constant_true(condition: Node) -> bool:
+    """Return True if *condition* is statically nonzero.
+
+    Recognises both the bare ``Int(value=N)`` form (not wrapped by the
+    parser) and the ``BinaryOperation("!=", Int(value=N), Int(value=0))``
+    form that ``Parser.parse_condition`` produces for bare expressions.
+    """
+    if isinstance(condition, Int) and condition.value != 0:
+        return True
+    if not isinstance(condition, BinaryOperation):
+        return False
+    if condition.operation != "!=":
+        return False
+    if condition.right != Int(value=0):
+        return False
+    return isinstance(condition.left, Int) and condition.left.value != 0
+
+
+class IRBuilder:
+    """Convert an AST :class:`Program` to a :class:`IRProgram`.
+
+    Each function body is flattened into a linear list of
+    :data:`IRInstruction` instructions.  Nested expressions are broken into
+    sequences of temporaries (``_ir_0``, ``_ir_1``, …) so every
+    instruction has at most one operator and simple operands.  Control
+    flow (``if`` / ``while`` / ``do``-``while``) is linearised into
+    :class:`IRLabel` / :class:`IRJump` / :class:`IRBranchFalse`
+    instructions.  Complex forms that the lowering cannot easily handle
+    fall back to :class:`IRBlock` so the existing AST-based codegen
+    path handles them unchanged.
+    """
+
+    def __init__(self, *, carry_return_functions: frozenset[str] = frozenset()) -> None:
+        """Initialize counters and record which callees use ``carry_return``.
+
+        ``carry_return_functions`` is the set of function names declared
+        with ``__attribute__((carry_return))``.  Conditions of the shape
+        ``call(...) != 0`` / ``call(...) == 0`` where the callee is in
+        this set lower to :class:`IRCarryBranch` instead of going through
+        a value temp, preserving the CF-based return-value convention.
+        """
+        self._counter = 0
+        self._str_counter = 0
+        self._carry_return_functions = carry_return_functions
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def build_program(self, program: Program) -> IRProgram:
+        """Lower every function in *program* to IR."""
+        return IRProgram(functions=[self._build_function(f) for f in program.functions], globals=program.globals)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _is_carry_return_call(self, node: Node) -> bool:
+        """Return True if *node* is a :class:`Call` to a carry_return function."""
+        return isinstance(node, Call) and node.name in self._carry_return_functions
+
+    def _tmp(self) -> str:
+        name = f"_ir_{self._counter}"
+        self._counter += 1
+        return name
+
+    def _lbl(self, tag: str = "l") -> str:
+        name = f"._ir_{tag}{self._counter}"
+        self._counter += 1
+        return name
+
+    # ------------------------------------------------------------------
+    # Function / statement building
+    # ------------------------------------------------------------------
+
+    def _build_function(self, func: Function) -> IRFunction:
+        out: list[IRInstruction] = []
+        strings: list[tuple[str, str]] = []
+        self._build_stmts(func.body, out, break_tgt=None, cont_tgt=None, strings=strings)
+        return IRFunction(ast_node=func, body=out, strings=strings)
+
+    def _build_stmts(
+        self,
+        stmts: list[Node],
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+        break_tgt: str | None,
+        cont_tgt: str | None,
+    ) -> None:
+        for s in stmts:
+            self._build_stmt(s, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+
+    def _build_stmt(
+        self,
+        stmt: Node,
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+        break_tgt: str | None,
+        cont_tgt: str | None,
+    ) -> None:
+        match stmt:
+            case VarDecl():
+                # Preserve full VarDecl semantics (constant aliases, visibility
+                # registration, byte-type tracking) via the existing AST path.
+                out.append(IRBlock(node=stmt))
+            case ArrayDecl():
+                # Array initializers are complex; delegate to existing codegen.
+                out.append(IRBlock(node=stmt))
+            case Assign(name=name, expr=expr):
+                source = self._build_expr(expr, out, strings=strings)
+                out.append(IRCopy(destination=name, source=source))
+            case IndexAssign(name=base, index=index_node, expr=expr):
+                index_value = self._build_expr(index_node, out, strings=strings)
+                source = self._build_expr(expr, out, strings=strings)
+                out.append(IRIndexAssign(base=base, index=index_value, source=source))
+            case Call(name="asm"):
+                # asm() requires raw String args; pass through as-is.
+                out.append(IRBlock(node=stmt))
+            case Call() as call:
+                args = tuple(self._build_expr(a, out, strings=strings) for a in call.args)
+                out.append(IRCall(args=args, destination=None, name=call.name))
+            case If(cond=cond, body=body, else_body=else_body):
+                self._build_if(cond, body, else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            case While(cond=cond, body=body):
+                self._build_while(cond, body, out, strings=strings)
+            case DoWhile(cond=cond, body=body):
+                self._build_do_while(cond, body, out, strings=strings)
+            case Break():
+                assert break_tgt is not None, "break outside loop"
+                out.append(IRJump(target=break_tgt))
+            case Continue():
+                assert cont_tgt is not None, "continue outside loop"
+                out.append(IRJump(target=cont_tgt))
+            case Return(value=value):
+                v = self._build_expr(value, out, strings=strings) if value is not None else None
+                out.append(IRReturn(value=v))
+            case InlineAsm(content=content):
+                out.append(IRInlineAsm(content=content))
+            case _:
+                out.append(IRBlock(node=stmt))
+
+    def _build_if(
+        self,
+        cond: Node,
+        body: list[Node],
+        else_body: list[Node] | None,
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+        break_tgt: str | None,
+        cont_tgt: str | None,
+    ) -> None:
+        if else_body is not None:
+            else_lbl = self._lbl("else")
+            end_lbl = self._lbl("endif")
+            self._build_cond_false(cond, else_lbl, out, strings=strings)
+            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.extend([IRJump(target=end_lbl), IRLabel(name=else_lbl)])
+            self._build_stmts(else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.append(IRLabel(name=end_lbl))
+        else:
+            end_lbl = self._lbl("endif")
+            self._build_cond_false(cond, end_lbl, out, strings=strings)
+            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.append(IRLabel(name=end_lbl))
+
+    def _build_while(
+        self,
+        cond: Node,
+        body: list[Node],
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        loop_lbl = self._lbl("wloop")
+        end_lbl = self._lbl("wend")
+        out.append(IRLabel(name=loop_lbl))
+        # ``while (1)`` (and other statically-nonzero conditions) skip
+        # the condition check entirely.  ``parse_condition`` wraps the
+        # bare ``1`` as ``BinaryOperation("!=", Int(1), Int(0))``, so
+        # both shapes have to be recognised.
+        if not _is_constant_true(cond):
+            self._build_cond_false(cond, end_lbl, out, strings=strings)
+        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=loop_lbl, strings=strings)
+        out.extend([IRJump(target=loop_lbl), IRLabel(name=end_lbl)])
+
+    def _build_do_while(
+        self,
+        cond: Node,
+        body: list[Node],
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        loop_lbl = self._lbl("dloop")
+        cond_lbl = self._lbl("dcond")
+        end_lbl = self._lbl("dend")
+        out.append(IRLabel(name=loop_lbl))
+        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
+        out.append(IRLabel(name=cond_lbl))
+        self._build_cond_true(cond, loop_lbl, out, strings=strings)
+        out.append(IRLabel(name=end_lbl))
+
+    # ------------------------------------------------------------------
+    # Condition helpers (emit branch-when-false / branch-when-true)
+    # ------------------------------------------------------------------
+
+    def _build_cond_false(
+        self,
+        cond: Node,
+        target: str,
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        """Emit IR that jumps to *target* when *cond* evaluates to false."""
+        match cond:
+            case LogicalAnd(left=left, right=right):
+                self._build_cond_false(left, target, out, strings=strings)
+                self._build_cond_false(right, target, out, strings=strings)
+            case LogicalOr(left=left, right=right):
+                skip_lbl = self._lbl("lor")
+                self._build_cond_true(left, skip_lbl, out, strings=strings)
+                self._build_cond_false(right, target, out, strings=strings)
+                out.append(IRLabel(name=skip_lbl))
+            case BinaryOperation(operation=operation, left=left, right=right) if (
+                operation in ("!=", "==") and self._is_carry_return_call(left) and right == Int(value=0)
+            ):
+                # ``if (carry_return_call() != 0)`` / ``... == 0`` — jump
+                # to *target* when the condition is false, i.e. on CF set
+                # for ``!=`` (false means the call returned 0) and on CF
+                # clear for ``==``.
+                when = "set" if operation == "!=" else "clear"
+                out.append(IRCarryBranch(call_ast=left, target=target, when=when))
+            case BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                out.append(IRBranchFalse(left=left_value, operation=operation, right=right_value, target=target))
+            case _:
+                # General case: evaluate to a temp, test non-zero.
+                value = self._build_expr(cond, out, strings=strings)
+                out.append(IRBranchFalse(left=value, operation="!=", right=0, target=target))
+
+    def _build_cond_true(
+        self,
+        cond: Node,
+        target: str,
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        """Emit IR that jumps to *target* when *cond* evaluates to true."""
+        match cond:
+            case LogicalOr(left=left, right=right):
+                self._build_cond_true(left, target, out, strings=strings)
+                self._build_cond_true(right, target, out, strings=strings)
+            case LogicalAnd(left=left, right=right):
+                skip_lbl = self._lbl("land")
+                self._build_cond_false(left, skip_lbl, out, strings=strings)
+                self._build_cond_true(right, target, out, strings=strings)
+                out.append(IRLabel(name=skip_lbl))
+            case BinaryOperation(operation=operation, left=left, right=right) if (
+                operation in ("!=", "==") and self._is_carry_return_call(left) and right == Int(value=0)
+            ):
+                # Dual of the false-jump shortcut in ``_build_cond_false``:
+                # jump on CF clear for ``!=`` (true means the call returned 1),
+                # on CF set for ``==``.
+                when = "clear" if operation == "!=" else "set"
+                out.append(IRCarryBranch(call_ast=left, target=target, when=when))
+            case BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                # Invert the condition: true-jump means false-branch doesn't fire.
+                inverted = INVERT_COMPARISON[operation]
+                out.append(IRBranchFalse(left=left_value, operation=inverted, right=right_value, target=target))
+            case _:
+                value = self._build_expr(cond, out, strings=strings)
+                out.append(IRBranchFalse(left=value, operation="==", right=0, target=target))
+
+    # ------------------------------------------------------------------
+    # Expression building (returns an IRValue for the result)
+    # ------------------------------------------------------------------
+
+    def _build_expr(
+        self,
+        expr: Node,
+        out: list[IRInstruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> IRValue:
+        match expr:
+            case Int(value=integer_value):
+                return integer_value
+            case Var(name=variable_name):
+                return variable_name
+            case String(content=content):
+                label = f"_ir_s{self._str_counter}"
+                self._str_counter += 1
+                strings.append((label, content))
+                return label
+            case BinaryOperation(operation=operation, left=left, right=right):
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                temp = self._tmp()
+                out.append(IRBinaryOperation(destination=temp, left=left_value, operation=operation, right=right_value))
+                return temp
+            case Call(name=name) if name in self._carry_return_functions:
+                # ``carry_return`` callees report their result via CF,
+                # not AX.  The IR flow would store (garbage) AX to a
+                # temp; delegate to the AST codegen (which knows how
+                # to synthesise ``0``/``1`` from CF when the call's
+                # return value is actually needed).
+                temp = self._tmp()
+                out.append(IRBlock(node=Assign(expr=expr, name=temp)))
+                return temp
+            case Call(name=name, args=args):
+                arg_values = tuple(self._build_expr(a, out, strings=strings) for a in args)
+                temp = self._tmp()
+                out.append(IRCall(args=arg_values, destination=temp, name=name))
+                return temp
+            case Index(name=base, index=index_node):
+                index_value = self._build_expr(index_node, out, strings=strings)
+                temp = self._tmp()
+                out.append(IRIndex(base=base, destination=temp, index=index_value))
+                return temp
+            case LogicalOr() | LogicalAnd():
+                # Short-circuit boolean: lower to conditional set (0 or 1).
+                temp = self._tmp()
+                true_lbl = self._lbl("btrue")
+                end_lbl = self._lbl("bend")
+                self._build_cond_true(expr, true_lbl, out, strings=strings)
+                out.extend([
+                    IRCopy(destination=temp, source=0),
+                    IRJump(target=end_lbl),
+                    IRLabel(name=true_lbl),
+                    IRCopy(destination=temp, source=1),
+                    IRLabel(name=end_lbl),
+                ])
+                return temp
+            case _:
+                # Complex: use a temp + IRBlock to let AST codegen handle it.
+                temp = self._tmp()
+                out.append(IRBlock(node=Assign(expr=expr, name=temp)))
+                return temp
+
+
+# IR comparison operator set (used by _build_cond_false / _build_cond_true).
+COMPARISON_OPERATIONS = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
+# Invert a comparison operator (for _build_cond_true via IRBranchFalse).
+INVERT_COMPARISON = {"==": "!=", "!=": "==", "<": ">=", "<=": ">", ">": "<=", ">=": "<"}
+
+
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
 CHARACTER_ESCAPES = {
@@ -3397,14 +3907,37 @@ class X86CodeGenerator:
 
         Handles pinned variables, memory locals, named constants,
         integer literals, and general expressions (evaluated via AX).
+
+        Keeps :attr:`ax_local` consistent: any path that writes AX
+        (either directly because *register* is the accumulator, or
+        indirectly via the byte-scalar ``mov al / xor ah, ah``
+        sequence) updates the tracking so a subsequent
+        ``emit_register_from_argument`` with the previously-tracked
+        var name can't emit a stale ``mov <reg>, ax`` shortcut.
         """
+        ax_written = register == self.target.acc
+        # Default: if we end up writing AX for a load that does not
+        # leave a named variable in AX (int / constant / address /
+        # expression), clear the tracking.  Paths that do leave a
+        # named var in AX (memory scalar) override this below.
+        new_ax_local: str | None = self.ax_local
+        new_ax_is_byte: bool = self.ax_is_byte
         if isinstance(argument, Int):
             self.emit(f"        mov {register}, {argument.value}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS:
             self.emit_constant_reference(argument.name)
             self.emit(f"        mov {register}, {argument.name}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
             self.emit(f"        mov {register}, {self.constant_aliases[argument.name]}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name in self.pinned_register:
             source = self.pinned_register[argument.name]
             if len(register) < len(source):
@@ -3419,36 +3952,59 @@ class X86CodeGenerator:
                 self.emit(f"        movzx {register}, {source}")
             elif source != register:
                 self.emit(f"        mov {register}, {source}")
+            if ax_written and source != self.target.acc:
+                new_ax_local = argument.name
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name in self.register_aliased_globals:
             source = self.register_aliased_globals[argument.name]
             if len(register) < len(source):
                 source = self.target.loword(source)
             if source != register:
                 self.emit(f"        mov {register}, {source}")
+            if ax_written and source != self.target.acc:
+                new_ax_local = argument.name
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != self.target.acc:
                 source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {source}")
+            # AX unchanged in both branches: shortcut leaves tracking intact.
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
             self.emit(f"        mov {register}, _g_{argument.name}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and self._is_memory_scalar(argument.name):
             if self._is_byte_scalar(argument.name):
                 # Byte-scalar source into a word register: load via AL
                 # and zero-extend so the high byte is clean, then move
                 # into the target (or stop if target is already acc).
+                # AX gets clobbered even when the final target is not
+                # AX, so we must refresh the tracking either way.
                 self.emit(f"        mov al, [{self._local_address(argument.name)}]")
                 self.emit("        xor ah, ah")
                 if register != self.target.acc:
                     source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {register}, {source}")
+                new_ax_local = argument.name
+                new_ax_is_byte = True
             else:
                 self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
+                if ax_written:
+                    new_ax_local = argument.name
+                    new_ax_is_byte = False
         elif isinstance(argument, String):
             self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif (constant_expr := self._constant_expression(argument)) is not None:
             for name in self._collect_constant_references(argument):
                 self.emit_constant_reference(name)
             self.emit(f"        mov {register}, {constant_expr}")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         else:
             self.generate_expression(argument)
             if register != self.target.acc:
@@ -3456,6 +4012,12 @@ class X86CodeGenerator:
                 # (bx, cx, dx, si, di) need the 16-bit low word of eax.
                 source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {source}")
+            # generate_expression leaves its own tracking; do not
+            # override new_ax_local here.
+            new_ax_local = self.ax_local
+            new_ax_is_byte = self.ax_is_byte
+        self.ax_local = new_ax_local
+        self.ax_is_byte = new_ax_is_byte
 
     def emit_si_from_argument(self, argument: Node, /) -> None:
         """Load a string or expression argument into SI."""
@@ -3616,6 +4178,14 @@ class X86CodeGenerator:
                     self._register_inline_body(function)
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
+
+        # Build IR for all non-main, non-always-inline functions.  The IR
+        # is consumed by generate_function; main keeps the AST path because
+        # its special handling (argc/argv startup, printf fusion, frame-
+        # elide data labels) is deeply tied to the AST shape.
+        ir_program = IRBuilder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
+        ir_by_name = {f.ast_node.name: f for f in ir_program.functions if not f.ast_node.always_inline}
+
         # Emit main first so execution starts at PROGRAM_BASE.
         main_func = None
         helpers: list[Node] = []
@@ -3627,7 +4197,11 @@ class X86CodeGenerator:
         if main_func is not None:
             self.generate_function(main_func)
         for function in helpers:
-            self.generate_function(function)
+            ir_func = ir_by_name.get(function.name)
+            if ir_func is not None:
+                self.generate_function(ir_func)
+            else:
+                self.generate_function(function)
         self.peephole()
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
@@ -4340,8 +4914,132 @@ class X86CodeGenerator:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
 
-    def generate_function(self, function: Function, /) -> None:
+    # ------------------------------------------------------------------
+    # IR lowering
+    # ------------------------------------------------------------------
+
+    def _ir_value_to_ast(self, value: IRValue) -> Node:
+        """Convert an :data:`IRValue` to the equivalent simple AST leaf node."""
+        if isinstance(value, int):
+            return Int(value=value)
+        if value.startswith("_ir_s"):
+            content = self._ir_string_map.get(value)
+            if content is not None:
+                return String(content=content)
+        return Var(name=value)
+
+    @staticmethod
+    def _collect_ir_temps(body: list[IRInstruction]) -> list[str]:
+        """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for instruction in body:
+            destination: str | None = None
+            match instruction:
+                case IRBinaryOperation(destination=name) | IRCopy(destination=name) | IRIndex(destination=name):
+                    destination = name
+                case IRCall(destination=name):
+                    destination = name
+                case IRBlock(node=Assign(name=name)):
+                    destination = name
+                case _:
+                    pass
+            if destination is not None and destination.startswith("_ir_") and destination not in seen:
+                seen.add(destination)
+                result.append(destination)
+        return result
+
+    @staticmethod
+    def _always_exits_ir(body: list[IRInstruction]) -> bool:
+        """Return True if the IR body always ends with a function exit.
+
+        Only :class:`IRReturn` and :class:`IRBlock` wrapping an
+        always-exiting AST node count.  :class:`IRJump` does *not* —
+        a jump transfers control within the IR body (e.g. a ``break``
+        to a loop-end label that then falls off the function).  If we
+        treated trailing ``IRJump`` as "always exits", no epilogue
+        would be emitted and a ``break`` in a tail ``while`` would
+        fall into whatever function follows.
+        """
+        for instruction in reversed(body):
+            match instruction:
+                case IRLabel():
+                    continue  # skip trailing labels
+                case IRReturn():
+                    return True
+                case IRBlock(node=node):
+                    return X86CodeGenerator.always_exits([node])
+                case _:
+                    return False
+        return False
+
+    def lower_ir_body(self, body: list[IRInstruction]) -> None:
+        """Generate x86 assembly from a flat IR instruction list."""
+        for instruction in body:
+            self._lower_ir_instruction(instruction)
+
+    def _lower_ir_instruction(self, instruction: IRInstruction) -> None:
+        match instruction:
+            case IRBinaryOperation(destination=destination, operation=operation, left=left, right=right):
+                expression = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
+                self.emit_store_local(expression=expression, name=destination)
+            case IRCopy(destination=destination, source=source):
+                self.emit_store_local(expression=self._ir_value_to_ast(source), name=destination)
+            case IRCall(destination=None, name=name, args=args):
+                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
+                self.generate_call(call, discard_return=True)
+                self.ax_clear()
+            case IRCall(destination=destination, name=name, args=args):
+                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
+                self.emit_store_local(expression=call, name=destination)
+            case IRIndex(destination=destination, base=base, index=index):
+                expression = Index(index=self._ir_value_to_ast(index), name=base)
+                self.emit_store_local(expression=expression, name=destination)
+            case IRIndexAssign(base=base, index=index, source=source):
+                stmt = IndexAssign(expr=self._ir_value_to_ast(source), index=self._ir_value_to_ast(index), name=base)
+                self.generate_index_assign(stmt)
+            case IRLabel(name=name):
+                # Control can arrive at an IR label from any preceding
+                # branch / jump, so AX-tracking state (``ax_local`` /
+                # ``ax_is_byte``) accumulated on the fall-through path
+                # is not guaranteed on the jump path.  Clear the
+                # tracking so downstream ``emit_comparison`` / similar
+                # do a real load instead of reusing a stale AX.
+                self.ax_clear()
+                self.emit(f"{name}:")
+            case IRJump(target=target):
+                self.emit(f"        jmp {target}")
+            case IRBranchFalse(left=left, operation=operation, right=right, target=target):
+                condition = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
+                self.emit_condition_false_jump(condition=condition, context="ir", fail_label=target)
+            case IRCarryBranch(call_ast=call_ast, target=target, when=when):
+                # Tight ``call X / jc target`` (when="set") or ``jnc``
+                # (when="clear") for ``carry_return`` callees used in an
+                # ``if`` / ``while`` condition.  ``generate_call`` sets
+                # up args (regparm / stack) the same way a direct call
+                # would.
+                self.generate_call(call_ast, discard_return=True)
+                self.emit(f"        {'jc' if when == 'set' else 'jnc'} {target}")
+                self.ax_clear()
+            case IRReturn(value=value):
+                stmt = Return(value=self._ir_value_to_ast(value) if value is not None else None)
+                self.generate_return(stmt)
+            case IRInlineAsm(content=content):
+                for line in _decode_string_escapes(content).splitlines():
+                    self.emit(line)
+            case IRBlock(node=node):
+                self.generate_statement(node)
+
+    def generate_function(self, function: Function | IRFunction, /) -> None:
         """Generate assembly for a single function definition."""
+        # Unpack IRFunction: keep the IR body for code generation but use
+        # the original AST node for all frame-setup analysis.
+        ir_body: list[IRInstruction] | None = None
+        ir_strings: list[tuple[str, str]] = []
+        if isinstance(function, IRFunction):
+            ir_body = function.body
+            ir_strings = function.strings
+            function = function.ast_node
         name = function.name
         if function.always_inline:
             # No free-standing body; the function has been recorded in
@@ -4455,6 +5153,13 @@ class X86CodeGenerator:
 
         self.scan_locals(body)
 
+        # IR path: pre-allocate compiler-generated temporaries so the
+        # frame size is correct before the prologue is emitted.
+        if ir_body is not None:
+            for temp in self._collect_ir_temps(ir_body):
+                if temp not in self.locals:
+                    self.allocate_local(temp)
+
         # Non-main: pin parameters that won a candidate slot but weren't
         # claimed during scan_locals.  Parameters that don't fit stay on
         # the stack at [bp+N].
@@ -4472,6 +5177,12 @@ class X86CodeGenerator:
         for param in parameters:
             self.visible_vars.add(param.name)
         self.visible_vars.update(self.pinned_register)
+        # IR temps are visible throughout the function and typed as int.
+        if ir_body is not None:
+            for temp in self._collect_ir_temps(ir_body):
+                self.visible_vars.add(temp)
+                if temp not in self.variable_types:
+                    self.variable_types[temp] = "int"
 
         # Register calling convention: pinned parameters arrive in their
         # target register (caller loaded them before the call), and
@@ -4509,6 +5220,13 @@ class X86CodeGenerator:
                         offset = self.target.param_slot_base + stack_index * self.target.int_size
                         self.emit(f"        mov {register}, [{self.target.bp_register}+{offset}]")
 
+        # IR path: register string literals discovered during IR building.
+        self._ir_string_map: dict[str, str] = {}
+        if ir_strings:
+            for label, content in ir_strings:
+                self.strings.append((label, content))
+                self._ir_string_map[label] = content
+
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
             body = self.emit_argument_vector_startup(parameters, body=body)
@@ -4517,15 +5235,19 @@ class X86CodeGenerator:
         if name == "main":
             body = self.fuse_trailing_printf(body)
 
-        # Tail-call: if the last statement is a statement-level user-
-        # function call that qualifies, emit everything before it as
-        # usual and lower the trailing call as ``jmp`` (no ``ret``).
-        tail_call_last = name != "main" and body and isinstance(body[-1], Call) and self._is_tail_call_eligible(body[-1])
-        if tail_call_last:
-            self.generate_body(body[:-1])
-            self.generate_call(body[-1], tail_call=True)
+        if ir_body is not None:
+            # IR path: lower the flat instruction list directly.
+            self.lower_ir_body(ir_body)
         else:
-            self.generate_body(body)
+            # Tail-call: if the last statement is a statement-level user-
+            # function call that qualifies, emit everything before it as
+            # usual and lower the trailing call as ``jmp`` (no ``ret``).
+            tail_call_last = name != "main" and body and isinstance(body[-1], Call) and self._is_tail_call_eligible(body[-1])
+            if tail_call_last:
+                self.generate_body(body[:-1])
+                self.generate_call(body[-1], tail_call=True)
+            else:
+                self.generate_body(body)
 
         if name == "main":
             self.emit("        jmp FUNCTION_EXIT")
@@ -4538,6 +5260,16 @@ class X86CodeGenerator:
                     else:
                         directive = "dw 0"
                     self.emit(f"_l_{vname}: {directive}")
+        elif ir_body is not None:
+            # IR path: generate epilogue unless the body always exits.
+            # Tail-call optimization is not yet applied on the IR path.
+            if not self.elide_frame and not self._always_exits_ir(ir_body):
+                if self.frame_size > 0:
+                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+                self.emit(f"        pop {self.target.bp_register}")
+                self.emit("        ret")
+            elif self.elide_frame:
+                self.emit("        ret")
         elif tail_call_last:
             # The tail ``jmp`` already transferred control; no ``ret`` needed.
             pass

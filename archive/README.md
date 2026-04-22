@@ -8,14 +8,14 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 9664      | +1411 |
+| asm     | 8253        | 11668     | +3415 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 222       | -46   |
 | date    | 15          | 15        |  0    |
-| dns     | 724         | 1091      | +367  |
+| dns     | 724         | 1199      | +475  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2226      | +249  |
+| edit    | 1977        | 2342      | +365  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 161       | +26   |
 | mkdir   | 123         | 127       | +4    |
@@ -23,8 +23,8 @@ source is kept here for reference.
 | netinit | 72          | 63        | -9    |
 | netrecv | 334         | 375       | +41   |
 | netsend | 187         | 216       | +29   |
-| ping    | 1019        | 1184      | +165  |
-| shell   | 921         | 1217      | +296  |
+| ping    | 1019        | 1313      | +294  |
+| shell   | 921         | 1324      | +403  |
 | uptime  | 50          | 78        | +28   |
 
 **asm (+878):** Every ``handle_*`` and every function lives in pure C
