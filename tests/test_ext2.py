@@ -55,6 +55,26 @@ TESTS: list[ProgramTest] = [
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
+    ProgramTest(
+        "mkdir",
+        ["mkdir mydir", "ls mydir"],
+        r"^\.\./",  # '..' entry always present
+    ),
+    ProgramTest(
+        "mkdir_ls_root",
+        ["mkdir mydir", "ls"],
+        r"mydir/",
+    ),
+    ProgramTest(
+        "rename",
+        ["cp src/parse_ip.asm out.asm", "mv out.asm renamed.asm", "cat renamed.asm"],
+        r"^parse_ip:",
+    ),
+    ProgramTest(
+        "rename_dir",
+        ["mkdir mydir", "mv mydir newdir", "ls newdir"],
+        r"^\.\./",
+    ),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 
