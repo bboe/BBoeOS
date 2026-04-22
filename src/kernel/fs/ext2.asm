@@ -4,6 +4,7 @@
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
+;;; ext2_read_sec: SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; ext2_readonly: → CF set (stub for unsupported write operations)
 ;;;
 ;;; Internal helpers:
@@ -482,6 +483,46 @@ ext2_search_blk:
         pop cx
         pop bx
         stc
+        ret
+
+ext2_read_sec:
+        ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
+        ;; Translates the 32-bit byte position through the inode's direct block list.
+        ;; Input:  SI = FD entry pointer (FD_OFFSET_START = inode number)
+        ;; Output: SECTOR_BUFFER filled, BX = byte offset within sector; CF on error
+        push ax
+        push cx
+        push dx
+        ;; Decompose 32-bit position: block_index = pos >> 10; sector_in_block = (pos >> 9) & 1
+        mov ax, [si+FD_OFFSET_POSITION]
+        mov dx, [si+FD_OFFSET_POSITION+2]
+        mov bx, ax
+        and bx, 01FFh           ; BX = byte offset within sector (to return)
+        mov cx, ax
+        shr cx, 9
+        and cx, 1               ; CX = sector_in_block (0 or 1)
+        shr ax, 10              ; low 6 bits of block_index
+        shl dx, 6               ; high bits of block_index
+        or ax, dx               ; AX = block_index
+        push bx                 ; save byte offset
+        push cx                 ; save sector_in_block
+        push ax                 ; save block_index
+        mov ax, [si+FD_OFFSET_START]    ; inode number
+        call ext2_read_inode            ; BX = &inode in SECTOR_BUFFER; clobbers AX,CX,DX
+        pop ax                          ; AX = block_index
+        shl ax, 2                       ; AX = block_index * 4
+        add bx, EXT2_INODE_BLOCK        ; BX = &i_block[0] in SECTOR_BUFFER
+        add bx, ax                      ; BX = &i_block[block_index]
+        mov ax, [bx]                    ; AX = block number (low 16 bits)
+        pop cx                          ; CX = sector_in_block
+        pop bx                          ; BX = byte offset (re-save below)
+        push bx
+        mov bx, cx
+        call ext2_read_blk_sec          ; AX = block, BX = sector_in_block → SECTOR_BUFFER
+        pop bx                          ; BX = byte offset within sector (to return)
+        pop dx
+        pop cx
+        pop ax
         ret
 
         ;; State
