@@ -1186,6 +1186,8 @@ void handle_pop() {
         return;
     }
     int packed_register = parse_register();
+    int size = (packed_register >> 8) & 0xFF;
+    emit_operand_size_prefix(size);
     emit_byte(0x58 | (packed_register & 0xFF));
 }
 
@@ -1200,6 +1202,8 @@ void handle_push() {
     }
     int packed_register = parse_register();
     if (packed_register >= 0) {
+        int size = (packed_register >> 8) & 0xFF;
+        emit_operand_size_prefix(size);
         emit_byte(0x50 | (packed_register & 0xFF));
         return;
     }

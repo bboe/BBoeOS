@@ -37,9 +37,23 @@ pm32:
 pm_entry_32:
         mov ax, 0x1234
         or  ax, 1
+        ;; 32-bit push / pop under bits=32 emit bare 0x50+reg / 0x58+reg;
+        ;; bits=16 sibling requires a 0x66 operand-size prefix.  Mirror
+        ;; the pattern with 16-bit push under bits=32 (0x66-prefixed) so
+        ;; both directions are covered.
+        push eax
+        push ecx
+        pop  edx
+        pop  ebx
+        push ax
+        pop  bx
 [bits 16]
 pm16_back:
         mov ax, 0x5678
+        push eax
+        push ax
+        pop  ecx
+        pop  bx
 
         ;; align N pads current_address to a multiple of N with zero
         ;; bytes — exercises the STR_ALIGN directive added in phase 5.2.
