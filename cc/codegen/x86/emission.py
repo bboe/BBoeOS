@@ -200,8 +200,8 @@ class EmissionMixin:
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
-                    self.emit(f"        mov si, {die_label}")
-                    self.emit(f"        mov cx, {die_length}")
+                    self.emit(f"        mov {self.target.si_register}, {die_label}")
+                    self.emit(f"        mov {self.target.count_register}, {die_length}")
                     operator = self.emit_condition(condition=statement.cond, context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
                     self.emit(f"        {true_jump} FUNCTION_DIE")
@@ -373,7 +373,7 @@ class EmissionMixin:
             else:
                 self.emit(f"        call {name}")
             if stack_args:
-                self.emit(f"        add sp, {len(stack_args) * 2}")
+                self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             if use_pusha:
                 self.emit("        popa")
             else:
@@ -494,8 +494,7 @@ class EmissionMixin:
                 # collapses the paired ``xor ah, ah`` before a ``cmp
                 # al`` (or any other AL-only consumer) when the high
                 # byte is provably unused.
-                self.emit(f"        mov al, [{self._local_address(vname)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(vname)}]")
                 self.ax_is_byte = True
             else:
                 self.emit(f"        mov {self.target.acc}, [{self._local_address(vname)}]")
@@ -522,23 +521,20 @@ class EmissionMixin:
                 if const_base is not None:
                     addr = f"{const_base}+{offset}" if offset else const_base
                     if is_byte:
-                        self.emit(f"        mov al, [{addr}]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{addr}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register="si")
+                    self._emit_load_var(vname, register=self.target.si_register)
+                    si = self.target.si_register
                     if is_byte:
-                        if offset:
-                            self.emit(f"        mov al, [si+{offset}]")
-                        else:
-                            self.emit("        mov al, [si]")
-                        self.emit("        xor ah, ah")
+                        mem = f"[{si}+{offset}]" if offset else f"[{si}]"
+                        self.emit_byte_load_zx(mem)
                     elif offset:
-                        self.emit(f"        mov {self.target.acc}, [si+{offset}]")
+                        self.emit(f"        mov {self.target.acc}, [{si}+{offset}]")
                     else:
-                        self.emit(f"        mov {self.target.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
             else:
                 is_byte = self._is_byte_var(vname)
@@ -552,38 +548,37 @@ class EmissionMixin:
                         preserve_ax=False,
                     )
                     if is_byte:
-                        self.emit(f"        mov al, [{addr}]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{addr}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                     self.ax_clear()
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register="si")
+                    self._emit_load_var(vname, register=self.target.si_register)
+                    si = self.target.si_register
                     # If the index is a pinned variable and the access is
                     # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                         ireg = self.pinned_register[index_expression.name]
-                        self.emit(f"        add si, {self.target.low_word(ireg)}")
+                        self.emit(f"        add {si}, {ireg}")
                     elif isinstance(index_expression, (Var, Int)):
                         # Simple Var/Int load doesn't touch SI, so skip the
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                        self.emit(f"        add {si}, {self.target.acc}")
                     else:
-                        self.emit("        push si")
+                        self.emit(f"        push {si}")
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                        self.emit("        pop si")
-                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                        self.emit(f"        pop {si}")
+                        self.emit(f"        add {si}, {self.target.acc}")
                     if is_byte:
-                        self.emit("        mov al, [si]")
-                        self.emit("        xor ah, ah")
+                        self.emit_byte_load_zx(f"[{si}]")
                     else:
-                        self.emit(f"        mov {self.target.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
@@ -676,8 +671,7 @@ class EmissionMixin:
                     and left.name not in self.array_labels
                     and not self._is_byte_scalar(left.name)
                 ):
-                    self.emit(f"        mov al, [{self._local_address(left.name)}+1]")
-                    self.emit("        xor ah, ah")
+                    self.emit_byte_load_zx(f"[{self._local_address(left.name)}+1]")
                     self.ax_clear()
                     return
                 # Fast path: shr r, imm — one instruction, no CX scratch.
@@ -1069,15 +1063,15 @@ class EmissionMixin:
 
         self.emit(f"{name}:")
         if not self.elide_frame:
-            self.emit(f"        push {self.target.bp_register}")
-            self.emit(f"        mov {self.target.bp_register}, {self.target.sp_register}")
+            self.emit(f"        push {self.target.base_register}")
+            self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
             if self.frame_size > 0:
-                self.emit(f"        sub {self.target.sp_register}, {self.frame_size}")
+                self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
             if is_fastcall:
                 # Spill AX (the caller-supplied arg 0) into its local slot
                 # so the body can read it through the normal local path.
                 slot = self.locals[parameters[0].name]
-                self.emit(f"        mov [{self.target.bp_register}-{slot}], {self.target.acc}")
+                self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
@@ -1088,7 +1082,7 @@ class EmissionMixin:
                         register = self.pinned_register[param.name]
                         stack_index = i - 1 if is_fastcall else i
                         offset = self.target.param_slot_base + stack_index * self.target.int_size
-                        self.emit(f"        mov {register}, [{self.target.bp_register}+{offset}]")
+                        self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
 
         # IR path: register string literals discovered during IR building.
         self._ir_string_map: dict[str, str] = {}
@@ -1122,21 +1116,26 @@ class EmissionMixin:
         if name == "main":
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
+                # Plain int / pointer locals get the target's native
+                # integer width (``dw`` / ``dd``); ``unsigned long``
+                # always stays 4 bytes (``dd``) regardless of mode;
+                # byte-scalar locals always stay 1 byte (``db``).
+                int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
                 for vname in sorted(self.locals):
                     if self.variable_types.get(vname) == "unsigned long":
                         directive = "dd 0"
                     elif vname in self.byte_scalar_locals:
                         directive = "db 0"
                     else:
-                        directive = "dw 0"
+                        directive = int_directive
                     self.emit(f"_l_{vname}: {directive}")
         elif ir_body is not None:
             # IR path: generate epilogue unless the body always exits.
             # Tail-call optimization is not yet applied on the IR path.
             if not self.elide_frame and not self._always_exits_ir(ir_body):
                 if self.frame_size > 0:
-                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-                self.emit(f"        pop {self.target.bp_register}")
+                    self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+                self.emit(f"        pop {self.target.base_register}")
                 self.emit("        ret")
             elif self.elide_frame:
                 self.emit("        ret")
@@ -1150,8 +1149,8 @@ class EmissionMixin:
             self.emit("        ret")
         elif not self.always_exits(body):
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
         self.emit()
 
@@ -1172,11 +1171,10 @@ class EmissionMixin:
         chain_var = self._dispatch_chain_var(statement)
         if chain_var is not None and chain_var != self.ax_local:
             if self._is_byte_scalar(chain_var):
-                self.emit(f"        mov al, [{self._local_address(chain_var)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(chain_var)}]")
                 self.ax_is_byte = True
             else:
-                self.emit(f"        mov ax, [{self._local_address(chain_var)}]")
+                self.emit(f"        mov {self.target.acc}, [{self._local_address(chain_var)}]")
                 self.ax_is_byte = False
             self.ax_local = chain_var
         label_index = self.new_label()
@@ -1231,7 +1229,7 @@ class EmissionMixin:
                 guarded = False
             else:
                 guarded = self._si_scratch_guard_begin(name)
-                self._emit_load_var(name, register="si")
+                self._emit_load_var(name, register=self.target.si_register)
                 addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
@@ -1248,12 +1246,13 @@ class EmissionMixin:
                 guarded = False
             else:
                 guarded = self._si_scratch_guard_begin(name)
-                self._emit_load_var(name, register="si")
-                addr = f"si+{offset}" if offset else "si"
+                self._emit_load_var(name, register=self.target.si_register)
+                si = self.target.si_register
+                addr = f"{si}+{offset}" if offset else si
             if is_byte:
                 self.emit(f"        mov [{addr}], al")
             else:
-                self.emit(f"        mov [{addr}], ax")
+                self.emit(f"        mov [{addr}], {self.target.acc}")
             self._si_scratch_guard_end(guarded=guarded)
         else:
             const_base = self._resolve_constant(name)
@@ -1269,7 +1268,7 @@ class EmissionMixin:
                 if is_byte:
                     self.emit(f"        mov [{addr}], al")
                 else:
-                    self.emit(f"        mov [{addr}], ax")
+                    self.emit(f"        mov [{addr}], {self.target.acc}")
                 self.ax_clear()
             else:
                 # Variable index: compute address in SI, then store.
@@ -1278,29 +1277,30 @@ class EmissionMixin:
                 guarded = self._si_scratch_guard_begin(name)
                 self.generate_expression(statement.expr)
                 self.emit(f"        push {self.target.acc}")
-                self._emit_load_var(name, register="si")
+                self._emit_load_var(name, register=self.target.si_register)
+                si = self.target.si_register
                 # If the index is a simple Var/Int, evaluating it doesn't
                 # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                    self.emit(f"        add {si}, {self.target.acc}")
                 else:
-                    self.emit("        push si")
+                    self.emit(f"        push {si}")
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                    self.emit("        pop si")
-                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                    self.emit(f"        pop {si}")
+                    self.emit(f"        add {si}, {self.target.acc}")
                 self.emit(f"        pop {self.target.acc}")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
                 self.ax_clear()
                 if is_byte:
-                    self.emit("        mov [si], al")
+                    self.emit(f"        mov [{si}], al")
                 else:
-                    self.emit(f"        mov [si], {self.target.acc}")
+                    self.emit(f"        mov [{si}], {self.target.acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
     def generate_long_expression(self, expression: Node, /) -> None:
@@ -1332,9 +1332,9 @@ class EmissionMixin:
                     self.emit(f"        mov {self.target.dx_register}, [{address}+2]")
             else:
                 low_offset = self.locals[vname]
-                self.emit(f"        mov {self.target.acc}, [{self.target.bp_register}-{low_offset}]")
+                self.emit(f"        mov {self.target.acc}, [{self.target.base_register}-{low_offset}]")
                 if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov {self.target.dx_register}, [{self.target.bp_register}-{low_offset - 2}]")
+                    self.emit(f"        mov {self.target.dx_register}, [{self.target.base_register}-{low_offset - 2}]")
             self.ax_is_byte = False
             self.ax_local = None
             return
@@ -1360,8 +1360,8 @@ class EmissionMixin:
             if isinstance(value, Int) and value.value in (0, 1):
                 self.emit("        clc" if value.value == 1 else "        stc")
                 if self.frame_size > 0:
-                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-                self.emit(f"        pop {self.target.bp_register}")
+                    self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+                self.emit(f"        pop {self.target.base_register}")
                 self.emit("        ret")
                 return
             # Bool-valued expression: evaluate it into the CF via the
@@ -1373,21 +1373,21 @@ class EmissionMixin:
             self.emit_condition_true_jump(condition=value, context="return", success_label=true_label)
             self.emit("        stc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
             self.emit(f"{true_label}:")
             self.emit("        clc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-            self.emit(f"        pop {self.target.bp_register}")
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
             self.emit("        ret")
             return
         if statement.value is not None:
             self.generate_expression(statement.value)
         if self.frame_size > 0:
-            self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
-        self.emit(f"        pop {self.target.bp_register}")
+            self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+        self.emit(f"        pop {self.target.base_register}")
         self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:

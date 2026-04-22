@@ -62,7 +62,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=2, name="checksum")
         buffer_argument, length_argument = arguments
         self.emit_si_from_argument(buffer_argument)
-        self.emit_register_from_argument(argument=length_argument, register="cx")
+        self.emit_register_from_argument(argument=length_argument, register=self.target.count_register)
         label_index = self.new_label()
         self.emit("        cld")
         self.emit("        xor bx, bx")
@@ -105,7 +105,7 @@ class BuiltinsMixin:
         ``mov bx, <fd> / mov ah, SYS_IO_CLOSE / int 30h``.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="close")
-        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
         self._emit_syscall("IO_CLOSE")
 
     def builtin_datetime(self, arguments: list[Node], /) -> None:
@@ -130,7 +130,7 @@ class BuiltinsMixin:
             raise CompileError(message, line=argument.line)
         label = self.new_string_label(argument.content)
         length = string_byte_length(argument.content)
-        self.emit(f"        mov si, {label}")
+        self.emit(f"        mov {self.target.si_register}, {label}")
         self.emit(f"        mov {self.target.count_register}, {length}")
         self.emit("        jmp FUNCTION_DIE")
 
@@ -146,7 +146,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="exec")
         self.emit_si_from_argument(arguments[0])
         self._emit_syscall("EXEC")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_exit(self, arguments: list[Node], /) -> None:
@@ -166,8 +166,8 @@ class BuiltinsMixin:
         without touching C callers.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="far_read16")
-        self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit(f"        mov {self.target.acc}, {self.target.far_ref('bx')}")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self.emit(f"        mov {self.target.acc}, {self.target.far_ref(self.target.bx_register)}")
         self.ax_clear()
 
     def builtin_far_read8(self, arguments: list[Node], /) -> None:
@@ -179,9 +179,9 @@ class BuiltinsMixin:
         and leave the byte load unchanged.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="far_read8")
-        self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit(f"        mov al, {self.target.far_ref('bx')}")
-        self.emit("        xor ah, ah")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self.emit(f"        mov al, {self.target.far_ref(self.target.bx_register)}")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_far_write16(self, arguments: list[Node], /) -> None:
@@ -196,14 +196,16 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=2, name="far_write16")
         offset_argument, value_argument = arguments
         if isinstance(value_argument, Int):
-            self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        mov {self.target.word_size} {self.target.far_ref('bx')}, {value_argument.value & 0xFFFF}")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            self.emit(
+                f"        mov {self.target.word_size} {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}"
+            )
         else:
             self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
             self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
             self.emit(f"        pop {self.target.acc}")
-            self.emit(f"        mov {self.target.far_ref('bx')}, {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
         self.ax_clear()
 
     def builtin_far_write8(self, arguments: list[Node], /) -> None:
@@ -218,14 +220,14 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=2, name="far_write8")
         offset_argument, value_argument = arguments
         if isinstance(value_argument, Int):
-            self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        mov byte {self.target.far_ref('bx')}, {value_argument.value & 0xFF}")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            self.emit(f"        mov byte {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFF}")
         else:
             self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
             self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=offset_argument, register="bx")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
             self.emit(f"        pop {self.target.acc}")
-            self.emit(f"        mov {self.target.far_ref('bx')}, al")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, al")
         self.ax_clear()
 
     def builtin_fstat(self, arguments: list[Node], /) -> None:
@@ -237,9 +239,9 @@ class BuiltinsMixin:
         discarded here.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="fstat")
-        self.emit_register_from_argument(argument=arguments[0], register="bx")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
         self._emit_syscall("IO_FSTAT")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_getchar(self, arguments: list[Node], /) -> None:
@@ -250,7 +252,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=0, name="getchar")
         self.emit("        call FUNCTION_GET_CHARACTER")
-        self.emit("        xor ah, ah")
+        self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
     def builtin_mac(
@@ -267,7 +269,7 @@ class BuiltinsMixin:
         Returns 0 on success, 1 if no NIC is present.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="mac")
-        self.emit_register_from_argument(argument=arguments[0], register="di")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.di_register)
         self._emit_syscall("NET_MAC")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
@@ -280,9 +282,9 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=3, name="memcpy")
         destination_argument, source_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=destination_argument, register="di")
-        self.emit_register_from_argument(argument=source_argument, register="si")
-        self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=destination_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=source_argument, register=self.target.si_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
         self.emit("        cld")
         self.emit("        rep movsb")
         self.ax_clear()
@@ -324,7 +326,7 @@ class BuiltinsMixin:
         self._emit_syscall("NET_OPEN")
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
-        self.emit("        mov ax, -1")
+        self.emit(f"        mov {self.target.acc}, -1")
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
@@ -370,7 +372,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=2, name="parse_ip")
         self.emit_si_from_argument(arguments[0])
-        self.emit_register_from_argument(argument=arguments[1], register="di")
+        self.emit_register_from_argument(argument=arguments[1], register=self.target.di_register)
         self.emit("        call parse_ip")
         self.required_includes.add("parse_ip.asm")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
@@ -421,7 +423,7 @@ class BuiltinsMixin:
         # Fast path: no '%' at all → emit print_string directly.
         if "%" not in fmt and len(arguments) == 1:
             label = self.new_string_label(fmt)
-            self.emit(f"        mov di, {label}")
+            self.emit(f"        mov {self.target.di_register}, {label}")
             self.emit("        call FUNCTION_PRINT_STRING")
             return
         # Count format specifiers (excluding %%) to validate argument count.
@@ -440,13 +442,13 @@ class BuiltinsMixin:
         # Push arguments right-to-left.
         for arg in reversed(arguments[1:]):
             self.generate_expression(arg)
-            self.emit("        push ax")
+            self.emit(f"        push {self.target.acc}")
         # Push format string pointer.
         label = self.new_string_label(fmt)
         self.emit(f"        push {label}")
         self.emit("        call FUNCTION_PRINTF")
-        stack_size = len(arguments) * 2
-        self.emit(f"        add sp, {stack_size}")
+        stack_size = len(arguments) * self.target.int_size
+        self.emit(f"        add {self.target.stack_register}, {stack_size}")
 
     def builtin_putchar(self, arguments: list[Node], /) -> None:
         """Generate code for the putchar() builtin."""
@@ -470,9 +472,9 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=3, name="read")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
-        self.emit_register_from_argument(argument=buffer_argument, register="di")
-        self.emit_register_from_argument(argument=count_argument, register="cx")
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=buffer_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
         self._emit_syscall("IO_READ")
         self.ax_clear()
 
@@ -496,10 +498,10 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
         fd_argument, buffer_argument, len_argument, port_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
-        self.emit_register_from_argument(argument=buffer_argument, register="di")
-        self.emit_register_from_argument(argument=len_argument, register="cx")
-        self.emit_register_from_argument(argument=port_argument, register="dx")
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=buffer_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=len_argument, register=self.target.count_register)
+        self.emit_register_from_argument(argument=port_argument, register=self.target.dx_register)
         self._emit_syscall("NET_RECVFROM")
         self.ax_clear()
 
@@ -519,7 +521,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=2, name="rename")
         self.emit_si_from_argument(arguments[0])
-        self.emit_register_from_argument(argument=arguments[1], register="di")
+        self.emit_register_from_argument(argument=arguments[1], register=self.target.di_register)
         self._emit_syscall("FS_RENAME")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
@@ -533,48 +535,48 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=6, name="sendto")
         fd_argument, buf_argument, len_argument, ip_argument, sport_argument, dport_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
         self.emit_si_from_argument(buf_argument)
-        self.emit_register_from_argument(argument=len_argument, register="cx")
-        self.emit_register_from_argument(argument=ip_argument, register="di")
-        self.emit_register_from_argument(argument=sport_argument, register="dx")
-        self.emit(f"        push {self.target.bp_register}")
+        self.emit_register_from_argument(argument=len_argument, register=self.target.count_register)
+        self.emit_register_from_argument(argument=ip_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=sport_argument, register=self.target.dx_register)
+        self.emit(f"        push {self.target.base_register}")
         if isinstance(dport_argument, Int):
-            self.emit(f"        mov {self.target.bp_register}, {dport_argument.value}")
+            self.emit(f"        mov {self.target.base_register}, {dport_argument.value}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.NAMED_CONSTANTS:
-            self.emit(f"        mov {self.target.bp_register}, {dport_argument.name}")
+            self.emit(f"        mov {self.target.base_register}, {dport_argument.name}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
-            self.emit(f"        mov {self.target.bp_register}, {self.pinned_register[dport_argument.name]}")
+            self.emit(f"        mov {self.target.base_register}, {self.pinned_register[dport_argument.name]}")
         elif (
             isinstance(dport_argument, Var)
             and self._is_memory_scalar(dport_argument.name)
             and not self._is_byte_scalar(dport_argument.name)
         ):
-            self.emit(f"        mov {self.target.bp_register}, [{self._local_address(dport_argument.name)}]")
+            self.emit(f"        mov {self.target.base_register}, [{self._local_address(dport_argument.name)}]")
         else:
             self.generate_expression(dport_argument)
-            self.emit(f"        mov {self.target.bp_register}, {self.target.acc}")
+            self.emit(f"        mov {self.target.base_register}, {self.target.acc}")
         self._emit_syscall("NET_SENDTO")
-        self.emit(f"        pop {self.target.bp_register}")
+        self.emit(f"        pop {self.target.base_register}")
         # Normalize the CF error signal into AX = -1 so callers can
         # check the return value with ``< 0``.
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
-        self.emit("        mov ax, -1")
+        self.emit(f"        mov {self.target.acc}, -1")
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
     def builtin_set_exec_arg(self, arguments: list[Node], /) -> None:
         """Generate code for the set_exec_arg(arg) builtin.
 
-        Writes the 16-bit pointer *arg* to ``[EXEC_ARG]`` so that
+        Writes the pointer *arg* to ``[EXEC_ARG]`` so that
         ``FUNCTION_PARSE_ARGV`` in the next exec()'d program can find
         it.  Pass NULL (0) to clear.  Used by the shell to forward
         command arguments into child programs.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="set_exec_arg")
         self.generate_expression(arguments[0])
-        self.emit("        mov [EXEC_ARG], ax")
+        self.emit(f"        mov [EXEC_ARG], {self.target.acc}")
 
     def builtin_shutdown(self, arguments: list[Node], /) -> None:
         """Generate code for the shutdown() builtin.
@@ -593,7 +595,7 @@ class BuiltinsMixin:
         int 30h``.  Busy-waits for the requested duration.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="sleep")
-        self.emit_register_from_argument(argument=arguments[0], register="cx")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.count_register)
         self._emit_syscall("RTC_SLEEP")
 
     def builtin_strlen(self, arguments: list[Node], /) -> None:
@@ -603,7 +605,7 @@ class BuiltinsMixin:
         string length in AX.  Uses ``repne scasb`` (clobbers CX, DI).
         """
         self._check_argument_count(arguments=arguments, expected=1, name="strlen")
-        self.emit_register_from_argument(argument=arguments[0], register="di")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.di_register)
         self.emit("        xor al, al")
         self.emit(f"        mov {self.target.count_register}, 0FFFFh")
         self.emit("        cld")
@@ -651,8 +653,8 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=3, name="write")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=buffer_argument, register="si")
-        self.emit_register_from_argument(argument=count_argument, register="cx")
-        self.emit_register_from_argument(argument=fd_argument, register="bx")
+        self.emit_register_from_argument(argument=buffer_argument, register=self.target.si_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
         self._emit_syscall("IO_WRITE")
         self.ax_clear()

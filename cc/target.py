@@ -24,6 +24,12 @@ EREG_LOW_WORD: dict[str, str] = {
     "esp": "sp",
 }
 
+#: Inverse of :data:`EREG_LOW_WORD`: widen a 16-bit GP name to its
+#: 32-bit E-register.  Used by :meth:`X86CodegenTarget32.widen_gp` to
+#: promote user-supplied ``asm_register("si")`` aliases and other
+#: stored 16-bit names when the target is 32-bit flat pmode.
+LOW_WORD_EREG: dict[str, str] = {v: k for k, v in EREG_LOW_WORD.items()}
+
 
 class CodegenTarget(ABC):
     """Architecture-independent interface for code-generation targets.
@@ -36,14 +42,12 @@ class CodegenTarget(ABC):
 
     #: Accumulator register name (e.g. ``"ax"`` / ``"eax"``).
     acc: str
-    #: Counter / shift register name.
+    #: Counter / shift register name (``"cx"`` / ``"ecx"``).
     count_register: str
-    #: Data register name.
-    dx_register: str
     #: Base-pointer register name.
-    bp_register: str
+    base_register: str
     #: Stack-pointer register name.
-    sp_register: str
+    stack_register: str
     #: NASM size keyword for the native integer width (``"word"`` / ``"dword"``).
     word_size: str
     #: ``sizeof(int)`` in bytes.
@@ -78,13 +82,48 @@ class CodegenTarget(ABC):
         """
         return reg
 
+    @staticmethod
+    def widen_gp(reg: str) -> str:
+        """Return the target-width GP register name for a 16-bit alias.
+
+        Default is the identity — correct for 16-bit x86 (``"si"`` →
+        ``"si"``) and for any non-x86 ISA that doesn't partition GP
+        names by width.  32-bit x86 overrides to map ``"si"`` →
+        ``"esi"`` so stored 16-bit names (``asm_register("si")``,
+        pinned register values, cached ``[bp+N]`` indexes) read at
+        the target's native width wherever they're emitted.
+        """
+        return reg
+
 
 class X86CodegenTarget(CodegenTarget):
     """Shared state for all x86 BBoeOS targets.
 
     Both the 16-bit real-mode and 32-bit flat-pmode targets use the
     same BBoeOS ``int 30h`` syscall ABI and x86 E-register aliasing.
+    The ``bx`` / ``dx`` / ``si`` / ``di`` register fields live on this
+    class (not ``CodegenTarget``) because they name physical x86
+    registers; a future non-x86 backend would subclass
+    ``CodegenTarget`` directly and expose its own role-shaped
+    register names instead.
     """
+
+    #: Base / general-purpose register (``"bx"`` / ``"ebx"``).  Holds
+    #: the BBoeOS syscall fd argument and serves as a general
+    #: pointer scratch for indexed-memory addressing.
+    bx_register: str
+    #: Destination-index register (``"di"`` / ``"edi"``).  Loaded
+    #: with destination-pointer arguments to string-op / syscall
+    #: builtins (``memcpy``, ``read``, ``recvfrom``, ``mac``, …).
+    di_register: str
+    #: Data register (``"dx"`` / ``"edx"``).  Half of the ``mul`` /
+    #: ``div`` result pair (DX:AX / EDX:EAX) and the UDP ``sendto`` /
+    #: ``recvfrom`` port / remainder argument register.
+    dx_register: str
+    #: Source-index register (``"si"`` / ``"esi"``).  Loaded with
+    #: source-pointer arguments to string-op / syscall builtins
+    #: (``mov``, ``die``, ``exec``, ``write``, ``sendto``, …).
+    si_register: str
 
     #: BBoeOS kernel ABI: every syscall uses ``int 30h``.
     SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -120,10 +159,13 @@ class X86CodegenTarget16(X86CodegenTarget):
     """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
 
     acc = "ax"
+    base_register = "bp"
+    bx_register = "bx"
     count_register = "cx"
+    di_register = "di"
     dx_register = "dx"
-    bp_register = "bp"
-    sp_register = "sp"
+    si_register = "si"
+    stack_register = "sp"
     word_size = "word"
     int_size = 2
     param_slot_base = 4
@@ -154,10 +196,13 @@ class X86CodegenTarget32(X86CodegenTarget):
     """32-bit flat-pmode x86 target (BBoeOS ring-0 protected mode)."""
 
     acc = "eax"
+    base_register = "ebp"
+    bx_register = "ebx"
     count_register = "ecx"
+    di_register = "edi"
     dx_register = "edx"
-    bp_register = "ebp"
-    sp_register = "esp"
+    si_register = "esi"
+    stack_register = "esp"
     word_size = "dword"
     int_size = 4
     param_slot_base = 8
@@ -182,3 +227,8 @@ class X86CodegenTarget32(X86CodegenTarget):
     def far_ref(base_reg: str) -> str:
         """Flat DS covers all memory; no segment override needed."""
         return f"[{base_reg}]"
+
+    @staticmethod
+    def widen_gp(reg: str) -> str:
+        """Promote a 16-bit GP register name to its E-register form."""
+        return LOW_WORD_EREG.get(reg, reg)

@@ -350,8 +350,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         vname = node.name
         offset = node.index.value
         guarded = self._si_scratch_guard_begin(vname)
-        self._emit_load_var(vname, register="si")
-        operand = f"byte [si+{offset}]" if offset else "byte [si]"
+        self._emit_load_var(vname, register=self.target.si_register)
+        si = self.target.si_register
+        operand = f"byte [{si}+{offset}]" if offset else f"byte [{si}]"
         return (operand, guarded)
 
     def _si_scratch_guard_begin(self, base_var: str | None = None, /) -> bool:
@@ -369,17 +370,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
 
         The caller pairs the guard with :meth:`_si_scratch_guard_end`.
         """
-        if not any(register == "si" for register in self.register_aliased_globals.values()):
+        si = self.target.si_register
+        if not any(register == si for register in self.register_aliased_globals.values()):
             return False
-        if base_var is not None and self.register_aliased_globals.get(base_var) == "si":
+        if base_var is not None and self.register_aliased_globals.get(base_var) == si:
             return False
-        self.emit("        push si")
+        self.emit(f"        push {si}")
         return True
 
     def _si_scratch_guard_end(self, *, guarded: bool) -> None:
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
-            self.emit("        pop si")
+            self.emit(f"        pop {self.target.si_register}")
 
     def _emit_constant_base_index_addr(
         self,
@@ -412,26 +414,32 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             sign = 1 if index.operation == "+" else -1
             displacement = sign * index.right.value * element_size
             index = index.left
-        base_register = "si"
+        si = self.target.si_register
+        base_register = si
         if isinstance(index, Int):
             displacement += index.value * element_size
-            self.emit("        xor si, si")
-        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
+            self.emit(f"        xor {si}, {si}")
+        elif (
+            is_byte
+            and isinstance(index, Var)
+            and index.name in self.pinned_register
+            and self.pinned_register[index.name] in (self.target.di_register, self.target.bx_register)
+        ):
             base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
-            self.emit(f"        mov si, {self.target.low_word(self.pinned_register[index.name])}")
+            self.emit(f"        mov {si}, {self.pinned_register[index.name]}")
             if not is_byte:
                 if self.target.int_size == 4:
-                    self.emit("        shl si, 2")
+                    self.emit(f"        shl {si}, 2")
                 else:
-                    self.emit("        add si, si")
+                    self.emit(f"        add {si}, {si}")
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
-            self.emit(f"        mov si, [{self._local_address(index.name)}]")
+            self.emit(f"        mov {si}, [{self._local_address(index.name)}]")
             if not is_byte:
                 if self.target.int_size == 4:
-                    self.emit("        shl si, 2")
+                    self.emit(f"        shl {si}, 2")
                 else:
-                    self.emit("        add si, si")
+                    self.emit(f"        add {si}, {si}")
         else:
             if preserve_ax:
                 self.emit(f"        push {self.target.acc}")
@@ -441,7 +449,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        shl {self.target.acc}, 2")
                 else:
                     self.emit(f"        add {self.target.acc}, {self.target.acc}")
-            self.emit(f"        mov si, {self.target.low_word(self.target.acc)}")
+            self.emit(f"        mov {si}, {self.target.acc}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
         addr = const_base
@@ -453,14 +461,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
     def _emit_global_storage(self) -> None:
         """Emit ``_g_<name>`` data cells for every initialized global, once at tail.
 
-        Scalars lay out as a single ``dw``/``db`` with the constant initializer.
-        Initialized arrays use ``db``/``dw`` literals matching the element type.
-        Zero-initialized globals (no initializer) are deferred to BSS: they are
-        collected in ``self.bss_vars`` and emitted by ``_emit_bss_trailer`` as
-        EQU definitions pointing past the binary end.
+        Scalars lay out as a single ``dw`` / ``dd`` cell (target's native
+        int width) / ``db`` (byte scalars) with the constant initializer.
+        Initialized arrays use ``db`` / ``dw`` / ``dd`` literals matching
+        the element type.  Zero-initialized globals (no initializer) are
+        deferred to BSS: they are collected in ``self.bss_vars`` and
+        emitted by ``_emit_bss_trailer`` as EQU definitions pointing past
+        the binary end.
         """
         if not self.global_scalars and not self.global_arrays:
             return
+        int_directive = "dd" if self.target.int_size == 4 else "dw"
         self.emit(";; --- global data ---")
         for name in sorted(self.global_scalars):
             declaration = self.global_scalars[name]
@@ -469,17 +480,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # so no ``_g_<name>`` label is emitted.
                 continue
             if declaration.init is None:
-                stride = 1 if self._is_byte_scalar_global(name) else 2
+                stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 self.bss_vars.append((name, str(stride)))
             else:
                 init_expression = self._constant_expression(declaration.init)
-                directive = "db" if self._is_byte_scalar_global(name) else "dw"
+                directive = "db" if self._is_byte_scalar_global(name) else int_directive
                 self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
-            stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
+            is_byte = declaration.type_name in self.BYTE_TYPES
+            stride = 1 if is_byte else self.target.int_size
             if declaration.init is not None:
-                directive = "db" if declaration.type_name in self.BYTE_TYPES else "dw"
+                directive = "db" if is_byte else int_directive
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
                     for element in declaration.init.elements
@@ -582,8 +594,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 return f"_l_{name}"
             offset = self.locals[name]
             if offset > 0:
-                return f"{self.target.bp_register}-{offset}"
-            return f"{self.target.bp_register}+{-offset}"
+                return f"{self.target.base_register}-{offset}"
+            return f"{self.target.base_register}+{-offset}"
         if name in self.register_aliased_globals:
             message = f"register-aliased global '{name}' has no memory address"
             raise CompileError(message)
@@ -616,7 +628,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit(f"        push {self.pinned_register[arg.name]}")
         else:
             self.generate_expression(arg)
-            self.emit("        push ax")
+            self.emit(f"        push {self.target.acc}")
 
     def _emit_register_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
         """Emit ``mov`` instructions that place args in target registers.
@@ -710,8 +722,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # Byte-scalar source into a word target: byte-load +
                 # zero-extend, then shuttle into the target if it
                 # isn't acc already.
-                self.emit(f"        mov al, [{self._local_address(arg.name)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(arg.name)}]")
                 if target != self.target.acc:
                     source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {target}, {source}")
@@ -856,7 +867,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     if declaration.init is not None:
                         message = f"register-aliased global '{name}' cannot have a constant initializer (initialize from main() instead)"
                         raise CompileError(message, line=declaration.line)
-                    self.register_aliased_globals[name] = declaration.asm_register
+                    # Widen the user's 16-bit alias ("si") to the target
+                    # width ("esi" in 32-bit pmode) so every downstream
+                    # read emits the right-width register without a
+                    # per-use lookup.
+                    self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t"):
@@ -1151,17 +1166,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
-    def allocate_local(self, name: str, /, *, size: int = 2) -> int:
+    def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.
 
         Args:
             name: local variable name.
-            size: slot size in bytes (2 for ints/pointers, 4 for unsigned long).
+            size: slot size in bytes.  Defaults to the target's native
+                integer width (2 on 16-bit real mode, 4 on 32-bit flat
+                pmode) so plain ``int`` / pointer locals pick up the
+                right width without caller-side branching.  Pass ``1``
+                explicitly for byte-typed scalars and ``4`` for
+                ``unsigned long`` pairs.
 
         Returns:
             The current frame size after allocation.
 
         """
+        if size is None:
+            size = self.target.int_size
         self.frame_size += size
         self.locals[name] = self.frame_size
         return self.frame_size
@@ -1206,7 +1228,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         in the pool so no extra exclusion is needed for subscript
         presence.
         """
-        pool = (*self.target.register_pool, "bp") if self.elide_frame else self.target.register_pool
+        pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
         def visit(node: Node) -> None:
@@ -1282,6 +1304,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 continue
             self.virtual_long_locals.add(name)
 
+    def emit_accumulator_zx_from_al(self) -> None:
+        """Zero-extend AL (byte result) to the target accumulator.
+
+        16-bit real mode: ``xor ah, ah`` — clears AH, leaving AX = AL.
+        32-bit flat pmode: ``movzx eax, al`` — clears bits 8-31,
+        leaving EAX = AL.  Used after syscalls and byte-returning
+        builtins (``exec`` / ``chmod`` / the carry-flag normalize path
+        in ``emit_error_syscall_tail``) where the kernel ABI delivers
+        the result in AL but the caller's code expects a full
+        accumulator-width integer.
+        """
+        if self.target.int_size == 2:
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, al")
+
     def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
@@ -1309,7 +1347,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         self.constant_aliases[argv_name] = "ARGV"
 
         self.emit("        cld")
-        self.emit("        mov di, ARGV")
+        self.emit(f"        mov {self.target.di_register}, ARGV")
         self.emit("        call FUNCTION_PARSE_ARGV")
 
         # Try to fuse the first body statement: if (argc != N) die(msg)
@@ -1334,15 +1372,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 die_label = self.new_string_label(die_message.content)
                 die_length = string_byte_length(die_message.content)
                 expected = first.cond.right.value
-                self.emit(f"        cmp cx, {expected}")
-                self.emit(f"        mov si, {die_label}")
-                self.emit(f"        mov cx, {die_length}")
+                self.emit(f"        cmp {self.target.count_register}, {expected}")
+                self.emit(f"        mov {self.target.si_register}, {die_label}")
+                self.emit(f"        mov {self.target.count_register}, {die_length}")
                 self.emit("        jne FUNCTION_DIE")
                 fused_argc = True
                 body = body[1:]
 
         if argc_name and not fused_argc:
-            self.emit(f"        mov [{self._local_address(argc_name)}], cx")
+            self.emit(f"        mov [{self._local_address(argc_name)}], {self.target.count_register}")
         return body
 
     def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
@@ -1372,6 +1410,29 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.generate_expression(right)
             self.emit(f"        mov {self.target.count_register}, {self.target.acc}")
             self.emit(f"        pop {self.target.acc}")
+
+    def emit_byte_load_zx(self, mem_operand: str, /) -> None:
+        """Load a byte from *mem_operand* into the accumulator, zero-extended.
+
+        On 16-bit real mode, emits ``mov al, <mem> / xor ah, ah`` — the
+        cheap 3-byte + 2-byte sequence the 8086 / early peepholes
+        (``peephole_dead_ah``, ``peephole_redundant_byte_mask``) expect
+        and can fuse through.  On 32-bit flat pmode, emits ``movzx eax,
+        byte <mem>`` so bits 16-31 of EAX stay clean — the old
+        ``mov al / xor ah, ah`` pair would leave EAX's upper word
+        whatever the caller last wrote to it, and a downstream
+        ``test eax, eax`` would read stale bits.
+
+        ``mem_operand`` is the bracket-enclosed memory reference
+        (``[addr]`` / ``[bp-4]`` / ``[si+12]`` / …) — callers don't
+        include the ``byte`` size prefix; this helper adds it in the
+        32-bit branch.
+        """
+        if self.target.int_size == 2:
+            self.emit(f"        mov al, {mem_operand}")
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, byte {mem_operand}")
 
     def emit_comparison(self, left: Node, right: Node, /) -> None:
         """Generate a comparison, leaving flags set for a conditional jump.
@@ -1593,8 +1654,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         """
         if fuse_die is not None:
             die_label, die_length = fuse_die
-            self.emit(f"        mov si, {die_label}")
-            self.emit(f"        mov cx, {die_length}")
+            self.emit(f"        mov {self.target.si_register}, {die_label}")
+            self.emit(f"        mov {self.target.count_register}, {die_length}")
             self.emit("        jc FUNCTION_DIE")
             return
         if fuse_exit:
@@ -1603,12 +1664,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
         if preserve_al:
-            self.emit("        xor ah, ah")
+            self.emit_accumulator_zx_from_al()
         else:
-            self.emit("        mov ax, 1")
+            self.emit(f"        mov {self.target.acc}, 1")
         self.emit(f"        jmp .done_{label_index}")
         self.emit(f".ok_{label_index}:")
-        self.emit("        xor ax, ax")
+        self.emit(f"        xor {self.target.acc}, {self.target.acc}")
         self.emit(f".done_{label_index}:")
 
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
@@ -1690,8 +1751,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # into the target (or stop if target is already acc).
                 # AX gets clobbered even when the final target is not
                 # AX, so we must refresh the tracking either way.
-                self.emit(f"        mov al, [{self._local_address(argument.name)}]")
-                self.emit("        xor ah, ah")
+                self.emit_byte_load_zx(f"[{self._local_address(argument.name)}]")
                 if register != self.target.acc:
                     source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {register}, {source}")
@@ -1729,20 +1789,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         self.ax_is_byte = new_ax_is_byte
 
     def emit_si_from_argument(self, argument: Node, /) -> None:
-        """Load a string or expression argument into SI."""
+        """Load a string or expression argument into SI (or ESI in 32-bit)."""
+        si = self.target.si_register
         if isinstance(argument, String):
-            self.emit(f"        mov si, {self.new_string_label(argument.content)}")
+            self.emit(f"        mov {si}, {self.new_string_label(argument.content)}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
-            self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
+            self.emit(f"        mov {si}, {self.constant_aliases[argument.name]}")
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
-            self.emit(f"        mov si, _g_{argument.name}")
+            self.emit(f"        mov {si}, _g_{argument.name}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
             for name in self._collect_constant_references(argument):
                 self.emit_constant_reference(name)
-            self.emit(f"        mov si, {constant_expr}")
+            self.emit(f"        mov {si}, {constant_expr}")
         else:
             self.generate_expression(argument)
-            self.emit("        mov si, ax")
+            self.emit(f"        mov {si}, {self.target.acc}")
 
     def emit_store_local(self, *, expression: Node, name: str) -> None:
         """Generate an expression and store the result in a local variable.
@@ -1770,9 +1831,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        mov [{address}+2], {self.target.dx_register}")
             else:
                 low_offset = self.locals[name]
-                self.emit(f"        mov [{self.target.bp_register}-{low_offset}], {self.target.acc}")
+                self.emit(f"        mov [{self.target.base_register}-{low_offset}], {self.target.acc}")
                 if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov [{self.target.bp_register}-{low_offset - 2}], {self.target.dx_register}")
+                    self.emit(f"        mov [{self.target.base_register}-{low_offset - 2}], {self.target.dx_register}")
             self.ax_is_byte = False
             self.ax_local = None
             return
