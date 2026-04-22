@@ -823,3 +823,6 @@ fd_write:
         fd_rw_done    dw 0
         fd_rw_left    dw 0
         fd_write_buffer dw 0
+        fd_table times FD_MAX * FD_ENTRY_SIZE db 0
+        serial_pushback_buffer    db 0, 0
+        serial_pushback_count  db 0

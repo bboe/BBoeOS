@@ -184,3 +184,10 @@ uptime_seconds:
         pop edx
         pop ecx
         ret
+
+        epoch_day        db 0
+        epoch_hours      db 0
+        epoch_minutes    db 0
+        epoch_month      db 0
+        epoch_seconds    db 0
+        epoch_year       dw 0

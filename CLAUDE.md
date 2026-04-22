@@ -98,6 +98,9 @@ renumbering is source-compatible — just rebuild.
 - `src/kernel/fd.asm` — File descriptor table management: `fd_open`, `fd_read`, `fd_write`, `fd_close`, `fd_fstat`
 - `src/kernel/fs.asm` — Filesystem layer: `find_file`, `load_file`, `read_sector`, `write_sector`, directory management
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_receive`, ARP, IP, ICMP, UDP — included in stage 2
+- `src/kernel/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`
+- `src/kernel/lib/print.asm` — output utilities: `shared_print_*`, `shared_printf`, `shared_write_stdout`
+- `src/kernel/lib/proc.asm` — program utilities: `shared_die`, `shared_exit`, `shared_get_character`, `shared_parse_argv`
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
 - `src/c/` programs written in the C subset: `arp`, `asm`, `asmesc`, `bits`, `booltest`, `cat`, `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `edit`, `gdemo`, `gtable`, `hello`, `inctest`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `ping`, `shell`, `uptime`. `asmesc` smoke-tests the `asm(...)` inline-asm escape (both file-scope and statement forms); `bits` is a smoke test for cc.py's bitwise operators (`|`, `^`, `~`, `<<`, `>>`, `&`) and their compound-assignment forms; `booltest` is a smoke test for cc.py's booleanized comparison BinOps used as expression values (`int x = (a == b);` etc.); `gdemo` and `gtable` are smoke tests for cc.py's file-scope globals; `inctest` is a smoke test for cc.py's `#include` directive (pairs with `src/c/inctest.h`).

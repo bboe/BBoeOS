@@ -1,66 +1,3 @@
-;;; -----------------------------------------------------------------------
-;;; Kernel shared functions (called via jump table at 0x7E00)
-;;; -----------------------------------------------------------------------
-
-shared_die:
-        ;; Write CX bytes from SI to stdout, then exit
-        call shared_write_stdout
-shared_exit:
-        ;; Exit program (reload shell)
-        mov ah, SYS_EXIT
-        int 30h
-
-shared_get_character:
-        ;; Read one byte from stdin via read syscall
-        ;; Returns: AL = byte read
-        push bx
-        push cx
-        push di
-        mov bx, STDIN
-        mov di, SECTOR_BUFFER
-        mov cx, 1
-        mov ah, SYS_IO_READ
-        int 30h
-        pop di
-        pop cx
-        pop bx
-        mov al, [SECTOR_BUFFER]
-        ret
-
-shared_parse_argv:
-        ;; Split [EXEC_ARG] at spaces into an argv-style pointer array.
-        ;; Input:  DI = buffer for argv pointers (caller-provided)
-        ;; Output: CX = argc (number of arguments)
-        ;; Clobbers: AX, SI
-        xor cx, cx
-        mov si, [EXEC_ARG]
-        test si, si
-        jz .parse_argv_done
-        .parse_argv_scan:
-        cmp byte [si], ' '
-        jne .parse_argv_check
-        inc si
-        jmp .parse_argv_scan
-        .parse_argv_check:
-        cmp byte [si], 0
-        je .parse_argv_done
-        mov [di], si
-        add di, 2
-        inc cx
-        .parse_argv_end:
-        cmp byte [si], 0
-        je .parse_argv_done
-        cmp byte [si], ' '
-        je .parse_argv_term
-        inc si
-        jmp .parse_argv_end
-        .parse_argv_term:
-        mov byte [si], 0
-        inc si
-        jmp .parse_argv_scan
-        .parse_argv_done:
-        ret
-
 shared_print_byte_decimal:
         ;; Print AL as 1-3 digit decimal (no leading zeros)
         push ax
@@ -542,20 +479,5 @@ shared_write_stdout:
         int 30h
         ret
 
-        ;; Values
-        epoch_year       dw 0
-        epoch_month      db 0
-        epoch_day        db 0
-        epoch_hours      db 0
-        epoch_minutes    db 0
-        epoch_seconds    db 0
-        fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         printf_pad    db 0         ; printf pad character (' ' or '0')
         printf_width  db 0         ; printf minimum field width
-        serial_pushback_buffer    db 0, 0 ; serial pushback buffer (up to 2 bytes)
-        serial_pushback_count  db 0    ; number of bytes in pushback buffer
-        shell_sp dw 0
-
-        ;; Strings
-        SHELL_ERROR db `Shell not found\n\0`
-        SHELL_NAME db `bin/shell\0`
