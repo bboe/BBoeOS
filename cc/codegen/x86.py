@@ -417,14 +417,6 @@ class X86CodeGenerator(CodeGeneratorBase):
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
 
-    def _check_defined(self, name: str, /, *, line: int | None = None) -> None:
-        """Raise CompileError if a variable is not in scope."""
-        if name in self.NAMED_CONSTANTS:
-            return
-        if name not in self.visible_vars:
-            message = f"undefined variable: {name}"
-            raise CompileError(message, line=line)
-
     def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
 
@@ -1179,29 +1171,6 @@ class X86CodeGenerator(CodeGeneratorBase):
             else:
                 break
         return assignments
-
-    def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
-        """Replace trailing simple printf(msg) with die(msg) in a branch body."""
-        if body and self._is_simple_printf(body[-1]):
-            last = body[-1]
-            return [*body[:-1], Call(args=last.args, line=last.line, name="die")]
-        return body
-
-    def _transform_if_printf(self, statement: If, /) -> If:
-        """Transform simple printf() at end of if-else branches into die()."""
-        condition, if_body, else_body = statement.cond, statement.body, statement.else_body
-        new_if = self._transform_branch_printf(if_body)
-        new_else = else_body
-        if else_body is not None:
-            if len(else_body) == 1 and isinstance(else_body[0], If):
-                transformed = self._transform_if_printf(else_body[0])
-                if transformed is not else_body[0]:
-                    new_else = [transformed]
-            else:
-                new_else = self._transform_branch_printf(else_body)
-        if new_if is if_body and new_else is else_body:
-            return statement
-        return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
 
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
@@ -2021,10 +1990,6 @@ class X86CodeGenerator(CodeGeneratorBase):
                 continue
             self.virtual_long_locals.add(name)
 
-    def emit(self, line: str = "") -> None:
-        """Append a line of assembly to the output buffer."""
-        self.lines.append(line)
-
     def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
@@ -2317,17 +2282,6 @@ class X86CodeGenerator(CodeGeneratorBase):
         operator = self.emit_condition(condition=condition, context=context)
         self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
 
-    def emit_constant_reference(self, name: str) -> None:
-        """Record a reference to a NAMED_CONSTANT.
-
-        If the constant requires an extra NASM %include to provide its
-        symbol (see :attr:`NAMED_CONSTANT_INCLUDES`), queue the include
-        for emission at output time.
-        """
-        include = self.NAMED_CONSTANT_INCLUDES.get(name)
-        if include is not None:
-            self.required_includes.add(include)
-
     def emit_error_syscall_tail(
         self,
         *,
@@ -2595,23 +2549,6 @@ class X86CodeGenerator(CodeGeneratorBase):
         # reload happens naturally.
         if self._peephole_will_strand_ax():
             self.ax_local = None
-
-    def fuse_trailing_printf(self, body: list[Node], /) -> list[Node]:
-        """Transform trailing simple printf() calls into die() for main.
-
-        Handles both a direct trailing ``printf(msg)`` and ``printf(msg)``
-        at the end of branches in a trailing if-else chain.
-        """
-        if not body:
-            return body
-        last = body[-1]
-        if self._is_simple_printf(last):
-            return [*body[:-1], Call(args=last.args, name="die")]
-        if isinstance(last, If):
-            transformed = self._transform_if_printf(last)
-            if transformed is not last:
-                return [*body[:-1], transformed]
-        return body
 
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
@@ -3391,27 +3328,6 @@ class X86CodeGenerator(CodeGeneratorBase):
                 return String(content=content)
         return Var(name=value)
 
-    @staticmethod
-    def _collect_ir_temps(body: list[ir.Instruction]) -> list[str]:
-        """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
-        seen: set[str] = set()
-        result: list[str] = []
-        for instruction in body:
-            destination: str | None = None
-            match instruction:
-                case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
-                    destination = name
-                case ir.Call(destination=name):
-                    destination = name
-                case ir.Block(node=Assign(name=name)):
-                    destination = name
-                case _:
-                    pass
-            if destination is not None and destination.startswith("_ir_") and destination not in seen:
-                seen.add(destination)
-                result.append(destination)
-        return result
-
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
         for instruction in body:
@@ -4058,30 +3974,6 @@ class X86CodeGenerator(CodeGeneratorBase):
         # if (prev[0] != ' ') break;`` leaves AX = prev, not end).
         # Invalidate ax_local so downstream code reloads from memory.
         self.ax_clear()
-
-    def new_label(self) -> int:
-        """Allocate and return a new unique label index.
-
-        Returns:
-            The allocated label index.
-
-        """
-        label_index = self.label_id
-        self.label_id += 1
-        return label_index
-
-    def new_string_label(self, content: str, /) -> str:
-        """Allocate a string literal and return its label name.
-
-        Identical strings are deduplicated — subsequent calls with the
-        same *content* return the existing label.
-        """
-        for label, existing in self.strings:
-            if existing == content:
-                return label
-        label = f"_str_{len(self.strings)}"
-        self.strings.append((label, content))
-        return label
 
     def peephole(self) -> None:
         """Run peephole optimization passes over generated assembly.

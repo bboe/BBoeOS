@@ -1,18 +1,21 @@
 """Architecture-agnostic code-generator scaffolding.
 
-:class:`CodeGeneratorBase` carries the AST/IR predicates every backend
-needs — liveness, aliasing, simple-arg classification, always-exit
-detection, argument-count validation, constant-expression folding,
-byte/memory-scalar classification, comparison-type inference — with
-no x86-specific assumptions.  Backends subclass it to add instruction
-selection, register pool management, peephole passes, and emit
-helpers.
+:class:`CodeGeneratorBase` carries the AST/IR predicates and shared
+plumbing every backend needs — liveness, aliasing, simple-arg
+classification, always-exit detection, argument-count validation,
+constant-expression folding, byte/memory-scalar classification,
+comparison-type inference, output-buffer emit, label allocation,
+string-literal dedup, ``%include`` tracking, ``printf`` → ``die``
+fusion — with no x86-specific assumptions.  Backends subclass it to
+add instruction selection, register pool management, peephole passes,
+and the concrete emit helpers.
 
 Instance methods assume the subclass has populated the state they
 read (``self.locals``, ``self.variable_types``, ``self.constant_aliases``,
-``self.NAMED_CONSTANTS``, ``self.BYTE_TYPES``, …).  Those still
-live on the subclass for now; a follow-up pass can move the
-arch-agnostic subset up here.
+``self.NAMED_CONSTANTS``, ``self.BYTE_TYPES``, ``self.lines``,
+``self.strings``, …).  Those still live on the subclass for now; a
+follow-up pass can move the arch-agnostic subset up here, along with
+an ``__init__`` that initializes them.
 """
 
 from __future__ import annotations
@@ -100,6 +103,14 @@ class CodeGeneratorBase:
             message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
             raise CompileError(message, line=line)
 
+    def _check_defined(self, name: str, /, *, line: int | None = None) -> None:
+        """Raise CompileError if a variable is not in scope."""
+        if name in self.NAMED_CONSTANTS:
+            return
+        if name not in self.visible_vars:
+            message = f"undefined variable: {name}"
+            raise CompileError(message, line=line)
+
     def _collect_constant_references(self, node: Node, /) -> set[str]:
         """Return every NAMED_CONSTANT name referenced inside *node*.
 
@@ -113,6 +124,27 @@ class CodeGeneratorBase:
         if isinstance(node, BinaryOperation):
             return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
         return set()
+
+    @staticmethod
+    def _collect_ir_temps(body: list[ir.Instruction]) -> list[str]:
+        """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for instruction in body:
+            destination: str | None = None
+            match instruction:
+                case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
+                    destination = name
+                case ir.Call(destination=name):
+                    destination = name
+                case ir.Block(node=Assign(name=name)):
+                    destination = name
+                case _:
+                    pass
+            if destination is not None and destination.startswith("_ir_") and destination not in seen:
+                seen.add(destination)
+                result.append(destination)
+        return result
 
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
@@ -421,6 +453,29 @@ class CodeGeneratorBase:
             lambda n: (isinstance(n, Var) and n.name == name) or (isinstance(n, Assign) and n.name == name),
         )
 
+    def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
+        """Replace trailing simple printf(msg) with die(msg) in a branch body."""
+        if body and self._is_simple_printf(body[-1]):
+            last = body[-1]
+            return [*body[:-1], Call(args=last.args, line=last.line, name="die")]
+        return body
+
+    def _transform_if_printf(self, statement: If, /) -> If:
+        """Transform simple printf() at end of if-else branches into die()."""
+        condition, if_body, else_body = statement.cond, statement.body, statement.else_body
+        new_if = self._transform_branch_printf(if_body)
+        new_else = else_body
+        if else_body is not None:
+            if len(else_body) == 1 and isinstance(else_body[0], If):
+                transformed = self._transform_if_printf(else_body[0])
+                if transformed is not else_body[0]:
+                    new_else = [transformed]
+            else:
+                new_else = self._transform_branch_printf(else_body)
+        if new_if is if_body and new_else is else_body:
+            return statement
+        return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
+
     def _type_of_operand(self, node: Node, /) -> str:
         """Classify an operand for comparison type-checking.
 
@@ -485,3 +540,59 @@ class CodeGeneratorBase:
         if isinstance(last, If) and last.else_body is not None:
             return CodeGeneratorBase.always_exits(last.body) and CodeGeneratorBase.always_exits(last.else_body)
         return False
+
+    def emit(self, line: str = "") -> None:
+        """Append a line of assembly to the output buffer."""
+        self.lines.append(line)
+
+    def emit_constant_reference(self, name: str) -> None:
+        """Record a reference to a NAMED_CONSTANT.
+
+        If the constant requires an extra NASM %include to provide its
+        symbol (see :attr:`NAMED_CONSTANT_INCLUDES`), queue the include
+        for emission at output time.
+        """
+        include = self.NAMED_CONSTANT_INCLUDES.get(name)
+        if include is not None:
+            self.required_includes.add(include)
+
+    def fuse_trailing_printf(self, body: list[Node], /) -> list[Node]:
+        """Transform trailing simple printf() calls into die() for main.
+
+        Handles both a direct trailing ``printf(msg)`` and ``printf(msg)``
+        at the end of branches in a trailing if-else chain.
+        """
+        if not body:
+            return body
+        last = body[-1]
+        if self._is_simple_printf(last):
+            return [*body[:-1], Call(args=last.args, name="die")]
+        if isinstance(last, If):
+            transformed = self._transform_if_printf(last)
+            if transformed is not last:
+                return [*body[:-1], transformed]
+        return body
+
+    def new_label(self) -> int:
+        """Allocate and return a new unique label index.
+
+        Returns:
+            The allocated label index.
+
+        """
+        label_index = self.label_id
+        self.label_id += 1
+        return label_index
+
+    def new_string_label(self, content: str, /) -> str:
+        """Allocate a string literal and return its label name.
+
+        Identical strings are deduplicated — subsequent calls with the
+        same *content* return the existing label.
+        """
+        for label, existing in self.strings:
+            if existing == content:
+                return label
+        label = f"_str_{len(self.strings)}"
+        self.strings.append((label, content))
+        return label
