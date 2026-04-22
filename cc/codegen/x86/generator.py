@@ -356,7 +356,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
             base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
-            self.emit(f"        mov si, {self.target.loword(self.pinned_register[index.name])}")
+            self.emit(f"        mov si, {self.target.low_word(self.pinned_register[index.name])}")
             if not is_byte:
                 if self.target.int_size == 4:
                     self.emit("        shl si, 2")
@@ -378,7 +378,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        shl {self.target.acc}, 2")
                 else:
                     self.emit(f"        add {self.target.acc}, {self.target.acc}")
-            self.emit(f"        mov si, {self.target.loword(self.target.acc)}")
+            self.emit(f"        mov si, {self.target.low_word(self.target.acc)}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
         addr = const_base
@@ -436,12 +436,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         if name in self.pinned_register:
             source = self.pinned_register[name]
             if len(register) < len(source):
-                source = self.target.loword(source)
+                source = self.target.low_word(source)
             self.emit(f"        mov {register}, {source}")
         elif name in self.register_aliased_globals:
             source = self.register_aliased_globals[name]
             if len(register) < len(source):
-                source = self.target.loword(source)
+                source = self.target.low_word(source)
             if source != register:
                 self.emit(f"        mov {register}, {source}")
         elif name in self.constant_aliases:
@@ -623,7 +623,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        movzx {target}, {source}")
                 elif len(source) > len(target):
                     # 32-bit source into narrower target: use low word.
-                    self.emit(f"        mov {target}, {self.target.loword(source)}")
+                    self.emit(f"        mov {target}, {self.target.low_word(source)}")
                 else:
                     self.emit(f"        mov {target}, {source}")
             return
@@ -650,7 +650,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 self.emit(f"        mov al, [{self._local_address(arg.name)}]")
                 self.emit("        xor ah, ah")
                 if target != self.target.acc:
-                    source = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
+                    source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {target}, {source}")
             else:
                 self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
@@ -661,7 +661,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             # pending arg.  Evaluate into AX, then move into target.
             self.generate_expression(arg)
             if target != self.target.acc:
-                source = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
+                source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {target}, {source}")
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
@@ -747,10 +747,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         ``BUILTIN_CLOBBERS`` uses canonical 16-bit names (``cx``,
         ``bx``, etc.).  In 32-bit mode the register pool holds
         E-register names, so we normalise both sides through
-        ``target.loword`` before comparing.
+        ``target.low_word`` before comparing.
         """
-        loword = self.target.loword
-        return sorted(register for register in self.pinned_register.values() if loword(register) in clobbers and loword(register) != "ax")
+        low_word = self.target.low_word
+        return sorted(
+            register for register in self.pinned_register.values() if low_word(register) in clobbers and low_word(register) != "ax"
+        )
 
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
@@ -1293,7 +1295,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.generate_expression(left)
             source_register = self.pinned_register[right.name]
             if len(source_register) < len(self.target.count_register):
-                source_register = self.target.loword(source_register)
+                source_register = self.target.low_word(source_register)
                 # Use movzx to zero-extend the 16-bit source into count_register.
                 self.emit(f"        movzx {self.target.count_register}, {source_register}")
             elif source_register != self.target.count_register:
@@ -1395,7 +1397,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.generate_expression(left)
                     # Use matching-width operands for cmp: if source is
                     # narrower than acc (e.g., bp vs eax), compare ax/source.
-                    cmp_acc = self.target.loword(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
+                    cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
                     self.emit(f"        cmp {cmp_acc}, {source}")
                     return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
@@ -1587,7 +1589,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             if len(register) < len(source):
                 # Loading a 32-bit pinned reg into a narrower (16-bit) target:
                 # use the low-word name.
-                source = self.target.loword(source)
+                source = self.target.low_word(source)
                 if source != register:
                     self.emit(f"        mov {register}, {source}")
             elif len(source) < len(register):
@@ -1602,7 +1604,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         elif isinstance(argument, Var) and argument.name in self.register_aliased_globals:
             source = self.register_aliased_globals[argument.name]
             if len(register) < len(source):
-                source = self.target.loword(source)
+                source = self.target.low_word(source)
             if source != register:
                 self.emit(f"        mov {register}, {source}")
             if ax_written and source != self.target.acc:
@@ -1610,7 +1612,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != self.target.acc:
-                source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {source}")
             # AX unchanged in both branches: shortcut leaves tracking intact.
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
@@ -1628,7 +1630,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 self.emit(f"        mov al, [{self._local_address(argument.name)}]")
                 self.emit("        xor ah, ah")
                 if register != self.target.acc:
-                    source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                    source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {register}, {source}")
                 new_ax_local = argument.name
                 new_ax_is_byte = True
@@ -1654,7 +1656,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             if register != self.target.acc:
                 # In 32-bit mode, the result is in eax; narrow-register targets
                 # (bx, cx, dx, si, di) need the 16-bit low word of eax.
-                source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {source}")
             # generate_expression leaves its own tracking; do not
             # override new_ax_local here.
@@ -1744,7 +1746,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             if direct_register != self.target.acc:
                 # When storing into a 16-bit register from a 32-bit acc,
                 # use the low-word of acc to avoid an invalid operand mix.
-                source = self.target.loword(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
+                source = self.target.low_word(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {direct_register}, {source}")
             self.ax_is_byte = False
         elif self._is_byte_scalar(name):
