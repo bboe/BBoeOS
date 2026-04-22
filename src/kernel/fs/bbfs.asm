@@ -10,6 +10,7 @@
 ;;; bbfs_mkdir:       SI=name → AX=allocated sector, CF on error
 ;;; bbfs_read_sec:    SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; bbfs_rename:      SI=old, DI=new → CF on error (AL=error code)
+;;; bbfs_rmdir:       SI=name → CF on error (AL=error code)
 ;;; bbfs_update_size: SI=fd_entry → CF on disk error
 
 bbfs_chmod:
@@ -129,6 +130,9 @@ bbfs_create:
 
         bbfs_create_name   dw 0
         bbfs_create_sector dw 0
+        bbfs_rd_entry_off  dw 0   ; bbfs_rmdir: byte offset of entry within parent sector
+        bbfs_rd_parent_sec dw 0   ; bbfs_rmdir: disk sector containing the directory entry
+        bbfs_rd_subdir_sec dw 0   ; bbfs_rmdir: first sector of the subdirectory's data
 
 bbfs_delete:
         ;; Delete a file by zeroing its directory entry.
@@ -573,6 +577,100 @@ bbfs_rename:
         .frc_disk_err:
         add sp, 14
         mov al, ERROR_NOT_FOUND
+        stc
+        ret
+
+bbfs_rmdir:
+        ;; Remove an empty subdirectory.
+        ;; Input:  SI = name (root-level only; slashes not allowed)
+        ;; Output: CF clear on success; CF set, AL = error code on failure
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        call find_file                  ; BX = entry ptr in SECTOR_BUFFER, CF on miss
+        jnc .bbrd_found
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .bbrd_found:
+        ;; Must be a directory
+        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
+        jnz .bbrd_is_dir
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .bbrd_is_dir:
+        ;; Save location of parent dir entry and start sector of subdir data
+        mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
+        mov [bbfs_rd_subdir_sec], ax
+        mov ax, [directory_loaded_sector]
+        mov [bbfs_rd_parent_sec], ax
+        mov ax, bx
+        sub ax, SECTOR_BUFFER
+        mov [bbfs_rd_entry_off], ax
+        ;; Scan subdir data sectors for any occupied entry
+        mov ax, [bbfs_rd_subdir_sec]
+        mov cx, DIRECTORY_SECTORS
+        .bbrd_check_sec:
+        call read_sector
+        jc .bbrd_disk_err
+        mov si, SECTOR_BUFFER
+        mov di, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
+        .bbrd_check_entry:
+        cmp byte [si], 0
+        jne .bbrd_not_empty
+        add si, DIRECTORY_ENTRY_SIZE
+        dec di
+        jnz .bbrd_check_entry
+        inc ax
+        dec cx
+        jnz .bbrd_check_sec
+        ;; Empty: reload parent sector, zero the directory entry, write back
+        mov ax, [bbfs_rd_parent_sec]
+        mov [directory_loaded_sector], ax
+        call read_sector
+        jc .bbrd_disk_err
+        mov bx, SECTOR_BUFFER
+        add bx, [bbfs_rd_entry_off]
+        mov di, bx
+        mov cx, DIRECTORY_ENTRY_SIZE / 2
+        xor ax, ax
+        cld
+        rep stosw
+        call directory_write_back
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        ret
+        .bbrd_not_empty:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_EMPTY
+        stc
+        ret
+        .bbrd_disk_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
         stc
         ret
 

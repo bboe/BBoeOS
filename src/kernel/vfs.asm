@@ -13,6 +13,7 @@
 ;;; vfs_load:               DI=dest → CF (loads file using vfs_found_inode+vfs_found_size)
 ;;; vfs_mkdir:              SI=name → AX=inode, CF on error
 ;;; vfs_prepare_write_sec:  SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
+;;; vfs_rmdir:              SI=name → CF on error, AL=error code
 ;;; vfs_read_dir:           SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
 ;;; vfs_read_sec:           SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; vfs_rename:             SI=old, DI=new → CF on error, AL=error code
@@ -31,6 +32,7 @@ vfs_prepare_write_sec_fn  dw bbfs_prepare_write_sec ; SI=fd_entry → SECTOR_BUF
 vfs_read_dir_fn           dw bbfs_read_dir           ; SI=fd_entry, DI=buf → AX=bytes; CF on err
 vfs_read_sec_fn           dw bbfs_read_sec            ; SI=fd entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 vfs_rename_fn             dw bbfs_rename
+vfs_rmdir_fn              dw bbfs_rmdir
 vfs_update_size_fn        dw bbfs_update_size
 
 ;;; State populated by vfs_find / vfs_create, consumed by fd_open and sys_exec
@@ -52,6 +54,7 @@ vfs_prepare_write_sec: jmp [vfs_prepare_write_sec_fn]
 vfs_read_dir:          jmp [vfs_read_dir_fn]
 vfs_read_sec:          jmp [vfs_read_sec_fn]
 vfs_rename:            jmp [vfs_rename_fn]
+vfs_rmdir:             jmp [vfs_rmdir_fn]
 vfs_update_size:       jmp [vfs_update_size_fn]
 
 vfs_init:
@@ -71,6 +74,7 @@ vfs_init:
         mov word [vfs_mkdir_fn], ext2_mkdir
         mov word [vfs_prepare_write_sec_fn], ext2_prepare_write_sec
         mov word [vfs_rename_fn], ext2_rename
+        mov word [vfs_rmdir_fn], ext2_rmdir
         mov word [vfs_update_size_fn], ext2_update_size
         ret
         .bbfs:

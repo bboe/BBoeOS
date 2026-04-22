@@ -88,6 +88,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         "reboot": frozenset({"ax"}),
         "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx"}),
         "rename": frozenset({"ax", "di", "si"}),
+        "rmdir": frozenset({"ax", "si"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "set_exec_arg": frozenset({"ax"}),
         "shutdown": frozenset({"ax"}),
@@ -100,7 +101,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
 
-    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename", "unlink"})
+    ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename", "rmdir", "unlink"})
 
     def __init__(self, *, defines: dict[str, str] | None = None, bits: int = 16) -> None:
         """Initialize code generator state.

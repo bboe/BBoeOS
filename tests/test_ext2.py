@@ -97,6 +97,16 @@ TESTS: list[ProgramTest] = [
         r"^\.\./",
     ),
     ProgramTest(
+        "rmdir",
+        ["mkdir mydir", "rmdir mydir", "ls mydir"],
+        r"Not found",  # ls fails because mydir was successfully removed
+    ),
+    ProgramTest(
+        "rmdir_nonempty",
+        ["mkdir mydir", "cp src/parse_ip.asm mydir/file.asm", "rmdir mydir"],
+        r"Not empty",
+    ),
+    ProgramTest(
         "rm",
         ["cp src/parse_ip.asm out.asm", "rm out.asm", "cat out.asm"],
         r"File not found",

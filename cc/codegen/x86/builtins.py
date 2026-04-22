@@ -525,6 +525,24 @@ class BuiltinsMixin:
         self._emit_syscall("FS_RENAME")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
+    def builtin_rmdir(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
+        """Generate code for the rmdir() builtin.
+
+        ``rmdir(path)`` emits ``mov si, <path> / mov ah, SYS_FS_RMDIR /
+        int 30h``.  Returns 0 on success or an ERROR_* code on failure.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="rmdir")
+        self.emit_si_from_argument(arguments[0])
+        self._emit_syscall("FS_RMDIR")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
+
     def builtin_sendto(self, arguments: list[Node], /) -> None:
         """Generate code for the sendto() builtin.
 
