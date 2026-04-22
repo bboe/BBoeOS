@@ -369,12 +369,16 @@ class PeepholeMixin:
         can flush it to the local — but the intermediate AX hop is
         dead if the next instruction writes that memory anyway.
         """
+        acc = self.target.acc
+        dx = self.target.dx_register
+        acc_from_dx = f"mov {acc}, {dx}"
+        comma_acc_suffix = f", {acc}"  # match ``", ax"`` / ``", eax"`` tails and drop the space
         i = 0
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a == "mov ax, dx" and b.startswith("mov [") and b.endswith("], ax"):
-                self.lines[i + 1] = f"{self.lines[i + 1][:-3]}dx"
+            if a == acc_from_dx and b.startswith("mov [") and b.endswith(comma_acc_suffix):
+                self.lines[i + 1] = f"{self.lines[i + 1][: -len(comma_acc_suffix)]},{dx}"
                 del self.lines[i]
                 continue
             i += 1
@@ -431,6 +435,13 @@ class PeepholeMixin:
         (3 bytes) for a net 3-byte gain (the new ``add si, [mem]`` is
         2 bytes longer than the old ``add si, ax``).
         """
+        acc = self.target.acc
+        si = self.target.si_register
+        push_acc = f"push {acc}"
+        pop_acc = f"pop {acc}"
+        mov_si_mem_prefix = f"mov {si}, ["
+        mov_acc_mem_prefix = f"mov {acc}, ["
+        add_si_acc = f"add {si}, {acc}"
         i = 0
         while i < len(self.lines) - 4:
             a = self.lines[i].strip()
@@ -438,21 +449,21 @@ class PeepholeMixin:
             c = self.lines[i + 2].strip()
             d = self.lines[i + 3].strip()
             e = self.lines[i + 4].strip()
-            if a != "push ax" or e != "pop ax":
+            if a != push_acc or e != pop_acc:
                 i += 1
                 continue
-            if not (b.startswith("mov si, [") and b.endswith("]")):
+            if not (b.startswith(mov_si_mem_prefix) and b.endswith("]")):
                 i += 1
                 continue
-            if not (c.startswith("mov ax, [") and c.endswith("]")):
+            if not (c.startswith(mov_acc_mem_prefix) and c.endswith("]")):
                 i += 1
                 continue
-            if d != "add si, ax":
+            if d != add_si_acc:
                 i += 1
                 continue
-            mem_operand = c[len("mov ax, ") :]
+            mem_operand = c[len(f"mov {acc}, ") :]
             self.lines[i] = self.lines[i + 1]
-            self.lines[i + 1] = f"        add si, {mem_operand}"
+            self.lines[i + 1] = f"        add {si}, {mem_operand}"
             del self.lines[i + 2 : i + 5]
             continue
 
@@ -836,8 +847,8 @@ class PeepholeMixin:
         to the register.  BX and SI are both subscript scratch targets
         so either can linger with a useful value across sites.
         """
-        self._dedup_register_reloads("bx")
-        self._dedup_register_reloads("si")
+        self._dedup_register_reloads(self.target.bx_register)
+        self._dedup_register_reloads(self.target.si_register)
 
     def peephole_redundant_byte_mask(self) -> None:
         """Drop ``and ax, 255`` when AX is provably zero-extended from a byte.

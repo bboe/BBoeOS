@@ -200,8 +200,8 @@ class EmissionMixin:
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
-                    self.emit(f"        mov si, {die_label}")
-                    self.emit(f"        mov cx, {die_length}")
+                    self.emit(f"        mov {self.target.si_register}, {die_label}")
+                    self.emit(f"        mov {self.target.count_register}, {die_length}")
                     operator = self.emit_condition(condition=statement.cond, context="if")
                     true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
                     self.emit(f"        {true_jump} FUNCTION_DIE")
@@ -373,7 +373,7 @@ class EmissionMixin:
             else:
                 self.emit(f"        call {name}")
             if stack_args:
-                self.emit(f"        add sp, {len(stack_args) * 2}")
+                self.emit(f"        add {self.target.sp_register}, {len(stack_args) * self.target.int_size}")
             if use_pusha:
                 self.emit("        popa")
             else:
@@ -528,17 +528,18 @@ class EmissionMixin:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register="si")
+                    self._emit_load_var(vname, register=self.target.si_register)
+                    si = self.target.si_register
                     if is_byte:
                         if offset:
-                            self.emit(f"        mov al, [si+{offset}]")
+                            self.emit(f"        mov al, [{si}+{offset}]")
                         else:
-                            self.emit("        mov al, [si]")
+                            self.emit(f"        mov al, [{si}]")
                         self.emit("        xor ah, ah")
                     elif offset:
-                        self.emit(f"        mov {self.target.acc}, [si+{offset}]")
+                        self.emit(f"        mov {self.target.acc}, [{si}+{offset}]")
                     else:
-                        self.emit(f"        mov {self.target.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
             else:
                 is_byte = self._is_byte_var(vname)
@@ -559,31 +560,32 @@ class EmissionMixin:
                     self.ax_clear()
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register="si")
+                    self._emit_load_var(vname, register=self.target.si_register)
+                    si = self.target.si_register
                     # If the index is a pinned variable and the access is
                     # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                         ireg = self.pinned_register[index_expression.name]
-                        self.emit(f"        add si, {self.target.low_word(ireg)}")
+                        self.emit(f"        add {si}, {ireg}")
                     elif isinstance(index_expression, (Var, Int)):
                         # Simple Var/Int load doesn't touch SI, so skip the
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                        self.emit(f"        add {si}, {self.target.acc}")
                     else:
-                        self.emit("        push si")
+                        self.emit(f"        push {si}")
                         self.generate_expression(index_expression)
                         if not is_byte:
                             self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                        self.emit("        pop si")
-                        self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                        self.emit(f"        pop {si}")
+                        self.emit(f"        add {si}, {self.target.acc}")
                     if is_byte:
-                        self.emit("        mov al, [si]")
+                        self.emit(f"        mov al, [{si}]")
                         self.emit("        xor ah, ah")
                     else:
-                        self.emit(f"        mov {self.target.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
@@ -1176,7 +1178,7 @@ class EmissionMixin:
                 self.emit("        xor ah, ah")
                 self.ax_is_byte = True
             else:
-                self.emit(f"        mov ax, [{self._local_address(chain_var)}]")
+                self.emit(f"        mov {self.target.acc}, [{self._local_address(chain_var)}]")
                 self.ax_is_byte = False
             self.ax_local = chain_var
         label_index = self.new_label()
@@ -1231,7 +1233,7 @@ class EmissionMixin:
                 guarded = False
             else:
                 guarded = self._si_scratch_guard_begin(name)
-                self._emit_load_var(name, register="si")
+                self._emit_load_var(name, register=self.target.si_register)
                 addr = f"si+{offset}" if offset else "si"
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
@@ -1248,12 +1250,13 @@ class EmissionMixin:
                 guarded = False
             else:
                 guarded = self._si_scratch_guard_begin(name)
-                self._emit_load_var(name, register="si")
-                addr = f"si+{offset}" if offset else "si"
+                self._emit_load_var(name, register=self.target.si_register)
+                si = self.target.si_register
+                addr = f"{si}+{offset}" if offset else si
             if is_byte:
                 self.emit(f"        mov [{addr}], al")
             else:
-                self.emit(f"        mov [{addr}], ax")
+                self.emit(f"        mov [{addr}], {self.target.acc}")
             self._si_scratch_guard_end(guarded=guarded)
         else:
             const_base = self._resolve_constant(name)
@@ -1269,7 +1272,7 @@ class EmissionMixin:
                 if is_byte:
                     self.emit(f"        mov [{addr}], al")
                 else:
-                    self.emit(f"        mov [{addr}], ax")
+                    self.emit(f"        mov [{addr}], {self.target.acc}")
                 self.ax_clear()
             else:
                 # Variable index: compute address in SI, then store.
@@ -1278,29 +1281,30 @@ class EmissionMixin:
                 guarded = self._si_scratch_guard_begin(name)
                 self.generate_expression(statement.expr)
                 self.emit(f"        push {self.target.acc}")
-                self._emit_load_var(name, register="si")
+                self._emit_load_var(name, register=self.target.si_register)
+                si = self.target.si_register
                 # If the index is a simple Var/Int, evaluating it doesn't
                 # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                    self.emit(f"        add {si}, {self.target.acc}")
                 else:
-                    self.emit("        push si")
+                    self.emit(f"        push {si}")
                     self.generate_expression(statement.index)
                     if not is_byte:
                         self.emit(f"        add {self.target.acc}, {self.target.acc}")
-                    self.emit("        pop si")
-                    self.emit(f"        add si, {self.target.low_word(self.target.acc)}")
+                    self.emit(f"        pop {si}")
+                    self.emit(f"        add {si}, {self.target.acc}")
                 self.emit(f"        pop {self.target.acc}")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
                 self.ax_clear()
                 if is_byte:
-                    self.emit("        mov [si], al")
+                    self.emit(f"        mov [{si}], al")
                 else:
-                    self.emit(f"        mov [si], {self.target.acc}")
+                    self.emit(f"        mov [{si}], {self.target.acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
     def generate_long_expression(self, expression: Node, /) -> None:

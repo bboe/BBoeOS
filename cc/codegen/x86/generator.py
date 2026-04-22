@@ -350,8 +350,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         vname = node.name
         offset = node.index.value
         guarded = self._si_scratch_guard_begin(vname)
-        self._emit_load_var(vname, register="si")
-        operand = f"byte [si+{offset}]" if offset else "byte [si]"
+        self._emit_load_var(vname, register=self.target.si_register)
+        si = self.target.si_register
+        operand = f"byte [{si}+{offset}]" if offset else f"byte [{si}]"
         return (operand, guarded)
 
     def _si_scratch_guard_begin(self, base_var: str | None = None, /) -> bool:
@@ -369,17 +370,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
 
         The caller pairs the guard with :meth:`_si_scratch_guard_end`.
         """
-        if not any(register == "si" for register in self.register_aliased_globals.values()):
+        si = self.target.si_register
+        if not any(register == si for register in self.register_aliased_globals.values()):
             return False
-        if base_var is not None and self.register_aliased_globals.get(base_var) == "si":
+        if base_var is not None and self.register_aliased_globals.get(base_var) == si:
             return False
-        self.emit("        push si")
+        self.emit(f"        push {si}")
         return True
 
     def _si_scratch_guard_end(self, *, guarded: bool) -> None:
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
-            self.emit("        pop si")
+            self.emit(f"        pop {self.target.si_register}")
 
     def _emit_constant_base_index_addr(
         self,
@@ -412,26 +414,32 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             sign = 1 if index.operation == "+" else -1
             displacement = sign * index.right.value * element_size
             index = index.left
-        base_register = "si"
+        si = self.target.si_register
+        base_register = si
         if isinstance(index, Int):
             displacement += index.value * element_size
-            self.emit("        xor si, si")
-        elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
+            self.emit(f"        xor {si}, {si}")
+        elif (
+            is_byte
+            and isinstance(index, Var)
+            and index.name in self.pinned_register
+            and self.pinned_register[index.name] in (self.target.di_register, self.target.bx_register)
+        ):
             base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
-            self.emit(f"        mov si, {self.target.low_word(self.pinned_register[index.name])}")
+            self.emit(f"        mov {si}, {self.pinned_register[index.name]}")
             if not is_byte:
                 if self.target.int_size == 4:
-                    self.emit("        shl si, 2")
+                    self.emit(f"        shl {si}, 2")
                 else:
-                    self.emit("        add si, si")
+                    self.emit(f"        add {si}, {si}")
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
-            self.emit(f"        mov si, [{self._local_address(index.name)}]")
+            self.emit(f"        mov {si}, [{self._local_address(index.name)}]")
             if not is_byte:
                 if self.target.int_size == 4:
-                    self.emit("        shl si, 2")
+                    self.emit(f"        shl {si}, 2")
                 else:
-                    self.emit("        add si, si")
+                    self.emit(f"        add {si}, {si}")
         else:
             if preserve_ax:
                 self.emit(f"        push {self.target.acc}")
@@ -441,7 +449,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     self.emit(f"        shl {self.target.acc}, 2")
                 else:
                     self.emit(f"        add {self.target.acc}, {self.target.acc}")
-            self.emit(f"        mov si, {self.target.low_word(self.target.acc)}")
+            self.emit(f"        mov {si}, {self.target.acc}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
         addr = const_base
@@ -616,7 +624,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit(f"        push {self.pinned_register[arg.name]}")
         else:
             self.generate_expression(arg)
-            self.emit("        push ax")
+            self.emit(f"        push {self.target.acc}")
 
     def _emit_register_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
         """Emit ``mov`` instructions that place args in target registers.
@@ -856,7 +864,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                     if declaration.init is not None:
                         message = f"register-aliased global '{name}' cannot have a constant initializer (initialize from main() instead)"
                         raise CompileError(message, line=declaration.line)
-                    self.register_aliased_globals[name] = declaration.asm_register
+                    # Widen the user's 16-bit alias ("si") to the target
+                    # width ("esi" in 32-bit pmode) so every downstream
+                    # read emits the right-width register without a
+                    # per-use lookup.
+                    self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t"):
@@ -1206,7 +1218,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         in the pool so no extra exclusion is needed for subscript
         presence.
         """
-        pool = (*self.target.register_pool, "bp") if self.elide_frame else self.target.register_pool
+        pool = (*self.target.register_pool, self.target.bp_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
         def visit(node: Node) -> None:
@@ -1309,7 +1321,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         self.constant_aliases[argv_name] = "ARGV"
 
         self.emit("        cld")
-        self.emit("        mov di, ARGV")
+        self.emit(f"        mov {self.target.di_register}, ARGV")
         self.emit("        call FUNCTION_PARSE_ARGV")
 
         # Try to fuse the first body statement: if (argc != N) die(msg)
@@ -1334,15 +1346,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 die_label = self.new_string_label(die_message.content)
                 die_length = string_byte_length(die_message.content)
                 expected = first.cond.right.value
-                self.emit(f"        cmp cx, {expected}")
-                self.emit(f"        mov si, {die_label}")
-                self.emit(f"        mov cx, {die_length}")
+                self.emit(f"        cmp {self.target.count_register}, {expected}")
+                self.emit(f"        mov {self.target.si_register}, {die_label}")
+                self.emit(f"        mov {self.target.count_register}, {die_length}")
                 self.emit("        jne FUNCTION_DIE")
                 fused_argc = True
                 body = body[1:]
 
         if argc_name and not fused_argc:
-            self.emit(f"        mov [{self._local_address(argc_name)}], cx")
+            self.emit(f"        mov [{self._local_address(argc_name)}], {self.target.count_register}")
         return body
 
     def emit_binary_operator_operands(self, left: Node, right: Node, /) -> None:
@@ -1593,8 +1605,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         """
         if fuse_die is not None:
             die_label, die_length = fuse_die
-            self.emit(f"        mov si, {die_label}")
-            self.emit(f"        mov cx, {die_length}")
+            self.emit(f"        mov {self.target.si_register}, {die_label}")
+            self.emit(f"        mov {self.target.count_register}, {die_length}")
             self.emit("        jc FUNCTION_DIE")
             return
         if fuse_exit:
@@ -1605,10 +1617,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         if preserve_al:
             self.emit("        xor ah, ah")
         else:
-            self.emit("        mov ax, 1")
+            self.emit(f"        mov {self.target.acc}, 1")
         self.emit(f"        jmp .done_{label_index}")
         self.emit(f".ok_{label_index}:")
-        self.emit("        xor ax, ax")
+        self.emit(f"        xor {self.target.acc}, {self.target.acc}")
         self.emit(f".done_{label_index}:")
 
     def emit_register_from_argument(self, *, argument: Node, register: str) -> None:
@@ -1729,20 +1741,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         self.ax_is_byte = new_ax_is_byte
 
     def emit_si_from_argument(self, argument: Node, /) -> None:
-        """Load a string or expression argument into SI."""
+        """Load a string or expression argument into SI (or ESI in 32-bit)."""
+        si = self.target.si_register
         if isinstance(argument, String):
-            self.emit(f"        mov si, {self.new_string_label(argument.content)}")
+            self.emit(f"        mov {si}, {self.new_string_label(argument.content)}")
         elif isinstance(argument, Var) and argument.name in self.constant_aliases:
-            self.emit(f"        mov si, {self.constant_aliases[argument.name]}")
+            self.emit(f"        mov {si}, {self.constant_aliases[argument.name]}")
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
-            self.emit(f"        mov si, _g_{argument.name}")
+            self.emit(f"        mov {si}, _g_{argument.name}")
         elif (constant_expr := self._constant_expression(argument)) is not None:
             for name in self._collect_constant_references(argument):
                 self.emit_constant_reference(name)
-            self.emit(f"        mov si, {constant_expr}")
+            self.emit(f"        mov {si}, {constant_expr}")
         else:
             self.generate_expression(argument)
-            self.emit("        mov si, ax")
+            self.emit(f"        mov {si}, {self.target.acc}")
 
     def emit_store_local(self, *, expression: Node, name: str) -> None:
         """Generate an expression and store the result in a local variable.
