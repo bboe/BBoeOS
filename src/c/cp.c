@@ -1,3 +1,5 @@
+char io_buffer[512];
+
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         die("Usage: cp <srcname> <destname>\n");
@@ -12,11 +14,10 @@ int main(int argc, char *argv[]) {
         close(source_fd);
         die("File already exists\n");
     }
-    uint8_t *buffer = SECTOR_BUFFER;
     int bytes;
     do {
-        bytes = read(source_fd, buffer, 512);
-        write(destination_fd, buffer, bytes);
+        bytes = read(source_fd, io_buffer, 512);
+        write(destination_fd, io_buffer, bytes);
     } while (bytes > 0);
     close(destination_fd);
     close(source_fd);

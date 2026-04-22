@@ -986,6 +986,32 @@ write_directory_name:
         jnz .pad
         ret
 
+bbfs_commit_write_sec:
+        ;; Write SECTOR_BUFFER to the sector cached by bbfs_prepare_write_sec.
+        ;; Output: CF on disk error
+        push ax
+        mov ax, [bbfs_pws_sector]
+        call write_sector
+        pop ax
+        ret
+
+bbfs_prepare_write_sec:
+        ;; Prepare for a write: translate fd position to sector, optionally read.
+        ;; Input:  SI = fd_entry pointer
+        ;; Output: SECTOR_BUFFER ready for modification (read if partial sector),
+        ;;         BX = byte offset within sector; CF on disk error
+        call fd_pos_to_sector   ; AX = sector, BX = byte offset
+        mov [bbfs_pws_sector], ax
+        test bx, bx
+        jz .no_read             ; offset 0: new/full-sector write, skip read
+        call read_sector
+        ret
+        .no_read:
+        clc
+        ret
+
+        bbfs_pws_sector dw 0
+
 bbfs_read_dir:
         ;; Read the next non-empty bbfs directory entry into [DI]
         ;; SI = FD entry pointer, DI = output buffer (DIRECTORY_ENTRY_SIZE bytes)
