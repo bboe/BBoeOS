@@ -62,6 +62,12 @@ TESTS: list[ProgramTest] = [
         ["mkdir mydir", "cp src/parse_ip.asm mydir/copy.asm", "cat mydir/copy.asm"],
         r"^parse_ip:",
     ),
+    ProgramTest(
+        "cp_overwrite_shrink",
+        ["cp src/asm.c out.c", "cp src/parse_ip.asm out.c", "cat out.c"],
+        r"^parse_ip:",
+        timeout=30.0,
+    ),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
