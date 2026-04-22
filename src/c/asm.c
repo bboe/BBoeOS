@@ -24,6 +24,13 @@
    the two small fixed-size buffers. */
 uint8_t changed_flag;
 int current_address;
+/* Default operand size set by the ``[bits N]`` directive.  Starts at
+   16 (real-mode default); a ``[bits 32]`` line flips it to 32 and
+   pmode encodings that match the default size emit without the 0x66
+   prefix, while 16-bit encodings acquire the prefix.  Reset to 16 at
+   the start of every pass so the directive's effect on each pass
+   matches the source order. */
+uint8_t default_bits;
 int equ_space;
 uint8_t error_flag;
 /* abort_unknown stores the offending mnemonic's SI into
@@ -113,6 +120,8 @@ int symbol_count;
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
+void emit_address_disp(int disp);
+__attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
 void emit_byte(int value);
@@ -120,6 +129,8 @@ __attribute__((regparm(1)))
 void emit_dword(int value);
 __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp);
+__attribute__((regparm(1)))
+void emit_operand_size_prefix(int size);
 __attribute__((regparm(1)))
 void emit_sized(int base, int size);
 __attribute__((regparm(1)))
@@ -360,6 +371,19 @@ void do_pass() {
    test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
    the call for the ``sub word [disp16], imm16`` form that only it
    uses. */
+/* Emit ``disp`` at the current addressing width: disp16 under
+   bits=16, disp32 under bits=32.  Used by the accumulator-direct
+   ``moffs`` short forms (A0 / A1 / A2 / A3) whose address field
+   follows the bare opcode with no ModR/M byte. */
+__attribute__((regparm(1)))
+void emit_address_disp(int disp) {
+    if (default_bits == 32) {
+        emit_dword(disp);
+    } else {
+        emit_word(disp);
+    }
+}
+
 __attribute__((regparm(1)))
 void emit_alu_binop(int rfield) {
     skip_ws();
@@ -413,13 +437,12 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
         emit_byte(imm & 0xFF);
         return;
     }
-    /* size == 16 or 32 — 32-bit widens via the 0x66 operand-size
-       prefix, and the imm16 tail grows to imm32 (emit_dword).  The
+    /* size == 16 or 32 — the operand-size prefix selects the width
+       against ``default_bits`` (no prefix in matching mode, 0x66 in
+       the other).  The imm16 tail grows to imm32 (emit_dword).  The
        sign-extended ``83 /r ib`` shape is identical between 16 and
        32 bits — only the prefix distinguishes them. */
-    if (size == 32) {
-        emit_byte(0x66);
-    }
+    emit_operand_size_prefix(size);
     if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
         emit_byte(modrm_base | reg);
@@ -470,12 +493,21 @@ void emit_byte(int value) {
     output_total = output_total + 1;
 }
 
-/* Emit the ``[disp16]`` direct-memory ModR/M form: ``(reg << 3) | 0x06``
-   plus a 2-byte disp16. */
+/* Emit the direct-memory ModR/M form plus its displacement at the
+   current addressing width.  Under 16-bit addressing the rm field
+   is 110 and the disp is 16-bit; under 32-bit addressing the rm
+   field is 101 and the disp is 32-bit.  Used by lgdt / lidt,
+   handle_mov's direct-memory branches, and any future caller
+   encoding a plain ``[disp]`` memory operand. */
 __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp) {
-    emit_byte((reg << 3) | 0x06);
-    emit_word(disp);
+    if (default_bits == 32) {
+        emit_byte((reg << 3) | 0x05);
+        emit_dword(disp);
+    } else {
+        emit_byte((reg << 3) | 0x06);
+        emit_word(disp);
+    }
 }
 
 /* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
@@ -511,21 +543,34 @@ void emit_modrm_disp8(int rm, int disp) {
     }
 }
 
+/* Emit the 0x66 operand-size prefix iff ``size`` is a 16/32 size
+   that disagrees with the current ``default_bits``.  Under the
+   default bits=16 mode a 32-bit operand acquires the prefix; under
+   bits=32 a 16-bit operand does.  Used by ``emit_sized`` and every
+   hand-written pmode-encoding site that used to emit 0x66 directly. */
+__attribute__((regparm(1)))
+void emit_operand_size_prefix(int size) {
+    if (size != 16 && size != 32) {
+        return;
+    }
+    if (size != default_bits) {
+        emit_byte(0x66);
+    }
+}
+
 /* Emit ``base`` for an 8-bit operand size, ``base + 1`` otherwise.
    Collapses the ``if (size == 8) emit_byte(X); else emit_byte(X+1);``
    split that every ALU / mov / cmp / test handler carries.
-   Size=32 adds the 0x66 operand-size prefix before the 16-bit
-   opcode byte, widening the same encoding to 32-bit in the
-   default-bits-16 environment the self-host emits into. */
+   Sizes that differ from ``default_bits`` get the 0x66 operand-size
+   prefix in front, so the same 16/32 opcode body assembles both
+   widths depending on the current [bits N] mode. */
 __attribute__((regparm(1)))
 void emit_sized(int base, int size) {
     if (size == 8) {
         emit_byte(base);
         return;
     }
-    if (size == 32) {
-        emit_byte(0x66);
-    }
+    emit_operand_size_prefix(size);
     emit_byte(base + 1);
 }
 
@@ -865,11 +910,12 @@ void handle_jle() {
 void handle_jmp() {
     skip_ws();
     /* ``jmp dword <selector>:<label>`` — far jmp with a 32-bit
-       offset.  Emits the operand-size prefix 0x66 so the EA opcode
-       reads a dword offset instead of the default word offset,
-       followed by the fixed ptr16:32 immediate tail.  The label
+       offset.  Under bits=16 the 0x66 operand-size prefix flips the
+       EA opcode's offset from word to dword; under bits=32 the dword
+       offset is already the default and the prefix is omitted.  The
+       ptr16:32 immediate tail is fixed either way.  The label
        resolves via ``resolve_label`` so pass 1 places a same-size
-       placeholder (instruction width is constant at 8 bytes). */
+       placeholder (instruction width is constant within a mode). */
     if (match_word(STR_DWORD)) {
         skip_ws();
         int selector = resolve_value();
@@ -879,7 +925,8 @@ void handle_jmp() {
             skip_ws();
         }
         int offset = resolve_label();
-        emit_word(0xEA66);
+        emit_operand_size_prefix(32);
+        emit_byte(0xEA);
         emit_dword(offset);
         emit_word(selector);
         return;
@@ -1032,26 +1079,29 @@ void handle_mov() {
             if (size1 == 8) {
                 emit_byte(0xB0 | register1_id);
                 emit_byte(value2 & 0xFF);
-            } else if (size1 == 32) {
-                emit_byte(0x66);
-                emit_byte(0xB8 | register1_id);
-                emit_dword(value2);
             } else {
+                emit_operand_size_prefix(size1);
                 emit_byte(0xB8 | register1_id);
-                emit_word(value2);
+                if (size1 == 32) {
+                    emit_dword(value2);
+                } else {
+                    emit_word(value2);
+                }
             }
             return;
         }
         if (type2 == 2) {
             if (size1 == 8 && register1_id == 0) {
                 emit_byte(0xA0);
+                emit_address_disp(value2);
             } else if (size1 != 8 && register1_id == 0) {
+                emit_operand_size_prefix(size1);
                 emit_byte(0xA1);
+                emit_address_disp(value2);
             } else {
                 emit_sized(0x8A, size1);
-                emit_byte((register1_id << 3) | 0x06);
+                emit_modrm_direct(register1_id, value2);
             }
-            emit_word(value2);
             return;
         }
         if (type2 == 3) {
@@ -1066,19 +1116,20 @@ void handle_mov() {
         if (type2 == 0) {
             if (size1 == 8 && register2_id == 0) {
                 emit_byte(0xA2);
+                emit_address_disp(value1);
             } else if (size1 != 8 && register2_id == 0) {
+                emit_operand_size_prefix(size1);
                 emit_byte(0xA3);
+                emit_address_disp(value1);
             } else {
                 emit_sized(0x88, size1);
-                emit_byte((register2_id << 3) | 0x06);
+                emit_modrm_direct(register2_id, value1);
             }
-            emit_word(value1);
             return;
         }
         if (type2 == 1) {
             emit_sized(0xC6, size1);
-            emit_byte(0x06);
-            emit_word(value1);
+            emit_modrm_direct(0, value1);
             emit_sized_imm(value2, size1);
             return;
         }
@@ -1162,6 +1213,8 @@ void handle_pop() {
         return;
     }
     int packed_register = parse_register();
+    int size = (packed_register >> 8) & 0xFF;
+    emit_operand_size_prefix(size);
     emit_byte(0x58 | (packed_register & 0xFF));
 }
 
@@ -1176,13 +1229,32 @@ void handle_push() {
     }
     int packed_register = parse_register();
     if (packed_register >= 0) {
+        int size = (packed_register >> 8) & 0xFF;
+        emit_operand_size_prefix(size);
         emit_byte(0x50 | (packed_register & 0xFF));
         return;
     }
+    /* ``push [word|dword] imm`` — the size token forces the push width.
+       Without a token the width defaults to the current bits mode
+       so ``push 0`` under bits=32 pushes a dword.  The imm8 short
+       form (0x6A) still applies when the value fits ±128 regardless
+       of operand size; otherwise the imm tail widens to match. */
+    int size = default_bits;
+    if (match_word(STR_WORD)) {
+        size = 16;
+        skip_ws();
+    } else if (match_word(STR_DWORD)) {
+        size = 32;
+        skip_ws();
+    }
     int value = resolve_value();
+    emit_operand_size_prefix(size);
     if (value >= -128 && value <= 127) {
         emit_byte(0x6A);
         emit_byte(value & 0xFF);
+    } else if (size == 32) {
+        emit_byte(0x68);
+        emit_dword(value);
     } else {
         emit_byte(0x68);
         emit_word(value);
@@ -1594,6 +1666,7 @@ int main(int argc, char *argv[]) {
     output_buffer = OUTPUT_BUFFER;
     source_buffer = SOURCE_BUFFER;
     include_source_save = SOURCE_BUFFER + 512;
+    default_bits = 16;
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -1925,6 +1998,20 @@ void parse_directive() {
         include_push();
         return;
     }
+    if (match_word(STR_ALIGN)) {
+        skip_ws();
+        int n = resolve_value();
+        /* Power-of-two alignment only — every NASM source we assemble
+           uses 2/4/8/16.  ``mask = n - 1`` picks the low bits that
+           must be zero; pad one NOP (0x90) at a time until they are.
+           NASM's flat-binary output uses 0x90 as the default fill,
+           so matching byte-for-byte requires it. */
+        int mask = n - 1;
+        while ((current_address & mask) != 0) {
+            emit_byte(0x90);
+        }
+        return;
+    }
     if (match_word(STR_ORG)) {
         skip_ws();
         int addr = resolve_value();
@@ -1981,6 +2068,24 @@ void parse_line() {
     }
     if (source_cursor[0] == '%') {
         parse_directive();
+        return;
+    }
+    /* ``[bits N]`` — NASM's bracketed directive switching the default
+       operand-size mode.  Must fire before label scanning because ``[``
+       never appears in a label.  No other bracketed directive is
+       supported; the handler silently skips through ``]`` so trailing
+       junk can't reach parse_mnemonic. */
+    if (source_cursor[0] == '[') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        if (match_word(STR_BITS)) {
+            skip_ws();
+            int value = resolve_value();
+            default_bits = value;
+        }
+        while (source_cursor[0] != ']' && source_cursor[0] != '\0') {
+            source_cursor = source_cursor + 1;
+        }
         return;
     }
     char *label_start = source_cursor;
@@ -2609,6 +2714,7 @@ void run_pass1() {
     while (1) {
         changed_flag = 0;
         current_address = 0;
+        default_bits = 16;
         global_scope = 0xFFFF;
         jump_index = 0;
         do_pass();
@@ -2635,6 +2741,7 @@ void run_pass1() {
 void run_pass2() {
     pass = 2;
     current_address = org_value;
+    default_bits = 16;
     global_scope = 0xFFFF;
     jump_index = 0;
     output_position = 0;
@@ -2972,8 +3079,10 @@ asm(
     "STR_AAM     db 'aam',0\n"
     "STR_ADC     db 'adc',0\n"
     "STR_ADD     db 'add',0\n"
+    "STR_ALIGN   db 'align',0\n"
     "STR_AND     db 'and',0\n"
     "STR_ASSIGN  db 'assign',0\n"
+    "STR_BITS    db 'bits',0\n"
     "STR_BYTE    db 'byte',0\n"
     "STR_CALL    db 'call',0\n"
     "STR_CLC     db 'clc',0\n"
