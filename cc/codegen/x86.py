@@ -137,144 +137,32 @@ class X86CodeGenerator(CodeGeneratorBase):
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename"})
 
-    #: Identifiers that resolve to NASM kernel constants rather than
-    #: user-defined variables.  Emitted verbatim so NASM can resolve
-    #: them from ``constants.asm``.
-    NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
-        "ARGV",
-        "arp_frame",
-        "BUFFER",
-        "DIRECTORY_ENTRY_SIZE",
-        "DIRECTORY_NAME_LENGTH",
-        "DIRECTORY_OFFSET_FLAGS",
-        "EDIT_BUFFER_BASE",
-        "EDIT_BUFFER_SIZE",
-        "EDIT_KILL_BUFFER",
-        "EDIT_KILL_BUFFER_SIZE",
-        "ERROR_EXISTS",
-        "ERROR_NOT_EXECUTE",
-        "ERROR_NOT_FOUND",
-        "ERROR_PROTECTED",
-        "EXEC_ARG",
-        "_program_end",
-        "FLAG_DIRECTORY",
-        "FLAG_EXECUTE",
-        "IPPROTO_ICMP",
-        "IPPROTO_UDP",
-        "MAX_INPUT",
-        "NULL",
-        "O_CREAT",
-        "O_RDONLY",
-        "O_TRUNC",
-        "O_WRONLY",
-        "register_table",
-        "SECTOR_BUFFER",
-        "SOCK_DGRAM",
-        "SOCK_RAW",
-        "STDERR",
-        "STDIN",
-        "STDOUT",
-        "STR_ASSIGN",
-        "STR_BYTE",
-        "STR_DB",
-        "STR_DD",
-        "STR_DEFINE",
-        "STR_DW",
-        "STR_DWORD",
-        "STR_EQU",
-        "STR_INCLUDE",
-        "STR_ORG",
-        "STR_SHORT",
-        "STR_TIMES",
-        "STR_WORD",
-        "VIDEO_MODE_CGA_320x200",
-        "VIDEO_MODE_CGA_640x200",
-        "VIDEO_MODE_EGA_320x200_16",
-        "VIDEO_MODE_EGA_640x200_16",
-        "VIDEO_MODE_EGA_640x350_16",
-        "VIDEO_MODE_TEXT_40x25",
-        "VIDEO_MODE_TEXT_80x25",
-        "VIDEO_MODE_VGA_320x200_256",
-        "VIDEO_MODE_VGA_640x480_16",
-    })
-
-    #: Named constants that, when referenced, require a NASM %include
-    #: directive in the generated output to provide their symbol.
-    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
-        "arp_frame": "arp_frame.asm",
-    }
-
-    #: Registers available for auto-pinning, in allocation order.  Kept
-    #: at the 16-bit names in both modes for now — in 32-bit mode these
-    #: refer to the lower halves of the corresponding E-registers, which
-    #: works transparently with the existing ``mov ax, <pool>`` accumulator
-    #: patterns.  Widening to E-registers would require rewriting those
-    #: patterns to use EAX throughout; deferred to the later pass that
-    #: widens arithmetic and stack frames together.
-    REGISTER_POOL: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
-
-    #: Byte-element type names.  ``uint8_t`` shares the ``char``
-    #: codegen path (byte array stride, ``mov al`` / ``xor ah, ah``
-    #: zero-extend load) but is classified as ``integer`` for
-    #: comparison type-checking, so ``uint8_t b; if (b == 0x45)``
-    #: works without pretending the literal is a character.
-    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
-    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
-
     def __init__(self, *, defines: dict[str, str] | None = None, bits: int = 16) -> None:
         """Initialize code generator state.
-
-        ``defines`` is the ``#define`` table the preprocessor collected.
-        Each entry is re-emitted as a NASM ``%define NAME VALUE`` at the
-        top of the output so inline-asm strings (which cc.py does not
-        scan for C macros) can reference the same symbolic names that
-        C code uses — otherwise every use inside an ``asm(...)`` string
-        would have to spell the literal.
 
         ``bits`` selects the target: 16 → ``X86CodegenTarget16``,
         32 → ``X86CodegenTarget32``.  All mode-dependent decisions
         (register names, operand widths, type sizes, kernel ABI) live
-        in the target object.
+        in the target object.  The arch-agnostic state
+        (symbol tables, output buffer, counters, BBoeOS constant
+        tables) is initialized by ``CodeGeneratorBase.__init__``;
+        this class adds the x86-specific trackers — accumulator
+        aliasing, the DX:AX remainder cache, the pinned-register
+        and register-aliased-global dicts (x86 register names), and
+        the store-target hint used by the pinned-destination
+        peephole.
         """
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
             raise ValueError(message)
-        self.target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
-        self.array_labels: dict[str, str] = {}
-        self.array_sizes: dict[str, int] = {}
-        self.arrays: list[tuple[str, list[str]]] = []
+        target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
+        super().__init__(target=target, defines=defines)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
-        self.byte_scalar_locals: set[str] = set()
-        self.constant_aliases: dict[str, str] = {}
-        self.defines: dict[str, str] = dict(defines) if defines else {}
-
         self.division_remainder: tuple | None = None
-        self.elide_frame: bool = False
-        self.frame_size: int = 0
-        self.global_arrays: dict[str, ArrayDecl] = {}
-        self.global_byte_arrays: set[str] = set()
-        self.global_scalars: dict[str, VarDecl] = {}
-        self.label_id: int = 0
-        self.lines: list[str] = []
-        self.live_long_local: str | None = None
-        self.locals: dict[str, int] = {}
-        self.loop_continue_labels: list[str] = []
-        self.loop_end_labels: list[str] = []
         self.pinned_register: dict[str, str] = {}
-        self.required_includes: set[str] = set()
-        self.store_target_register: str | None = None
-        self.strings: list[tuple[str, str]] = []
-        self.user_functions: dict[str, int] = {}  # name → param count
-        self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in AX
-        self.carry_return_functions: set[str] = set()  # callees that return via CF
-        self.inline_bodies: dict[str, str] = {}  # always_inline callees: name → raw asm body
-        self.inline_call_counter: int = 0  # per-inline-site label-uniquification suffix
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
-        self.variable_arrays: set[str] = set()
-        self.variable_types: dict[str, str] = {}
-        self.virtual_long_locals: set[str] = set()
-        self.visible_vars: set[str] = set()
+        self.store_target_register: str | None = None
 
     def _register_inline_body(self, function: Function, /) -> None:
         """Record an ``always_inline`` function's asm body for splicing.

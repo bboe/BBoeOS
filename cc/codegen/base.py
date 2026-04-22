@@ -20,8 +20,11 @@ an ``__init__`` that initializes them.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, ClassVar
+
 from cc import ir
 from cc.ast_nodes import (
+    ArrayDecl,
     Assign,
     BinaryOperation,
     Break,
@@ -44,15 +47,141 @@ from cc.ast_nodes import (
 from cc.errors import CompileError
 from cc.utils import ast_contains
 
+if TYPE_CHECKING:
+    from cc.target import CodegenTarget
+
 
 class CodeGeneratorBase:
     """Architecture-agnostic base for every backend code generator.
 
     Holds predicates that query AST / IR shape and validate caller
-    arguments.  Backends (e.g. :class:`cc.codegen.x86.X86CodeGenerator`)
-    subclass this and layer on the emit / peephole / instruction-
-    selection logic specific to their ISA.
+    arguments, plus the output buffer, label / string counters,
+    frame state, symbol tables, and BBoeOS-level constant tables.
+    Backends (e.g. :class:`cc.codegen.x86.X86CodeGenerator`) subclass
+    this and layer on the emit / peephole / instruction-selection
+    logic specific to their ISA.
     """
+
+    #: Identifiers that resolve to NASM kernel constants rather than
+    #: user-defined variables.  Emitted verbatim so NASM can resolve
+    #: them from ``constants.asm``.  BBoeOS-specific but arch-agnostic:
+    #: any backend running on BBoeOS needs them.
+    NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
+        "ARGV",
+        "arp_frame",
+        "BUFFER",
+        "DIRECTORY_ENTRY_SIZE",
+        "DIRECTORY_NAME_LENGTH",
+        "DIRECTORY_OFFSET_FLAGS",
+        "EDIT_BUFFER_BASE",
+        "EDIT_BUFFER_SIZE",
+        "EDIT_KILL_BUFFER",
+        "EDIT_KILL_BUFFER_SIZE",
+        "ERROR_EXISTS",
+        "ERROR_NOT_EXECUTE",
+        "ERROR_NOT_FOUND",
+        "ERROR_PROTECTED",
+        "EXEC_ARG",
+        "_program_end",
+        "FLAG_DIRECTORY",
+        "FLAG_EXECUTE",
+        "IPPROTO_ICMP",
+        "IPPROTO_UDP",
+        "MAX_INPUT",
+        "NULL",
+        "O_CREAT",
+        "O_RDONLY",
+        "O_TRUNC",
+        "O_WRONLY",
+        "register_table",
+        "SECTOR_BUFFER",
+        "SOCK_DGRAM",
+        "SOCK_RAW",
+        "STDERR",
+        "STDIN",
+        "STDOUT",
+        "STR_ASSIGN",
+        "STR_BYTE",
+        "STR_DB",
+        "STR_DD",
+        "STR_DEFINE",
+        "STR_DW",
+        "STR_DWORD",
+        "STR_EQU",
+        "STR_INCLUDE",
+        "STR_ORG",
+        "STR_SHORT",
+        "STR_TIMES",
+        "STR_WORD",
+        "VIDEO_MODE_CGA_320x200",
+        "VIDEO_MODE_CGA_640x200",
+        "VIDEO_MODE_EGA_320x200_16",
+        "VIDEO_MODE_EGA_640x200_16",
+        "VIDEO_MODE_EGA_640x350_16",
+        "VIDEO_MODE_TEXT_40x25",
+        "VIDEO_MODE_TEXT_80x25",
+        "VIDEO_MODE_VGA_320x200_256",
+        "VIDEO_MODE_VGA_640x480_16",
+    })
+
+    #: Named constants that, when referenced, require a NASM %include
+    #: directive in the generated output to provide their symbol.
+    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
+        "arp_frame": "arp_frame.asm",
+    }
+
+    #: Byte-element type names.  ``uint8_t`` shares the ``char``
+    #: codegen path (byte array stride, byte-wide load with zero
+    #: extend) but is classified as ``integer`` for comparison
+    #: type-checking, so ``uint8_t b; if (b == 0x45)`` works without
+    #: pretending the literal is a character.
+    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
+    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
+
+    def __init__(self, *, target: CodegenTarget, defines: dict[str, str] | None = None) -> None:
+        """Initialize arch-agnostic code generator state.
+
+        *target* is the :class:`cc.target.CodegenTarget` instance the
+        subclass selected (x86-16, x86-32, or a future backend).
+        *defines* is the ``#define`` table from the preprocessor; each
+        entry re-emits as a NASM ``%define NAME VALUE`` at the top of
+        the output so inline-asm strings can reference C macro names
+        directly.
+
+        Subclasses override ``__init__`` to pick their target, call
+        ``super().__init__(target=..., defines=defines)``, and then
+        initialize any arch-specific state (register trackers, pinned
+        aliases, etc.).
+        """
+        self.target: CodegenTarget = target
+        self.array_labels: dict[str, str] = {}
+        self.array_sizes: dict[str, int] = {}
+        self.arrays: list[tuple[str, list[str]]] = []
+        self.byte_scalar_locals: set[str] = set()
+        self.carry_return_functions: set[str] = set()  # callees that return via CF
+        self.constant_aliases: dict[str, str] = {}
+        self.defines: dict[str, str] = dict(defines) if defines else {}
+        self.elide_frame: bool = False
+        self.fastcall_functions: set[str] = set()  # regparm(1) callees: arg 0 in acc
+        self.frame_size: int = 0
+        self.global_arrays: dict[str, ArrayDecl] = {}
+        self.global_byte_arrays: set[str] = set()
+        self.global_scalars: dict[str, VarDecl] = {}
+        self.inline_bodies: dict[str, str] = {}  # always_inline callees: name → raw asm body
+        self.inline_call_counter: int = 0  # per-inline-site label-uniquification suffix
+        self.label_id: int = 0
+        self.lines: list[str] = []
+        self.live_long_local: str | None = None
+        self.locals: dict[str, int] = {}
+        self.loop_continue_labels: list[str] = []
+        self.loop_end_labels: list[str] = []
+        self.required_includes: set[str] = set()
+        self.strings: list[tuple[str, str]] = []
+        self.user_functions: dict[str, int] = {}  # name → param count
+        self.variable_arrays: set[str] = set()
+        self.variable_types: dict[str, str] = {}
+        self.virtual_long_locals: set[str] = set()
+        self.visible_vars: set[str] = set()
 
     @staticmethod
     def _always_exits_ir(body: list[ir.Instruction]) -> bool:
