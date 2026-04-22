@@ -82,6 +82,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -548,40 +549,68 @@ EREG_LOW_WORD: dict[str, str] = {
 }
 
 
-class CodegenTarget:
-    """All target-specific code-generation decisions for one compilation.
+class CodegenTarget(ABC):
+    """Architecture-independent interface for code-generation targets.
 
     ``CodeGenerator`` holds exactly one ``CodegenTarget`` and routes
-    every mode-dependent choice through it.  To retarget the compiler
-    (new kernel ABI, 64-bit mode, …) write a new ``CodegenTarget``
-    constructor — the ``CodeGenerator`` body needs no changes.
+    every mode-dependent choice through it.  To add a new target
+    (different ISA, new ABI, …) subclass this and pass an instance
+    to ``CodeGenerator``.
     """
 
-    #: 16-bit (real-mode) sizeof table.
-    _TYPE_SIZES_16: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "char*": 2,
-        "int": 2,
-        "uint8_t": 1,
-        "uint8_t*": 2,
-        "unsigned long": 4,
-        "void": 0,
-    }
+    #: Accumulator register name (e.g. ``"ax"`` / ``"eax"``).
+    acc: str
+    #: Counter / shift register name.
+    cx_register: str
+    #: Data register name.
+    dx_register: str
+    #: Base-pointer register name.
+    bp_register: str
+    #: Stack-pointer register name.
+    sp_register: str
+    #: NASM size keyword for the native integer width (``"word"`` / ``"dword"``).
+    word_size: str
+    #: ``sizeof(int)`` in bytes.
+    int_size: int
+    #: ``[bp+N]`` offset to the first stack parameter.
+    param_slot_base: int
+    #: ``sizeof`` table for all supported C types.
+    type_sizes: ClassVar[dict[str, int]]
+    #: Caller-save scratch registers available for local pinning.
+    register_pool: ClassVar[tuple[str, ...]]
+    #: Invocation sequence per syscall name.
+    syscall_sequences: ClassVar[dict[str, tuple[str, ...]]]
+    #: General-purpose registers that are not the accumulator.
+    non_acc_registers: ClassVar[frozenset[str]]
 
-    #: 32-bit (protected-mode) sizeof table: int and pointers widen to 4.
-    _TYPE_SIZES_32: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "char*": 4,
-        "int": 4,
-        "uint8_t": 1,
-        "uint8_t*": 4,
-        "unsigned long": 4,
-        "void": 0,
-    }
+    @staticmethod
+    @abstractmethod
+    def preamble_lines() -> list[str]:
+        """NASM directives emitted before ``org``."""
 
-    #: Kernel ABI: invocation sequence per syscall name.  Both real-mode
-    #: and flat-pmode use ``int 30h``; a different ABI (SYSCALL/SYSENTER,
-    #: a future 64-bit port) overrides this per-instance.
+    @staticmethod
+    @abstractmethod
+    def far_ref(base_reg: str) -> str:
+        """Memory-operand string for ``far_read*/far_write*`` builtins."""
+
+    @staticmethod
+    def loword(reg: str) -> str:
+        """Return the low-word alias of *reg*, or *reg* unchanged.
+
+        Default is the identity — correct for ISAs with no sub-register
+        aliasing.  x86 overrides this to map ``eax`` → ``ax``, etc.
+        """
+        return reg
+
+
+class X86CodegenTarget(CodegenTarget):
+    """Shared state for all x86 BBoeOS targets.
+
+    Both the 16-bit real-mode and 32-bit flat-pmode targets use the
+    same BBoeOS ``int 30h`` syscall ABI and x86 E-register aliasing.
+    """
+
+    #: BBoeOS kernel ABI: every syscall uses ``int 30h``.
     SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
         "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
         "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
@@ -603,71 +632,80 @@ class CodegenTarget:
         "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
         "VIDEO_MODE": ("mov ah, SYS_VIDEO_MODE", "int 30h"),
     }
-
-    def __init__(self, bits: int) -> None:
-        """Initialise the target for *bits*-wide code generation (16 or 32)."""
-        self.bits: int = bits
-        if bits == 32:
-            self.acc: str = "eax"
-            self.cx_register: str = "ecx"
-            self.dx_register: str = "edx"
-            self.bp_register: str = "ebp"
-            self.sp_register: str = "esp"
-            self.word_size: str = "dword"
-            self.int_size: int = 4
-            self.param_slot_base: int = 8
-            self.type_sizes: dict[str, int] = dict(self._TYPE_SIZES_32)
-            self.register_pool: tuple[str, ...] = ("edx", "ecx", "ebx", "edi")
-        else:
-            self.acc = "ax"
-            self.cx_register = "cx"
-            self.dx_register = "dx"
-            self.bp_register = "bp"
-            self.sp_register = "sp"
-            self.word_size = "word"
-            self.int_size = 2
-            self.param_slot_base = 4
-            self.type_sizes = dict(self._TYPE_SIZES_16)
-            self.register_pool = ("dx", "cx", "bx", "di")
-        self.syscall_sequences: dict[str, tuple[str, ...]] = self.SYSCALL_SEQUENCES
-
-    def preamble_lines(self) -> list[str]:
-        """NASM directives emitted before ``org``; empty for 16-bit targets."""
-        if self.bits == 32:
-            return ["        [bits 32]"]
-        return []
-
-    def far_ref(self, base_reg: str) -> str:
-        """Memory-operand string for ``far_read*/far_write*`` builtins.
-
-        16-bit real mode uses an ES segment override; 32-bit flat pmode
-        uses the base register directly (the flat DS covers all memory).
-        """
-        if self.bits == 32:
-            return f"[{base_reg}]"
-        return f"[es:{base_reg}]"
+    syscall_sequences = SYSCALL_SEQUENCES
 
     @staticmethod
     def loword(reg: str) -> str:
-        """Return the 16-bit low-word alias of *reg*, or *reg* unchanged.
-
-        Used wherever SI must hold a 16-bit index even in 32-bit mode
-        (``add si, loword(pinned_reg)``), and to normalise register names
-        when matching 16-bit clobber sets against the 32-bit pool.
-        """
+        """Return the 16-bit low-word alias of *reg*, or *reg* unchanged."""
         return EREG_LOW_WORD.get(reg, reg)
 
-    @property
-    def non_acc_registers(self) -> frozenset[str]:
-        """Set of general-purpose registers that are *not* the accumulator.
 
-        Used by peephole passes that match ``mov <reg>, <acc>`` or
-        ``mov <acc>, <reg>`` patterns: the set is correct for both
-        16-bit (``bx``, ``cx``, …) and 32-bit (``ebx``, ``ecx``, …).
-        """
-        if self.bits == 32:
-            return frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
-        return frozenset({"bx", "cx", "dx", "si", "di", "bp"})
+class X86CodegenTarget16(X86CodegenTarget):
+    """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
+
+    acc = "ax"
+    cx_register = "cx"
+    dx_register = "dx"
+    bp_register = "bp"
+    sp_register = "sp"
+    word_size = "word"
+    int_size = 2
+    param_slot_base = 4
+    type_sizes: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "char*": 2,
+        "int": 2,
+        "uint8_t": 1,
+        "uint8_t*": 2,
+        "unsigned long": 4,
+        "void": 0,
+    }
+    register_pool: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
+    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"bx", "cx", "dx", "si", "di", "bp"})
+
+    @staticmethod
+    def preamble_lines() -> list[str]:
+        """No preamble needed for 16-bit real-mode targets."""
+        return []
+
+    @staticmethod
+    def far_ref(base_reg: str) -> str:
+        """ES-segment override for real-mode far-memory access."""
+        return f"[es:{base_reg}]"
+
+
+class X86CodegenTarget32(X86CodegenTarget):
+    """32-bit flat-pmode x86 target (BBoeOS ring-0 protected mode)."""
+
+    acc = "eax"
+    cx_register = "ecx"
+    dx_register = "edx"
+    bp_register = "ebp"
+    sp_register = "esp"
+    word_size = "dword"
+    int_size = 4
+    param_slot_base = 8
+    type_sizes: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "char*": 4,
+        "int": 4,
+        "uint8_t": 1,
+        "uint8_t*": 4,
+        "unsigned long": 4,
+        "void": 0,
+    }
+    register_pool: ClassVar[tuple[str, ...]] = ("edx", "ecx", "ebx", "edi")
+    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
+
+    @staticmethod
+    def preamble_lines() -> list[str]:
+        """Emit ``[bits 32]`` to switch NASM to 32-bit encoding."""
+        return ["        [bits 32]"]
+
+    @staticmethod
+    def far_ref(base_reg: str) -> str:
+        """Flat DS covers all memory; no segment override needed."""
+        return f"[{base_reg}]"
 
 
 class CodeGenerator:
@@ -810,14 +848,15 @@ class CodeGenerator:
         C code uses — otherwise every use inside an ``asm(...)`` string
         would have to spell the literal.
 
-        ``bits`` selects the target via ``CodegenTarget(bits)``; all
-        mode-dependent decisions (register names, operand widths, type
-        sizes, kernel ABI) live there.
+        ``bits`` selects the target: 16 → ``X86CodegenTarget16``,
+        32 → ``X86CodegenTarget32``.  All mode-dependent decisions
+        (register names, operand widths, type sizes, kernel ABI) live
+        in the target object.
         """
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
             raise ValueError(message)
-        self.target: CodegenTarget = CodegenTarget(bits)
+        self.target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
@@ -3449,12 +3488,12 @@ class CodeGenerator:
             address = self._local_address(name)
             if self.elide_frame:
                 self.emit(f"        mov [{address}], {self.target.acc}")
-                if self.target.bits == 16:
+                if isinstance(self.target, X86CodegenTarget16):
                     self.emit(f"        mov [{address}+2], {self.target.dx_register}")
             else:
                 low_offset = self.locals[name]
                 self.emit(f"        mov [{self.target.bp_register}-{low_offset}], {self.target.acc}")
-                if self.target.bits == 16:
+                if isinstance(self.target, X86CodegenTarget16):
                     self.emit(f"        mov [{self.target.bp_register}-{low_offset - 2}], {self.target.dx_register}")
             self.ax_is_byte = False
             self.ax_local = None
@@ -4100,7 +4139,7 @@ class CodeGenerator:
                     self.emit(f"        inc {self.target.acc}")
                 elif operator == "-" and right.value == 1:
                     self.emit(f"        dec {self.target.acc}")
-                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and self.target.bits == 16:
+                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and isinstance(self.target, X86CodegenTarget16):
                     # ``x ^ 0xFFFF`` is the ``~x`` lowering — ``not ax``
                     # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
                     self.emit(f"        not {self.target.acc}")
@@ -4132,7 +4171,7 @@ class CodeGenerator:
                 # shift path (which loads zero).
                 if (
                     shift == 8
-                    and self.target.bits == 16
+                    and isinstance(self.target, X86CodegenTarget16)
                     and isinstance(left, Var)
                     and self._is_memory_scalar(left.name)
                     and left.name not in self.pinned_register
@@ -4677,12 +4716,12 @@ class CodeGenerator:
             address = self._local_address(vname)
             if self.elide_frame:
                 self.emit(f"        mov {self.target.acc}, [{address}]")
-                if self.target.bits == 16:
+                if isinstance(self.target, X86CodegenTarget16):
                     self.emit(f"        mov {self.target.dx_register}, [{address}+2]")
             else:
                 low_offset = self.locals[vname]
                 self.emit(f"        mov {self.target.acc}, [{self.target.bp_register}-{low_offset}]")
-                if self.target.bits == 16:
+                if isinstance(self.target, X86CodegenTarget16):
                     self.emit(f"        mov {self.target.dx_register}, [{self.target.bp_register}-{low_offset - 2}]")
             self.ax_is_byte = False
             self.ax_local = None
