@@ -123,6 +123,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         super().__init__(target=target, defines=defines)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
+        self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
+        self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
         self.division_remainder: tuple | None = None
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
@@ -269,6 +271,67 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
 
+    def _emit_bss_equs(self) -> None:
+        """Emit BSS EQU definitions and ``_bss_end`` after ``_program_end:``.
+
+        Placing EQUs after ``_program_end:`` ensures they are never forward
+        references, which is important for the self-hosted assembler whose
+        EQU resolution does not handle forward references correctly.
+        """
+        # Always emit _bss_end so programs can reference it regardless of
+        # whether they have BSS variables (e.g. asm_layout.h).
+        if (isinstance(self.bss_total, int) and self.bss_total > 0) or isinstance(self.bss_total, str):
+            self.emit(f"_bss_end equ _program_end + {self.bss_total}")
+        else:
+            self.emit("_bss_end equ _program_end")
+
+        if not self.bss_vars:
+            return
+
+        self.emit(";; --- BSS (zero-initialized) ---")
+        if isinstance(self.bss_total, int):
+            # All sizes are literals: emit with Python-computed integer offsets.
+            offset = 0
+            for name, size_expr in self.bss_vars:
+                suffix = f" + {offset}" if offset else ""
+                self.emit(f"_g_{name} equ _program_end{suffix}")
+                offset += int(size_expr)
+        else:
+            # Non-literal sizes: use EQU chain and define _bss_total_size.
+            prev_end = "_program_end"
+            for name, size_expr in self.bss_vars:
+                self.emit(f"_g_{name} equ {prev_end}")
+                prev_end = f"_g_{name} + {size_expr}"
+            self.emit(f"_bss_total_size equ {prev_end} - _program_end")
+
+    def _emit_bss_trailer(self) -> None:
+        """Emit the 4-byte BSS trailer (``dw <size>; dw 0B055h``) just before ``_program_end``.
+
+        Sets ``self.bss_total`` so the caller can emit ``_bss_end`` and
+        the per-variable EQUs after ``_program_end:`` (avoiding forward
+        references that the self-hosted assembler cannot resolve).
+        """
+        if not self.bss_vars:
+            return
+
+        # Compute total BSS size as Python int when all sizes are decimal literals.
+        total = 0
+        all_literal = True
+        for _name, size_expr in self.bss_vars:
+            try:
+                total += int(size_expr)
+            except ValueError:
+                all_literal = False
+                break
+
+        if all_literal:
+            self.bss_total = total
+            self.emit(f"        dw {total}")
+        else:
+            self.bss_total = "_bss_total_size"
+            self.emit("        dw _bss_total_size")
+        self.emit("        dw 0B055h")
+
     def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
 
@@ -388,15 +451,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         return addr
 
     def _emit_global_storage(self) -> None:
-        """Emit ``_g_<name>`` data cells for every global, once at tail.
+        """Emit ``_g_<name>`` data cells for every initialized global, once at tail.
 
-        Scalars lay out as a single ``dw`` with either the constant
-        initializer or zero.  Initialized arrays use ``db``/``dw``
-        literals matching the element type.  Uninitialized arrays use
-        ``times <byte_count> db 0``; byte-granular output keeps the
-        self-hosted assembler happy (it only implements the ``times N
-        db ...`` form).  Size expressions can reference named constants
-        so NASM folds the arithmetic at assemble time.
+        Scalars lay out as a single ``dw``/``db`` with the constant initializer.
+        Initialized arrays use ``db``/``dw`` literals matching the element type.
+        Zero-initialized globals (no initializer) are deferred to BSS: they are
+        collected in ``self.bss_vars`` and emitted by ``_emit_bss_trailer`` as
+        EQU definitions pointing past the binary end.
         """
         if not self.global_scalars and not self.global_arrays:
             return
@@ -407,11 +468,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 # Storage lives in the aliased CPU register, not memory,
                 # so no ``_g_<name>`` label is emitted.
                 continue
-            init_expression = "0"
-            if declaration.init is not None:
+            if declaration.init is None:
+                stride = 1 if self._is_byte_scalar_global(name) else 2
+                self.bss_vars.append((name, str(stride)))
+            else:
                 init_expression = self._constant_expression(declaration.init)
-            directive = "db" if self._is_byte_scalar_global(name) else "dw"
-            self.emit(f"_g_{name}: {directive} {init_expression}")
+                directive = "db" if self._is_byte_scalar_global(name) else "dw"
+                self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
@@ -425,7 +488,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             else:
                 size_expression = self._constant_expression(declaration.size)
                 byte_count = f"({size_expression})*{stride}" if stride != 1 else size_expression
-                self.emit(f"_g_{name}: times {byte_count} db 0")
+                self.bss_vars.append((name, byte_count))
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.

@@ -4,11 +4,11 @@
    names are usable from both C code and the inline ``asm(\"...\")``
    strings.
 
-   Scratch-buffer layout lives past ``_program_end``: the line buffer
-   (256 bytes), the output buffer (512 bytes), and the source-read
-   buffer (512 bytes).  A further 512-byte block starting at
-   ``_program_end + 1280`` holds the parent's source-buffer copy for
-   ``%include`` nesting (main() initializes
+   Scratch-buffer layout lives past ``_bss_end`` (= ``_program_end`` +
+   BSS size): the line buffer (256 bytes), the output buffer (512 bytes),
+   and the source-read buffer (512 bytes).  A further 512-byte block
+   starting at ``_bss_end + 1280`` holds the parent's source-buffer copy
+   for ``%include`` nesting (main() initializes
    ``include_source_save`` to that address).
 
    The symbol table and jump table live in their own ES segment
@@ -24,6 +24,6 @@
 #define SYMBOL_NAME_LENGTH  32
 #define SYMBOL_SEGMENT      0x2000
 
-#define LINE_BUFFER         _program_end
+#define LINE_BUFFER         _bss_end
 #define OUTPUT_BUFFER       (LINE_BUFFER + 256)
 #define SOURCE_BUFFER       (OUTPUT_BUFFER + 512)

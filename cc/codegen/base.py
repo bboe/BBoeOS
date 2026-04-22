@@ -82,6 +82,7 @@ class CodeGeneratorBase:
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
         "EXEC_ARG",
+        "_bss_end",
         "_program_end",
         "FLAG_DIRECTORY",
         "FLAG_EXECUTE",

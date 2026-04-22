@@ -34,6 +34,7 @@ boot_shell:
         mov di, PROGRAM_BASE
         call vfs_load           ; DI=dest → CF
         jc .no_shell
+        call bss_setup
 
         mov [shell_sp], sp
         jmp PROGRAM_BASE
@@ -58,6 +59,32 @@ boot_shell:
 %include "syscall.asm"
 %include "system.asm"
 %include "vfs.asm"
+
+bss_setup:
+        ;; Zero the BSS region of the freshly-loaded program.
+        ;; Reads binary size from vfs_found_size, checks for the 4-byte
+        ;; trailer (dw bss_size; dw BSS_MAGIC) at the end, then zeroes
+        ;; bss_size bytes starting immediately after the binary.
+        push ax
+        push cx
+        push di
+        mov di, PROGRAM_BASE
+        add di, [vfs_found_size]        ; DI = PROGRAM_BASE + binary_size
+        cmp di, PROGRAM_BASE + 4
+        jb .bss_done
+        cmp word [di - 2], BSS_MAGIC
+        jne .bss_done
+        mov cx, [di - 4]                ; CX = BSS byte count
+        test cx, cx
+        jz .bss_done
+        xor ax, ax
+        cld
+        rep stosb
+        .bss_done:
+        pop di
+        pop cx
+        pop ax
+        ret
 
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
