@@ -22,6 +22,25 @@
 pm_entry:
         jmp pm_entry
 
+        ;; [bits 32] flips the default operand size.  Same mnemonics,
+        ;; different prefix pattern: 32-bit ops emit bare opcodes, and
+        ;; 16-bit ops acquire the 0x66 prefix.  NASM's own encoder
+        ;; behaves identically, so byte-for-byte diff still holds.
+[bits 32]
+pm32:
+        mov eax, cr0
+        or  eax, 1
+        mov cr0, eax
+        mov eax, 0x1234
+        mov ebx, eax
+        jmp dword 0x08:pm_entry_32
+pm_entry_32:
+        mov ax, 0x1234
+        or  ax, 1
+[bits 16]
+pm16_back:
+        mov ax, 0x5678
+
 gdt_desc:
         dw 0
         dd 0

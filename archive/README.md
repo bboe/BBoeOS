@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 11547     | +3294 |
+| asm     | 8253        | 11681     | +3428 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 226       | -42   |
@@ -27,7 +27,7 @@ source is kept here for reference.
 | shell   | 921         | 1324      | +403  |
 | uptime  | 50          | 78        | +28   |
 
-**asm (+3294):** Every ``handle_*`` and every function lives in pure C
+**asm (+3428):** Every ``handle_*`` and every function lives in pure C
 now — what's still
 inline is the `abort_unknown` trampoline (stashes SI into
 `_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
@@ -77,7 +77,10 @@ whose body is a single ``asm("...")`` statement with no parameters
 on the hot paths dropped back to the NASM baseline — 324 bytes
 shaved (8830 → 8506) and the self-host runtime recovered to ~9s.
 BSS support moved 125 bytes of zero-initialized globals out of the
-binary and into a 4-byte trailer (11668 → 11547).
+binary and into a 4-byte trailer (11668 → 11547).  Phase 5 added the
+``[bits N]`` directive: ``default_bits`` state, ``emit_operand_size_prefix``
+helper routing the 0x66 operand-size prefix through the current mode,
+and the ``parse_line`` bracket-directive handler (11547 → 11681).
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
