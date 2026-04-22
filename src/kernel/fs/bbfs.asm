@@ -986,6 +986,58 @@ write_directory_name:
         jnz .pad
         ret
 
+bbfs_read_dir:
+        ;; Read the next non-empty bbfs directory entry into [DI]
+        ;; SI = FD entry pointer, DI = output buffer (DIRECTORY_ENTRY_SIZE bytes)
+        ;; Returns AX = DIRECTORY_ENTRY_SIZE if found, 0 at EOF, CF on error
+        push bx
+        push cx
+        push dx
+        push di
+        .brd_next:
+        mov ax, [si+FD_OFFSET_POSITION]
+        cmp ax, DIRECTORY_SECTORS * 512
+        jae .brd_eof
+        call fd_pos_to_sector           ; AX = sector, BX = byte offset
+        call read_sector
+        jc .brd_disk_err
+        cmp byte [SECTOR_BUFFER+bx], 0
+        jne .brd_found
+        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
+        jmp .brd_next
+        .brd_found:
+        push si
+        mov si, SECTOR_BUFFER
+        add si, bx
+        mov cx, DIRECTORY_ENTRY_SIZE
+        cld
+        rep movsb
+        pop si
+        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
+        mov ax, DIRECTORY_ENTRY_SIZE
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .brd_eof:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        xor ax, ax
+        clc
+        ret
+        .brd_disk_err:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        mov ax, -1
+        stc
+        ret
+
 bbfs_read_sec:
         ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
         ;; Input:  SI = FD entry pointer (FD_OFFSET_START = file start sector)

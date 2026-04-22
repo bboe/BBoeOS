@@ -52,6 +52,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("cat_large", ["cat src/asm.asm"], r"org 0600h", timeout=30.0),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
+    ProgramTest("ls", ["ls bin"], r"hello\*"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 

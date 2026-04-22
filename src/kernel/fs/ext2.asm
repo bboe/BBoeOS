@@ -4,6 +4,7 @@
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
+;;; ext2_read_dir: SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
 ;;; ext2_read_sec: SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; ext2_readonly: → CF set (stub for unsupported write operations)
 ;;;
@@ -52,13 +53,16 @@ ext2_find:
         push dx
         push si
         push di
-        ;; Handle "." — synthesise root directory entry
+        ;; Handle "." — synthesise root directory entry using actual inode size
         cmp byte [si], '.'
         jne .ef_normal
         cmp byte [si+1], 0
         jne .ef_normal
         mov word [vfs_found_inode], EXT2_ROOT_INODE
-        mov word [vfs_found_size], 0
+        mov ax, EXT2_ROOT_INODE
+        call ext2_read_inode            ; BX = pointer to inode in SECTOR_BUFFER
+        mov cx, [bx+EXT2_INODE_SIZE_LO]
+        mov [vfs_found_size], cx
         mov word [vfs_found_size+2], 0
         mov byte [vfs_found_mode], FLAG_DIRECTORY
         mov byte [vfs_found_type], FD_TYPE_DIRECTORY
@@ -294,6 +298,120 @@ ext2_load:
         pop si
         pop cx
         pop bx
+        stc
+        ret
+
+ext2_read_dir:
+        ;; Read the next non-empty ext2 directory entry in bbfs format into [DI]
+        ;; SI = FD entry pointer (FD_OFFSET_START = inode number, FD_OFFSET_SIZE = dir data size)
+        ;; DI = output buffer (DIRECTORY_ENTRY_SIZE bytes)
+        ;; Returns AX = DIRECTORY_ENTRY_SIZE if found, 0 at EOF, CF on error
+        ;;
+        ;; Name is staged through ext2_rd_name (static buffer) because ext2_read_inode
+        ;; clobbers SECTOR_BUFFER — which may alias the caller's output buffer DI.
+        push bx
+        push cx
+        push dx
+        push di
+        mov [ext2_rd_outbuf], di        ; save for use after ext2_read_inode
+        .erd_loop:
+        ;; 32-bit EOF: pos >= size
+        mov ax, [si+FD_OFFSET_POSITION+2]
+        cmp ax, [si+FD_OFFSET_SIZE+2]
+        ja .erd_eof
+        jb .erd_not_eof
+        mov ax, [si+FD_OFFSET_POSITION]
+        cmp ax, [si+FD_OFFSET_SIZE]
+        jae .erd_eof
+        .erd_not_eof:
+        call ext2_read_sec              ; SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset
+        jc .erd_err
+        ;; rec_len (used to advance position)
+        mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
+        cmp dx, EXT2_DIRENT_NAME        ; < 8 is invalid
+        jb .erd_err
+        ;; inode (low 16 bits)
+        mov ax, [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE]
+        test ax, ax
+        jz .erd_skip                    ; deleted entry: advance and retry
+        ;; Save rec_len and inode across ext2_read_inode (which clobbers SECTOR_BUFFER)
+        mov [ext2_rd_rec_len], dx
+        mov [ext2_rd_inode], ax
+        ;; Stage name into ext2_rd_name static buffer (safe across ext2_read_inode)
+        push si
+        mov cl, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN]
+        xor ch, ch
+        cmp cx, DIRECTORY_NAME_LENGTH - 1
+        jbe .erd_namelen_ok
+        mov cx, DIRECTORY_NAME_LENGTH - 1
+        .erd_namelen_ok:
+        mov si, SECTOR_BUFFER
+        add si, bx
+        add si, EXT2_DIRENT_NAME        ; SI = entry name in SECTOR_BUFFER
+        mov di, ext2_rd_name
+        cld
+        rep movsb                       ; copy name bytes to static buffer
+        mov byte [di], 0                ; null-terminate
+        pop si                          ; restore fd_entry pointer
+        ;; Read inode to get mode and size (clobbers SECTOR_BUFFER, AX, BX, CX, DX)
+        mov ax, [ext2_rd_inode]
+        call ext2_read_inode            ; BX = pointer to inode in SECTOR_BUFFER
+        mov cx, [bx+EXT2_INODE_MODE]
+        mov dx, [bx+EXT2_INODE_SIZE_LO] ; read size before writes to output
+        ;; Compute flags
+        xor al, al
+        test cx, EXT2_S_IFDIR
+        jz .erd_check_exec
+        or al, FLAG_DIRECTORY
+        .erd_check_exec:
+        test cx, EXT2_S_IXUSR
+        jz .erd_set_flags
+        or al, FLAG_EXECUTE
+        .erd_set_flags:
+        ;; Copy name from static buffer to output [DI+0..DI+24]
+        push si
+        mov di, [ext2_rd_outbuf]
+        mov si, ext2_rd_name
+        mov cx, DIRECTORY_NAME_LENGTH   ; copy all 25 bytes (name + null + padding)
+        rep movsb
+        pop si                          ; restore fd_entry pointer
+        ;; Write flags, inode, size into output
+        mov di, [ext2_rd_outbuf]
+        mov [di+DIRECTORY_OFFSET_FLAGS], al
+        mov ax, [ext2_rd_inode]
+        mov [di+DIRECTORY_OFFSET_SECTOR], ax
+        mov [di+DIRECTORY_OFFSET_SIZE], dx
+        mov word [di+DIRECTORY_OFFSET_SIZE+2], 0
+        ;; Advance position by rec_len
+        mov ax, [ext2_rd_rec_len]
+        add [si+FD_OFFSET_POSITION], ax
+        adc word [si+FD_OFFSET_POSITION+2], 0
+        mov ax, DIRECTORY_ENTRY_SIZE
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .erd_skip:
+        ;; Deleted entry: advance position by rec_len and retry
+        add [si+FD_OFFSET_POSITION], dx
+        adc word [si+FD_OFFSET_POSITION+2], 0
+        jmp .erd_loop
+        .erd_eof:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        xor ax, ax
+        clc
+        ret
+        .erd_err:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        mov ax, -1
         stc
         ret
 
@@ -610,4 +728,8 @@ ext2_read_sec:
         ext2_load_indirect_ptr dw 0
         ext2_load_rem          dw 0
         ext2_log_block_size  db 0
+        ext2_rd_inode        dw 0
+        ext2_rd_name         times DIRECTORY_NAME_LENGTH db 0
+        ext2_rd_outbuf       dw 0
+        ext2_rd_rec_len      dw 0
         ext2_sd_name         dw 0
