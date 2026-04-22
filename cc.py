@@ -548,6 +548,128 @@ EREG_LOW_WORD: dict[str, str] = {
 }
 
 
+class CodegenTarget:
+    """All target-specific code-generation decisions for one compilation.
+
+    ``CodeGenerator`` holds exactly one ``CodegenTarget`` and routes
+    every mode-dependent choice through it.  To retarget the compiler
+    (new kernel ABI, 64-bit mode, …) write a new ``CodegenTarget``
+    constructor — the ``CodeGenerator`` body needs no changes.
+    """
+
+    #: 16-bit (real-mode) sizeof table.
+    _TYPE_SIZES_16: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "char*": 2,
+        "int": 2,
+        "uint8_t": 1,
+        "uint8_t*": 2,
+        "unsigned long": 4,
+        "void": 0,
+    }
+
+    #: 32-bit (protected-mode) sizeof table: int and pointers widen to 4.
+    _TYPE_SIZES_32: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "char*": 4,
+        "int": 4,
+        "uint8_t": 1,
+        "uint8_t*": 4,
+        "unsigned long": 4,
+        "void": 0,
+    }
+
+    #: Kernel ABI: invocation sequence per syscall name.  Both real-mode
+    #: and flat-pmode use ``int 30h``; a different ABI (SYSCALL/SYSENTER,
+    #: a future 64-bit port) overrides this per-instance.
+    SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
+        "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
+        "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
+        "FS_MKDIR": ("mov ah, SYS_FS_MKDIR", "int 30h"),
+        "FS_RENAME": ("mov ah, SYS_FS_RENAME", "int 30h"),
+        "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
+        "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
+        "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
+        "IO_READ": ("mov ah, SYS_IO_READ", "int 30h"),
+        "IO_WRITE": ("mov ah, SYS_IO_WRITE", "int 30h"),
+        "NET_MAC": ("mov ah, SYS_NET_MAC", "int 30h"),
+        "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),
+        "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
+        "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
+        "REBOOT": ("mov ah, SYS_REBOOT", "int 30h"),
+        "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
+        "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
+        "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
+        "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
+        "VIDEO_MODE": ("mov ah, SYS_VIDEO_MODE", "int 30h"),
+    }
+
+    def __init__(self, bits: int) -> None:
+        """Initialise the target for *bits*-wide code generation (16 or 32)."""
+        self.bits: int = bits
+        if bits == 32:
+            self.acc: str = "eax"
+            self.cx_register: str = "ecx"
+            self.dx_register: str = "edx"
+            self.bp_register: str = "ebp"
+            self.sp_register: str = "esp"
+            self.word_size: str = "dword"
+            self.int_size: int = 4
+            self.param_slot_base: int = 8
+            self.type_sizes: dict[str, int] = dict(self._TYPE_SIZES_32)
+            self.register_pool: tuple[str, ...] = ("edx", "ecx", "ebx", "edi")
+        else:
+            self.acc = "ax"
+            self.cx_register = "cx"
+            self.dx_register = "dx"
+            self.bp_register = "bp"
+            self.sp_register = "sp"
+            self.word_size = "word"
+            self.int_size = 2
+            self.param_slot_base = 4
+            self.type_sizes = dict(self._TYPE_SIZES_16)
+            self.register_pool = ("dx", "cx", "bx", "di")
+        self.syscall_sequences: dict[str, tuple[str, ...]] = self.SYSCALL_SEQUENCES
+
+    def preamble_lines(self) -> list[str]:
+        """NASM directives emitted before ``org``; empty for 16-bit targets."""
+        if self.bits == 32:
+            return ["        [bits 32]"]
+        return []
+
+    def far_ref(self, base_reg: str) -> str:
+        """Memory-operand string for ``far_read*/far_write*`` builtins.
+
+        16-bit real mode uses an ES segment override; 32-bit flat pmode
+        uses the base register directly (the flat DS covers all memory).
+        """
+        if self.bits == 32:
+            return f"[{base_reg}]"
+        return f"[es:{base_reg}]"
+
+    @staticmethod
+    def loword(reg: str) -> str:
+        """Return the 16-bit low-word alias of *reg*, or *reg* unchanged.
+
+        Used wherever SI must hold a 16-bit index even in 32-bit mode
+        (``add si, loword(pinned_reg)``), and to normalise register names
+        when matching 16-bit clobber sets against the 32-bit pool.
+        """
+        return EREG_LOW_WORD.get(reg, reg)
+
+    @property
+    def non_acc_registers(self) -> frozenset[str]:
+        """Set of general-purpose registers that are *not* the accumulator.
+
+        Used by peephole passes that match ``mov <reg>, <acc>`` or
+        ``mov <acc>, <reg>`` patterns: the set is correct for both
+        16-bit (``bx``, ``cx``, …) and 32-bit (``ebx``, ``ecx``, …).
+        """
+        if self.bits == 32:
+            return frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
+        return frozenset({"bx", "cx", "dx", "si", "di", "bp"})
+
+
 class CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
@@ -590,39 +712,6 @@ class CodeGenerator:
         "uptime": frozenset({"ax"}),
         "video_mode": frozenset({"ax"}),
         "write": frozenset({"ax", "bx", "cx", "si"}),
-    }
-
-    #: Invocation sequence for each kernel syscall cc.py builtins issue.
-    #: ``_emit_syscall(name)`` looks up the tuple and emits one line per
-    #: entry.  This is the single choke point when retargeting the OS
-    #: to a different kernel ABI (e.g., real-mode ``int 30h`` →
-    #: protected-mode ``SYSCALL`` / ``SYSENTER``): only this table needs
-    #: editing — every builtin that touches the kernel flows through
-    #: ``_emit_syscall``.  Syscall-specific argument loading and return
-    #: handling (``xor ah, ah`` after EXEC, CF-to-int normalization in
-    #: ``emit_error_syscall_tail``, etc.) stay in the per-builtin
-    #: methods since they depend on the builtin's C semantics, not on
-    #: the underlying kernel entry mechanism.
-    SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
-        "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
-        "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
-        "FS_MKDIR": ("mov ah, SYS_FS_MKDIR", "int 30h"),
-        "FS_RENAME": ("mov ah, SYS_FS_RENAME", "int 30h"),
-        "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
-        "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
-        "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
-        "IO_READ": ("mov ah, SYS_IO_READ", "int 30h"),
-        "IO_WRITE": ("mov ah, SYS_IO_WRITE", "int 30h"),
-        "NET_MAC": ("mov ah, SYS_NET_MAC", "int 30h"),
-        "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),
-        "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
-        "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
-        "REBOOT": ("mov ah, SYS_REBOOT", "int 30h"),
-        "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
-        "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
-        "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
-        "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
-        "VIDEO_MODE": ("mov ah, SYS_VIDEO_MODE", "int 30h"),
     }
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename"})
@@ -711,33 +800,6 @@ class CodeGenerator:
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
-    TYPE_SIZES: ClassVar[dict[str, int]] = {
-        # Standard C-semantic sizes: what ``sizeof(T)`` returns, what a
-        # body local of type T allocates on the stack.  Byte-typed body
-        # locals already get a 1-byte slot via the :attr:`BYTE_TYPES`
-        # override in :meth:`scan_locals`; parameters don't read this
-        # table at all (they use the hard-coded cdecl push-slot width
-        # in the prologue math).
-        "char": 1,
-        "char*": 2,
-        "int": 2,
-        "uint8_t": 1,
-        "uint8_t*": 2,
-        "unsigned long": 4,
-        "void": 0,
-    }
-    #: 32-bit flavour: int and pointers widen to 4; byte types stay at 1
-    #: so ``sizeof(char) == 1`` regardless of target mode.
-    TYPE_SIZES_32: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "char*": 4,
-        "int": 4,
-        "uint8_t": 1,
-        "uint8_t*": 4,
-        "unsigned long": 4,
-        "void": 0,
-    }
-
     def __init__(self, *, defines: dict[str, str] | None = None, bits: int = 16) -> None:
         """Initialize code generator state.
 
@@ -748,37 +810,14 @@ class CodeGenerator:
         C code uses — otherwise every use inside an ``asm(...)`` string
         would have to spell the literal.
 
-        ``bits`` selects the target CPU mode (16 or 32).  In 32-bit mode
-        the preamble emits ``[bits 32]`` and the :attr:`TYPE_SIZES` and
-        :attr:`REGISTER_POOL` tables widen to pmode-appropriate values.
-        This PR lays down the plumbing; fuller codegen widening
-        (arithmetic, stack frame layout, peepholes, syscall registers)
-        follows in the kernel-widening PR that flips pmode on.
+        ``bits`` selects the target via ``CodegenTarget(bits)``; all
+        mode-dependent decisions (register names, operand widths, type
+        sizes, kernel ABI) live there.
         """
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
             raise ValueError(message)
-        self.bits: int = bits
-        if bits == 32:
-            self.TYPE_SIZES = self.TYPE_SIZES_32
-            self.acc: str = "eax"
-            self.cx_register: str = "ecx"
-            self.dx_register: str = "edx"
-            self.bp_register: str = "ebp"
-            self.sp_register: str = "esp"
-            self.word_size: str = "dword"
-            self.int_size: int = 4
-            self.param_slot_base: int = 8
-            self.REGISTER_POOL = ("edx", "ecx", "ebx", "edi")
-        else:
-            self.acc = "ax"
-            self.cx_register = "cx"
-            self.dx_register = "dx"
-            self.bp_register = "bp"
-            self.sp_register = "sp"
-            self.word_size = "word"
-            self.int_size = 2
-            self.param_slot_base = 4
+        self.target: CodegenTarget = CodegenTarget(bits)
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
         self.arrays: list[tuple[str, list[str]]] = []
@@ -1144,7 +1183,7 @@ class CodeGenerator:
         When *preserve_ax* is True, any path that evaluates the index
         through AX pushes/pops AX so the caller's value survives.
         """
-        element_size = 1 if is_byte else self.int_size
+        element_size = 1 if is_byte else self.target.int_size
         displacement = 0
         if isinstance(index, BinOp) and index.op in ("+", "-") and isinstance(index.right, Int):
             sign = 1 if index.op == "+" else -1
@@ -1157,31 +1196,31 @@ class CodeGenerator:
         elif is_byte and isinstance(index, Var) and index.name in self.pinned_register and self.pinned_register[index.name] in ("di", "bx"):
             base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
-            self.emit(f"        mov si, {EREG_LOW_WORD.get(self.pinned_register[index.name], self.pinned_register[index.name])}")
+            self.emit(f"        mov si, {self.target.loword(self.pinned_register[index.name])}")
             if not is_byte:
-                if self.int_size == 4:
+                if self.target.int_size == 4:
                     self.emit("        shl si, 2")
                 else:
                     self.emit("        add si, si")
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
             self.emit(f"        mov si, [{self._local_address(index.name)}]")
             if not is_byte:
-                if self.int_size == 4:
+                if self.target.int_size == 4:
                     self.emit("        shl si, 2")
                 else:
                     self.emit("        add si, si")
         else:
             if preserve_ax:
-                self.emit(f"        push {self.acc}")
+                self.emit(f"        push {self.target.acc}")
             self.generate_expression(index)
             if not is_byte:
-                if self.int_size == 4:
-                    self.emit(f"        shl {self.acc}, 2")
+                if self.target.int_size == 4:
+                    self.emit(f"        shl {self.target.acc}, 2")
                 else:
-                    self.emit(f"        add {self.acc}, {self.acc}")
-            self.emit(f"        mov si, {EREG_LOW_WORD.get(self.acc, self.acc)}")
+                    self.emit(f"        add {self.target.acc}, {self.target.acc}")
+            self.emit(f"        mov si, {self.target.loword(self.target.acc)}")
             if preserve_ax:
-                self.emit(f"        pop {self.acc}")
+                self.emit(f"        pop {self.target.acc}")
         addr = const_base
         if displacement != 0:
             addr += f"{displacement:+d}"
@@ -1237,12 +1276,12 @@ class CodeGenerator:
         if name in self.pinned_register:
             source = self.pinned_register[name]
             if len(register) < len(source):
-                source = EREG_LOW_WORD.get(source, source)
+                source = self.target.loword(source)
             self.emit(f"        mov {register}, {source}")
         elif name in self.register_aliased_globals:
             source = self.register_aliased_globals[name]
             if len(register) < len(source):
-                source = EREG_LOW_WORD.get(source, source)
+                source = self.target.loword(source)
             if source != register:
                 self.emit(f"        mov {register}, {source}")
         elif name in self.constant_aliases:
@@ -1259,10 +1298,10 @@ class CodeGenerator:
         (e.g., protected-mode ``syscall`` / ``sysenter``) is done by
         editing that table — no per-builtin edits required.
         """
-        if name not in self.SYSCALL_SEQUENCES:
+        if name not in self.target.syscall_sequences:
             message = f"unknown syscall: {name!r}"
             raise CompileError(message)
-        for instruction in self.SYSCALL_SEQUENCES[name]:
+        for instruction in self.target.syscall_sequences[name]:
             self.emit(f"        {instruction}")
 
     @staticmethod
@@ -1519,8 +1558,8 @@ class CodeGenerator:
                 return f"_l_{name}"
             offset = self.locals[name]
             if offset > 0:
-                return f"{self.bp_register}-{offset}"
-            return f"{self.bp_register}+{-offset}"
+                return f"{self.target.bp_register}-{offset}"
+            return f"{self.target.bp_register}+{-offset}"
         if name in self.register_aliased_globals:
             message = f"register-aliased global '{name}' has no memory address"
             raise CompileError(message)
@@ -1607,15 +1646,15 @@ class CodeGenerator:
                 message = "register-convention call has a cyclic register dependency that involves a complex argument"
                 raise CompileError(message, line=getattr(item["arg"], "line", None))
             source = item["source"]
-            if len(source) < len(self.acc):
-                self.emit(f"        movzx {self.acc}, {source}")
+            if len(source) < len(self.target.acc):
+                self.emit(f"        movzx {self.target.acc}, {source}")
             else:
-                self.emit(f"        mov {self.acc}, {source}")
+                self.emit(f"        mov {self.target.acc}, {source}")
             for other in items:
                 if source in other["sources"]:
-                    other["sources"] = {register if register != source else self.acc for register in other["sources"]}
+                    other["sources"] = {register if register != source else self.target.acc for register in other["sources"]}
                     if other["source"] == source:
-                        other["source"] = self.acc
+                        other["source"] = self.target.acc
                         other["arg"] = None  # mark as "load from acc"
 
     def _emit_register_arg_single(self, *, target: str, arg: Node, source: str | None) -> None:
@@ -1633,12 +1672,12 @@ class CodeGenerator:
                     self.emit(f"        movzx {target}, {source}")
                 elif len(source) > len(target):
                     # 32-bit source into narrower target: use low word.
-                    self.emit(f"        mov {target}, {EREG_LOW_WORD.get(source, source)}")
+                    self.emit(f"        mov {target}, {self.target.loword(source)}")
                 else:
                     self.emit(f"        mov {target}, {source}")
             return
         if isinstance(arg, Int):
-            if arg.value == 0 and target != self.acc:
+            if arg.value == 0 and target != self.target.acc:
                 self.emit(f"        xor {target}, {target}")
             else:
                 self.emit(f"        mov {target}, {arg.value}")
@@ -1659,8 +1698,8 @@ class CodeGenerator:
                 # isn't acc already.
                 self.emit(f"        mov al, [{self._local_address(arg.name)}]")
                 self.emit("        xor ah, ah")
-                if target != self.acc:
-                    src = EREG_LOW_WORD.get(self.acc, self.acc) if len(target) < len(self.acc) else self.acc
+                if target != self.target.acc:
+                    src = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {target}, {src}")
             else:
                 self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
@@ -1670,8 +1709,8 @@ class CodeGenerator:
             # already verified that ``target`` is not read by any other
             # pending arg.  Evaluate into AX, then move into target.
             self.generate_expression(arg)
-            if target != self.acc:
-                src = EREG_LOW_WORD.get(self.acc, self.acc) if len(target) < len(self.acc) else self.acc
+            if target != self.target.acc:
+                src = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {target}, {src}")
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
@@ -1699,6 +1738,7 @@ class CodeGenerator:
         has been emitted; if we report True it clears its own
         tracking instead of guessing at peephole time.
         """
+        acc = self.target.acc
         # Byte-global fusion: last 4 lines are ``mov al, [mem] / xor
         # ah, ah / <op> ax, ... / mov [mem], al`` and the two mem refs
         # match — peephole_memory_arithmetic_byte will delete all four.
@@ -1717,30 +1757,31 @@ class CodeGenerator:
                 source = first[len("mov al, ") :]
                 destination = last[len("mov ") : -len(", al")].strip()
                 if source == destination:
-                    if third in ("inc ax", "dec ax"):
+                    if third in (f"inc {acc}", f"dec {acc}"):
                         return True
-                    if third.startswith(("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, ")):
+                    if third.startswith((f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, ")):
                         return True
         if len(self.lines) < 3:
             return False
         first = self.lines[-3].strip()
         middle = self.lines[-2].strip()
         last = self.lines[-1].strip()
-        if not (first.startswith("mov ax, ") and last.startswith("mov ") and last.endswith(", ax")):
+        mov_acc_prefix = f"mov {acc}, "
+        if not (first.startswith(mov_acc_prefix) and last.startswith("mov ") and last.endswith(f", {acc}")):
             return False
-        source = first[len("mov ax, ") :]
-        destination = last[len("mov ") : -len(", ax")].strip()
+        source = first[len(mov_acc_prefix) :]
+        destination = last[len("mov ") : -len(f", {acc}")].strip()
         if source == destination:
             # Passes 2 and 3 of peephole_memory_arithmetic cover inc/dec
             # and (add|sub|and) with any operand shape (imm, register,
             # or ``[mem]``).
-            if middle in ("inc ax", "dec ax"):
+            if middle in (f"inc {acc}", f"dec {acc}"):
                 return True
-            return middle.startswith(("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, "))
+            return middle.startswith((f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, "))
         # peephole_register_arithmetic: different register destination,
         # op in {add, sub, and, or, xor}, operand doesn't reference the target.
-        if destination in {"bx", "cx", "dx", "si", "di", "bp"}:
-            for prefix in ("add ax, ", "sub ax, ", "and ax, ", "or ax, ", "xor ax, "):
+        if destination in self.target.non_acc_registers:
+            for prefix in (f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, "):
                 if middle.startswith(prefix):
                     operand = middle[len(prefix) :]
                     return destination not in operand.split()
@@ -1751,9 +1792,14 @@ class CodeGenerator:
 
         Order is deterministic (sorted) so ``push`` / ``pop`` pairs
         nest correctly.  ``ax`` is never pinned, so never saved here.
+
+        ``BUILTIN_CLOBBERS`` uses canonical 16-bit names (``cx``,
+        ``bx``, etc.).  In 32-bit mode the register pool holds
+        E-register names, so we normalise both sides through
+        ``target.loword`` before comparing.
         """
-        pinned_set = set(self.pinned_register.values())
-        return sorted(register for register in clobbers if register in pinned_set and register != "ax")
+        loword = self.target.loword
+        return sorted(register for register in self.pinned_register.values() if loword(register) in clobbers and loword(register) != "ax")
 
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
@@ -2322,7 +2368,7 @@ class CodeGenerator:
         label = self.new_string_label(argument.content)
         length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
-        self.emit(f"        mov {self.cx_register}, {length}")
+        self.emit(f"        mov {self.target.cx_register}, {length}")
         self.emit("        jmp FUNCTION_DIE")
 
     def builtin_exec(self, arguments: list[Node], /) -> None:
@@ -2358,7 +2404,7 @@ class CodeGenerator:
         """
         self._check_argument_count(arguments=arguments, expected=1, name="far_read16")
         self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit(f"        mov {self.acc}, {'[bx]' if self.bits == 32 else '[es:bx]'}")
+        self.emit(f"        mov {self.target.acc}, {self.target.far_ref('bx')}")
         self.ax_clear()
 
     def builtin_far_read8(self, arguments: list[Node], /) -> None:
@@ -2371,7 +2417,7 @@ class CodeGenerator:
         """
         self._check_argument_count(arguments=arguments, expected=1, name="far_read8")
         self.emit_register_from_argument(argument=arguments[0], register="bx")
-        self.emit(f"        mov al, {'[bx]' if self.bits == 32 else '[es:bx]'}")
+        self.emit(f"        mov al, {self.target.far_ref('bx')}")
         self.emit("        xor ah, ah")
         self.ax_clear()
 
@@ -2388,13 +2434,13 @@ class CodeGenerator:
         offset_argument, value_argument = arguments
         if isinstance(value_argument, Int):
             self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        mov {self.word_size} [{'bx' if self.bits == 32 else 'es:bx'}], {value_argument.value & 0xFFFF}")
+            self.emit(f"        mov {self.target.word_size} {self.target.far_ref('bx')}, {value_argument.value & 0xFFFF}")
         else:
-            self.emit_register_from_argument(argument=value_argument, register=self.acc)
-            self.emit(f"        push {self.acc}")
+            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
             self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        pop {self.acc}")
-            self.emit(f"        mov [{'bx' if self.bits == 32 else 'es:bx'}], {self.acc}")
+            self.emit(f"        pop {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref('bx')}, {self.target.acc}")
         self.ax_clear()
 
     def builtin_far_write8(self, arguments: list[Node], /) -> None:
@@ -2410,13 +2456,13 @@ class CodeGenerator:
         offset_argument, value_argument = arguments
         if isinstance(value_argument, Int):
             self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        mov byte [{'bx' if self.bits == 32 else 'es:bx'}], {value_argument.value & 0xFF}")
+            self.emit(f"        mov byte {self.target.far_ref('bx')}, {value_argument.value & 0xFF}")
         else:
-            self.emit_register_from_argument(argument=value_argument, register=self.acc)
-            self.emit(f"        push {self.acc}")
+            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
             self.emit_register_from_argument(argument=offset_argument, register="bx")
-            self.emit(f"        pop {self.acc}")
-            self.emit(f"        mov [{'bx' if self.bits == 32 else 'es:bx'}], al")
+            self.emit(f"        pop {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref('bx')}, al")
         self.ax_clear()
 
     def builtin_fstat(self, arguments: list[Node], /) -> None:
@@ -2729,24 +2775,24 @@ class CodeGenerator:
         self.emit_register_from_argument(argument=len_argument, register="cx")
         self.emit_register_from_argument(argument=ip_argument, register="di")
         self.emit_register_from_argument(argument=sport_argument, register="dx")
-        self.emit(f"        push {self.bp_register}")
+        self.emit(f"        push {self.target.bp_register}")
         if isinstance(dport_argument, Int):
-            self.emit(f"        mov {self.bp_register}, {dport_argument.value}")
+            self.emit(f"        mov {self.target.bp_register}, {dport_argument.value}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.NAMED_CONSTANTS:
-            self.emit(f"        mov {self.bp_register}, {dport_argument.name}")
+            self.emit(f"        mov {self.target.bp_register}, {dport_argument.name}")
         elif isinstance(dport_argument, Var) and dport_argument.name in self.pinned_register:
-            self.emit(f"        mov {self.bp_register}, {self.pinned_register[dport_argument.name]}")
+            self.emit(f"        mov {self.target.bp_register}, {self.pinned_register[dport_argument.name]}")
         elif (
             isinstance(dport_argument, Var)
             and self._is_memory_scalar(dport_argument.name)
             and not self._is_byte_scalar(dport_argument.name)
         ):
-            self.emit(f"        mov {self.bp_register}, [{self._local_address(dport_argument.name)}]")
+            self.emit(f"        mov {self.target.bp_register}, [{self._local_address(dport_argument.name)}]")
         else:
             self.generate_expression(dport_argument)
-            self.emit(f"        mov {self.bp_register}, {self.acc}")
+            self.emit(f"        mov {self.target.bp_register}, {self.target.acc}")
         self._emit_syscall("NET_SENDTO")
-        self.emit(f"        pop {self.bp_register}")
+        self.emit(f"        pop {self.target.bp_register}")
         # Normalize the CF error signal into AX = -1 so callers can
         # check the return value with ``< 0``.
         label_index = self.new_label()
@@ -2796,11 +2842,11 @@ class CodeGenerator:
         self._check_argument_count(arguments=arguments, expected=1, name="strlen")
         self.emit_register_from_argument(argument=arguments[0], register="di")
         self.emit("        xor al, al")
-        self.emit(f"        mov {self.cx_register}, 0FFFFh")
+        self.emit(f"        mov {self.target.cx_register}, 0FFFFh")
         self.emit("        cld")
         self.emit("        repne scasb")
-        self.emit(f"        mov {self.acc}, 0FFFEh")
-        self.emit(f"        sub {self.acc}, {self.cx_register}")
+        self.emit(f"        mov {self.target.acc}, 0FFFEh")
+        self.emit(f"        sub {self.target.acc}, {self.target.cx_register}")
         self.ax_clear()
 
     def builtin_ticks(self, arguments: list[Node], /) -> None:
@@ -2814,7 +2860,7 @@ class CodeGenerator:
         self._check_argument_count(arguments=arguments, expected=0, name="ticks")
         self.emit("        xor ah, ah")
         self.emit("        int 1Ah")
-        self.emit(f"        mov {self.acc}, {self.dx_register}")
+        self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
         self.ax_clear()
 
     def builtin_uptime(self, arguments: list[Node], /) -> None:
@@ -2829,7 +2875,7 @@ class CodeGenerator:
         screen and serial terminal.  AL = mode.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="video_mode")
-        self.emit_register_from_argument(argument=arguments[0], register=self.acc)
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.acc)
         self._emit_syscall("VIDEO_MODE")
         self.ax_clear()
 
@@ -2883,7 +2929,7 @@ class CodeGenerator:
         in the pool so no extra exclusion is needed for subscript
         presence.
         """
-        pool = (*self.REGISTER_POOL, "bp") if self.elide_frame else self.REGISTER_POOL
+        pool = (*self.target.register_pool, "bp") if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
         def visit(node: Node) -> None:
@@ -2893,7 +2939,7 @@ class CodeGenerator:
                     # (``push bp / mov bp, sp / … / pop bp``) which
                     # preserves the caller's BP, so BP is omitted from
                     # the user-call clobber set even when it's pinned.
-                    for register in self.REGISTER_POOL:
+                    for register in self.target.register_pool:
                         clobber_counts[register] += 1
                 else:
                     if node.name not in self.BUILTIN_CLOBBERS:
@@ -3034,25 +3080,25 @@ class CodeGenerator:
         """
         if isinstance(right, Int):
             self.generate_expression(left)
-            self.emit(f"        mov {self.cx_register}, {right.value}")
+            self.emit(f"        mov {self.target.cx_register}, {right.value}")
         elif isinstance(right, Var) and right.name in self.pinned_register:
             self.generate_expression(left)
             source_register = self.pinned_register[right.name]
-            if len(source_register) < len(self.cx_register):
-                source_register = EREG_LOW_WORD.get(source_register, source_register)
+            if len(source_register) < len(self.target.cx_register):
+                source_register = self.target.loword(source_register)
                 # Use movzx to zero-extend the 16-bit source into cx_register.
-                self.emit(f"        movzx {self.cx_register}, {source_register}")
-            elif source_register != self.cx_register:
-                self.emit(f"        mov {self.cx_register}, {source_register}")
+                self.emit(f"        movzx {self.target.cx_register}, {source_register}")
+            elif source_register != self.target.cx_register:
+                self.emit(f"        mov {self.target.cx_register}, {source_register}")
         elif isinstance(right, Var) and self._is_memory_scalar(right.name) and not self._is_byte_scalar(right.name):
             self.generate_expression(left)
-            self.emit(f"        mov {self.cx_register}, [{self._local_address(right.name)}]")
+            self.emit(f"        mov {self.target.cx_register}, [{self._local_address(right.name)}]")
         else:
             self.generate_expression(left)
-            self.emit(f"        push {self.acc}")
+            self.emit(f"        push {self.target.acc}")
             self.generate_expression(right)
-            self.emit(f"        mov {self.cx_register}, {self.acc}")
-            self.emit(f"        pop {self.acc}")
+            self.emit(f"        mov {self.target.cx_register}, {self.target.acc}")
+            self.emit(f"        pop {self.target.acc}")
 
     def emit_comparison(self, left: Node, right: Node, /) -> None:
         """Generate a comparison, leaving flags set for a conditional jump.
@@ -3093,7 +3139,7 @@ class CodeGenerator:
                 and self.variable_types.get(left.name) != "unsigned long"
             ):
                 address = self._local_address(left.name)
-                width = "byte" if self._is_byte_scalar(left.name) else self.word_size
+                width = "byte" if self._is_byte_scalar(left.name) else self.target.word_size
                 if is_zero:
                     self.emit(f"        cmp {width} [{address}], 0")
                 else:
@@ -3112,9 +3158,9 @@ class CodeGenerator:
                 return
             self.generate_expression(left)
             if is_zero:
-                self.emit("        test al, al" if self.ax_is_byte else f"        test {self.acc}, {self.acc}")
+                self.emit("        test al, al" if self.ax_is_byte else f"        test {self.target.acc}, {self.target.acc}")
             else:
-                register = "al" if self.ax_is_byte else self.acc
+                register = "al" if self.ax_is_byte else self.target.acc
                 self.emit(f"        cmp {register}, {literal}")
         else:
             # Two byte-indexed variables: load left byte into AL, then
@@ -3137,11 +3183,11 @@ class CodeGenerator:
             # generate_expression can't clobber CX mid-compare.
             if isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
-                if source != self.cx_register or isinstance(left, (Int, Var, String)):
+                if source != self.target.cx_register or isinstance(left, (Int, Var, String)):
                     self.generate_expression(left)
                     # Use matching-width operands for cmp: if source is
                     # narrower than acc (e.g., bp vs eax), compare ax/source.
-                    cmp_acc = EREG_LOW_WORD.get(self.acc, self.acc) if len(source) < len(self.acc) else self.acc
+                    cmp_acc = self.target.loword(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
                     self.emit(f"        cmp {cmp_acc}, {source}")
                     return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
@@ -3158,19 +3204,19 @@ class CodeGenerator:
                 and not self._is_byte_scalar(right.name)
             ):
                 self.generate_expression(left)
-                self.emit(f"        cmp {self.acc}, [{self._local_address(right.name)}]")
+                self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
                 return
             # emit_binary_operator_operands clobbers CX; save it when a
             # pinned variable lives there (push/pop don't modify flags,
             # so the cmp's flags survive the restore for the caller's
             # conditional jump).
-            cx_pinned = any(register == self.cx_register for register in self.pinned_register.values())
+            cx_pinned = any(register == self.target.cx_register for register in self.pinned_register.values())
             if cx_pinned:
-                self.emit(f"        push {self.cx_register}")
+                self.emit(f"        push {self.target.cx_register}")
             self.emit_binary_operator_operands(left, right)
-            self.emit(f"        cmp {self.acc}, {self.cx_register}")
+            self.emit(f"        cmp {self.target.acc}, {self.target.cx_register}")
             if cx_pinned:
-                self.emit(f"        pop {self.cx_register}")
+                self.emit(f"        pop {self.target.cx_register}")
 
     def emit_condition(self, *, condition: Node, context: str) -> str:
         """Validate a condition, emit a comparison, and return the operator.
@@ -3318,7 +3364,7 @@ class CodeGenerator:
             if len(register) < len(source):
                 # Loading a 32-bit pinned reg into a narrower (16-bit) target:
                 # use the low-word name.
-                source = EREG_LOW_WORD.get(source, source)
+                source = self.target.loword(source)
                 if source != register:
                     self.emit(f"        mov {register}, {source}")
             elif len(source) < len(register):
@@ -3330,12 +3376,12 @@ class CodeGenerator:
         elif isinstance(argument, Var) and argument.name in self.register_aliased_globals:
             source = self.register_aliased_globals[argument.name]
             if len(register) < len(source):
-                source = EREG_LOW_WORD.get(source, source)
+                source = self.target.loword(source)
             if source != register:
                 self.emit(f"        mov {register}, {source}")
         elif isinstance(argument, Var) and argument.name == self.ax_local:
-            if register != self.acc:
-                src = EREG_LOW_WORD.get(self.acc, self.acc) if len(register) < len(self.acc) else self.acc
+            if register != self.target.acc:
+                src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {src}")
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
             self.emit(f"        mov {register}, _g_{argument.name}")
@@ -3346,8 +3392,8 @@ class CodeGenerator:
                 # into the target (or stop if target is already acc).
                 self.emit(f"        mov al, [{self._local_address(argument.name)}]")
                 self.emit("        xor ah, ah")
-                if register != self.acc:
-                    src = EREG_LOW_WORD.get(self.acc, self.acc) if len(register) < len(self.acc) else self.acc
+                if register != self.target.acc:
+                    src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                     self.emit(f"        mov {register}, {src}")
             else:
                 self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
@@ -3359,10 +3405,10 @@ class CodeGenerator:
             self.emit(f"        mov {register}, {constant_expr}")
         else:
             self.generate_expression(argument)
-            if register != self.acc:
+            if register != self.target.acc:
                 # In 32-bit mode, the result is in eax; narrow-register targets
                 # (bx, cx, dx, si, di) need the 16-bit low word of eax.
-                src = EREG_LOW_WORD.get(self.acc, self.acc) if len(register) < len(self.acc) else self.acc
+                src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {src}")
 
     def emit_si_from_argument(self, argument: Node, /) -> None:
@@ -3402,14 +3448,14 @@ class CodeGenerator:
                 return
             address = self._local_address(name)
             if self.elide_frame:
-                self.emit(f"        mov [{address}], {self.acc}")
-                if self.bits == 16:
-                    self.emit(f"        mov [{address}+2], {self.dx_register}")
+                self.emit(f"        mov [{address}], {self.target.acc}")
+                if self.target.bits == 16:
+                    self.emit(f"        mov [{address}+2], {self.target.dx_register}")
             else:
                 low_offset = self.locals[name]
-                self.emit(f"        mov [{self.bp_register}-{low_offset}], {self.acc}")
-                if self.bits == 16:
-                    self.emit(f"        mov [{self.bp_register}-{low_offset - 2}], {self.dx_register}")
+                self.emit(f"        mov [{self.target.bp_register}-{low_offset}], {self.target.acc}")
+                if self.target.bits == 16:
+                    self.emit(f"        mov [{self.target.bp_register}-{low_offset - 2}], {self.target.dx_register}")
             self.ax_is_byte = False
             self.ax_local = None
             return
@@ -3443,10 +3489,10 @@ class CodeGenerator:
         self.generate_expression(expression)
         self.store_target_register = previous_store_target
         if direct_register is not None:
-            if direct_register != self.acc:
+            if direct_register != self.target.acc:
                 # When storing into a 16-bit register from a 32-bit acc,
                 # use the low-word of acc to avoid an invalid operand mix.
-                src = EREG_LOW_WORD.get(self.acc, self.acc) if len(direct_register) < len(self.acc) else self.acc
+                src = self.target.loword(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {direct_register}, {src}")
             self.ax_is_byte = False
         elif self._is_byte_scalar(name):
@@ -3465,7 +3511,7 @@ class CodeGenerator:
             # goes through the Var-load path which re-issues the load.
             self.ax_is_byte = True
         else:
-            self.emit(f"        mov [{self._local_address(name)}], {self.acc}")
+            self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
             self.ax_is_byte = False
         self.ax_local = name
         # ``mov ax, D / <op> ax, ... / mov D, ax`` sequences are fused
@@ -3503,8 +3549,8 @@ class CodeGenerator:
             The complete assembly source as a string.
 
         """
-        if self.bits == 32:
-            self.emit("        [bits 32]")
+        for line in self.target.preamble_lines():
+            self.emit(line)
         self.emit("        org 0600h")
         self.emit()
         self.emit('%include "constants.asm"')
@@ -3702,7 +3748,7 @@ class CodeGenerator:
             return False
         if call.name in self.inline_bodies:
             return False
-        clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
+        clobbers: frozenset[str] = frozenset(self.target.register_pool)
         if self._pinned_registers_to_save(clobbers):
             return False
         callee_pins = self.user_function_pin_params.get(call.name, {}) if call.name in self.register_convention_functions else {}
@@ -3747,7 +3793,7 @@ class CodeGenerator:
             if len(arguments) != expected:
                 message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
                 raise CompileError(message, line=statement.line)
-            clobbers: frozenset[str] = frozenset(self.REGISTER_POOL)
+            clobbers: frozenset[str] = frozenset(self.target.register_pool)
             saved = self._pinned_registers_to_save(clobbers)
             use_pusha = discard_return and len(saved) >= 3
             if not tail_call:
@@ -3776,7 +3822,7 @@ class CodeGenerator:
             # Fastcall arg 0 is loaded last so earlier arg evaluation can't
             # trash AX while we're assembling the other parameters.
             if fastcall_ax_arg is not None:
-                self.emit_register_from_argument(argument=fastcall_ax_arg, register=self.acc)
+                self.emit_register_from_argument(argument=fastcall_ax_arg, register=self.target.acc)
             if tail_call:
                 # Tail call: jmp instead of call; no stack cleanup (ruled
                 # out by _is_tail_call_eligible) and no register restore
@@ -3858,28 +3904,28 @@ class CodeGenerator:
         if isinstance(expression, Int):
             self.ax_clear()
             if expression.value == 0:
-                self.emit(f"        xor {self.acc}, {self.acc}")
+                self.emit(f"        xor {self.target.acc}, {self.target.acc}")
             else:
-                self.emit(f"        mov {self.acc}, {expression.value}")
+                self.emit(f"        mov {self.target.acc}, {expression.value}")
         elif isinstance(expression, String):
             self.ax_clear()
-            self.emit(f"        mov {self.acc}, {self.new_string_label(expression.content)}")
+            self.emit(f"        mov {self.target.acc}, {self.new_string_label(expression.content)}")
         elif isinstance(expression, Var):
             vname = expression.name
             if vname in self.NAMED_CONSTANTS:
                 self.emit_constant_reference(vname)
-                self.emit(f"        mov {self.acc}, {vname}")
+                self.emit(f"        mov {self.target.acc}, {vname}")
                 self.ax_clear()
                 return
             if vname in self.constant_aliases:
-                self.emit(f"        mov {self.acc}, {self.constant_aliases[vname]}")
+                self.emit(f"        mov {self.target.acc}, {self.constant_aliases[vname]}")
                 self.ax_clear()
                 return
             if vname in self.global_arrays:
                 # A global array name decays to its base address — the
                 # ``_g_<name>`` label.  Load it as an immediate, not as a
                 # memory fetch from that address.
-                self.emit(f"        mov {self.acc}, _g_{vname}")
+                self.emit(f"        mov {self.target.acc}, _g_{vname}")
                 self.ax_clear()
                 return
             self._check_defined(vname, line=expression.line)
@@ -3888,18 +3934,18 @@ class CodeGenerator:
                 raise CompileError(message, line=expression.line)
             if vname in self.pinned_register:
                 src = self.pinned_register[vname]
-                if len(src) < len(self.acc):
+                if len(src) < len(self.target.acc):
                     # 16-bit pinned register into 32-bit acc: zero-extend.
-                    self.emit(f"        movzx {self.acc}, {src}")
+                    self.emit(f"        movzx {self.target.acc}, {src}")
                 else:
-                    self.emit(f"        mov {self.acc}, {src}")
+                    self.emit(f"        mov {self.target.acc}, {src}")
                 self.ax_is_byte = False
             elif vname in self.register_aliased_globals:
                 src = self.register_aliased_globals[vname]
-                if len(src) < len(self.acc):
-                    self.emit(f"        movzx {self.acc}, {src}")
+                if len(src) < len(self.target.acc):
+                    self.emit(f"        movzx {self.target.acc}, {src}")
                 else:
-                    self.emit(f"        mov {self.acc}, {src}")
+                    self.emit(f"        mov {self.target.acc}, {src}")
                 self.ax_is_byte = False
             elif self._is_byte_scalar(vname):
                 # Byte-scalar locals and globals store as a single
@@ -3915,7 +3961,7 @@ class CodeGenerator:
                 self.emit("        xor ah, ah")
                 self.ax_is_byte = True
             else:
-                self.emit(f"        mov {self.acc}, [{self._local_address(vname)}]")
+                self.emit(f"        mov {self.target.acc}, [{self._local_address(vname)}]")
                 self.ax_is_byte = False
             self.ax_local = vname
         elif isinstance(expression, Index):
@@ -3924,15 +3970,15 @@ class CodeGenerator:
             index_expression = expression.index
             self._check_defined(vname, line=expression.line)
             if isinstance(index_expression, Int) and vname in self.array_labels:
-                offset = index_expression.value * self.int_size
+                offset = index_expression.value * self.target.int_size
                 label = self.array_labels[vname]
                 if offset:
-                    self.emit(f"        mov {self.acc}, [{label}+{offset}]")
+                    self.emit(f"        mov {self.target.acc}, [{label}+{offset}]")
                 else:
-                    self.emit(f"        mov {self.acc}, [{label}]")
+                    self.emit(f"        mov {self.target.acc}, [{label}]")
             elif isinstance(index_expression, Int):
                 is_byte = self._is_byte_var(vname)
-                offset = index_expression.value * (1 if is_byte else self.int_size)
+                offset = index_expression.value * (1 if is_byte else self.target.int_size)
                 # Direct memory access for constant/aliased bases:
                 # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
                 const_base = self._resolve_constant(vname)
@@ -3942,7 +3988,7 @@ class CodeGenerator:
                         self.emit(f"        mov al, [{addr}]")
                         self.emit("        xor ah, ah")
                     else:
-                        self.emit(f"        mov {self.acc}, [{addr}]")
+                        self.emit(f"        mov {self.target.acc}, [{addr}]")
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register="si")
@@ -3953,9 +3999,9 @@ class CodeGenerator:
                             self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
                     elif offset:
-                        self.emit(f"        mov {self.acc}, [si+{offset}]")
+                        self.emit(f"        mov {self.target.acc}, [si+{offset}]")
                     else:
-                        self.emit(f"        mov {self.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [si]")
                     self._si_scratch_guard_end(guarded=guarded)
             else:
                 is_byte = self._is_byte_var(vname)
@@ -3972,7 +4018,7 @@ class CodeGenerator:
                         self.emit(f"        mov al, [{addr}]")
                         self.emit("        xor ah, ah")
                     else:
-                        self.emit(f"        mov {self.acc}, [{addr}]")
+                        self.emit(f"        mov {self.target.acc}, [{addr}]")
                     self.ax_clear()
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
@@ -3981,33 +4027,33 @@ class CodeGenerator:
                     # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
                         ireg = self.pinned_register[index_expression.name]
-                        self.emit(f"        add si, {EREG_LOW_WORD.get(ireg, ireg)}")
+                        self.emit(f"        add si, {self.target.loword(ireg)}")
                     elif isinstance(index_expression, (Var, Int)):
                         # Simple Var/Int load doesn't touch SI, so skip the
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self.emit(f"        add {self.acc}, {self.acc}")
-                        self.emit(f"        add si, {EREG_LOW_WORD.get(self.acc, self.acc)}")
+                            self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                        self.emit(f"        add si, {self.target.loword(self.target.acc)}")
                     else:
                         self.emit("        push si")
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self.emit(f"        add {self.acc}, {self.acc}")
+                            self.emit(f"        add {self.target.acc}, {self.target.acc}")
                         self.emit("        pop si")
-                        self.emit(f"        add si, {EREG_LOW_WORD.get(self.acc, self.acc)}")
+                        self.emit(f"        add si, {self.target.loword(self.target.acc)}")
                     if is_byte:
                         self.emit("        mov al, [si]")
                         self.emit("        xor ah, ah")
                     else:
-                        self.emit(f"        mov {self.acc}, [si]")
+                        self.emit(f"        mov {self.target.acc}, [si]")
                     self._si_scratch_guard_end(guarded=guarded)
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
                     self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
-            self.emit(f"        mov {self.acc}, {self.TYPE_SIZES[expression.type_name]}")
+            self.emit(f"        mov {self.target.acc}, {self.target.type_sizes[expression.type_name]}")
         elif isinstance(expression, SizeofVar):
             self.ax_clear()
             vname = expression.name
@@ -4016,16 +4062,16 @@ class CodeGenerator:
                 stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
                 if declaration.init is not None:
                     size = len(declaration.init.elements) * stride
-                    self.emit(f"        mov {self.acc}, {size}")
+                    self.emit(f"        mov {self.target.acc}, {size}")
                 else:
                     size_expression = self._constant_expression(declaration.size)
-                    self.emit(f"        mov {self.acc}, ({size_expression})*{stride}")
+                    self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
             elif vname in self.array_sizes:
-                size = self.array_sizes[vname] * self.int_size  # word-sized elements
-                self.emit(f"        mov {self.acc}, {size}")
+                size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
+                self.emit(f"        mov {self.target.acc}, {size}")
             else:
-                size = self.int_size  # all non-array variables are word-sized
-                self.emit(f"        mov {self.acc}, {size}")
+                size = self.target.int_size  # all non-array variables are word-sized
+                self.emit(f"        mov {self.target.acc}, {size}")
         elif isinstance(expression, Call):
             self.generate_call(expression)
         elif isinstance(expression, BinOp):
@@ -4037,12 +4083,12 @@ class CodeGenerator:
             if (constant_expr := self._constant_expression(expression)) is not None:
                 for name in self._collect_constant_references(expression):
                     self.emit_constant_reference(name)
-                self.emit(f"        mov {self.acc}, {constant_expr}")
+                self.emit(f"        mov {self.target.acc}, {constant_expr}")
                 self.ax_clear()
                 return
             operator, left, right = expression.op, expression.left, expression.right
             if operator == "%" and self._has_remainder(left, right):
-                self.emit(f"        mov {self.acc}, {self.dx_register}")
+                self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
                 self.ax_clear()
                 return
             if operator in ("+", "-", "&", "|", "^") and isinstance(right, Int):
@@ -4051,16 +4097,16 @@ class CodeGenerator:
                 self.generate_expression(left)
                 # +1 and -1 fit in a 1-byte inc/dec.
                 if operator == "+" and right.value == 1:
-                    self.emit(f"        inc {self.acc}")
+                    self.emit(f"        inc {self.target.acc}")
                 elif operator == "-" and right.value == 1:
-                    self.emit(f"        dec {self.acc}")
-                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and self.bits == 16:
+                    self.emit(f"        dec {self.target.acc}")
+                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and self.target.bits == 16:
                     # ``x ^ 0xFFFF`` is the ``~x`` lowering — ``not ax``
                     # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
-                    self.emit(f"        not {self.acc}")
+                    self.emit(f"        not {self.target.acc}")
                 else:
                     mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
-                    self.emit(f"        {mnemonic} {self.acc}, {right.value}")
+                    self.emit(f"        {mnemonic} {self.target.acc}, {right.value}")
                 self.ax_clear()
                 return
             if operator == "<<" and isinstance(right, Int):
@@ -4069,10 +4115,10 @@ class CodeGenerator:
                 self.generate_expression(left)
                 if shift == 0:
                     pass
-                elif shift >= self.int_size * 8:
-                    self.emit(f"        xor {self.acc}, {self.acc}")
+                elif shift >= self.target.int_size * 8:
+                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
                 else:
-                    self.emit(f"        shl {self.acc}, {shift}")
+                    self.emit(f"        shl {self.target.acc}, {shift}")
                 self.ax_clear()
                 return
             if operator == ">>" and isinstance(right, Int):
@@ -4086,7 +4132,7 @@ class CodeGenerator:
                 # shift path (which loads zero).
                 if (
                     shift == 8
-                    and self.bits == 16
+                    and self.target.bits == 16
                     and isinstance(left, Var)
                     and self._is_memory_scalar(left.name)
                     and left.name not in self.pinned_register
@@ -4101,10 +4147,10 @@ class CodeGenerator:
                 self.generate_expression(left)
                 if shift == 0:
                     pass
-                elif shift >= self.int_size * 8:
-                    self.emit(f"        xor {self.acc}, {self.acc}")
+                elif shift >= self.target.int_size * 8:
+                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
                 else:
-                    self.emit(f"        shr {self.acc}, {shift}")
+                    self.emit(f"        shr {self.target.acc}, {shift}")
                 self.ax_clear()
                 return
             # Fast path for ``+`` / ``-`` with a stack-resident right
@@ -4126,7 +4172,7 @@ class CodeGenerator:
             ):
                 self.generate_expression(left)
                 mnemonic = "add" if operator == "+" else "sub"
-                self.emit(f"        {mnemonic} {self.acc}, [{self._local_address(right.name)}]")
+                self.emit(f"        {mnemonic} {self.target.acc}, [{self._local_address(right.name)}]")
                 self.ax_clear()
                 return
             # Byte-scalar right operand for ``+`` / ``-``: a word-
@@ -4164,63 +4210,63 @@ class CodeGenerator:
             # can't clobber it mid-compute.
             if operator in ("+", "-", "&", "|", "^") and isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
-                if source != self.cx_register or isinstance(left, (Int, Var, String)):
+                if source != self.target.cx_register or isinstance(left, (Int, Var, String)):
                     self.generate_expression(left)
                     mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
-                    if len(source) < len(self.acc):
+                    if len(source) < len(self.target.acc):
                         # 16-bit pinned reg into 32-bit acc: push into cx_register first.
-                        self.emit(f"        movzx {self.cx_register}, {source}")
-                        self.emit(f"        {mnemonic} {self.acc}, {self.cx_register}")
+                        self.emit(f"        movzx {self.target.cx_register}, {source}")
+                        self.emit(f"        {mnemonic} {self.target.acc}, {self.target.cx_register}")
                     else:
-                        self.emit(f"        {mnemonic} {self.acc}, {source}")
+                        self.emit(f"        {mnemonic} {self.target.acc}, {source}")
                     self.ax_clear()
                     return
             cx_pinned_var = next(
-                (name for name, register in self.pinned_register.items() if register == self.cx_register),
+                (name for name, register in self.pinned_register.items() if register == self.target.cx_register),
                 None,
             )
             # Skip the CX save when an enclosing store is about to
             # overwrite CX anyway — its original value is dead.
-            protect_cx = cx_pinned_var is not None and self.store_target_register != self.cx_register
+            protect_cx = cx_pinned_var is not None and self.store_target_register != self.target.cx_register
             if protect_cx:
-                self.emit(f"        push {self.cx_register}")
+                self.emit(f"        push {self.target.cx_register}")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
-                self.emit(f"        add {self.acc}, {self.cx_register}")
+                self.emit(f"        add {self.target.acc}, {self.target.cx_register}")
             elif operator == "-":
-                self.emit(f"        sub {self.acc}, {self.cx_register}")
+                self.emit(f"        sub {self.target.acc}, {self.target.cx_register}")
             elif operator == "&":
-                self.emit(f"        and {self.acc}, {self.cx_register}")
+                self.emit(f"        and {self.target.acc}, {self.target.cx_register}")
             elif operator == "|":
-                self.emit(f"        or {self.acc}, {self.cx_register}")
+                self.emit(f"        or {self.target.acc}, {self.target.cx_register}")
             elif operator == "^":
-                self.emit(f"        xor {self.acc}, {self.cx_register}")
+                self.emit(f"        xor {self.target.acc}, {self.target.cx_register}")
             elif operator == "<<":
-                self.emit(f"        shl {self.acc}, cl")
+                self.emit(f"        shl {self.target.acc}, cl")
             elif operator == ">>":
-                self.emit(f"        shr {self.acc}, cl")
+                self.emit(f"        shr {self.target.acc}, cl")
             elif operator == "*":
                 protect_dx = (
-                    any(register == self.dx_register for register in self.pinned_register.values())
-                    and self.store_target_register != self.dx_register
+                    any(register == self.target.dx_register for register in self.pinned_register.values())
+                    and self.store_target_register != self.target.dx_register
                 )
                 if protect_dx:
-                    self.emit(f"        push {self.dx_register}")
-                self.emit(f"        mul {self.cx_register}")
+                    self.emit(f"        push {self.target.dx_register}")
+                self.emit(f"        mul {self.target.cx_register}")
                 if protect_dx:
-                    self.emit(f"        pop {self.dx_register}")
+                    self.emit(f"        pop {self.target.dx_register}")
                 self.division_remainder = None
             elif operator in {"/", "%"}:
-                dx_pinned = any(register == self.dx_register for register in self.pinned_register.values())
-                protect_dx = dx_pinned and self.store_target_register != self.dx_register
+                dx_pinned = any(register == self.target.dx_register for register in self.pinned_register.values())
+                protect_dx = dx_pinned and self.store_target_register != self.target.dx_register
                 if protect_dx:
-                    self.emit(f"        push {self.dx_register}")
-                self.emit(f"        xor {self.dx_register}, {self.dx_register}")
-                self.emit(f"        div {self.cx_register}")
+                    self.emit(f"        push {self.target.dx_register}")
+                self.emit(f"        xor {self.target.dx_register}, {self.target.dx_register}")
+                self.emit(f"        div {self.target.cx_register}")
                 if operator == "%":
-                    self.emit(f"        mov {self.acc}, {self.dx_register}")
+                    self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
                 if protect_dx:
-                    self.emit(f"        pop {self.dx_register}")
+                    self.emit(f"        pop {self.target.dx_register}")
                 if dx_pinned:
                     self.division_remainder = None
                 else:
@@ -4231,16 +4277,16 @@ class CodeGenerator:
                 # (unlike ``xor ax, ax``), so the jump-when-false branch
                 # reads the right condition.
                 skip_label = f".bool_{self.new_label()}"
-                self.emit(f"        cmp {self.acc}, {self.cx_register}")
-                self.emit(f"        mov {self.acc}, 0")
+                self.emit(f"        cmp {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        mov {self.target.acc}, 0")
                 self.emit(f"        {JUMP_WHEN_FALSE[operator]} {skip_label}")
-                self.emit(f"        inc {self.acc}")
+                self.emit(f"        inc {self.target.acc}")
                 self.emit(f"{skip_label}:")
             else:
                 message = f"unknown operator: {operator}"
                 raise CompileError(message, line=expression.line)
             if protect_cx:
-                self.emit(f"        pop {self.cx_register}")
+                self.emit(f"        pop {self.target.cx_register}")
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
@@ -4339,7 +4385,7 @@ class CodeGenerator:
                     # caller-pushed address.
                     continue
                 stack_index = i - 1 if is_fastcall else i
-                self.locals[param.name] = -(self.param_slot_base + stack_index * self.int_size)  # negative = above bp
+                self.locals[param.name] = -(self.target.param_slot_base + stack_index * self.target.int_size)  # negative = above bp
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
@@ -4389,20 +4435,20 @@ class CodeGenerator:
             for param in parameters:
                 if param.name in self.pinned_register:
                     continue
-                self.locals[param.name] = -(self.param_slot_base + stack_position * self.int_size)
+                self.locals[param.name] = -(self.target.param_slot_base + stack_position * self.target.int_size)
                 stack_position += 1
 
         self.emit(f"{name}:")
         if not self.elide_frame:
-            self.emit(f"        push {self.bp_register}")
-            self.emit(f"        mov {self.bp_register}, {self.sp_register}")
+            self.emit(f"        push {self.target.bp_register}")
+            self.emit(f"        mov {self.target.bp_register}, {self.target.sp_register}")
             if self.frame_size > 0:
-                self.emit(f"        sub {self.sp_register}, {self.frame_size}")
+                self.emit(f"        sub {self.target.sp_register}, {self.frame_size}")
             if is_fastcall:
                 # Spill AX (the caller-supplied arg 0) into its local slot
                 # so the body can read it through the normal local path.
                 slot = self.locals[parameters[0].name]
-                self.emit(f"        mov [{self.bp_register}-{slot}], {self.acc}")
+                self.emit(f"        mov [{self.target.bp_register}-{slot}], {self.target.acc}")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
@@ -4412,7 +4458,8 @@ class CodeGenerator:
                     if param.name in self.pinned_register:
                         register = self.pinned_register[param.name]
                         stack_index = i - 1 if is_fastcall else i
-                        self.emit(f"        mov {register}, [{self.bp_register}+{self.param_slot_base + stack_index * self.int_size}]")
+                        offset = self.target.param_slot_base + stack_index * self.target.int_size
+                        self.emit(f"        mov {register}, [{self.target.bp_register}+{offset}]")
 
         # Emit argc/argv startup for main with parameters.
         if name == "main" and parameters:
@@ -4452,8 +4499,8 @@ class CodeGenerator:
             self.emit("        ret")
         elif not self.always_exits(body):
             if self.frame_size > 0:
-                self.emit(f"        mov {self.sp_register}, {self.bp_register}")
-            self.emit(f"        pop {self.bp_register}")
+                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+            self.emit(f"        pop {self.target.bp_register}")
             self.emit("        ret")
         self.emit()
 
@@ -4526,7 +4573,7 @@ class CodeGenerator:
         # Evaluate value into AX, then store at base+index.
         if isinstance(statement.index, Int) and isinstance(statement.expr, Int):
             # Both index and value are constants: direct store.
-            offset = statement.index.value * (1 if is_byte else self.int_size)
+            offset = statement.index.value * (1 if is_byte else self.target.int_size)
             const_base = self._resolve_constant(name)
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
@@ -4538,11 +4585,11 @@ class CodeGenerator:
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
             else:
-                self.emit(f"        mov {self.word_size} [{addr}], {statement.expr.value}")
+                self.emit(f"        mov {self.target.word_size} [{addr}], {statement.expr.value}")
             self._si_scratch_guard_end(guarded=guarded)
         elif isinstance(statement.index, Int):
             # Constant index, variable value.
-            offset = statement.index.value * (1 if is_byte else self.int_size)
+            offset = statement.index.value * (1 if is_byte else self.target.int_size)
             self.generate_expression(statement.expr)
             const_base = self._resolve_constant(name)
             if const_base is not None:
@@ -4579,30 +4626,30 @@ class CodeGenerator:
                 # order matches the push order (push ax..., pop ax, pop si).
                 guarded = self._si_scratch_guard_begin(name)
                 self.generate_expression(statement.expr)
-                self.emit(f"        push {self.acc}")
+                self.emit(f"        push {self.target.acc}")
                 self._emit_load_var(name, register="si")
                 # If the index is a simple Var/Int, evaluating it doesn't
                 # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
                     if not is_byte:
-                        self.emit(f"        add {self.acc}, {self.acc}")
-                    self.emit(f"        add si, {EREG_LOW_WORD.get(self.acc, self.acc)}")
+                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                    self.emit(f"        add si, {self.target.loword(self.target.acc)}")
                 else:
                     self.emit("        push si")
                     self.generate_expression(statement.index)
                     if not is_byte:
-                        self.emit(f"        add {self.acc}, {self.acc}")
+                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
                     self.emit("        pop si")
-                    self.emit(f"        add si, {EREG_LOW_WORD.get(self.acc, self.acc)}")
-                self.emit(f"        pop {self.acc}")
+                    self.emit(f"        add si, {self.target.loword(self.target.acc)}")
+                self.emit(f"        pop {self.target.acc}")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
                 self.ax_clear()
                 if is_byte:
                     self.emit("        mov [si], al")
                 else:
-                    self.emit(f"        mov [si], {self.acc}")
+                    self.emit(f"        mov [si], {self.target.acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
     def generate_long_expression(self, expression: Node, /) -> None:
@@ -4629,14 +4676,14 @@ class CodeGenerator:
                 return
             address = self._local_address(vname)
             if self.elide_frame:
-                self.emit(f"        mov {self.acc}, [{address}]")
-                if self.bits == 16:
-                    self.emit(f"        mov {self.dx_register}, [{address}+2]")
+                self.emit(f"        mov {self.target.acc}, [{address}]")
+                if self.target.bits == 16:
+                    self.emit(f"        mov {self.target.dx_register}, [{address}+2]")
             else:
                 low_offset = self.locals[vname]
-                self.emit(f"        mov {self.acc}, [{self.bp_register}-{low_offset}]")
-                if self.bits == 16:
-                    self.emit(f"        mov {self.dx_register}, [{self.bp_register}-{low_offset - 2}]")
+                self.emit(f"        mov {self.target.acc}, [{self.target.bp_register}-{low_offset}]")
+                if self.target.bits == 16:
+                    self.emit(f"        mov {self.target.dx_register}, [{self.target.bp_register}-{low_offset - 2}]")
             self.ax_is_byte = False
             self.ax_local = None
             return
@@ -4662,8 +4709,8 @@ class CodeGenerator:
             if isinstance(value, Int) and value.value in (0, 1):
                 self.emit("        clc" if value.value == 1 else "        stc")
                 if self.frame_size > 0:
-                    self.emit(f"        mov {self.sp_register}, {self.bp_register}")
-                self.emit(f"        pop {self.bp_register}")
+                    self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+                self.emit(f"        pop {self.target.bp_register}")
                 self.emit("        ret")
                 return
             # Bool-valued expression: evaluate it into the CF via the
@@ -4675,21 +4722,21 @@ class CodeGenerator:
             self.emit_condition_true_jump(condition=value, success_label=true_label, context="return")
             self.emit("        stc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.sp_register}, {self.bp_register}")
-            self.emit(f"        pop {self.bp_register}")
+                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+            self.emit(f"        pop {self.target.bp_register}")
             self.emit("        ret")
             self.emit(f"{true_label}:")
             self.emit("        clc")
             if self.frame_size > 0:
-                self.emit(f"        mov {self.sp_register}, {self.bp_register}")
-            self.emit(f"        pop {self.bp_register}")
+                self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+            self.emit(f"        pop {self.target.bp_register}")
             self.emit("        ret")
             return
         if statement.value is not None:
             self.generate_expression(statement.value)
         if self.frame_size > 0:
-            self.emit(f"        mov {self.sp_register}, {self.bp_register}")
-        self.emit(f"        pop {self.bp_register}")
+            self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
+        self.emit(f"        pop {self.target.bp_register}")
         self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:
@@ -4726,7 +4773,7 @@ class CodeGenerator:
                 self.arrays.append((array_label, elem_labels))
                 self.array_labels[statement.name] = array_label
                 self.array_sizes[statement.name] = len(elem_labels)
-                self.emit(f"        mov {self.word_size} [{self._local_address(statement.name)}], {array_label}")
+                self.emit(f"        mov {self.target.word_size} [{self._local_address(statement.name)}], {array_label}")
         elif isinstance(statement, Assign):
             self._check_defined(statement.name, line=statement.line)
             self.emit_store_local(expression=statement.expr, name=statement.name)
@@ -4862,7 +4909,7 @@ class CodeGenerator:
         AX, but subsequent fall-through code might consume the
         rebinding).
         """
-        registers = {"ebx", "ecx", "edx", "esi", "edi", "ebp"} if self.bits == 32 else {"bx", "cx", "dx", "si", "di", "bp"}
+        registers = self.target.non_acc_registers
         jump_prefixes = (
             "ja ",
             "jae ",
@@ -4885,8 +4932,8 @@ class CodeGenerator:
             "js ",
             "jz ",
         )
-        mov_acc_prefix = f"mov {self.acc}, "
-        cmp_acc_prefix = f"cmp {self.acc}, "
+        mov_acc_prefix = f"mov {self.target.acc}, "
+        cmp_acc_prefix = f"cmp {self.target.acc}, "
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -4916,8 +4963,8 @@ class CodeGenerator:
         when the constant is zero, ``xor <reg>, <reg>`` (one byte
         shorter).
         """
-        registers = {"ebx", "ecx", "edx", "esi", "edi", "ebp"} if self.bits == 32 else {"bx", "cx", "dx", "si", "di", "bp"}
-        mov_acc_prefix = f"mov {self.acc}, "
+        registers = self.target.non_acc_registers
+        mov_acc_prefix = f"mov {self.target.acc}, "
         i = 0
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
@@ -4933,7 +4980,7 @@ class CodeGenerator:
                 i += 1
                 continue
             parts = b[len("mov ") :].split(", ")
-            if len(parts) != 2 or parts[1] != self.acc or parts[0] not in registers:
+            if len(parts) != 2 or parts[1] != self.target.acc or parts[0] not in registers:
                 i += 1
                 continue
             register = parts[0]
@@ -5155,7 +5202,7 @@ class CodeGenerator:
         while i < len(self.lines) - 1:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
-            if a == f"sbb {self.acc}, {self.acc}" and b == f"test {self.acc}, {self.acc}":
+            if a == f"sbb {self.target.acc}, {self.target.acc}" and b == f"test {self.target.acc}, {self.target.acc}":
                 del self.lines[i + 1]
                 continue
             i += 1
@@ -5370,11 +5417,11 @@ class CodeGenerator:
         - ``mov ax, D / mov cx, imm / (add|sub) ax, cx /
           mov D, ax`` → ``(add|sub) D, imm``
         """
-        registers = {"ebx", "ecx", "edx", "esi", "edi", "ebp"} if self.bits == 32 else {"bx", "cx", "dx", "si", "di", "bp"}
-        mov_acc_prefix = f"mov {self.acc}, "
-        mov_cx_prefix = f"mov {self.cx_register}, "
-        add_acc_cx = f"add {self.acc}, {self.cx_register}"
-        sub_acc_cx = f"sub {self.acc}, {self.cx_register}"
+        registers = self.target.non_acc_registers
+        mov_acc_prefix = f"mov {self.target.acc}, "
+        mov_cx_prefix = f"mov {self.target.cx_register}, "
+        add_acc_cx = f"add {self.target.acc}, {self.target.cx_register}"
+        sub_acc_cx = f"sub {self.target.acc}, {self.target.cx_register}"
         i = 0
         while i < len(self.lines) - 3:
             a = self.lines[i].strip()
@@ -5396,12 +5443,12 @@ class CodeGenerator:
             if c not in {add_acc_cx, sub_acc_cx}:
                 i += 1
                 continue
-            if d != f"mov {source}, {self.acc}":
+            if d != f"mov {source}, {self.target.acc}":
                 i += 1
                 continue
             immediate = b[len(mov_cx_prefix) :]
             operator = "add" if c == add_acc_cx else "sub"
-            width = f"{self.word_size} " if is_memory else ""
+            width = f"{self.target.word_size} " if is_memory else ""
             if immediate == "1":
                 instruction = "inc" if operator == "add" else "dec"
                 self.lines[i] = f"        {instruction} {width}{source}"
@@ -5433,15 +5480,15 @@ class CodeGenerator:
                 continue
             operator = None
             operand = None
-            if b == f"inc {self.acc}":
+            if b == f"inc {self.target.acc}":
                 operator = "inc"
                 operand = ""
-            elif b == f"dec {self.acc}":
+            elif b == f"dec {self.target.acc}":
                 operator = "dec"
                 operand = ""
             else:
                 for op in mnemonic_ops:
-                    prefix = f"{op} {self.acc}, "
+                    prefix = f"{op} {self.target.acc}, "
                     if b.startswith(prefix):
                         operator = op
                         operand = b[len(prefix) :]
@@ -5454,10 +5501,10 @@ class CodeGenerator:
             if operand.startswith("["):
                 i += 1
                 continue
-            if c != f"mov {source}, {self.acc}":
+            if c != f"mov {source}, {self.target.acc}":
                 i += 1
                 continue
-            width = f"{self.word_size} " if is_memory else ""
+            width = f"{self.target.word_size} " if is_memory else ""
             if operator in ("inc", "dec"):
                 self.lines[i] = f"        {operator} {width}{source}"
             elif operand == "1" and operator in ("add", "sub"):
@@ -5488,7 +5535,7 @@ class CodeGenerator:
             operator = None
             rhs = None
             for op in ("add", "sub", "and", "or", "xor"):
-                prefix = f"{op} {self.acc}, "
+                prefix = f"{op} {self.target.acc}, "
                 if b.startswith(prefix):
                     operator = op
                     rhs = b[len(prefix) :]
@@ -5502,11 +5549,11 @@ class CodeGenerator:
             if rhs == source:
                 i += 1
                 continue
-            if c != f"mov {source}, {self.acc}":
+            if c != f"mov {source}, {self.target.acc}":
                 i += 1
                 continue
-            self.lines[i] = f"        mov {self.acc}, {rhs}"
-            self.lines[i + 1] = f"        {operator} {source}, {self.acc}"
+            self.lines[i] = f"        mov {self.target.acc}, {rhs}"
+            self.lines[i + 1] = f"        {operator} {source}, {self.target.acc}"
             del self.lines[i + 2]
             continue
 
@@ -5681,9 +5728,9 @@ class CodeGenerator:
         pinned-register locals aren't referenced via AX tracking
         post-codegen.
         """
-        registers = {"ebx", "ecx", "edx", "esi", "edi", "ebp"} if self.bits == 32 else {"bx", "cx", "dx", "si", "di", "bp"}
-        ops = tuple(f"{op} {self.acc}," for op in ("add", "sub", "and", "or", "xor"))
-        mov_acc_prefix = f"mov {self.acc}, "
+        registers = self.target.non_acc_registers
+        ops = tuple(f"{op} {self.target.acc}," for op in ("add", "sub", "and", "or", "xor"))
+        mov_acc_prefix = f"mov {self.target.acc}, "
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -5699,7 +5746,7 @@ class CodeGenerator:
                 i += 1
                 continue
             parts = c[len("mov ") :].split(", ")
-            if len(parts) != 2 or parts[1] != self.acc or parts[0] not in registers:
+            if len(parts) != 2 or parts[1] != self.target.acc or parts[0] not in registers:
                 i += 1
                 continue
             target = parts[0]
@@ -5713,7 +5760,7 @@ class CodeGenerator:
             if target in source.split():
                 i += 1
                 continue
-            new_op = b.replace(f"{self.acc},", f"{target},", 1)
+            new_op = b.replace(f"{self.target.acc},", f"{target},", 1)
             self.lines[i] = f"        mov {target}, {source}"
             self.lines[i + 1] = f"        {new_op}"
             del self.lines[i + 2]
@@ -5835,11 +5882,11 @@ class CodeGenerator:
         i = 0
         while i < len(self.lines) - 1:
             line = self.lines[i].strip()
-            if not (line.startswith("mov [") and line.endswith((f"], {self.acc}", "], al"))):
+            if not (line.startswith("mov [") and line.endswith((f"], {self.target.acc}", "], al"))):
                 i += 1
                 continue
             address = line[4 : line.index("]") + 1]
-            reload_word = f"mov {self.acc}, {address}"
+            reload_word = f"mov {self.target.acc}, {address}"
             reload_byte = f"mov al, {address}"
             j = i + 1
             removed = False
@@ -5920,7 +5967,7 @@ class CodeGenerator:
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
-                size = self.TYPE_SIZES[statement.type_name]
+                size = self.target.type_sizes[statement.type_name]
                 # Byte-typed scalar body locals get a 1-byte slot; track
                 # them so load / store / compare paths use the byte-wide
                 # codegen shared with byte-scalar globals.  Parameters
