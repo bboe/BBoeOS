@@ -41,9 +41,13 @@ pm_entry_32:
 pm16_back:
         mov ax, 0x5678
 
+        ;; align N pads current_address to a multiple of N with zero
+        ;; bytes — exercises the STR_ALIGN directive added in phase 5.2.
+        align 8
 gdt_desc:
         dw 0
         dd 0
+        align 4
 idt_desc:
         dw 0
         dd 0

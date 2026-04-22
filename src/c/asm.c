@@ -1950,6 +1950,20 @@ void parse_directive() {
         include_push();
         return;
     }
+    if (match_word(STR_ALIGN)) {
+        skip_ws();
+        int n = resolve_value();
+        /* Power-of-two alignment only — every NASM source we assemble
+           uses 2/4/8/16.  ``mask = n - 1`` picks the low bits that
+           must be zero; pad one NOP (0x90) at a time until they are.
+           NASM's flat-binary output uses 0x90 as the default fill,
+           so matching byte-for-byte requires it. */
+        int mask = n - 1;
+        while ((current_address & mask) != 0) {
+            emit_byte(0x90);
+        }
+        return;
+    }
     if (match_word(STR_ORG)) {
         skip_ws();
         int addr = resolve_value();
@@ -3017,6 +3031,7 @@ asm(
     "STR_AAM     db 'aam',0\n"
     "STR_ADC     db 'adc',0\n"
     "STR_ADD     db 'add',0\n"
+    "STR_ALIGN   db 'align',0\n"
     "STR_AND     db 'and',0\n"
     "STR_ASSIGN  db 'assign',0\n"
     "STR_BITS    db 'bits',0\n"

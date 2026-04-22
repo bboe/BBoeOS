@@ -120,6 +120,7 @@ extern char arp_frame[];
 /* Assembler keyword strings (defined in src/c/asm.c's trailing asm block).
    Exposed as NAMED_CONSTANTS in cc.py so match_word_c(STR_X) can pass
    the keyword address through AX without per-keyword wrappers. */
+extern char STR_ALIGN[];
 extern char STR_ASSIGN[];
 extern char STR_BITS[];
 extern char STR_BYTE[];

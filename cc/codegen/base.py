@@ -101,6 +101,7 @@ class CodeGeneratorBase:
         "STDERR",
         "STDIN",
         "STDOUT",
+        "STR_ALIGN",
         "STR_ASSIGN",
         "STR_BITS",
         "STR_BYTE",
