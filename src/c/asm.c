@@ -1337,11 +1337,11 @@ void handle_push() {
         emit_byte(0x50 | (packed_register & 0xFF));
         return;
     }
-    /* ``push [word|dword] imm`` — the size token forces the push width.
-       Without a token the width defaults to the current bits mode
-       so ``push 0`` under bits=32 pushes a dword.  The imm8 short
-       form (0x6A) still applies when the value fits ±128 regardless
-       of operand size; otherwise the imm tail widens to match. */
+    /* ``push [word|dword] imm`` or ``push [word|dword] [mem]`` —
+       the size token forces the push width.  Without a token the
+       width defaults to the current bits mode so ``push 0`` under
+       bits=32 pushes a dword.  Memory operands use the ``FF /6``
+       encoding; immediates use the 0x6A short / 0x68 long form. */
     int size = default_bits;
     if (match_word(STR_WORD)) {
         size = 16;
@@ -1349,6 +1349,21 @@ void handle_push() {
     } else if (match_word(STR_DWORD)) {
         size = 32;
         skip_ws();
+    }
+    if (source_cursor[0] == '[') {
+        int packed_operand = parse_operand();
+        int type = (packed_operand >> 8) & 0xFF;
+        int register_id = packed_operand & 0xFF;
+        int value = parse_operand_value;
+        emit_operand_size_prefix(size);
+        emit_address_size_prefix(parse_operand_address_size);
+        emit_byte(0xFF);
+        if (type == 2) {
+            emit_modrm_direct(6, value);
+        } else {
+            emit_indexed_mem(6, register_id, value);
+        }
+        return;
     }
     int value = resolve_value();
     emit_operand_size_prefix(size);
@@ -2415,15 +2430,16 @@ int parse_operand() {
         }
         skip_ws();
         int disp = 0;
+        /* ``[reg + expr]`` and ``[reg - expr]`` — leave the sign for
+           resolve_value so left-to-right semantics apply (``[bp-4+1]``
+           evaluates to ``bp-3``, not ``bp-5``).  ``+`` is consumed so
+           resolve_value sees the bare expression. */
         if (source_cursor[0] == '+') {
             source_cursor = source_cursor + 1;
             skip_ws();
             disp = resolve_value();
         } else if (source_cursor[0] == '-') {
-            source_cursor = source_cursor + 1;
-            skip_ws();
-            int value = resolve_value();
-            disp = 0 - value;
+            disp = resolve_value();
         }
         skip_ws();
         if (source_cursor[0] == ']') {
@@ -2726,6 +2742,20 @@ int resolve_label() {
 int resolve_value() {
     skip_ws();
     int value;
+    /* Leading unary ``-`` / ``+`` on the first term — matches NASM's
+       displacement-expression semantics where ``[bp-4+1]`` evaluates
+       left-to-right as ``((-4) + 1) = -3``.  Negation applies only
+       to the first term; the operator chain that follows picks up
+       from there. */
+    int negate = 0;
+    if (source_cursor[0] == '-') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+        negate = 1;
+    } else if (source_cursor[0] == '+') {
+        source_cursor = source_cursor + 1;
+        skip_ws();
+    }
     char first = source_cursor[0];
     if (first == '(') {
         source_cursor = source_cursor + 1;
@@ -2776,6 +2806,9 @@ int resolve_value() {
            the identifier so the operator-chain tail starts on the next
            non-ident byte. */
         value = lookup_ident_here(1);
+    }
+    if (negate) {
+        value = 0 - value;
     }
     /* Operator chain (flat precedence, right-associative via recursion
        in ``parse_rhs``).  NASM's constant-expression lowering
