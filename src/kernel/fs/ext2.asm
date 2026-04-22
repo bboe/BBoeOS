@@ -1459,39 +1459,190 @@ ext2_rename:
 
 ext2_update_size:
         ;; Write fd position back to inode i_size (32-bit).
+        ;; Grows i_size if position > current size; on shrink, frees orphaned blocks.
         ;; Input:  SI = fd_entry pointer
         ;; Output: CF on disk error
         push ax
         push bx
         push cx
         push dx
-        mov ax, [si+FD_OFFSET_START]    ; inode number
-        call ext2_read_inode            ; BX = inode pointer in SECTOR_BUFFER
+        push si
+        push di
+        mov [ext2_us_fd], si
+        mov ax, [si+FD_OFFSET_START]
+        call ext2_read_inode                ; BX = inode ptr in SECTOR_BUFFER
+        ;; 32-bit compare: new_pos vs old i_size
+        movzx eax, word [si+FD_OFFSET_POSITION]
+        movzx edx, word [si+FD_OFFSET_POSITION+2]
+        shl edx, 16
+        or eax, edx                         ; EAX = new_pos
+        movzx ecx, word [bx + EXT2_INODE_SIZE_LO]
+        movzx edx, word [bx + EXT2_INODE_SIZE_LO + 2]
+        shl edx, 16
+        or ecx, edx                         ; ECX = old_size
+        cmp eax, ecx
+        ja .eus_grow
+        je .eus_no_update
+        ;; Shrink: compute keep_blocks = ceil(new_pos / block_size)
+        movzx ecx, byte [ext2_log_block_size]
+        add cl, 10                          ; CL = block_size_shift (10 for 1 KB blocks)
+        mov edx, 1
+        shl edx, cl
+        dec edx                             ; EDX = block_size - 1
+        add eax, edx
+        shr eax, cl                         ; EAX = keep_blocks
+        mov [ext2_us_keep_blocks], ax
+        ;; Save i_block[0..12] (low 16 bits of each 4-byte entry)
+        push si
+        lea si, [bx + EXT2_INODE_BLOCK]
+        mov di, ext2_us_blks
+        mov cx, 13
+        cld
+        .eus_save_blks:
+        mov ax, [si]
+        stosw
+        add si, 4
+        dec cx
+        jnz .eus_save_blks
+        pop si
+        ;; Update i_size and zero freed i_block[] entries in SECTOR_BUFFER
         mov ax, [si+FD_OFFSET_POSITION]
-        ;; Only update if position > current size
-        mov cx, [bx + EXT2_INODE_SIZE_LO]
-        cmp ax, cx
-        jbe .eus_no_update
+        mov [bx + EXT2_INODE_SIZE_LO], ax
+        mov ax, [si+FD_OFFSET_POSITION+2]
+        mov [bx + EXT2_INODE_SIZE_LO + 2], ax
+        mov cx, [ext2_us_keep_blocks]
+        cmp cx, 13
+        jae .eus_flush
+        mov di, cx
+        shl di, 2
+        add di, EXT2_INODE_BLOCK
+        add di, bx                          ; DI → i_block[keep_blocks] in SECTOR_BUFFER
+        mov cx, 13
+        sub cx, [ext2_us_keep_blocks]
+        shl cx, 1                           ; words to zero (each entry = 4 bytes = 2 words)
+        xor ax, ax
+        rep stosw
+        .eus_flush:
+        ;; Flush inode to disk before freeing blocks
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .eus_err
+        ;; Free direct blocks [keep_blocks..11]
+        mov cx, [ext2_us_keep_blocks]
+        .eus_free_direct_loop:
+        cmp cx, 12
+        jae .eus_indirect
+        mov di, cx
+        shl di, 1
+        mov ax, [ext2_us_blks + di]
+        test ax, ax
+        jz .eus_next_direct
+        push cx
+        call ext2_free_block
+        pop cx
+        jc .eus_err
+        .eus_next_direct:
+        inc cx
+        jmp .eus_free_direct_loop
+        .eus_indirect:
+        ;; Handle indirect block (i_block[12] at offset 24 in ext2_us_blks)
+        mov ax, [ext2_us_blks + 24]
+        test ax, ax
+        jz .eus_done
+        mov [ext2_us_ind_blk], ax
+        ;; ind_start = max(0, keep_blocks - 12): first indirect entry to free
+        mov ax, [ext2_us_keep_blocks]
+        cmp ax, 12
+        jbe .eus_ind_start_zero
+        sub ax, 12
+        jmp .eus_ind_start_set
+        .eus_ind_start_zero:
+        xor ax, ax
+        .eus_ind_start_set:
+        mov cx, ax
+        shr cx, 7
+        mov [ext2_us_ind_fsec], cx          ; fsec = ind_start >> 7
+        and ax, 07Fh
+        mov [ext2_us_ind_fptr], ax          ; fptr = ind_start & 0x7F
+        ;; sectors_per_block
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov bx, 1
+        shl bx, cl
+        mov [ext2_us_ind_secs], bx
+        mov bx, [ext2_us_ind_fsec]
+        .eus_ind_next_sec:
+        cmp bx, [ext2_us_ind_secs]
+        jae .eus_ind_blk_maybe_free
+        push bx
+        mov ax, [ext2_us_ind_blk]
+        call ext2_read_blk_sec
+        pop bx
+        jc .eus_err
+        ;; Determine start pointer: fptr for first sector, 0 for subsequent
+        cmp bx, [ext2_us_ind_fsec]
+        jne .eus_ind_sec_start_0
+        mov si, [ext2_us_ind_fptr]
+        jmp .eus_ind_sec_start_set
+        .eus_ind_sec_start_0:
+        xor si, si
+        .eus_ind_sec_start_set:
+        push bx
+        mov cx, 128
+        sub cx, si                          ; entries remaining in this sector
+        shl si, 2
+        add si, SECTOR_BUFFER               ; SI → first entry to free
+        .eus_ind_ptr:
+        mov ax, [si]
+        test ax, ax
+        jz .eus_ind_ptr_next
+        push cx
+        push si
+        call ext2_free_block
+        pop si
+        pop cx
+        jc .eus_err_ind
+        .eus_ind_ptr_next:
+        add si, 4
+        dec cx
+        jnz .eus_ind_ptr
+        pop bx
+        inc bx
+        jmp .eus_ind_next_sec
+        .eus_ind_blk_maybe_free:
+        ;; Free the indirect block itself only when ind_start == 0 (all entries freed)
+        cmp word [ext2_us_ind_fsec], 0
+        jne .eus_done
+        cmp word [ext2_us_ind_fptr], 0
+        jne .eus_done
+        mov ax, [ext2_us_ind_blk]
+        call ext2_free_block
+        jc .eus_err
+        jmp .eus_done
+        .eus_grow:
+        mov ax, [si+FD_OFFSET_POSITION]
         mov [bx + EXT2_INODE_SIZE_LO], ax
         mov ax, [si+FD_OFFSET_POSITION+2]
         mov [bx + EXT2_INODE_SIZE_LO + 2], ax
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .eus_err
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        clc
-        ret
+        .eus_done:
         .eus_no_update:
+        pop di
+        pop si
         pop dx
         pop cx
         pop bx
         pop ax
         clc
         ret
+        .eus_err_ind:
+        add sp, 2                           ; discard saved BX (sector counter)
         .eus_err:
+        pop di
+        pop si
         pop dx
         pop cx
         pop bx
@@ -1918,3 +2069,10 @@ ext2_resolve_path:
         ext2_rn_old_name       dw 0     ; ext2_rename: pointer to old basename
         ext2_rn_old_path       dw 0     ; ext2_rename: pointer to old full path
         ext2_sd_name           dw 0
+        ext2_us_blks           times 13 dw 0  ; ext2_update_size: saved block pointers
+        ext2_us_fd             dw 0     ; ext2_update_size: fd_entry pointer
+        ext2_us_ind_blk        dw 0     ; ext2_update_size: indirect block number
+        ext2_us_ind_fptr       dw 0     ; ext2_update_size: first pointer index in first sector
+        ext2_us_ind_fsec       dw 0     ; ext2_update_size: first sector index to process
+        ext2_us_ind_secs       dw 0     ; ext2_update_size: sectors_per_block for indirect scan
+        ext2_us_keep_blocks    dw 0     ; ext2_update_size: ceil(new_size / block_size)
