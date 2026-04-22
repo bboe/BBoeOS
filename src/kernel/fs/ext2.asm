@@ -4,7 +4,7 @@
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
-;;; ext2_mkdir:    SI=name → AX=inode, CF on error, AL=error code
+;;; ext2_mkdir:    SI=path → AX=inode, CF on error, AL=error code
 ;;; ext2_read_dir: SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
 ;;; ext2_read_sec: SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; ext2_readonly: → CF set (stub for unsupported write operations)
@@ -316,8 +316,8 @@ ext2_load:
         ret
 
 ext2_mkdir:
-        ;; Create a new subdirectory in the root directory.
-        ;; Input:  SI = name (no slashes, max 24 chars)
+        ;; Create a new subdirectory under the given parent path.
+        ;; Input:  SI = path (e.g. "mydir" or "parent/child")
         ;; Output: AX = new inode number; CF on error, AL = error code
         push bx
         push cx
@@ -337,6 +337,12 @@ ext2_mkdir:
         stc
         ret
         .emkdir_ok:
+        ;; Resolve parent directory and basename from path
+        mov si, [ext2_mk_name]
+        call ext2_resolve_path          ; AX = parent inode, SI = basename; CF if not found
+        jc .emkdir_err
+        mov [ext2_mk_parent_inode], ax
+        mov [ext2_mk_name], si          ; narrow to basename only
         ;; Allocate inode for the new directory
         call ext2_alloc_inode           ; AX = inode number, CF on err
         jc .emkdir_err
@@ -386,7 +392,8 @@ ext2_mkdir:
         mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME_LEN], 1
         mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME_LEN + 1], 2  ; FT_DIR
         mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME], '.'
-        mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE], EXT2_ROOT_INODE
+        mov ax, [ext2_mk_parent_inode]
+        mov [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE], ax
         mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE + 2], 0
         mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_REC_LEN], 1012
         mov byte [SECTOR_BUFFER + 12 + EXT2_DIRENT_NAME_LEN], 2
@@ -417,8 +424,8 @@ ext2_mkdir:
         inc ax
         call write_sector
         jc .emkdir_err
-        ;; Add entry for new directory in root
-        mov ax, EXT2_ROOT_INODE
+        ;; Add entry for new directory in parent
+        mov ax, [ext2_mk_parent_inode]
         mov di, [ext2_mk_name]
         mov bx, [ext2_mk_new_inode]
         call ext2_add_dir_entry
@@ -1555,9 +1562,10 @@ ext2_resolve_path:
         ext2_load_indirect_ptr dw 0
         ext2_load_rem          dw 0
         ext2_log_block_size    db 0
-        ext2_mk_name           dw 0     ; ext2_mkdir: pointer to directory name
+        ext2_mk_name           dw 0     ; ext2_mkdir: pointer to basename
         ext2_mk_new_blk        dw 0     ; ext2_mkdir: newly allocated data block
         ext2_mk_new_inode      dw 0     ; ext2_mkdir: newly allocated inode
+        ext2_mk_parent_inode   dw 0     ; ext2_mkdir: parent directory inode
         ext2_pws_block_idx     dw 0     ; ext2_prepare_write_sec: block index
         ext2_pws_byte_offset   dw 0     ; ext2_prepare_write_sec: byte offset within sector
         ext2_pws_sec_in_blk    dw 0     ; ext2_prepare_write_sec: sector within block

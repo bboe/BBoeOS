@@ -61,6 +61,11 @@ TESTS: list[ProgramTest] = [
         r"^\.\./",  # '..' entry always present
     ),
     ProgramTest(
+        "mkdir_nested",
+        ["mkdir parent", "mkdir parent/child", "ls parent/child"],
+        r"^\.\./",
+    ),
+    ProgramTest(
         "mkdir_ls_root",
         ["mkdir mydir", "ls"],
         r"mydir/",
