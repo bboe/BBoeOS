@@ -107,12 +107,12 @@ def make_drive(*, name: str, temporary_directory: Path) -> Path:
 
 
 def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
-    """Copy src/asm.asm (>64 KB, sector >255) to a new root file.
+    """Copy src/asm.c (>64 KB, sector >255) to a new root file.
 
     Verify the destination is byte-identical to the source.
     """
     drive = make_drive(name="copy_large", temporary_directory=temporary_directory)
-    run_commands(["cp src/asm.asm big"], command_timeout=COMMAND_TIMEOUT, drive=drive)
+    run_commands(["cp src/asm.c big"], command_timeout=COMMAND_TIMEOUT, drive=drive)
     image = drive.read_bytes()
 
     big = find_entry(
@@ -138,9 +138,9 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
         directory_sectors=directory_sectors,
         directory_start_sector=source_entry[1],
         image=image,
-        name="asm.asm",
+        name="asm.c",
     )
-    assert asm is not None, "src/asm.asm not found"
+    assert asm is not None, "src/asm.c not found"
     _, source_sector, source_size = asm
 
     big_data = image[big_sector * SECTOR_SIZE :][:big_size]
@@ -251,7 +251,7 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
 def test_make_directory_high_sector(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
     """Verify mkdir allocates a 16-bit sector past sector 255.
 
-    asm.asm pushes the next free sector well beyond 256.
+    asm.c pushes the next free sector well beyond 256.
     """
     drive = make_drive(name="make_directory_high", temporary_directory=temporary_directory)
     run_commands(["mkdir hi"], command_timeout=COMMAND_TIMEOUT, drive=drive)
