@@ -73,6 +73,16 @@ int op1_size;
 int op1_value;
 int op2_value;
 int org_value;
+/* Addressing size of the most recently parsed memory operand: 16 or
+   32, matching the base register used inside the brackets (or
+   ``default_bits`` for a plain ``[disp]``).  Stashed by
+   ``parse_operand`` so callers can emit the 0x67 address-size
+   prefix and pick the correct ModR/M encoding.  Only touched on
+   memory operands; register/immediate parses leave the value from
+   a previous memory parse intact so a two-memory-operand call
+   order (e.g. ``mov [esp], eax``) still sees the address size of
+   the bracketed operand. */
+int parse_operand_address_size;
 /* ``parse_operand`` returns the packed ``(type << 8) | reg`` in AX
    and stashes the displacement / immediate here for the caller to
    read after the call — cc.py's return ABI is AX-only. */
@@ -122,17 +132,25 @@ int symbol_count;
 __attribute__((regparm(1)))
 void emit_address_disp(int disp);
 __attribute__((regparm(1)))
+void emit_address_size_prefix(int size);
+__attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
 void emit_byte(int value);
 __attribute__((regparm(1)))
 void emit_dword(int value);
 __attribute__((regparm(1)))
+void emit_indexed_mem(int reg_field, int rm_reg_id, int disp);
+__attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp);
+__attribute__((regparm(1)))
+void emit_modrm_disp(int modrm, int disp);
 __attribute__((regparm(1)))
 void emit_operand_size_prefix(int size);
 __attribute__((regparm(1)))
 void emit_sized(int base, int size);
+__attribute__((regparm(1)))
+void emit_sized_mem(int base, int size);
 __attribute__((regparm(1)))
 void emit_word(int value);
 void flush_output();
@@ -384,6 +402,22 @@ void emit_address_disp(int disp) {
     }
 }
 
+/* Emit the 0x67 address-size prefix iff ``size`` is a 16/32 size
+   that disagrees with ``default_bits``.  ``size`` is typically the
+   value parse_operand stashed in ``parse_operand_address_size``;
+   the emit site calls this right before the opcode so the prefix
+   lands ahead of any 0x66 operand-size prefix and the opcode
+   itself. */
+__attribute__((regparm(1)))
+void emit_address_size_prefix(int size) {
+    if (size != 16 && size != 32) {
+        return;
+    }
+    if (size != default_bits) {
+        emit_byte(0x67);
+    }
+}
+
 __attribute__((regparm(1)))
 void emit_alu_binop(int rfield) {
     skip_ws();
@@ -404,12 +438,11 @@ void emit_alu_binop(int rfield) {
         emit_sized(op_rr, size1);
         emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
     } else if (type2 == 2) {
-        emit_sized(op_rr | 2, size1);
+        emit_sized_mem(op_rr | 2, size1);
         emit_modrm_direct(register1_id, value2);
     } else if (type2 == 3) {
-        emit_sized(op_rr | 2, size1);
-        emit_byte(reg_to_rm(register2_id) | 0x40 | (register1_id << 3));
-        emit_byte(value2 & 0xFF);
+        emit_sized_mem(op_rr | 2, size1);
+        emit_indexed_mem(register1_id, register2_id, value2);
     } else {
         emit_alu_reg_imm(op_rr, register1_id, size1, value2);
     }
@@ -493,6 +526,55 @@ void emit_byte(int value) {
     output_total = output_total + 1;
 }
 
+/* Emit a ``[reg+disp]`` ModR/M (and any needed SIB + disp) for the
+   current ``parse_operand_address_size``.  Under 16-bit addressing
+   the rm field is picked by ``reg_to_rm`` and the disp passes
+   through ``emit_modrm_disp``.  Under 32-bit addressing rm = the
+   register number directly, with two special cases: ESP (reg 4)
+   always needs a SIB byte (0x24: scale=0, no index, base=ESP), and
+   EBP (reg 5) at mod=00 means disp32 with no base, so ``[ebp]``
+   must be encoded as ``[ebp+0]`` with mod=01 disp8=0.  Every disp
+   that doesn't fit in a signed byte widens to disp32 (vs disp16
+   in 16-bit addressing). */
+__attribute__((regparm(1)))
+void emit_indexed_mem(int reg_field, int rm_reg_id, int disp) {
+    if (parse_operand_address_size != 32) {
+        int modrm = (reg_field << 3) | reg_to_rm(rm_reg_id);
+        emit_modrm_disp(modrm, disp);
+        return;
+    }
+    rm_reg_id = rm_reg_id & 0xFF;
+    int reg_bits = (reg_field & 0x7) << 3;
+    if (rm_reg_id == 4) {
+        /* ESP: emit the ModR/M + SIB pair as a single word (SIB=0x24
+           goes in the high byte since emit_word is little-endian). */
+        if (disp == 0) {
+            emit_word(0x2400 | reg_bits | 0x04);
+        } else if (disp >= -128 && disp <= 127) {
+            emit_word(0x2400 | reg_bits | 0x44);
+            emit_byte(disp & 0xFF);
+        } else {
+            emit_word(0x2400 | reg_bits | 0x84);
+            emit_dword(disp);
+        }
+        return;
+    }
+    if (rm_reg_id == 5 && disp == 0) {
+        /* [ebp] → [ebp+0] with mod=01 disp8=0; the disp byte is 0
+           so it lands in the high byte of the word for free. */
+        emit_word(reg_bits | 0x45);
+        return;
+    }
+    if (disp == 0) {
+        emit_byte(reg_bits | rm_reg_id);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_word(((disp & 0xFF) << 8) | reg_bits | 0x40 | rm_reg_id);
+    } else {
+        emit_byte(reg_bits | 0x80 | rm_reg_id);
+        emit_dword(disp);
+    }
+}
+
 /* Emit the direct-memory ModR/M form plus its displacement at the
    current addressing width.  Under 16-bit addressing the rm field
    is 110 and the disp is 16-bit; under 32-bit addressing the rm
@@ -574,6 +656,24 @@ void emit_sized(int base, int size) {
     emit_byte(base + 1);
 }
 
+/* Same as ``emit_sized`` but also emits the 0x67 address-size prefix
+   ahead of the opcode when the current ``parse_operand_address_size``
+   disagrees with ``default_bits``.  Ordering follows NASM: operand-
+   size prefix first (0x66), address-size prefix second (0x67), then
+   the opcode.  Every memory-operand emit site uses this instead of
+   ``emit_sized`` so instructions like ``mov eax, [esp]`` assemble
+   identically to NASM across both bits modes. */
+__attribute__((regparm(1)))
+void emit_sized_mem(int base, int size) {
+    emit_operand_size_prefix(size);
+    emit_address_size_prefix(parse_operand_address_size);
+    if (size == 8) {
+        emit_byte(base);
+    } else {
+        emit_byte(base + 1);
+    }
+}
+
 /* Emit a little-endian dword — the 32-bit companion to ``emit_word``.
    Used by the pmode-specific paths that widen imm16 / disp16 to
    imm32 / disp32 behind a 0x66 operand-size prefix. */
@@ -596,6 +696,8 @@ __attribute__((regparm(1)))
 void emit_sized_imm(int value, int size) {
     if (size == 8) {
         emit_byte(value & 0xFF);
+    } else if (size == 32) {
+        emit_dword(value);
     } else {
         emit_word(value);
     }
@@ -745,9 +847,9 @@ void handle_call() {
         if (type != 3 || value == 0 || value < -128 || value > 127) {
             abort_unknown();
         }
+        emit_address_size_prefix(parse_operand_address_size);
         emit_byte(0xFF);
-        emit_byte(reg_to_rm(register_id) | 0x50);
-        emit_byte(value & 0xFF);
+        emit_indexed_mem(2, register_id, value);
     } else {
         emit_byte(0xE8);
         int target = resolve_label();
@@ -790,14 +892,13 @@ void handle_cmp() {
             int register2_id = packed_operand2 & 0xFF;
             int value2 = parse_operand_value;
             if (type2 == 2) {
-                emit_sized(0x3A, size1);
+                emit_sized_mem(0x3A, size1);
                 emit_modrm_direct(register1_id, value2);
                 return;
             }
             if (type2 == 3) {
-                emit_sized(0x3A, size1);
-                int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-                emit_modrm_disp(modrm, value2);
+                emit_sized_mem(0x3A, size1);
+                emit_indexed_mem(register1_id, register2_id, value2);
                 return;
             }
         }
@@ -821,18 +922,18 @@ void handle_cmp() {
         opcode = 0x81;
         is_imm8 = 0;
     }
+    emit_operand_size_prefix(size1);
+    emit_address_size_prefix(parse_operand_address_size);
     emit_byte(opcode);
     if (type1 == 2) {
-        emit_byte(0x3E);
-        emit_word(value1);
+        emit_modrm_direct(7, value1);
     } else {
-        int modrm = reg_to_rm(register1_id) | 0x38;
-        emit_modrm_disp(modrm, value1);
+        emit_indexed_mem(7, register1_id, value1);
     }
     if (is_imm8) {
         emit_byte(imm & 0xFF);
     } else {
-        emit_word(imm);
+        emit_sized_imm(imm, size1);
     }
 }
 
@@ -961,6 +1062,7 @@ void handle_jz() {
 void handle_lgdt() {
     skip_ws();
     parse_operand();
+    emit_address_size_prefix(parse_operand_address_size);
     emit_word(0x010F);
     emit_modrm_direct(2, parse_operand_value);
 }
@@ -968,6 +1070,7 @@ void handle_lgdt() {
 void handle_lidt() {
     skip_ws();
     parse_operand();
+    emit_address_size_prefix(parse_operand_address_size);
     emit_word(0x010F);
     emit_modrm_direct(3, parse_operand_value);
 }
@@ -1099,15 +1202,14 @@ void handle_mov() {
                 emit_byte(0xA1);
                 emit_address_disp(value2);
             } else {
-                emit_sized(0x8A, size1);
+                emit_sized_mem(0x8A, size1);
                 emit_modrm_direct(register1_id, value2);
             }
             return;
         }
         if (type2 == 3) {
-            emit_sized(0x8A, size1);
-            int modrm = (register1_id << 3) | reg_to_rm(register2_id);
-            emit_modrm_disp(modrm, value2);
+            emit_sized_mem(0x8A, size1);
+            emit_indexed_mem(register1_id, register2_id, value2);
             return;
         }
         abort_unknown();
@@ -1122,13 +1224,13 @@ void handle_mov() {
                 emit_byte(0xA3);
                 emit_address_disp(value1);
             } else {
-                emit_sized(0x88, size1);
+                emit_sized_mem(0x88, size1);
                 emit_modrm_direct(register2_id, value1);
             }
             return;
         }
         if (type2 == 1) {
-            emit_sized(0xC6, size1);
+            emit_sized_mem(0xC6, size1);
             emit_modrm_direct(0, value1);
             emit_sized_imm(value2, size1);
             return;
@@ -1137,15 +1239,13 @@ void handle_mov() {
     }
     if (type1 == 3) {
         if (type2 == 0) {
-            emit_sized(0x88, size1);
-            int modrm = (register2_id << 3) | reg_to_rm(register1_id);
-            emit_modrm_disp(modrm, value1);
+            emit_sized_mem(0x88, size1);
+            emit_indexed_mem(register2_id, register1_id, value1);
             return;
         }
         if (type2 == 1) {
-            emit_sized(0xC6, size1);
-            int modrm = reg_to_rm(register1_id);
-            emit_modrm_disp(modrm, value1);
+            emit_sized_mem(0xC6, size1);
+            emit_indexed_mem(0, register1_id, value1);
             emit_sized_imm(value2, size1);
             return;
         }
@@ -1175,11 +1275,14 @@ void handle_movzx() {
     int type2 = (packed_operand >> 8) & 0xFF;
     int register2_id = packed_operand & 0xFF;
     int value2 = parse_operand_value;
+    if (type2 != 0) {
+        emit_address_size_prefix(parse_operand_address_size);
+    }
     emit_word(0xB60F);
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else {
-        emit_modrm_disp8((register1_id << 3) | reg_to_rm(register2_id), value2);
+        emit_indexed_mem(register1_id, register2_id, value2);
     }
 }
 
@@ -1386,12 +1489,12 @@ void handle_test() {
         }
     } else {
         int imm = resolve_value();
+        emit_address_size_prefix(parse_operand_address_size);
         emit_byte(0xF6);
         if (type1 == 2) {
-            emit_byte(0x06);
-            emit_word(value1);
+            emit_modrm_direct(0, value1);
         } else {
-            emit_modrm_disp8(reg_to_rm(register1_id), value1);
+            emit_indexed_mem(0, register1_id, value1);
         }
         emit_byte(imm & 0xFF);
     }
@@ -1506,12 +1609,11 @@ void inc_dec_handler(int rfield) {
             emit_byte(0x40 | reg_shift | register_id);
         }
     } else {
-        emit_sized(0xFE, size);
+        emit_sized_mem(0xFE, size);
         if (type == 2) {
-            emit_byte(0x06 | reg_shift);
-            emit_word(value);
+            emit_modrm_direct(rfield, value);
         } else {
-            emit_modrm_disp8(reg_to_rm(register_id) | reg_shift, value);
+            emit_indexed_mem(rfield, register_id, value);
         }
     }
 }
@@ -1667,6 +1769,7 @@ int main(int argc, char *argv[]) {
     source_buffer = SOURCE_BUFFER;
     include_source_save = SOURCE_BUFFER + 512;
     default_bits = 16;
+    parse_operand_address_size = 16;
     if (argc != 2) {
         die("Usage: asm <source> <output>\n");
     }
@@ -2265,13 +2368,18 @@ int parse_number() {
    register / byte/word-prefix paths. */
 int parse_operand() {
     skip_ws();
-    /* ``byte`` / ``word`` size prefix — match_word already rewinds
-       ``source_cursor`` on miss, so no manual backtrack needed. */
+    /* ``byte`` / ``word`` / ``dword`` size prefix — match_word already
+       rewinds ``source_cursor`` on miss, so no manual backtrack
+       needed.  The ``dword`` form appears in pmode sources with
+       ``cmp dword [reg], imm`` / ``inc dword [reg]`` shapes. */
     if (match_word(STR_BYTE)) {
         op1_size = 8;
         skip_ws();
     } else if (match_word(STR_WORD)) {
         op1_size = 16;
+        skip_ws();
+    } else if (match_word(STR_DWORD)) {
+        op1_size = 32;
         skip_ws();
     }
     if (source_cursor[0] != '[') {
@@ -2285,7 +2393,10 @@ int parse_operand() {
         parse_operand_value = imm;
         return 1 << 8;                  /* type=1 (imm) */
     }
-    /* Memory operand starting at ``[``. */
+    /* Memory operand starting at ``[``.  Default addressing size
+       matches the current bits mode; gets bumped to 32 below if the
+       base register is an e-prefixed reg. */
+    parse_operand_address_size = default_bits;
     source_cursor = source_cursor + 1;
     skip_ws();
     /* ``[es:...]`` segment override: emit 0x26 prefix, skip past. */
@@ -2298,6 +2409,10 @@ int parse_operand() {
     int packed_register = parse_register();
     if (packed_register >= 0) {
         int register_id = packed_register & 0xFF;
+        int reg_size = (packed_register >> 8) & 0xFF;
+        if (reg_size == 16 || reg_size == 32) {
+            parse_operand_address_size = reg_size;
+        }
         skip_ws();
         int disp = 0;
         if (source_cursor[0] == '+') {
@@ -2361,6 +2476,10 @@ int parse_operand() {
                     source_cursor = close;
                     if (source_cursor[0] == ']') {
                         source_cursor = source_cursor + 1;
+                    }
+                    int reg_size2 = (packed_register2 >> 8) & 0xFF;
+                    if (reg_size2 == 16 || reg_size2 == 32) {
+                        parse_operand_address_size = reg_size2;
                     }
                     parse_operand_value = disp;
                     return (3 << 8) | (packed_register2 & 0xFF);

@@ -66,6 +66,30 @@ pm_entry_32:
         mov [gdt_desc], ebx
         mov ax, [gdt_desc]
         mov [gdt_desc], ax
+
+        ;; [reg32] / [reg32+disp] addressing — phase 5.6.  Under
+        ;; bits=16 the 0x67 address-size prefix flips addressing to
+        ;; 32-bit; ESP / EBP require SIB and disp8=0 quirks that
+        ;; the new emit_indexed_mem handles.  Each form below is
+        ;; byte-diffed against NASM.
+        mov al, [esp]
+        mov al, [esp+4]
+        mov eax, [esp]
+        mov eax, [esp+8]
+        mov eax, [ebp]
+        mov eax, [ebp+12]
+        mov eax, [ebx]
+        mov eax, [ebx+16]
+        mov [esp], eax
+        mov [esp+4], eax
+        mov [ebx], eax
+        add eax, [esp]
+        add eax, [ebx+4]
+        cmp dword [ebx], 0
+        cmp dword [ebx+4], 0x1000
+        test byte [ebx+4], 0x80
+        inc dword [ebx]
+        inc dword [ebx+4]
 [bits 16]
 pm16_back:
         mov ax, 0x5678
@@ -76,6 +100,19 @@ pm16_back:
         push dword 0
         push dword 0x1234
         push 0x1234
+
+        ;; [reg32+disp] under bits=16 picks up the 0x67 address-size
+        ;; prefix on every form; mirror the bits=32 block so NASM
+        ;; diff stays honest.
+        mov al, [esp]
+        mov eax, [esp+4]
+        mov eax, [ebp]
+        mov eax, [ebx+8]
+        mov [esp], eax
+        mov [ebx], eax
+        add eax, [esp]
+        cmp dword [ebx], 0
+        inc dword [ebx+4]
 
         ;; align N pads current_address to a multiple of N with zero
         ;; bytes — exercises the STR_ALIGN directive added in phase 5.2.
