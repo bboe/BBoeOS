@@ -50,7 +50,7 @@ class ProgramTest:
 
 TESTS: list[ProgramTest] = [
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
-    ProgramTest("cat_large", ["cat src/asm.asm"], r"org 0600h", timeout=30.0),
+    ProgramTest("cat_large", ["cat src/asm.c"], r"Port of src/asm/asm\.asm to C", timeout=30.0),
     ProgramTest("cp", ["cp src/parse_ip.asm out.asm", "cat out.asm"], r"^parse_ip:"),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),

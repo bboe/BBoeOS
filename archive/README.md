@@ -8,7 +8,6 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 446       | -5    |
-| asm     | 8253        | 12313     | +4060 |
 | cat     | 145         | 129       | -16   |
 | chmod   | 149         | 173       | +24   |
 | cp      | 268         | 226       | -42   |
@@ -26,84 +25,6 @@ source is kept here for reference.
 | ping    | 1019        | 1313      | +294  |
 | shell   | 921         | 1324      | +403  |
 | uptime  | 50          | 78        | +28   |
-
-**asm (+4060):** Every ``handle_*`` and every function lives in pure C
-now — what's still
-inline is the `abort_unknown` trampoline (stashes SI into
-`_g_error_word` and jumps to `abort_unknown_impl`), the `syscall`
-ES-safe int-30h wrapper, the `mnemonic_table` / `register_table` /
-`STR_*` data tables, and the `_program_end` sentinel.  Those are
-all NASM-only constructs (data layout and control-flow idioms
-cc.py doesn't express), so they stay as a trailing `asm("...")`
-block alongside the C functions.  The 31 archaeological
-`<name> equ _g_<name>` aliases also retired: with every handler
-now pure C (and the handful of remaining inline-asm blocks using
-the explicit `_g_<name>` form), no inline-asm referred to the
-bare names.  Historical deltas: 33 mutable globals moved into
-cc.py file-scope declarations (+11 bytes, db→dw widening); memory
-layout / symbol-shape magic numbers (SYMBOL_ENTRY, LINE_BUFFER,
-OUTPUT_BUFFER, SOURCE_BUFFER, JUMP_TABLE, JUMP_MAX,
-SYMBOL_SEGMENT) migrated to `src/c/asm_layout.h` which cc.py
-bridges to NASM `%define`s; every function that used to live in
-file-scope asm is now a cc.py-emitted C function with an
-inline-asm body — `compute_source_prefix`, `run_pass1` /
-`run_pass2`, `flush_output`, `abort_unknown_impl`, three `die_*`
-helpers, `include_push` / `include_pop`, `do_pass`, `read_line`,
-`load_src_sector`, `skip_ws` / `skip_comma`, `hex_digit`,
-`make_modrm_reg_reg` / `reg_to_rm`, `symbol_entry_address`, `match_word`,
-`mem_op_reg_emit`, `encode_rel8_jump`, the full `main`, the full
-instruction-handler family (handle_aam / adc / add / and / call /
-clc / cld / cmp / dec / div / inc / int / ja / jb / jbe / jg /
-jge / jl / jle / jmp / jnc / jne / jns / jz / lodsb / lodsw /
-loop / mov / movsb / movsw / movzx / mul / neg / not / or / pop
-/ popa / push / pusha / rep / repne / ret / sbb / scasb / shl /
-shr / stc / stosb / stosw / sub / test / unknown_word / xchg /
-xor), the parse_* family (parse_db / parse_directive / parse_line
-/ parse_mnemonic / parse_number / parse_operand / parse_register),
-peek_label_target / resolve_label / resolve_value, and the
-symbol_* family (symbol_add / symbol_add_constant / symbol_lookup
-/ symbol_set).  Eight dead `.error_*` labels, thirteen MESSAGE_*
-strings, the dead `print_hex_word` helper, five `call_*`
-kernel-jump wrappers, and the INCLUDE_SAVE / INCLUDE_SOURCE_SAVE
-`%define`s all retired along the way (the 6-byte parent-state
-triplet moved into cc.py-emitted globals; the 512-byte
-source-buffer copy lives in post-binary scratch RAM via a pointer
-main() initializes).  The ``emit_byte_al`` / ``emit_word_ax``
-bridge thunks and the ``parse_operand_c`` forwarder also retired
-once every handler was pure C (no inline-asm caller left the
-bridges had to feed).  cc.py now elides the bp frame for functions
-whose body is a single ``asm("...")`` statement with no parameters
-(the vast majority of the ported helpers), so the per-call overhead
-on the hot paths dropped back to the NASM baseline — 324 bytes
-shaved (8830 → 8506) and the self-host runtime recovered to ~9s.
-BSS support moved 125 bytes of zero-initialized globals out of the
-binary and into a 4-byte trailer (11668 → 11547).  Phase 5 added the
-``[bits N]`` directive: ``default_bits`` state, ``emit_operand_size_prefix``
-helper routing the 0x66 operand-size prefix through the current mode,
-and the ``parse_line`` bracket-directive handler (11547 → 11681).  Phase
-5.2 added the ``align N`` directive (NOP-fill loop keyed off
-``current_address & (n-1)``) for GDT/IDT descriptor alignment
-(11681 → 11735).  Phase 5.3 routed ``handle_push`` / ``handle_pop``
-of 32-bit registers through ``emit_operand_size_prefix`` so the
-0x66 prefix tracks the current bits mode (11735 → 11763).  Phase
-5.4 added the ``push [word|dword] imm`` size-token form, widening
-the imm tail to dword when requested (11763 → 11835).  Phase 5.5
-made ``mov r32, [mem]`` / ``mov [mem], r32`` mode-aware via a new
-``emit_address_disp`` helper and bits-aware ``emit_modrm_direct``
-(rm field flips 110 ↔ 101, disp widens 16 ↔ 32) (11835 → 11914).
-Phase 5.6 added ``[reg32+disp]`` / SIB addressing with the 0x67
-address-size prefix: ``parse_operand_address_size`` state set by
-``parse_operand`` on bracket entry, ``emit_address_size_prefix``
-and ``emit_sized_mem`` helpers, and ``emit_indexed_mem`` that picks
-between 16-bit addressing (via ``reg_to_rm`` + ``emit_modrm_disp``)
-and 32-bit addressing (direct ``rm=reg_id`` with SIB for ESP and
-the ``[ebp]`` → ``[ebp+0]`` quirk).  Ten call sites across
-``emit_alu_binop`` / ``handle_call`` / ``handle_cmp`` /
-``handle_mov`` / ``handle_movzx`` / ``handle_test`` /
-``inc_dec_handler`` / ``lgdt`` / ``lidt`` route through the new
-helpers.  ``parse_operand`` also learned the ``dword`` size prefix
-and ``emit_sized_imm`` widens to imm32 when requested
-(11914 → 12313).
 
 **chmod (+24):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
