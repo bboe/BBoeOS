@@ -1,7 +1,7 @@
 ;;; ------------------------------------------------------------------------
 ;;; ata.asm — native ATA PIO driver (primary controller, master drive).
 ;;;
-;;; Replaces the INT 13h-based sector I/O that io.asm used to do.  Talks
+;;; Replaces the INT 13h-based sector I/O that fs.asm used to do.  Talks
 ;;; to the primary IDE controller at 0x1F0..0x1F7 in LBA28 PIO mode.  The
 ;;; caller-facing surface is unchanged:
 ;;;     read_sector   AX = 1-based LBA; fills SECTOR_BUFFER; CF on error.

@@ -94,8 +94,9 @@ renumbering is source-compatible — just rebuild.
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character` — included in stage 1 MBR
 - `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
+- `src/kernel/drivers/ata.asm`, `src/kernel/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs.asm`'s `read_sector`/`write_sector` dispatch
 - `src/kernel/fd.asm` — File descriptor table management: `fd_open`, `fd_read`, `fd_write`, `fd_close`, `fd_fstat`
-- `src/kernel/io.asm` — `find_file`, `load_file`, `read_sector`, `write_sector`
+- `src/kernel/fs.asm` — Filesystem layer: `find_file`, `load_file`, `read_sector`, `write_sector`, directory management
 - `src/kernel/net.asm` — NE2000 NIC driver: `ne2k_probe`, `ne2k_init`, `ne2k_send`, `ne2k_receive`, ARP, IP, ICMP, UDP — included in stage 2
 - `src/kernel/syscall.asm` — INT 30h syscall handler, `install_syscalls`
 - `src/kernel/system.asm` — `reboot`, `shutdown`

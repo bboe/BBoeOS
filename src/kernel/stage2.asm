@@ -46,10 +46,10 @@ boot_shell:
         jmp .shell_halt
 
 %include "ansi.asm"
-%include "ata.asm"
+%include "drivers/ata.asm"
+%include "drivers/fdc.asm"
 %include "fd.asm"
-%include "fdc.asm"
-%include "io.asm"
+%include "fs.asm"
 %include "net.asm"
 %include "ps2.asm"
 %include "rtc.asm"
