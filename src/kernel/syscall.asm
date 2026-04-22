@@ -60,12 +60,12 @@ syscall_handler:
         je .sys_shutdown
         jmp .iret_done
 
-%include "syscall_fs.asm"
-%include "syscall_io.asm"
-%include "syscall_net.asm"
-%include "syscall_rtc.asm"
-%include "syscall_sys.asm"
-%include "syscall_video.asm"
+%include "syscall/fs.asm"
+%include "syscall/io.asm"
+%include "syscall/net.asm"
+%include "syscall/rtc.asm"
+%include "syscall/sys.asm"
+%include "syscall/video.asm"
 
         .iret_cf:
         ;; Propagate the handler's CF to the caller's saved FLAGS,
