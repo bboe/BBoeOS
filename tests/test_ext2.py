@@ -6,10 +6,11 @@ command for each test program, and checks the output against an expected regex.
 Each test gets its own QEMU boot with `snapshot=on` so writes don't affect the
 shared image.
 
-Only programs that rely solely on `ext2_find` + `ext2_load` (i.e. `sys_exec`)
-are tested here.  Programs that read file content via `io_read` (e.g. `cat`,
-`ls`) are excluded because fd.asm stores inode numbers in the sector field,
-which is incompatible with the ext2 VFS backend.
+Programs that read file content via `io_read` (e.g. `cat`) exercise the
+`vfs_read_sec` function pointer, which routes through `ext2_read_sec` to
+translate byte positions to ext2 block lookups.  Programs that list directory
+contents via `fd_read_dir` (e.g. `ls`) are excluded because directory reads
+are still bbfs-only.
 
 Usage:
     ./test_ext2.py            # run the full suite
@@ -47,6 +48,7 @@ class ProgramTest:
 
 
 TESTS: list[ProgramTest] = [
+    ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),

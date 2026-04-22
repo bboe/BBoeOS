@@ -7,6 +7,7 @@
 ;;; bbfs_init:        → (no-op: no persistent state to initialise)
 ;;; bbfs_load:        DI=dest → CF (loads file using vfs_found_inode + vfs_found_size)
 ;;; bbfs_mkdir:       SI=name → AX=allocated sector, CF on error
+;;; bbfs_read_sec:    SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; bbfs_rename:      SI=old, DI=new → CF on error (AL=error code)
 ;;; bbfs_update_size: SI=fd_entry → CF on disk error
 
@@ -983,4 +984,25 @@ write_directory_name:
         inc bx
         dec cx
         jnz .pad
+        ret
+
+bbfs_read_sec:
+        ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
+        ;; Input:  SI = FD entry pointer (FD_OFFSET_START = file start sector)
+        ;; Output: SECTOR_BUFFER filled, BX = byte offset within sector; CF on error
+        push ax
+        push cx
+        mov ax, [si+FD_OFFSET_POSITION+2]
+        mov bx, [si+FD_OFFSET_POSITION]
+        shl ax, 7
+        mov cx, bx
+        shr cx, 9
+        or ax, cx
+        add ax, [si+FD_OFFSET_START]    ; AX = absolute sector
+        and bx, 01FFh                   ; BX = byte offset within sector
+        push bx
+        call read_sector
+        pop bx
+        pop cx
+        pop ax
         ret

@@ -84,11 +84,8 @@ fd_read_file:
         .rf_loop:
         cmp word [fd_rw_left], 0
         je .rf_done
-        ;; Compute sector = start_sec + (pos >> 9)
         mov si, [fd_rw_descriptor_pointer]
-        call fd_pos_to_sector   ; AX = sector, BX = offset within sector
-        ;; Read this sector into SECTOR_BUFFER
-        call read_sector
+        call vfs_read_sec       ; SI = fd entry → SECTOR_BUFFER filled, BX = byte offset
         jc .rf_disk_err
         ;; Chunk size = min(512 - offset, bytes_left)
         mov cx, 512
