@@ -53,7 +53,11 @@ boot_shell:
 %include "net.asm"
 %include "ps2.asm"
 %include "rtc.asm"
-%include "shared.asm"
+%include "lib.asm"
 %include "syscall.asm"
 %include "system.asm"
 %include "vga.asm"
+
+        shell_sp dw 0
+        SHELL_ERROR db `Shell not found\n\0`
+        SHELL_NAME db `bin/shell\0`
