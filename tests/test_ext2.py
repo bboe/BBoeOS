@@ -90,6 +90,11 @@ TESTS: list[ProgramTest] = [
         ["mkdir mydir", "mv mydir newdir", "ls newdir"],
         r"^\.\./",
     ),
+    ProgramTest(
+        "rm",
+        ["cp src/parse_ip.asm out.asm", "rm out.asm", "cat out.asm"],
+        r"File not found",
+    ),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 

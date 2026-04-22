@@ -29,3 +29,15 @@
         .fs_rename_do:
         call vfs_rename         ; SI=old, DI=new → CF, AL=error code
         jmp .iret_cf
+
+
+        .fs_unlink:
+        ;; Delete a file: SI = filename
+        call .check_shell
+        jne .fs_unlink_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_unlink_do:
+        call vfs_delete         ; SI=path → CF, AL=error code
+        jmp .iret_cf

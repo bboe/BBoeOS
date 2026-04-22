@@ -1,16 +1,20 @@
 ;;; fs/ext2.asm -- ext2 filesystem VFS backend
 ;;;
 ;;; VFS interface (called through vfs.asm function pointers):
+;;; ext2_chmod:    SI=path, AL=mode → CF on error, AL=error code
+;;; ext2_delete:   SI=path → CF on error, AL=error code
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
 ;;; ext2_mkdir:    SI=path → AX=inode, CF on error, AL=error code
 ;;; ext2_read_dir: SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
 ;;; ext2_read_sec: SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
-;;; ext2_chmod:    SI=path, AL=mode → CF on error, AL=error code
 ;;; ext2_rename:   SI=old path, DI=new path → CF on error, AL=error code
 ;;;
 ;;; Internal helpers:
+;;; ext2_free_bit:          AX=bitmap-block, BX=bit-index; CF on error
+;;; ext2_free_block:        AX=block-number; CF on error
+;;; ext2_free_inode:        AX=inode-number (1-based); CF on error
 ;;; ext2_get_data_block:    AX=block-index, BX=inode-ptr; AX=block-num, CF=err
 ;;; ext2_names_match:       SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
 ;;; ext2_read_blk_sec:      AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
@@ -1009,6 +1013,198 @@ ext2_create:
         stc
         ret
 
+ext2_delete:
+        ;; Delete a regular file: free its data blocks and inode, remove dir entry.
+        ;; Directories are rejected.
+        ;; Input:  SI = path
+        ;; Output: CF clear on success; CF set, AL = error code on failure
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        ;; Resolve parent directory and basename
+        call ext2_resolve_path          ; AX=parent_inode, SI=basename; CF if not found
+        jc .edl_not_found
+        mov [ext2_dl_parent_inode], ax
+        mov [ext2_dl_name], si
+        ;; Find the file in its parent directory
+        call ext2_search_dir            ; AX=file_inode; CF if not found
+        jc .edl_not_found
+        mov [ext2_dl_inode], ax
+        ;; Read inode; reject directories
+        call ext2_read_inode            ; BX = inode ptr in SECTOR_BUFFER
+        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        jnz .edl_not_found
+        ;; Save block pointers (direct 0-11, indirect 12) — 13 × 16-bit words
+        push si
+        lea si, [bx + EXT2_INODE_BLOCK]
+        mov di, ext2_dl_blks
+        mov cx, 13
+        cld
+        .edl_save_blks:
+        mov ax, [si]
+        stosw
+        add si, 4                       ; each i_block[] entry is 4 bytes wide
+        dec cx
+        jnz .edl_save_blks
+        pop si
+        ;; Free direct blocks 0-11
+        mov bx, ext2_dl_blks
+        mov cx, 12
+        .edl_free_direct:
+        mov ax, [bx]
+        test ax, ax
+        jz .edl_next_direct
+        push bx
+        push cx
+        call ext2_free_block            ; AX = block number; CF on error
+        pop cx
+        pop bx
+        jc .edl_err
+        .edl_next_direct:
+        add bx, 2
+        dec cx
+        jnz .edl_free_direct
+        ;; Free indirect block and all blocks it references (i_block[12])
+        mov ax, [ext2_dl_blks + 24]    ; 12 direct × 2 bytes each = offset 24
+        test ax, ax
+        jz .edl_free_inode
+        mov [ext2_dl_ind_blk], ax
+        ;; Compute sectors_per_block
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov bx, 1
+        shl bx, cl                      ; BX = sectors_per_block
+        mov [ext2_dl_ind_secs], bx
+        xor bx, bx                      ; BX = sector index within indirect block
+        .edl_ind_next_sec:
+        cmp bx, [ext2_dl_ind_secs]
+        jae .edl_ind_blk_done
+        push bx
+        mov ax, [ext2_dl_ind_blk]
+        call ext2_read_blk_sec          ; AX=ind_blk, BX=sector → SECTOR_BUFFER
+        pop bx
+        jc .edl_err
+        ;; Free each non-zero 32-bit block pointer (128 per 512-byte sector)
+        push bx
+        mov si, SECTOR_BUFFER
+        mov cx, 128
+        .edl_ind_ptr:
+        mov ax, [si]
+        test ax, ax
+        jz .edl_ind_ptr_next
+        push cx
+        push si
+        call ext2_free_block            ; AX = block number; CF on error
+        pop si
+        pop cx
+        jc .edl_err_ind
+        .edl_ind_ptr_next:
+        add si, 4
+        dec cx
+        jnz .edl_ind_ptr
+        pop bx
+        inc bx
+        jmp .edl_ind_next_sec
+        .edl_ind_blk_done:
+        mov ax, [ext2_dl_ind_blk]
+        call ext2_free_block            ; free the indirect block itself
+        jc .edl_err
+        .edl_free_inode:
+        mov ax, [ext2_dl_inode]
+        call ext2_free_inode            ; AX = inode number (1-based)
+        jc .edl_err
+        ;; Remove directory entry
+        mov ax, [ext2_dl_parent_inode]
+        mov si, [ext2_dl_name]
+        call ext2_remove_dir_entry      ; AX=dir_inode, SI=name; CF on error
+        jc .edl_err
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .edl_not_found:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .edl_err_ind:
+        add sp, 2                       ; discard saved BX (sector counter)
+        .edl_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
+ext2_free_bit:
+        ;; Clear a bit in a bitmap block (inverse of ext2_alloc_bit).
+        ;; Input:  AX = bitmap block number, BX = bit index (0-based)
+        ;; Output: CF on disk error
+        ;; Clobbers: AX, BX, CX, SI
+        push di
+        mov [ext2_fb_bitmap_blk], ax
+        mov cx, bx
+        shr cx, 12                      ; CX = sector within block (bit_idx / 4096)
+        push bx
+        mov bx, cx
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER
+        pop bx
+        jc .efb_err
+        ;; Byte offset within sector = (bit_idx & 0xFFF) >> 3
+        mov si, bx
+        and si, 0FFFh
+        shr si, 3
+        ;; Build clear mask: ~(1 << (bit_idx & 7))
+        mov cl, bl
+        and cl, 7
+        mov al, 1
+        shl al, cl
+        not al
+        and [SECTOR_BUFFER + si], al
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        pop di
+        ret
+        .efb_err:
+        pop di
+        stc
+        ret
+
+ext2_free_block:
+        ;; Free one block from the block bitmap.
+        ;; Input:  AX = block number (0-based bit index in bitmap)
+        ;; Output: CF on disk error
+        push bx
+        mov bx, ax
+        mov ax, [ext2_block_bitmap_blk]
+        call ext2_free_bit
+        pop bx
+        ret
+
+ext2_free_inode:
+        ;; Free one inode from the inode bitmap.
+        ;; Input:  AX = inode number (1-based)
+        ;; Output: CF on disk error
+        push bx
+        dec ax                          ; convert 1-based to 0-based bit index
+        mov bx, ax
+        mov ax, [ext2_inode_bitmap_blk]
+        call ext2_free_bit
+        pop bx
+        ret
+
 ext2_prepare_write_sec:
         ;; Prepare for a write: find or allocate the block for fd's current
         ;; position, read that sector into SECTOR_BUFFER, return byte offset.
@@ -1684,6 +1880,13 @@ ext2_resolve_path:
         ext2_cr_new_inode      dw 0     ; ext2_create: allocated inode number
         ext2_cr_parent_inode   dw 0     ; ext2_create: parent directory inode
         ext2_dir_blks          times 12 dw 0
+        ext2_dl_blks           times 13 dw 0  ; ext2_delete: saved block pointers
+        ext2_dl_ind_blk        dw 0     ; ext2_delete: indirect block number
+        ext2_dl_ind_secs       dw 0     ; ext2_delete: sectors_per_block for indirect scan
+        ext2_dl_inode          dw 0     ; ext2_delete: inode number to free
+        ext2_dl_name           dw 0     ; ext2_delete: pointer to basename
+        ext2_dl_parent_inode   dw 0     ; ext2_delete: parent directory inode
+        ext2_fb_bitmap_blk     dw 0     ; ext2_free_bit: bitmap block being cleared
         ext2_inode_bitmap_blk  dw 0
         ext2_inode_size        dw 128
         ext2_inode_table_blk   dw 0

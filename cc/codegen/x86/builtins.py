@@ -628,6 +628,24 @@ class BuiltinsMixin:
         self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
         self.ax_clear()
 
+    def builtin_unlink(
+        self,
+        arguments: list[Node],
+        /,
+        *,
+        fuse_die: tuple[str, int] | None = None,
+        fuse_exit: bool = False,
+    ) -> None:
+        """Generate code for the unlink() builtin.
+
+        ``unlink(path)`` emits ``mov si, <path> / mov ah, SYS_FS_UNLINK /
+        int 30h``.  Returns 0 on success or an ERROR_* code on failure.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="unlink")
+        self.emit_si_from_argument(arguments[0])
+        self._emit_syscall("FS_UNLINK")
+        self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
+
     def builtin_uptime(self, arguments: list[Node], /) -> None:
         """Generate code for the uptime() builtin."""
         self._check_argument_count(arguments=arguments, expected=0, name="uptime")

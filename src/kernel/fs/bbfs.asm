@@ -3,6 +3,7 @@
 ;;; VFS interface (called through vfs.asm function pointers):
 ;;; bbfs_chmod:       SI=path, AL=mode → CF on error (AL=error code)
 ;;; bbfs_create:      SI=path → vfs_found_*, CF on error
+;;; bbfs_delete:      SI=path → CF on error (AL=error code)
 ;;; bbfs_find:        SI=path → vfs_found_*, CF if not found
 ;;; bbfs_init:        → (no-op: no persistent state to initialise)
 ;;; bbfs_load:        DI=dest → CF (loads file using vfs_found_inode + vfs_found_size)
@@ -128,6 +129,35 @@ bbfs_create:
 
         bbfs_create_name   dw 0
         bbfs_create_sector dw 0
+
+bbfs_delete:
+        ;; Delete a file by zeroing its directory entry.
+        ;; Input:  SI = path
+        ;; Output: CF clear on success; CF set, AL = error code on failure
+        push bx
+        push cx
+        push di
+        call find_file          ; BX = entry ptr in SECTOR_BUFFER, CF on miss
+        jnc .do_delete
+        pop di
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .do_delete:
+        push si
+        mov di, bx
+        mov cx, DIRECTORY_ENTRY_SIZE / 2
+        xor ax, ax
+        cld
+        rep stosw
+        pop si
+        call directory_write_back
+        pop di
+        pop cx
+        pop bx
+        ret
 
 bbfs_find:
         ;; Find a file (or "." root) and populate vfs_found_*
