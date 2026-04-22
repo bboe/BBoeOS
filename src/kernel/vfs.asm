@@ -64,9 +64,9 @@ vfs_init:
         mov word [vfs_chmod_fn], ext2_readonly
         mov word [vfs_commit_write_sec_fn], ext2_commit_write_sec
         mov word [vfs_create_fn], ext2_create
-        mov word [vfs_mkdir_fn], ext2_readonly
+        mov word [vfs_mkdir_fn], ext2_mkdir
         mov word [vfs_prepare_write_sec_fn], ext2_prepare_write_sec
-        mov word [vfs_rename_fn], ext2_readonly
+        mov word [vfs_rename_fn], ext2_rename
         mov word [vfs_update_size_fn], ext2_update_size
         ret
         .bbfs:

@@ -4,16 +4,20 @@
 ;;; ext2_find:     SI=path → vfs_found_*, CF if not found
 ;;; ext2_init:     → CF if ext2 not detected; initialises state on success
 ;;; ext2_load:     DI=dest → CF on disk error
+;;; ext2_mkdir:    SI=path → AX=inode, CF on error, AL=error code
 ;;; ext2_read_dir: SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
 ;;; ext2_read_sec: SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
 ;;; ext2_readonly: → CF set (stub for unsupported write operations)
+;;; ext2_rename:   SI=old path, DI=new path → CF on error, AL=error code
 ;;;
 ;;; Internal helpers:
-;;; ext2_get_data_block: AX=block-index, BX=inode-ptr; AX=block-num, CF=err
-;;; ext2_names_match:    SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
-;;; ext2_read_blk_sec:   AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
-;;; ext2_read_inode:     AX=inode-number; BX=pointer into SECTOR_BUFFER
-;;; ext2_search_dir:     AX=dir-inode, SI=name; AX=found-inode, CF=not-found
+;;; ext2_get_data_block:    AX=block-index, BX=inode-ptr; AX=block-num, CF=err
+;;; ext2_names_match:       SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
+;;; ext2_read_blk_sec:      AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
+;;; ext2_read_inode:        AX=inode-number; BX=pointer into SECTOR_BUFFER
+;;; ext2_remove_dir_entry:  AX=dir-inode, SI=name; CF on error
+;;; ext2_resolve_path:      SI=path → AX=parent-inode, SI=basename; CF if parent not found
+;;; ext2_search_dir:        AX=dir-inode, SI=name; AX=found-inode, CF=not-found
 
 ;;; Superblock field offsets (all within the first 512-byte sector of block 1)
 %assign EXT2_SB_FIRST_DATA_BLOCK  20
@@ -311,6 +315,138 @@ ext2_load:
         stc
         ret
 
+ext2_mkdir:
+        ;; Create a new subdirectory under the given parent path.
+        ;; Input:  SI = path (e.g. "mydir" or "parent/child")
+        ;; Output: AX = new inode number; CF on error, AL = error code
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov [ext2_mk_name], si
+        ;; Reject if name already exists
+        call ext2_find
+        jc .emkdir_ok
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_EXISTS
+        stc
+        ret
+        .emkdir_ok:
+        ;; Resolve parent directory and basename from path
+        mov si, [ext2_mk_name]
+        call ext2_resolve_path          ; AX = parent inode, SI = basename; CF if not found
+        jc .emkdir_err
+        mov [ext2_mk_parent_inode], ax
+        mov [ext2_mk_name], si          ; narrow to basename only
+        ;; Allocate inode for the new directory
+        call ext2_alloc_inode           ; AX = inode number, CF on err
+        jc .emkdir_err
+        mov [ext2_mk_new_inode], ax
+        ;; Allocate data block for the directory contents
+        call ext2_alloc_block           ; AX = block number, CF on err
+        jc .emkdir_err
+        mov [ext2_mk_new_blk], ax
+        ;; Read the new inode, zero it, then set fields
+        mov ax, [ext2_mk_new_inode]
+        call ext2_read_inode            ; BX = inode ptr in SECTOR_BUFFER
+        push si
+        push cx
+        mov si, bx
+        mov cx, [ext2_inode_size]
+        xor ax, ax
+        cld
+        .emkdir_zero_inode:
+        mov [si], ax
+        add si, 2
+        sub cx, 2
+        jnz .emkdir_zero_inode
+        pop cx
+        pop si
+        mov word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR | 01EDh  ; S_IFDIR | 0755
+        mov word [bx + EXT2_INODE_LINKS_COUNT], 2
+        mov word [bx + EXT2_INODE_SIZE_LO], 1024
+        mov word [bx + EXT2_INODE_SIZE_LO + 2], 0
+        mov ax, [ext2_mk_new_blk]
+        mov [bx + EXT2_INODE_BLOCK], ax
+        mov word [bx + EXT2_INODE_BLOCK + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .emkdir_err
+        ;; Build '.' and '..' entries in SECTOR_BUFFER; write to block sector 0
+        push di
+        mov di, SECTOR_BUFFER
+        mov cx, 256
+        xor ax, ax
+        cld
+        rep stosw
+        pop di
+        mov ax, [ext2_mk_new_inode]
+        mov [SECTOR_BUFFER + EXT2_DIRENT_INODE], ax
+        mov word [SECTOR_BUFFER + EXT2_DIRENT_INODE + 2], 0
+        mov word [SECTOR_BUFFER + EXT2_DIRENT_REC_LEN], 12
+        mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME_LEN], 1
+        mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME_LEN + 1], 2  ; FT_DIR
+        mov byte [SECTOR_BUFFER + EXT2_DIRENT_NAME], '.'
+        mov ax, [ext2_mk_parent_inode]
+        mov [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE], ax
+        mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE + 2], 0
+        mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_REC_LEN], 1012
+        mov byte [SECTOR_BUFFER + 12 + EXT2_DIRENT_NAME_LEN], 2
+        mov byte [SECTOR_BUFFER + 12 + EXT2_DIRENT_NAME_LEN + 1], 2  ; FT_DIR
+        mov byte [SECTOR_BUFFER + 12 + EXT2_DIRENT_NAME], '.'
+        mov byte [SECTOR_BUFFER + 12 + EXT2_DIRENT_NAME + 1], '.'
+        ;; Compute sector 0 of the new block; write it
+        push cx
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov ax, [ext2_mk_new_blk]
+        shl ax, cl
+        add ax, EXT2_START_SECTOR
+        mov [ext2_last_blk_sec], ax
+        pop cx
+        call write_sector
+        jc .emkdir_err
+        ;; Zero SECTOR_BUFFER and write sector 1 of the new block
+        push di
+        mov di, SECTOR_BUFFER
+        mov cx, 256
+        xor ax, ax
+        cld
+        rep stosw
+        pop di
+        mov ax, [ext2_last_blk_sec]
+        inc ax
+        call write_sector
+        jc .emkdir_err
+        ;; Add entry for new directory in parent
+        mov ax, [ext2_mk_parent_inode]
+        mov di, [ext2_mk_name]
+        mov bx, [ext2_mk_new_inode]
+        call ext2_add_dir_entry
+        jc .emkdir_err
+        mov ax, [ext2_mk_new_inode]
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .emkdir_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
 ext2_read_dir:
         ;; Read the next non-empty ext2 directory entry in bbfs format into [DI]
         ;; SI = FD entry pointer (FD_OFFSET_START = inode number, FD_OFFSET_SIZE = dir data size)
@@ -373,6 +509,7 @@ ext2_read_dir:
         test cx, EXT2_S_IFDIR
         jz .erd_check_exec
         or al, FLAG_DIRECTORY
+        jmp .erd_set_flags      ; directories are never also marked executable
         .erd_check_exec:
         test cx, EXT2_S_IXUSR
         jz .erd_set_flags
@@ -845,6 +982,170 @@ ext2_readonly:
         stc
         ret
 
+ext2_remove_dir_entry:
+        ;; Delete an entry by name from a directory (sets its inode field to 0).
+        ;; Input:  AX = dir_inode, SI = name
+        ;; Output: CF on error (not found or disk error)
+        push bx
+        push cx
+        push dx
+        push di
+        mov [ext2_rde_name], si
+        ;; Read dir inode; save direct block pointers
+        call ext2_read_inode            ; BX = inode ptr in SECTOR_BUFFER
+        mov si, bx
+        add si, EXT2_INODE_BLOCK
+        mov di, ext2_dir_blks
+        mov cx, 12
+        .erde_save:
+        mov ax, [si]
+        stosw
+        add si, 4
+        dec cx
+        jnz .erde_save
+        ;; Scan sector 0 of each direct block
+        xor cx, cx
+        .erde_next_blk:
+        cmp cx, 12
+        jae .erde_not_found
+        mov bx, cx
+        shl bx, 1
+        mov ax, [ext2_dir_blks + bx]
+        test ax, ax
+        jz .erde_not_found
+        push cx
+        xor bx, bx
+        call ext2_read_blk_sec          ; AX=block, BX=0 → SECTOR_BUFFER
+        pop cx
+        jc .erde_err
+        xor bx, bx
+        .erde_scan:
+        cmp bx, 512
+        jae .erde_blk_done
+        mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
+        cmp dx, 8
+        jb .erde_err
+        mov ax, [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE]
+        test ax, ax
+        jz .erde_advance
+        push bx
+        push cx
+        push dx
+        lea di, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME]
+        mov si, [ext2_rde_name]
+        mov cl, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN]
+        call ext2_names_match           ; CF = no match
+        pop dx
+        pop cx
+        pop bx
+        jc .erde_advance
+        ;; Found: zero the inode field and flush the sector
+        mov word [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE], 0
+        mov word [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector               ; CF on disk error
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        ret
+        .erde_advance:
+        add bx, dx
+        jmp .erde_scan
+        .erde_blk_done:
+        inc cx
+        jmp .erde_next_blk
+        .erde_not_found:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+        .erde_err:
+        pop di
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
+ext2_rename:
+        ;; Rename or move a file or directory.
+        ;; Input:  SI = old path, DI = new path
+        ;; Output: CF on error, AL = error code
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov [ext2_rn_old_path], si
+        mov [ext2_rn_new_path], di
+        ;; Reject if new name already exists
+        mov si, di
+        call ext2_find
+        jc .ern_dest_ok
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_EXISTS
+        stc
+        ret
+        .ern_dest_ok:
+        ;; Resolve old path → (old_dir_inode, old_basename)
+        mov si, [ext2_rn_old_path]
+        call ext2_resolve_path          ; AX = dir inode, SI = basename; CF if not found
+        jc .ern_not_found
+        mov [ext2_rn_old_dir], ax
+        mov [ext2_rn_old_name], si
+        ;; Look up old entry's inode
+        call ext2_search_dir            ; AX = dir inode, SI = basename → AX = inode; CF if not found
+        jc .ern_not_found
+        mov [ext2_rn_old_inode], ax
+        ;; Resolve new path → (new_dir_inode, new_basename)
+        mov si, [ext2_rn_new_path]
+        call ext2_resolve_path          ; AX = dir inode, SI = basename; CF if parent not found
+        jc .ern_not_found
+        mov [ext2_rn_new_dir], ax
+        mov [ext2_rn_new_name], si
+        ;; Add new directory entry
+        mov ax, [ext2_rn_new_dir]
+        mov di, [ext2_rn_new_name]
+        mov bx, [ext2_rn_old_inode]
+        call ext2_add_dir_entry
+        jc .ern_err
+        ;; Remove old directory entry
+        mov ax, [ext2_rn_old_dir]
+        mov si, [ext2_rn_old_name]
+        call ext2_remove_dir_entry
+        jc .ern_err
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        clc
+        ret
+        .ern_not_found:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        mov al, ERROR_NOT_FOUND
+        stc
+        ret
+        .ern_err:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        stc
+        ret
+
 ext2_update_size:
         ;; Write fd position back to inode i_size (32-bit).
         ;; Input:  SI = fd_entry pointer
@@ -1197,6 +1498,46 @@ ext2_read_sec:
         stc
         ret
 
+ext2_resolve_path:
+        ;; Parse a path into (parent_dir_inode, basename).
+        ;; Input:  SI = null-terminated path (optionally "dir/name")
+        ;; Output: AX = parent dir inode, SI = basename; CF if parent dir not found
+        push cx
+        push di
+        mov di, si
+        .erp_scan:
+        cmp byte [di], 0
+        je .erp_root
+        cmp byte [di], '/'
+        je .erp_subdir
+        inc di
+        jmp .erp_scan
+        .erp_root:
+        mov ax, EXT2_ROOT_INODE
+        pop di
+        pop cx
+        clc
+        ret
+        .erp_subdir:
+        mov byte [di], 0                ; null-terminate dirname
+        push di                         ; save slash position
+        mov ax, EXT2_ROOT_INODE
+        call ext2_search_dir            ; AX=root, SI=dirname → AX=dir_inode; CF if not found
+        pop di                          ; DI = slash position
+        mov byte [di], '/'              ; restore slash
+        jc .erp_not_found
+        inc di                          ; DI = basename
+        mov si, di
+        pop di                          ; restore caller's DI
+        pop cx
+        clc
+        ret
+        .erp_not_found:
+        pop di
+        pop cx
+        stc
+        ret
+
         ;; State
         ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index
         ext2_ade_inode         dw 0     ; ext2_add_dir_entry: new file's inode
@@ -1221,6 +1562,10 @@ ext2_read_sec:
         ext2_load_indirect_ptr dw 0
         ext2_load_rem          dw 0
         ext2_log_block_size    db 0
+        ext2_mk_name           dw 0     ; ext2_mkdir: pointer to basename
+        ext2_mk_new_blk        dw 0     ; ext2_mkdir: newly allocated data block
+        ext2_mk_new_inode      dw 0     ; ext2_mkdir: newly allocated inode
+        ext2_mk_parent_inode   dw 0     ; ext2_mkdir: parent directory inode
         ext2_pws_block_idx     dw 0     ; ext2_prepare_write_sec: block index
         ext2_pws_byte_offset   dw 0     ; ext2_prepare_write_sec: byte offset within sector
         ext2_pws_sec_in_blk    dw 0     ; ext2_prepare_write_sec: sector within block
@@ -1228,4 +1573,12 @@ ext2_read_sec:
         ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
         ext2_rd_outbuf         dw 0
         ext2_rd_rec_len        dw 0
+        ext2_rde_name          dw 0     ; ext2_remove_dir_entry: pointer to name string
+        ext2_rn_new_dir        dw 0     ; ext2_rename: new parent dir inode
+        ext2_rn_new_name       dw 0     ; ext2_rename: pointer to new basename
+        ext2_rn_new_path       dw 0     ; ext2_rename: pointer to new full path
+        ext2_rn_old_dir        dw 0     ; ext2_rename: old parent dir inode
+        ext2_rn_old_inode      dw 0     ; ext2_rename: inode to relocate
+        ext2_rn_old_name       dw 0     ; ext2_rename: pointer to old basename
+        ext2_rn_old_path       dw 0     ; ext2_rename: pointer to old full path
         ext2_sd_name           dw 0
