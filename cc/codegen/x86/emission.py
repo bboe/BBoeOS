@@ -43,7 +43,7 @@ from cc.ast_nodes import (
     VarDecl,
     While,
 )
-from cc.codegen.x86.jumps import JUMP_INVERT, JUMP_WHEN_FALSE
+from cc.codegen.x86.jumps import JUMP_WHEN_FALSE
 from cc.errors import CompileError
 from cc.target import X86CodegenTarget16
 from cc.utils import decode_string_escapes, string_byte_length
@@ -164,8 +164,8 @@ class EmissionMixin:
           syscall with ``jnc FUNCTION_EXIT`` (skip error-code conversion)
         - ``int err = syscall(...); if (err != 0) { die(msg); }`` →
           syscall with pre-loaded SI and ``jc FUNCTION_DIE`` (skip sbb)
-        - ``if (cond) { die(msg); }`` → pre-load SI and emit a direct
-          conditional jump to ``FUNCTION_DIE``, skipping the if-body dance
+        - ``if (cond) { die(msg); }`` → evaluate condition, inline die block
+          on true-path, skip label on false-path
         """
         saved = self.visible_vars.copy() if scoped else None
         i = 0
@@ -186,9 +186,11 @@ class EmissionMixin:
                 init = statement.expr
             else:
                 init = None
-            # Fuse `if (cond) { die(msg); }` into pre-load SI+CX + jCC .die.
-            # AX tracking is preserved because the die path doesn't fall
-            # through — the continuation path sees AX unchanged from before.
+            # Fuse `if (cond) { die(msg); }`: evaluate the condition, skip over
+            # an inline die block when false, otherwise load SI+CX and jump.
+            # Condition is emitted first so live registers are not clobbered by
+            # the die-argument setup before the comparison runs.
+            # AX tracking is preserved because the die path doesn't fall through.
             if isinstance(statement, If) and statement.else_body is None and len(statement.body) == 1:
                 inner = statement.body[0]
                 if (
@@ -200,11 +202,14 @@ class EmissionMixin:
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
+                    operator = self.emit_condition(condition=statement.cond, context="if")
+                    false_jump = JUMP_WHEN_FALSE[operator]
+                    skip_label = f".if_{self.new_label()}"
+                    self.emit(f"        {false_jump} {skip_label}")
                     self.emit(f"        mov {self.target.si_register}, {die_label}")
                     self.emit(f"        mov {self.target.count_register}, {die_length}")
-                    operator = self.emit_condition(condition=statement.cond, context="if")
-                    true_jump = JUMP_INVERT[JUMP_WHEN_FALSE[operator]]
-                    self.emit(f"        {true_jump} FUNCTION_DIE")
+                    self.emit("        jmp FUNCTION_DIE")
+                    self.emit(f"{skip_label}:")
                     i += 1
                     continue
             # Fuse error-returning syscall + if-truthy-die:

@@ -51,7 +51,17 @@ class ProgramTest:
 TESTS: list[ProgramTest] = [
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest("cat_large", ["cat src/asm.c"], r"Port of src/asm/asm\.asm to C", timeout=30.0),
+    ProgramTest(
+        "chmod",
+        ["cp src/parse_ip.asm out.asm", "chmod +x out.asm", "ls"],
+        r"out\.asm\*",
+    ),
     ProgramTest("cp", ["cp src/parse_ip.asm out.asm", "cat out.asm"], r"^parse_ip:"),
+    ProgramTest(
+        "cp_into_subdir",
+        ["mkdir mydir", "cp src/parse_ip.asm mydir/copy.asm", "cat mydir/copy.asm"],
+        r"^parse_ip:",
+    ),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
@@ -84,11 +94,11 @@ TESTS: list[ProgramTest] = [
 ]
 
 
-def _build_os(*, temporary_directory: Path) -> None:
+def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
     """Run make_os.sh --ext2; abort if the build fails."""
     image = temporary_directory / BASE_IMAGE
     result = subprocess.run(
-        ["./make_os.sh", "--ext2", str(image)],
+        ["./make_os.sh", "--ext2", f"--ext2-block-size={block_size}", str(image)],
         capture_output=True,
         text=True,
         check=False,
@@ -116,6 +126,35 @@ def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, st
     return False, f"expected regex {test.expect!r} not found in output"
 
 
+def _run_suite(
+    *,
+    tests: list[ProgramTest],
+    temporary_directory: Path,
+    label: str = "",
+) -> tuple[int, int, list[str]]:
+    """Run a list of ProgramTests; return (pass_count, fail_count, failed_names)."""
+    pass_count = 0
+    fail_count = 0
+    failed: list[str] = []
+    for test in tests:
+        name = f"{label}{test.name}" if label else test.name
+        started = time.monotonic()
+        ok, message = _run_test(temporary_directory=temporary_directory, test=test)
+        elapsed = time.monotonic() - started
+        if ok:
+            print(f"  PASS  {name:<20}              {elapsed:6.2f}s")
+            pass_count += 1
+        else:
+            print(f"  FAIL  {name:<20}  {message}   {elapsed:6.2f}s")
+            fail_count += 1
+            failed.append(name)
+    return pass_count, fail_count, failed
+
+
+# Subset of tests to re-run with 2 KB blocks (exercises the variable-block-size paths).
+BLOCK_SIZE_TESTS: list[ProgramTest] = [t for t in TESTS if t.name in {"cat", "cp", "cp_into_subdir", "ls", "mkdir_nested"}]
+
+
 def main() -> int:
     """Run the selected ProgramTests and print a summary."""
     os.chdir(REPO_ROOT)
@@ -131,30 +170,38 @@ def main() -> int:
         print(f"No test named {arguments.program!r}")
         return 1
 
+    total_pass = 0
+    total_fail = 0
+    all_failed: list[str] = []
+
     with tempfile.TemporaryDirectory(prefix="test_ext2_") as temporary_path:
         temporary_directory = Path(temporary_path)
-        _build_os(temporary_directory=temporary_directory)
+        _build_os(temporary_directory=temporary_directory, block_size=1024)
+        p, f, failed = _run_suite(tests=tests, temporary_directory=temporary_directory)
+        total_pass += p
+        total_fail += f
+        all_failed += failed
 
-        pass_count = 0
-        fail_count = 0
-        failed: list[str] = []
-        for test in tests:
-            started = time.monotonic()
-            ok, message = _run_test(temporary_directory=temporary_directory, test=test)
-            elapsed = time.monotonic() - started
-            if ok:
-                print(f"  PASS  {test.name:<12}              {elapsed:6.2f}s")
-                pass_count += 1
-            else:
-                print(f"  FAIL  {test.name:<12}  {message}   {elapsed:6.2f}s")
-                fail_count += 1
-                failed.append(test.name)
+    # 2 KB block-size tests (only when running the full suite)
+    if arguments.program is None:
+        blk2_tests = BLOCK_SIZE_TESTS
+        with tempfile.TemporaryDirectory(prefix="test_ext2_2k_") as temporary_path:
+            temporary_directory = Path(temporary_path)
+            _build_os(temporary_directory=temporary_directory, block_size=2048)
+            p, f, failed = _run_suite(
+                tests=blk2_tests,
+                temporary_directory=temporary_directory,
+                label="2k/",
+            )
+            total_pass += p
+            total_fail += f
+            all_failed += failed
 
     print()
-    print(f"{pass_count} passed, {fail_count} failed")
-    if fail_count:
-        print("Failed:", " ".join(failed))
-    return 1 if fail_count else 0
+    print(f"{total_pass} passed, {total_fail} failed")
+    if total_fail:
+        print("Failed:", " ".join(all_failed))
+    return 1 if total_fail else 0
 
 
 if __name__ == "__main__":
