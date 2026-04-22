@@ -546,6 +546,7 @@ class EmissionMixin:
                 const_base = self._resolve_constant(vname)
                 if const_base is not None:
                     self.emit_constant_reference(vname)
+                    guarded = self._si_scratch_guard_begin(vname)
                     addr = self._emit_constant_base_index_addr(
                         const_base=const_base,
                         index=index_expression,
@@ -556,6 +557,7 @@ class EmissionMixin:
                         self.emit_byte_load_zx(f"[{addr}]")
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
+                    self._si_scratch_guard_end(guarded=guarded)
                     self.ax_clear()
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
@@ -1264,6 +1266,7 @@ class EmissionMixin:
             if const_base is not None:
                 self.emit_constant_reference(name)
                 self.generate_expression(statement.expr)
+                guarded = self._si_scratch_guard_begin(name)
                 addr = self._emit_constant_base_index_addr(
                     const_base=const_base,
                     index=statement.index,
@@ -1274,6 +1277,7 @@ class EmissionMixin:
                     self.emit(f"        mov [{addr}], al")
                 else:
                     self.emit(f"        mov [{addr}], {self.target.acc}")
+                self._si_scratch_guard_end(guarded=guarded)
                 self.ax_clear()
             else:
                 # Variable index: compute address in SI, then store.
