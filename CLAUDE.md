@@ -101,13 +101,15 @@ renumbering is source-compatible — just rebuild.
 - `src/kernel/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
 - `src/kernel/drivers/vga.asm` — VGA text mode helpers
 - `src/kernel/fd.asm` — File descriptor table management: `fd_open`, `fd_read`, `fd_write`, `fd_close`, `fd_fstat`
-- `src/kernel/fs.asm` — Filesystem layer: `find_file`, `load_file`, `read_sector`, `write_sector`, directory management
+- `src/kernel/fs.asm` — Low-level sector I/O: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
+- `src/kernel/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
 - `src/kernel/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`
 - `src/kernel/lib/print.asm` — output utilities: `shared_print_*`, `shared_printf`, `shared_write_stdout`
 - `src/kernel/lib/proc.asm` — program utilities: `shared_die`, `shared_exit`, `shared_get_character`, `shared_parse_argv`
 - `src/kernel/net.asm` — 5-line orchestrator; includes `net/arp.asm`, `net/icmp.asm`, `net/ip.asm`, `net/ne2k.asm`, `net/udp.asm`
 - `src/kernel/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/kernel/system.asm` — `reboot`, `shutdown`
+- `src/kernel/vfs.asm` — VFS layer: runtime function-pointer table (`vfs_find_fn`, etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`, `vfs_create`, …); `%include`s `fs/bbfs.asm`
 - `src/c/` programs written in the C subset: `arp`, `asm`, `asmesc`, `bits`, `booltest`, `cat`, `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `edit`, `gdemo`, `gtable`, `hello`, `inctest`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `ping`, `shell`, `uptime`. `asmesc` smoke-tests the `asm(...)` inline-asm escape (both file-scope and statement forms); `bits` is a smoke test for cc.py's bitwise operators (`|`, `^`, `~`, `<<`, `>>`, `&`) and their compound-assignment forms; `booltest` is a smoke test for cc.py's booleanized comparison BinOps used as expression values (`int x = (a == b);` etc.); `gdemo` and `gtable` are smoke tests for cc.py's file-scope globals; `inctest` is a smoke test for cc.py's `#include` directive (pairs with `src/c/inctest.h`).
 - `src/c/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. Gap buffer at `EDIT_BUFFER_BASE` (`0x2000`) up to the 2.5 KB kill buffer at `EDIT_KILL_BUFFER` (`0x7200`); sizes are defined in `constants.asm`. Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
 - `src/c/asm.c` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`). Phase 1 port: the driver and handlers still live inside a single file-scope `asm("...")` block that wraps `archive/asm.asm`'s original NASM source; follow-up PRs extract pieces into pure C one family at a time. Supported directives and mnemonics are documented in the inline-asm body.

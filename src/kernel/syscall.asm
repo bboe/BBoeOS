@@ -96,68 +96,6 @@ syscall_handler:
         pop si
         ret
 
-subdir_find_free:
-        ;; Scan a subdirectory's DIRECTORY_SECTORS data sectors for the first
-        ;; empty entry.
-        ;; Input: AX = subdirectory's first data sector (16-bit)
-        ;; Output: CF clear, BX = entry pointer in SECTOR_BUFFER on success.
-        ;;         directory_loaded_sector set to the sector containing the entry.
-        ;;         CF set on failure with AL = ERROR_NOT_FOUND (read error)
-        ;;         or ERROR_DIRECTORY_FULL (no empty entry).
-        ;; Clobbers: AX, BX, CX, DX
-        mov dx, DIRECTORY_SECTORS
-        .sff_loop:
-        push ax
-        push dx
-        mov [directory_loaded_sector], ax
-        call read_sector
-        pop dx
-        pop ax
-        jnc .sff_scan_init
-        mov al, ERROR_NOT_FOUND
-        stc
-        ret
-        .sff_scan_init:
-        mov bx, SECTOR_BUFFER
-        mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
-        .sff_scan:
-        cmp byte [bx], 0
-        je .sff_found
-        add bx, DIRECTORY_ENTRY_SIZE
-        loop .sff_scan
-        inc ax
-        dec dx
-        jnz .sff_loop
-        mov al, ERROR_DIRECTORY_FULL
-        stc
-        ret
-        .sff_found:
-        clc
-        ret
-
-write_directory_name:
-        ;; Copy null-terminated name from SI into entry at BX, padding with
-        ;; zeros up to DIRECTORY_NAME_LENGTH - 1 bytes total. SI is advanced past the
-        ;; null terminator and BX is advanced DIRECTORY_NAME_LENGTH - 1 bytes.
-        ;; Clobbers: AX, BX (advanced), CX, SI (advanced)
-        mov cx, DIRECTORY_NAME_LENGTH - 1
-        .copy:
-        mov al, [si]
-        test al, al
-        jz .pad
-        inc si
-        mov [bx], al
-        inc bx
-        dec cx
-        jnz .copy
-        ret
-        .pad:
-        mov byte [bx], 0
-        inc bx
-        dec cx
-        jnz .pad
-        ret
-
 install_syscalls:
         ;; Install INT 30h handler
         push ax

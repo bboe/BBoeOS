@@ -26,13 +26,13 @@ boot_shell:
         call fdc_init           ; reset, motor, recalibrate drive A:
         .post_fdc:
         call fd_init
+        call vfs_init
         ;; Load shell program from filesystem
         mov si, SHELL_NAME
-        call find_file
+        call vfs_find           ; populates vfs_found_*
         jc .no_shell
-
         mov di, PROGRAM_BASE
-        call load_file
+        call vfs_load           ; DI=dest → CF
         jc .no_shell
 
         mov [shell_sp], sp
@@ -57,6 +57,7 @@ boot_shell:
 %include "net.asm"
 %include "syscall.asm"
 %include "system.asm"
+%include "vfs.asm"
 
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
