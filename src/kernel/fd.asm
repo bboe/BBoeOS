@@ -40,51 +40,18 @@ fd_alloc:
 ;;; Input:  BX = fd number
 ;;; Output: CF set on error
 ;;;
-;;; For writable file FDs, updates the directory entry's size field
-;;; from fd_pos (the number of bytes written) before freeing the slot.
+;;; For writable file FDs, calls vfs_update_size to write the final
+;;; position back to the directory entry as the file size.
 ;;; -----------------------------------------------------------------------
 fd_close:
         call fd_lookup
         jc .close_err
-        ;; SI = entry pointer
         cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
         jne .close_free
         test byte [si+FD_OFFSET_FLAGS], O_WRONLY
         jz .close_free
-        ;; Writable file — update directory entry size from fd_pos
-        push ax
-        push bx
-        push cx
-        push dx
-        ;; Read the directory sector containing this file's entry
-        mov ax, [si+FD_OFFSET_DIRECTORY_SECTOR]
-        mov [directory_loaded_sector], ax
-        call read_sector
-        jc .close_write_err
-        ;; Point BX at the entry within SECTOR_BUFFER
-        mov bx, SECTOR_BUFFER
-        add bx, [si+FD_OFFSET_DIRECTORY_OFFSET]
-        ;; Update size from fd_pos (32-bit)
-        mov ax, [si+FD_OFFSET_POSITION]
-        mov [bx+DIRECTORY_OFFSET_SIZE], ax
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov [bx+DIRECTORY_OFFSET_SIZE+2], ax
-        ;; Write back the directory sector
-        call directory_write_back
-        jc .close_write_err
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        jmp .close_free
-        .close_write_err:
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        ;; Fall through to free the slot, but propagate error
+        call vfs_update_size    ; SI = fd_table entry → updates dir entry size
         .close_free:
-        ;; Zero the entry to free it
         push ax
         push cx
         push di
@@ -111,7 +78,6 @@ fd_close:
 fd_fstat:
         call fd_lookup
         jc .fstat_err
-        ;; SI = entry pointer
         mov al, [si+FD_OFFSET_MODE]
         mov dx, [si+FD_OFFSET_SIZE]
         mov cx, [si+FD_OFFSET_SIZE+2]
@@ -176,121 +142,47 @@ fd_open:
         push cx
         push dx
         push di
-        ;; Save flags and filename before subsequent calls clobber them
         mov [fd_open_flags], al
         mov [fd_open_name], si
-        ;; Check for "." (root directory)
-        cmp byte [si], '.'
-        jne .open_find
-        cmp byte [si+1], 0
-        jne .open_find
-        jmp .open_root_dir
-        .open_find:
-        ;; Look up the file
-        call find_file
+        ;; Look up the file (vfs_find handles "." → root directory)
+        call vfs_find           ; populates vfs_found_*
         jc .open_not_found
-        ;; Found — open as DIR or FILE depending on entry flags
         jmp .open_populate
 
         .open_not_found:
         ;; If O_CREAT is set, create the file
         test byte [fd_open_flags], O_CREAT
         jz .open_err
-        ;; Create: scan for free entry + next data sector
         mov si, [fd_open_name]
-        call scan_directory_entries   ; BX = free root entry index, DX = next data sector
-        mov [fd_open_sector], dx   ; save start sector for new file
-        ;; Check for '/' in filename to handle subdirectory paths
-        mov di, [fd_open_name]
-        .open_find_slash:
-        mov al, [di]
-        test al, al
-        jz .open_create_root
-        cmp al, '/'
-        je .open_create_subdir
-        inc di
-        jmp .open_find_slash
-
-        .open_create_root:
-        ;; Create in root directory
-        cmp bx, 0FFFFh
-        je .open_err            ; directory full
-        call directory_load_entry     ; BX = entry ptr in SECTOR_BUFFER
-        mov si, [fd_open_name]
-        jmp .open_write_entry
-
-        .open_create_subdir:
-        ;; DI points to '/'. Null-terminate dirname, find subdir, create entry.
-        mov byte [di], 0
-        push di
-        mov si, [fd_open_name]
-        call find_file          ; find the subdirectory
-        pop di
-        mov byte [di], '/'
+        call vfs_create         ; SI=path → vfs_found_*, CF on error
         jc .open_err
-        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
-        jz .open_err
-        ;; Scan subdirectory for free entry
-        mov ax, [bx+DIRECTORY_OFFSET_SECTOR]
-        call subdir_find_free
-        jc .open_err
-        ;; BX = free entry ptr in SECTOR_BUFFER, directory_loaded_sector set
-        inc di                  ; skip past '/'
-        mov si, di              ; SI = basename
-        jmp .open_write_entry
-
-        .open_write_entry:
-        ;; BX = entry ptr in SECTOR_BUFFER, SI = filename to write
-        push bx
-        call write_directory_name
-        pop bx
-        mov byte [bx+DIRECTORY_OFFSET_FLAGS], 0
-        mov ax, [fd_open_sector]
-        mov [bx+DIRECTORY_OFFSET_SECTOR], ax
-        mov word [bx+DIRECTORY_OFFSET_SIZE], 0
-        mov word [bx+DIRECTORY_OFFSET_SIZE+2], 0
-        call directory_write_back
-        jc .open_err
-        ;; Now BX points to the new entry in SECTOR_BUFFER — fall through
-        ;; to populate the FD
+        jmp .open_populate
 
         .open_populate:
-        ;; BX = dir entry in SECTOR_BUFFER
+        ;; vfs_found_* is now fully populated
         call fd_alloc
-        jc .open_err            ; table full
-        ;; SI = FD entry pointer from fd_alloc, AX = fd number
+        jc .open_err
         mov [fd_open_fd], ax
-        ;; Set FD type: DIR if directory entry, FILE otherwise
-        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
-        jnz .open_set_dir
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
-        jmp .open_set_flags
-        .open_set_dir:
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
-        .open_set_flags:
+        ;; Type, flags, mode, inode, size, position from vfs_found_*
+        mov cl, [vfs_found_type]
+        mov [si+FD_OFFSET_TYPE], cl
         mov cl, [fd_open_flags]
         mov [si+FD_OFFSET_FLAGS], cl
-        ;; mode (file permission flags from directory entry)
-        mov cl, [bx+DIRECTORY_OFFSET_FLAGS]
+        mov cl, [vfs_found_mode]
         mov [si+FD_OFFSET_MODE], cl
-        ;; start_sec
-        mov cx, [bx+DIRECTORY_OFFSET_SECTOR]
+        mov cx, [vfs_found_inode]
         mov [si+FD_OFFSET_START], cx
-        ;; size (32-bit)
-        mov cx, [bx+DIRECTORY_OFFSET_SIZE]
+        mov cx, [vfs_found_size]
         mov [si+FD_OFFSET_SIZE], cx
-        mov cx, [bx+DIRECTORY_OFFSET_SIZE+2]
+        mov cx, [vfs_found_size+2]
         mov [si+FD_OFFSET_SIZE+2], cx
-        ;; pos = 0
         mov word [si+FD_OFFSET_POSITION], 0
         mov word [si+FD_OFFSET_POSITION+2], 0
-        ;; dir_sec and dir_off (for writeback on close)
-        mov cx, [directory_loaded_sector]
+        mov cx, [vfs_found_dir_sec]
         mov [si+FD_OFFSET_DIRECTORY_SECTOR], cx
-        mov cx, bx
-        sub cx, SECTOR_BUFFER
+        mov cx, [vfs_found_dir_off]
         mov [si+FD_OFFSET_DIRECTORY_OFFSET], cx
-        ;; If O_TRUNC, reset size to 0
+        ;; O_TRUNC: reset size to 0
         test byte [fd_open_flags], O_TRUNC
         jz .open_done
         mov word [si+FD_OFFSET_SIZE], 0
@@ -302,24 +194,6 @@ fd_open:
         pop cx
         clc
         ret
-
-        .open_root_dir:
-        ;; Synthesize a DIR fd for the root directory
-        call fd_alloc
-        jc .open_err
-        mov [fd_open_fd], ax
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
-        mov cl, [fd_open_flags]
-        mov [si+FD_OFFSET_FLAGS], cl
-        mov byte [si+FD_OFFSET_MODE], FLAG_DIRECTORY
-        mov word [si+FD_OFFSET_START], DIRECTORY_SECTOR
-        mov word [si+FD_OFFSET_SIZE], DIRECTORY_SECTORS * 512
-        mov word [si+FD_OFFSET_SIZE+2], 0
-        mov word [si+FD_OFFSET_POSITION], 0
-        mov word [si+FD_OFFSET_POSITION+2], 0
-        mov word [si+FD_OFFSET_DIRECTORY_SECTOR], 0
-        mov word [si+FD_OFFSET_DIRECTORY_OFFSET], 0
-        jmp .open_done
 
         .open_err:
         pop di
@@ -404,7 +278,6 @@ fd_ops:
         fd_open_flags db 0
         fd_open_mode  db 0
         fd_open_name  dw 0
-        fd_open_sector dw 0
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         fd_write_buffer dw 0
 

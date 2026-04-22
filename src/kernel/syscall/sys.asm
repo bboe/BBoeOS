@@ -1,18 +1,15 @@
         .sys_exec:
         ;; Execute program: SI = filename
-        ;; Saves shell stack, loads program at PROGRAM_BASE, jumps to it
         ;; On error: CF set, AL = ERROR_NOT_FOUND or ERROR_NOT_EXECUTE
-        call find_file
+        call vfs_find           ; populates vfs_found_*
         jc .exec_not_found
-        jmp .exec_check_flag
-        .exec_not_found:
-        mov al, ERROR_NOT_FOUND
-        stc
-        jmp .iret_cf
-        .exec_check_flag:
-        test byte [bx+DIRECTORY_OFFSET_FLAGS], FLAG_EXECUTE
+        test byte [vfs_found_mode], FLAG_EXECUTE
         jnz .exec_load
         mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+        .exec_not_found:
+        mov al, ERROR_NOT_FOUND
         stc
         jmp .iret_cf
         .exec_load:
@@ -22,9 +19,8 @@
         mov bp, sp
         add bp, 22
         mov [shell_sp], bp
-        ;; Load program into PROGRAM_BASE
         mov di, PROGRAM_BASE
-        call load_file
+        call vfs_load           ; DI=dest → CF
         jnc .exec_run
         mov al, ERROR_NOT_FOUND
         stc
