@@ -48,15 +48,15 @@ boot_shell:
 %include "ansi.asm"
 %include "drivers/ata.asm"
 %include "drivers/fdc.asm"
+%include "drivers/ps2.asm"
+%include "drivers/rtc.asm"
+%include "drivers/vga.asm"
 %include "fd.asm"
 %include "fs.asm"
-%include "net.asm"
-%include "ps2.asm"
-%include "rtc.asm"
 %include "lib.asm"
+%include "net.asm"
 %include "syscall.asm"
 %include "system.asm"
-%include "vga.asm"
 
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
