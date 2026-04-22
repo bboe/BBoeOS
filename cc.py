@@ -105,24 +105,23 @@ class CompileError(Exception):
         super().__init__(f"line {line}: {message}" if line else message)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Node:
     """Base class for every AST node.
 
     ``line`` is the 1-based source line where the construct begins; it
     defaults to 0 for nodes synthesized by the compiler (e.g. constant
     folding) and is set by the parser to the first token's line for
-    everything else.  The field is keyword-only so subclasses can keep
-    their positional constructors, and excluded from ``__eq__`` so two
-    AST nodes with the same shape compare equal regardless of source
-    location — several peephole / fusion passes rely on structural
-    equality (``cond.right == Int(0)`` etc.).
+    everything else.  Excluded from ``__eq__`` so two AST nodes with
+    the same shape compare equal regardless of source location —
+    several peephole / fusion passes rely on structural equality
+    (``cond.right == Int(value=0)`` etc.).
     """
 
-    line: int = field(default=0, kw_only=True, compare=False)
+    line: int = field(compare=False, default=0)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Param:
     """A function parameter: type, name, and whether it was declared with ``[]``."""
 
@@ -131,7 +130,7 @@ class Param:
     is_array: bool
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class ArrayDecl(Node):
     """Array declaration ``T name[] = {...};`` (local or global).
 
@@ -146,14 +145,14 @@ class ArrayDecl(Node):
     size: Node | None = field(default=None, kw_only=True)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class ArrayInit(Node):
     """Brace-initializer ``{a, b, c}`` for an array declaration."""
 
     elements: list[Node]
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Assign(Node):
     """Assignment ``name = expr;`` or ``name += expr;`` (the latter lowers to ``name = name + expr``)."""
 
@@ -161,21 +160,21 @@ class Assign(Node):
     expr: Node
 
 
-@dataclass(slots=True)
-class BinOp(Node):
-    """Binary operator expression ``left OP right``."""
+@dataclass(kw_only=True, slots=True)
+class BinaryOperation(Node):
+    """Binary operator expression ``left OPERATION right``."""
 
-    op: str
+    operation: str
     left: Node
     right: Node
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Break(Node):
     """``break;`` statement (exits the innermost loop)."""
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Call(Node):
     """Function/builtin call ``name(args...)``."""
 
@@ -183,12 +182,12 @@ class Call(Node):
     args: list[Node]
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Continue(Node):
     """``continue;`` statement (jumps to the innermost loop's condition test)."""
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class DoWhile(Node):
     """``do { body } while (cond);`` loop."""
 
@@ -196,7 +195,7 @@ class DoWhile(Node):
     body: list[Node]
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Function(Node):
     """Function definition: name, parameter list, and body.
 
@@ -228,7 +227,7 @@ class Function(Node):
     always_inline: bool = field(default=False, kw_only=True)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class If(Node):
     """``if (cond) { body } [else { else_body }]`` statement."""
 
@@ -237,7 +236,7 @@ class If(Node):
     else_body: list[Node] | None
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Index(Node):
     """Subscript expression ``name[index]``."""
 
@@ -245,7 +244,7 @@ class Index(Node):
     index: Node
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class IndexAssign(Node):
     """Indexed assignment ``name[index] = expr;``."""
 
@@ -254,7 +253,7 @@ class IndexAssign(Node):
     expr: Node
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class InlineAsm(Node):
     """File-scope ``asm("...");`` directive.
 
@@ -265,7 +264,7 @@ class InlineAsm(Node):
     content: str
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Int(Node):
     """Integer literal."""
 
@@ -287,7 +286,7 @@ class Char(Int):
     __slots__ = ()
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class LogicalAnd(Node):
     """Short-circuit ``left && right`` expression."""
 
@@ -295,7 +294,7 @@ class LogicalAnd(Node):
     right: Node
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class LogicalOr(Node):
     """Short-circuit ``left || right`` expression."""
 
@@ -303,7 +302,7 @@ class LogicalOr(Node):
     right: Node
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Program(Node):
     """Top-level AST: functions and file-scope global declarations.
 
@@ -317,42 +316,42 @@ class Program(Node):
     globals: list[Node] = field(default_factory=list, kw_only=True)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Return(Node):
     """``return [expr];`` statement."""
 
     value: Node | None
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class SizeofType(Node):
     """``sizeof(type_name)`` expression."""
 
     type_name: str
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class SizeofVar(Node):
     """``sizeof(name)`` expression (size of a declared variable)."""
 
     name: str
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class String(Node):
     """String literal."""
 
     content: str
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Var(Node):
     """Reference to a named variable or named constant."""
 
     name: str
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class VarDecl(Node):
     """Scalar local declaration ``T name [= init];``.
 
@@ -369,7 +368,7 @@ class VarDecl(Node):
     asm_register: str | None = field(default=None, kw_only=True)
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class While(Node):
     """``while (cond) { body }`` loop."""
 
@@ -519,9 +518,9 @@ TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UINT8_T", "UNSIGNED", 
 def _ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
     """Return True if any node in the tree satisfies *predicate*.
 
-    Generic AST walker used by :meth:`CodeGenerator.__name_is_reassigned`,
-    :meth:`CodeGenerator.__node_references_var`, and
-    :meth:`CodeGenerator.__statement_references`.
+    Generic AST walker used by :meth:`X86CodeGenerator.__name_is_reassigned`,
+    :meth:`X86CodeGenerator.__node_references_var`, and
+    :meth:`X86CodeGenerator.__statement_references`.
     """
     if predicate(node):
         return True
@@ -552,16 +551,16 @@ EREG_LOW_WORD: dict[str, str] = {
 class CodegenTarget(ABC):
     """Architecture-independent interface for code-generation targets.
 
-    ``CodeGenerator`` holds exactly one ``CodegenTarget`` and routes
+    ``X86CodeGenerator`` holds exactly one ``CodegenTarget`` and routes
     every mode-dependent choice through it.  To add a new target
     (different ISA, new ABI, …) subclass this and pass an instance
-    to ``CodeGenerator``.
+    to ``X86CodeGenerator``.
     """
 
     #: Accumulator register name (e.g. ``"ax"`` / ``"eax"``).
     acc: str
     #: Counter / shift register name.
-    cx_register: str
+    count_register: str
     #: Data register name.
     dx_register: str
     #: Base-pointer register name.
@@ -644,7 +643,7 @@ class X86CodegenTarget16(X86CodegenTarget):
     """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
 
     acc = "ax"
-    cx_register = "cx"
+    count_register = "cx"
     dx_register = "dx"
     bp_register = "bp"
     sp_register = "sp"
@@ -678,7 +677,7 @@ class X86CodegenTarget32(X86CodegenTarget):
     """32-bit flat-pmode x86 target (BBoeOS ring-0 protected mode)."""
 
     acc = "eax"
-    cx_register = "ecx"
+    count_register = "ecx"
     dx_register = "edx"
     bp_register = "ebp"
     sp_register = "esp"
@@ -708,7 +707,7 @@ class X86CodegenTarget32(X86CodegenTarget):
         return f"[{base_reg}]"
 
 
-class CodeGenerator:
+class X86CodeGenerator:
     """Generates NASM x86 assembly from the parsed AST."""
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
@@ -1008,7 +1007,7 @@ class CodeGenerator:
 
         Used by :meth:`_emit_register_arg_moves` to schedule arg loads
         without overwriting a register that another arg still needs.
-        Walks ``Var``/``BinOp`` recursively; non-leaf nodes outside
+        Walks ``Var``/``BinaryOperation`` recursively; non-leaf nodes outside
         the simple-arg shape contribute no sources (and would be
         rejected by :meth:`_is_simple_arg` upstream anyway).
         """
@@ -1016,7 +1015,7 @@ class CodeGenerator:
             if arg.name in self.pinned_register:
                 return {self.pinned_register[arg.name]}
             return set()
-        if isinstance(arg, BinOp):
+        if isinstance(arg, BinaryOperation):
             return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
         return set()
 
@@ -1077,7 +1076,7 @@ class CodeGenerator:
         """
         if isinstance(node, Var) and node.name in self.NAMED_CONSTANTS:
             return {node.name}
-        if isinstance(node, BinOp):
+        if isinstance(node, BinaryOperation):
             return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
         return set()
 
@@ -1099,18 +1098,18 @@ class CodeGenerator:
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
             return None
-        if isinstance(init, BinOp) and init.op in ("+", "-", "*", "&", "|", "^"):
+        if isinstance(init, BinaryOperation) and init.operation in ("+", "-", "*", "&", "|", "^"):
             left = self._constant_expression(init.left)
             right = self._constant_expression(init.right)
             if left is not None and right is not None:
-                return f"({left}{init.op}{right})"
+                return f"({left}{init.operation}{right})"
         return None
 
     def _dispatch_chain_var(self, statement: If, /) -> str | None:
         """Return the local var name shared by an if-else dispatch chain.
 
-        A chain is two or more nested ``if (var op literal) … else if
-        (var op literal) …`` clauses on the same memory-resident
+        A chain is two or more nested ``if (var operation literal) … else if
+        (var operation literal) …`` clauses on the same memory-resident
         local, where each comparison is one of ``==``/``!=``/``<``/
         ``<=``/``>``/``>=`` and the variable always sits on the left.
         Pinned vars, constant aliases, and array bases are excluded —
@@ -1126,7 +1125,7 @@ class CodeGenerator:
         current: Node | None = statement
         while isinstance(current, If):
             condition = current.cond
-            if not (isinstance(condition, BinOp) and condition.op in ("==", "!=", "<", "<=", ">", ">=")):
+            if not (isinstance(condition, BinaryOperation) and condition.operation in ("==", "!=", "<", "<=", ">", ">=")):
                 break
             if not (isinstance(condition.left, Var) and isinstance(condition.right, Int)):
                 break
@@ -1224,8 +1223,8 @@ class CodeGenerator:
         """
         element_size = 1 if is_byte else self.target.int_size
         displacement = 0
-        if isinstance(index, BinOp) and index.op in ("+", "-") and isinstance(index.right, Int):
-            sign = 1 if index.op == "+" else -1
+        if isinstance(index, BinaryOperation) and index.operation in ("+", "-") and isinstance(index.right, Int):
+            sign = 1 if index.operation == "+" else -1
             displacement = sign * index.right.value * element_size
             index = index.left
         base_register = "si"
@@ -1402,7 +1401,7 @@ class CodeGenerator:
 
     def _is_byte_eq(self, node: Node, /) -> bool:
         """Check if a node is ``byte_index == <something>``."""
-        return isinstance(node, BinOp) and node.op == "==" and self._is_byte_index(node.left)
+        return isinstance(node, BinaryOperation) and node.operation == "==" and self._is_byte_index(node.left)
 
     def _is_byte_index(self, node: Node, /) -> bool:
         """Check if a node is a constant-subscript byte index."""
@@ -1487,11 +1486,11 @@ class CodeGenerator:
 
         ``parse_condition`` wraps bare expressions as ``expr != 0``,
         so ``while (1)`` reaches here as
-        ``BinOp("!=", Int(1), Int(0))``.
+        ``BinaryOperation(left=Int(value=1), operation="!=", right=Int(value=0))``.
         """
-        if not isinstance(condition, BinOp) or condition.op != "!=":
+        if not isinstance(condition, BinaryOperation) or condition.operation != "!=":
             return False
-        if condition.right != Int(0):
+        if condition.right != Int(value=0):
             return False
         return isinstance(condition.left, Int) and condition.left.value != 0
 
@@ -1509,9 +1508,9 @@ class CodeGenerator:
             # Unconditional reassignment kills the old value — but only
             # if the RHS doesn't read the variable (e.g. `err = err + 1`
             # would read the old value).
-            if isinstance(stmt, Assign) and stmt.name == name and not CodeGenerator._node_references_var(name=name, node=stmt.expr):
+            if isinstance(stmt, Assign) and stmt.name == name and not X86CodeGenerator._node_references_var(name=name, node=stmt.expr):
                 return False
-            if CodeGenerator._node_references_var(name=name, node=stmt):
+            if X86CodeGenerator._node_references_var(name=name, node=stmt):
                 return True
         return False
 
@@ -1532,7 +1531,12 @@ class CodeGenerator:
     @staticmethod
     def _is_modulo_of(*, base: Node, expression: Node) -> bool:
         """Check if expression is (base % N) for some integer N."""
-        return isinstance(expression, BinOp) and expression.op == "%" and expression.left == base and isinstance(expression.right, Int)
+        return (
+            isinstance(expression, BinaryOperation)
+            and expression.operation == "%"
+            and expression.left == base
+            and isinstance(expression.right, Int)
+        )
 
     @staticmethod
     def _is_simple_arg(node: Node, /) -> bool:
@@ -1541,7 +1545,7 @@ class CodeGenerator:
         "Safe" means :meth:`_emit_register_arg_single` can evaluate it
         without clobbering registers that another arg still needs.
         The base case is ``Int``/``String``/``Var`` (a single ``mov``
-        from immediate/memory/pinned-reg).  ``BinOp(+/-, leaf, leaf)``
+        from immediate/memory/pinned-reg).  ``BinaryOperation(+/-, leaf, leaf)``
         is also safe: ``generate_expression`` handles those via the
         ``add ax, [mem]``/``sub ax, imm`` fast paths, which only touch
         AX.  Inter-arg conflicts are checked separately at codegen
@@ -1550,7 +1554,7 @@ class CodeGenerator:
         """
         if isinstance(node, (Int, String, Var)):
             return True
-        if isinstance(node, BinOp) and node.op in ("+", "-"):
+        if isinstance(node, BinaryOperation) and node.operation in ("+", "-"):
             return isinstance(node.left, (Int, String, Var)) and isinstance(node.right, (Int, String, Var))
         return False
 
@@ -1574,11 +1578,11 @@ class CodeGenerator:
         """Check if a statement is ``if (VAR == 0) { exit(); }`` or ``if (VAR == 0) { return ...; }``."""
         return (
             isinstance(statement, If)
-            and isinstance(statement.cond, BinOp)
-            and statement.cond.op == "=="
-            and statement.cond.right == Int(0)
+            and isinstance(statement.cond, BinaryOperation)
+            and statement.cond.operation == "=="
+            and statement.cond.right == Int(value=0)
             and len(statement.body) == 1
-            and (statement.body[0] == Call("exit", []) or isinstance(statement.body[0], Return))
+            and (statement.body[0] == Call(args=[], name="exit") or isinstance(statement.body[0], Return))
             and statement.else_body is None
         )
 
@@ -1648,13 +1652,13 @@ class CodeGenerator:
 
         Each item carries a ``sources`` set of caller-pinned registers
         it reads (``{caller_pin}`` for simple ``Var`` args,
-        recursively-collected for ``BinOp`` args, empty otherwise).
+        recursively-collected for ``BinaryOperation`` args, empty otherwise).
         The topological loop picks an item whose target register is
         not in any other item's source set, which guarantees that
         emitting the item won't trash a value another item still
         needs.  When two simple args form a read/write cycle
         (``mov bx, di`` / ``mov di, bx``), the first item's source is
-        copied through AX to break it.  ``BinOp`` args participating
+        copied through AX to break it.  ``BinaryOperation`` args participating
         in a cycle would need a stack temp that the current cdecl-
         fallback never has to emit; we raise a ``CompileError`` so
         the caller can be reshaped instead.
@@ -1676,10 +1680,10 @@ class CodeGenerator:
                     break
             if progress_index is not None:
                 item = items.pop(progress_index)
-                self._emit_register_arg_single(target=item["target"], arg=item["arg"], source=item["source"])
+                self._emit_register_arg_single(arg=item["arg"], source=item["source"], target=item["target"])
                 continue
             # Cycle break: only the simple-Var case supports the AX
-            # spill (the BinOp path can't reroute its operand reads).
+            # spill (the BinaryOperation path can't reroute its operand reads).
             item = items[0]
             if not isinstance(item["arg"], Var) or item["source"] is None:
                 message = "register-convention call has a cyclic register dependency that involves a complex argument"
@@ -1738,19 +1742,19 @@ class CodeGenerator:
                 self.emit(f"        mov al, [{self._local_address(arg.name)}]")
                 self.emit("        xor ah, ah")
                 if target != self.target.acc:
-                    src = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        mov {target}, {src}")
+                    source = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
+                    self.emit(f"        mov {target}, {source}")
             else:
                 self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
-        elif isinstance(arg, BinOp):
-            # ``_is_simple_arg`` only admits BinOp(+/-, leaf, leaf), and
+        elif isinstance(arg, BinaryOperation):
+            # ``_is_simple_arg`` only admits BinaryOperation(+/-, leaf, leaf), and
             # the topological scheduler in ``_emit_register_arg_moves``
             # already verified that ``target`` is not read by any other
             # pending arg.  Evaluate into AX, then move into target.
             self.generate_expression(arg)
             if target != self.target.acc:
-                src = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {target}, {src}")
+                source = self.target.loword(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {target}, {source}")
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
@@ -1759,13 +1763,13 @@ class CodeGenerator:
         """Return True if the last emitted lines form a fusion target.
 
         :meth:`peephole_memory_arithmetic` collapses
-        ``mov ax, D / <op> ax, ... / mov D, ax`` into ``<op> D, ...`` when
+        ``mov ax, D / <operation> ax, ... / mov D, ax`` into ``<operation> D, ...`` when
         source and destination match (passes 2 and 3); :meth:`peephole_register_arithmetic`
         pushes the computation directly into a pin-eligible destination
         register when it differs from the source.
         :meth:`peephole_memory_arithmetic_byte` collapses the 4-line
-        byte-scalar-global shape (``mov al, [mem] / xor ah, ah / <op>
-        ax, ... / mov [mem], al``) into ``<op> byte [mem], ...``.
+        byte-scalar-global shape (``mov al, [mem] / xor ah, ah / <operation>
+        ax, ... / mov [mem], al``) into ``<operation> byte [mem], ...``.
         All three leave AX holding something other than the new
         stored value, so the ``ax_local`` tracking the caller just
         set (pointing at the store's destination local) would
@@ -1779,7 +1783,7 @@ class CodeGenerator:
         """
         acc = self.target.acc
         # Byte-global fusion: last 4 lines are ``mov al, [mem] / xor
-        # ah, ah / <op> ax, ... / mov [mem], al`` and the two mem refs
+        # ah, ah / <operation> ax, ... / mov [mem], al`` and the two mem refs
         # match — peephole_memory_arithmetic_byte will delete all four.
         if len(self.lines) >= 4:
             first = self.lines[-4].strip()
@@ -1818,7 +1822,7 @@ class CodeGenerator:
                 return True
             return middle.startswith((f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, "))
         # peephole_register_arithmetic: different register destination,
-        # op in {add, sub, and, or, xor}, operand doesn't reference the target.
+        # operation in {add, sub, and, or, xor}, operand doesn't reference the target.
         if destination in self.target.non_acc_registers:
             for prefix in (f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, "):
                 if middle.startswith(prefix):
@@ -1997,7 +2001,7 @@ class CodeGenerator:
         other_uses: dict[str, int] = {}
         init_count: dict[str, int] = {}
         init_expr: dict[str, Node] = {}
-        comparison_ops = {"==", "!=", "<", "<=", ">", ">="}
+        comparison_operations = {"==", "!=", "<", "<=", ">", ">="}
 
         def collect_index_vars(node: Node) -> None:
             """Tally Var occurrences inside Index/IndexAssign subscripts.
@@ -2037,8 +2041,8 @@ class CodeGenerator:
                     ax_resident_uses[node.name] = ax_resident_uses.get(node.name, 0) + 1
                 else:
                     other_uses[node.name] = other_uses.get(node.name, 0) + 1
-            if isinstance(node, BinOp):
-                if node.op in comparison_ops:
+            if isinstance(node, BinaryOperation):
+                if node.operation in comparison_operations:
                     # Only the LEFT operand can reuse an AX-resident
                     # value: the right side is loaded into CX after the
                     # left's evaluation has overwritten AX.  Even on
@@ -2073,7 +2077,7 @@ class CodeGenerator:
             """Skip pinning vars whose value lives in AX between assignment and consumer.
 
             A var assigned exactly once from a non-trivial expression
-            (Call/Index/BinOp — all leave the value in AX) and consumed
+            (Call/Index/BinaryOperation — all leave the value in AX) and consumed
             only as the LEFT operand of a comparison against an integer
             literal naturally lives in AX through its lifetime.
             ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
@@ -2089,7 +2093,7 @@ class CodeGenerator:
                 return False
             if ax_resident_uses.get(name, 0) == 0:
                 return False
-            return isinstance(init_expr.get(name), (Call, Index, BinOp))
+            return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
 
         def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
             return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
@@ -2142,7 +2146,7 @@ class CodeGenerator:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
         if body and self._is_simple_printf(body[-1]):
             last = body[-1]
-            return [*body[:-1], Call("die", last.args, line=last.line)]
+            return [*body[:-1], Call(args=last.args, line=last.line, name="die")]
         return body
 
     def _transform_if_printf(self, statement: If, /) -> If:
@@ -2159,7 +2163,7 @@ class CodeGenerator:
                 new_else = self._transform_branch_printf(else_body)
         if new_if is if_body and new_else is else_body:
             return statement
-        return If(condition, new_if, new_else, line=statement.line)
+        return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
 
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
@@ -2220,7 +2224,7 @@ class CodeGenerator:
                         i += 2
                         continue
             # Not fusible — emit normally
-            self.emit_condition_false_jump(condition=leaves[i], fail_label=fail_label, context=context)
+            self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
     def _type_of_operand(self, node: Node, /) -> str:
@@ -2258,7 +2262,7 @@ class CodeGenerator:
                 return "integer"
             message = f"undefined operand: {node.name}"
             raise CompileError(message, line=node.line)
-        if isinstance(node, (BinOp, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
+        if isinstance(node, (BinaryOperation, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
             return "integer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
@@ -2300,7 +2304,7 @@ class CodeGenerator:
             return True
         # Exhaustive if-else: both branches always exit.
         if isinstance(last, If) and last.else_body is not None:
-            return CodeGenerator.always_exits(last.body) and CodeGenerator.always_exits(last.else_body)
+            return X86CodeGenerator.always_exits(last.body) and X86CodeGenerator.always_exits(last.else_body)
         return False
 
     def ax_clear(self) -> None:
@@ -2407,7 +2411,7 @@ class CodeGenerator:
         label = self.new_string_label(argument.content)
         length = string_byte_length(argument.content)
         self.emit(f"        mov si, {label}")
-        self.emit(f"        mov {self.target.cx_register}, {length}")
+        self.emit(f"        mov {self.target.count_register}, {length}")
         self.emit("        jmp FUNCTION_DIE")
 
     def builtin_exec(self, arguments: list[Node], /) -> None:
@@ -2881,11 +2885,11 @@ class CodeGenerator:
         self._check_argument_count(arguments=arguments, expected=1, name="strlen")
         self.emit_register_from_argument(argument=arguments[0], register="di")
         self.emit("        xor al, al")
-        self.emit(f"        mov {self.target.cx_register}, 0FFFFh")
+        self.emit(f"        mov {self.target.count_register}, 0FFFFh")
         self.emit("        cld")
         self.emit("        repne scasb")
         self.emit(f"        mov {self.target.acc}, 0FFFEh")
-        self.emit(f"        sub {self.target.acc}, {self.target.cx_register}")
+        self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
         self.ax_clear()
 
     def builtin_ticks(self, arguments: list[Node], /) -> None:
@@ -3040,7 +3044,7 @@ class CodeGenerator:
                 continue
             other_statements = statements[:index] + statements[index + 2 :]
             name = statement.name
-            if any(CodeGenerator._statement_references(other, name) for other in other_statements):
+            if any(X86CodeGenerator._statement_references(other, name) for other in other_statements):
                 continue
             self.virtual_long_locals.add(name)
 
@@ -3090,8 +3094,8 @@ class CodeGenerator:
                 and first.body[0].name == "die"
                 and len(first.body[0].args) == 1
                 and isinstance(first.body[0].args[0], String)
-                and isinstance(first.cond, BinOp)
-                and first.cond.op == "!="
+                and isinstance(first.cond, BinaryOperation)
+                and first.cond.operation == "!="
                 and isinstance(first.cond.left, Var)
                 and first.cond.left.name == argc_name
                 and isinstance(first.cond.right, Int)
@@ -3119,24 +3123,24 @@ class CodeGenerator:
         """
         if isinstance(right, Int):
             self.generate_expression(left)
-            self.emit(f"        mov {self.target.cx_register}, {right.value}")
+            self.emit(f"        mov {self.target.count_register}, {right.value}")
         elif isinstance(right, Var) and right.name in self.pinned_register:
             self.generate_expression(left)
             source_register = self.pinned_register[right.name]
-            if len(source_register) < len(self.target.cx_register):
+            if len(source_register) < len(self.target.count_register):
                 source_register = self.target.loword(source_register)
-                # Use movzx to zero-extend the 16-bit source into cx_register.
-                self.emit(f"        movzx {self.target.cx_register}, {source_register}")
-            elif source_register != self.target.cx_register:
-                self.emit(f"        mov {self.target.cx_register}, {source_register}")
+                # Use movzx to zero-extend the 16-bit source into count_register.
+                self.emit(f"        movzx {self.target.count_register}, {source_register}")
+            elif source_register != self.target.count_register:
+                self.emit(f"        mov {self.target.count_register}, {source_register}")
         elif isinstance(right, Var) and self._is_memory_scalar(right.name) and not self._is_byte_scalar(right.name):
             self.generate_expression(left)
-            self.emit(f"        mov {self.target.cx_register}, [{self._local_address(right.name)}]")
+            self.emit(f"        mov {self.target.count_register}, [{self._local_address(right.name)}]")
         else:
             self.generate_expression(left)
             self.emit(f"        push {self.target.acc}")
             self.generate_expression(right)
-            self.emit(f"        mov {self.target.cx_register}, {self.target.acc}")
+            self.emit(f"        mov {self.target.count_register}, {self.target.acc}")
             self.emit(f"        pop {self.target.acc}")
 
     def emit_comparison(self, left: Node, right: Node, /) -> None:
@@ -3222,7 +3226,7 @@ class CodeGenerator:
             # generate_expression can't clobber CX mid-compare.
             if isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
-                if source != self.target.cx_register or isinstance(left, (Int, Var, String)):
+                if source != self.target.count_register or isinstance(left, (Int, Var, String)):
                     self.generate_expression(left)
                     # Use matching-width operands for cmp: if source is
                     # narrower than acc (e.g., bp vs eax), compare ax/source.
@@ -3249,13 +3253,13 @@ class CodeGenerator:
             # pinned variable lives there (push/pop don't modify flags,
             # so the cmp's flags survive the restore for the caller's
             # conditional jump).
-            cx_pinned = any(register == self.target.cx_register for register in self.pinned_register.values())
-            if cx_pinned:
-                self.emit(f"        push {self.target.cx_register}")
+            count_pinned = any(register == self.target.count_register for register in self.pinned_register.values())
+            if count_pinned:
+                self.emit(f"        push {self.target.count_register}")
             self.emit_binary_operator_operands(left, right)
-            self.emit(f"        cmp {self.target.acc}, {self.target.cx_register}")
-            if cx_pinned:
-                self.emit(f"        pop {self.target.cx_register}")
+            self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
+            if count_pinned:
+                self.emit(f"        pop {self.target.count_register}")
 
     def emit_condition(self, *, condition: Node, context: str) -> str:
         """Validate a condition, emit a comparison, and return the operator.
@@ -3270,27 +3274,30 @@ class CodeGenerator:
         != 0``, and inside ``&&`` / ``||`` this routine does the same
         wrapping for leaf operands (so ``while (foo() || x == 0)`` and
         ``if (foo() && bar())`` desugar the bare-call legs into the
-        same ``BinOp('!=', Call, Int(0))`` shape the top-level form
+        same ``BinaryOperation(left=Call, operation='!=', right=Int(value=0))`` shape the top-level form
         uses).
         """
-        if not isinstance(condition, BinOp) or condition.op not in JUMP_WHEN_FALSE:
+        if not isinstance(condition, BinaryOperation) or condition.operation not in JUMP_WHEN_FALSE:
             # Wrap a bare expression (Call / Var / Index / ...) as ``expr != 0``
             # so the rest of the routine sees the same shape the top-level
             # parser already emits.  Reaches here from && / || recursion
             # where leaf operands haven't been run through parse_condition.
-            condition = BinOp("!=", condition, Int(0, line=condition.line), line=condition.line)
+            condition = BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
         if (
-            condition.op in ("!=", "==")
+            condition.operation in ("!=", "==")
             and isinstance(condition.right, Int)
             and condition.right.value == 0
             and isinstance(condition.left, Call)
             and condition.left.name in self.carry_return_functions
         ):
             self.generate_call(condition.left, discard_return=True)
-            return "carry" if condition.op == "!=" else "not_carry"
-        self.validate_comparison_types(condition.left, condition.right)
+            return "carry" if condition.operation == "!=" else "not_carry"
+        # Skip type validation for IR-generated conditions — the AST was
+        # already validated by the parser before IR construction.
+        if context != "ir":
+            self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
-        return condition.op
+        return condition.operation
 
     def emit_condition_false_jump(self, *, condition: Node, fail_label: str, context: str) -> None:
         """Emit a condition that jumps to ``fail_label`` when false.
@@ -3307,12 +3314,12 @@ class CodeGenerator:
         """
         if isinstance(condition, LogicalAnd):
             leaves = self._flatten_and(condition)
-            self._try_fuse_word_conditions(leaves, fail_label=fail_label, context=context)
+            self._try_fuse_word_conditions(leaves, context=context, fail_label=fail_label)
             return
         if isinstance(condition, LogicalOr):
             pass_label = f".lor_{self.new_label()}"
-            self.emit_condition_true_jump(condition=condition.left, success_label=pass_label, context=context)
-            self.emit_condition_false_jump(condition=condition.right, fail_label=fail_label, context=context)
+            self.emit_condition_true_jump(condition=condition.left, context=context, success_label=pass_label)
+            self.emit_condition_false_jump(condition=condition.right, context=context, fail_label=fail_label)
             self.emit(f"{pass_label}:")
             return
         operator = self.emit_condition(condition=condition, context=context)
@@ -3325,13 +3332,13 @@ class CodeGenerator:
         short-circuit so that a truthy left leg can skip the right.
         """
         if isinstance(condition, LogicalOr):
-            self.emit_condition_true_jump(condition=condition.left, success_label=success_label, context=context)
-            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            self.emit_condition_true_jump(condition=condition.left, context=context, success_label=success_label)
+            self.emit_condition_true_jump(condition=condition.right, context=context, success_label=success_label)
             return
         if isinstance(condition, LogicalAnd):
             skip_label = f".land_{self.new_label()}"
-            self.emit_condition_false_jump(condition=condition.left, fail_label=skip_label, context=context)
-            self.emit_condition_true_jump(condition=condition.right, success_label=success_label, context=context)
+            self.emit_condition_false_jump(condition=condition.left, context=context, fail_label=skip_label)
+            self.emit_condition_true_jump(condition=condition.right, context=context, success_label=success_label)
             self.emit(f"{skip_label}:")
             return
         operator = self.emit_condition(condition=condition, context=context)
@@ -3420,8 +3427,8 @@ class CodeGenerator:
                 self.emit(f"        mov {register}, {source}")
         elif isinstance(argument, Var) and argument.name == self.ax_local:
             if register != self.target.acc:
-                src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {register}, {src}")
+                source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {register}, {source}")
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
             self.emit(f"        mov {register}, _g_{argument.name}")
         elif isinstance(argument, Var) and self._is_memory_scalar(argument.name):
@@ -3432,8 +3439,8 @@ class CodeGenerator:
                 self.emit(f"        mov al, [{self._local_address(argument.name)}]")
                 self.emit("        xor ah, ah")
                 if register != self.target.acc:
-                    src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        mov {register}, {src}")
+                    source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                    self.emit(f"        mov {register}, {source}")
             else:
                 self.emit(f"        mov {register}, [{self._local_address(argument.name)}]")
         elif isinstance(argument, String):
@@ -3447,8 +3454,8 @@ class CodeGenerator:
             if register != self.target.acc:
                 # In 32-bit mode, the result is in eax; narrow-register targets
                 # (bx, cx, dx, si, di) need the 16-bit low word of eax.
-                src = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {register}, {src}")
+                source = self.target.loword(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {register}, {source}")
 
     def emit_si_from_argument(self, argument: Node, /) -> None:
         """Load a string or expression argument into SI."""
@@ -3531,8 +3538,8 @@ class CodeGenerator:
             if direct_register != self.target.acc:
                 # When storing into a 16-bit register from a 32-bit acc,
                 # use the low-word of acc to avoid an invalid operand mix.
-                src = self.target.loword(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {direct_register}, {src}")
+                source = self.target.loword(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {direct_register}, {source}")
             self.ax_is_byte = False
         elif self._is_byte_scalar(name):
             # Byte-scalar locals and globals store as a single byte;
@@ -3553,8 +3560,8 @@ class CodeGenerator:
             self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
             self.ax_is_byte = False
         self.ax_local = name
-        # ``mov ax, D / <op> ax, ... / mov D, ax`` sequences are fused
-        # by the late peephole passes into a single ``<op> D, ...`` (or
+        # ``mov ax, D / <operation> ax, ... / mov D, ax`` sequences are fused
+        # by the late peephole passes into a single ``<operation> D, ...`` (or
         # into a compute-into-pinned-register form), neither of which
         # leaves AX holding the new value.  When that fusion applies,
         # the ``ax_local`` tracking we just set would let a downstream
@@ -3574,7 +3581,7 @@ class CodeGenerator:
             return body
         last = body[-1]
         if self._is_simple_printf(last):
-            return [*body[:-1], Call("die", last.args)]
+            return [*body[:-1], Call(args=last.args, name="die")]
         if isinstance(last, If):
             transformed = self._transform_if_printf(last)
             if transformed is not last:
@@ -3676,7 +3683,9 @@ class CodeGenerator:
         while i < len(statements):
             statement = statements[i]
             # Fuse simple printf() + exit() into die().
-            next_is_exit = i + 1 < len(statements) and (statements[i + 1] == Call("exit", []) or isinstance(statements[i + 1], Return))
+            next_is_exit = i + 1 < len(statements) and (
+                statements[i + 1] == Call(args=[], name="exit") or isinstance(statements[i + 1], Return)
+            )
             if self._is_simple_printf(statement) and next_is_exit:
                 self.builtin_die(statement.args)
                 i += 2
@@ -3696,8 +3705,8 @@ class CodeGenerator:
                 if (
                     isinstance(inner, Call)
                     and inner.name == "die"
-                    and isinstance(statement.cond, BinOp)
-                    and statement.cond.op in JUMP_WHEN_FALSE
+                    and isinstance(statement.cond, BinaryOperation)
+                    and statement.cond.operation in JUMP_WHEN_FALSE
                 ):
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
@@ -3719,14 +3728,14 @@ class CodeGenerator:
             if init is not None and isinstance(init, Call) and init.name in self.ERROR_RETURNING_BUILTINS and i + 1 < len(statements):
                 next_stmt = statements[i + 1]
                 die_call = None
-                # Match cond: `err` (BinOp != 0) or `!err` (BinOp == 0)
+                # Match cond: `err` (BinaryOperation != 0) or `!err` (BinaryOperation == 0)
                 cond = next_stmt.cond if isinstance(next_stmt, If) else None
                 is_truthy_cond = (
-                    isinstance(cond, BinOp)
-                    and cond.op == "!="
+                    isinstance(cond, BinaryOperation)
+                    and cond.operation == "!="
                     and isinstance(cond.left, Var)
                     and cond.left.name == statement.name
-                    and cond.right == Int(0)
+                    and cond.right == Int(value=0)
                 )
                 if (
                     is_truthy_cond
@@ -3924,7 +3933,7 @@ class CodeGenerator:
         # ``jfalse end_label; jmp top; end_label:`` pattern is collapsed
         # by peephole_double_jump into ``jtrue top`` for single
         # comparisons.
-        self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="do_while")
+        self.emit_condition_false_jump(condition=condition, context="do_while", fail_label=end_label)
         self.emit(f"        jmp .do_{label_index}")
         self.emit(f"{end_label}:")
         self.loop_continue_labels.pop()
@@ -3972,19 +3981,19 @@ class CodeGenerator:
                 message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
                 raise CompileError(message, line=expression.line)
             if vname in self.pinned_register:
-                src = self.pinned_register[vname]
-                if len(src) < len(self.target.acc):
+                source = self.pinned_register[vname]
+                if len(source) < len(self.target.acc):
                     # 16-bit pinned register into 32-bit acc: zero-extend.
-                    self.emit(f"        movzx {self.target.acc}, {src}")
+                    self.emit(f"        movzx {self.target.acc}, {source}")
                 else:
-                    self.emit(f"        mov {self.target.acc}, {src}")
+                    self.emit(f"        mov {self.target.acc}, {source}")
                 self.ax_is_byte = False
             elif vname in self.register_aliased_globals:
-                src = self.register_aliased_globals[vname]
-                if len(src) < len(self.target.acc):
-                    self.emit(f"        movzx {self.target.acc}, {src}")
+                source = self.register_aliased_globals[vname]
+                if len(source) < len(self.target.acc):
+                    self.emit(f"        movzx {self.target.acc}, {source}")
                 else:
-                    self.emit(f"        mov {self.target.acc}, {src}")
+                    self.emit(f"        mov {self.target.acc}, {source}")
                 self.ax_is_byte = False
             elif self._is_byte_scalar(vname):
                 # Byte-scalar locals and globals store as a single
@@ -4113,7 +4122,7 @@ class CodeGenerator:
                 self.emit(f"        mov {self.target.acc}, {size}")
         elif isinstance(expression, Call):
             self.generate_call(expression)
-        elif isinstance(expression, BinOp):
+        elif isinstance(expression, BinaryOperation):
             # Fold an entirely-constant subtree (named constants and
             # integer literals) into a single ``mov ax, <expr>`` so the
             # assembler does the arithmetic.  Without this, expressions
@@ -4125,13 +4134,13 @@ class CodeGenerator:
                 self.emit(f"        mov {self.target.acc}, {constant_expr}")
                 self.ax_clear()
                 return
-            operator, left, right = expression.op, expression.left, expression.right
+            operator, left, right = expression.operation, expression.left, expression.right
             if operator == "%" and self._has_remainder(left, right):
                 self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
                 self.ax_clear()
                 return
             if operator in ("+", "-", "&", "|", "^") and isinstance(right, Int):
-                # Fast path: reg op imm uses the immediate form, skipping
+                # Fast path: reg operation imm uses the immediate form, skipping
                 # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
                 self.generate_expression(left)
                 # +1 and -1 fit in a 1-byte inc/dec.
@@ -4165,7 +4174,7 @@ class CodeGenerator:
                 # Special case: `local >> 8` when ``local`` lives in memory.
                 # Loading the high byte directly avoids one instruction
                 # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
-                # an ALU op on a shift that's really a byte-select.
+                # an ALU operation on a shift that's really a byte-select.
                 # Byte-scalar locals / globals have no high byte — their
                 # storage is a single ``db`` cell, so bail to the general
                 # shift path (which loads zero).
@@ -4218,12 +4227,12 @@ class CodeGenerator:
             # sized ``add ax, [mem]`` / ``sub ax, [mem]`` would read
             # the adjacent byte into the high byte, so split into
             # ``add al, [mem] / adc ah, 0`` (or ``sub`` / ``sbb``).
-            # The byte-wide op on AL with the carry / borrow propagate
+            # The byte-wide operation on AL with the carry / borrow propagate
             # on AH matches word semantics for an unsigned-byte
             # operand: its high byte is known zero, so adding or
             # subtracting zero from AH and folding in the carry /
             # borrow out of AL produces the same 16-bit result as
-            # the word op would.  5 bytes vs 11+ bytes of the CX
+            # the word operation would.  5 bytes vs 11+ bytes of the CX
             # fallback.
             if (
                 operator in ("+", "-")
@@ -4249,37 +4258,37 @@ class CodeGenerator:
             # can't clobber it mid-compute.
             if operator in ("+", "-", "&", "|", "^") and isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
-                if source != self.target.cx_register or isinstance(left, (Int, Var, String)):
+                if source != self.target.count_register or isinstance(left, (Int, Var, String)):
                     self.generate_expression(left)
                     mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
                     if len(source) < len(self.target.acc):
-                        # 16-bit pinned reg into 32-bit acc: push into cx_register first.
-                        self.emit(f"        movzx {self.target.cx_register}, {source}")
-                        self.emit(f"        {mnemonic} {self.target.acc}, {self.target.cx_register}")
+                        # 16-bit pinned reg into 32-bit acc: push into count_register first.
+                        self.emit(f"        movzx {self.target.count_register}, {source}")
+                        self.emit(f"        {mnemonic} {self.target.acc}, {self.target.count_register}")
                     else:
                         self.emit(f"        {mnemonic} {self.target.acc}, {source}")
                     self.ax_clear()
                     return
-            cx_pinned_var = next(
-                (name for name, register in self.pinned_register.items() if register == self.target.cx_register),
+            count_pinned_var = next(
+                (name for name, register in self.pinned_register.items() if register == self.target.count_register),
                 None,
             )
             # Skip the CX save when an enclosing store is about to
             # overwrite CX anyway — its original value is dead.
-            protect_cx = cx_pinned_var is not None and self.store_target_register != self.target.cx_register
-            if protect_cx:
-                self.emit(f"        push {self.target.cx_register}")
+            protect_count = count_pinned_var is not None and self.store_target_register != self.target.count_register
+            if protect_count:
+                self.emit(f"        push {self.target.count_register}")
             self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
             if operator == "+":
-                self.emit(f"        add {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        add {self.target.acc}, {self.target.count_register}")
             elif operator == "-":
-                self.emit(f"        sub {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
             elif operator == "&":
-                self.emit(f"        and {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        and {self.target.acc}, {self.target.count_register}")
             elif operator == "|":
-                self.emit(f"        or {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        or {self.target.acc}, {self.target.count_register}")
             elif operator == "^":
-                self.emit(f"        xor {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        xor {self.target.acc}, {self.target.count_register}")
             elif operator == "<<":
                 self.emit(f"        shl {self.target.acc}, cl")
             elif operator == ">>":
@@ -4291,7 +4300,7 @@ class CodeGenerator:
                 )
                 if protect_dx:
                     self.emit(f"        push {self.target.dx_register}")
-                self.emit(f"        mul {self.target.cx_register}")
+                self.emit(f"        mul {self.target.count_register}")
                 if protect_dx:
                     self.emit(f"        pop {self.target.dx_register}")
                 self.division_remainder = None
@@ -4301,7 +4310,7 @@ class CodeGenerator:
                 if protect_dx:
                     self.emit(f"        push {self.target.dx_register}")
                 self.emit(f"        xor {self.target.dx_register}, {self.target.dx_register}")
-                self.emit(f"        div {self.target.cx_register}")
+                self.emit(f"        div {self.target.count_register}")
                 if operator == "%":
                     self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
                 if protect_dx:
@@ -4311,12 +4320,12 @@ class CodeGenerator:
                 else:
                     self.division_remainder = (left, right)
             elif operator in JUMP_WHEN_FALSE:
-                # Booleanize the comparison: AX = 1 if ``left <op> right``,
+                # Booleanize the comparison: AX = 1 if ``left <operation> right``,
                 # else 0.  ``mov ax, 0`` preserves the flags set by ``cmp``
                 # (unlike ``xor ax, ax``), so the jump-when-false branch
                 # reads the right condition.
                 skip_label = f".bool_{self.new_label()}"
-                self.emit(f"        cmp {self.target.acc}, {self.target.cx_register}")
+                self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
                 self.emit(f"        mov {self.target.acc}, 0")
                 self.emit(f"        {JUMP_WHEN_FALSE[operator]} {skip_label}")
                 self.emit(f"        inc {self.target.acc}")
@@ -4324,8 +4333,8 @@ class CodeGenerator:
             else:
                 message = f"unknown operator: {operator}"
                 raise CompileError(message, line=expression.line)
-            if protect_cx:
-                self.emit(f"        pop {self.target.cx_register}")
+            if protect_count:
+                self.emit(f"        pop {self.target.count_register}")
             self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
@@ -4507,6 +4516,7 @@ class CodeGenerator:
         # Fuse trailing printf() calls into die() since main exits implicitly.
         if name == "main":
             body = self.fuse_trailing_printf(body)
+
         # Tail-call: if the last statement is a statement-level user-
         # function call that qualifies, emit everything before it as
         # usual and lower the trailing call as ``jmp`` (no ``ret``).
@@ -4547,7 +4557,7 @@ class CodeGenerator:
         """Generate assembly for an if statement.
 
         Before emitting anything, checks whether this if begins a
-        ``var op literal`` dispatch chain over a memory-resident local
+        ``var operation literal`` dispatch chain over a memory-resident local
         (e.g. ``if (c == 1) … else if (c == 2) …``).  If so and AX
         does not already hold the local, hoists a single
         ``mov ax, [_l_var]`` so every subsequent comparison along the
@@ -4569,7 +4579,7 @@ class CodeGenerator:
             self.ax_local = chain_var
         label_index = self.new_label()
         if else_body is not None:
-            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_else", context="if")
+            self.emit_condition_false_jump(condition=condition, context="if", fail_label=f".if_{label_index}_else")
             # Snapshot AX tracking at the point the fall-through (else)
             # path actually resumes — before body generation disturbs it.
             post_condition_ax = (self.ax_local, self.ax_is_byte)
@@ -4584,7 +4594,7 @@ class CodeGenerator:
                 self.emit(f".if_{label_index}_end:")
             self.ax_clear()
         else:
-            self.emit_condition_false_jump(condition=condition, fail_label=f".if_{label_index}_end", context="if")
+            self.emit_condition_false_jump(condition=condition, context="if", fail_label=f".if_{label_index}_end")
             post_condition_ax = (self.ax_local, self.ax_is_byte)
             self.generate_body(body, scoped=True)
             self.emit(f".if_{label_index}_end:")
@@ -4758,7 +4768,7 @@ class CodeGenerator:
             # stc; ret;`` — same two-leg shape the hand-written if
             # pattern produces.
             true_label = f".cret_{self.new_label()}"
-            self.emit_condition_true_jump(condition=value, success_label=true_label, context="return")
+            self.emit_condition_true_jump(condition=value, context="return", success_label=true_label)
             self.emit("        stc")
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.sp_register}, {self.target.bp_register}")
@@ -4865,7 +4875,7 @@ class CodeGenerator:
         if self._is_constant_true_condition(condition):
             self.generate_body(body, scoped=True)
         else:
-            self.emit_condition_false_jump(condition=condition, fail_label=end_label, context="while")
+            self.emit_condition_false_jump(condition=condition, context="while", fail_label=end_label)
             self.generate_body(body, scoped=True)
         self.emit(f"        jmp {top_label}")
         self.emit(f"{end_label}:")
@@ -5070,7 +5080,9 @@ class CodeGenerator:
         # AX-preserving skip list — instructions that don't touch AX
         # (including AH) and don't transfer control.  Any instruction
         # not recognized here aborts the scan conservatively.
-        ax_preserving_pushpop = {f"{op} {reg}" for op in ("push", "pop") for reg in ("bx", "cx", "dx", "si", "di", "bp")}
+        ax_preserving_pushpop = {
+            f"{operation} {register}" for operation in ("push", "pop") for register in ("bx", "cx", "dx", "si", "di", "bp")
+        }
         ax_preserving_prefixes = ("cmp ", "test ")  # cmp/test on non-AX also fine since they don't write AX
         ax_preserving_exact = {"clc", "stc", "cld"}
 
@@ -5116,7 +5128,7 @@ class CodeGenerator:
                 i += 1
                 continue
             b = self.lines[j].strip()
-            # Word op on AX that only inspects AL because AH is known
+            # Word operation on AX that only inspects AL because AH is known
             # zero — rewrite to the byte form so the xor becomes dead.
             # ``test ax, ax`` → ``test al, al`` and ``cmp ax, K`` →
             # ``cmp al, K`` when K fits in a byte.  Byte form is 1 byte
@@ -5145,48 +5157,6 @@ class CodeGenerator:
                 continue
             i += 1
 
-    def peephole_redundant_byte_mask(self) -> None:
-        """Drop ``and ax, 255`` when AX is provably zero-extended from a byte.
-
-        The C expression ``byte_local & 0xFF`` (or any wider mask whose
-        low byte saturates the byte operand) codegens as ``mov al,
-        [X] / xor ah, ah / and ax, 255``.  The zero-extend has already
-        cleared AH, so the mask is a no-op on the value.  Dropping it
-        saves 4 bytes per site — there are 106+ sites in asm.c from
-        the ``emit_byte(x & 0xFF)`` idiom alone.
-
-        The ``and`` does set flags, though: ZF = (AL == 0), unlike the
-        preceding ``xor`` which always leaves ZF=1 (AH=0).  So the
-        drop is only safe when the following instruction doesn't
-        consume flags — walk forward to confirm.  Conservative
-        allowlist: ``mov`` / ``call`` / ``push`` / ``pop`` / ``shl`` /
-        ``shr`` / ``ret`` don't read flags; conditional jumps
-        (``j*`` except ``jmp``) and ``adc`` / ``sbb`` / ``rcl`` /
-        ``rcr`` do.  Anything else: bail.
-        """
-        flag_safe_prefixes = (
-            "mov ",
-            "call ",
-            "push ",
-            "pop ",
-            "shl ",
-            "shr ",
-            "ret",
-            "int ",
-            "lea ",
-        )
-        i = 0
-        while i < len(self.lines) - 1:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            if a == "xor ah, ah" and b == "and ax, 255":
-                # Look past the mask at what actually consumes the value.
-                follower = self.lines[i + 2].strip() if i + 2 < len(self.lines) else ""
-                if follower.startswith(flag_safe_prefixes):
-                    del self.lines[i + 1]
-                    continue
-            i += 1
-
     def peephole_dead_code(self) -> None:
         """Remove unreachable instructions after unconditional jumps."""
         i = 0
@@ -5201,7 +5171,7 @@ class CodeGenerator:
     def peephole_dead_stores(self) -> None:
         """Remove stores to local variables that are never loaded."""
         # Collect all _l_ labels referenced anywhere except as a store
-        # destination.  Stores are "mov ... [_l_X], <src>"; reads include
+        # destination.  Stores are "mov ... [_l_X], <source>"; reads include
         # "mov <dst>, [_l_X]", "cmp word [_l_X], ...", etc.
         loaded: set[str] = set()
         for line in self.lines:
@@ -5458,9 +5428,9 @@ class CodeGenerator:
         """
         registers = self.target.non_acc_registers
         mov_acc_prefix = f"mov {self.target.acc}, "
-        mov_cx_prefix = f"mov {self.target.cx_register}, "
-        add_acc_cx = f"add {self.target.acc}, {self.target.cx_register}"
-        sub_acc_cx = f"sub {self.target.acc}, {self.target.cx_register}"
+        mov_cx_prefix = f"mov {self.target.count_register}, "
+        add_acc_cx = f"add {self.target.acc}, {self.target.count_register}"
+        sub_acc_cx = f"sub {self.target.acc}, {self.target.count_register}"
         i = 0
         while i < len(self.lines) - 3:
             a = self.lines[i].strip()
@@ -5496,13 +5466,13 @@ class CodeGenerator:
             del self.lines[i + 1 : i + 4]
             continue
         # Second pass: 3-instruction pattern without CX intermediate.
-        # Handles four shapes of ``D = D <op> Y`` where D is memory or
+        # Handles four shapes of ``D = D <operation> Y`` where D is memory or
         # a 16-bit register:
-        #   mov ax, D / (add|sub|and) ax, imm  / mov D, ax → op D, imm
+        #   mov ax, D / (add|sub|and) ax, imm  / mov D, ax → operation D, imm
         #   mov ax, D / inc ax  / mov D, ax                → inc D
         #   mov ax, D / dec ax  / mov D, ax                → dec D
-        #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → op D, <reg>
-        mnemonic_ops = {"add", "sub", "and", "or", "xor"}
+        #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → operation D, <reg>
+        mnemonic_operations = {"add", "sub", "and", "or", "xor"}
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -5526,17 +5496,17 @@ class CodeGenerator:
                 operator = "dec"
                 operand = ""
             else:
-                for op in mnemonic_ops:
-                    prefix = f"{op} {self.target.acc}, "
+                for operation in mnemonic_operations:
+                    prefix = f"{operation} {self.target.acc}, "
                     if b.startswith(prefix):
-                        operator = op
+                        operator = operation
                         operand = b[len(prefix) :]
                         break
             if operator is None:
                 i += 1
                 continue
             # Reject memory operands — would need swapping to ``mov ax, [X] /
-            # op D, ax`` and handled by the next pass instead.
+            # operation D, ax`` and handled by the next pass instead.
             if operand.startswith("["):
                 i += 1
                 continue
@@ -5553,12 +5523,12 @@ class CodeGenerator:
                 self.lines[i] = f"        {operator} {width}{source}, {operand}"
             del self.lines[i + 1 : i + 3]
             continue
-        # Third pass: ``D = D <op> [X]`` with both sides in memory.
-        # ``mov ax, D / op ax, [X] / mov D, ax`` collapses to
-        # ``mov ax, [X] / op D, ax`` (10 bytes → 7 for word ops).  Only
-        # safe when D is memory (the target of ``op D, ax`` must be
+        # Third pass: ``D = D <operation> [X]`` with both sides in memory.
+        # ``mov ax, D / operation ax, [X] / mov D, ax`` collapses to
+        # ``mov ax, [X] / operation D, ax`` (10 bytes → 7 for word operations).  Only
+        # safe when D is memory (the target of ``operation D, ax`` must be
         # addressable as r/m16) and D ≠ X (overlapping would read the
-        # stale value after the op writes D).
+        # stale value after the operation writes D).
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -5573,10 +5543,10 @@ class CodeGenerator:
                 continue
             operator = None
             rhs = None
-            for op in ("add", "sub", "and", "or", "xor"):
-                prefix = f"{op} {self.target.acc}, "
+            for operation in ("add", "sub", "and", "or", "xor"):
+                prefix = f"{operation} {self.target.acc}, "
                 if b.startswith(prefix):
-                    operator = op
+                    operator = operation
                     rhs = b[len(prefix) :]
                     break
             if operator is None:
@@ -5608,8 +5578,8 @@ class CodeGenerator:
                               or: mov cx, imm16 / add|sub ax, cx)
             mov [_g_X], al
 
-        The low byte of the AX-width op is identical to the
-        corresponding AL-width op on the same low byte (addition /
+        The low byte of the AX-width operation is identical to the
+        corresponding AL-width operation on the same low byte (addition /
         subtraction / bitwise all ignore the high byte when the result
         is truncated to AL on store), so the whole sequence collapses
         to a single memory-direct byte instruction:
@@ -5640,8 +5610,8 @@ class CodeGenerator:
             return -128 <= value <= 255
 
         # 4-line pattern without CX intermediate:
-        #   mov al, [mem] / xor ah, ah / <op> ax, <imm|reg> / mov [mem], al
-        single_imm_ops = {"add", "sub", "and", "or", "xor"}
+        #   mov al, [mem] / xor ah, ah / <operation> ax, <imm|reg> / mov [mem], al
+        single_immediate_operations = {"add", "sub", "and", "or", "xor"}
         i = 0
         while i < len(self.lines) - 3:
             a = self.lines[i].strip()
@@ -5669,15 +5639,15 @@ class CodeGenerator:
                 self.lines[i] = f"        dec byte {source}"
                 del self.lines[i + 1 : i + 4]
                 continue
-            op_name: str | None = None
+            operation_name: str | None = None
             operand: str | None = None
-            for op in single_imm_ops:
-                prefix = f"{op} ax, "
+            for operation in single_immediate_operations:
+                prefix = f"{operation} ax, "
                 if c.startswith(prefix):
-                    op_name = op
+                    operation_name = operation
                     operand = c[len(prefix) :]
                     break
-            if op_name is None:
+            if operation_name is None:
                 i += 1
                 continue
             if operand.startswith("["):
@@ -5686,18 +5656,18 @@ class CodeGenerator:
             # Bitwise masks narrowed to byte can silently drop
             # high-byte effect; only fuse when the literal fits in 8
             # bits.  add/sub truncate cleanly so any imm is OK.
-            if op_name in ("and", "or", "xor") and not fits_imm8(operand):
+            if operation_name in ("and", "or", "xor") and not fits_imm8(operand):
                 i += 1
                 continue
-            if op_name == "add" and operand == "1":
+            if operation_name == "add" and operand == "1":
                 self.lines[i] = f"        inc byte {source}"
-            elif op_name == "sub" and operand == "1":
+            elif operation_name == "sub" and operand == "1":
                 self.lines[i] = f"        dec byte {source}"
             else:
                 # NASM accepts the wider literal for add/sub byte; it
                 # assembles the low 8 bits since the destination is
                 # byte-sized.
-                self.lines[i] = f"        {op_name} byte {source}, {operand}"
+                self.lines[i] = f"        {operation_name} byte {source}, {operand}"
             del self.lines[i + 1 : i + 4]
             continue
 
@@ -5753,11 +5723,53 @@ class CodeGenerator:
         self._dedup_register_reloads("bx")
         self._dedup_register_reloads("si")
 
+    def peephole_redundant_byte_mask(self) -> None:
+        """Drop ``and ax, 255`` when AX is provably zero-extended from a byte.
+
+        The C expression ``byte_local & 0xFF`` (or any wider mask whose
+        low byte saturates the byte operand) codegens as ``mov al,
+        [X] / xor ah, ah / and ax, 255``.  The zero-extend has already
+        cleared AH, so the mask is a no-op on the value.  Dropping it
+        saves 4 bytes per site — there are 106+ sites in asm.c from
+        the ``emit_byte(x & 0xFF)`` idiom alone.
+
+        The ``and`` does set flags, though: ZF = (AL == 0), unlike the
+        preceding ``xor`` which always leaves ZF=1 (AH=0).  So the
+        drop is only safe when the following instruction doesn't
+        consume flags — walk forward to confirm.  Conservative
+        allowlist: ``mov`` / ``call`` / ``push`` / ``pop`` / ``shl`` /
+        ``shr`` / ``ret`` don't read flags; conditional jumps
+        (``j*`` except ``jmp``) and ``adc`` / ``sbb`` / ``rcl`` /
+        ``rcr`` do.  Anything else: bail.
+        """
+        flag_safe_prefixes = (
+            "mov ",
+            "call ",
+            "push ",
+            "pop ",
+            "shl ",
+            "shr ",
+            "ret",
+            "int ",
+            "lea ",
+        )
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a == "xor ah, ah" and b == "and ax, 255":
+                # Look past the mask at what actually consumes the value.
+                follower = self.lines[i + 2].strip() if i + 2 < len(self.lines) else ""
+                if follower.startswith(flag_safe_prefixes):
+                    del self.lines[i + 1]
+                    continue
+            i += 1
+
     def peephole_register_arithmetic(self) -> None:
         """Compute directly into a pinned-local target register.
 
-        Turns ``mov ax, X / <op> ax, Y / mov <reg>, ax`` into
-        ``mov <reg>, X / <op> <reg>, Y`` when <reg> isn't already
+        Turns ``mov ax, X / <operation> ax, Y / mov <reg>, ax`` into
+        ``mov <reg>, X / <operation> <reg>, Y`` when <reg> isn't already
         read by Y (e.g., ``sub reg, reg`` would zero it).
 
         Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
@@ -5768,7 +5780,7 @@ class CodeGenerator:
         post-codegen.
         """
         registers = self.target.non_acc_registers
-        ops = tuple(f"{op} {self.target.acc}," for op in ("add", "sub", "and", "or", "xor"))
+        operations = tuple(f"{operation} {self.target.acc}," for operation in ("add", "sub", "and", "or", "xor"))
         mov_acc_prefix = f"mov {self.target.acc}, "
         i = 0
         while i < len(self.lines) - 2:
@@ -5778,7 +5790,7 @@ class CodeGenerator:
             if not a.startswith(mov_acc_prefix):
                 i += 1
                 continue
-            if not any(b.startswith(op) for op in ops):
+            if not any(b.startswith(operation) for operation in operations):
                 i += 1
                 continue
             if not c.startswith("mov "):
@@ -5806,11 +5818,11 @@ class CodeGenerator:
             continue
 
     def _dedup_register_reloads(self, register: str, /) -> None:
-        """Skip ``mov {register}, <src>`` when ``<src>`` already reached this register.
+        """Skip ``mov {register}, <source>`` when ``<source>`` already reached this register.
 
         The tracked source goes stale on anything that changes either
         the register itself (direct clobber) or the source register
-        when ``<src>`` is register-sourced — e.g. ``mov si, ax / inc
+        when ``<source>`` is register-sourced — e.g. ``mov si, ax / inc
         ax / mov si, ax`` is NOT a redundant reload because ``inc ax``
         makes the second ``mov si, ax`` store a different value.
         Memory / immediate sources stay stable until the destination
@@ -5835,7 +5847,7 @@ class CodeGenerator:
         )
         # Register-modifying mnemonics we care about as SOURCE clobbers.
         # ``mov <reg>, X`` is handled below alongside the other writers.
-        source_clobber_ops = (
+        source_clobber_operations = (
             "add ",
             "and ",
             "dec ",
@@ -5873,10 +5885,10 @@ class CodeGenerator:
                 # instruction writes to the source register, invalidating
                 # the stored value.  e.g. ``mov si, ax / inc ax`` — the
                 # tracked ``ax`` in SI no longer matches the current AX.
-                for op in source_clobber_ops:
-                    if not stripped.startswith(op):
+                for operation in source_clobber_operations:
+                    if not stripped.startswith(operation):
                         continue
-                    target = stripped[len(op) :].split(",", 1)[0].strip()
+                    target = stripped[len(operation) :].split(",", 1)[0].strip()
                     if target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]):
                         value = None
                     break
@@ -5917,7 +5929,7 @@ class CodeGenerator:
             "js ",
             "jz ",
         )
-        non_ax_pushpop = {f"{op} {reg}" for op in ("push", "pop") for reg in ("bx", "cx", "dx", "si", "di", "bp")}
+        non_ax_pushpop = {f"{operation} {register}" for operation in ("push", "pop") for register in ("bx", "cx", "dx", "si", "di", "bp")}
         i = 0
         while i < len(self.lines) - 1:
             line = self.lines[i].strip()
@@ -5953,9 +5965,9 @@ class CodeGenerator:
         removed when the direction flag is already clear (no intervening
         label, call, or interrupt that could change DF).
         """
-        string_ops = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
-        has_string_ops = any(any(line.strip().startswith(op) for op in string_ops) for line in self.lines)
-        if not has_string_ops:
+        string_operations = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
+        has_string_operations = any(any(line.strip().startswith(operation) for operation in string_operations) for line in self.lines)
+        if not has_string_operations:
             self.lines = [line for line in self.lines if line.strip() != "cld"]
             return
         # Deduplicate: track whether DF is known-clear.
@@ -6102,7 +6114,7 @@ class Parser:
 
         Handles two shapes:
 
-        1. ``Int op Int`` collapses to a single ``Int`` — lets
+        1. ``Int operation Int`` collapses to a single ``Int`` — lets
            ``COLUMNS - 1`` become ``39`` at parse time.
         2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
            folds the trailing constants through so
@@ -6114,334 +6126,54 @@ class Parser:
         if isinstance(left, Int) and isinstance(right, Int):
             a, b = left.value, right.value
             if operator == "+":
-                return Int(a + b, line=line)
+                return Int(line=line, value=a + b)
             if operator == "-":
-                return Int(a - b, line=line)
+                return Int(line=line, value=a - b)
             if operator == "*":
-                return Int(a * b, line=line)
+                return Int(line=line, value=a * b)
             if operator == "&":
-                return Int(a & b, line=line)
+                return Int(line=line, value=a & b)
             if operator == "|":
-                return Int(a | b, line=line)
+                return Int(line=line, value=a | b)
             if operator == "^":
-                return Int(a ^ b, line=line)
+                return Int(line=line, value=a ^ b)
             if operator == "/" and b != 0:
-                return Int(a // b, line=line)
+                return Int(line=line, value=a // b)
             if operator == "%" and b != 0:
-                return Int(a % b, line=line)
+                return Int(line=line, value=a % b)
             if operator == "<<":
-                return Int(((a & 0xFFFF) << (b & 0x1F)) & 0xFFFF, line=line)
+                return Int(line=line, value=(a & 65535) << (b & 31) & 65535)
             if operator == ">>":
-                return Int((a & 0xFFFF) >> (b & 0x1F), line=line)
+                return Int(line=line, value=(a & 65535) >> (b & 31))
         # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
         # div sequence and avoids the slow div instruction.  Only kicks
         # in when N is a positive power of two; other divisions stay as-is.
         if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
             shift = right.value.bit_length() - 1
-            return BinOp(">>", left, Int(shift, line=line), line=line)
+            return BinaryOperation(left=left, line=line, operation=">>", right=Int(line=line, value=shift))
         if (
             operator in ("+", "-")
             and isinstance(right, Int)
-            and isinstance(left, BinOp)
-            and left.op in ("+", "-")
+            and isinstance(left, BinaryOperation)
+            and left.operation in ("+", "-")
             and isinstance(left.right, Int)
         ):
-            inner_sign = 1 if left.op == "+" else -1
+            inner_sign = 1 if left.operation == "+" else -1
             outer_sign = 1 if operator == "+" else -1
             combined = inner_sign * left.right.value + outer_sign * right.value
             if combined >= 0:
-                return BinOp("+", left.left, Int(combined, line=line), line=line)
-            return BinOp("-", left.left, Int(-combined, line=line), line=line)
-        return BinOp(operator, left, right, line=line)
+                return BinaryOperation(left=left.left, line=line, operation="+", right=Int(line=line, value=combined))
+            return BinaryOperation(left=left.left, line=line, operation="-", right=Int(line=line, value=-combined))
+        return BinaryOperation(left=left, line=line, operation=operator, right=right)
 
-    def parse_additive(self) -> Node:
-        """Parse an additive expression (addition and subtraction).
-
-        Returns:
-            An AST node for the additive expression.
-
-        """
-        node = self.parse_multiplicative()
-        while self.peek()[0] in ADDITIVE_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_multiplicative()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
-
-    def parse_arguments(self) -> list[Node]:
-        """Parse a comma-separated argument list through the closing paren.
+    def peek(self, offset: int = 0) -> tuple[str, str, int]:
+        """Return the token at the current position plus an optional offset.
 
         Returns:
-            A list of AST expression nodes.
+            The token as a (kind, text, line) triple.
 
         """
-        arguments: list[Node] = []
-        if self.peek()[0] != "RPAREN":
-            arguments.append(self.parse_expression())
-            while self.peek()[0] == "COMMA":
-                self.eat("COMMA")
-                arguments.append(self.parse_expression())
-        self.eat("RPAREN")
-        return arguments
-
-    def parse_array_init(self) -> Node:
-        """Parse a brace-enclosed array initializer.
-
-        Returns:
-            An AST node for the array initializer.
-
-        """
-        line = self.peek()[2]
-        self.eat("LBRACE")
-        elems = [self.parse_expression()]
-        while self.peek()[0] == "COMMA":
-            self.eat("COMMA")
-            elems.append(self.parse_expression())
-        self.eat("RBRACE")
-        return ArrayInit(elems, line=line)
-
-    def parse_assignment(self) -> Node:
-        """Parse a simple assignment statement.
-
-        Returns:
-            An AST node for the assignment.
-
-        """
-        token = self.eat("IDENT")
-        name = token[1]
-        self.eat("ASSIGN")
-        expression = self.parse_expression()
-        self.eat("SEMI")
-        return Assign(name, expression, line=token[2])
-
-    def parse_bitwise_and(self) -> Node:
-        """Parse a left-associative bitwise ``&`` expression.
-
-        Returns:
-            A ``BinOp`` chain or the underlying comparison.
-
-        """
-        left = self.parse_comparison()
-        while self.peek()[0] == "AMP":
-            self.eat()
-            right = self.parse_comparison()
-            left = self.fold_binop("&", left, right)
-        return left
-
-    def parse_bitwise_or(self) -> Node:
-        """Parse a left-associative bitwise ``|`` expression.
-
-        Lower precedence than ``^`` and ``&``, higher than ``&&``.
-        """
-        left = self.parse_bitwise_xor()
-        while self.peek()[0] == "PIPE":
-            self.eat()
-            right = self.parse_bitwise_xor()
-            left = self.fold_binop("|", left, right)
-        return left
-
-    def parse_bitwise_xor(self) -> Node:
-        """Parse a left-associative bitwise ``^`` expression.
-
-        Lower precedence than ``&``, higher than ``|``.
-        """
-        left = self.parse_bitwise_and()
-        while self.peek()[0] == "CARET":
-            self.eat()
-            right = self.parse_bitwise_and()
-            left = self.fold_binop("^", left, right)
-        return left
-
-    def parse_block(self) -> list[Node]:
-        """Parse statements until a closing brace and consume it.
-
-        Returns:
-            A list of AST statement nodes.
-
-        """
-        body: list[Node] = []
-        while self.peek()[0] != "RBRACE":
-            body.append(self.parse_statement())
-        self.eat("RBRACE")
-        return body
-
-    def parse_call_statement(self) -> Node:
-        """Parse a function call statement.
-
-        Returns:
-            An AST node for the call statement.
-
-        """
-        token = self.eat("IDENT")
-        name = token[1]
-        self.eat("LPAREN")
-        arguments = self.parse_arguments()
-        self.eat("SEMI")
-        return Call(name, arguments, line=token[2])
-
-    def parse_comparison(self) -> Node:
-        """Parse a comparison expression.
-
-        Returns:
-            An AST node for the comparison expression.
-
-        """
-        left = self.parse_shift()
-        if self.peek()[0] in COMPARISON_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_shift()
-            return BinOp(operator_token[1], left, right, line=operator_token[2])
-        return left
-
-    def parse_compound_assignment(self) -> Node:
-        """Parse a compound assignment (``+=``, ``&=``, ``|=``, ``^=``, ``<<=``, ``>>=``).
-
-        Returns:
-            An AST node for the desugared assignment ``x = x op rhs``.
-
-        """
-        token = self.eat("IDENT")
-        name = token[1]
-        line = token[2]
-        op_token = self.eat()
-        operator = COMPOUND_ASSIGN_OPERATORS[op_token[0]]
-        expression = self.parse_expression()
-        self.eat("SEMI")
-        return Assign(name, BinOp(operator, Var(name, line=line), expression, line=line), line=line)
-
-    def parse_condition(self) -> Node:
-        """Parse an if/while condition.
-
-        Wraps a bare expression as ``expr != 0`` so that ``if (error)``
-        is equivalent to ``if (error != 0)``.  Comparisons at the top
-        level are returned unchanged.
-
-        Returns:
-            A BinOp AST node suitable for conditional jumps.
-
-        """
-        expression = self.parse_expression()
-        if isinstance(expression, (LogicalAnd, LogicalOr)):
-            return expression
-        if isinstance(expression, BinOp) and expression.op in JUMP_WHEN_FALSE:
-            return expression
-        return BinOp("!=", expression, Int(0, line=expression.line), line=expression.line)
-
-    def parse_do_while(self) -> Node:
-        """Parse a do...while loop statement.
-
-        Returns:
-            A ``DoWhile`` AST node.
-
-        """
-        token = self.eat("DO")
-        self.eat("LBRACE")
-        body = self.parse_block()
-        self.eat("WHILE")
-        self.eat("LPAREN")
-        condition = self.parse_condition()
-        self.eat("RPAREN")
-        self.eat("SEMI")
-        return DoWhile(condition, body, line=token[2])
-
-    def parse_expression(self) -> Node:
-        """Parse an expression.
-
-        Returns:
-            An AST node for the expression.
-
-        """
-        return self.parse_logical_or()
-
-    def parse_if(self) -> Node:
-        """Parse an if statement.
-
-        Returns:
-            An AST node for the if statement.
-
-        """
-        token = self.eat("IF")
-        self.eat("LPAREN")
-        condition = self.parse_condition()
-        self.eat("RPAREN")
-        self.eat("LBRACE")
-        body = self.parse_block()
-        else_body: list[Node] | None = None
-        if self.peek()[0] == "ELSE":
-            self.eat("ELSE")
-            if self.peek()[0] == "IF":
-                else_body = [self.parse_if()]
-            else:
-                self.eat("LBRACE")
-                else_body = self.parse_block()
-        return If(condition, body, else_body, line=token[2])
-
-    def parse_index_assignment(self) -> Node:
-        """Parse an indexed assignment ``name[index] = expr;``."""
-        token = self.eat("IDENT")
-        name = token[1]
-        self.eat("LBRACKET")
-        index = self.parse_expression()
-        self.eat("RBRACKET")
-        self.eat("ASSIGN")
-        expr = self.parse_expression()
-        self.eat("SEMI")
-        return IndexAssign(name, index, expr, line=token[2])
-
-    def parse_logical_and(self) -> Node:
-        """Parse a left-associative ``&&`` expression.
-
-        Returns:
-            A ``LogicalAnd`` tree or the underlying bitwise-OR node.
-
-        """
-        left = self.parse_bitwise_or()
-        while self.peek()[0] == "AND_AND":
-            op_token = self.eat()
-            right = self.parse_bitwise_or()
-            left = LogicalAnd(left, right, line=op_token[2])
-        return left
-
-    def parse_logical_or(self) -> Node:
-        """Parse a left-associative ``||`` expression.
-
-        Returns:
-            A ``LogicalOr`` tree or the underlying ``&&`` node.
-
-        """
-        left = self.parse_logical_and()
-        while self.peek()[0] == "OR_OR":
-            op_token = self.eat()
-            right = self.parse_logical_and()
-            left = LogicalOr(left, right, line=op_token[2])
-        return left
-
-    def parse_multiplicative(self) -> Node:
-        """Parse a multiplicative expression (multiplication and division).
-
-        Returns:
-            An AST node for the multiplicative expression.
-
-        """
-        node = self.parse_primary()
-        while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_primary()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
-
-    def parse_shift(self) -> Node:
-        """Parse a shift expression (``<<`` and ``>>``).
-
-        Higher precedence than comparison, lower than additive — matches
-        C's precedence order.
-        """
-        node = self.parse_additive()
-        while self.peek()[0] in SHIFT_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_additive()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
+        return self.tokens[self.position + offset]
 
     def _parse_attribute(self, *, line: int) -> tuple[str, object]:
         """Consume a single ``__attribute__((name(args)))`` directive.
@@ -6500,6 +6232,284 @@ class Parser:
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
+    def parse_additive(self) -> Node:
+        """Parse an additive expression (addition and subtraction).
+
+        Returns:
+            An AST node for the additive expression.
+
+        """
+        node = self.parse_multiplicative()
+        while self.peek()[0] in ADDITIVE_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_multiplicative()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
+
+    def parse_arguments(self) -> list[Node]:
+        """Parse a comma-separated argument list through the closing paren.
+
+        Returns:
+            A list of AST expression nodes.
+
+        """
+        arguments: list[Node] = []
+        if self.peek()[0] != "RPAREN":
+            arguments.append(self.parse_expression())
+            while self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+                arguments.append(self.parse_expression())
+        self.eat("RPAREN")
+        return arguments
+
+    def parse_array_init(self) -> Node:
+        """Parse a brace-enclosed array initializer.
+
+        Returns:
+            An AST node for the array initializer.
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        elems = [self.parse_expression()]
+        while self.peek()[0] == "COMMA":
+            self.eat("COMMA")
+            elems.append(self.parse_expression())
+        self.eat("RBRACE")
+        return ArrayInit(elements=elems, line=line)
+
+    def parse_assignment(self) -> Node:
+        """Parse a simple assignment statement.
+
+        Returns:
+            An AST node for the assignment.
+
+        """
+        token = self.eat("IDENT")
+        name = token[1]
+        self.eat("ASSIGN")
+        expression = self.parse_expression()
+        self.eat("SEMI")
+        return Assign(expr=expression, line=token[2], name=name)
+
+    def parse_bitwise_and(self) -> Node:
+        """Parse a left-associative bitwise ``&`` expression.
+
+        Returns:
+            A ``BinaryOperation`` chain or the underlying comparison.
+
+        """
+        left = self.parse_comparison()
+        while self.peek()[0] == "AMP":
+            self.eat()
+            right = self.parse_comparison()
+            left = self.fold_binop("&", left, right)
+        return left
+
+    def parse_bitwise_or(self) -> Node:
+        """Parse a left-associative bitwise ``|`` expression.
+
+        Lower precedence than ``^`` and ``&``, higher than ``&&``.
+        """
+        left = self.parse_bitwise_xor()
+        while self.peek()[0] == "PIPE":
+            self.eat()
+            right = self.parse_bitwise_xor()
+            left = self.fold_binop("|", left, right)
+        return left
+
+    def parse_bitwise_xor(self) -> Node:
+        """Parse a left-associative bitwise ``^`` expression.
+
+        Lower precedence than ``&``, higher than ``|``.
+        """
+        left = self.parse_bitwise_and()
+        while self.peek()[0] == "CARET":
+            self.eat()
+            right = self.parse_bitwise_and()
+            left = self.fold_binop("^", left, right)
+        return left
+
+    def parse_block(self) -> list[Node]:
+        """Parse statements until a closing brace and consume it.
+
+        Returns:
+            A list of AST statement nodes.
+
+        """
+        body: list[Node] = []
+        while self.peek()[0] != "RBRACE":
+            body.append(self.parse_statement())
+        self.eat("RBRACE")
+        return body
+
+    def parse_call_statement(self) -> Node:
+        """Parse a function call statement.
+
+        Returns:
+            An AST node for the call statement.
+
+        """
+        token = self.eat("IDENT")
+        name = token[1]
+        self.eat("LPAREN")
+        arguments = self.parse_arguments()
+        self.eat("SEMI")
+        return Call(args=arguments, line=token[2], name=name)
+
+    def parse_comparison(self) -> Node:
+        """Parse a comparison expression.
+
+        Returns:
+            An AST node for the comparison expression.
+
+        """
+        left = self.parse_shift()
+        if self.peek()[0] in COMPARISON_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_shift()
+            return BinaryOperation(left=left, line=operator_token[2], operation=operator_token[1], right=right)
+        return left
+
+    def parse_compound_assignment(self) -> Node:
+        """Parse a compound assignment (``+=``, ``&=``, ``|=``, ``^=``, ``<<=``, ``>>=``).
+
+        Returns:
+            An AST node for the desugared assignment ``x = x operation rhs``.
+
+        """
+        token = self.eat("IDENT")
+        name = token[1]
+        line = token[2]
+        operator_token = self.eat()
+        operator = COMPOUND_ASSIGN_OPERATORS[operator_token[0]]
+        expression = self.parse_expression()
+        self.eat("SEMI")
+        return Assign(
+            expr=BinaryOperation(left=Var(line=line, name=name), line=line, operation=operator, right=expression), line=line, name=name
+        )
+
+    def parse_condition(self) -> Node:
+        """Parse an if/while condition.
+
+        Wraps a bare expression as ``expr != 0`` so that ``if (error)``
+        is equivalent to ``if (error != 0)``.  Comparisons at the top
+        level are returned unchanged.
+
+        Returns:
+            A BinaryOperation AST node suitable for conditional jumps.
+
+        """
+        expression = self.parse_expression()
+        if isinstance(expression, (LogicalAnd, LogicalOr)):
+            return expression
+        if isinstance(expression, BinaryOperation) and expression.operation in JUMP_WHEN_FALSE:
+            return expression
+        return BinaryOperation(left=expression, line=expression.line, operation="!=", right=Int(line=expression.line, value=0))
+
+    def parse_do_while(self) -> Node:
+        """Parse a do...while loop statement.
+
+        Returns:
+            A ``DoWhile`` AST node.
+
+        """
+        token = self.eat("DO")
+        self.eat("LBRACE")
+        body = self.parse_block()
+        self.eat("WHILE")
+        self.eat("LPAREN")
+        condition = self.parse_condition()
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return DoWhile(body=body, cond=condition, line=token[2])
+
+    def parse_expression(self) -> Node:
+        """Parse an expression.
+
+        Returns:
+            An AST node for the expression.
+
+        """
+        return self.parse_logical_or()
+
+    def parse_if(self) -> Node:
+        """Parse an if statement.
+
+        Returns:
+            An AST node for the if statement.
+
+        """
+        token = self.eat("IF")
+        self.eat("LPAREN")
+        condition = self.parse_condition()
+        self.eat("RPAREN")
+        self.eat("LBRACE")
+        body = self.parse_block()
+        else_body: list[Node] | None = None
+        if self.peek()[0] == "ELSE":
+            self.eat("ELSE")
+            if self.peek()[0] == "IF":
+                else_body = [self.parse_if()]
+            else:
+                self.eat("LBRACE")
+                else_body = self.parse_block()
+        return If(body=body, cond=condition, else_body=else_body, line=token[2])
+
+    def parse_index_assignment(self) -> Node:
+        """Parse an indexed assignment ``name[index] = expr;``."""
+        token = self.eat("IDENT")
+        name = token[1]
+        self.eat("LBRACKET")
+        index = self.parse_expression()
+        self.eat("RBRACKET")
+        self.eat("ASSIGN")
+        expr = self.parse_expression()
+        self.eat("SEMI")
+        return IndexAssign(expr=expr, index=index, line=token[2], name=name)
+
+    def parse_logical_and(self) -> Node:
+        """Parse a left-associative ``&&`` expression.
+
+        Returns:
+            A ``LogicalAnd`` tree or the underlying bitwise-OR node.
+
+        """
+        left = self.parse_bitwise_or()
+        while self.peek()[0] == "AND_AND":
+            operator_token = self.eat()
+            right = self.parse_bitwise_or()
+            left = LogicalAnd(left=left, line=operator_token[2], right=right)
+        return left
+
+    def parse_logical_or(self) -> Node:
+        """Parse a left-associative ``||`` expression.
+
+        Returns:
+            A ``LogicalOr`` tree or the underlying ``&&`` node.
+
+        """
+        left = self.parse_logical_and()
+        while self.peek()[0] == "OR_OR":
+            operator_token = self.eat()
+            right = self.parse_logical_and()
+            left = LogicalOr(left=left, line=operator_token[2], right=right)
+        return left
+
+    def parse_multiplicative(self) -> Node:
+        """Parse a multiplicative expression (multiplication and division).
+
+        Returns:
+            An AST node for the multiplicative expression.
+
+        """
+        node = self.parse_primary()
+        while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_primary()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
+
     def parse_parameter(self) -> Param:
         """Parse a single function parameter.
 
@@ -6514,7 +6524,7 @@ class Parser:
             self.eat("LBRACKET")
             self.eat("RBRACKET")
             is_array = True
-        return Param(type_string, name, is_array)
+        return Param(is_array=is_array, name=name, type=type_string)
 
     def parse_parameters(self) -> list[Param]:
         """Parse a function parameter list.
@@ -6547,10 +6557,10 @@ class Parser:
             return self.parse_sizeof()
         if token[0] == "NUMBER":
             self.eat()
-            return Int(int(token[1], 0), line=line)
+            return Int(line=line, value=int(token[1], 0))
         if token[0] == "CHAR_LIT":
             self.eat()
-            return Char(decode_first_character(token[1][1:-1], line=line), line=line)
+            return Char(line=line, value=decode_first_character(token[1][1:-1], line=line))
         if token[0] == "STRING":
             self.eat()
             content = token[1][1:-1]
@@ -6558,27 +6568,27 @@ class Parser:
             # ``"foo" "bar"`` folds to ``"foobar"`` at parse time.
             while self.peek()[0] == "STRING":
                 content += self.eat()[1][1:-1]
-            return String(content, line=line)
+            return String(content=content, line=line)
         if token[0] == "IDENT":
             self.eat()
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
-                return Call(token[1], self.parse_arguments(), line=line)
+                return Call(args=self.parse_arguments(), line=line, name=token[1])
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
-                return Index(token[1], index, line=line)
-            return Var(token[1], line=line)
+                return Index(index=index, line=line, name=token[1])
+            return Var(line=line, name=token[1])
         if token[0] == "NOT":
             self.eat()
-            return BinOp("==", self.parse_primary(), Int(0, line=line), line=line)
+            return BinaryOperation(left=self.parse_primary(), line=line, operation="==", right=Int(line=line, value=0))
         if token[0] == "TILDE":
             self.eat()
             operand = self.parse_primary()
             if isinstance(operand, Int):
-                return Int(operand.value ^ 0xFFFF, line=line)
-            return BinOp("^", operand, Int(0xFFFF, line=line), line=line)
+                return Int(line=line, value=operand.value ^ 65535)
+            return BinaryOperation(left=operand, line=line, operation="^", right=Int(line=line, value=65535))
         if token[0] == "MINUS":
             self.eat()
             operand = self.parse_primary()
@@ -6586,8 +6596,8 @@ class Parser:
             # round-trip as literals instead of an addition node.  Runtime
             # negation still rewrites to ``0 - x`` to reuse the subtract path.
             if isinstance(operand, Int):
-                return Int(-operand.value, line=line)
-            return BinOp("-", Int(0, line=line), operand, line=line)
+                return Int(line=line, value=-operand.value)
+            return BinaryOperation(left=Int(line=line, value=0), line=line, operation="-", right=operand)
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
@@ -6618,7 +6628,20 @@ class Parser:
                 functions.append(declaration)
             else:
                 globals_list.append(declaration)
-        return Program(functions, globals=globals_list, line=line)
+        return Program(functions=functions, globals=globals_list, line=line)
+
+    def parse_shift(self) -> Node:
+        """Parse a shift expression (``<<`` and ``>>``).
+
+        Higher precedence than comparison, lower than additive — matches
+        C's precedence order.
+        """
+        node = self.parse_additive()
+        while self.peek()[0] in SHIFT_OPERATORS:
+            operator_token = self.eat()
+            right = self.parse_additive()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
 
     def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
@@ -6633,10 +6656,10 @@ class Parser:
         if self.peek()[0] in TYPE_TOKENS:
             type_string = self.parse_type()
             self.eat("RPAREN")
-            return SizeofType(type_string, line=token[2])
+            return SizeofType(line=token[2], type_name=type_string)
         name = self.eat("IDENT")[1]
         self.eat("RPAREN")
-        return SizeofVar(name, line=token[2])
+        return SizeofVar(line=token[2], name=name)
 
     def parse_statement(self) -> Node:
         """Parse a single statement.
@@ -6669,7 +6692,7 @@ class Parser:
             if self.peek()[0] != "SEMI":
                 value = self.parse_expression()
             self.eat("SEMI")
-            return Return(value, line=token[2])
+            return Return(line=token[2], value=value)
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "IDENT":
@@ -6703,7 +6726,7 @@ class Parser:
                 content += self.eat()[1][1:-1]
             self.eat("RPAREN")
             self.eat("SEMI")
-            return InlineAsm(content, line=line)
+            return InlineAsm(content=content, line=line)
         # Optional leading ``__attribute__((...))`` directives.
         # ``regparm(1)`` applies to function definitions (arg 0 in AX);
         # ``asm_register("REG")`` applies to file-scope VarDecls (the
@@ -6774,13 +6797,13 @@ class Parser:
                 return None
             self.eat("LBRACE")
             return Function(
-                name,
-                parameters,
-                self.parse_block(),
-                line=line,
-                regparm_count=regparm_count,
-                carry_return=carry_return,
                 always_inline=always_inline,
+                body=self.parse_block(),
+                carry_return=carry_return,
+                line=line,
+                name=name,
+                params=parameters,
+                regparm_count=regparm_count,
             )
         if regparm_count != 0:
             message = "regparm attribute is not valid on global variables"
@@ -6814,8 +6837,8 @@ class Parser:
             if size_expression is None and init is None:
                 message = f"global array '{name}' needs either a size or an initializer"
                 raise CompileError(message, line=line)
-            return ArrayDecl(name, type_string, init, line=line, size=size_expression)
-        return VarDecl(name, type_string, init, line=line, asm_register=asm_register)
+            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
+        return VarDecl(asm_register=asm_register, init=init, line=line, name=name, type_name=type_string)
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, unsigned long).
@@ -6891,8 +6914,8 @@ class Parser:
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
-            return ArrayDecl(name, type_string, init, line=line)
-        return VarDecl(name, type_string, init, line=line)
+            return ArrayDecl(init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(init=init, line=line, name=name, type_name=type_string)
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.
@@ -6906,16 +6929,7 @@ class Parser:
         condition = self.parse_condition()
         self.eat("RPAREN")
         self.eat("LBRACE")
-        return While(condition, self.parse_block(), line=token[2])
-
-    def peek(self, offset: int = 0) -> tuple[str, str, int]:
-        """Return the token at the current position plus an optional offset.
-
-        Returns:
-            The token as a (kind, text, line) triple.
-
-        """
-        return self.tokens[self.position + offset]
+        return While(body=self.parse_block(), cond=condition, line=token[2])
 
 
 def apply_defines(
@@ -7013,14 +7027,8 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description="Compile a C source file to NASM.")
     parser.add_argument("input", help="input .c file")
-    parser.add_argument("output", nargs="?", help="output .asm file (default stdout)")
-    parser.add_argument(
-        "--bits",
-        type=int,
-        choices=(16, 32),
-        default=16,
-        help="target CPU mode for emitted assembly (default 16)",
-    )
+    parser.add_argument("output", help="output .asm file (default stdout)", nargs="?")
+    parser.add_argument("--bits", choices=(16, 32), default=16, help="target CPU mode for emitted assembly (default 16)", type=int)
     arguments = parser.parse_args()
 
     try:
@@ -7029,7 +7037,7 @@ def main() -> int:
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        output = CodeGenerator(defines=defines, bits=arguments.bits).generate(ast)
+        output = X86CodeGenerator(bits=arguments.bits, defines=defines).generate(ast)
     except CompileError as error:
         location = f"{arguments.input}:{error.line}" if error.line else arguments.input
         print(f"{location}: error: {error.message}", file=sys.stderr)
