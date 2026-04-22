@@ -8,10 +8,11 @@
 ;;; ext2_readonly: → CF set (stub for unsupported write operations)
 ;;;
 ;;; Internal helpers:
-;;; ext2_names_match: SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
-;;; ext2_read_blk_sec: AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
-;;; ext2_read_inode:   AX=inode-number; BX=pointer into SECTOR_BUFFER
-;;; ext2_search_dir:   AX=dir-inode, SI=name; AX=found-inode, CF=not-found
+;;; ext2_get_data_block: AX=block-index, BX=inode-ptr; AX=block-num, CF=err
+;;; ext2_names_match:    SI=search-name, DI=entry-name, CX=entry-namelen; CF=no-match
+;;; ext2_read_blk_sec:   AX=block, BX=sector-within-block; reads into SECTOR_BUFFER
+;;; ext2_read_inode:     AX=inode-number; BX=pointer into SECTOR_BUFFER
+;;; ext2_search_dir:     AX=dir-inode, SI=name; AX=found-inode, CF=not-found
 
 ;;; Superblock field offsets (all within the first 512-byte sector of block 1)
 %assign EXT2_SB_FIRST_DATA_BLOCK  20
@@ -184,13 +185,14 @@ ext2_init:
         ret
 
 ext2_load:
-        ;; Load file data into memory using vfs_found_inode and vfs_found_size
+        ;; Load file data into memory using vfs_found_inode and vfs_found_size.
+        ;; Supports direct blocks (0..11) and the singly-indirect block (i_block[12]).
         ;; Input:  DI = destination address
         ;; Output: CF set on disk error
         push bx
         push cx
         push si
-        ;; Read inode into SECTOR_BUFFER; save 12 direct block numbers
+        ;; Read inode into SECTOR_BUFFER; save 12 direct block numbers + indirect ptr
         mov ax, [vfs_found_inode]
         call ext2_read_inode            ; BX = pointer to inode
         mov si, bx
@@ -204,27 +206,55 @@ ext2_load:
         add si, 4
         dec cx
         jnz .el_save
+        mov ax, [si]                    ; i_block[12] = singly-indirect block pointer
+        mov [ext2_load_indirect_ptr], ax
         pop di
         mov cx, [vfs_found_size]        ; remaining bytes (low 16 bits)
         mov word [ext2_load_rem], cx
-        ;; Load each direct block (12 max)
-        mov si, ext2_load_blks
+        mov word [ext2_load_blk_counter], 0
+        ;; Main loop: iterate block_counter from 0; direct (0..11) then indirect (12+)
         .el_block:
         mov cx, [ext2_load_rem]
         test cx, cx
         jbe .el_done
-        mov ax, [si]
+        mov ax, [ext2_load_blk_counter]
+        cmp ax, 12
+        jb .el_direct
+        ;; Singly indirect: look up entry in i_block[12]
+        sub ax, 12                      ; indirect_idx (0-based within indirect block)
+        mov cx, ax
+        shr cx, 7                       ; CX = sector within indirect block (0 or 1)
+        and ax, 07Fh
+        shl ax, 2                       ; AX = byte offset of entry within that sector
+        push ax                         ; save entry_offset
+        mov bx, cx
+        mov ax, [ext2_load_indirect_ptr]
+        test ax, ax
+        jz .el_done_pop
+        call ext2_read_blk_sec          ; AX=indirect_ptr, BX=sector_in_ind → SECTOR_BUFFER
+        jc .el_err_pop
+        pop bx                          ; BX = entry_offset
+        mov ax, [SECTOR_BUFFER + bx]    ; AX = data block number
+        jmp .el_got_block
+        .el_done_pop:
+        add sp, 2
+        jmp .el_done
+        .el_err_pop:
+        add sp, 2
+        jmp .el_err
+        .el_direct:
+        shl ax, 1                       ; index * 2 (word-sized entries in ext2_load_blks)
+        mov bx, ax
+        mov ax, [ext2_load_blks + bx]
+        .el_got_block:
         test ax, ax
         jz .el_done                     ; zero block pointer = end
-        add si, 2
         ;; Read 2 sectors (1 KB block)
         xor bx, bx
         .el_sector:
         push ax
         push bx
-        push si
         call ext2_read_blk_sec          ; AX=block, BX=sector offset
-        pop si
         pop bx
         pop ax
         jc .el_err
@@ -252,6 +282,7 @@ ext2_load:
         inc bx
         cmp bx, 2                       ; 2 sectors per 1 KB block
         jb .el_sector
+        inc word [ext2_load_blk_counter]
         jmp .el_block
         .el_done:
         pop si
@@ -274,6 +305,43 @@ ext2_readonly:
 ;;; -----------------------------------------------------------------------
 ;;; Internal helpers
 ;;; -----------------------------------------------------------------------
+
+ext2_get_data_block:
+        ;; Translate a logical block index to an ext2 block number.
+        ;; Must be called immediately after ext2_read_inode (SECTOR_BUFFER holds the inode sector).
+        ;; Input:  AX = block_index, BX = inode pointer in SECTOR_BUFFER
+        ;; Output: AX = ext2 block number; CF on disk error (only possible for indirect)
+        ;; Clobbers: AX, BX, CX
+        cmp ax, 12
+        jb .direct
+        ;; Singly indirect: i_block[12] → indirect block → data block
+        sub ax, 12                      ; indirect_idx (0-based)
+        mov cx, ax
+        and cx, 07Fh
+        shl cx, 2                       ; CX = byte offset of entry within sector
+        shr ax, 7                       ; AX = sector within indirect block (0 or 1)
+        push cx                         ; save entry_offset
+        add bx, EXT2_INODE_BLOCK + 48   ; BX = &i_block[12] (12 * 4 = 48)
+        mov cx, [bx]                    ; CX = indirect block pointer (16-bit)
+        mov bx, ax                      ; BX = sector_in_indirect_block
+        mov ax, cx                      ; AX = indirect block pointer
+        call ext2_read_blk_sec          ; AX=indirect_ptr, BX=sector_in_ind → SECTOR_BUFFER
+        jc .indirect_err
+        pop bx                          ; BX = entry_offset
+        mov ax, [SECTOR_BUFFER + bx]    ; AX = data block number
+        clc
+        ret
+        .indirect_err:
+        add sp, 2                       ; discard entry_offset
+        stc
+        ret
+        .direct:
+        shl ax, 2                       ; AX = block_index * 4
+        add bx, EXT2_INODE_BLOCK        ; BX = &i_block[0]
+        add bx, ax                      ; BX = &i_block[block_index]
+        mov ax, [bx]                    ; AX = block number
+        clc
+        ret
 
 ext2_names_match:
         ;; Compare null-terminated SI against entry name at DI with length CL
@@ -487,7 +555,7 @@ ext2_search_blk:
 
 ext2_read_sec:
         ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
-        ;; Translates the 32-bit byte position through the inode's direct block list.
+        ;; Handles direct blocks (0..11) and the singly-indirect block via ext2_get_data_block.
         ;; Input:  SI = FD entry pointer (FD_OFFSET_START = inode number)
         ;; Output: SECTOR_BUFFER filled, BX = byte offset within sector; CF on error
         push ax
@@ -510,19 +578,26 @@ ext2_read_sec:
         mov ax, [si+FD_OFFSET_START]    ; inode number
         call ext2_read_inode            ; BX = &inode in SECTOR_BUFFER; clobbers AX,CX,DX
         pop ax                          ; AX = block_index
-        shl ax, 2                       ; AX = block_index * 4
-        add bx, EXT2_INODE_BLOCK        ; BX = &i_block[0] in SECTOR_BUFFER
-        add bx, ax                      ; BX = &i_block[block_index]
-        mov ax, [bx]                    ; AX = block number (low 16 bits)
+        call ext2_get_data_block        ; AX=block_index, BX=inode_ptr → AX=block_num; CF on err
+        jc .err
         pop cx                          ; CX = sector_in_block
-        pop bx                          ; BX = byte offset (re-save below)
-        push bx
+        pop bx                          ; BX = byte offset
+        push bx                         ; re-save byte offset
         mov bx, cx
         call ext2_read_blk_sec          ; AX = block, BX = sector_in_block → SECTOR_BUFFER
         pop bx                          ; BX = byte offset within sector (to return)
+        jc .blk_err
         pop dx
         pop cx
         pop ax
+        ret
+        .err:                           ; ext2_get_data_block failed; discard sector_in_block + byte_offset
+        add sp, 4
+        .blk_err:                       ; ext2_read_blk_sec failed; outer regs still on stack
+        pop dx
+        pop cx
+        pop ax
+        stc
         ret
 
         ;; State
@@ -530,7 +605,9 @@ ext2_read_sec:
         ext2_inode_size      dw 128
         ext2_inode_table_blk dw 0
         ext2_inodes_per_group dw 0
-        ext2_load_blks       times 12 dw 0
-        ext2_load_rem        dw 0
+        ext2_load_blk_counter  dw 0
+        ext2_load_blks         times 12 dw 0
+        ext2_load_indirect_ptr dw 0
+        ext2_load_rem          dw 0
         ext2_log_block_size  db 0
         ext2_sd_name         dw 0
