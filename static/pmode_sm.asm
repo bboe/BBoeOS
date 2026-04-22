@@ -55,6 +55,17 @@ pm_entry_32:
         push dword 0x1234
         push word 0
         push word 0x1234
+
+        ;; mov r32, [mem] / mov [mem], r32 — direct-memory moves.
+        ;; Under bits=32 the address operand widens to disp32 and the
+        ;; ModR/M rm field flips from 110 to 101.  Both the accumulator
+        ;; short form (A0/A1/A2/A3) and the generic /r form exercise.
+        mov eax, [gdt_desc]
+        mov ebx, [gdt_desc]
+        mov [gdt_desc], eax
+        mov [gdt_desc], ebx
+        mov ax, [gdt_desc]
+        mov [gdt_desc], ax
 [bits 16]
 pm16_back:
         mov ax, 0x5678

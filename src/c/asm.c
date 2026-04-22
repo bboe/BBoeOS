@@ -120,6 +120,8 @@ int symbol_count;
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
 __attribute__((regparm(1)))
+void emit_address_disp(int disp);
+__attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
 void emit_byte(int value);
@@ -369,6 +371,19 @@ void do_pass() {
    test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
    the call for the ``sub word [disp16], imm16`` form that only it
    uses. */
+/* Emit ``disp`` at the current addressing width: disp16 under
+   bits=16, disp32 under bits=32.  Used by the accumulator-direct
+   ``moffs`` short forms (A0 / A1 / A2 / A3) whose address field
+   follows the bare opcode with no ModR/M byte. */
+__attribute__((regparm(1)))
+void emit_address_disp(int disp) {
+    if (default_bits == 32) {
+        emit_dword(disp);
+    } else {
+        emit_word(disp);
+    }
+}
+
 __attribute__((regparm(1)))
 void emit_alu_binop(int rfield) {
     skip_ws();
@@ -478,12 +493,21 @@ void emit_byte(int value) {
     output_total = output_total + 1;
 }
 
-/* Emit the ``[disp16]`` direct-memory ModR/M form: ``(reg << 3) | 0x06``
-   plus a 2-byte disp16. */
+/* Emit the direct-memory ModR/M form plus its displacement at the
+   current addressing width.  Under 16-bit addressing the rm field
+   is 110 and the disp is 16-bit; under 32-bit addressing the rm
+   field is 101 and the disp is 32-bit.  Used by lgdt / lidt,
+   handle_mov's direct-memory branches, and any future caller
+   encoding a plain ``[disp]`` memory operand. */
 __attribute__((regparm(1)))
 void emit_modrm_direct(int reg, int disp) {
-    emit_byte((reg << 3) | 0x06);
-    emit_word(disp);
+    if (default_bits == 32) {
+        emit_byte((reg << 3) | 0x05);
+        emit_dword(disp);
+    } else {
+        emit_byte((reg << 3) | 0x06);
+        emit_word(disp);
+    }
 }
 
 /* Emit the ModR/M byte plus an optional disp8 / disp16 based on the
@@ -1069,13 +1093,15 @@ void handle_mov() {
         if (type2 == 2) {
             if (size1 == 8 && register1_id == 0) {
                 emit_byte(0xA0);
+                emit_address_disp(value2);
             } else if (size1 != 8 && register1_id == 0) {
+                emit_operand_size_prefix(size1);
                 emit_byte(0xA1);
+                emit_address_disp(value2);
             } else {
                 emit_sized(0x8A, size1);
-                emit_byte((register1_id << 3) | 0x06);
+                emit_modrm_direct(register1_id, value2);
             }
-            emit_word(value2);
             return;
         }
         if (type2 == 3) {
@@ -1090,19 +1116,20 @@ void handle_mov() {
         if (type2 == 0) {
             if (size1 == 8 && register2_id == 0) {
                 emit_byte(0xA2);
+                emit_address_disp(value1);
             } else if (size1 != 8 && register2_id == 0) {
+                emit_operand_size_prefix(size1);
                 emit_byte(0xA3);
+                emit_address_disp(value1);
             } else {
                 emit_sized(0x88, size1);
-                emit_byte((register2_id << 3) | 0x06);
+                emit_modrm_direct(register2_id, value1);
             }
-            emit_word(value1);
             return;
         }
         if (type2 == 1) {
             emit_sized(0xC6, size1);
-            emit_byte(0x06);
-            emit_word(value1);
+            emit_modrm_direct(0, value1);
             emit_sized_imm(value2, size1);
             return;
         }
