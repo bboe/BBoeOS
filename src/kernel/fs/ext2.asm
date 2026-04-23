@@ -30,6 +30,8 @@
 ;;; ext2_remove_dir_entry:  AX=dir-inode, SI=name; CF on error
 ;;; ext2_resolve_path:      SI=path → AX=parent-inode, SI=basename; CF if parent not found
 ;;; ext2_search_dir:        AX=dir-inode, SI=name; AX=found-inode, CF=not-found
+;;; ext2_set_mtime_ctime_now: BX=inode-ptr; set mtime=ctime=now; clobbers AX,DX
+;;; ext2_set_timestamps_now:  BX=inode-ptr; set atime=mtime=ctime=now; clobbers AX,DX
 
 ;;; Superblock field offsets (all within the first 512-byte sector of block 1)
 %assign EXT2_SB_FIRST_DATA_BLOCK  20
@@ -487,6 +489,7 @@ ext2_mkdir:
         shl ax, cl                      ; AX = sectors_per_block
         mov [bx + EXT2_INODE_BLOCKS], ax
         mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .emkdir_err
@@ -1101,6 +1104,9 @@ ext2_chmod:
         .echm_clear:
         and word [bx + EXT2_INODE_MODE], ~EXT2_S_IXALL
         .echm_flush:
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .echm_err
@@ -1183,6 +1189,7 @@ ext2_create:
         mov [bx + EXT2_INODE_MODE], ax
         ;; links_count = 1
         mov word [bx + EXT2_INODE_LINKS_COUNT], 1
+        call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         ;; Flush inode sector
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2033,6 +2040,30 @@ ext2_rmdir:
         stc
         ret
 
+ext2_set_mtime_ctime_now:
+        ;; Set inode mtime and ctime to the current wall-clock time.
+        ;; Input:  BX = pointer to inode in SECTOR_BUFFER
+        ;; Clobbers: AX, DX
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_MTIME], ax
+        mov [bx + EXT2_INODE_MTIME + 2], dx
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
+        ret
+
+ext2_set_timestamps_now:
+        ;; Set inode atime, mtime, and ctime to the current wall-clock time.
+        ;; Input:  BX = pointer to inode in SECTOR_BUFFER
+        ;; Clobbers: AX, DX
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_ATIME], ax
+        mov [bx + EXT2_INODE_ATIME + 2], dx
+        mov [bx + EXT2_INODE_MTIME], ax
+        mov [bx + EXT2_INODE_MTIME + 2], dx
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
+        ret
+
 ext2_update_size:
         ;; Write fd position back to inode i_size (32-bit).
         ;; Grows i_size if position > current size; on shrink, frees orphaned blocks.
@@ -2111,6 +2142,7 @@ ext2_update_size:
         shl ax, cl
         mov [bx + EXT2_INODE_BLOCKS], ax
         mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        call ext2_set_mtime_ctime_now   ; mtime = ctime = now; clobbers AX, DX
         ;; Flush inode to disk before freeing blocks
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2232,6 +2264,7 @@ ext2_update_size:
         mov [bx + EXT2_INODE_SIZE_LO], ax
         mov ax, [si+FD_OFFSET_POSITION+2]
         mov [bx + EXT2_INODE_SIZE_LO + 2], ax
+        call ext2_set_mtime_ctime_now   ; mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .eus_err
