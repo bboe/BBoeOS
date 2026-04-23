@@ -48,7 +48,6 @@ boot_shell:
         jmp .shell_halt
 
 %include "ansi.asm"
-%include "arch/pic.asm"
 %include "drivers/ata.asm"
 %include "drivers/fdc.asm"
 %include "drivers/ps2.asm"
@@ -58,6 +57,7 @@ boot_shell:
 %include "fs.asm"
 %include "lib.asm"
 %include "net.asm"
+%include "pic.asm"
 %include "syscall.asm"
 %include "system.asm"
 %include "vfs.asm"
