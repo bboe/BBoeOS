@@ -8,7 +8,7 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-nasm -f bin -i src/kernel/ -o tests/idt_test.bin tests/idt_test.asm
+nasm -f bin -i src/arch/x86/ -o tests/idt_test.bin tests/idt_test.asm
 
 IMAGE=tests/idt_test.img
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE" status=none
