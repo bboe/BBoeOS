@@ -139,6 +139,12 @@ renumbering is source-compatible — just rebuild.
 - Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.) — the direction flag may be in an unknown state at program entry.
 - Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
 
+## Python conventions
+
+- Every function uses mandatory keyword arguments (keyword-only via `*`) unless the positional args are self-evident (single obvious arg → positional-only via `/`). Arguments sorted alphabetically at definition and call sites.
+- Functions sorted alphabetically within their scope (module, class).
+- No abbreviations in function or variable names. Examples: `expression` (not `expr`), `generate` (not `gen`), `statement` (not `stmt`), `function` (not `func`), `directory` (not `dir`), `command` (not `cmd`), `message` (not `msg`), `process` (not `proc`), `reference` (not `ref`), `buffer` (not `buf`), `offset` (not `off`), `declaration` (not `decl`), `parameter` (not `param`), `allocate` (not `alloc`), `file_descriptor` (not `fd`), `serial` (not `ser`), `sector` (not `sec`).
+
 ## Releases
 
 Update `CHANGELOG.md` with new entries as features land. Group entries by date under the Unreleased section. After a batch of significant improvements, bump the version in `src/kernel/bboeos.asm` and move the Unreleased entries under a new version header with updated comparison links.
