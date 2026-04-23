@@ -110,7 +110,11 @@ int ticks(void);
    rely on cc.py's builtin for compilation, don't redeclare here. */
 /* BBoeOS syscall: seconds since boot */
 int uptime(void);
-/* Switch video mode via INT 10h (no POSIX equivalent) */
+/* Fill an 8x8 pixel tile at (col, row) with palette index color in VGA mode 13h */
+void fill_block(int col, int row, int color);
+/* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
+void set_palette_color(int index, int r, int g, int b);
+/* Switch video mode (no POSIX equivalent) */
 void video_mode(int mode);
 
 /* --- External data --- */

@@ -13,7 +13,6 @@ source is kept here for reference.
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1216      | +492  |
-| draw    | 245         | 239       | -6    |
 | edit    | 1977        | 2409      | +432  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 174       | +39   |
