@@ -1,9 +1,14 @@
 /* Smoke test for cc.py's bitwise operators and their compound-
    assignment forms, plus ``%=`` (the arithmetic compound-assignment
    that exercises the div/remainder path the other compound-assigns
-   don't reach).  Every result is printed as unsigned decimal because
-   the printf builtin's %x prints only the low byte.  The expected
-   values make the verification a simple text match. */
+   don't reach) and the memory-direct ALU shapes cc.py's
+   ``peephole_memory_arithmetic`` emits for a globally-stored
+   counter (``add|and|or|sub|xor word [mem], imm``).  Every result is
+   printed as unsigned decimal because the printf builtin's %x
+   prints only the low byte.  The expected values make the
+   verification a simple text match. */
+
+int counter;
 
 int main() {
     int a = 61680;  /* 0xF0F0 */
@@ -32,5 +37,21 @@ int main() {
     printf("%%=   = %u\n", y);
     y -= 5;            /* 11 - 5 = 6 (exercises ``sub word [mem], imm8``) */
     printf("-=   = %u\n", y);
+
+    /* Memory-allocated counter — forces cc.py to emit the
+       ``<op> word [_g_counter], imm`` shapes that
+       ``peephole_memory_arithmetic`` produces for load/modify/store
+       triples on a global.  Each printf between ops clobbers AX so
+       the next op must reload from memory. */
+    counter = 100;
+    printf("g=   = %u\n", counter);
+    counter += 5;      /* 105 — exercises ``add word [mem], imm8`` */
+    printf("g+=  = %u\n", counter);
+    counter |= 16;     /* 105 | 16 = 121 — ``or word [mem], imm8`` */
+    printf("g|=  = %u\n", counter);
+    counter &= 63;     /* 121 & 63 = 57 — ``and word [mem], imm8`` */
+    printf("g&=  = %u\n", counter);
+    counter ^= 32;     /* 57 ^ 32 = 25 — ``xor word [mem], imm8`` */
+    printf("g^=  = %u\n", counter);
     return 0;
 }

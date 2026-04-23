@@ -159,6 +159,8 @@ void emit_address_size_prefix(int size);
 __attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
+int emit_alu_word_mem_imm(int rfield);
+__attribute__((regparm(1)))
 void emit_byte(int value);
 __attribute__((regparm(1)))
 void emit_dword(int value);
@@ -492,11 +494,13 @@ void do_pass() {
    shapes that were silently mis-encoded (e.g. ``or ax, imm16`` went
    through ``81 /1 iw`` instead of the ``0D iw`` short form) now match
    NASM.  asm.asm doesn't exercise those previously-broken shapes, so
-   test_asm.py parity holds.  ``handle_sub`` keeps a wrapper around
-   the call for the ``sub word [disp16], imm`` form that only it
-   uses, picking the ``83 /5 ib`` sign-extended short form when the
-   immediate fits in a signed byte and falling back to ``81 /5 iw``
-   otherwise. */
+   test_asm.py parity holds.  ``handle_add`` / ``handle_and`` /
+   ``handle_or`` / ``handle_sub`` / ``handle_xor`` peel off the
+   ``<op> word [disp16], imm`` shape via ``emit_alu_word_mem_imm``
+   before calling ``emit_alu_binop`` (the shared path expects the
+   second operand to be a register), picking the ``83 /r ib``
+   sign-extended short form when the immediate fits signed 8-bit and
+   falling back to ``81 /r iw`` otherwise. */
 /* Emit ``disp`` at the current addressing width: disp16 under
    bits=16, disp32 under bits=32.  Used by the accumulator-direct
    ``moffs`` short forms (A0 / A1 / A2 / A3) whose address field
@@ -614,6 +618,50 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
     } else {
         emit_word(imm);
     }
+}
+
+/* ``<op> word [disp16], imm`` for the 83 /r family — shared by
+   handle_add, handle_and, handle_or, handle_sub, handle_xor.
+   ``rfield`` is the /r field (add=0, or=1, and=4, sub=5, xor=6) and
+   the direct-disp16 ModR/M byte works out to ``0x06 | (rfield << 3)``.
+   Picks the 5-byte ``83 /r ib`` sign-extended short form when the
+   immediate fits signed 8-bit, otherwise ``81 /r iw`` (6 bytes),
+   matching NASM byte-for-byte.
+
+   Returns 1 when the ``word [mem], imm`` shape was consumed and
+   emitted, 0 when the cursor didn't start with a ``word`` keyword —
+   the caller then falls back to the register-taking ``emit_alu_binop``
+   path.  Expects the caller to have skipped leading whitespace. */
+__attribute__((regparm(1)))
+int emit_alu_word_mem_imm(int rfield) {
+    if (!match_word(STR_WORD)) {
+        return 0;
+    }
+    skip_ws();
+    if (source_cursor[0] != '[') {
+        abort_unknown();
+    }
+    source_cursor += 1;
+    int disp = resolve_value();
+    if (source_cursor[0] != ']') {
+        abort_unknown();
+    }
+    source_cursor += 1;
+    skip_comma();
+    int imm = resolve_value();
+    int modrm = 0x06 | (rfield << 3);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(0x83);
+        emit_byte(modrm);
+        emit_word(disp);
+        emit_byte(imm & 0xFF);
+    } else {
+        emit_byte(0x81);
+        emit_byte(modrm);
+        emit_word(disp);
+        emit_word(imm);
+    }
+    return 1;
 }
 
 /* Emit one byte into the output stream.  Pass 1 only bumps
@@ -1055,10 +1103,18 @@ void handle_adc() {
 }
 
 void handle_add() {
+    skip_ws();
+    if (emit_alu_word_mem_imm(0)) {
+        return;
+    }
     emit_alu_binop(0);
 }
 
 void handle_and() {
+    skip_ws();
+    if (emit_alu_word_mem_imm(4)) {
+        return;
+    }
     emit_alu_binop(4);
 }
 
@@ -1563,6 +1619,10 @@ void handle_not() {
 }
 
 void handle_or() {
+    skip_ws();
+    if (emit_alu_word_mem_imm(1)) {
+        return;
+    }
     emit_alu_binop(1);
 }
 
@@ -1726,35 +1786,9 @@ void handle_stosw() {
    form that only sub uses — ``sub word [disp16], imm16`` (the
    dedicated 81 /5 iw path, the TCP-checksum update idiom in
    asm.asm).  The wrapper peels off that path before delegating. */
-/* ``sub word [disp16], imm`` — picked off before ``emit_alu_binop``
-   because the shared path assumes the second operand is a register.
-   When ``imm`` fits signed-8-bit, NASM picks ``83 /5 ib`` (5 bytes);
-   otherwise ``81 /5 iw`` (6 bytes).  Matching that is what lets
-   ``cc.py``-emitted ``sub word [_l_y], 5`` round-trip byte-identical. */
 void handle_sub() {
     skip_ws();
-    if (match_word(STR_WORD)) {
-        skip_ws();
-        if (source_cursor[0] != '[') {
-            abort_unknown();
-        }
-        source_cursor += 1;
-        int disp = resolve_value();
-        if (source_cursor[0] != ']') {
-            abort_unknown();
-        }
-        source_cursor += 1;
-        skip_comma();
-        int imm = resolve_value();
-        if (imm >= -128 && imm <= 127) {
-            emit_word(0x2E83);
-            emit_word(disp);
-            emit_byte(imm & 0xFF);
-        } else {
-            emit_word(0x2E81);
-            emit_word(disp);
-            emit_word(imm);
-        }
+    if (emit_alu_word_mem_imm(5)) {
         return;
     }
     emit_alu_binop(5);
@@ -1872,6 +1906,10 @@ void handle_xchg() {
 }
 
 void handle_xor() {
+    skip_ws();
+    if (emit_alu_word_mem_imm(6)) {
+        return;
+    }
     emit_alu_binop(6);
 }
 
