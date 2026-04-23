@@ -149,9 +149,8 @@ vga_set_cursor:
         push dx
 
         movzx ax, dh
-        mov bx, VGA_COLS
-        mul bx                          ; AX = row * 80 (DX clobbered, stacked copy preserved)
-        movzx bx, dl
+        imul ax, ax, VGA_COLS           ; AX = row * 80 (DX not clobbered)
+        movzx bx, dl                    ; BX = col (DX still valid)
         add ax, bx                      ; AX = row * 80 + col
         mov cx, ax                      ; CX = linear position
 
@@ -199,9 +198,8 @@ vga_teletype:
         call vga_get_cursor             ; DH=row, DL=col (clobbers AX)
 
         movzx ax, dh
-        mov bx, VGA_COLS
-        mul bx                          ; AX = row*80
-        movzx bx, dl
+        imul ax, ax, VGA_COLS           ; AX = row * 80 (DX not clobbered)
+        movzx bx, dl                    ; BX = col (DX still valid)
         add ax, bx
         shl ax, 1                       ; byte offset
         mov di, ax
@@ -273,9 +271,8 @@ vga_write_attribute:
         call vga_get_cursor             ; DH=row, DL=col (clobbers AX)
 
         movzx ax, dh
-        mov bx, VGA_COLS
-        mul bx
-        movzx bx, dl
+        imul ax, ax, VGA_COLS           ; AX = row * 80 (DX not clobbered)
+        movzx bx, dl                    ; BX = col (DX still valid)
         add ax, bx
         shl ax, 1
         mov di, ax
