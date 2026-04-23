@@ -94,8 +94,9 @@
         %assign SYS_NET_RECVFROM 22h
         %assign SYS_NET_SENDTO 23h
         %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
-        %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
-        %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot
+        %assign SYS_RTC_MILLIS 31h      ; returns DX:AX = milliseconds since boot
+        %assign SYS_RTC_SLEEP 32h       ; CX=milliseconds: busy-wait via the PIT tick counter
+        %assign SYS_RTC_UPTIME 33h      ; returns AX = seconds since boot
 
         %assign SYS_EXEC 0F0h
         %assign SYS_EXIT 0F1h

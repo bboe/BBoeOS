@@ -136,7 +136,7 @@ int main(int argc, char *argv[]) {
         packet_buffer[2] = sum;
         packet_buffer[3] = sum / 256;
 
-        int t0 = ticks();
+        int start_time = uptime_ms();
         sendto(fd, packet_buffer, 16, target_ip, 0, 0);
         /* ~32k tries fits signed 16-bit (our C subset compares signed)
            and is plenty for the local ring to surface a reply. */
@@ -151,9 +151,10 @@ int main(int argc, char *argv[]) {
             tries = tries - 1;
         }
         if (got) {
+            int duration = uptime_ms() - start_time;
             printf("Reply from ");
             print_ip(target_ip);
-            printf(": time=%d ticks\n", ticks() - t0);
+            printf(": time=%d ms\n", duration);
         } else {
             printf("Request timed out\n");
         }

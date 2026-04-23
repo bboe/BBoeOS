@@ -48,6 +48,8 @@ syscall_handler:
         je .net_sendto
         cmp ah, SYS_RTC_DATETIME ; rtc_datetime
         je .rtc_datetime
+        cmp ah, SYS_RTC_MILLIS ; rtc_millis
+        je .rtc_millis
         cmp ah, SYS_RTC_SLEEP  ; rtc_sleep
         je .rtc_sleep
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime

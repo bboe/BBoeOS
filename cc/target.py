@@ -145,6 +145,7 @@ class X86CodegenTarget(CodegenTarget):
         "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
         "REBOOT": ("mov ah, SYS_REBOOT", "int 30h"),
         "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
+        "RTC_MILLIS": ("mov ah, SYS_RTC_MILLIS", "int 30h"),
         "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
         "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
         "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),

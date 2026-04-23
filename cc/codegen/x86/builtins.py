@@ -676,20 +676,6 @@ class BuiltinsMixin:
         self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
         self.ax_clear()
 
-    def builtin_ticks(self, arguments: list[Node], /) -> None:
-        """Generate code for the ticks() builtin.
-
-        Returns the low 16 bits of the BIOS timer tick counter
-        (~18.2 Hz).  Suitable for measuring short elapsed intervals —
-        subtract two readings to get a tick count in [0, 65535].  The
-        counter wraps roughly once an hour.
-        """
-        self._check_argument_count(arguments=arguments, expected=0, name="ticks")
-        self.emit("        xor ah, ah")
-        self.emit("        int 1Ah")
-        self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
-        self.ax_clear()
-
     def builtin_unlink(
         self,
         arguments: list[Node],
@@ -712,6 +698,18 @@ class BuiltinsMixin:
         """Generate code for the uptime() builtin."""
         self._check_argument_count(arguments=arguments, expected=0, name="uptime")
         self._emit_syscall("RTC_UPTIME")
+
+    def builtin_uptime_ms(self, arguments: list[Node], /) -> None:
+        """Generate code for the uptime_ms() builtin.
+
+        Returns milliseconds since boot in DX:AX (via SYS_RTC_MILLIS).
+        Callers assigning to ``unsigned long`` get the full 32-bit value
+        (wraps at ~49.7 days); callers using ``int`` truncate to the
+        low 16 bits (wraps at ~65.5 s, fine for short elapsed intervals
+        such as ping round trips).
+        """
+        self._check_argument_count(arguments=arguments, expected=0, name="uptime_ms")
+        self._emit_syscall("RTC_MILLIS")
 
     def builtin_video_mode(self, arguments: list[Node], /) -> None:
         """Generate code for the video_mode(fd, mode) builtin.

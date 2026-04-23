@@ -21,7 +21,7 @@ source is kept here for reference.
 | netinit | 72          | 69        | -3    |
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1365      | +346  |
+| ping    | 1019        | 1368      | +349  |
 | shell   | 950         | 1357      | +407  |
 | uptime  | 50          | 78        | +28   |
 
