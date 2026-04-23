@@ -1135,6 +1135,60 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 break
         return assignments
 
+    def _try_direct_load(self, *, argument: Node, register: str, optimize_zero: bool = False) -> bool:
+        """Emit a direct load of a constant-or-address *argument* into *register*.
+
+        Covers integer literals, string literals, named kernel
+        constants, constant-aliased variables, global arrays, local
+        stack arrays, and constant-folded expressions — every case
+        whose source is a compile-time constant or label-relative
+        address and that does not need width narrowing or AX tracking
+        updates.  Returns ``True`` when a load was emitted; ``False``
+        tells the caller to handle *argument* via its own path
+        (pinned register, memory-resident scalar, or generic
+        expression).
+
+        *optimize_zero* lowers ``Int(0)`` to ``xor reg, reg`` instead
+        of ``mov reg, 0``.  :meth:`emit_store_local` uses this for
+        pinned destinations where the shorter encoding is pure win;
+        argument-loader paths leave it off to keep the canonical
+        ``mov reg, imm`` shape that downstream peepholes match on.
+        """
+        if isinstance(argument, Int):
+            if optimize_zero and argument.value == 0:
+                self.emit(f"        xor {register}, {register}")
+            else:
+                self.emit(f"        mov {register}, {argument.value}")
+            return True
+        if isinstance(argument, String):
+            self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
+            return True
+        if isinstance(argument, Var):
+            name = argument.name
+            if name in self.NAMED_CONSTANTS:
+                self.emit_constant_reference(name)
+                self.emit(f"        mov {register}, {name}")
+                return True
+            if name in self.constant_aliases:
+                self.emit(f"        mov {register}, {self.constant_aliases[name]}")
+                return True
+            if name in self.global_arrays:
+                self.emit(f"        mov {register}, _g_{name}")
+                return True
+            if name in self.local_stack_arrays:
+                if self.elide_frame:
+                    self.emit(f"        mov {register}, _l_{name}")
+                else:
+                    offset = self.locals[name]
+                    self.emit(f"        lea {register}, [{self.target.base_register}-{offset}]")
+                return True
+        if (constant_expr := self._constant_expression(argument)) is not None:
+            for name in self._collect_constant_references(argument):
+                self.emit_constant_reference(name)
+            self.emit(f"        mov {register}, {constant_expr}")
+            return True
+        return False
+
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
 
@@ -1731,26 +1785,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # Default: if we end up writing AX for a load that does not
         # leave a named variable in AX (int / constant / address /
         # expression), clear the tracking.  Paths that do leave a
-        # named var in AX (memory scalar) override this below.
+        # named var in AX (pinned / aliased global / memory scalar)
+        # override this below.
         new_ax_local: str | None = self.ax_local
         new_ax_is_byte: bool = self.ax_is_byte
-        if isinstance(argument, Int):
-            self.emit(f"        mov {register}, {argument.value}")
-            if ax_written:
-                new_ax_local = None
-                new_ax_is_byte = False
-        elif isinstance(argument, Var) and argument.name in self.NAMED_CONSTANTS:
-            self.emit_constant_reference(argument.name)
-            self.emit(f"        mov {register}, {argument.name}")
-            if ax_written:
-                new_ax_local = None
-                new_ax_is_byte = False
-        elif isinstance(argument, Var) and argument.name in self.constant_aliases:
-            self.emit(f"        mov {register}, {self.constant_aliases[argument.name]}")
-            if ax_written:
-                new_ax_local = None
-                new_ax_is_byte = False
-        elif isinstance(argument, Var) and argument.name in self.pinned_register:
+        if isinstance(argument, Var) and argument.name in self.pinned_register:
             source = self.pinned_register[argument.name]
             if len(register) < len(source):
                 # Loading a 32-bit pinned reg into a narrower (16-bit) target:
@@ -1781,17 +1820,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
                 self.emit(f"        mov {register}, {source}")
             # AX unchanged in both branches: shortcut leaves tracking intact.
-        elif isinstance(argument, Var) and argument.name in self.global_arrays:
-            self.emit(f"        mov {register}, _g_{argument.name}")
-            if ax_written:
-                new_ax_local = None
-                new_ax_is_byte = False
-        elif isinstance(argument, Var) and argument.name in self.local_stack_arrays:
-            if self.elide_frame:
-                self.emit(f"        mov {register}, _l_{argument.name}")
-            else:
-                offset = self.locals[argument.name]
-                self.emit(f"        lea {register}, [{self.target.base_register}-{offset}]")
+        elif isinstance(argument, Var) and (argument.name in self.global_arrays or argument.name in self.local_stack_arrays):
+            # Arrays live in memory but get their base address loaded,
+            # not their contents — dispatch through _try_direct_load
+            # before _is_memory_scalar (which would otherwise match any
+            # Var whose name is in ``self.locals``).
+            self._try_direct_load(argument=argument, register=register)
             if ax_written:
                 new_ax_local = None
                 new_ax_is_byte = False
@@ -1813,15 +1847,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if ax_written:
                     new_ax_local = argument.name
                     new_ax_is_byte = False
-        elif isinstance(argument, String):
-            self.emit(f"        mov {register}, {self.new_string_label(argument.content)}")
-            if ax_written:
-                new_ax_local = None
-                new_ax_is_byte = False
-        elif (constant_expr := self._constant_expression(argument)) is not None:
-            for name in self._collect_constant_references(argument):
-                self.emit_constant_reference(name)
-            self.emit(f"        mov {register}, {constant_expr}")
+        elif self._try_direct_load(argument=argument, register=register):
             if ax_written:
                 new_ax_local = None
                 new_ax_is_byte = False
@@ -1842,25 +1868,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     def emit_si_from_argument(self, argument: Node, /) -> None:
         """Load a string or expression argument into SI (or ESI in 32-bit)."""
         si = self.target.si_register
-        if isinstance(argument, String):
-            self.emit(f"        mov {si}, {self.new_string_label(argument.content)}")
-        elif isinstance(argument, Var) and argument.name in self.constant_aliases:
-            self.emit(f"        mov {si}, {self.constant_aliases[argument.name]}")
-        elif isinstance(argument, Var) and argument.name in self.global_arrays:
-            self.emit(f"        mov {si}, _g_{argument.name}")
-        elif isinstance(argument, Var) and argument.name in self.local_stack_arrays:
-            if self.elide_frame:
-                self.emit(f"        mov {si}, _l_{argument.name}")
-            else:
-                offset = self.locals[argument.name]
-                self.emit(f"        lea {si}, [{self.target.base_register}-{offset}]")
-        elif (constant_expr := self._constant_expression(argument)) is not None:
-            for name in self._collect_constant_references(argument):
-                self.emit_constant_reference(name)
-            self.emit(f"        mov {si}, {constant_expr}")
-        else:
-            self.generate_expression(argument)
-            self.emit(f"        mov {si}, {self.target.acc}")
+        if self._try_direct_load(argument=argument, register=si):
+            return
+        self.generate_expression(argument)
+        self.emit(f"        mov {si}, {self.target.acc}")
 
     def emit_store_local(self, *, expression: Node, name: str) -> None:
         """Generate an expression and store the result in a local variable.
@@ -1899,31 +1910,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             direct_register = self.pinned_register[name]
         elif name in self.register_aliased_globals:
             direct_register = self.register_aliased_globals[name]
-        if direct_register is not None:
-            if isinstance(expression, Int):
-                if expression.value == 0:
-                    self.emit(f"        xor {direct_register}, {direct_register}")
-                else:
-                    self.emit(f"        mov {direct_register}, {expression.value}")
-                return
-            if isinstance(expression, String):
-                label = self.new_string_label(expression.content)
-                self.emit(f"        mov {direct_register}, {label}")
-                return
-            if isinstance(expression, Var) and expression.name in self.NAMED_CONSTANTS:
-                self.emit(f"        mov {direct_register}, {expression.name}")
-                return
-            if isinstance(expression, Var) and expression.name in self.global_arrays:
-                self.emit(f"        mov {direct_register}, _g_{expression.name}")
-                return
-            if isinstance(expression, Var) and expression.name in self.local_stack_arrays:
-                vname = expression.name
-                if self.elide_frame:
-                    self.emit(f"        mov {direct_register}, _l_{vname}")
-                else:
-                    offset = self.locals[vname]
-                    self.emit(f"        lea {direct_register}, [{self.target.base_register}-{offset}]")
-                return
+        if direct_register is not None and self._try_direct_load(argument=expression, register=direct_register, optimize_zero=True):
+            return
         # Tell nested expression handling that the pinned destination
         # register (if any) will be overwritten at end of this store, so
         # they don't need to push/pop it to preserve the old value.
