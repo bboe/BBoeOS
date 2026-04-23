@@ -40,6 +40,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
+from add_file import ext2_add_file  # noqa: E402
+
 
 @dataclass
 class ProgramTest:
@@ -70,6 +72,18 @@ TESTS: list[ProgramTest] = [
         ["cp src/asm.c out.c", "cp src/parse_ip.asm out.c", "cat out.c"],
         r"^parse_ip:",
         timeout=30.0,
+    ),
+    ProgramTest(
+        "doubly_indirect_cat",
+        ["cat src/large.bin"],
+        r"Port of src/asm/asm\.asm to C",
+        timeout=30.0,
+    ),
+    ProgramTest(
+        "doubly_indirect_cp_shrink",
+        ["cp src/large.bin out.bin", "cp src/parse_ip.asm out.bin", "cat out.bin"],
+        r"^parse_ip:",
+        timeout=60.0,
     ),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
@@ -128,6 +142,28 @@ TESTS: list[ProgramTest] = [
 ]
 
 
+def _add_large_test_file(*, image: Path) -> None:
+    """Inject a 280 KB file into src/ to exercise the doubly-indirect block paths.
+
+    With 1 KB blocks the doubly-indirect threshold is 268 KB (12 direct + 256
+    singly-indirect).  280 KB puts 12 data blocks into the doubly-indirect
+    region, covering both the allocation and free paths.
+    """
+    target_bytes = 280 * 1024
+    source = (REPO_ROOT / "src" / "c" / "asm.c").read_bytes()
+    content = (source * (target_bytes // len(source) + 1))[:target_bytes]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        large_file = Path(tmpdir) / "large.bin"
+        large_file.write_bytes(content)
+        ext2_add_file(
+            executable=False,
+            ext2_start_sector=EXT2_SECTOR_OFFSET,
+            file_path=str(large_file),
+            image_path=str(image),
+            subdirectory="src",
+        )
+
+
 def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
     """Run make_os.sh --ext2; abort if the build fails."""
     image = temporary_directory / BASE_IMAGE
@@ -140,6 +176,8 @@ def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(1)
+    if block_size == 1024:
+        _add_large_test_file(image=image)
 
 
 def _fsck(*, image: Path) -> str | None:
