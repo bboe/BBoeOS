@@ -658,6 +658,14 @@ int emit_alu_mem_imm(int rfield) {
     source_cursor += 1;
     skip_comma();
     int imm = resolve_value();
+    /* Keep the opcode / modrm pair as two ``emit_byte`` calls rather
+       than folding into ``emit_word(opcode | (modrm << 8))``.  modrm
+       is runtime-computed from ``rfield``, so cc.py lowers the
+       ``<< 8`` through ``mov cx, 8 / shl ax, cl`` — which costs more
+       than the extra ``emit_byte`` call saves (tried: asm.c binary
+       grew 30 bytes).  The ``emit_word(constant)`` idiom only pays
+       off when both bytes are compile-time constants, as in
+       ``handle_aam``'s ``emit_word(0x0AD4)``. */
     int modrm = 0x06 | (rfield << 3);
     if (size == 8) {
         emit_byte(0x80);
