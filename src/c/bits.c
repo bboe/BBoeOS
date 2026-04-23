@@ -30,5 +30,7 @@ int main() {
     int y = 50;
     y %= 13;           /* 50 % 13 = 11 */
     printf("%%=   = %u\n", y);
+    y -= 5;            /* 11 - 5 = 6 (exercises ``sub word [mem], imm8``) */
+    printf("-=   = %u\n", y);
     return 0;
 }

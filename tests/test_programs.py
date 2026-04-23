@@ -47,7 +47,7 @@ class ProgramTest:
 TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
-    ProgramTest("bits", ["bits"], r"^%=   = 11$"),
+    ProgramTest("bits", ["bits"], r"^-=   = 6$"),
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
