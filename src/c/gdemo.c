@@ -12,7 +12,7 @@ int history[8];
 char label[8];
 
 int bump() {
-    counter = counter + 1;
+    counter += 1;
     return counter;
 }
 
@@ -21,7 +21,7 @@ int main() {
     int i = 0;
     while (i < 5) {
         history[i] = bump();
-        i = i + 1;
+        i += 1;
     }
     label[0] = 'g';
     label[1] = 'l';
@@ -31,7 +31,7 @@ int main() {
     int j = 0;
     while (j < 5) {
         printf("%s[%d] = %d\n", label, j, history[j]);
-        j = j + 1;
+        j += 1;
     }
     printf("sizeof(history) = %d\n", sizeof(history));
     printf("sizeof(label) = %d\n", sizeof(label));

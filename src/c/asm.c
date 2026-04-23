@@ -137,7 +137,7 @@ int source_buffer_valid;
    bodies read and advance ``source_cursor`` as a normal ``char *``.
    No storage is emitted for the global — reads compile as ``mov ax,
    si`` (or a no-op when the target IS SI), writes as ``mov si, ...``,
-   ``source_cursor = source_cursor + 1`` folds to ``inc si``, and
+   ``source_cursor += 1`` folds to ``inc si``, and
    ``source_cursor[0]`` compiles to ``mov al, [si]``. */
 __attribute__((asm_register("si")))
 char *source_cursor;
@@ -304,12 +304,12 @@ void compute_source_prefix() {
         if (source_name[i] == '/') {
             end = i + 1;
         }
-        i = i + 1;
+        i += 1;
     }
     int j = 0;
     while (j < end) {
         source_prefix[j] = source_name[j];
-        j = j + 1;
+        j += 1;
     }
     source_prefix[end] = '\0';
 }
@@ -356,8 +356,8 @@ void define_macro() {
     char *name_start = source_cursor;
     int name_len = 0;
     while (is_ident_char(source_cursor[0])) {
-        source_cursor = source_cursor + 1;
-        name_len = name_len + 1;
+        source_cursor += 1;
+        name_len += 1;
     }
     int slot = macro_count;
     int has_slot = 0;
@@ -366,7 +366,7 @@ void define_macro() {
         int j = 0;
         while (j < name_len && j < MACRO_NAME_LEN - 1) {
             macro_names[slot * MACRO_NAME_LEN + j] = name_start[j];
-            j = j + 1;
+            j += 1;
         }
         macro_names[slot * MACRO_NAME_LEN + j] = '\0';
     }
@@ -383,7 +383,7 @@ void define_macro() {
         }
         char *cur = line_buffer;
         while (cur[0] == ' ' || cur[0] == '\t') {
-            cur = cur + 1;
+            cur += 1;
         }
         if (cur[0] == '%') {
             /* match_word returns via CF (``carry_return`` attribute);
@@ -398,13 +398,13 @@ void define_macro() {
         }
         int len = 0;
         while (line_buffer[len] != '\0') {
-            len = len + 1;
+            len += 1;
         }
         if (macro_body_used + len + 1 < MACRO_BODY_BUFFER_SIZE) {
             int k = 0;
             while (k <= len) {
                 macro_body_buffer[macro_body_used + k] = line_buffer[k];
-                k = k + 1;
+                k += 1;
             }
             macro_body_used = macro_body_used + len + 1;
         }
@@ -635,14 +635,14 @@ void emit_byte(int value) {
     if (pass == 2) {
         asm("push si");
         output_buffer[output_position] = value;
-        output_position = output_position + 1;
+        output_position += 1;
         if (output_position >= 512) {
             flush_output();
         }
         asm("pop si");
     }
-    current_address = current_address + 1;
-    output_total = output_total + 1;
+    current_address += 1;
+    output_total += 1;
 }
 
 /* Emit a ``[reg+disp]`` ModR/M (and any needed SIB + disp) for the
@@ -662,7 +662,7 @@ void emit_indexed_mem(int reg_field, int rm_reg_id, int disp) {
         emit_modrm_disp(modrm, disp);
         return;
     }
-    rm_reg_id = rm_reg_id & 0xFF;
+    rm_reg_id &= 0xFF;
     int reg_bits = (reg_field & 0x7) << 3;
     if (rm_reg_id == 4) {
         /* ESP: emit the ModR/M + SIB pair as a single word (SIB=0x24
@@ -853,7 +853,7 @@ __attribute__((regparm(1)))
 void encode_rel8_jump(int opcode) {
     skip_ws();
     int bx = jump_index;
-    jump_index = jump_index + 1;
+    jump_index += 1;
     int current_size = far_read8(JUMP_TABLE + bx);
     int use_short = 1;
     if (current_size == 0) {
@@ -883,12 +883,12 @@ void encode_rel8_jump(int opcode) {
                 int target = peek_label_value;
                 int base = current_address;
                 if (target >= base) {
-                    base = base + 4;
+                    base += 4;
                     if (opcode == 0xEB) {
-                        base = base - 1;
+                        base -= 1;
                     }
                 } else {
-                    base = base + 2;
+                    base += 2;
                 }
                 int rel = target - base;
                 if (rel >= -128 && rel <= 127) {
@@ -939,23 +939,23 @@ void expand_macro(int idx) {
     int i = 0;
     while (i < argcount) {
         while (cursor[0] == ' ' || cursor[0] == '\t') {
-            cursor = cursor + 1;
+            cursor += 1;
         }
         macro_arg_starts[i] = pos;
         while (cursor[0] != ',' && cursor[0] != '\0' && cursor[0] != ';') {
             macro_args_text[pos] = cursor[0];
-            pos = pos + 1;
-            cursor = cursor + 1;
+            pos += 1;
+            cursor += 1;
         }
         while (pos > macro_arg_starts[i] && (macro_args_text[pos - 1] == ' ' || macro_args_text[pos - 1] == '\t')) {
-            pos = pos - 1;
+            pos -= 1;
         }
         macro_args_text[pos] = '\0';
-        pos = pos + 1;
+        pos += 1;
         if (cursor[0] == ',') {
-            cursor = cursor + 1;
+            cursor += 1;
         }
-        i = i + 1;
+        i += 1;
     }
     source_cursor = cursor;
     int body_offset = macro_body_starts[idx];
@@ -971,19 +971,19 @@ void expand_macro(int idx) {
                     int k = macro_arg_starts[n];
                     while (macro_args_text[k] != '\0') {
                         line_buffer[dst] = macro_args_text[k];
-                        dst = dst + 1;
-                        k = k + 1;
+                        dst += 1;
+                        k += 1;
                     }
                 }
-                body_offset = body_offset + 2;
+                body_offset += 2;
             } else {
                 line_buffer[dst] = ch;
-                dst = dst + 1;
-                body_offset = body_offset + 1;
+                dst += 1;
+                body_offset += 1;
             }
         }
         line_buffer[dst] = '\0';
-        body_offset = body_offset + 1;
+        body_offset += 1;
         parse_line();
     }
 }
@@ -998,7 +998,7 @@ int find_macro() {
     char *cursor = source_cursor;
     int len = 0;
     while (is_ident_char(cursor[len])) {
-        len = len + 1;
+        len += 1;
     }
     if (len == 0) {
         return -1;
@@ -1012,13 +1012,13 @@ int find_macro() {
             if (macro_names[base + j] != cursor[j]) {
                 match = 0;
             }
-            j = j + 1;
+            j += 1;
         }
         if (match != 0 && macro_names[base + len] == '\0') {
             source_cursor = cursor + len;
             return i;
         }
-        i = i + 1;
+        i += 1;
     }
     return -1;
 }
@@ -1272,7 +1272,7 @@ void handle_jmp() {
         int selector = resolve_value();
         skip_ws();
         if (source_cursor[0] == ':') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             skip_ws();
         }
         int offset = resolve_label();
@@ -1385,10 +1385,10 @@ void handle_mov() {
     }
     if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
         char *saved = source_cursor;
-        source_cursor = source_cursor + 2;
+        source_cursor += 2;
         skip_ws();
         if (source_cursor[0] == ',') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             skip_ws();
             int packed_operand = parse_operand();
             emit_byte(0x8E);
@@ -1731,12 +1731,12 @@ void handle_sub() {
         if (source_cursor[0] != '[') {
             abort_unknown();
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         int disp = resolve_value();
         if (source_cursor[0] != ']') {
             abort_unknown();
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_comma();
         int imm = resolve_value();
         emit_word(0x2E81);
@@ -1814,7 +1814,7 @@ void handle_test() {
 void handle_unknown_word() {
     char *name_start = source_cursor;
     while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
     if (source_cursor[0] == '\0') {
         return;
@@ -1942,7 +1942,7 @@ void include_pop() {
         "mov cx, 256\n"
         "cld\nrep movsw\n"
         "pop es");
-    include_depth = include_depth - 1;
+    include_depth -= 1;
 }
 
 /* Push the include stack: save the current file's fd / buffer
@@ -1971,14 +1971,14 @@ void include_push() {
     int j = 0;
     while (source_prefix[i] != '\0') {
         include_path[j] = source_prefix[i];
-        i = i + 1;
-        j = j + 1;
+        i += 1;
+        j += 1;
     }
     int k = 0;
     while (include_push_arg[k] != '\0') {
         include_path[j] = include_push_arg[k];
-        j = j + 1;
-        k = k + 1;
+        j += 1;
+        k += 1;
     }
     include_path[j] = '\0';
     source_fd = open_file_ro(include_path);
@@ -1988,7 +1988,7 @@ void include_push() {
     }
     source_buffer_position = 0;
     source_buffer_valid = 0;
-    include_depth = include_depth + 1;
+    include_depth += 1;
 }
 
 /* Classify an ASCII byte as an identifier character — ``[a-zA-Z0-9_]``.
@@ -2106,8 +2106,8 @@ int main(int argc, char *argv[]) {
    retired with its ~7 inline-asm callers. */
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int register_id, int rm) {
-    register_id = register_id & 0xFF;
-    rm = rm & 0xFF;
+    register_id &= 0xFF;
+    rm &= 0xFF;
     return 0xC0 | (register_id << 3) | rm;
 }
 
@@ -2120,12 +2120,12 @@ int make_modrm_reg_reg_impl(int register_id, int rm) {
 __attribute__((regparm(1)))
 int match_seg_ds_es(int ds_opcode, int es_opcode) {
     if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
+        source_cursor += 2;
         emit_byte(ds_opcode);
         return 1;
     }
     if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
-        source_cursor = source_cursor + 2;
+        source_cursor += 2;
         emit_byte(es_opcode);
         return 1;
     }
@@ -2153,14 +2153,14 @@ int match_word(char *keyword) {
     while (keyword[0] != '\0') {
         char s = source_cursor[0];
         if (s >= 'A' && s <= 'Z') {
-            s = s + 32;
+            s += 32;
         }
         if (s != keyword[0]) {
             source_cursor = saved;
             return 0;
         }
-        source_cursor = source_cursor + 1;
-        keyword = keyword + 1;
+        source_cursor += 1;
+        keyword += 1;
     }
     if (is_ident_char(source_cursor[0])) {
         source_cursor = saved;
@@ -2177,12 +2177,12 @@ int match_word(char *keyword) {
    abort_unknown (which never returns). */
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode) {
-    source_cursor = source_cursor + 1;
+    source_cursor += 1;
     int disp = resolve_value();
     if (source_cursor[0] != ']') {
         abort_unknown();
     }
-    source_cursor = source_cursor + 1;
+    source_cursor += 1;
     skip_comma();
     int packed_register = parse_register();
     if (packed_register < 0) {
@@ -2256,7 +2256,7 @@ void parse_d_values(int extra_word) {
         if (source_cursor[0] != ',') {
             return;
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_ws();
     }
 }
@@ -2278,18 +2278,18 @@ void parse_db() {
             return;
         }
         if (source_cursor[0] == '`') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             while (1) {
                 char c = source_cursor[0];
                 if (c == '`') {
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                     break;
                 }
                 if (c == '\0') {
                     return;
                 }
                 if (c == '\\') {
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                     char esc = source_cursor[0];
                     if (esc == 'n') {
                         emit_byte('\n');
@@ -2304,34 +2304,34 @@ void parse_db() {
                     } else if (esc == '\\') {
                         emit_byte('\\');
                     } else if (esc == 'x') {
-                        source_cursor = source_cursor + 1;
+                        source_cursor += 1;
                         int hi = hex_digit(source_cursor[0]);
-                        source_cursor = source_cursor + 1;
+                        source_cursor += 1;
                         int lo = hex_digit(source_cursor[0]);
                         emit_byte((hi << 4) | lo);
                     } else {
                         emit_byte('\\');
                         emit_byte(esc);
                     }
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                 } else {
                     emit_byte(c);
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                 }
             }
         } else if (source_cursor[0] == '\'' && source_cursor[2] != '\'') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             while (1) {
                 char c = source_cursor[0];
                 if (c == '\'') {
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                     break;
                 }
                 if (c == '\0') {
                     return;
                 }
                 emit_byte(c);
-                source_cursor = source_cursor + 1;
+                source_cursor += 1;
             }
         } else {
             int value = resolve_value();
@@ -2341,7 +2341,7 @@ void parse_db() {
         if (source_cursor[0] != ',') {
             return;
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
 }
 
@@ -2355,7 +2355,7 @@ void parse_db() {
    block's data section). */
 void parse_directive() {
     if (source_cursor[0] == '%') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         int matched_assign = 0;
         if (match_word(STR_ASSIGN)) {
             matched_assign = 1;
@@ -2366,13 +2366,13 @@ void parse_directive() {
             skip_ws();
             char *name = source_cursor;
             while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
-                source_cursor = source_cursor + 1;
+                source_cursor += 1;
             }
             if (source_cursor[0] == '\0') {
                 return;
             }
             source_cursor[0] = '\0';
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             skip_ws();
             int value = resolve_value();
             if (pass == 1) {
@@ -2392,13 +2392,13 @@ void parse_directive() {
         if (source_cursor[0] != '"') {
             return;
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         char *fname = source_cursor;
         while (source_cursor[0] != '"') {
             if (source_cursor[0] == '\0') {
                 return;
             }
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
         source_cursor[0] = '\0';
         source_cursor = fname;
@@ -2438,7 +2438,7 @@ void parse_directive() {
         while (count != 0) {
             source_cursor = saved;
             parse_db();
-            count = count - 1;
+            count -= 1;
         }
         return;
     }
@@ -2483,7 +2483,7 @@ void parse_line() {
        supported; the handler silently skips through ``]`` so trailing
        junk can't reach parse_mnemonic. */
     if (source_cursor[0] == '[') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_ws();
         if (match_word(STR_BITS)) {
             skip_ws();
@@ -2491,7 +2491,7 @@ void parse_line() {
             default_bits = value;
         }
         while (source_cursor[0] != ']' && source_cursor[0] != '\0') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
         return;
     }
@@ -2547,7 +2547,7 @@ void parse_line() {
             space_pos[0] = ' ';
             return;
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
 }
 
@@ -2575,7 +2575,7 @@ void parse_mnemonic() {
             mnemonic_dispatch_at(index);
             return;
         }
-        index = index + 1;
+        index += 1;
     }
 }
 
@@ -2599,14 +2599,14 @@ int parse_number() {
     if (c == '0') {
         c = source_cursor[1];
         if (c == 'x' || c == 'X') {
-            source_cursor = source_cursor + 2;
+            source_cursor += 2;
             while (1) {
                 d = hex_digit(source_cursor[0]);
                 if (d < 0) {
                     return value;
                 }
                 value = (value << 4) | d;
-                source_cursor = source_cursor + 1;
+                source_cursor += 1;
             }
         }
     }
@@ -2617,11 +2617,11 @@ int parse_number() {
     while (1) {
         c = source_cursor[0];
         if (c >= '0' && c <= '9') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         } else if (c >= 'A' && c <= 'F') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         } else if (c >= 'a' && c <= 'f') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         } else if (c == 'h' || c == 'H') {
             is_hex = 1;
             break;
@@ -2634,19 +2634,19 @@ int parse_number() {
         while (1) {
             c = source_cursor[0];
             if (c == 'h' || c == 'H') {
-                source_cursor = source_cursor + 1;
+                source_cursor += 1;
                 return value;
             }
             d = hex_digit(c);
             if (d < 0) {
                 c = source_cursor[0];
                 if (c == 'h' || c == 'H') {
-                    source_cursor = source_cursor + 1;
+                    source_cursor += 1;
                 }
                 return value;
             }
             value = (value << 4) | d;
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
     }
     /* Decimal */
@@ -2656,7 +2656,7 @@ int parse_number() {
             return value;
         }
         value = value * 10 + (c - '0');
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
 }
 
@@ -2706,12 +2706,12 @@ int parse_operand() {
        matches the current bits mode; gets bumped to 32 below if the
        base register is an e-prefixed reg. */
     parse_operand_address_size = default_bits;
-    source_cursor = source_cursor + 1;
+    source_cursor += 1;
     skip_ws();
     /* ``[es:...]`` segment override: emit 0x26 prefix, skip past. */
     if (source_cursor[0] == 'e' && source_cursor[1] == 's' && source_cursor[2] == ':') {
         emit_byte(0x26);
-        source_cursor = source_cursor + 3;
+        source_cursor += 3;
         skip_ws();
     }
     /* Try ``[reg...]`` form (register first inside brackets). */
@@ -2729,7 +2729,7 @@ int parse_operand() {
            evaluates to ``bp-3``, not ``bp-5``).  ``+`` is consumed so
            resolve_value sees the bare expression. */
         if (source_cursor[0] == '+') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             skip_ws();
             disp = resolve_value();
         } else if (source_cursor[0] == '-') {
@@ -2737,7 +2737,7 @@ int parse_operand() {
         }
         skip_ws();
         if (source_cursor[0] == ']') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
         parse_operand_value = disp;
         return (3 << 8) | register_id;          /* type=3 (reg+disp) */
@@ -2748,7 +2748,7 @@ int parse_operand() {
     char *bracket_start = source_cursor;
     char *close = source_cursor;
     while (close[0] != ']' && close[0] != '\0') {
-        close = close + 1;
+        close += 1;
     }
     char *end = close;
     while (end > bracket_start) {
@@ -2785,7 +2785,7 @@ int parse_operand() {
                     plus[0] = '+';
                     source_cursor = close;
                     if (source_cursor[0] == ']') {
-                        source_cursor = source_cursor + 1;
+                        source_cursor += 1;
                     }
                     int reg_size2 = (packed_register2 >> 8) & 0xFF;
                     if (reg_size2 == 16 || reg_size2 == 32) {
@@ -2800,10 +2800,10 @@ int parse_operand() {
     /* Plain ``[disp16]``. */
     int disp = resolve_value();
     while (source_cursor[0] != ']' && source_cursor[0] != '\0') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
     if (source_cursor[0] == ']') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
     parse_operand_value = disp;
     return 2 << 8;                      /* type=2 (direct mem) */
@@ -2827,29 +2827,29 @@ int parse_register() {
            table with size_bump = 16; on miss (not a real 32-bit
            reg, e.g. a user identifier starting with ``e``) we
            rewind the cursor so callers see no change. */
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         size_bump = 16;
     }
     char *entry = register_table;
     while (entry[0] != '\0') {
         char a = source_cursor[0];
         if (a >= 'A' && a <= 'Z') {
-            a = a + 32;
+            a += 32;
         }
         if (a != entry[0]) {
-            entry = entry + 4;
+            entry += 4;
             continue;
         }
         a = source_cursor[1];
         if (a >= 'A' && a <= 'Z') {
-            a = a + 32;
+            a += 32;
         }
         if (a != entry[1]) {
-            entry = entry + 4;
+            entry += 4;
             continue;
         }
         if (is_ident_char(source_cursor[2])) {
-            entry = entry + 4;
+            entry += 4;
             continue;
         }
         int size = entry[3];
@@ -2857,10 +2857,10 @@ int parse_register() {
            isn't a real mnemonic, so skip 8-bit matches in that
            case and keep scanning. */
         if (size_bump != 0 && size != 16) {
-            entry = entry + 4;
+            entry += 4;
             continue;
         }
-        source_cursor = source_cursor + 2;
+        source_cursor += 2;
         return ((size + size_bump) << 8) | entry[2];
     }
     source_cursor = saved;
@@ -2890,7 +2890,7 @@ int parse_creg() {
     if (is_ident_char(source_cursor[3])) {
         return -1;
     }
-    source_cursor = source_cursor + 3;
+    source_cursor += 3;
     return c - '0';
 }
 
@@ -2898,7 +2898,7 @@ int parse_creg() {
    the operator byte, skip whitespace, and recurse.  Factored so the
    7 operator arms each collapse to ``value = value OP parse_rhs();``. */
 int parse_rhs() {
-    source_cursor = source_cursor + 1;
+    source_cursor += 1;
     skip_ws();
     return resolve_value();
 }
@@ -2942,7 +2942,7 @@ int read_line() {
             }
         }
         char c = source_buffer[source_buffer_position];
-        source_buffer_position = source_buffer_position + 1;
+        source_buffer_position += 1;
         if (c == '\n') {
             break;
         }
@@ -2951,7 +2951,7 @@ int read_line() {
         }
         if (length < 255) {
             line_buffer[length] = c;
-            length = length + 1;
+            length += 1;
         }
     }
     line_buffer[length] = '\0';
@@ -2987,7 +2987,7 @@ int read_source_sector() {
    switch to match the old AL-only comparison semantics. */
 __attribute__((regparm(1)))
 int reg_to_rm(int register_id) {
-    register_id = register_id & 0xFF;
+    register_id &= 0xFF;
     if (register_id == 3) {
         return 7;
     }
@@ -3043,33 +3043,33 @@ int resolve_value() {
        from there. */
     int negate = 0;
     if (source_cursor[0] == '-') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_ws();
         negate = 1;
     } else if (source_cursor[0] == '+') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_ws();
     }
     char first = source_cursor[0];
     if (first == '(') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         value = resolve_value();
         skip_ws();
         if (source_cursor[0] == ')') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
     } else if (first == '\'') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         value = source_cursor[0];
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         if (source_cursor[0] == '\'') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
     } else if (first == '`') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         char c = source_cursor[0];
         if (c == '\\') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
             char esc = source_cursor[0];
             if (esc == 'n') {
                 value = '\n';
@@ -3085,12 +3085,12 @@ int resolve_value() {
         } else {
             value = c;
         }
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         if (source_cursor[0] == '`') {
-            source_cursor = source_cursor + 1;
+            source_cursor += 1;
         }
     } else if (first == '$') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         value = current_address;
     } else if (first >= '0' && first <= '9') {
         value = parse_number();
@@ -3111,19 +3111,19 @@ int resolve_value() {
     skip_ws();
     char op = source_cursor[0];
     if (op == '+') {
-        value = value + parse_rhs();
+        value += parse_rhs();
     } else if (op == '-') {
-        value = value - parse_rhs();
+        value -= parse_rhs();
     } else if (op == '*') {
-        value = value * parse_rhs();
+        value *= parse_rhs();
     } else if (op == '/') {
-        value = value / parse_rhs();
+        value /= parse_rhs();
     } else if (op == '&') {
-        value = value & parse_rhs();
+        value &= parse_rhs();
     } else if (op == '|') {
-        value = value | parse_rhs();
+        value |= parse_rhs();
     } else if (op == '^') {
-        value = value ^ parse_rhs();
+        value ^= parse_rhs();
     }
     return value;
 }
@@ -3169,7 +3169,7 @@ void run_pass1() {
         if (error_flag != 0) {
             die_error_pass1_io();
         }
-        iteration_count = iteration_count + 1;
+        iteration_count += 1;
         if (iteration_count >= 100) {
             die_error_pass1_iter();
         }
@@ -3205,7 +3205,7 @@ void run_pass2() {
    peek_label_target, resolve_label, resolve_value's symbol path. */
 void scan_ident_dot() {
     while (is_ident_char(source_cursor[0]) || source_cursor[0] == '.') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
 }
 
@@ -3238,7 +3238,7 @@ void shift_handler(int modrm_base) {
 void skip_comma() {
     skip_ws();
     if (source_cursor[0] == ',') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
         skip_ws();
     }
 }
@@ -3252,7 +3252,7 @@ void skip_comma() {
    to the retired inline-asm body except for cc.py's bp frame. */
 void skip_ws() {
     while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
-        source_cursor = source_cursor + 1;
+        source_cursor += 1;
     }
 }
 
@@ -3285,18 +3285,18 @@ void symbol_add(int value, int scope) {
             break;
         }
         far_write8(entry + n, src);
-        source_cursor = source_cursor + 1;
-        n = n + 1;
+        source_cursor += 1;
+        n += 1;
     }
     while (n < SYMBOL_NAME_LENGTH) {
         far_write8(entry + n, 0);
-        n = n + 1;
+        n += 1;
     }
     source_cursor = saved;
     far_write16(entry + SYMBOL_NAME_LENGTH, value);
     far_write8(entry + SYMBOL_NAME_LENGTH + 2, 0);
     far_write8(entry + SYMBOL_NAME_LENGTH + 3, scope & 0xFF);
-    symbol_count = symbol_count + 1;
+    symbol_count += 1;
 }
 
 /* ``%assign`` entries: a value-only binding (scope=0xFFFF, type=1
@@ -3365,8 +3365,8 @@ int symbol_lookup(int scope) {
                 if (src == 0) {
                     break;
                 }
-                source_cursor = source_cursor + 1;
-                name_offset = name_offset + 1;
+                source_cursor += 1;
+                name_offset += 1;
             }
             source_cursor = saved;
             if (mismatch == 0) {
@@ -3374,8 +3374,8 @@ int symbol_lookup(int scope) {
                 return far_read16(entry + SYMBOL_NAME_LENGTH);
             }
         }
-        entry = entry + SYMBOL_ENTRY;
-        index = index + 1;
+        entry += SYMBOL_ENTRY;
+        index += 1;
     }
     return 0;
 }

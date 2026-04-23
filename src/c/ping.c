@@ -19,14 +19,14 @@ int encode_domain(char *domain, char *buf) {
             }
             buf[label_start] = count;
             label_start = position;
-            position = position + 1;
+            position += 1;
             count = 0;
         } else {
             buf[position] = ch;
-            position = position + 1;
-            count = count + 1;
+            position += 1;
+            count += 1;
         }
-        index = index + 1;
+        index += 1;
     }
 }
 
@@ -72,7 +72,7 @@ int resolve_dns(char *domain, char *target, char *query, char *ip) {
         if (received > 0) {
             break;
         }
-        tries = tries - 1;
+        tries -= 1;
     }
     close(fd);
     if (received == 0) {
@@ -93,7 +93,7 @@ int resolve_dns(char *domain, char *target, char *query, char *ip) {
             return 0;
         }
         offset = offset + 10 + rdlength;
-        answer_count = answer_count - 1;
+        answer_count -= 1;
     }
     return 1;
 }
@@ -148,7 +148,7 @@ int main(int argc, char *argv[]) {
                 got = 1;
                 break;
             }
-            tries = tries - 1;
+            tries -= 1;
         }
         if (got) {
             int duration = uptime_ms() - start_time;
@@ -159,8 +159,8 @@ int main(int argc, char *argv[]) {
             printf("Request timed out\n");
         }
         sleep(1000);
-        seq = seq + 1;
-        count = count - 1;
+        seq += 1;
+        count -= 1;
     }
     close(fd);
 }

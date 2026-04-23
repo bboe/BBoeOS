@@ -18,17 +18,17 @@ int decode_domain(char *base, int offset, char *out) {
             /* Regular label */
             if (label_count > 0) {
                 out[out_position] = '.';
-                out_position = out_position + 1;
+                out_position += 1;
             }
-            label_count = label_count + 1;
-            offset = offset + 1;
+            label_count += 1;
+            offset += 1;
             int length = byte;
             int copied = 0;
             while (copied < length) {
                 out[out_position] = base[offset];
-                out_position = out_position + 1;
-                offset = offset + 1;
-                copied = copied + 1;
+                out_position += 1;
+                offset += 1;
+                copied += 1;
             }
         }
     }
@@ -57,14 +57,14 @@ int encode_domain(char *domain, char *buf) {
             }
             buf[label_start] = count;
             label_start = position;
-            position = position + 1;
+            position += 1;
             count = 0;
         } else {
             buf[position] = ch;
-            position = position + 1;
-            count = count + 1;
+            position += 1;
+            count += 1;
         }
-        index = index + 1;
+        index += 1;
     }
 }
 
@@ -151,7 +151,7 @@ int main(int argc, char *argv[]) {
         if (received > 0) {
             break;
         }
-        tries = tries - 1;
+        tries -= 1;
     }
     close(socket_fd);
     if (received == 0) {
@@ -197,7 +197,7 @@ int main(int argc, char *argv[]) {
             printf("%s is a CNAME for %s\n", name_buffer, cname_buffer);
         }
         offset = offset + 10 + rdlength;
-        answer_count = answer_count - 1;
+        answer_count -= 1;
     }
     if (found_address == 0) {
         die("No answer in DNS response\n");

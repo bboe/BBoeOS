@@ -7,7 +7,7 @@ int strcmp(const char *a, const char *b) {
         if (a[index] == '\0') {
             return 0;
         }
-        index = index + 1;
+        index += 1;
     }
 }
 
@@ -32,10 +32,10 @@ int insert_char(char *buf, int cursor, int end, char ch) {
     int shift = end;
     while (shift > cursor) {
         buf[shift] = buf[shift - 1];
-        shift = shift - 1;
+        shift -= 1;
     }
     buf[cursor] = ch;
-    end = end + 1;
+    end += 1;
     write(STDOUT, buf + cursor, end - cursor);
     cursor_back(end - cursor - 1);
     return end;
@@ -47,9 +47,9 @@ int delete_at_cursor(char *buf, int cursor, int end) {
     int shift = cursor;
     while (shift < end - 1) {
         buf[shift] = buf[shift + 1];
-        shift = shift + 1;
+        shift += 1;
     }
-    end = end - 1;
+    end -= 1;
     write(STDOUT, buf + cursor, end - cursor);
     putchar(' ');
     cursor_back(end - cursor + 1);
@@ -95,7 +95,7 @@ int main() {
                 /* Ctrl-B: cursor left */
                 if (cursor > 0) {
                     cursor_back(1);
-                    cursor = cursor - 1;
+                    cursor -= 1;
                 }
             } else if (ch == '\x03') {
                 /* Ctrl-C: cancel line */
@@ -113,13 +113,13 @@ int main() {
                 /* Ctrl-F: cursor right */
                 if (cursor < end) {
                     putchar(buf[cursor]);
-                    cursor = cursor + 1;
+                    cursor += 1;
                 }
             } else if (ch == '\b' || ch == '\x7F') {
                 /* Backspace / DEL */
                 if (cursor > 0) {
                     cursor_back(1);
-                    cursor = cursor - 1;
+                    cursor -= 1;
                     end = delete_at_cursor(buf, cursor, end);
                 }
             } else if (ch == '\x0B') {
@@ -133,12 +133,12 @@ int main() {
                     int copy_index = 0;
                     while (copy_index < span) {
                         kill_buf[copy_index] = buf[cursor + copy_index];
-                        copy_index = copy_index + 1;
+                        copy_index += 1;
                     }
                     int erase_index = 0;
                     while (erase_index < span) {
                         putchar(' ');
-                        erase_index = erase_index + 1;
+                        erase_index += 1;
                     }
                     cursor_back(span);
                     end = cursor;
@@ -161,8 +161,8 @@ int main() {
                         break;
                     }
                     end = insert_char(buf, cursor, end, kill_buf[yank_index]);
-                    cursor = cursor + 1;
-                    yank_index = yank_index + 1;
+                    cursor += 1;
+                    yank_index += 1;
                 }
             } else if (ch >= ' ') {
                 /* Printable char — insert at cursor */
@@ -170,7 +170,7 @@ int main() {
                     visual_bell();
                 } else {
                     end = insert_char(buf, cursor, end, ch);
-                    cursor = cursor + 1;
+                    cursor += 1;
                 }
             }
         }
@@ -182,7 +182,7 @@ int main() {
         set_exec_arg(NULL);
         int scan = 0;
         while (buf[scan] != '\0' && buf[scan] != ' ') {
-            scan = scan + 1;
+            scan += 1;
         }
         if (buf[scan] == ' ') {
             buf[scan] = '\0';
@@ -206,7 +206,7 @@ int main() {
             int copy_index = 0;
             while (buf[copy_index] != '\0') {
                 exec_path[4 + copy_index] = buf[copy_index];
-                copy_index = copy_index + 1;
+                copy_index += 1;
             }
             exec_path[4 + copy_index] = '\0';
             if (try_exec(exec_path)) {

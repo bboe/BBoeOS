@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
                 return 0;
             }
         }
-        tries = tries - 1;
+        tries -= 1;
     }
     close(fd);
     die("ARP timeout\n");

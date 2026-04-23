@@ -9,6 +9,6 @@ int main() {
     int i = 0;
     while (i < sizeof(fib) / sizeof(int)) {
         printf("fib[%d] = %d\n", i, fib[i]);
-        i = i + 1;
+        i += 1;
     }
 }

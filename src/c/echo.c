@@ -6,7 +6,7 @@ int main(int argc, char *argv[]) {
 	}
         int len = strlen(argv[i]);
         write(STDOUT, argv[i], len);
-        i = i + 1;
+        i += 1;
     }
     putchar('\n');
 }
