@@ -100,7 +100,8 @@ ext2_find:
         call ext2_read_inode            ; BX = pointer to inode in SECTOR_BUFFER
         mov cx, [bx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], cx
-        mov word [vfs_found_size+2], 0
+        mov cx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov [vfs_found_size+2], cx
         mov byte [vfs_found_mode], FLAG_DIRECTORY
         mov byte [vfs_found_type], FD_TYPE_DIRECTORY
         mov word [vfs_found_dir_sec], 0
@@ -149,7 +150,8 @@ ext2_find:
         mov cx, [bx+EXT2_INODE_MODE]
         mov dx, [bx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], dx
-        mov word [vfs_found_size+2], 0
+        mov dx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov [vfs_found_size+2], dx
         mov word [vfs_found_dir_sec], 0
         mov word [vfs_found_dir_off], 0
         ;; Determine type and mode flags from i_mode
@@ -3079,9 +3081,14 @@ ext2_resolve_path:
         ext2_mk_parent_inode   dw 0     ; ext2_mkdir: parent directory inode
         ext2_pws_block_idx     dw 0     ; ext2_prepare_write_sec: block index
         ext2_pws_byte_offset   dw 0     ; ext2_prepare_write_sec: byte offset within sector
+        ext2_pws_dbl_blk       dw 0     ; ext2_prepare_write_sec: top doubly-indirect block
         ext2_pws_ind_blk       dw 0     ; ext2_prepare_write_sec: indirect block number
+        ext2_pws_inner_idx     dw 0     ; ext2_prepare_write_sec: inner index in sub-singly block
+        ext2_pws_outer_idx     dw 0     ; ext2_prepare_write_sec: outer index in doubly block
         ext2_pws_ptr_idx       dw 0     ; ext2_prepare_write_sec: entry index in indirect block
+        ext2_pws_ptrs          dw 0     ; ext2_prepare_write_sec: ptrs_per_blk
         ext2_pws_sec_in_blk    dw 0     ; ext2_prepare_write_sec: sector within block
+        ext2_pws_sub_blk       dw 0     ; ext2_prepare_write_sec: sub-singly-indirect block
         ext2_rd_inode          dw 0
         ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
         ext2_rd_outbuf         dw 0
