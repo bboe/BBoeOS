@@ -555,6 +555,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         for instruction in self.target.syscall_sequences[name]:
             self.emit(f"        {instruction}")
 
+    def _eval_local_array_size(self, size: Node, /, *, stride: int) -> int | None:
+        """Return the byte count for a local array declaration, or ``None``.
+
+        Only ``Int`` literals and :attr:`NAMED_CONSTANT_VALUES` entries
+        can be resolved at Python time — those are the only cases where
+        cc.py knows the integer value needed to size the stack frame slot.
+        Any other expression returns ``None`` and the caller falls back to
+        the old 2-byte-pointer behavior (raising a compile error or keeping
+        the array at file scope).
+        """
+        if isinstance(size, Int):
+            return size.value * stride
+        if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
+            return self.NAMED_CONSTANT_VALUES[size.name] * stride
+        return None
+
     @staticmethod
     def _extract_local_label(line: str, /) -> str | None:
         """Return the _l_ label from a store or declaration, or None.
@@ -1181,22 +1197,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             # Not fusible — emit normally
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
-
-    def _eval_local_array_size(self, size: Node, /, *, stride: int) -> int | None:
-        """Return the byte count for a local array declaration, or ``None``.
-
-        Only ``Int`` literals and :attr:`NAMED_CONSTANT_VALUES` entries
-        can be resolved at Python time — those are the only cases where
-        cc.py knows the integer value needed to size the stack frame slot.
-        Any other expression returns ``None`` and the caller falls back to
-        the old 2-byte-pointer behavior (raising a compile error or keeping
-        the array at file scope).
-        """
-        if isinstance(size, Int):
-            return size.value * stride
-        if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
-            return self.NAMED_CONSTANT_VALUES[size.name] * stride
-        return None
 
     def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.

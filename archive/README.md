@@ -8,21 +8,21 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 454       | +3    |
-| cat     | 145         | 143       | -2    |
+| cat     | 145         | 145       |  0    |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1216      | +492  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2348      | +371  |
+| edit    | 1977        | 2409      | +432  |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 172       | +37   |
+| ls      | 135         | 174       | +39   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 220       | +3    |
 | netinit | 72          | 69        | -3    |
-| netrecv | 334         | 386       | +52   |
+| netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1356      | +337  |
+| ping    | 1019        | 1365      | +346  |
 | shell   | 921         | 1326      | +405  |
 | uptime  | 50          | 78        | +28   |
 
@@ -49,7 +49,7 @@ word-sized loads with `xor ah,ah` zero-extension for every byte read,
 whereas the assembly version uses `lodsb` / `stosb` / `rep movsb`
 for compact byte-oriented loops.
 
-**edit (+371):** Both versions implement the same gap-buffer /
+**edit (+432):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -89,16 +89,16 @@ bytes over the previous 2247-byte build come from the
 24)`` sites (and their column equivalents) now reloads the
 pinned value after the fused ``inc <reg>``, where the old
 output elided the reload via an ``ax_local`` shortcut that the
-peephole invalidated.  The save-path scratch buffer is now a local
-stack array (``char sector[512]``), which triggers a full BP frame
-for `main` so the 512-byte array lives on the stack segment rather
-than as a data label in the binary (2346 → 2348 with the BP prologue).
+peephole invalidated.  The save-path scratch buffer is a local stack array
+(``char sector[512]``), which triggers a full BP frame for `main`
+so the 512-byte array lives on the stack segment rather than as a
+data label in the binary.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+37):** The assembly version uses inline `repne scasb` with a
+**ls (+39):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
@@ -108,7 +108,7 @@ addressing on `entry` accesses).
 
 **mkdir (+4):** Null-terminator overhead across 4 string literals.
 
-**netrecv (+52):** The C version uses stack-local `receive_buffer[128]`
+**netrecv (+69):** The C version uses stack-local `receive_buffer[128]`
 and `mac_buffer[6]` in `main`'s BP frame where the assembly version
 used `BUFFER + 128` and `BUFFER`.  The delta is otherwise ordinary
 C-compiler overhead: null-terminated strings, the net_open CF
@@ -123,7 +123,7 @@ length-bearing messages without null terminators.  The C version uses
 a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
 uses ``BUFFER``.
 
-**ping (+337):** Both versions build ICMP echo requests in userspace
+**ping (+346):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
 arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,

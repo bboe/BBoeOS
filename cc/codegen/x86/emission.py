@@ -969,6 +969,31 @@ class EmissionMixin:
         self.virtual_long_locals = set()
         self.zero_init_skippable: set[str] = set()
 
+        # Pre-scan: detect local stack arrays before compute_safe_pin_registers
+        # so bp is excluded from the pin pool when it's needed as a frame
+        # pointer.  compute_safe_pin_registers adds bp to the pool only when
+        # elide_frame is True; if we discover arrays here and flip the flag
+        # early, the pool will correctly omit bp and no variable will be
+        # pinned to the frame-pointer register.
+        if name == "main":
+
+            def _body_has_stack_arrays(stmts: list[Node]) -> bool:
+                for stmt in stmts:
+                    if isinstance(stmt, ArrayDecl) and stmt.size is not None:
+                        stride = 1 if stmt.type_name in self.BYTE_TYPES else self.target.int_size
+                        if self._eval_local_array_size(stmt.size, stride=stride) is not None:
+                            return True
+                    if isinstance(stmt, If) and (
+                        _body_has_stack_arrays(stmt.body) or (stmt.else_body is not None and _body_has_stack_arrays(stmt.else_body))
+                    ):
+                        return True
+                    if isinstance(stmt, (DoWhile, While)) and _body_has_stack_arrays(stmt.body):
+                        return True
+                return False
+
+            if _body_has_stack_arrays(body):
+                self.elide_frame = False
+
         # Globals are visible in every function.  Scalars get a
         # ``_g_<name>`` memory slot; arrays are resolved via the
         # ``_resolve_constant`` path (they behave like a fixed base
@@ -1033,15 +1058,6 @@ class EmissionMixin:
             self.allocate_local(parameters[0].name)
 
         self.scan_locals(body)
-
-        # If main has local stack arrays, drop the elide-frame shortcut so
-        # the arrays live on the actual stack (separate segment) rather than
-        # as ``times N db 0`` data labels inside the binary.  Scalar locals
-        # follow along — they also move to ``[bp-N]`` slots — trading the
-        # ``push bp / mov bp, sp / sub sp, N`` prologue (6-8 bytes) for
-        # keeping potentially large arrays out of the binary entirely.
-        if name == "main" and self.local_stack_arrays:
-            self.elide_frame = False
 
         # IR path: pre-allocate compiler-generated temporaries so the
         # frame size is correct before the prologue is emitted.
