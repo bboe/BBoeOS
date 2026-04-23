@@ -34,13 +34,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive_ext2.img"
-EXT2_SECTOR_OFFSET = 30  # DIRECTORY_SECTOR in src/include/constants.asm
 
 sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import ext2_add_file  # noqa: E402
+from add_file import ext2_add_file, read_assign  # noqa: E402
+
+EXT2_SECTOR_OFFSET = read_assign("DIRECTORY_SECTOR")
 
 
 @dataclass
@@ -76,8 +77,14 @@ TESTS: list[ProgramTest] = [
     ProgramTest(
         "doubly_indirect_cat",
         ["cat src/large.bin"],
-        r"Port of src/asm/asm\.asm to C",
-        timeout=30.0,
+        r"EXT2_DOUBLY_INDIRECT_OK",  # sentinel placed at byte 274432 (block 268)
+        timeout=60.0,
+    ),
+    ProgramTest(
+        "doubly_indirect_cp",
+        ["cp src/large.bin out.bin", "cat out.bin"],
+        r"EXT2_DOUBLY_INDIRECT_OK",  # verifies doubly-indirect write path
+        timeout=60.0,
     ),
     ProgramTest(
         "doubly_indirect_cp_shrink",
@@ -142,16 +149,26 @@ TESTS: list[ProgramTest] = [
 ]
 
 
+DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
+DOUBLY_INDIRECT_SENTINEL = b"EXT2_DOUBLY_INDIRECT_OK"
+
+
 def _add_large_test_file(*, image: Path) -> None:
     """Inject a 280 KB file into src/ to exercise the doubly-indirect block paths.
 
     With 1 KB blocks the doubly-indirect threshold is 268 KB (12 direct + 256
     singly-indirect).  280 KB puts 12 data blocks into the doubly-indirect
     region, covering both the allocation and free paths.
+
+    A sentinel string is written at byte 274432 (start of block 268, the first
+    doubly-indirect block) so tests can confirm that reads and writes actually
+    reach the doubly-indirect region rather than matching content in the direct
+    or singly-indirect range.
     """
     target_bytes = 280 * 1024
     source = (REPO_ROOT / "src" / "c" / "asm.c").read_bytes()
-    content = (source * (target_bytes // len(source) + 1))[:target_bytes]
+    content = bytearray((source * (target_bytes // len(source) + 1))[:target_bytes])
+    content[DOUBLY_INDIRECT_START : DOUBLY_INDIRECT_START + len(DOUBLY_INDIRECT_SENTINEL)] = DOUBLY_INDIRECT_SENTINEL
     with tempfile.TemporaryDirectory() as tmpdir:
         large_file = Path(tmpdir) / "large.bin"
         large_file.write_bytes(content)

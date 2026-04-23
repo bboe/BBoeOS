@@ -100,7 +100,8 @@ ext2_find:
         call ext2_read_inode            ; BX = pointer to inode in SECTOR_BUFFER
         mov cx, [bx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], cx
-        mov word [vfs_found_size+2], 0
+        mov cx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov [vfs_found_size+2], cx
         mov byte [vfs_found_mode], FLAG_DIRECTORY
         mov byte [vfs_found_type], FD_TYPE_DIRECTORY
         mov word [vfs_found_dir_sec], 0
@@ -149,7 +150,8 @@ ext2_find:
         mov cx, [bx+EXT2_INODE_MODE]
         mov dx, [bx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], dx
-        mov word [vfs_found_size+2], 0
+        mov dx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov [vfs_found_size+2], dx
         mov word [vfs_found_dir_sec], 0
         mov word [vfs_found_dir_off], 0
         ;; Determine type and mode flags from i_mode
@@ -751,13 +753,30 @@ ext2_add_dir_entry:
         shr bx, 1
         test ax, ax
         jz .ead_alloc_blk               ; unallocated block → need new block
+        mov [ext2_ade_blk_num], ax      ; save block number (AX clobbered by read_blk_sec)
         xor bx, bx
         call ext2_read_blk_sec          ; AX=block, BX=0 → sector 0; sets ext2_last_blk_sec
         jc .ead_err
         xor bx, bx
+        mov word [ext2_ade_cur_sec], 0
         .ead_scan_entry:
-        cmp bx, 512                     ; only scan entries that start in sector 0
-        jae .ead_next_blk_inc
+        cmp bx, 512                     ; end of current sector?
+        jb .ead_in_sector
+        ;; Advance to next sector within this block
+        inc word [ext2_ade_cur_sec]
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl                          ; CL = log2(sectors_per_block)
+        mov ax, 1
+        shl ax, cl                      ; AX = sectors_per_block
+        cmp [ext2_ade_cur_sec], ax
+        jae .ead_next_blk_inc           ; all sectors exhausted → try next block
+        mov bx, [ext2_ade_cur_sec]
+        mov ax, [ext2_ade_blk_num]
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER
+        jc .ead_err
+        xor bx, bx
+        .ead_in_sector:
         mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
         cmp dx, 8
         jb .ead_err
@@ -772,8 +791,11 @@ ext2_add_dir_entry:
         add bx, dx
         jmp .ead_scan_entry
         .ead_live_entry:
-        mov cx, bx
-        add cx, dx                      ; CX = offset after this entry
+        ;; abs_end = cur_sec * 512 + bx + rec_len (compare against block_size)
+        mov cx, [ext2_ade_cur_sec]
+        shl cx, 9                       ; CX = cur_sec * 512
+        add cx, bx
+        add cx, dx                      ; CX = abs offset after this entry
         push cx
         xor ah, ah
         mov al, [ext2_log_block_size]
@@ -1463,6 +1485,15 @@ ext2_prepare_write_sec:
         mov ax, [ext2_pws_block_idx]
         cmp ax, 12
         jb .epws_alloc_direct
+        ;; Compute ptrs_per_blk and check if block falls in the doubly-indirect range
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        mov dx, 256
+        shl dx, cl                      ; DX = ptrs_per_blk
+        mov [ext2_pws_ptrs], dx
+        add dx, 12                      ; DX = 12 + ptrs_per_blk
+        cmp ax, dx
+        jae .epws_alloc_doubly
         ;; ---- Singly-indirect path ----
         ;; Re-read inode; check if i_block[12] (indirect block) already exists
         mov ax, [ext2_last_read_inode]
@@ -1551,6 +1582,180 @@ ext2_prepare_write_sec:
         movzx cx, byte [ext2_log_block_size]
         inc cx
         push bx                         ; save inode ptr
+        mov ax, 1
+        shl ax, cl
+        pop bx
+        add [bx + EXT2_INODE_BLOCKS], ax
+        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        pop ax                          ; AX = data_blk (restore)
+        jc .epws_err
+        jmp .epws_have_block
+        ;; ---- Doubly-indirect path ---- (block_idx >= 12 + ptrs_per_blk)
+        .epws_alloc_doubly:
+        ;; AX = block_idx; dbl_idx = block_idx - 12 - ptrs_per_blk
+        sub ax, 12
+        sub ax, [ext2_pws_ptrs]         ; AX = dbl_idx
+        xor dx, dx
+        div word [ext2_pws_ptrs]        ; AX = outer_idx, DX = inner_idx
+        mov [ext2_pws_outer_idx], ax
+        mov [ext2_pws_inner_idx], dx
+        ;; --- Ensure i_block[13] (top doubly-indirect block) exists ---
+        mov ax, [ext2_last_read_inode]
+        call ext2_read_inode            ; BX = inode ptr
+        mov ax, [bx + EXT2_INODE_BLOCK + 52]   ; low word of i_block[13]
+        test ax, ax
+        jnz .epws_have_dbl_blk
+        ;; Allocate and zero-fill a new top doubly-indirect block
+        call ext2_alloc_block           ; AX = dbl_blk; SI clobbered; SECTOR_BUFFER clobbered
+        jc .epws_err
+        mov [ext2_pws_dbl_blk], ax
+        push di
+        mov di, SECTOR_BUFFER
+        mov cx, 256
+        xor ax, ax
+        cld
+        rep stosw
+        pop di
+        xor bx, bx
+        .epws_zero_dbl:
+        movzx cx, byte [ext2_log_block_size]
+        inc cx
+        mov ax, 1
+        shl ax, cl
+        cmp bx, ax
+        jae .epws_dbl_zeroed
+        push bx
+        mov ax, [ext2_pws_dbl_blk]
+        shl ax, cl
+        add ax, EXT2_START_SECTOR
+        add ax, bx
+        call write_sector
+        pop bx
+        jc .epws_err
+        inc bx
+        jmp .epws_zero_dbl
+        .epws_dbl_zeroed:
+        ;; Re-read inode; store dbl_blk in i_block[13]; update i_blocks; flush
+        mov ax, [ext2_last_read_inode]
+        call ext2_read_inode
+        mov ax, [ext2_pws_dbl_blk]
+        mov [bx + EXT2_INODE_BLOCK + 52], ax
+        mov word [bx + EXT2_INODE_BLOCK + 54], 0
+        movzx cx, byte [ext2_log_block_size]
+        inc cx
+        push ax                         ; save dbl_blk
+        mov ax, 1
+        shl ax, cl
+        add [bx + EXT2_INODE_BLOCKS], ax
+        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        pop ax                          ; AX = dbl_blk (restore)
+        jc .epws_err
+        .epws_have_dbl_blk:
+        mov [ext2_pws_dbl_blk], ax
+        ;; --- Look up or allocate sub-singly block at outer_idx in doubly block ---
+        mov bx, [ext2_pws_outer_idx]
+        shr bx, 7                       ; BX = sector within doubly block
+        mov ax, [ext2_pws_dbl_blk]
+        call ext2_read_blk_sec
+        jc .epws_err
+        mov bx, [ext2_pws_outer_idx]
+        and bx, 07Fh
+        shl bx, 2
+        mov ax, [SECTOR_BUFFER + bx]    ; AX = sub-singly block pointer
+        test ax, ax
+        jnz .epws_have_sub_blk
+        ;; Allocate and zero-fill a new sub-singly block
+        call ext2_alloc_block           ; AX = sub_blk; SI clobbered; SECTOR_BUFFER clobbered
+        jc .epws_err
+        mov [ext2_pws_sub_blk], ax
+        push di
+        mov di, SECTOR_BUFFER
+        mov cx, 256
+        xor ax, ax
+        cld
+        rep stosw
+        pop di
+        xor bx, bx
+        .epws_zero_sub:
+        movzx cx, byte [ext2_log_block_size]
+        inc cx
+        mov ax, 1
+        shl ax, cl
+        cmp bx, ax
+        jae .epws_sub_zeroed
+        push bx
+        mov ax, [ext2_pws_sub_blk]
+        shl ax, cl
+        add ax, EXT2_START_SECTOR
+        add ax, bx
+        call write_sector
+        pop bx
+        jc .epws_err
+        inc bx
+        jmp .epws_zero_sub
+        .epws_sub_zeroed:
+        ;; Write sub-singly pointer into doubly block at outer_idx
+        mov bx, [ext2_pws_outer_idx]
+        shr bx, 7
+        mov ax, [ext2_pws_dbl_blk]
+        call ext2_read_blk_sec
+        jc .epws_err
+        mov ax, [ext2_pws_sub_blk]
+        mov bx, [ext2_pws_outer_idx]
+        and bx, 07Fh
+        shl bx, 2
+        mov [SECTOR_BUFFER + bx], ax
+        mov word [SECTOR_BUFFER + bx + 2], 0
+        call ext2_write_blk_sec
+        jc .epws_err
+        ;; Update i_blocks for new sub-singly block
+        mov ax, [ext2_last_read_inode]
+        call ext2_read_inode
+        movzx cx, byte [ext2_log_block_size]
+        inc cx
+        push bx
+        mov ax, 1
+        shl ax, cl
+        pop bx
+        add [bx + EXT2_INODE_BLOCKS], ax
+        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .epws_err
+        jmp .epws_alloc_dbl_data
+        .epws_have_sub_blk:
+        mov [ext2_pws_sub_blk], ax      ; save existing sub-singly block number
+        .epws_alloc_dbl_data:
+        ;; --- Allocate data block and store at inner_idx in sub-singly block ---
+        call ext2_alloc_block           ; AX = data_blk; SI clobbered; SECTOR_BUFFER clobbered
+        jc .epws_err
+        push ax                         ; save data_blk
+        mov bx, [ext2_pws_inner_idx]
+        shr bx, 7                       ; BX = sector within sub-singly block
+        mov ax, [ext2_pws_sub_blk]
+        call ext2_read_blk_sec
+        pop ax                          ; AX = data_blk (restore)
+        push ax                         ; re-save
+        jc .epws_err_dblk
+        mov bx, [ext2_pws_inner_idx]
+        and bx, 07Fh
+        shl bx, 2                       ; BX = byte offset within sector
+        mov [SECTOR_BUFFER + bx], ax
+        mov word [SECTOR_BUFFER + bx + 2], 0
+        call ext2_write_blk_sec
+        pop ax                          ; AX = data_blk (restore for have_block)
+        jc .epws_err
+        ;; Update i_blocks in inode for the newly allocated data block
+        push ax                         ; save data_blk
+        mov ax, [ext2_last_read_inode]
+        call ext2_read_inode            ; BX = inode ptr
+        movzx cx, byte [ext2_log_block_size]
+        inc cx
+        push bx
         mov ax, 1
         shl ax, cl
         pop bx
@@ -1654,15 +1859,36 @@ ext2_remove_dir_entry:
         mov ax, [ext2_dir_blks + bx]
         test ax, ax
         jz .erde_not_found
+        mov [ext2_rde_blk_num], ax      ; save block number (AX clobbered by read_blk_sec)
         push cx
         xor bx, bx
         call ext2_read_blk_sec          ; AX=block, BX=0 → SECTOR_BUFFER
         pop cx
         jc .erde_err
         xor bx, bx
+        mov word [ext2_rde_cur_sec], 0
         .erde_scan:
-        cmp bx, 512
-        jae .erde_blk_done
+        cmp bx, 512                     ; end of current sector?
+        jb .erde_in_sector
+        ;; Advance to next sector within this block
+        inc word [ext2_rde_cur_sec]
+        push cx
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl                          ; CL = log2(sectors_per_block)
+        mov ax, 1
+        shl ax, cl                      ; AX = sectors_per_block
+        cmp [ext2_rde_cur_sec], ax
+        pop cx                          ; pop does not modify flags
+        jae .erde_blk_done              ; all sectors exhausted → next block
+        push cx
+        mov bx, [ext2_rde_cur_sec]
+        mov ax, [ext2_rde_blk_num]
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER
+        pop cx
+        jc .erde_err
+        xor bx, bx
+        .erde_in_sector:
         mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
         cmp dx, 8
         jb .erde_err
@@ -2747,7 +2973,7 @@ ext2_search_blk:
 
 ext2_read_sec:
         ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
-        ;; Handles direct blocks (0..11) and the singly-indirect block via ext2_get_data_block.
+        ;; Handles direct, singly-indirect, and doubly-indirect blocks via ext2_get_data_block.
         ;; Input:  SI = FD entry pointer (FD_OFFSET_START = inode number)
         ;; Output: SECTOR_BUFFER filled, BX = byte offset within sector; CF on error
         push ax
@@ -2846,7 +3072,9 @@ ext2_resolve_path:
         ret
 
         ;; State
-        ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index
+        ext2_ade_blk_num       dw 0     ; ext2_add_dir_entry: block number for multi-sector scan
+        ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index (0-11)
+        ext2_ade_cur_sec       dw 0     ; ext2_add_dir_entry: sector within current block
         ext2_ade_filetype      db 1     ; ext2_add_dir_entry: file type (1=reg, 2=dir)
         ext2_ade_inode         dw 0     ; ext2_add_dir_entry: new file's inode
         ext2_ade_min_rec       dw 0     ; ext2_add_dir_entry: minimum rec_len needed
@@ -2896,13 +3124,20 @@ ext2_resolve_path:
         ext2_mk_parent_inode   dw 0     ; ext2_mkdir: parent directory inode
         ext2_pws_block_idx     dw 0     ; ext2_prepare_write_sec: block index
         ext2_pws_byte_offset   dw 0     ; ext2_prepare_write_sec: byte offset within sector
+        ext2_pws_dbl_blk       dw 0     ; ext2_prepare_write_sec: top doubly-indirect block
         ext2_pws_ind_blk       dw 0     ; ext2_prepare_write_sec: indirect block number
+        ext2_pws_inner_idx     dw 0     ; ext2_prepare_write_sec: inner index in sub-singly block
+        ext2_pws_outer_idx     dw 0     ; ext2_prepare_write_sec: outer index in doubly block
         ext2_pws_ptr_idx       dw 0     ; ext2_prepare_write_sec: entry index in indirect block
+        ext2_pws_ptrs          dw 0     ; ext2_prepare_write_sec: ptrs_per_blk
         ext2_pws_sec_in_blk    dw 0     ; ext2_prepare_write_sec: sector within block
+        ext2_pws_sub_blk       dw 0     ; ext2_prepare_write_sec: sub-singly-indirect block
         ext2_rd_inode          dw 0
         ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
         ext2_rd_outbuf         dw 0
         ext2_rd_rec_len        dw 0
+        ext2_rde_blk_num       dw 0     ; ext2_remove_dir_entry: block number for multi-sector scan
+        ext2_rde_cur_sec       dw 0     ; ext2_remove_dir_entry: sector within current block
         ext2_rde_name          dw 0     ; ext2_remove_dir_entry: pointer to name string
         ext2_rdr_blks          times 14 dw 0  ; ext2_rmdir: saved i_block[0..13]
         ext2_rdr_cde_blk       dw 0     ; ext2_check_dir_empty: block number
