@@ -1172,6 +1172,29 @@ void handle_div() {
     unary_f6f7(0xF0);
 }
 
+void handle_in() {
+    /* ``in al, dx`` → EC  (byte port read).
+       ``in ax, dx`` → ED  (word port read).
+       Operands are fixed (DX is the port, AL/AX is the destination);
+       parser validates the form and the data-register size picks the
+       opcode width. */
+    skip_ws();
+    int data_reg = parse_register();
+    if (data_reg < 0 || (data_reg & 0xFF) != 0) {
+        die("Error: in expects al or ax as data\n");
+    }
+    skip_comma();
+    int port_reg = parse_register();
+    if (port_reg < 0 || (port_reg & 0xFF) != 2 || (port_reg >> 8) != 16) {
+        die("Error: in expects dx as port\n");
+    }
+    if ((data_reg >> 8) == 8) {
+        emit_byte(0xEC);
+    } else {
+        emit_byte(0xED);
+    }
+}
+
 void handle_inc() {
     inc_dec_handler(0);
 }
@@ -1539,6 +1562,29 @@ void handle_not() {
 
 void handle_or() {
     emit_alu_binop(1);
+}
+
+void handle_out() {
+    /* ``out dx, al`` → EE  (byte port write).
+       ``out dx, ax`` → EF  (word port write).
+       Operands are fixed (DX is the port, AL/AX is the data source);
+       parser validates the form and the data-register size picks the
+       opcode width. */
+    skip_ws();
+    int port_reg = parse_register();
+    if (port_reg < 0 || (port_reg & 0xFF) != 2 || (port_reg >> 8) != 16) {
+        die("Error: out expects dx as port\n");
+    }
+    skip_comma();
+    int data_reg = parse_register();
+    if (data_reg < 0 || (data_reg & 0xFF) != 0) {
+        die("Error: out expects al or ax as data\n");
+    }
+    if ((data_reg >> 8) == 8) {
+        emit_byte(0xEE);
+    } else {
+        emit_byte(0xEF);
+    }
 }
 
 /* ``pop`` / ``push`` accept a register (58+reg / 50+reg), segment
@@ -3428,6 +3474,7 @@ asm(
     "        dw STR_CMP, handle_cmp\n"
     "        dw STR_DEC, handle_dec\n"
     "        dw STR_DIV, handle_div\n"
+    "        dw STR_IN,  handle_in\n"
     "        dw STR_INC, handle_inc\n"
     "        dw STR_INT, handle_int\n"
     "        dw STR_JA,  handle_ja\n"
@@ -3460,6 +3507,7 @@ asm(
     "        dw STR_NEG, handle_neg\n"
     "        dw STR_NOT, handle_not\n"
     "        dw STR_OR,  handle_or\n"
+    "        dw STR_OUT, handle_out\n"
     "        dw STR_POP, handle_pop\n"
     "        dw STR_POPA, handle_popa\n"
     "        dw STR_PUSH, handle_push\n"
@@ -3501,6 +3549,7 @@ asm(
     "STR_DEFINE  db 'define',0\n"
     "STR_DW      db 'dw',0\n"
     "STR_ENDMACRO db 'endmacro',0\n"
+    "STR_IN      db 'in',0\n"
     "STR_INC     db 'inc',0\n"
     "STR_INCLUDE db 'include',0\n"
     "STR_INT     db 'int',0\n"
@@ -3537,6 +3586,7 @@ asm(
     "STR_NOT     db 'not',0\n"
     "STR_OR      db 'or',0\n"
     "STR_ORG     db 'org',0\n"
+    "STR_OUT     db 'out',0\n"
     "STR_SHORT   db 'short',0\n"
     "STR_POP     db 'pop',0\n"
     "STR_POPA    db 'popa',0\n"
