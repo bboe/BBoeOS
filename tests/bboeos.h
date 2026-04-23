@@ -108,12 +108,12 @@ void set_exec_arg(const char *arg);
 void set_palette_color(int fd, int index, int r, int g, int b);
 /* Power off via APM. Returns only when APM is unavailable. */
 void shutdown(void);
-/* Low 16 bits of BIOS tick counter (BBoeOS-specific) */
-int ticks(void);
 /* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);
    rely on cc.py's builtin for compilation, don't redeclare here. */
 /* BBoeOS syscall: seconds since boot */
 int uptime(void);
+/* Milliseconds since boot (low 16 bits; assign to unsigned long for the full DX:AX) */
+int uptime_ms(void);
 /* Switch video mode (no POSIX equivalent) */
 void video_mode(int fd, int mode);
 

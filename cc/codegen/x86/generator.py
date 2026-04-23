@@ -96,9 +96,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         "shutdown": frozenset({"ax"}),
         "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
-        "ticks": frozenset({"ax", "cx", "dx"}),
         "unlink": frozenset({"ax", "si"}),
         "uptime": frozenset({"ax"}),
+        "uptime_ms": frozenset({"ax", "dx"}),
         "video_mode": frozenset({"ax", "bx", "dx"}),
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
