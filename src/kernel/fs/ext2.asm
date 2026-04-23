@@ -753,13 +753,30 @@ ext2_add_dir_entry:
         shr bx, 1
         test ax, ax
         jz .ead_alloc_blk               ; unallocated block → need new block
+        mov [ext2_ade_blk_num], ax      ; save block number (AX clobbered by read_blk_sec)
         xor bx, bx
         call ext2_read_blk_sec          ; AX=block, BX=0 → sector 0; sets ext2_last_blk_sec
         jc .ead_err
         xor bx, bx
+        mov word [ext2_ade_cur_sec], 0
         .ead_scan_entry:
-        cmp bx, 512                     ; only scan entries that start in sector 0
-        jae .ead_next_blk_inc
+        cmp bx, 512                     ; end of current sector?
+        jb .ead_in_sector
+        ;; Advance to next sector within this block
+        inc word [ext2_ade_cur_sec]
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl                          ; CL = log2(sectors_per_block)
+        mov ax, 1
+        shl ax, cl                      ; AX = sectors_per_block
+        cmp [ext2_ade_cur_sec], ax
+        jae .ead_next_blk_inc           ; all sectors exhausted → try next block
+        mov bx, [ext2_ade_cur_sec]
+        mov ax, [ext2_ade_blk_num]
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER
+        jc .ead_err
+        xor bx, bx
+        .ead_in_sector:
         mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
         cmp dx, 8
         jb .ead_err
@@ -774,8 +791,11 @@ ext2_add_dir_entry:
         add bx, dx
         jmp .ead_scan_entry
         .ead_live_entry:
-        mov cx, bx
-        add cx, dx                      ; CX = offset after this entry
+        ;; abs_end = cur_sec * 512 + bx + rec_len (compare against block_size)
+        mov cx, [ext2_ade_cur_sec]
+        shl cx, 9                       ; CX = cur_sec * 512
+        add cx, bx
+        add cx, dx                      ; CX = abs offset after this entry
         push cx
         xor ah, ah
         mov al, [ext2_log_block_size]
@@ -1839,15 +1859,36 @@ ext2_remove_dir_entry:
         mov ax, [ext2_dir_blks + bx]
         test ax, ax
         jz .erde_not_found
+        mov [ext2_rde_blk_num], ax      ; save block number (AX clobbered by read_blk_sec)
         push cx
         xor bx, bx
         call ext2_read_blk_sec          ; AX=block, BX=0 → SECTOR_BUFFER
         pop cx
         jc .erde_err
         xor bx, bx
+        mov word [ext2_rde_cur_sec], 0
         .erde_scan:
-        cmp bx, 512
-        jae .erde_blk_done
+        cmp bx, 512                     ; end of current sector?
+        jb .erde_in_sector
+        ;; Advance to next sector within this block
+        inc word [ext2_rde_cur_sec]
+        push cx
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl                          ; CL = log2(sectors_per_block)
+        mov ax, 1
+        shl ax, cl                      ; AX = sectors_per_block
+        cmp [ext2_rde_cur_sec], ax
+        pop cx                          ; pop does not modify flags
+        jae .erde_blk_done              ; all sectors exhausted → next block
+        push cx
+        mov bx, [ext2_rde_cur_sec]
+        mov ax, [ext2_rde_blk_num]
+        call ext2_read_blk_sec          ; AX=block, BX=sector → SECTOR_BUFFER
+        pop cx
+        jc .erde_err
+        xor bx, bx
+        .erde_in_sector:
         mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
         cmp dx, 8
         jb .erde_err
@@ -2932,7 +2973,7 @@ ext2_search_blk:
 
 ext2_read_sec:
         ;; Fill SECTOR_BUFFER with the 512-byte sector at the current read position.
-        ;; Handles direct blocks (0..11) and the singly-indirect block via ext2_get_data_block.
+        ;; Handles direct, singly-indirect, and doubly-indirect blocks via ext2_get_data_block.
         ;; Input:  SI = FD entry pointer (FD_OFFSET_START = inode number)
         ;; Output: SECTOR_BUFFER filled, BX = byte offset within sector; CF on error
         push ax
@@ -3031,7 +3072,9 @@ ext2_resolve_path:
         ret
 
         ;; State
-        ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index
+        ext2_ade_blk_num       dw 0     ; ext2_add_dir_entry: block number for multi-sector scan
+        ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index (0-11)
+        ext2_ade_cur_sec       dw 0     ; ext2_add_dir_entry: sector within current block
         ext2_ade_filetype      db 1     ; ext2_add_dir_entry: file type (1=reg, 2=dir)
         ext2_ade_inode         dw 0     ; ext2_add_dir_entry: new file's inode
         ext2_ade_min_rec       dw 0     ; ext2_add_dir_entry: minimum rec_len needed
@@ -3093,6 +3136,8 @@ ext2_resolve_path:
         ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
         ext2_rd_outbuf         dw 0
         ext2_rd_rec_len        dw 0
+        ext2_rde_blk_num       dw 0     ; ext2_remove_dir_entry: block number for multi-sector scan
+        ext2_rde_cur_sec       dw 0     ; ext2_remove_dir_entry: sector within current block
         ext2_rde_name          dw 0     ; ext2_remove_dir_entry: pointer to name string
         ext2_rdr_blks          times 14 dw 0  ; ext2_rmdir: saved i_block[0..13]
         ext2_rdr_cde_blk       dw 0     ; ext2_check_dir_empty: block number
