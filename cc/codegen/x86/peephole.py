@@ -1,62 +1,145 @@
 """x86 peephole optimization passes.
 
-Runs over ``self.lines`` (the emitted assembly buffer) after
-``generate()`` has walked the AST / IR.  Each ``peephole_*`` pass
-scans for a specific instruction-sequence pattern and rewrites it
-into a shorter / cheaper equivalent; ``peephole()`` orchestrates
-them.  All passes are lexical — no AST or IR state — so they're
-safe to run in any order as long as earlier passes' outputs don't
-silently invalidate later passes' assumptions.
+Runs over the emitted assembly buffer after ``generate()`` has walked
+the AST / IR.  Each ``peephole_*`` pass scans for a specific
+instruction-sequence pattern and rewrites it into a shorter / cheaper
+equivalent; :meth:`Peepholer.run` orchestrates them.  All passes are
+lexical — no AST or IR state — so they're safe to run in any order as
+long as earlier passes' outputs don't silently invalidate later
+passes' assumptions.
 
 The patterns are x86-specific (``mov ax, imm / add ax, … / mov reg,
-ax`` etc.), so the mixin lives in the x86 package rather than
+ax`` etc.), so this module lives in the x86 package rather than
 :mod:`cc.codegen.base`.
 """
 
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from cc.codegen.x86.jumps import JUMP_INVERT
 
+if TYPE_CHECKING:
+    from cc.target import CodegenTarget
 
-class PeepholeMixin:
-    """x86 peephole passes, mixed into :class:`X86CodeGenerator`.
 
-    Relies on the mixing class for ``self.lines`` (emit buffer,
-    initialized by :class:`cc.codegen.base.CodeGeneratorBase`) and
-    ``self.target`` (for accumulator / register-pool introspection).
+class Peepholer:
+    """x86 peephole passes, run as a standalone post-processing stage.
+
+    Owns a reference to the emitted-line buffer and the
+    :class:`cc.target.CodegenTarget` describing the accumulator and
+    register pool.  Instantiate, call :meth:`run`, and use the
+    returned list as the new emit buffer.
     """
 
-    def peephole(self) -> None:
-        """Run peephole optimization passes over generated assembly.
+    def __init__(self, *, lines: list[str], target: CodegenTarget) -> None:
+        """Capture the emit buffer and target descriptor.
 
-        Ordering note: :meth:`peephole_memory_arithmetic` runs before
-        :meth:`peephole_store_reload` so that load/modify/store triples
-        get folded into a direct ``inc D`` (etc.) first.  Reversing the
-        order lets ``store_reload`` delete a reload that ``emit_store_local``
-        added as a safety net — ``memory_arithmetic`` would then fuse
-        the triple and leave the downstream read picking up stale AX.
+        ``lines`` is consumed in place by the passes that mutate it and
+        replaced by the ones that rebuild it; call :meth:`run` to
+        obtain the final buffer regardless of which passes ran.
         """
-        self.peephole_dead_code()
-        self.peephole_double_jump()
-        self.peephole_jump_next()
-        self.peephole_label_forwarding()
-        self.peephole_memory_arithmetic()
-        self.peephole_memory_arithmetic_byte()
-        self.peephole_store_reload()
-        self.peephole_dx_to_memory()
-        self.peephole_constant_to_register()
-        self.peephole_register_arithmetic()
-        self.peephole_index_through_memory()
-        self.peephole_fold_zero_save()
-        self.peephole_compare_through_register()
-        self.peephole_dead_ah()
-        self.peephole_redundant_byte_mask()
-        self.peephole_unused_cld()
-        self.peephole_dead_stores()
-        self.peephole_dead_test_after_sbb()
-        self.peephole_redundant_bx()
+        self.lines = lines
+        self.target = target
+
+    def _dedup_register_reloads(self, register: str, /) -> None:
+        """Skip ``mov {register}, <source>`` when ``<source>`` already reached this register.
+
+        The tracked source goes stale on anything that changes either
+        the register itself (direct clobber) or the source register
+        when ``<source>`` is register-sourced — e.g. ``mov si, ax / inc
+        ax / mov si, ax`` is NOT a redundant reload because ``inc ax``
+        makes the second ``mov si, ax`` store a different value.
+        Memory / immediate sources stay stable until the destination
+        register is clobbered.
+        """
+        value: str | None = None
+        result: list[str] = []
+        # Instructions that clobber the destination register directly.
+        clobber_prefixes = (
+            f"add {register}",
+            "call ",
+            "int ",
+            "lodsb",
+            "lodsw",
+            "movsb",
+            "movsw",
+            f"pop {register}",
+            "rep ",
+            f"sub {register}",
+            "xchg",
+            f"xor {register}",
+        )
+        # Register-modifying mnemonics we care about as SOURCE clobbers.
+        # ``mov <reg>, X`` is handled below alongside the other writers.
+        source_clobber_operations = (
+            "add ",
+            "and ",
+            "dec ",
+            "div ",
+            "idiv ",
+            "imul ",
+            "inc ",
+            "mov ",
+            "mul ",
+            "neg ",
+            "not ",
+            "or ",
+            "rcl ",
+            "rcr ",
+            "rol ",
+            "ror ",
+            "sal ",
+            "sar ",
+            "shl ",
+            "shr ",
+            "sub ",
+            "xor ",
+        )
+        for line in self.lines:
+            stripped = line.strip()
+            if stripped.startswith(f"mov {register}, "):
+                source = stripped[len(f"mov {register}, ") :]
+                if source == value:
+                    continue  # redundant — skip
+                value = source
+            elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
+                value = None
+            elif value is not None and "[" not in value:
+                # Source is a register or immediate.  Check whether this
+                # instruction writes to the source register, invalidating
+                # the stored value.  e.g. ``mov si, ax / inc ax`` — the
+                # tracked ``ax`` in SI no longer matches the current AX.
+                for operation in source_clobber_operations:
+                    if not stripped.startswith(operation):
+                        continue
+                    target = stripped[len(operation) :].split(",", 1)[0].strip()
+                    if target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]):
+                        value = None
+                    break
+            result.append(line)
+        self.lines = result
+
+    @staticmethod
+    def _extract_local_label(line: str, /) -> str | None:
+        """Return the _l_ label from a store or declaration, or None.
+
+        Stops at the first non-identifier byte so a byte-offset store
+        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
+        same way peephole_dead_stores resolves reads.
+        """
+        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
+        if line.startswith("mov") and "[_l_" in line and "], " in line:
+            start = line.index("[_l_") + 1
+            end = start
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            return line[start:end]
+        # Declaration: _l_NAME: dw 0
+        if line.startswith("_l_") and line.endswith(": dw 0"):
+            return line[: line.index(":")]
+        return None
 
     def peephole_compare_through_register(self) -> None:
         """Fold ``mov ax, <reg> / cmp ax, <X>`` into ``cmp <reg>, <X>``.
@@ -944,84 +1027,6 @@ class PeepholeMixin:
             del self.lines[i + 2]
             continue
 
-    def _dedup_register_reloads(self, register: str, /) -> None:
-        """Skip ``mov {register}, <source>`` when ``<source>`` already reached this register.
-
-        The tracked source goes stale on anything that changes either
-        the register itself (direct clobber) or the source register
-        when ``<source>`` is register-sourced — e.g. ``mov si, ax / inc
-        ax / mov si, ax`` is NOT a redundant reload because ``inc ax``
-        makes the second ``mov si, ax`` store a different value.
-        Memory / immediate sources stay stable until the destination
-        register is clobbered.
-        """
-        value: str | None = None
-        result: list[str] = []
-        # Instructions that clobber the destination register directly.
-        clobber_prefixes = (
-            f"add {register}",
-            "call ",
-            "int ",
-            "lodsb",
-            "lodsw",
-            "movsb",
-            "movsw",
-            f"pop {register}",
-            "rep ",
-            f"sub {register}",
-            "xchg",
-            f"xor {register}",
-        )
-        # Register-modifying mnemonics we care about as SOURCE clobbers.
-        # ``mov <reg>, X`` is handled below alongside the other writers.
-        source_clobber_operations = (
-            "add ",
-            "and ",
-            "dec ",
-            "div ",
-            "idiv ",
-            "imul ",
-            "inc ",
-            "mov ",
-            "mul ",
-            "neg ",
-            "not ",
-            "or ",
-            "rcl ",
-            "rcr ",
-            "rol ",
-            "ror ",
-            "sal ",
-            "sar ",
-            "shl ",
-            "shr ",
-            "sub ",
-            "xor ",
-        )
-        for line in self.lines:
-            stripped = line.strip()
-            if stripped.startswith(f"mov {register}, "):
-                source = stripped[len(f"mov {register}, ") :]
-                if source == value:
-                    continue  # redundant — skip
-                value = source
-            elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
-                value = None
-            elif value is not None and "[" not in value:
-                # Source is a register or immediate.  Check whether this
-                # instruction writes to the source register, invalidating
-                # the stored value.  e.g. ``mov si, ax / inc ax`` — the
-                # tracked ``ax`` in SI no longer matches the current AX.
-                for operation in source_clobber_operations:
-                    if not stripped.startswith(operation):
-                        continue
-                    target = stripped[len(operation) :].split(",", 1)[0].strip()
-                    if target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]):
-                        value = None
-                    break
-            result.append(line)
-        self.lines = result
-
     def peephole_store_reload(self) -> None:
         """Remove redundant store-then-reload sequences.
 
@@ -1110,3 +1115,34 @@ class PeepholeMixin:
                 df_clear = False
             result.append(line)
         self.lines = result
+
+    def run(self) -> list[str]:
+        """Run peephole optimization passes over generated assembly.
+
+        Ordering note: :meth:`peephole_memory_arithmetic` runs before
+        :meth:`peephole_store_reload` so that load/modify/store triples
+        get folded into a direct ``inc D`` (etc.) first.  Reversing the
+        order lets ``store_reload`` delete a reload that ``emit_store_local``
+        added as a safety net — ``memory_arithmetic`` would then fuse
+        the triple and leave the downstream read picking up stale AX.
+        """
+        self.peephole_dead_code()
+        self.peephole_double_jump()
+        self.peephole_jump_next()
+        self.peephole_label_forwarding()
+        self.peephole_memory_arithmetic()
+        self.peephole_memory_arithmetic_byte()
+        self.peephole_store_reload()
+        self.peephole_dx_to_memory()
+        self.peephole_constant_to_register()
+        self.peephole_register_arithmetic()
+        self.peephole_index_through_memory()
+        self.peephole_fold_zero_save()
+        self.peephole_compare_through_register()
+        self.peephole_dead_ah()
+        self.peephole_redundant_byte_mask()
+        self.peephole_unused_cld()
+        self.peephole_dead_stores()
+        self.peephole_dead_test_after_sbb()
+        self.peephole_redundant_bx()
+        return self.lines

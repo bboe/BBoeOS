@@ -12,9 +12,11 @@ the IR lowering helpers (``_ir_value_to_ast``, ``lower_ir_body``,
 Everything in this module reads arch-specific register names and
 x86 mnemonics, so it stays inside the ``cc.codegen.x86`` package.
 The mixin only relies on methods supplied by ``CodeGeneratorBase``
-and the other x86 mixins (``BuiltinsMixin`` for ``builtin_*``
-dispatch, ``PeepholeMixin`` for the ``peephole()`` pass), so
-composition order in ``X86CodeGenerator`` isn't load-bearing.
+and ``BuiltinsMixin`` (for ``builtin_*`` dispatch), so composition
+order in ``X86CodeGenerator`` isn't load-bearing.  The peephole pass
+runs as a post-processing stage via :class:`cc.codegen.x86.peephole.Peepholer`
+and is invoked from :meth:`generate` after all functions have been
+emitted.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from cc.ast_nodes import (
     While,
 )
 from cc.codegen.x86.jumps import JUMP_WHEN_FALSE
+from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
 from cc.target import X86CodegenTarget16
 from cc.utils import decode_string_escapes, string_byte_length
@@ -112,7 +115,7 @@ class EmissionMixin:
                 self.generate_function(ir_func)
             else:
                 self.generate_function(function)
-        self.peephole()
+        self.lines = Peepholer(lines=self.lines, target=self.target).run()
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
         # File-scope ``asm("...")`` blocks are emitted BEFORE globals /
