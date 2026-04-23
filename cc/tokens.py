@@ -59,10 +59,14 @@ SHIFT_OPERATORS = frozenset({"SHL", "SHR"})
 COMPOUND_ASSIGN_OPERATORS = {
     "AMP_ASSIGN": "&",
     "CARET_ASSIGN": "^",
+    "MINUS_ASSIGN": "-",
+    "PERCENT_ASSIGN": "%",
     "PIPE_ASSIGN": "|",
     "PLUS_ASSIGN": "+",
     "SHL_ASSIGN": "<<",
     "SHR_ASSIGN": ">>",
+    "SLASH_ASSIGN": "/",
+    "STAR_ASSIGN": "*",
 }
 
 TOKEN_PATTERN = re.compile(
@@ -86,6 +90,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<ASSIGN>=)
   | (?P<GT>>)
   | (?P<LT><)
+  | (?P<MINUS_ASSIGN>-=)
   | (?P<MINUS>-)
   | (?P<AND_AND>&&)
   | (?P<AMP_ASSIGN>&=)
@@ -97,9 +102,12 @@ TOKEN_PATTERN = re.compile(
   | (?P<CARET>\^)
   | (?P<TILDE>~)
   | (?P<NOT>!)
+  | (?P<PERCENT_ASSIGN>%=)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
+  | (?P<SLASH_ASSIGN>/=)
   | (?P<SLASH>/)
+  | (?P<STAR_ASSIGN>\*=)
   | (?P<STAR>\*)
   | (?P<LBRACE>\{)
   | (?P<LBRACKET>\[)

@@ -27,7 +27,7 @@ int remaining;
 __attribute__((carry_return))
 int tick() {
     if (remaining > 0) {
-        remaining = remaining - 1;
+        remaining -= 1;
         return 1;
     }
     return 0;
@@ -49,7 +49,7 @@ int main() {
     remaining = 3;
     int steps = 0;
     while (tick()) {
-        steps = steps + 1;
+        steps += 1;
     }
     printf("tick() fired %d times, remaining = %d\n", steps, remaining);
     return 0;

@@ -769,11 +769,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         :meth:`peephole_memory_arithmetic_byte` collapses the 4-line
         byte-scalar-global shape (``mov al, [mem] / xor ah, ah / <operation>
         ax, ... / mov [mem], al``) into ``<operation> byte [mem], ...``.
-        All three leave AX holding something other than the new
-        stored value, so the ``ax_local`` tracking the caller just
-        set (pointing at the store's destination local) would
-        mislead later reads into skipping a reload and picking up
-        stale contents.
+        :meth:`peephole_dx_to_memory` collapses ``mov ax, dx / mov [mem],
+        ax`` (emitted after a ``%`` operation stages the remainder from
+        DX through AX so the standard store path can flush it) into
+        ``mov [mem], dx`` — and AX then still holds the quotient from
+        the preceding ``div`` rather than the remainder that actually
+        reached memory.  All four leave AX holding something other
+        than the new stored value, so the ``ax_local`` tracking the
+        caller just set (pointing at the store's destination local)
+        would mislead later reads into skipping a reload and picking
+        up stale contents.
 
         The caller — :meth:`emit_store_local` — consults this after the
         final ``mov <D>, ax`` (or ``mov [_g_X], al`` for byte globals)
@@ -803,6 +808,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         return True
                     if third.startswith((f"add {acc}, ", f"sub {acc}, ", f"and {acc}, ", f"or {acc}, ", f"xor {acc}, ")):
                         return True
+        # peephole_dx_to_memory: ``mov ax, dx / mov [mem], ax`` folds
+        # to ``mov [mem], dx`` and leaves AX holding the pre-``mov
+        # ax, dx`` value (the quotient, when the pair was emitted by
+        # a ``%`` expression).
+        if len(self.lines) >= 2:
+            penultimate = self.lines[-2].strip()
+            last = self.lines[-1].strip()
+            if penultimate == f"mov {acc}, {self.target.dx_register}" and last.startswith("mov [") and last.endswith(f", {acc}"):
+                return True
         if len(self.lines) < 3:
             return False
         first = self.lines[-3].strip()

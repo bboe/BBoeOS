@@ -13,7 +13,7 @@ int buffer_character_at(char *buffer, int offset) {
         return -1;
     }
     if (offset >= gap_start) {
-        offset = offset + gap_size;
+        offset += gap_size;
     }
     return buffer[offset];
 }
@@ -25,11 +25,11 @@ int column_before(char *buffer) {
     int column = 0;
     int i = gap_start;
     while (i > 0) {
-        i = i - 1;
+        i -= 1;
         if (buffer[i] == '\n') {
             return column;
         }
-        column = column + 1;
+        column += 1;
     }
     return column;
 }
@@ -40,8 +40,8 @@ int column_before(char *buffer) {
 int gap_move_left() {
     char *buffer = EDIT_BUFFER_BASE;
     buffer[gap_end - 1] = buffer[gap_start - 1];
-    gap_start = gap_start - 1;
-    gap_end = gap_end - 1;
+    gap_start -= 1;
+    gap_end -= 1;
     return buffer[gap_end];
 }
 
@@ -50,8 +50,8 @@ int gap_move_left() {
 int gap_move_right() {
     char *buffer = EDIT_BUFFER_BASE;
     buffer[gap_start] = buffer[gap_end];
-    gap_start = gap_start + 1;
-    gap_end = gap_end + 1;
+    gap_start += 1;
+    gap_end += 1;
     return buffer[gap_start - 1];
 }
 
@@ -99,8 +99,8 @@ int main(int argc, char *argv[]) {
         int dest = EDIT_BUFFER_SIZE - 1;
         while (src >= 0) {
             buffer[dest] = buffer[src];
-            dest = dest - 1;
-            src = src - 1;
+            dest -= 1;
+            src -= 1;
         }
         gap_end = EDIT_BUFFER_SIZE - bytes;
     }
@@ -117,9 +117,9 @@ int main(int argc, char *argv[]) {
             if (character < 0) {
                 break;
             }
-            offset = offset + 1;
+            offset += 1;
             if (character == 10) {
-                lines_to_skip = lines_to_skip - 1;
+                lines_to_skip -= 1;
             }
         }
 
@@ -142,25 +142,25 @@ int main(int argc, char *argv[]) {
                     at_eof = 1;
                     break;
                 }
-                offset = offset + 1;
+                offset += 1;
                 if (character == 10) {
                     if (visible != 0) {
                         putchar('\n');
                     }
-                    rows_remaining = rows_remaining - 1;
+                    rows_remaining -= 1;
                     break;
                 }
                 if (skip > 0) {
-                    skip = skip - 1;
+                    skip -= 1;
                 } else if (visible > 0) {
                     putchar(character);
-                    visible = visible - 1;
+                    visible -= 1;
                 }
             }
             if (at_eof != 0 && visible != 80) {
                 /* Partial row at EOF: consume a display row; emit \n
                    unless a full row already wrapped the cursor. */
-                rows_remaining = rows_remaining - 1;
+                rows_remaining -= 1;
                 if (visible != 0) {
                     putchar('\n');
                 }
@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
         /* Pad remaining rows with \n to land on row 25. */
         while (rows_remaining > 0) {
             putchar('\n');
-            rows_remaining = rows_remaining - 1;
+            rows_remaining -= 1;
         }
 
         /* ---- Status bar (row 25) ---- */
@@ -236,52 +236,52 @@ int main(int argc, char *argv[]) {
                 int c = gap_move_left();
                 if (c == '\n') {
                     if (cursor_line > 0) {
-                        cursor_line = cursor_line - 1;
+                        cursor_line -= 1;
                         cursor_column = column_before(buffer);
                         if (cursor_line < view_line) {
                             view_line = cursor_line;
                         }
                     }
                 } else if (cursor_column > 0) {
-                    cursor_column = cursor_column - 1;
+                    cursor_column -= 1;
                 }
             }
         } else if (character == '\x05') {
             /* Ctrl+E: move to end of line. */
             while (gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
                 gap_move_right();
-                cursor_column = cursor_column + 1;
+                cursor_column += 1;
             }
         } else if (character == '\x06') {
             /* Ctrl+F: cursor right one character. */
             if (gap_end < EDIT_BUFFER_SIZE) {
                 int c = gap_move_right();
                 if (c == '\n') {
-                    cursor_line = cursor_line + 1;
+                    cursor_line += 1;
                     cursor_column = 0;
                     if (cursor_line >= view_line + 24) {
                         view_line = cursor_line - 23;
                     }
                 } else {
-                    cursor_column = cursor_column + 1;
+                    cursor_column += 1;
                 }
             }
         } else if (character == '\b' || character == '\x7F') {
             /* Backspace / DEL: delete the char before the cursor. */
             if (gap_start > 0) {
                 char c = buffer[gap_start - 1];
-                gap_start = gap_start - 1;
+                gap_start -= 1;
                 dirty = 1;
                 if (c == '\n') {
                     if (cursor_line > 0) {
-                        cursor_line = cursor_line - 1;
+                        cursor_line -= 1;
                         cursor_column = column_before(buffer);
                         if (cursor_line < view_line) {
                             view_line = cursor_line;
                         }
                     }
                 } else if (cursor_column > 0) {
-                    cursor_column = cursor_column - 1;
+                    cursor_column -= 1;
                 }
             }
         } else if (character == '\x0B') {
@@ -290,11 +290,11 @@ int main(int argc, char *argv[]) {
             int kill_index = 0;
             while (gap_end < EDIT_BUFFER_SIZE) {
                 char c = buffer[gap_end];
-                gap_end = gap_end + 1;
+                gap_end += 1;
                 dirty = 1;
                 if (kill_index < EDIT_KILL_BUFFER_SIZE) {
                     kill_buf[kill_index] = c;
-                    kill_index = kill_index + 1;
+                    kill_index += 1;
                 }
                 if (c == '\n') {
                     break;
@@ -305,9 +305,9 @@ int main(int argc, char *argv[]) {
             /* Enter: insert newline at cursor. */
             if (gap_start < gap_end) {
                 buffer[gap_start] = '\n';
-                gap_start = gap_start + 1;
+                gap_start += 1;
                 dirty = 1;
-                cursor_line = cursor_line + 1;
+                cursor_line += 1;
                 cursor_column = 0;
                 if (cursor_line >= view_line + 24) {
                     view_line = cursor_line - 23;
@@ -325,15 +325,15 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (found_nl) {
-                cursor_line = cursor_line + 1;
+                cursor_line += 1;
                 cursor_column = 0;
                 if (cursor_line >= view_line + 24) {
                     view_line = cursor_line - 23;
                 }
                 while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
                     gap_move_right();
-                    cursor_column = cursor_column + 1;
-                    target_col = target_col - 1;
+                    cursor_column += 1;
+                    target_col -= 1;
                 }
             }
         } else if (character == '\x10') {
@@ -353,15 +353,15 @@ int main(int argc, char *argv[]) {
                     while (gap_start > 0 && buffer[gap_start - 1] != '\n') {
                         gap_move_left();
                     }
-                    cursor_line = cursor_line - 1;
+                    cursor_line -= 1;
                     cursor_column = 0;
                     if (cursor_line < view_line) {
                         view_line = cursor_line;
                     }
                     while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
                         gap_move_right();
-                        cursor_column = cursor_column + 1;
-                        target_col = target_col - 1;
+                        cursor_column += 1;
+                        target_col -= 1;
                     }
                 }
             }
@@ -390,13 +390,13 @@ int main(int argc, char *argv[]) {
                     int i = 0;
                     while (i < chunk_size) {
                         sector[i] = buffer_character_at(buffer, logical_offset + i);
-                        i = i + 1;
+                        i += 1;
                     }
                     if (write(save_fd, sector, chunk_size) < 0) {
                         write_err = 1;
                         break;
                     }
-                    logical_offset = logical_offset + chunk_size;
+                    logical_offset += chunk_size;
                 }
                 close(save_fd);
                 if (write_err) {
@@ -413,27 +413,27 @@ int main(int argc, char *argv[]) {
                 if (gap_start < gap_end) {
                     char c = kill_buf[i];
                     buffer[gap_start] = c;
-                    gap_start = gap_start + 1;
+                    gap_start += 1;
                     dirty = 1;
                     if (c == '\n') {
-                        cursor_line = cursor_line + 1;
+                        cursor_line += 1;
                         cursor_column = 0;
                         if (cursor_line >= view_line + 24) {
                             view_line = cursor_line - 23;
                         }
                     } else {
-                        cursor_column = cursor_column + 1;
+                        cursor_column += 1;
                     }
                 }
-                i = i + 1;
+                i += 1;
             }
         } else if (character >= ' ' && character <= '~') {
             /* Printable ASCII: insert at cursor. */
             if (gap_start < gap_end) {
                 buffer[gap_start] = character;
-                gap_start = gap_start + 1;
+                gap_start += 1;
                 dirty = 1;
-                cursor_column = cursor_column + 1;
+                cursor_column += 1;
             }
         }
     }

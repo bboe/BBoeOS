@@ -22,7 +22,7 @@ int main() {
         if (bytes > 0) {
             break;
         }
-        tries = tries - 1;
+        tries -= 1;
     }
     close(fd);
 
@@ -38,7 +38,7 @@ int main() {
     }
     while (i < limit) {
         printf("%x ", receive_buffer[i]);
-        i = i + 1;
+        i += 1;
     }
     putchar('\n');
 }
