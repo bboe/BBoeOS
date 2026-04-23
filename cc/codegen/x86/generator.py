@@ -42,20 +42,23 @@ from cc.codegen.base import CodeGeneratorBase
 from cc.codegen.x86.builtins import BuiltinsMixin
 from cc.codegen.x86.emission import EmissionMixin
 from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_TRUE
-from cc.codegen.x86.peephole import PeepholeMixin
 from cc.errors import CompileError
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.utils import decode_string_escapes, string_byte_length
 
 
-class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGeneratorBase):
+class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     """Generates NASM x86 assembly from the parsed AST.
 
     Composed from concern-specific mixins (``BuiltinsMixin``,
-    ``PeepholeMixin``, …) alongside the arch-agnostic
+    ``EmissionMixin``) alongside the arch-agnostic
     ``CodeGeneratorBase``.  Put the mixins before
     ``CodeGeneratorBase`` so MRO resolves their overrides first,
-    though none of them override base methods today.
+    though none of them override base methods today.  The peephole
+    pass is a standalone collaborator (:class:`cc.codegen.x86.peephole.Peepholer`)
+    rather than a mixin — it runs as a post-processing stage over
+    the finished line buffer and has no need to share per-statement
+    state with the generator.
     """
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
@@ -571,26 +574,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             return size.value * stride
         if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
             return self.NAMED_CONSTANT_VALUES[size.name] * stride
-        return None
-
-    @staticmethod
-    def _extract_local_label(line: str, /) -> str | None:
-        """Return the _l_ label from a store or declaration, or None.
-
-        Stops at the first non-identifier byte so a byte-offset store
-        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
-        same way peephole_dead_stores resolves reads.
-        """
-        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
-        if line.startswith("mov") and "[_l_" in line and "], " in line:
-            start = line.index("[_l_") + 1
-            end = start
-            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
-                end += 1
-            return line[start:end]
-        # Declaration: _l_NAME: dw 0
-        if line.startswith("_l_") and line.endswith(": dw 0"):
-            return line[: line.index(":")]
         return None
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:

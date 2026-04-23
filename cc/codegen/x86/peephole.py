@@ -1,34 +1,49 @@
 """x86 peephole optimization passes.
 
-Runs over ``self.lines`` (the emitted assembly buffer) after
-``generate()`` has walked the AST / IR.  Each ``peephole_*`` pass
-scans for a specific instruction-sequence pattern and rewrites it
-into a shorter / cheaper equivalent; ``peephole()`` orchestrates
-them.  All passes are lexical — no AST or IR state — so they're
-safe to run in any order as long as earlier passes' outputs don't
-silently invalidate later passes' assumptions.
+Runs over the emitted assembly buffer after ``generate()`` has walked
+the AST / IR.  Each ``peephole_*`` pass scans for a specific
+instruction-sequence pattern and rewrites it into a shorter / cheaper
+equivalent; :meth:`Peepholer.run` orchestrates them.  All passes are
+lexical — no AST or IR state — so they're safe to run in any order as
+long as earlier passes' outputs don't silently invalidate later
+passes' assumptions.
 
 The patterns are x86-specific (``mov ax, imm / add ax, … / mov reg,
-ax`` etc.), so the mixin lives in the x86 package rather than
+ax`` etc.), so this module lives in the x86 package rather than
 :mod:`cc.codegen.base`.
 """
 
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from cc.codegen.x86.jumps import JUMP_INVERT
 
+if TYPE_CHECKING:
+    from cc.target import CodegenTarget
 
-class PeepholeMixin:
-    """x86 peephole passes, mixed into :class:`X86CodeGenerator`.
 
-    Relies on the mixing class for ``self.lines`` (emit buffer,
-    initialized by :class:`cc.codegen.base.CodeGeneratorBase`) and
-    ``self.target`` (for accumulator / register-pool introspection).
+class Peepholer:
+    """x86 peephole passes, run as a standalone post-processing stage.
+
+    Owns a reference to the emitted-line buffer and the
+    :class:`cc.target.CodegenTarget` describing the accumulator and
+    register pool.  Instantiate, call :meth:`run`, and use the
+    returned list as the new emit buffer.
     """
 
-    def peephole(self) -> None:
+    def __init__(self, *, lines: list[str], target: CodegenTarget) -> None:
+        """Capture the emit buffer and target descriptor.
+
+        ``lines`` is consumed in place by the passes that mutate it and
+        replaced by the ones that rebuild it; call :meth:`run` to
+        obtain the final buffer regardless of which passes ran.
+        """
+        self.lines = lines
+        self.target = target
+
+    def run(self) -> list[str]:
         """Run peephole optimization passes over generated assembly.
 
         Ordering note: :meth:`peephole_memory_arithmetic` runs before
@@ -57,6 +72,27 @@ class PeepholeMixin:
         self.peephole_dead_stores()
         self.peephole_dead_test_after_sbb()
         self.peephole_redundant_bx()
+        return self.lines
+
+    @staticmethod
+    def _extract_local_label(line: str, /) -> str | None:
+        """Return the _l_ label from a store or declaration, or None.
+
+        Stops at the first non-identifier byte so a byte-offset store
+        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
+        same way peephole_dead_stores resolves reads.
+        """
+        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
+        if line.startswith("mov") and "[_l_" in line and "], " in line:
+            start = line.index("[_l_") + 1
+            end = start
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            return line[start:end]
+        # Declaration: _l_NAME: dw 0
+        if line.startswith("_l_") and line.endswith(": dw 0"):
+            return line[: line.index(":")]
+        return None
 
     def peephole_compare_through_register(self) -> None:
         """Fold ``mov ax, <reg> / cmp ax, <X>`` into ``cmp <reg>, <X>``.
