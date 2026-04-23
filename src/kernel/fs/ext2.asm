@@ -1759,6 +1759,40 @@ ext2_rename:
         jz .ern_filetype_set
         mov byte [ext2_ade_filetype], 2
         .ern_filetype_set:
+        ;; Cross-parent directory move: update '..' and adjust parent link counts
+        cmp byte [ext2_ade_filetype], 2
+        jne .ern_add_entry
+        mov ax, [ext2_rn_old_dir]
+        cmp ax, [ext2_rn_new_dir]
+        je .ern_add_entry
+        ;; Update '..' inode in the moved directory's data block
+        mov ax, [ext2_rn_old_inode]
+        call ext2_read_inode            ; BX = inode ptr; clobbers AX, CX, DX
+        mov ax, [bx + EXT2_INODE_BLOCK] ; AX = i_block[0]
+        xor bx, bx                      ; BX = sector 0 within block
+        call ext2_read_blk_sec          ; SECTOR_BUFFER = directory data; clobbers AX
+        jc .ern_err
+        mov ax, [ext2_rn_new_dir]
+        mov [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE], ax
+        mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        ;; Decrement old parent's i_links_count
+        mov ax, [ext2_rn_old_dir]
+        call ext2_read_inode
+        dec word [bx + EXT2_INODE_LINKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        ;; Increment new parent's i_links_count
+        mov ax, [ext2_rn_new_dir]
+        call ext2_read_inode
+        inc word [bx + EXT2_INODE_LINKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        .ern_add_entry:
         ;; Add new directory entry
         mov ax, [ext2_rn_new_dir]
         mov di, [ext2_rn_new_name]

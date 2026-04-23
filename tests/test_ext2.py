@@ -95,8 +95,18 @@ TESTS: list[ProgramTest] = [
         r"^parse_ip:",
     ),
     ProgramTest(
+        "rename_cross_parent",
+        ["mkdir sub", "cp src/parse_ip.asm sub/file.asm", "mv sub/file.asm out.asm", "cat out.asm"],
+        r"^parse_ip:",
+    ),
+    ProgramTest(
         "rename_dir",
         ["mkdir mydir", "mv mydir newdir", "ls newdir"],
+        r"^\.\./",
+    ),
+    ProgramTest(
+        "rename_dir_cross_parent",
+        ["mkdir sub", "mkdir mydir", "mv mydir sub/mydir", "ls sub/mydir"],
         r"^\.\./",
     ),
     ProgramTest(
