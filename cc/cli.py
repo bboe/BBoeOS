@@ -11,6 +11,7 @@ from cc.errors import CompileError
 from cc.lexer import tokenize
 from cc.parser import Parser
 from cc.preprocessor import apply_defines, preprocess
+from cc.utils import parse_asm_constants
 
 
 def main() -> int:
@@ -33,12 +34,18 @@ def main() -> int:
     arguments = parser.parse_args()
 
     try:
-        source = Path(arguments.input).read_text(encoding="utf-8")
-        source, defines = preprocess(source, include_base=Path(arguments.input).parent)
+        input_path = Path(arguments.input)
+        source = input_path.read_text(encoding="utf-8")
+        source, defines = preprocess(source, include_base=input_path.parent)
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        output = X86CodeGenerator(bits=arguments.bits, defines=defines).generate(ast)
+        # Discover constants.asm alongside the source's include sibling directory
+        # (src/c/foo.c → src/include/constants.asm) and parse %assign values so
+        # the generator can evaluate local array sizes at compile time.
+        constants_asm = input_path.parent.parent / "include" / "constants.asm"
+        constant_values = parse_asm_constants(constants_asm) if constants_asm.is_file() else {}
+        output = X86CodeGenerator(bits=arguments.bits, constant_values=constant_values, defines=defines).generate(ast)
     except CompileError as error:
         location = f"{arguments.input}:{error.line}" if error.line else arguments.input
         print(f"{location}: error: {error.message}", file=sys.stderr)

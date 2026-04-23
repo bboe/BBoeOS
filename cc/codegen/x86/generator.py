@@ -103,7 +103,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename", "rmdir", "unlink"})
 
-    def __init__(self, *, defines: dict[str, str] | None = None, bits: int = 16) -> None:
+    def __init__(self, *, bits: int = 16, constant_values: dict[str, int] | None = None, defines: dict[str, str] | None = None) -> None:
         """Initialize code generator state.
 
         ``bits`` selects the target: 16 → ``X86CodegenTarget16``,
@@ -117,12 +117,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         and register-aliased-global dicts (x86 register names), and
         the store-target hint used by the pinned-destination
         peephole.
+
+        ``constant_values`` maps NASM constant names (from
+        ``constants.asm``) to their evaluated integer values and is used
+        by :meth:`_eval_local_array_size` to size stack-local arrays
+        whose element counts are named constants.  When omitted or
+        ``None`` the generator falls back to the empty mapping.
         """
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
             raise ValueError(message)
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
-        super().__init__(target=target, defines=defines)
+        super().__init__(constant_values=constant_values, defines=defines, target=target)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise

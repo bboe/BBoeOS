@@ -62,16 +62,6 @@ class CodeGeneratorBase:
     logic specific to their ISA.
     """
 
-    #: Integer values for a subset of :attr:`NAMED_CONSTANTS` that may
-    #: appear as local array sizes.  Used only by
-    #: :meth:`_eval_local_array_size` when sizing a stack-allocated
-    #: local array; NASM still resolves the symbol at assemble time for
-    #: all other uses.
-    NAMED_CONSTANT_VALUES: ClassVar[dict[str, int]] = {
-        "DIRECTORY_ENTRY_SIZE": 32,
-        "DIRECTORY_NAME_LENGTH": 27,
-    }
-
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.  BBoeOS-specific but arch-agnostic:
@@ -154,7 +144,13 @@ class CodeGeneratorBase:
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
-    def __init__(self, *, target: CodegenTarget, defines: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        constant_values: dict[str, int] | None = None,
+        defines: dict[str, str] | None = None,
+        target: CodegenTarget,
+    ) -> None:
         """Initialize arch-agnostic code generator state.
 
         *target* is the :class:`cc.target.CodegenTarget` instance the
@@ -163,12 +159,17 @@ class CodeGeneratorBase:
         entry re-emits as a NASM ``%define NAME VALUE`` at the top of
         the output so inline-asm strings can reference C macro names
         directly.
+        *constant_values* maps NASM ``%assign`` constant names to their
+        evaluated integer values (populated by parsing ``constants.asm``
+        at the call site); used by :meth:`_eval_local_array_size` to
+        size stack-local arrays whose element count is a named constant.
 
         Subclasses override ``__init__`` to pick their target, call
         ``super().__init__(target=..., defines=defines)``, and then
         initialize any arch-specific state (register trackers, pinned
         aliases, etc.).
         """
+        self.NAMED_CONSTANT_VALUES: dict[str, int] = dict(constant_values) if constant_values else {}
         self.target: CodegenTarget = target
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import fields
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,48 @@ from cc.tokens import CHARACTER_ESCAPES
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
+
+_ASSIGN_RE = re.compile(r"%assign\s+(\w+)\s+(.*?)(?:\s*;.*)?$")
+_HEX_RE = re.compile(r"\b([0-9A-Fa-f]+)h\b")
+
+
+def parse_asm_constants(path: Path, /) -> dict[str, int]:
+    """Parse ``%assign NAME EXPR`` lines from a NASM ``.asm`` file.
+
+    Returns a dict mapping each constant name to its integer value.
+    Simple decimal and hex (``Nh``) literals are resolved in one pass;
+    expression-based constants (e.g. ``DIRECTORY_NAME_LENGTH + 1``) are
+    resolved in subsequent passes once their dependencies are known.
+    Constants whose expressions still contain unresolvable names after
+    all passes are silently omitted.
+    """
+    raw: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = _ASSIGN_RE.search(line)
+        if m:
+            raw[m.group(1)] = m.group(2).strip()
+
+    resolved: dict[str, int] = {}
+    changed = True
+    while changed:
+        changed = False
+        for name, expr in raw.items():
+            if name in resolved:
+                continue
+            # Convert NASM hex literals (4DEh → 0x4DE) and substitute
+            # already-resolved names so Python's eval can handle the rest.
+            py_expr = _HEX_RE.sub(lambda m: "0x" + m.group(1), expr)
+            for known, val in resolved.items():
+                py_expr = re.sub(r"\b" + re.escape(known) + r"\b", str(val), py_expr)
+            try:
+                value = eval(py_expr, {"__builtins__": {}})  # noqa: S307
+                if isinstance(value, int):
+                    resolved[name] = value
+                    changed = True
+            except Exception:  # noqa: BLE001, S110
+                pass
+    return resolved
 
 
 def ast_contains(node: Node, predicate: Callable[[Node], bool], /) -> bool:
