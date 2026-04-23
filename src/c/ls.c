@@ -1,3 +1,5 @@
+char entry[DIRECTORY_ENTRY_SIZE];
+
 int main(int argc, char *argv[]) {
     char *name = ".";
     if (argc > 0) {
@@ -7,7 +9,6 @@ int main(int argc, char *argv[]) {
     if (fd < 0) {
         die("Not found\n");
     }
-    char *entry = SECTOR_BUFFER;
     while (1) {
         int bytes = read(fd, entry, DIRECTORY_ENTRY_SIZE);
         if (bytes == 0) {

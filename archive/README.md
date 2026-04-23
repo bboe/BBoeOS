@@ -8,7 +8,7 @@ source is kept here for reference.
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
 | arp     | 451         | 447       | -4    |
-| cat     | 145         | 130       | -15   |
+| cat     | 145         | 134       | -11   |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
@@ -16,12 +16,12 @@ source is kept here for reference.
 | draw    | 245         | 239       | -6    |
 | edit    | 1977        | 2357      | +380  |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 162       | +27   |
+| ls      | 135         | 166       | +31   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 220       | +3    |
-| netinit | 72          | 63        | -9    |
-| netrecv | 334         | 377       | +43   |
-| netsend | 187         | 218       | +31   |
+| netinit | 72          | 67        | -5    |
+| netrecv | 334         | 381       | +47   |
+| netsend | 187         | 222       | +35   |
 | ping    | 1019        | 1317      | +298  |
 | shell   | 921         | 1326      | +405  |
 | uptime  | 50          | 78        | +28   |
