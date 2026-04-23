@@ -159,7 +159,7 @@ void emit_address_size_prefix(int size);
 __attribute__((regparm(1)))
 void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
 __attribute__((regparm(1)))
-int emit_alu_word_mem_imm(int rfield);
+int emit_alu_mem_imm(int rfield);
 __attribute__((regparm(1)))
 void emit_byte(int value);
 __attribute__((regparm(1)))
@@ -496,11 +496,12 @@ void do_pass() {
    NASM.  asm.asm doesn't exercise those previously-broken shapes, so
    test_asm.py parity holds.  ``handle_add`` / ``handle_and`` /
    ``handle_or`` / ``handle_sub`` / ``handle_xor`` peel off the
-   ``<op> word [disp16], imm`` shape via ``emit_alu_word_mem_imm``
+   ``<op> byte|word [disp16], imm`` shape via ``emit_alu_mem_imm``
    before calling ``emit_alu_binop`` (the shared path expects the
-   second operand to be a register), picking the ``83 /r ib``
-   sign-extended short form when the immediate fits signed 8-bit and
-   falling back to ``81 /r iw`` otherwise. */
+   second operand to be a register).  Byte width always emits
+   ``80 /r ib``; word width picks ``83 /r ib`` (sign-extended short
+   form) when the immediate fits signed 8-bit and ``81 /r iw``
+   otherwise. */
 /* Emit ``disp`` at the current addressing width: disp16 under
    bits=16, disp32 under bits=32.  Used by the accumulator-direct
    ``moffs`` short forms (A0 / A1 / A2 / A3) whose address field
@@ -620,21 +621,29 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
     }
 }
 
-/* ``<op> word [disp16], imm`` for the 83 /r family — shared by
-   handle_add, handle_and, handle_or, handle_sub, handle_xor.
+/* ``<op> <width> [disp16], imm`` for the 80 / 81 / 83 /r families —
+   shared by handle_add, handle_and, handle_or, handle_sub, handle_xor.
    ``rfield`` is the /r field (add=0, or=1, and=4, sub=5, xor=6) and
    the direct-disp16 ModR/M byte works out to ``0x06 | (rfield << 3)``.
-   Picks the 5-byte ``83 /r ib`` sign-extended short form when the
-   immediate fits signed 8-bit, otherwise ``81 /r iw`` (6 bytes),
-   matching NASM byte-for-byte.
+   Three encodings picked by width and immediate range:
+     - ``byte [mem], imm8``:            80 /r ib    (5 bytes)
+     - ``word [mem], imm8`` (sign-ext): 83 /r ib    (5 bytes)
+     - ``word [mem], imm16``:           81 /r iw    (6 bytes)
+   ``word`` picks the 83 form in the signed-8-bit imm range and the
+   81 form otherwise, matching NASM.
 
-   Returns 1 when the ``word [mem], imm`` shape was consumed and
-   emitted, 0 when the cursor didn't start with a ``word`` keyword —
-   the caller then falls back to the register-taking ``emit_alu_binop``
+   Returns 1 when a ``byte|word [mem], imm`` shape was consumed and
+   emitted, 0 when the cursor didn't start with either keyword — the
+   caller then falls back to the register-taking ``emit_alu_binop``
    path.  Expects the caller to have skipped leading whitespace. */
 __attribute__((regparm(1)))
-int emit_alu_word_mem_imm(int rfield) {
-    if (!match_word(STR_WORD)) {
+int emit_alu_mem_imm(int rfield) {
+    int size;
+    if (match_word(STR_BYTE)) {
+        size = 8;
+    } else if (match_word(STR_WORD)) {
+        size = 16;
+    } else {
         return 0;
     }
     skip_ws();
@@ -650,7 +659,12 @@ int emit_alu_word_mem_imm(int rfield) {
     skip_comma();
     int imm = resolve_value();
     int modrm = 0x06 | (rfield << 3);
-    if (imm >= -128 && imm <= 127) {
+    if (size == 8) {
+        emit_byte(0x80);
+        emit_byte(modrm);
+        emit_word(disp);
+        emit_byte(imm & 0xFF);
+    } else if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
         emit_byte(modrm);
         emit_word(disp);
@@ -1104,7 +1118,7 @@ void handle_adc() {
 
 void handle_add() {
     skip_ws();
-    if (emit_alu_word_mem_imm(0)) {
+    if (emit_alu_mem_imm(0)) {
         return;
     }
     emit_alu_binop(0);
@@ -1112,7 +1126,7 @@ void handle_add() {
 
 void handle_and() {
     skip_ws();
-    if (emit_alu_word_mem_imm(4)) {
+    if (emit_alu_mem_imm(4)) {
         return;
     }
     emit_alu_binop(4);
@@ -1620,7 +1634,7 @@ void handle_not() {
 
 void handle_or() {
     skip_ws();
-    if (emit_alu_word_mem_imm(1)) {
+    if (emit_alu_mem_imm(1)) {
         return;
     }
     emit_alu_binop(1);
@@ -1788,7 +1802,7 @@ void handle_stosw() {
    asm.asm).  The wrapper peels off that path before delegating. */
 void handle_sub() {
     skip_ws();
-    if (emit_alu_word_mem_imm(5)) {
+    if (emit_alu_mem_imm(5)) {
         return;
     }
     emit_alu_binop(5);
@@ -1907,7 +1921,7 @@ void handle_xchg() {
 
 void handle_xor() {
     skip_ws();
-    if (emit_alu_word_mem_imm(6)) {
+    if (emit_alu_mem_imm(6)) {
         return;
     }
     emit_alu_binop(6);

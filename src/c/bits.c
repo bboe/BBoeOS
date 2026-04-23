@@ -2,13 +2,15 @@
    assignment forms, plus ``%=`` (the arithmetic compound-assignment
    that exercises the div/remainder path the other compound-assigns
    don't reach) and the memory-direct ALU shapes cc.py's
-   ``peephole_memory_arithmetic`` emits for a globally-stored
-   counter (``add|and|or|sub|xor word [mem], imm``).  Every result is
-   printed as unsigned decimal because the printf builtin's %x
-   prints only the low byte.  The expected values make the
-   verification a simple text match. */
+   ``peephole_memory_arithmetic`` / ``_byte`` emit for a
+   globally-stored counter (``add|and|or|sub|xor word [mem], imm``
+   for an ``int`` global, ``... byte [mem], imm8`` for a ``uint8_t``
+   global).  Every result is printed as unsigned decimal because the
+   printf builtin's %x prints only the low byte.  The expected values
+   make the verification a simple text match. */
 
 int counter;
+uint8_t bcounter;
 
 int main() {
     int a = 61680;  /* 0xF0F0 */
@@ -53,5 +55,22 @@ int main() {
     printf("g&=  = %u\n", counter);
     counter ^= 32;     /* 57 ^ 32 = 25 — ``xor word [mem], imm8`` */
     printf("g^=  = %u\n", counter);
+
+    /* uint8_t global — exercises the byte-width variants via
+       ``peephole_memory_arithmetic_byte``.  Use non-1 addends so the
+       ``add|sub`` stays as ``add|sub byte [mem], imm`` instead of
+       collapsing to ``inc|dec byte [mem]``. */
+    bcounter = 100;
+    printf("b=   = %u\n", bcounter);
+    bcounter += 7;     /* 107 — ``add byte [mem], imm8`` */
+    printf("b+=  = %u\n", bcounter);
+    bcounter |= 16;    /* 123 — ``or byte [mem], imm8`` */
+    printf("b|=  = %u\n", bcounter);
+    bcounter &= 63;    /* 59  — ``and byte [mem], imm8`` */
+    printf("b&=  = %u\n", bcounter);
+    bcounter ^= 8;     /* 51  — ``xor byte [mem], imm8`` */
+    printf("b^=  = %u\n", bcounter);
+    bcounter -= 5;     /* 46  — ``sub byte [mem], imm8`` */
+    printf("b-=  = %u\n", bcounter);
     return 0;
 }
