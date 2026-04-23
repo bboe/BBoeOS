@@ -14,8 +14,11 @@ fd_read_console:
         ;; Drain serial pushback buffer first
         cmp byte [serial_pushback_count], 0
         jne .rcon_pushback
-        ;; Poll hardware
+        ;; Poll hardware.  sti so PIT IRQ 0 can advance system_ticks while
+        ;; we're idle — INT 30h entered with IF=0 and nothing else re-enables
+        ;; it before we spin here.
         .rcon_poll:
+        sti
         push dx
         mov dx, 3FDh
         in al, dx

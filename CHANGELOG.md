@@ -6,6 +6,10 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.6.0...main)
 
+### Kernel
+- `rtc_tick_init` reprograms the PIT from the BIOS default ~18.2 Hz to 100 Hz (10 ms/tick), giving `rtc_sleep_ms` 10 ms granularity (was 55 ms) and `uptime` sub-second precision underneath the `HH:MM:SS` display.  `TICKS_PER_SECOND` becomes 100; `rtc_sleep_ms` rounds to whole 10 ms ticks
+- `fd_read_console`: `sti` at the top of the idle polling loop so PIT IRQ 0 can advance `system_ticks` while the shell is waiting for input.  Prior behaviour held IF=0 for the entire wait (syscalls enter with IF=0 and nothing re-enabled it), which silently starved the tick counter and kept `uptime` pinned at `00:00:00`
+
 ### Syscalls
 - `SYS_IO_IOCTL` (15h): device-control dispatch keyed on fd type.  `/dev/vga` (new `FD_TYPE_VGA`) is a synthetic device — `open("/dev/vga", O_WRONLY)` allocates an fd of that type without touching the filesystem, and `fd_ioctl` routes through `fd_ioctl_ops` to per-type handlers.  The VGA handler rejects fds that weren't opened writable and supports three cmds: `VGA_IOCTL_MODE` (DL=mode, also clears screen+serial), `VGA_IOCTL_FILL_BLOCK` (CL=col, CH=row, DL=color), `VGA_IOCTL_SET_PALETTE` (CL=index, CH=r, DL=g, DH=b).  The palette write lives in a new kernel `vga_set_palette_color` driver function instead of cc.py inlining `out dx, al` in every caller.
 - Retire `SYS_VIDEO_MODE` (40h) and the `FUNCTION_VGA_FILL_BLOCK` jump-table slot: `video_mode` / `fill_block` / `set_palette_color` cc.py builtins now take an fd as the first argument and emit a single `int 30h` to SYS_IO_IOCTL.  `src/c/shell.c`, `edit.c`, and `draw.c` each open `/dev/vga` once in `main()` and pass the fd through.
