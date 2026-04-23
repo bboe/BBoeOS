@@ -14,7 +14,7 @@ source is kept here for reference.
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1203      | +479  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2343      | +366  |
+| edit    | 1977        | 2357      | +380  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 162       | +27   |
 | mkdir   | 123         | 127       | +4    |
@@ -23,7 +23,7 @@ source is kept here for reference.
 | netrecv | 334         | 377       | +43   |
 | netsend | 187         | 218       | +31   |
 | ping    | 1019        | 1317      | +298  |
-| shell   | 921         | 1324      | +403  |
+| shell   | 921         | 1326      | +405  |
 | uptime  | 50          | 78        | +28   |
 
 **chmod (+25):** The assembly version walks the mode argument with
@@ -43,7 +43,7 @@ compiler also generates word-sized loads with `xor ah,ah`
 zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+366):** Both versions implement the same gap-buffer /
+**edit (+380):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -126,7 +126,7 @@ ICMP echo template) use ``memcpy`` from short string-literal
 constants instead of per-byte assignments, which collapses each
 ~8 × ``mov byte [...], imm`` burst into a single ``rep movsb``.
 
-**shell (+403):** The archived ``shell.asm`` has been edited so
+**shell (+405):** The archived ``shell.asm`` has been edited so
 that both versions share the same scratch layout — ``SECTOR_BUFFER
 + 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
 exec path — instead of carrying ~290 bytes of zero-initialized

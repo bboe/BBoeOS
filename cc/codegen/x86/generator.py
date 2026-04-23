@@ -1539,8 +1539,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 and self.variable_types.get(right.name) != "unsigned long"
                 and not self._is_byte_scalar(right.name)
             ):
+                # Invalidate ax_local when ``left`` is pinned — the
+                # ``mov ax, reg`` that generate_expression emits here
+                # will be removed by ``peephole_compare_through_register``
+                # once the caller emits a conditional jump after the
+                # cmp, leaving AX without the loaded value.  Without
+                # this clear, downstream reads of ``left`` would skip
+                # their own load (ax_local == left.name) and pick up
+                # whatever AX held from an unrelated earlier expression.
+                left_pinned = isinstance(left, Var) and left.name in self.pinned_register
                 self.generate_expression(left)
                 self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
+                if left_pinned:
+                    self.ax_clear()
                 return
             # emit_binary_operator_operands clobbers CX; save it when a
             # pinned variable lives there (push/pop don't modify flags,

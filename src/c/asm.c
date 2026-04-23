@@ -66,6 +66,28 @@ int last_symbol_index;
    ``_program_end`` (main() initializes it).  read_line fills it
    null-terminated; abort_unknown_impl prints it. */
 char *line_buffer;
+/* Macro table — ``%macro NAME N`` through ``%endmacro`` stores the
+   body lines in ``macro_body_buffer`` (each null-terminated, packed
+   one after another) and the metadata in parallel arrays indexed
+   by macro slot.  Lookup is a linear scan over ``macro_names``;
+   invocation substitutes ``%1``..``%9`` with the call-site
+   arguments into ``line_buffer`` and re-runs ``parse_line`` on each
+   expanded body line.  Reset at the start of every pass so %macro
+   blocks re-populate the table as they're re-parsed.
+
+   ``macro_args_text`` / ``macro_arg_starts`` are per-invocation
+   scratch filled by expand_macro just before it walks the body;
+   valid only for the duration of that expansion (macros are not
+   currently re-entrant). */
+int macro_arg_counts[MACRO_MAX];
+int macro_arg_starts[9];
+char macro_args_text[256];
+char macro_body_buffer[MACRO_BODY_BUFFER_SIZE];
+int macro_body_lengths[MACRO_MAX];
+int macro_body_starts[MACRO_MAX];
+int macro_body_used;
+int macro_count;
+char macro_names[MACRO_MAX * MACRO_NAME_LEN];
 /* Kept ``int`` — hot-path readers (``int size1 = op1_size;``) bind
    the value into an ``int`` local, which under byte-slot codegen
    pays a ``xor ah, ah`` per load with no matching store-side win. */
@@ -129,6 +151,7 @@ int symbol_count;
    ``user_functions`` registry regardless of source order, but clang
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
+void define_macro();
 __attribute__((regparm(1)))
 void emit_address_disp(int disp);
 __attribute__((regparm(1)))
@@ -153,10 +176,16 @@ __attribute__((regparm(1)))
 void emit_sized_mem(int base, int size);
 __attribute__((regparm(1)))
 void emit_word(int value);
+__attribute__((regparm(1)))
+void expand_macro(int idx);
+int find_macro();
 void flush_output();
 __attribute__((regparm(1)))
 void inc_dec_handler(int rfield);
 void include_pop();
+__attribute__((regparm(1)))
+__attribute__((carry_return))
+int is_ident_char(int c);
 __attribute__((regparm(1)))
 int make_modrm_reg_reg_impl(int register_id, int rm);
 __attribute__((regparm(1)))
@@ -306,6 +335,83 @@ void define_label_here(int is_local) {
         if (last_symbol_index != 0xFFFF) {
             global_scope = last_symbol_index;
         }
+    }
+}
+
+/* Parse a ``%macro NAME N`` header and slurp body lines into
+   ``macro_body_buffer`` up to ``%endmacro``.  source_cursor is
+   already past the ``%macro`` token when this is called.  Each body
+   line is stored null-terminated so expand_macro can walk them
+   cheaply.  Overflow of either ``macro_count`` or
+   ``macro_body_used`` silently drops the macro (we still consume
+   through %endmacro to keep the parser aligned). */
+void define_macro() {
+    skip_ws();
+    /* Save the name's starting address, then advance ``source_cursor``
+       one char at a time (``inc si``) through the identifier.  Copying
+       the name to ``macro_names`` afterwards uses ``name_start`` as a
+       plain char pointer that cc.py places in a non-SI register, so
+       the byte-index loop doesn't have to juggle the SI-pinned
+       source_cursor against ``macro_names`` indexing. */
+    char *name_start = source_cursor;
+    int name_len = 0;
+    while (is_ident_char(source_cursor[0])) {
+        source_cursor = source_cursor + 1;
+        name_len = name_len + 1;
+    }
+    int slot = macro_count;
+    int has_slot = 0;
+    if (slot < MACRO_MAX) {
+        has_slot = 1;
+        int j = 0;
+        while (j < name_len && j < MACRO_NAME_LEN - 1) {
+            macro_names[slot * MACRO_NAME_LEN + j] = name_start[j];
+            j = j + 1;
+        }
+        macro_names[slot * MACRO_NAME_LEN + j] = '\0';
+    }
+    skip_ws();
+    int argcount = resolve_value();
+    int body_start = macro_body_used;
+    if (has_slot) {
+        macro_arg_counts[slot] = argcount;
+        macro_body_starts[slot] = body_start;
+    }
+    while (1) {
+        if (read_line() != 0) {
+            break;
+        }
+        char *cur = line_buffer;
+        while (cur[0] == ' ' || cur[0] == '\t') {
+            cur = cur + 1;
+        }
+        if (cur[0] == '%') {
+            /* match_word returns via CF (``carry_return`` attribute);
+               assigning its result to an int doesn't work, so test the
+               match directly in the condition.  source_cursor is
+               clobbered either way — the outer do_pass loop's next
+               read_line + parse_line will reset it. */
+            source_cursor = cur + 1;
+            if (match_word(STR_ENDMACRO)) {
+                break;
+            }
+        }
+        int len = 0;
+        while (line_buffer[len] != '\0') {
+            len = len + 1;
+        }
+        if (macro_body_used + len + 1 < MACRO_BODY_BUFFER_SIZE) {
+            int k = 0;
+            while (k <= len) {
+                macro_body_buffer[macro_body_used + k] = line_buffer[k];
+                k = k + 1;
+            }
+            macro_body_used = macro_body_used + len + 1;
+        }
+    }
+    if (has_slot) {
+        macro_body_lengths[slot] = macro_body_used - body_start;
+        macro_count = slot + 1;
     }
 }
 
@@ -794,6 +900,114 @@ void encode_rel8_jump(int opcode) {
         int disp = resolve_label() - (current_address + 2);
         emit_word(disp);
     }
+}
+
+/* Expand macro *idx*.  source_cursor points past the macro name, at
+   the (possibly empty) comma-separated argument list.  Arguments
+   are copied to ``macro_args_text`` with each arg null-terminated;
+   ``macro_arg_starts[i]`` records where the i-th arg begins.  The
+   body is then walked one line at a time: ``%1``..``%9`` runs are
+   replaced with the corresponding argument text (higher indices
+   are silently dropped), the expanded line is written into
+   ``line_buffer``, and ``parse_line`` is re-invoked to process it
+   as if it had been the current source line. */
+__attribute__((regparm(1)))
+void expand_macro(int idx) {
+    /* Snapshot source_cursor into a non-SI-pinned local BEFORE any
+       indexed global access — cc.py uses SI as scratch for computing
+       ``macro_*[idx]`` addresses, which would clobber the SI-pinned
+       source_cursor and leave cc.py's live-range tracking stale. */
+    char *cursor = source_cursor;
+    int argcount = macro_arg_counts[idx];
+    if (argcount > 9) {
+        argcount = 9;
+    }
+    int pos = 0;
+    int i = 0;
+    while (i < argcount) {
+        while (cursor[0] == ' ' || cursor[0] == '\t') {
+            cursor = cursor + 1;
+        }
+        macro_arg_starts[i] = pos;
+        while (cursor[0] != ',' && cursor[0] != '\0' && cursor[0] != ';') {
+            macro_args_text[pos] = cursor[0];
+            pos = pos + 1;
+            cursor = cursor + 1;
+        }
+        while (pos > macro_arg_starts[i] && (macro_args_text[pos - 1] == ' ' || macro_args_text[pos - 1] == '\t')) {
+            pos = pos - 1;
+        }
+        macro_args_text[pos] = '\0';
+        pos = pos + 1;
+        if (cursor[0] == ',') {
+            cursor = cursor + 1;
+        }
+        i = i + 1;
+    }
+    source_cursor = cursor;
+    int body_offset = macro_body_starts[idx];
+    int body_end = body_offset + macro_body_lengths[idx];
+    while (body_offset < body_end) {
+        int dst = 0;
+        while (macro_body_buffer[body_offset] != '\0') {
+            char ch = macro_body_buffer[body_offset];
+            char next = macro_body_buffer[body_offset + 1];
+            if (ch == '%' && next >= '1' && next <= '9') {
+                int n = next - '1';
+                if (n < argcount) {
+                    int k = macro_arg_starts[n];
+                    while (macro_args_text[k] != '\0') {
+                        line_buffer[dst] = macro_args_text[k];
+                        dst = dst + 1;
+                        k = k + 1;
+                    }
+                }
+                body_offset = body_offset + 2;
+            } else {
+                line_buffer[dst] = ch;
+                dst = dst + 1;
+                body_offset = body_offset + 1;
+            }
+        }
+        line_buffer[dst] = '\0';
+        body_offset = body_offset + 1;
+        parse_line();
+    }
+}
+
+/* Linear scan over the macro table matching the identifier at
+   source_cursor.  Returns the macro index (and advances
+   source_cursor past the name) on hit; returns -1 with the cursor
+   unchanged on miss.  Uses ``cursor`` as a local copy of
+   source_cursor so byte-comparison loops don't have to juggle SI
+   between the source cursor and macro_names indexing. */
+int find_macro() {
+    char *cursor = source_cursor;
+    int len = 0;
+    while (is_ident_char(cursor[len])) {
+        len = len + 1;
+    }
+    if (len == 0) {
+        return -1;
+    }
+    int i = 0;
+    while (i < macro_count) {
+        int base = i * MACRO_NAME_LEN;
+        int j = 0;
+        int match = 1;
+        while (j < len) {
+            if (macro_names[base + j] != cursor[j]) {
+                match = 0;
+            }
+            j = j + 1;
+        }
+        if (match != 0 && macro_names[base + len] == '\0') {
+            source_cursor = cursor + len;
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
@@ -2096,6 +2310,10 @@ void parse_directive() {
             }
             return;
         }
+        if (match_word(STR_MACRO)) {
+            define_macro();
+            return;
+        }
         if (match_word(STR_INCLUDE) == 0) {
             return;
         }
@@ -2270,6 +2488,11 @@ void parse_line() {
    (``USAGE db ...`` without a colon) still reach their
    symbol-table branch. */
 void parse_mnemonic() {
+    int macro_index = find_macro();
+    if (macro_index >= 0) {
+        expand_macro(macro_index);
+        return;
+    }
     int index = 0;
     while (1) {
         char *keyword = mnemonic_keyword_at(index);
@@ -2869,6 +3092,8 @@ void run_pass1() {
         default_bits = 16;
         global_scope = 0xFFFF;
         jump_index = 0;
+        macro_count = 0;
+        macro_body_used = 0;
         do_pass();
         if (error_flag != 0) {
             die_error_pass1_io();
@@ -2896,6 +3121,8 @@ void run_pass2() {
     default_bits = 16;
     global_scope = 0xFFFF;
     jump_index = 0;
+    macro_count = 0;
+    macro_body_used = 0;
     output_position = 0;
     output_total = 0;
     do_pass();
@@ -3247,6 +3474,7 @@ asm(
     "STR_DD      db 'dd',0\n"
     "STR_DEFINE  db 'define',0\n"
     "STR_DW      db 'dw',0\n"
+    "STR_ENDMACRO db 'endmacro',0\n"
     "STR_INC     db 'inc',0\n"
     "STR_INCLUDE db 'include',0\n"
     "STR_INT     db 'int',0\n"
@@ -3272,6 +3500,7 @@ asm(
     "STR_LODSB   db 'lodsb',0\n"
     "STR_LODSW   db 'lodsw',0\n"
     "STR_LOOP    db 'loop',0\n"
+    "STR_MACRO   db 'macro',0\n"
     "STR_MOV     db 'mov',0\n"
     "STR_MOVSB   db 'movsb',0\n"
     "STR_MOVSW   db 'movsw',0\n"
