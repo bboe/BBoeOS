@@ -7,7 +7,7 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR 31
+        %assign DIRECTORY_SECTOR 32
         %assign DIRECTORY_SECTORS 3
         %assign EXT2_START_SECTOR DIRECTORY_SECTOR  ; ext2 partition base (same as bbfs start)
         %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
@@ -54,7 +54,8 @@
         %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
         %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 3 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 3 ; SI=buf, CX=len: write to stdout
+        %assign FUNCTION_VGA_FILL_BLOCK FUNCTION_PRINTF + 3    ; BL=col, BH=row, AL=color: fill 8×8 tile in mode 13h
+        %assign FUNCTION_WRITE_STDOUT  FUNCTION_VGA_FILL_BLOCK + 3 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256

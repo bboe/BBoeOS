@@ -17,9 +17,11 @@
         jmp near shared_print_mac
         jmp near shared_print_string
         jmp near shared_printf
+        jmp near vga_fill_block
         jmp near shared_write_stdout
 
 boot_shell:
+        call vga_font_load      ; load ROM 8x16 font into plane 2 offset 0x4000 before any mode 13h switch corrupts plane 2
         call ps2_init           ; mask BIOS IRQ 1 before anyone reads keys
         cmp byte [boot_disk], 80h
         jae .post_fdc

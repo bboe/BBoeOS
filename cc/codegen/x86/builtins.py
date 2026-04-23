@@ -230,6 +230,48 @@ class BuiltinsMixin:
             self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, al")
         self.ax_clear()
 
+    def builtin_fill_block(self, arguments: list[Node], /) -> None:
+        """Generate code for fill_block(col, row, color).
+
+        Fills an 8x8 tile at (col, row) with the given palette index in VGA
+        mode 13h (320x200 256-colour).  Calls FUNCTION_VGA_FILL_BLOCK with
+        BL=col, BH=row, AL=color.
+
+        Row is loaded into BH first so that loading col (via AL→BL) cannot
+        clobber it — a full ``mov bx, col`` would overwrite BH if row happens
+        to be pinned to BX.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="fill_block")
+        col_arg, row_arg, color_arg = arguments
+        self.emit_register_from_argument(argument=row_arg, register=self.target.acc)
+        self.emit("        mov bh, al")
+        self.emit_register_from_argument(argument=col_arg, register=self.target.acc)
+        self.emit("        mov bl, al")
+        self.emit_register_from_argument(argument=color_arg, register=self.target.acc)
+        self.emit("        call FUNCTION_VGA_FILL_BLOCK")
+        self.ax_clear()
+
+    def builtin_set_palette_color(self, arguments: list[Node], /) -> None:
+        """Generate code for set_palette_color(index, r, g, b).
+
+        Programs the VGA DAC register for the given palette index to (r, g, b)
+        using 6-bit values (0-63).  Writes index to port 0x3C8, then R/G/B
+        sequentially to port 0x3C9.
+        """
+        self._check_argument_count(arguments=arguments, expected=4, name="set_palette_color")
+        index_arg, r_arg, g_arg, b_arg = arguments
+        self.emit_register_from_argument(argument=index_arg, register=self.target.acc)
+        self.emit("        mov dx, 03C8h")
+        self.emit("        out dx, al")
+        self.emit("        inc dx")
+        self.emit_register_from_argument(argument=r_arg, register=self.target.acc)
+        self.emit("        out dx, al")
+        self.emit_register_from_argument(argument=g_arg, register=self.target.acc)
+        self.emit("        out dx, al")
+        self.emit_register_from_argument(argument=b_arg, register=self.target.acc)
+        self.emit("        out dx, al")
+        self.ax_clear()
+
     def builtin_fstat(self, arguments: list[Node], /) -> None:
         """Generate code for the fstat() builtin.
 
