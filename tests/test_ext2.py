@@ -257,7 +257,29 @@ def _run_suite(
 
 
 # Subset of tests to re-run with 2 KB blocks (exercises the variable-block-size paths).
-BLOCK_SIZE_TESTS: list[ProgramTest] = [t for t in TESTS if t.name in {"cat", "cp", "cp_into_subdir", "ls", "mkdir_nested"}]
+# Excludes tests that don't touch ext2 (echo, hello, uptime).
+BLOCK_SIZE_TESTS: list[ProgramTest] = [
+    t
+    for t in TESTS
+    if t.name
+    in {
+        "cat",
+        "cat_large",
+        "chmod",
+        "cp",
+        "cp_into_subdir",
+        "cp_overwrite_shrink",
+        "ls",
+        "mkdir",
+        "mkdir_ls_root",
+        "mkdir_nested",
+        "rename",
+        "rename_dir",
+        "rm",
+        "rmdir",
+        "rmdir_nonempty",
+    }
+]
 
 
 def main() -> int:
