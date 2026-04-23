@@ -13,7 +13,7 @@ source is kept here for reference.
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1216      | +492  |
-| draw    | 245         | 239       | -6    |
+| draw    | 245         | 208       | -37   |
 | edit    | 1977        | 2346      | +369  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 166       | +31   |
@@ -26,11 +26,18 @@ source is kept here for reference.
 | shell   | 921         | 1326      | +405  |
 | uptime  | 50          | 78        | +28   |
 
+**draw (-37):** The rewritten C version calls `fill_block()` (a single
+`call FUNCTION_VGA_FILL_BLOCK` instruction) to paint 8x8 pixel tiles
+directly in mode 13h, replacing the old `printf()` calls that pushed
+a format string and arguments onto the stack and routed through the
+full `FUNCTION_PRINTF` scanner.  Eliminating printf overhead accounts
+for the extra reduction beyond the original -6.
+
 **chmod (+25):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+479):** Both versions use the same shared memory regions
+**dns (+492):** Both versions use the same shared memory regions
 (`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
 The C version is larger because `decode_domain` and `encode_domain`
 carry full stack-frame overhead (push bp / mov bp,sp / pop bp / ret
@@ -43,7 +50,7 @@ compiler also generates word-sized loads with `xor ah,ah`
 zero-extension for every byte read, whereas the assembly version
 uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
-**edit (+380):** Both versions implement the same gap-buffer /
+**edit (+369):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -89,14 +96,14 @@ peephole invalidated.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+27):** The assembly version uses inline `repne scasb` with a
+**ls (+31):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 
 **mkdir (+4):** Null-terminator overhead across 4 string literals.
 
-**netrecv (+43):** Both versions read into `BUFFER + 128` with a
+**netrecv (+47):** Both versions read into `BUFFER + 128` with a
 capped 128-byte read -- plenty for the ARP reply that's being demoed.
 The delta is ordinary C-compiler overhead: null-terminated strings,
 the net_open CF normalization, fd stashed in a memory local so it
@@ -104,7 +111,7 @@ survives across `FUNCTION_WRITE_STDOUT` calls, and printf-style hex
 formatting instead of the asm version's inline `FUNCTION_PRINT_HEX`
 loop.
 
-**netsend (+31):** Null terminators on three strings, the net_open
+**netsend (+35):** Null terminators on three strings, the net_open
 CF-to-integer normalization, and storing fd to a local all add a
 handful of bytes.  The asm version kept fd in BX and used
 length-bearing messages without null terminators.  Both versions

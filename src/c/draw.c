@@ -1,35 +1,31 @@
-#define COLOR_MASK 15
 #define COLUMNS 40
 #define ROWS 25
+#define CURSOR_COLOR 15
 
 int main() {
-    video_mode(VIDEO_MODE_EGA_320x200_16);
-    int background = 0;
-    int changed = 1;
+    video_mode(VIDEO_MODE_VGA_320x200_256);
+    int background = 1;
     int column = 0;
     int row = 0;
-    char character = 0;
-    while (character != 'q') {
-        if (changed) {
-            printf("\e[38;5;3m\e[48;5;%dm\e[%d;%dH\e[42@", background, row + 1, column + 1);
-        }
-        character = getchar();
-        changed = 1;
-        if (character == 'a') {
+    char ch = 0;
+    fill_block(column, row, CURSOR_COLOR);
+    while (ch != 'q') {
+        ch = getchar();
+        fill_block(column, row, background);
+        if (ch == 'a') {
             column = (column + COLUMNS - 1) % COLUMNS;
-        } else if (character == 'd') {
+        } else if (ch == 'd') {
             column = (column + 1) % COLUMNS;
-        } else if (character == 's') {
+        } else if (ch == 's') {
             row = (row + 1) % ROWS;
-        } else if (character == 'w') {
+        } else if (ch == 'w') {
             row = (row + ROWS - 1) % ROWS;
-        } else if (character == 'j') {
-            background = (background - 1) & COLOR_MASK;
-        } else if (character == 'k') {
-            background = (background + 1) & COLOR_MASK;
-        } else {
-            changed = 0;
+        } else if (ch == 'j') {
+            background = (background + 15) & 15;
+        } else if (ch == 'k') {
+            background = (background + 1) & 15;
         }
+        fill_block(column, row, CURSOR_COLOR);
     }
     video_mode(VIDEO_MODE_TEXT_80x25);
 }

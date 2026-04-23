@@ -71,6 +71,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         "far_read8": frozenset({"ax", "bx"}),
         "far_write16": frozenset({"ax", "bx"}),
         "far_write8": frozenset({"ax", "bx"}),
+        "fill_block": frozenset({"ax", "bx"}),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getchar": frozenset({"ax"}),
         "mac": frozenset({"ax", "di"}),

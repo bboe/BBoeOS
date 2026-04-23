@@ -54,7 +54,8 @@
         %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
         %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 3 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 3 ; SI=buf, CX=len: write to stdout
+        %assign FUNCTION_VGA_FILL_BLOCK FUNCTION_PRINTF + 3    ; BL=col, BH=row, AL=color: fill 8×8 tile in mode 13h
+        %assign FUNCTION_WRITE_STDOUT  FUNCTION_VGA_FILL_BLOCK + 3 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256

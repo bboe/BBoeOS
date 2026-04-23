@@ -230,6 +230,22 @@ class BuiltinsMixin:
             self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, al")
         self.ax_clear()
 
+    def builtin_fill_block(self, arguments: list[Node], /) -> None:
+        """Generate code for fill_block(col, row, color).
+
+        Fills an 8x8 tile at (col, row) with the given palette index in VGA
+        mode 13h (320x200 256-colour).  Calls FUNCTION_VGA_FILL_BLOCK with
+        BL=col, BH=row, AL=color.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="fill_block")
+        col_arg, row_arg, color_arg = arguments
+        self.emit_register_from_argument(argument=col_arg, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=row_arg, register=self.target.acc)
+        self.emit("        mov bh, al")
+        self.emit_register_from_argument(argument=color_arg, register=self.target.acc)
+        self.emit("        call FUNCTION_VGA_FILL_BLOCK")
+        self.ax_clear()
+
     def builtin_fstat(self, arguments: list[Node], /) -> None:
         """Generate code for the fstat() builtin.
 

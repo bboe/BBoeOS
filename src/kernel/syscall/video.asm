@@ -1,19 +1,15 @@
         .video_mode:
-        ;; Set video mode: AL = mode; clears serial and screen.  For
-        ;; VIDEO_MODE_TEXT_80x25 we reset natively (works after the pmode
-        ;; transition too).  Graphics modes fall through to INT 10h and
-        ;; remain BIOS-dependent — a future VESA driver replaces them.
+        ;; Set video mode: AL = mode; clears serial and screen.
+        ;; Uses native VGA register tables (vga_set_mode); unsupported modes are ignored.
         push ax
         mov al, `\r`
         call serial_character
         mov al, 0Ch             ; Form feed
         call serial_character
         pop ax
+        call vga_set_mode
+        jc .iret_done           ; unsupported mode — skip
         cmp al, VIDEO_MODE_TEXT_80x25
-        jne .video_mode_bios
-        call vga_clear_screen
-        jmp .iret_done
-        .video_mode_bios:
-        xor ah, ah              ; INT 10h AH=00h set mode (AL), clears screen
-        int 10h
+        jne .iret_done
+        call vga_clear_screen   ; restore blank text buffer after text-mode reset
         jmp .iret_done
