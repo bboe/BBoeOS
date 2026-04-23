@@ -72,6 +72,7 @@ int main(int argc, char *argv[]) {
     int dirty = 0;
     int confirm_quit = 0;
     char *status_message;
+    char sector[512];
 
     int fd = open(filename, O_RDONLY);
     if (fd >= 0) {
@@ -377,7 +378,6 @@ int main(int argc, char *argv[]) {
             if (save_fd < 0) {
                 status_message = "Cannot create file (directory full?)";
             } else {
-                char *sector = SECTOR_BUFFER;
                 int total_length = EDIT_BUFFER_SIZE - (gap_end - gap_start);
                 int logical_offset = 0;
                 int write_err = 0;

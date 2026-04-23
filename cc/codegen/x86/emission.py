@@ -470,6 +470,15 @@ class EmissionMixin:
                 self.emit(f"        mov {self.target.acc}, _g_{vname}")
                 self.ax_clear()
                 return
+            if vname in self.local_stack_arrays:
+                # Local stack array decays to its base address.
+                if self.elide_frame:
+                    self.emit(f"        mov {self.target.acc}, _l_{vname}")
+                else:
+                    offset = self.locals[vname]
+                    self.emit(f"        lea {self.target.acc}, [{self.target.base_register}-{offset}]")
+                self.ax_clear()
+                return
             self._check_defined(vname, line=expression.line)
             if self.variable_types.get(vname) == "unsigned long":
                 message = f"'unsigned long' variable {vname!r} cannot be used in a 16-bit expression context"
@@ -952,6 +961,7 @@ class EmissionMixin:
         self.byte_scalar_locals = set()
         self.frame_size = 0
         self.live_long_local = None
+        self.local_stack_arrays = {}
         self.locals = {}
         self.pinned_register = {}
         self.variable_arrays = set()
@@ -1023,6 +1033,15 @@ class EmissionMixin:
             self.allocate_local(parameters[0].name)
 
         self.scan_locals(body)
+
+        # If main has local stack arrays, drop the elide-frame shortcut so
+        # the arrays live on the actual stack (separate segment) rather than
+        # as ``times N db 0`` data labels inside the binary.  Scalar locals
+        # follow along — they also move to ``[bp-N]`` slots — trading the
+        # ``push bp / mov bp, sp / sub sp, N`` prologue (6-8 bytes) for
+        # keeping potentially large arrays out of the binary entirely.
+        if name == "main" and self.local_stack_arrays:
+            self.elide_frame = False
 
         # IR path: pre-allocate compiler-generated temporaries so the
         # frame size is correct before the prologue is emitted.
@@ -1126,16 +1145,19 @@ class EmissionMixin:
                 # Plain int / pointer locals get the target's native
                 # integer width (``dw`` / ``dd``); ``unsigned long``
                 # always stays 4 bytes (``dd``) regardless of mode;
-                # byte-scalar locals always stay 1 byte (``db``).
+                # byte-scalar locals always stay 1 byte (``db``);
+                # local stack arrays reserve their full byte count.
                 int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
                 for vname in sorted(self.locals):
-                    if self.variable_types.get(vname) == "unsigned long":
-                        directive = "dd 0"
+                    if vname in self.local_stack_arrays:
+                        byte_count = self.local_stack_arrays[vname]
+                        self.emit(f"_l_{vname}: times {byte_count} db 0")
+                    elif self.variable_types.get(vname) == "unsigned long":
+                        self.emit(f"_l_{vname}: dd 0")
                     elif vname in self.byte_scalar_locals:
-                        directive = "db 0"
+                        self.emit(f"_l_{vname}: db 0")
                     else:
-                        directive = int_directive
-                    self.emit(f"_l_{vname}: {directive}")
+                        self.emit(f"_l_{vname}: {int_directive}")
         elif ir_body is not None:
             # IR path: generate epilogue unless the body always exits.
             # Tail-call optimization is not yet applied on the IR path.

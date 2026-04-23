@@ -62,6 +62,16 @@ class CodeGeneratorBase:
     logic specific to their ISA.
     """
 
+    #: Integer values for a subset of :attr:`NAMED_CONSTANTS` that may
+    #: appear as local array sizes.  Used only by
+    #: :meth:`_eval_local_array_size` when sizing a stack-allocated
+    #: local array; NASM still resolves the symbol at assemble time for
+    #: all other uses.
+    NAMED_CONSTANT_VALUES: ClassVar[dict[str, int]] = {
+        "DIRECTORY_ENTRY_SIZE": 32,
+        "DIRECTORY_NAME_LENGTH": 27,
+    }
+
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.  BBoeOS-specific but arch-agnostic:
@@ -178,6 +188,7 @@ class CodeGeneratorBase:
         self.label_id: int = 0
         self.lines: list[str] = []
         self.live_long_local: str | None = None
+        self.local_stack_arrays: dict[str, int] = {}  # name → byte count
         self.locals: dict[str, int] = {}
         self.loop_continue_labels: list[str] = []
         self.loop_end_labels: list[str] = []
@@ -421,14 +432,15 @@ class CodeGeneratorBase:
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.
 
-        Covers ``char`` / ``uint8_t`` scalars and pointers, and
-        file-scope byte-element arrays (``char NAME[SIZE];`` or
-        ``uint8_t NAME[SIZE];``).  Locally-declared arrays and
-        ``int``-typed globals keep word-sized element access — only
-        the explicit byte-typed path widens to byte semantics.
+        Covers ``char`` / ``uint8_t`` scalars and pointers,
+        file-scope byte-element arrays (``char NAME[SIZE];``), and
+        local stack arrays with byte element types.  ``int``-typed
+        globals and arrays keep word-sized element access.
         """
         if name in self.global_byte_arrays:
             return True
+        if name in self.local_stack_arrays:
+            return self.variable_types.get(name) in self.BYTE_TYPES
         return name not in self.variable_arrays and self.variable_types.get(name) in self.BYTE_SCALAR_TYPES
 
     def _is_constant_alias(self, *, body: list[Node], statement: VarDecl) -> bool:

@@ -1,4 +1,5 @@
 int main(int argc, char *argv[]) {
+    char buffer[512];
     if (argc != 1) {
         die("Usage: cat <filename>\n");
     }
@@ -6,7 +7,6 @@ int main(int argc, char *argv[]) {
     if (fd < 0) {
         die("File not found\n");
     }
-    char *buffer = SECTOR_BUFFER;
     int bytes;
     do {
         bytes = read(fd, buffer, 512);

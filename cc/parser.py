@@ -868,19 +868,22 @@ class Parser:
         line = self.peek()[2]
         type_string = self.parse_type()
         name = self.eat("IDENT")[1]
-        # Optional [] for array declarations
+        # Optional [] or [N] for array declarations
         is_array = False
+        size_expression: Node | None = None
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
-            self.eat("RBRACKET")
             is_array = True
+            if self.peek()[0] != "RBRACKET":
+                size_expression = self.parse_expression()
+            self.eat("RBRACKET")
         init = None
         if self.peek()[0] == "ASSIGN":
             self.eat("ASSIGN")
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
         if is_array:
-            return ArrayDecl(init=init, line=line, name=name, type_name=type_string)
+            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
         return VarDecl(init=init, line=line, name=name, type_name=type_string)
 
     def parse_while(self) -> Node:

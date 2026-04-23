@@ -7,43 +7,49 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 451         | 447       | -4    |
-| cat     | 145         | 130       | -15   |
+| arp     | 451         | 454       | +3    |
+| cat     | 145         | 143       | -2    |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
-| dns     | 724         | 1203      | +479  |
+| dns     | 724         | 1216      | +492  |
 | draw    | 245         | 239       | -6    |
-| edit    | 1977        | 2357      | +380  |
+| edit    | 1977        | 2348      | +371  |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 162       | +27   |
+| ls      | 135         | 172       | +37   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 220       | +3    |
-| netinit | 72          | 63        | -9    |
-| netrecv | 334         | 377       | +43   |
-| netsend | 187         | 218       | +31   |
-| ping    | 1019        | 1317      | +298  |
+| netinit | 72          | 69        | -3    |
+| netrecv | 334         | 386       | +52   |
+| netsend | 187         | 221       | +34   |
+| ping    | 1019        | 1356      | +337  |
 | shell   | 921         | 1326      | +405  |
 | uptime  | 50          | 78        | +28   |
+
+**arp (+3):** The three scratch arrays (`mac_buffer[6]`,
+`receive_buffer[128]`, `target_ip[4]`) are file-scope BSS globals;
+the assembly version uses inline `BUFFER`/`BUFFER+N` offsets.  The
+remaining +3 is null terminators on the two `die()` strings.
 
 **chmod (+25):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+479):** Both versions use the same shared memory regions
-(`SECTOR_BUFFER` for the query/response, `BUFFER` for name decoding).
-The C version is larger because `decode_domain` and `encode_domain`
-carry full stack-frame overhead (push bp / mov bp,sp / pop bp / ret
-per call) and pass arguments via the stack (their callers pass
-complex expressions, so the register calling convention doesn't
-kick in); `skip_name` is simple enough that cc.py now routes its
-arguments through registers.  The assembly version uses register
-calling conventions with no frame setup for every helper.  The C
-compiler also generates word-sized loads with `xor ah,ah`
-zero-extension for every byte read, whereas the assembly version
-uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
+**dns (+492):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
+`name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals;
+the assembly version reused `SECTOR_BUFFER` and `BUFFER`.  Most of
+the delta comes from `decode_domain` and `encode_domain` carrying
+full stack-frame overhead (push bp / mov bp,sp / pop bp / ret per
+call) and passing arguments via the stack (their callers pass complex
+expressions, so the register calling convention doesn't kick in);
+`skip_name` is simple enough that cc.py routes its arguments through
+registers.  The assembly version uses register calling conventions
+with no frame setup for every helper.  The C compiler also generates
+word-sized loads with `xor ah,ah` zero-extension for every byte read,
+whereas the assembly version uses `lodsb` / `stosb` / `rep movsb`
+for compact byte-oriented loops.
 
-**edit (+380):** Both versions implement the same gap-buffer /
+**edit (+371):** Both versions implement the same gap-buffer /
 kill-buffer editor over the same key bindings.  The C version
 translates `ESC [ A/B/C/D` into the matching Ctrl-char before
 dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
@@ -83,38 +89,48 @@ bytes over the previous 2247-byte build come from the
 24)`` sites (and their column equivalents) now reloads the
 pinned value after the fused ``inc <reg>``, where the old
 output elided the reload via an ``ax_local`` shortcut that the
-peephole invalidated.
+peephole invalidated.  The save-path scratch buffer is now a local
+stack array (``char sector[512]``), which triggers a full BP frame
+for `main` so the 512-byte array lives on the stack segment rather
+than as a data label in the binary (2346 → 2348 with the BP prologue).
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+27):** The assembly version uses inline `repne scasb` with a
+**ls (+37):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
+`entry[DIRECTORY_ENTRY_SIZE]` is a local stack array, triggering a BP
+frame for `main` (+6 bytes for prologue, +6 bytes for `lea`-vs-`mov`
+addressing on `entry` accesses).
 
 **mkdir (+4):** Null-terminator overhead across 4 string literals.
 
-**netrecv (+43):** Both versions read into `BUFFER + 128` with a
-capped 128-byte read -- plenty for the ARP reply that's being demoed.
-The delta is ordinary C-compiler overhead: null-terminated strings,
-the net_open CF normalization, fd stashed in a memory local so it
-survives across `FUNCTION_WRITE_STDOUT` calls, and printf-style hex
-formatting instead of the asm version's inline `FUNCTION_PRINT_HEX`
-loop.
+**netrecv (+52):** The C version uses stack-local `receive_buffer[128]`
+and `mac_buffer[6]` in `main`'s BP frame where the assembly version
+used `BUFFER + 128` and `BUFFER`.  The delta is otherwise ordinary
+C-compiler overhead: null-terminated strings, the net_open CF
+normalization, fd stashed in a memory local so it survives across
+`FUNCTION_WRITE_STDOUT` calls, and printf-style hex formatting instead
+of the asm version's inline `FUNCTION_PRINT_HEX` loop.
 
-**netsend (+31):** Null terminators on three strings, the net_open
+**netsend (+34):** Null terminators on three strings, the net_open
 CF-to-integer normalization, and storing fd to a local all add a
 handful of bytes.  The asm version kept fd in BX and used
-length-bearing messages without null terminators.  Both versions
-stash the MAC in the shell's idle input buffer at ``BUFFER`` rather
-than in an embedded cell.
+length-bearing messages without null terminators.  The C version uses
+a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
+uses ``BUFFER``.
 
-**ping (+298):** Both versions build ICMP echo requests in userspace
+**ping (+337):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
-``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  Most of the delta is
-the DNS fallback: ``encode_domain`` and ``resolve_dns`` carry full
+``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
+arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,
+``target_ip[4]``) are local stack arrays in `main`; ``query_buffer``
+and ``dns_ip`` are passed as parameters to ``resolve_dns`` so the
+helper no longer reads file-scope globals.  Most of the delta is the
+DNS fallback: ``encode_domain`` and ``resolve_dns`` carry full
 stack-frame overhead (push bp / mov bp,sp / pop bp / ret) and pass
 arguments via the stack — their call sites include complex
 expressions so cc.py can't switch them to register passing.

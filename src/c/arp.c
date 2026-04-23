@@ -1,22 +1,24 @@
+char mac_buffer[6];
+char receive_buffer[128];
+char target_ip[4];
+
 int main(int argc, char *argv[]) {
     if (argc != 1) {
         die("usage: arp <ip>\n");
     }
 
-    uint8_t *target_ip = BUFFER;
     int error = parse_ip(argv[0], target_ip);
     if (error) {
         die("usage: arp <ip>\n");
     }
 
-    uint8_t *my_mac = BUFFER + 4;
-    error = mac(my_mac);
+    error = mac(mac_buffer);
     if (error) {
         die("No NIC found\n");
     }
 
-    memcpy(arp_frame + 6, my_mac, 6);
-    memcpy(arp_frame + 22, my_mac, 6);
+    memcpy(arp_frame + 6, mac_buffer, 6);
+    memcpy(arp_frame + 22, mac_buffer, 6);
     memcpy(arp_frame + 38, target_ip, 4);
 
     int fd = net_open(SOCK_RAW, 0);
@@ -26,7 +28,6 @@ int main(int argc, char *argv[]) {
 
     write(fd, arp_frame, 60);
 
-    uint8_t *receive_buffer = BUFFER + 128;
     int tries = 30000;
     while (tries > 0) {
         int bytes = read(fd, receive_buffer, 128);

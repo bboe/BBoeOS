@@ -508,7 +508,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
         """Load a variable's value into *register*.
 
         Checks pinned registers first, then constant aliases, then
-        falls back to the memory frame slot.
+        falls back to the memory frame slot.  Local stack arrays
+        compute their base address (``lea`` or label-immediate) rather
+        than dereferencing a pointer slot.
         """
         if name in self.pinned_register:
             source = self.pinned_register[name]
@@ -523,6 +525,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 self.emit(f"        mov {register}, {source}")
         elif name in self.constant_aliases:
             self.emit(f"        mov {register}, {self.constant_aliases[name]}")
+        elif name in self.local_stack_arrays:
+            if self.elide_frame:
+                self.emit(f"        mov {register}, _l_{name}")
+            else:
+                offset = self.locals[name]
+                self.emit(f"        lea {register}, [{self.target.base_register}-{offset}]")
         else:
             self.emit(f"        mov {register}, [{self._local_address(name)}]")
 
@@ -1168,6 +1176,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
+    def _eval_local_array_size(self, size: Node, /, *, stride: int) -> int | None:
+        """Return the byte count for a local array declaration, or ``None``.
+
+        Only ``Int`` literals and :attr:`NAMED_CONSTANT_VALUES` entries
+        can be resolved at Python time — those are the only cases where
+        cc.py knows the integer value needed to size the stack frame slot.
+        Any other expression returns ``None`` and the caller falls back to
+        the old 2-byte-pointer behavior (raising a compile error or keeping
+        the array at file scope).
+        """
+        if isinstance(size, Int):
+            return size.value * stride
+        if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
+            return self.NAMED_CONSTANT_VALUES[size.name] * stride
+        return None
+
     def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.
 
@@ -1757,6 +1781,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             if ax_written:
                 new_ax_local = None
                 new_ax_is_byte = False
+        elif isinstance(argument, Var) and argument.name in self.local_stack_arrays:
+            if self.elide_frame:
+                self.emit(f"        mov {register}, _l_{argument.name}")
+            else:
+                offset = self.locals[argument.name]
+                self.emit(f"        lea {register}, [{self.target.base_register}-{offset}]")
+            if ax_written:
+                new_ax_local = None
+                new_ax_is_byte = False
         elif isinstance(argument, Var) and self._is_memory_scalar(argument.name):
             if self._is_byte_scalar(argument.name):
                 # Byte-scalar source into a word register: load via AL
@@ -1810,6 +1843,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             self.emit(f"        mov {si}, {self.constant_aliases[argument.name]}")
         elif isinstance(argument, Var) and argument.name in self.global_arrays:
             self.emit(f"        mov {si}, _g_{argument.name}")
+        elif isinstance(argument, Var) and argument.name in self.local_stack_arrays:
+            if self.elide_frame:
+                self.emit(f"        mov {si}, _l_{argument.name}")
+            else:
+                offset = self.locals[argument.name]
+                self.emit(f"        lea {si}, [{self.target.base_register}-{offset}]")
         elif (constant_expr := self._constant_expression(argument)) is not None:
             for name in self._collect_constant_references(argument):
                 self.emit_constant_reference(name)
@@ -1871,6 +1910,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
                 return
             if isinstance(expression, Var) and expression.name in self.global_arrays:
                 self.emit(f"        mov {direct_register}, _g_{expression.name}")
+                return
+            if isinstance(expression, Var) and expression.name in self.local_stack_arrays:
+                vname = expression.name
+                if self.elide_frame:
+                    self.emit(f"        mov {direct_register}, _l_{vname}")
+                else:
+                    offset = self.locals[vname]
+                    self.emit(f"        lea {direct_register}, [{self.target.base_register}-{offset}]")
                 return
         # Tell nested expression handling that the pinned destination
         # register (if any) will be overwritten at end of this store, so
@@ -1970,7 +2017,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, PeepholeMixin, CodeGenerato
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
-                self.allocate_local(statement.name)
+                stride = 1 if statement.type_name in self.BYTE_TYPES else self.target.int_size
+                byte_count = self._eval_local_array_size(statement.size, stride=stride) if statement.size is not None else None
+                if byte_count is not None:
+                    self.allocate_local(statement.name, size=byte_count)
+                    self.local_stack_arrays[statement.name] = byte_count
+                else:
+                    self.allocate_local(statement.name)
             elif isinstance(statement, If):
                 self.scan_locals(statement.body, top_level=False)
                 if statement.else_body is not None:
