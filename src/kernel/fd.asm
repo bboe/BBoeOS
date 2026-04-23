@@ -144,6 +144,21 @@ fd_open:
         push di
         mov [fd_open_flags], al
         mov [fd_open_name], si
+        ;; Check synthetic device paths first (no filesystem lookup).
+        mov di, DEV_VGA_PATH
+        mov cx, 9                       ; "/dev/vga" + null
+        cld
+        repe cmpsb
+        jne .open_not_device
+        call fd_alloc
+        jc .open_err
+        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_VGA
+        mov cl, [fd_open_flags]
+        mov [si+FD_OFFSET_FLAGS], cl
+        mov [fd_open_fd], ax
+        jmp .open_done
+        .open_not_device:
+        mov si, [fd_open_name]
         ;; Look up the file (vfs_find handles "." → root directory)
         call vfs_find           ; populates vfs_found_*
         jc .open_not_found
@@ -265,15 +280,47 @@ fd_write:
         ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
         ;; A zero entry means unsupported for that type.
 fd_ops:
-        dw 0,               0                ; FD_TYPE_FREE (0)
-        dw fd_read_file,    fd_write_file     ; FD_TYPE_FILE (1)
-        dw fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (2)
-        dw fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (3)
-        dw fd_read_net,     fd_write_net      ; FD_TYPE_NET (4)
-        dw 0,               0                 ; FD_TYPE_UDP (5)
-        dw 0,               0                 ; FD_TYPE_ICMP (6)
+        dw 0,               0                 ; FD_TYPE_FREE (0)
+        dw fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (1)
+        dw fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (2)
+        dw fd_read_file,    fd_write_file     ; FD_TYPE_FILE (3)
+        dw 0,               0                 ; FD_TYPE_ICMP (4)
+        dw fd_read_net,     fd_write_net      ; FD_TYPE_NET (5)
+        dw 0,               0                 ; FD_TYPE_UDP (6)
+        dw 0,               0                 ; FD_TYPE_VGA (7)
+
+;;; -----------------------------------------------------------------------
+;;; fd_ioctl: Device-control dispatch.  Looks up BX=fd, then jumps to the
+;;; per-type ioctl handler in fd_ioctl_ops.  Handler receives AL=cmd plus
+;;; cmd-specific args in other registers and returns CF=0/1.
+;;; -----------------------------------------------------------------------
+fd_ioctl:
+        call fd_lookup
+        jc .err
+        xor bh, bh
+        mov bl, [si+FD_OFFSET_TYPE]
+        shl bx, 1               ; one word per entry
+        mov bx, [fd_ioctl_ops+bx]
+        test bx, bx
+        jz .err
+        jmp bx
+        .err:
+        stc
+        ret
+
+        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.
+fd_ioctl_ops:
+        dw 0                    ; FD_TYPE_FREE (0)
+        dw 0                    ; FD_TYPE_CONSOLE (1)
+        dw 0                    ; FD_TYPE_DIRECTORY (2)
+        dw 0                    ; FD_TYPE_FILE (3)
+        dw 0                    ; FD_TYPE_ICMP (4)
+        dw 0                    ; FD_TYPE_NET (5)
+        dw 0                    ; FD_TYPE_UDP (6)
+        dw fd_ioctl_vga         ; FD_TYPE_VGA (7)
 
         ;; Variables
+        DEV_VGA_PATH    db `/dev/vga\0`
         fd_open_fd    dw 0
         fd_open_flags db 0
         fd_open_mode  db 0

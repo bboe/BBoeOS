@@ -17,7 +17,6 @@
         jmp near shared_print_mac
         jmp near shared_print_string
         jmp near shared_printf
-        jmp near vga_fill_block
         jmp near shared_write_stdout
 
 boot_shell:

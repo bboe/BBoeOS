@@ -680,6 +680,92 @@ vga_write_attribute:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; fd_ioctl_vga: SYS_IO_IOCTL entry for /dev/vga fds.
+;;; Input:  AL = cmd (VGA_IOCTL_*); args per cmd (see constants.asm).
+;;; Output: CF = 1 on unsupported cmd or mode.
+;;;
+;;; Called via jmp from fd_ioctl, so returning with ret here goes back to
+;;; the syscall handler's .iret_cf path.  BX was clobbered by the
+;;; dispatch-table indirection; SI still points at the fd entry.
+;;; -----------------------------------------------------------------------
+fd_ioctl_vga:
+        ;; Every VGA ioctl mutates device state (mode, framebuffer, DAC),
+        ;; so the fd must have been opened O_WRONLY.  fd_lookup left SI
+        ;; pointing at the fd entry; the dispatch table jump into here
+        ;; clobbered BX but SI survives.
+        test byte [si+FD_OFFSET_FLAGS], O_WRONLY
+        jz .vga_bad
+        cmp al, VGA_IOCTL_FILL_BLOCK
+        je .vga_fill_block
+        cmp al, VGA_IOCTL_MODE
+        je .vga_mode
+        cmp al, VGA_IOCTL_SET_PALETTE
+        je .vga_set_palette
+.vga_bad:
+        stc
+        ret
+
+.vga_fill_block:
+        ;; CL=col, CH=row, DL=color.  vga_fill_block's native ABI uses
+        ;; BL/BH/AL, so shuffle before the call.
+        mov bx, cx
+        mov al, dl
+        call vga_fill_block
+        clc
+        ret
+
+.vga_mode:
+        ;; DL = requested video mode.  Send CR+form-feed to serial, then
+        ;; program the VGA registers.  On text-mode switches, follow up
+        ;; with a buffer clear so the 80×25 framebuffer isn't left with
+        ;; stale content from the previous mode.
+        push ax
+        mov al, `\r`
+        call serial_character
+        mov al, 0Ch
+        call serial_character
+        pop ax
+        mov al, dl
+        call vga_set_mode       ; CF=1 on unsupported mode
+        jc .vga_mode_done
+        cmp al, VIDEO_MODE_TEXT_80x25
+        jne .vga_mode_clear_done
+        call vga_clear_screen
+.vga_mode_clear_done:
+        clc
+.vga_mode_done:
+        ret
+
+.vga_set_palette:
+        ;; CL=index, CH=r, DL=g, DH=b → pass straight through.
+        call vga_set_palette_color
+        clc
+        ret
+
+vga_set_palette_color:
+        ;; Program DAC entry CL to (CH, DL, DH) in 6-bit R/G/B.
+        ;; Writes index to 0x3C8 (write-address) then R/G/B sequentially
+        ;; to 0x3C9 (data).  Preserves all registers.
+        push ax
+        push bx
+        push dx
+        mov bx, dx                      ; stash G (BL) and B (BH); DX freed
+        mov dx, 03C8h
+        mov al, cl                      ; index
+        out dx, al
+        inc dx                          ; 03C9h: R, G, B
+        mov al, ch                      ; R
+        out dx, al
+        mov al, bl                      ; G
+        out dx, al
+        mov al, bh                      ; B
+        out dx, al
+        pop dx
+        pop bx
+        pop ax
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; Data tables (kept at end of file, sorted alphabetically by label).
 ;;; -----------------------------------------------------------------------
 

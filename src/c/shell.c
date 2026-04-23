@@ -77,6 +77,7 @@ int main() {
        and sits outside SECTOR_BUFFER so the directory-sector read
        during find_file doesn't clobber the path mid-lookup. */
     char *exec_path = ARGV;
+    int vga_fd = open("/dev/vga", O_WRONLY);
     int kill_len = 0;
     while (1) {
         write(STDOUT, "$ ", 2);
@@ -144,7 +145,7 @@ int main() {
                 }
             } else if (ch == '\x0C') {
                 /* Ctrl-L: clear screen and reprompt */
-                video_mode(VIDEO_MODE_TEXT_80x25);
+                video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
                 break;
             } else if (ch == '\r') {

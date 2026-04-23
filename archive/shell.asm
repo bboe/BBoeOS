@@ -13,13 +13,21 @@
 
 main:
         cld
+        ;; Open /dev/vga for ioctl-based video-mode switching.  Stash the
+        ;; fd so Ctrl-L can reuse it without reopening on every keypress.
+        mov si, DEV_VGA
+        mov al, O_WRONLY
+        mov ah, SYS_IO_OPEN
+        int 30h
+        mov [vga_fd], ax
+prompt:
         mov si, PROMPT
         mov cx, PROMPT_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         call read_line
         test cx, cx
-        jz main
+        jz prompt
 
         ;; Split command at first space
         mov si, BUFFER
@@ -93,10 +101,10 @@ main:
 
 .output:
         test si, si
-        jz main
+        jz prompt
         mov di, si
         call FUNCTION_PRINT_STRING
-        jmp main
+        jmp prompt
 
 ;; Command handlers
 ;; Return: SI = string to print, or SI = 0 for no output
@@ -319,8 +327,10 @@ read_line:
         jmp .read_char
 
         .ctrl_l:
-        mov ah, SYS_VIDEO_MODE
-        mov al, VIDEO_MODE_TEXT_80x25
+        mov bx, [vga_fd]
+        mov dl, VIDEO_MODE_TEXT_80x25
+        mov al, VGA_IOCTL_MODE
+        mov ah, SYS_IO_IOCTL
         int 30h
         mov cx, BUFFER
         mov dx, BUFFER
@@ -510,6 +520,7 @@ cmd_table:
         .shutdown db `shutdown\0`
 
 ;; Strings
+DEV_VGA       db `/dev/vga\0`
 HELP_PREFIX   db `Commands: `
 HELP_PREFIX_LENGTH equ $ - HELP_PREFIX
 INVALID_COMMAND   db `unknown command\n\0`
@@ -523,4 +534,5 @@ SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 ;; as %assigns at the top of this file; no binary storage is reserved
 ;; for them here.
 kill_length   dw 0
+vga_fd        dw 0
 

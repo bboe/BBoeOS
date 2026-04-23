@@ -25,6 +25,14 @@
 main:
         cld
 
+        ;; Open /dev/vga up front so the render loop and quit path can
+        ;; issue SYS_IO_IOCTL / VGA_IOCTL_MODE without reopening.
+        mov si, DEV_VGA
+        mov al, O_WRONLY
+        mov ah, SYS_IO_OPEN
+        int 30h
+        mov [vga_fd], ax
+
         ;; Require exactly one argument
         mov di, ARGV
         call FUNCTION_PARSE_ARGV
@@ -495,8 +503,10 @@ get_input:
         pop cx
         pop bx
         pop ax
-        mov ah, SYS_VIDEO_MODE
-        mov al, VIDEO_MODE_TEXT_80x25
+        mov bx, [vga_fd]
+        mov dl, VIDEO_MODE_TEXT_80x25
+        mov al, VGA_IOCTL_MODE
+        mov ah, SYS_IO_IOCTL
         int 30h
         jmp FUNCTION_EXIT
 
@@ -788,8 +798,10 @@ render:
         push dx
         push si
 
-        mov ah, SYS_VIDEO_MODE
-        mov al, VIDEO_MODE_TEXT_80x25
+        mov bx, [vga_fd]
+        mov dl, VIDEO_MODE_TEXT_80x25
+        mov al, VGA_IOCTL_MODE
+        mov ah, SYS_IO_IOCTL
         int 30h
 
         ;; Walk to start of view_line: count newlines from offset 0
@@ -1041,12 +1053,14 @@ save_file:
         kill_length      dw 0
         save_fd       dw 0
         status_message    dw 0
+        vga_fd        dw 0
         view_column      dw 0
         view_line     dw 0
 
 ;;; -----------------------------------------------------------------------
 ;;; Strings (sorted)
 ;;; -----------------------------------------------------------------------
+        DEV_VGA                 db `/dev/vga\0`
         MESSAGE_COLUMN          db `  col `
         MESSAGE_COLUMN_LENGTH   equ $ - MESSAGE_COLUMN
         MESSAGE_CREATE_ERROR   db `Cannot create file (directory full?)\0`

@@ -13,7 +13,7 @@ source is kept here for reference.
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1216      | +492  |
-| edit    | 1977        | 2409      | +432  |
+| edit    | 2018        | 2484      | +466  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 174       | +39   |
 | mkdir   | 123         | 127       | +4    |
@@ -22,7 +22,7 @@ source is kept here for reference.
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
 | ping    | 1019        | 1365      | +346  |
-| shell   | 921         | 1326      | +405  |
+| shell   | 950         | 1357      | +407  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+3):** The three scratch arrays (`mac_buffer[6]`,

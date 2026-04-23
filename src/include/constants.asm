@@ -7,7 +7,7 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR 32
+        %assign DIRECTORY_SECTOR 34
         %assign DIRECTORY_SECTORS 3
         %assign EXT2_START_SECTOR DIRECTORY_SECTOR  ; ext2 partition base (same as bbfs start)
         %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
@@ -31,13 +31,14 @@
         %assign FD_OFFSET_SIZE 4        ; offset of size field within FD entry (32-bit)
         %assign FD_OFFSET_START 2       ; offset of start_sec field within FD entry
         %assign FD_OFFSET_TYPE 0        ; offset of type field within FD entry
-        %assign FD_TYPE_CONSOLE 2
-        %assign FD_TYPE_DIRECTORY 3
-        %assign FD_TYPE_FILE 1
-        %assign FD_TYPE_FREE 0
-        %assign FD_TYPE_ICMP 6
-        %assign FD_TYPE_NET 4
-        %assign FD_TYPE_UDP 5
+        %assign FD_TYPE_FREE 0      ; Must stay 0: fd_init zeroes the table; fd_alloc treats 0 as free
+        %assign FD_TYPE_CONSOLE 1
+        %assign FD_TYPE_DIRECTORY 2
+        %assign FD_TYPE_FILE 3
+        %assign FD_TYPE_ICMP 4
+        %assign FD_TYPE_NET 5
+        %assign FD_TYPE_UDP 6
+        %assign FD_TYPE_VGA 7
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (3 bytes per entry)
@@ -54,8 +55,7 @@
         %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
         %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 3 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_VGA_FILL_BLOCK FUNCTION_PRINTF + 3    ; BL=col, BH=row, AL=color: fill 8×8 tile in mode 13h
-        %assign FUNCTION_WRITE_STDOUT  FUNCTION_VGA_FILL_BLOCK + 3 ; SI=buf, CX=len: write to stdout
+        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 3 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256
@@ -84,9 +84,10 @@
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
-        %assign SYS_IO_OPEN  12h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
-        %assign SYS_IO_READ  13h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_WRITE 14h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_IOCTL 12h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
+        %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
+        %assign SYS_IO_READ  14h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_WRITE 15h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         %assign SYS_NET_MAC 20h
         %assign SYS_NET_OPEN 21h
@@ -96,14 +97,17 @@
         %assign SYS_RTC_SLEEP 31h       ; CX=milliseconds: busy-wait via BIOS INT 15h
         %assign SYS_RTC_UPTIME 32h      ; returns AX = seconds since boot
 
-        %assign SYS_VIDEO_MODE 40h      ; AL=video mode; clears screen and serial
-
         %assign SYS_EXEC 0F0h
         %assign SYS_EXIT 0F1h
         %assign SYS_REBOOT 0F2h
         %assign SYS_SHUTDOWN 0F3h
 
-        ;; Video modes (argument to SYS_VIDEO_MODE; INT 10h AH=00h AL)
+        ;; VGA ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_VGA)
+        %assign VGA_IOCTL_FILL_BLOCK    00h  ; CL=col, CH=row, DL=color (mode 13h 8x8 tile)
+        %assign VGA_IOCTL_MODE          01h  ; DL=mode; also clears screen and serial
+        %assign VGA_IOCTL_SET_PALETTE   02h  ; CL=index, CH=r, DL=g, DH=b (6-bit DAC)
+
+        ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL)
         %assign VIDEO_MODE_TEXT_40x25      01h  ; 40x25 color text
         %assign VIDEO_MODE_TEXT_80x25      03h  ; 80x25 color text (default)
         %assign VIDEO_MODE_CGA_320x200     04h  ; CGA 4-color 320x200

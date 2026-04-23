@@ -29,6 +29,8 @@ syscall_handler:
         je .io_close
         cmp ah, SYS_IO_FSTAT   ; io_fstat
         je .io_fstat
+        cmp ah, SYS_IO_IOCTL   ; io_ioctl
+        je .io_ioctl
         cmp ah, SYS_IO_OPEN    ; io_open
         je .io_open
         cmp ah, SYS_IO_READ    ; io_read
@@ -51,9 +53,6 @@ syscall_handler:
         cmp ah, SYS_RTC_UPTIME ; rtc_uptime
         je .rtc_uptime
 
-        cmp ah, SYS_VIDEO_MODE    ; video_mode
-        je .video_mode
-
         cmp ah, SYS_EXEC       ; sys_exec
         je .sys_exec
         cmp ah, SYS_EXIT       ; sys_exit
@@ -69,7 +68,6 @@ syscall_handler:
 %include "syscall/net.asm"
 %include "syscall/rtc.asm"
 %include "syscall/sys.asm"
-%include "syscall/video.asm"
 
         .iret_cf:
         ;; Propagate the handler's CF to the caller's saved FLAGS,
