@@ -3,8 +3,9 @@
 
 Builds the OS with `make_os.sh --ext2`, boots in QEMU, runs a representative
 command for each test program, and checks the output against an expected regex.
-Each test gets its own QEMU boot with `snapshot=on` so writes don't affect the
-shared image.
+Each test gets its own copy of the base image so writes don't affect other
+tests.  After QEMU exits, ``e2fsck -f -n`` runs on the modified image to check
+filesystem integrity.
 
 Programs that read file content via `io_read` (e.g. `cat`) exercise the
 `vfs_read_sec` function pointer, which routes through `ext2_read_sec` to
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive_ext2.img"
+EXT2_SECTOR_OFFSET = 30  # DIRECTORY_SECTOR in src/include/constants.asm
 
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -129,22 +132,55 @@ def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
         sys.exit(1)
 
 
+def _fsck(*, image: Path) -> str | None:
+    """Run e2fsck on the ext2 partition; return an error string or None if clean."""
+    ext2_offset = EXT2_SECTOR_OFFSET * 512
+    with Path(image).open("rb") as f:
+        f.seek(ext2_offset)
+        ext2_data = f.read()
+    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as tmp:
+        tmp.write(ext2_data)
+        ext2_path = Path(tmp.name)
+    try:
+        result = subprocess.run(
+            ["e2fsck", "-f", "-n", str(ext2_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            lines = result.stdout.splitlines()
+            for line in lines:
+                if line and not line.startswith("Pass ") and not line.startswith("Running ") and not line.startswith("/tmp"):
+                    return line
+            return f"exit {result.returncode}"
+        return None
+    finally:
+        ext2_path.unlink(missing_ok=True)
+
+
 def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
     """Run one ProgramTest; return (passed, short message for report)."""
+    test_image = temporary_directory / f"test_{test.name}.img"
+    shutil.copy2(temporary_directory / BASE_IMAGE, test_image)
     try:
         output = run_commands(
             test.commands,
             command_timeout=test.timeout,
-            drive=temporary_directory / BASE_IMAGE,
-            snapshot=True,
+            drive=test_image,
+            snapshot=False,
         )
     except TimeoutError as error:
         return False, f"timeout: {error}"
     except RuntimeError as error:
         return False, f"qemu error: {error}"
-    if re.search(test.expect, output.replace("\r", ""), re.MULTILINE):
-        return True, ""
-    return False, f"expected regex {test.expect!r} not found in output"
+    failures = []
+    if not re.search(test.expect, output.replace("\r", ""), re.MULTILINE):
+        failures.append(f"expected regex {test.expect!r} not found in output")
+    fsck_error = _fsck(image=test_image)
+    if fsck_error:
+        failures.append(f"fsck: {fsck_error}")
+    return (not failures), "; ".join(failures)
 
 
 def _run_suite(
