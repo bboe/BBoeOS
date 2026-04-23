@@ -82,6 +82,8 @@ int far_read16(int offset);
 int far_read8(int offset);
 void far_write16(int offset, int value);
 void far_write8(int offset, int value);
+/* Fill an 8x8 pixel tile at (col, row) with palette index color in VGA mode 13h */
+void fill_block(int fd, int col, int row, int color);
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */
@@ -102,6 +104,8 @@ int recvfrom(int fd, char *buffer, int length, int port);
 int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
 /* Publish the argument pointer for the next exec()'d program */
 void set_exec_arg(const char *arg);
+/* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
+void set_palette_color(int fd, int index, int r, int g, int b);
 /* Power off via APM. Returns only when APM is unavailable. */
 void shutdown(void);
 /* Low 16 bits of BIOS tick counter (BBoeOS-specific) */
@@ -110,12 +114,8 @@ int ticks(void);
    rely on cc.py's builtin for compilation, don't redeclare here. */
 /* BBoeOS syscall: seconds since boot */
 int uptime(void);
-/* Fill an 8x8 pixel tile at (col, row) with palette index color in VGA mode 13h */
-void fill_block(int col, int row, int color);
-/* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
-void set_palette_color(int index, int r, int g, int b);
 /* Switch video mode (no POSIX equivalent) */
-void video_mode(int mode);
+void video_mode(int fd, int mode);
 
 /* --- External data --- */
 

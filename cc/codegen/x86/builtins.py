@@ -231,45 +231,47 @@ class BuiltinsMixin:
         self.ax_clear()
 
     def builtin_fill_block(self, arguments: list[Node], /) -> None:
-        """Generate code for fill_block(col, row, color).
+        """Generate code for fill_block(fd, col, row, color).
 
-        Fills an 8x8 tile at (col, row) with the given palette index in VGA
-        mode 13h (320x200 256-colour).  Calls FUNCTION_VGA_FILL_BLOCK with
-        BL=col, BH=row, AL=color.
-
-        Row is loaded into BH first so that loading col (via AL→BL) cannot
-        clobber it — a full ``mov bx, col`` would overwrite BH if row happens
-        to be pinned to BX.
+        Thin wrapper over SYS_IO_IOCTL / VGA_IOCTL_FILL_BLOCK: programs
+        first open("/dev/vga") to obtain the fd, then call fill_block to
+        fill an 8x8 tile at (col, row) with the given palette index in
+        mode 13h.  Emits BX=fd, CL=col, CH=row, DL=color, AL=cmd.
         """
-        self._check_argument_count(arguments=arguments, expected=3, name="fill_block")
-        col_arg, row_arg, color_arg = arguments
-        self.emit_register_from_argument(argument=row_arg, register=self.target.acc)
-        self.emit("        mov bh, al")
+        self._check_argument_count(arguments=arguments, expected=4, name="fill_block")
+        fd_arg, col_arg, row_arg, color_arg = arguments
         self.emit_register_from_argument(argument=col_arg, register=self.target.acc)
-        self.emit("        mov bl, al")
+        self.emit("        mov cl, al")
+        self.emit_register_from_argument(argument=row_arg, register=self.target.acc)
+        self.emit("        mov ch, al")
         self.emit_register_from_argument(argument=color_arg, register=self.target.acc)
-        self.emit("        call FUNCTION_VGA_FILL_BLOCK")
+        self.emit("        mov dl, al")
+        self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
+        self.emit("        mov al, VGA_IOCTL_FILL_BLOCK")
+        self._emit_syscall("IO_IOCTL")
         self.ax_clear()
 
     def builtin_set_palette_color(self, arguments: list[Node], /) -> None:
-        """Generate code for set_palette_color(index, r, g, b).
+        """Generate code for set_palette_color(fd, index, r, g, b).
 
-        Programs the VGA DAC register for the given palette index to (r, g, b)
-        using 6-bit values (0-63).  Writes index to port 0x3C8, then R/G/B
-        sequentially to port 0x3C9.
+        Thin wrapper over SYS_IO_IOCTL / VGA_IOCTL_SET_PALETTE.  Programs
+        the VGA DAC entry ``index`` to 6-bit (r, g, b) via the kernel's
+        vga_set_palette_color driver.  Emits BX=fd, CL=index, CH=r,
+        DL=g, DH=b, AL=cmd.
         """
-        self._check_argument_count(arguments=arguments, expected=4, name="set_palette_color")
-        index_arg, r_arg, g_arg, b_arg = arguments
+        self._check_argument_count(arguments=arguments, expected=5, name="set_palette_color")
+        fd_arg, index_arg, r_arg, g_arg, b_arg = arguments
         self.emit_register_from_argument(argument=index_arg, register=self.target.acc)
-        self.emit("        mov dx, 03C8h")
-        self.emit("        out dx, al")
-        self.emit("        inc dx")
+        self.emit("        mov cl, al")
         self.emit_register_from_argument(argument=r_arg, register=self.target.acc)
-        self.emit("        out dx, al")
+        self.emit("        mov ch, al")
         self.emit_register_from_argument(argument=g_arg, register=self.target.acc)
-        self.emit("        out dx, al")
+        self.emit("        mov dl, al")
         self.emit_register_from_argument(argument=b_arg, register=self.target.acc)
-        self.emit("        out dx, al")
+        self.emit("        mov dh, al")
+        self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
+        self.emit("        mov al, VGA_IOCTL_SET_PALETTE")
+        self._emit_syscall("IO_IOCTL")
         self.ax_clear()
 
     def builtin_fstat(self, arguments: list[Node], /) -> None:
@@ -712,14 +714,19 @@ class BuiltinsMixin:
         self._emit_syscall("RTC_UPTIME")
 
     def builtin_video_mode(self, arguments: list[Node], /) -> None:
-        """Generate code for the video_mode(mode) builtin.
+        """Generate code for the video_mode(fd, mode) builtin.
 
-        Invokes SYS_VIDEO_MODE to switch video mode; also clears the
-        screen and serial terminal.  AL = mode.
+        Thin wrapper over SYS_IO_IOCTL / VGA_IOCTL_MODE.  Switches the
+        VGA mode and clears the framebuffer + serial terminal.  Emits
+        BX=fd, DL=mode, AL=cmd.
         """
-        self._check_argument_count(arguments=arguments, expected=1, name="video_mode")
-        self.emit_register_from_argument(argument=arguments[0], register=self.target.acc)
-        self._emit_syscall("VIDEO_MODE")
+        self._check_argument_count(arguments=arguments, expected=2, name="video_mode")
+        fd_arg, mode_arg = arguments
+        self.emit_register_from_argument(argument=mode_arg, register=self.target.acc)
+        self.emit("        mov dl, al")
+        self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
+        self.emit("        mov al, VGA_IOCTL_MODE")
+        self._emit_syscall("IO_IOCTL")
         self.ax_clear()
 
     def builtin_write(self, arguments: list[Node], /) -> None:

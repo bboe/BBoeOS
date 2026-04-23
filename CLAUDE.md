@@ -64,9 +64,10 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 04h   | fs_unlink    | Delete a file, SI = filename, CF on err               |
 | 10h   | io_close     | Close fd, BX = fd, CF on error                        |
 | 11h   | io_fstat     | Get file status, BX = fd; AL = mode, CX:DX = size     |
-| 12h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
-| 13h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
-| 14h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
+| 12h   | io_ioctl     | Device control, BX = fd, AL = cmd, args in other regs per (fd_type, cmd); CF on err |
+| 13h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
+| 14h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
+| 15h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
@@ -74,7 +75,6 @@ Programs loaded from the filesystem can use INT 30h for OS services:
 | 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |
 | 31h   | rtc_sleep    | Busy-wait for CX milliseconds                           |
 | 32h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
-| 40h   | video_mode   | Set video mode, AL = mode; clears serial and screen   |
 | F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F1h   | sys_exit     | Reload and return to shell                             |
 | F2h   | sys_reboot   | Reboot                                                |
@@ -101,8 +101,8 @@ renumbering is source-compatible — just rebuild.
 - `src/kernel/drivers/ata.asm`, `src/kernel/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
 - `src/kernel/drivers/ps2.asm` — PS/2 keyboard driver: `ps2_init`, `ps2_check`, `ps2_read`
 - `src/kernel/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
-- `src/kernel/drivers/vga.asm` — VGA text mode helpers
-- `src/kernel/fd.asm` — File descriptor table management: `fd_open`, `fd_read`, `fd_write`, `fd_close`, `fd_fstat`
+- `src/kernel/drivers/vga.asm` — VGA driver: text and mode-13h helpers (`vga_set_mode`, `vga_clear_screen`, `vga_fill_block`, `vga_set_palette_color`, …) plus `fd_ioctl_vga` (the `/dev/vga` ioctl dispatcher for `VGA_IOCTL_MODE` / `VGA_IOCTL_FILL_BLOCK` / `VGA_IOCTL_SET_PALETTE`)
+- `src/kernel/fd.asm` — File descriptor table management: `fd_open` (synthesizes `/dev/vga` into `FD_TYPE_VGA` without touching the filesystem), `fd_read`, `fd_write`, `fd_close`, `fd_fstat`, `fd_ioctl`
 - `src/kernel/fs.asm` — Low-level sector I/O: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
 - `src/kernel/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
 - `src/kernel/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`

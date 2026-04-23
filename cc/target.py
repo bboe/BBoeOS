@@ -135,6 +135,7 @@ class X86CodegenTarget(CodegenTarget):
         "FS_UNLINK": ("mov ah, SYS_FS_UNLINK", "int 30h"),
         "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
         "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
+        "IO_IOCTL": ("mov ah, SYS_IO_IOCTL", "int 30h"),
         "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
         "IO_READ": ("mov ah, SYS_IO_READ", "int 30h"),
         "IO_WRITE": ("mov ah, SYS_IO_WRITE", "int 30h"),
@@ -147,7 +148,6 @@ class X86CodegenTarget(CodegenTarget):
         "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
         "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
         "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
-        "VIDEO_MODE": ("mov ah, SYS_VIDEO_MODE", "int 30h"),
     }
     syscall_sequences = SYSCALL_SEQUENCES
 

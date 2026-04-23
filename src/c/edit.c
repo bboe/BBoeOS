@@ -74,6 +74,7 @@ int main(int argc, char *argv[]) {
     char *status_message;
     char sector[512];
 
+    int vga_fd = open("/dev/vga", O_WRONLY);
     int fd = open(filename, O_RDONLY);
     if (fd >= 0) {
         if (fstat(fd) & FLAG_DIRECTORY) {
@@ -106,7 +107,7 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         /* ---- Render ---- */
-        video_mode(VIDEO_MODE_TEXT_80x25);
+        video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
 
         /* Walk to the start of view_line by counting newlines. */
         int offset = 0;
@@ -195,7 +196,7 @@ int main(int argc, char *argv[]) {
 
         if (confirm_quit) {
             if (character == '\x11') {
-                video_mode(VIDEO_MODE_TEXT_80x25);
+                video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 return 0;
             }
             confirm_quit = 0;
@@ -367,7 +368,7 @@ int main(int argc, char *argv[]) {
         } else if (character == '\x11') {
             /* Ctrl+Q: quit; require a second Ctrl+Q when dirty. */
             if (!dirty) {
-                video_mode(VIDEO_MODE_TEXT_80x25);
+                video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 return 0;
             }
             confirm_quit = 1;

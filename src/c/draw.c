@@ -47,17 +47,18 @@ int trail_wrap(int value) {
 }
 
 int main() {
-    video_mode(VIDEO_MODE_VGA_320x200_256);
+    int vga_fd = open("/dev/vga", O_WRONLY);
+    video_mode(vga_fd, VIDEO_MODE_VGA_320x200_256);
     int background_color_index = 0;
     char character = 0;
     int column = 0;
     int row = 0;
     int trail_palette_index = 1;
-    set_palette_color(BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
-    fill_block(column, row, CURSOR_PALETTE_INDEX);
+    set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+    fill_block(vga_fd, column, row, CURSOR_PALETTE_INDEX);
     while (character != 'q') {
         character = getchar();
-        fill_block(column, row, trail_palette_index);
+        fill_block(vga_fd, column, row, trail_palette_index);
         if (character == 'a') {
             column = (column + COLUMNS - 1) % COLUMNS;
         } else if (character == 'd') {
@@ -72,12 +73,12 @@ int main() {
             trail_palette_index = trail_step(trail_palette_index, 1, background_color_index);
         } else if (character == 'j') {
             background_color_index = background_step(background_color_index, -1, trail_palette_index);
-            set_palette_color(BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
         } else if (character == 'k') {
             background_color_index = background_step(background_color_index, 1, trail_palette_index);
-            set_palette_color(BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
         }
-        fill_block(column, row, CURSOR_PALETTE_INDEX);
+        fill_block(vga_fd, column, row, CURSOR_PALETTE_INDEX);
     }
-    video_mode(VIDEO_MODE_TEXT_80x25);
+    video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
 }

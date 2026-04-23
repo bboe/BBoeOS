@@ -13,6 +13,12 @@
         mov [bp+10], dx         ; low 16 of size → saved DX
         jmp .iret_cf
 
+        .io_ioctl:
+        ;; Device control: BX = fd, AL = cmd, other regs per (type,cmd)
+        ;; Returns CF set on error (invalid fd, unsupported type, or bad cmd)
+        call fd_ioctl
+        jmp .iret_cf
+
         .io_open:
         ;; Open file/device: SI = filename, AL = flags
         ;; Returns AX = fd, CF on error

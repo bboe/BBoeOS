@@ -6,6 +6,10 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.6.0...main)
 
+### Syscalls
+- `SYS_IO_IOCTL` (15h): device-control dispatch keyed on fd type.  `/dev/vga` (new `FD_TYPE_VGA`) is a synthetic device — `open("/dev/vga", O_WRONLY)` allocates an fd of that type without touching the filesystem, and `fd_ioctl` routes through `fd_ioctl_ops` to per-type handlers.  The VGA handler rejects fds that weren't opened writable and supports three cmds: `VGA_IOCTL_MODE` (DL=mode, also clears screen+serial), `VGA_IOCTL_FILL_BLOCK` (CL=col, CH=row, DL=color), `VGA_IOCTL_SET_PALETTE` (CL=index, CH=r, DL=g, DH=b).  The palette write lives in a new kernel `vga_set_palette_color` driver function instead of cc.py inlining `out dx, al` in every caller.
+- Retire `SYS_VIDEO_MODE` (40h) and the `FUNCTION_VGA_FILL_BLOCK` jump-table slot: `video_mode` / `fill_block` / `set_palette_color` cc.py builtins now take an fd as the first argument and emit a single `int 30h` to SYS_IO_IOCTL.  `src/c/shell.c`, `edit.c`, and `draw.c` each open `/dev/vga` once in `main()` and pass the fd through.
+
 ### Tooling
 - Self-hosted assembler (`src/c/asm.c`): protected-mode extension (phase 5).  `parse_register` accepts the `e`-prefixed 32-bit general register file (eax / ecx / edx / ebx / esp / ebp / esi / edi); a dedicated `parse_creg` handles cr0..cr7; `emit_sized` prepends the 0x66 operand-size prefix for 32-bit widths; new `emit_dword` emits little-endian imm32 / disp32.  `handle_mov` gains `mov crN, r32` / `mov r32, crN` (0F 22 /r, 0F 20 /r) and `mov r32, imm32` with the 0x66 prefix; `emit_alu_reg_imm` extends to 32-bit operand size for the `or eax, 1` style encodings.  New `handle_lgdt` / `handle_lidt` (0F 01 /2, /3) and `jmp dword SEL:OFS` (0x66 0xEA ptr16:32) round out the pmode bootstrap encodings.  `static/pmode_sm.asm` exercises the full set against NASM; byte-identical on the self-host test
 
