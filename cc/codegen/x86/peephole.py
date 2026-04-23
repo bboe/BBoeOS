@@ -1119,12 +1119,17 @@ class Peepholer:
     def run(self) -> list[str]:
         """Run peephole optimization passes over generated assembly.
 
-        Ordering note: :meth:`peephole_memory_arithmetic` runs before
+        Ordering note: :meth:`peephole_memory_arithmetic` and
+        :meth:`peephole_dx_to_memory` both run before
         :meth:`peephole_store_reload` so that load/modify/store triples
-        get folded into a direct ``inc D`` (etc.) first.  Reversing the
-        order lets ``store_reload`` delete a reload that ``emit_store_local``
-        added as a safety net — ``memory_arithmetic`` would then fuse
-        the triple and leave the downstream read picking up stale AX.
+        get folded into a direct ``inc D`` (etc.) first, and so that a
+        ``%`` expression's ``mov ax, dx / mov [X], ax`` collapses to
+        ``mov [X], dx`` before ``store_reload`` gets to consider the
+        pair.  Reversing either order lets ``store_reload`` delete a
+        reload that ``emit_store_local`` added as a safety net — the
+        subsequent fuse would then leave AX holding the pre-store value
+        (the quotient, in the ``%`` case) while the downstream code
+        reads AX expecting the just-stored value.
         """
         self.peephole_dead_code()
         self.peephole_double_jump()
@@ -1132,8 +1137,8 @@ class Peepholer:
         self.peephole_label_forwarding()
         self.peephole_memory_arithmetic()
         self.peephole_memory_arithmetic_byte()
-        self.peephole_store_reload()
         self.peephole_dx_to_memory()
+        self.peephole_store_reload()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()
         self.peephole_index_through_memory()

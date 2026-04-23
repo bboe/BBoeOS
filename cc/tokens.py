@@ -60,6 +60,7 @@ COMPOUND_ASSIGN_OPERATORS = {
     "AMP_ASSIGN": "&",
     "CARET_ASSIGN": "^",
     "MINUS_ASSIGN": "-",
+    "PERCENT_ASSIGN": "%",
     "PIPE_ASSIGN": "|",
     "PLUS_ASSIGN": "+",
     "SHL_ASSIGN": "<<",
@@ -101,6 +102,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<CARET>\^)
   | (?P<TILDE>~)
   | (?P<NOT>!)
+  | (?P<PERCENT_ASSIGN>%=)
   | (?P<PERCENT>%)
   | (?P<PLUS>\+)
   | (?P<SLASH_ASSIGN>/=)

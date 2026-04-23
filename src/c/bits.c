@@ -1,7 +1,9 @@
-/* Smoke test for cc.py's bitwise operators and compound-assignment
-   forms.  Every result is printed as unsigned decimal because the
-   printf builtin's %x prints only the low byte.  The expected values
-   make the verification a simple text match. */
+/* Smoke test for cc.py's bitwise operators and their compound-
+   assignment forms, plus ``%=`` (the arithmetic compound-assignment
+   that exercises the div/remainder path the other compound-assigns
+   don't reach).  Every result is printed as unsigned decimal because
+   the printf builtin's %x prints only the low byte.  The expected
+   values make the verification a simple text match. */
 
 int main() {
     int a = 61680;  /* 0xF0F0 */
@@ -24,5 +26,9 @@ int main() {
     printf("<<=  = %u\n", x);
     x >>= 2;           /* shr 2 → 0x00CC = 204 */
     printf(">>=  = %u\n", x);
+
+    int y = 50;
+    y %= 13;           /* 50 % 13 = 11 */
+    printf("%%=   = %u\n", y);
     return 0;
 }
