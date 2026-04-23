@@ -13,6 +13,12 @@
 ;;; ext2_rename:   SI=old path, DI=new path → CF on error, AL=error code
 ;;;
 ;;; Internal helpers:
+;;; ext2_bgd_block_alloc:   dec bg_free_blocks_count in BGD+SB; Clobbers AX,BX,CX,DX
+;;; ext2_bgd_block_free:    inc bg_free_blocks_count in BGD+SB; Clobbers AX,BX,CX,DX
+;;; ext2_bgd_dir_alloc:     inc bg_used_dirs_count in BGD; Clobbers AX,BX,CX,DX
+;;; ext2_bgd_dir_free:      dec bg_used_dirs_count in BGD; Clobbers AX,BX,CX,DX
+;;; ext2_bgd_inode_alloc:   dec bg_free_inodes_count in BGD+SB; Clobbers AX,BX,CX,DX
+;;; ext2_bgd_inode_free:    inc bg_free_inodes_count in BGD+SB; Clobbers AX,BX,CX,DX
 ;;; ext2_free_bit:          AX=bitmap-block, BX=bit-index; CF on error
 ;;; ext2_free_block:        AX=block-number; CF on error
 ;;; ext2_free_inode:        AX=inode-number (1-based); CF on error
@@ -35,9 +41,16 @@
 %assign EXT2_MAGIC                0EF53h
 
 ;;; Block group descriptor field offsets
-%assign EXT2_BGD_BLOCK_BITMAP     0
-%assign EXT2_BGD_INODE_BITMAP     4
-%assign EXT2_BGD_INODE_TABLE      8
+%assign EXT2_BGD_BLOCK_BITMAP       0
+%assign EXT2_BGD_INODE_BITMAP       4
+%assign EXT2_BGD_INODE_TABLE        8
+%assign EXT2_BGD_FREE_BLOCKS_COUNT  12
+%assign EXT2_BGD_FREE_INODES_COUNT  14
+%assign EXT2_BGD_USED_DIRS_COUNT    16
+
+;;; Superblock free-count field offsets (low 16 bits, high 16 bits always 0 for small FSes)
+%assign EXT2_SB_FREE_BLOCKS_COUNT   12
+%assign EXT2_SB_FREE_INODES_COUNT   16
 
 ;;; Inode field offsets
 %assign EXT2_INODE_ATIME          8
@@ -181,6 +194,8 @@ ext2_init:
         ;; s_log_block_size: 0=1KB, 1=2KB, 2=4KB
         mov al, [SECTOR_BUFFER+EXT2_SB_LOG_BLOCK_SIZE]
         mov [ext2_log_block_size], al
+        mov ax, [SECTOR_BUFFER+EXT2_SB_FIRST_DATA_BLOCK]
+        mov [ext2_first_data_block], ax
         mov ax, [SECTOR_BUFFER+EXT2_SB_INODES_PER_GROUP]
         mov [ext2_inodes_per_group], ax
         ;; Inode size: 128 for rev 0, read from superblock for rev 1+
@@ -198,6 +213,7 @@ ext2_init:
         .ei_bgd_blk2:
         mov ax, 2
         .ei_bgd_read:
+        mov [ext2_bgd_block], ax        ; save for ext2_bgd_* helpers
         xor bx, bx
         call ext2_read_blk_sec          ; AX=bgd_block, BX=0 → SECTOR_BUFFER
         jc .ei_err
@@ -541,6 +557,7 @@ ext2_mkdir:
         jmp .emkdir_zero_next
         .emkdir_zeros_done:
         ;; Add entry for new directory in parent
+        mov byte [ext2_ade_filetype], 2    ; FT_DIR
         mov ax, [ext2_mk_parent_inode]
         mov di, [ext2_mk_name]
         mov bx, [ext2_mk_new_inode]
@@ -553,6 +570,7 @@ ext2_mkdir:
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .emkdir_err
+        call ext2_bgd_dir_alloc
         mov ax, [ext2_mk_new_inode]
         pop di
         pop si
@@ -834,7 +852,8 @@ ext2_add_dir_entry:
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN], dx
         mov cx, [ext2_ade_namelen]
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN], cl
-        mov byte [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN + 1], 1
+        mov al, [ext2_ade_filetype]
+        mov [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN + 1], al
         push si
         mov si, [ext2_ade_name]
         lea di, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME]
@@ -937,12 +956,23 @@ ext2_alloc_bit:
 
 ext2_alloc_block:
         ;; Allocate one block from the block bitmap.
-        ;; Output: AX = block number (1-based, matches bit index for group 0), CF on err
+        ;; Output: AX = block number, CF on err
+        ;; Block number = bit_index + first_data_block (for 1KB blocks, first_data_block=1)
         push bx
         mov ax, [ext2_block_bitmap_blk]
-        call ext2_alloc_bit     ; AX = bit index
+        call ext2_alloc_bit     ; AX = bit index, CF on err
+        jc .eab_err
+        add ax, [ext2_first_data_block]    ; block number = bit_index + first_data_block
+        push ax
+        call ext2_bgd_block_alloc
+        pop ax
         pop bx
-        ret                     ; AX = block number (bit index = block number for group 0)
+        clc
+        ret
+        .eab_err:
+        pop bx
+        stc
+        ret
 
 ext2_alloc_inode:
         ;; Allocate one inode from the inode bitmap.
@@ -952,12 +982,101 @@ ext2_alloc_inode:
         call ext2_alloc_bit     ; AX = bit index
         jc .eai_err
         inc ax                  ; inodes are 1-based
+        push ax
+        call ext2_bgd_inode_alloc
+        pop ax
         pop bx
         clc
         ret
         .eai_err:
         pop bx
         stc
+        ret
+
+ext2_bgd_block_alloc:
+        ;; Decrement bg_free_blocks_count in BGD and s_free_blocks_count in superblock.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        dec word [SECTOR_BUFFER + EXT2_BGD_FREE_BLOCKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        mov ax, EXT2_START_SECTOR + 2
+        call read_sector
+        dec word [SECTOR_BUFFER + EXT2_SB_FREE_BLOCKS_COUNT]
+        mov ax, EXT2_START_SECTOR + 2
+        call write_sector
+        ret
+
+ext2_bgd_block_free:
+        ;; Increment bg_free_blocks_count in BGD and s_free_blocks_count in superblock.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        inc word [SECTOR_BUFFER + EXT2_BGD_FREE_BLOCKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        mov ax, EXT2_START_SECTOR + 2
+        call read_sector
+        inc word [SECTOR_BUFFER + EXT2_SB_FREE_BLOCKS_COUNT]
+        mov ax, EXT2_START_SECTOR + 2
+        call write_sector
+        ret
+
+ext2_bgd_dir_alloc:
+        ;; Increment bg_used_dirs_count in BGD.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        inc word [SECTOR_BUFFER + EXT2_BGD_USED_DIRS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        ret
+
+ext2_bgd_dir_free:
+        ;; Decrement bg_used_dirs_count in BGD.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        dec word [SECTOR_BUFFER + EXT2_BGD_USED_DIRS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        ret
+
+ext2_bgd_inode_alloc:
+        ;; Decrement bg_free_inodes_count in BGD and s_free_inodes_count in superblock.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        dec word [SECTOR_BUFFER + EXT2_BGD_FREE_INODES_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        mov ax, EXT2_START_SECTOR + 2
+        call read_sector
+        dec word [SECTOR_BUFFER + EXT2_SB_FREE_INODES_COUNT]
+        mov ax, EXT2_START_SECTOR + 2
+        call write_sector
+        ret
+
+ext2_bgd_inode_free:
+        ;; Increment bg_free_inodes_count in BGD and s_free_inodes_count in superblock.
+        ;; Clobbers: AX, BX, CX, DX
+        xor bx, bx
+        mov ax, [ext2_bgd_block]
+        call ext2_read_blk_sec
+        inc word [SECTOR_BUFFER + EXT2_BGD_FREE_INODES_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        mov ax, EXT2_START_SECTOR + 2
+        call read_sector
+        inc word [SECTOR_BUFFER + EXT2_SB_FREE_INODES_COUNT]
+        mov ax, EXT2_START_SECTOR + 2
+        call write_sector
         ret
 
 ext2_chmod:
@@ -1069,6 +1188,7 @@ ext2_create:
         call write_sector
         jc .ecr_err
         ;; Add directory entry in parent directory
+        mov byte [ext2_ade_filetype], 1    ; FT_REG_FILE
         mov ax, [ext2_cr_parent_inode]
         mov di, [ext2_cr_name]
         mov bx, [ext2_cr_new_inode]
@@ -1124,10 +1244,11 @@ ext2_delete:
         dec cx
         jnz .edl_save_blks
         pop si
-        ;; Set i_dtime and flush inode before freeing blocks
+        ;; Set i_dtime, zero i_links_count, flush inode before freeing blocks
         call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
         mov [bx + EXT2_INODE_DTIME], ax
         mov [bx + EXT2_INODE_DTIME + 2], dx
+        mov word [bx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .edl_err
@@ -1256,13 +1377,21 @@ ext2_free_bit:
 
 ext2_free_block:
         ;; Free one block from the block bitmap.
-        ;; Input:  AX = block number (0-based bit index in bitmap)
+        ;; Input:  AX = block number
         ;; Output: CF on disk error
         push bx
+        sub ax, [ext2_first_data_block]    ; bit_index = block_number - first_data_block
         mov bx, ax
         mov ax, [ext2_block_bitmap_blk]
         call ext2_free_bit
+        jc .efbl_err
+        call ext2_bgd_block_free
         pop bx
+        clc
+        ret
+        .efbl_err:
+        pop bx
+        stc
         ret
 
 ext2_free_inode:
@@ -1274,7 +1403,14 @@ ext2_free_inode:
         mov bx, ax
         mov ax, [ext2_inode_bitmap_blk]
         call ext2_free_bit
+        jc .efi_err
+        call ext2_bgd_inode_free
         pop bx
+        clc
+        ret
+        .efi_err:
+        pop bx
+        stc
         ret
 
 ext2_prepare_write_sec:
@@ -1608,6 +1744,14 @@ ext2_rename:
         jc .ern_not_found
         mov [ext2_rn_new_dir], ax
         mov [ext2_rn_new_name], si
+        ;; Determine filetype from old inode's mode
+        mov ax, [ext2_rn_old_inode]
+        call ext2_read_inode            ; BX = old inode ptr; clobbers AX, CX, DX
+        mov byte [ext2_ade_filetype], 1
+        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        jz .ern_filetype_set
+        mov byte [ext2_ade_filetype], 2
+        .ern_filetype_set:
         ;; Add new directory entry
         mov ax, [ext2_rn_new_dir]
         mov di, [ext2_rn_new_name]
@@ -1775,10 +1919,11 @@ ext2_rmdir:
         ;; Directory is empty: re-read inode (check_dir_empty clobbers SECTOR_BUFFER)
         mov ax, [ext2_rdr_inode]
         call ext2_read_inode            ; BX = inode ptr
-        ;; Set i_dtime and flush before freeing blocks
+        ;; Set i_dtime, zero i_links_count, flush before freeing blocks
         call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
         mov [bx + EXT2_INODE_DTIME], ax
         mov [bx + EXT2_INODE_DTIME + 2], dx
+        mov word [bx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .erdr_err
@@ -1853,6 +1998,7 @@ ext2_rmdir:
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .erdr_err
+        call ext2_bgd_dir_free
         pop di
         pop si
         pop dx
@@ -1953,6 +2099,18 @@ ext2_update_size:
         xor ax, ax
         rep stosw
         .eus_flush:
+        ;; Update i_blocks = total_blocks_kept * sectors_per_block
+        mov ax, [ext2_us_keep_blocks]
+        cmp ax, 12
+        jbe .eus_ib_no_ind
+        inc ax                          ; +1 for singly-indirect pointer block
+        .eus_ib_no_ind:
+        xor cx, cx
+        mov cl, [ext2_log_block_size]
+        inc cl                          ; sectors_per_block shift = log_block_size + 1
+        shl ax, cl
+        mov [bx + EXT2_INODE_BLOCKS], ax
+        mov word [bx + EXT2_INODE_BLOCKS + 2], 0
         ;; Flush inode to disk before freeing blocks
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2569,13 +2727,16 @@ ext2_resolve_path:
 
         ;; State
         ext2_ade_cur_blk       dw 0     ; ext2_add_dir_entry: current block index
+        ext2_ade_filetype      db 1     ; ext2_add_dir_entry: file type (1=reg, 2=dir)
         ext2_ade_inode         dw 0     ; ext2_add_dir_entry: new file's inode
         ext2_ade_min_rec       dw 0     ; ext2_add_dir_entry: minimum rec_len needed
         ext2_ade_name          dw 0     ; ext2_add_dir_entry: pointer to name string
         ext2_ade_namelen       dw 0     ; ext2_add_dir_entry: name length in bytes
         ext2_ade_new_blk       dw 0     ; ext2_add_dir_entry: newly allocated block number
         ext2_alloc_bitmap_blk  dw 0     ; ext2_alloc_bit: bitmap block being scanned
+        ext2_bgd_block         dw 0
         ext2_block_bitmap_blk  dw 0
+        ext2_first_data_block  dw 0
         ext2_cr_mode           db 0     ; ext2_create: FLAG_EXECUTE / FLAG_DIRECTORY
         ext2_cr_name           dw 0     ; ext2_create: pointer to filename
         ext2_cr_new_inode      dw 0     ; ext2_create: allocated inode number
