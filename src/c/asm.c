@@ -529,7 +529,20 @@ void emit_alu_binop(int rfield) {
     skip_ws();
     int op_rr = rfield << 3;
     if (source_cursor[0] == '[') {
-        mem_op_reg_emit(op_rr | 1);
+        int packed_mem = parse_operand();
+        int mem_type = (packed_mem >> 8) & 0xFF;
+        int mem_reg = packed_mem & 0xFF;
+        int mem_val = parse_operand_value;
+        skip_comma();
+        int packed_register = parse_register();
+        int reg_id = packed_register & 0xFF;
+        int size = (packed_register >> 8) & 0xFF;
+        emit_sized_mem(op_rr, size);
+        if (mem_type == 3) {
+            emit_indexed_mem(reg_id, mem_reg, mem_val);
+        } else {
+            emit_modrm_direct(reg_id, mem_val);
+        }
         return;
     }
     int packed_register = parse_register();
@@ -1264,6 +1277,18 @@ void handle_jns() {
 
 void handle_jz() {
     encode_rel8_jump(0x74);
+}
+
+void handle_lea() {
+    skip_ws();
+    int packed_operand1 = parse_operand();
+    int register1_id = packed_operand1 & 0xFF;
+    skip_comma();
+    int packed_operand2 = parse_operand();
+    int register2_id = packed_operand2 & 0xFF;
+    int value2 = parse_operand_value;
+    emit_byte(0x8D);
+    emit_indexed_mem(register1_id, register2_id, value2);
 }
 
 /* ``lgdt [mem]`` / ``lidt [mem]`` — load the GDT / IDT descriptor
@@ -3421,6 +3446,7 @@ asm(
     "        dw STR_JNS, handle_jns\n"
     "        dw STR_JNZ, handle_jne\n"
     "        dw STR_JZ,  handle_jz\n"
+    "        dw STR_LEA, handle_lea\n"
     "        dw STR_LGDT, handle_lgdt\n"
     "        dw STR_LIDT, handle_lidt\n"
     "        dw STR_LODSB, handle_lodsb\n"
@@ -3495,6 +3521,7 @@ asm(
     "STR_JNZ     db 'jnz',0\n"
     "STR_JZ      db 'jz',0\n"
     "STR_DWORD   db 'dword',0\n"
+    "STR_LEA     db 'lea',0\n"
     "STR_LGDT    db 'lgdt',0\n"
     "STR_LIDT    db 'lidt',0\n"
     "STR_LODSB   db 'lodsb',0\n"
