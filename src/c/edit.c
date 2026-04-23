@@ -3,6 +3,7 @@
    [gap_end, EDIT_BUFFER_SIZE); the gap sits between. */
 int gap_start;
 int gap_end;
+char sector[512];
 
 int buffer_character_at(char *buffer, int offset) {
     /* Gap-buffer lookup: map a logical offset to the raw byte.  Returns
@@ -377,7 +378,6 @@ int main(int argc, char *argv[]) {
             if (save_fd < 0) {
                 status_message = "Cannot create file (directory full?)";
             } else {
-                char *sector = SECTOR_BUFFER;
                 int total_length = EDIT_BUFFER_SIZE - (gap_end - gap_start);
                 int logical_offset = 0;
                 int write_err = 0;

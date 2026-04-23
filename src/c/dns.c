@@ -83,54 +83,52 @@ int skip_name(char *buf, int offset) {
     }
 }
 
+char cname_buffer[128];
+char dns_ip[4];
+char name_buffer[128];
+char query_buffer[512];
+
 int main(int argc, char *argv[]) {
     if (argc != 1) {
         die("Usage: dns <domain>\n");
     }
 
-    /* Use SECTOR_BUFFER for the MAC check: BUFFER overlaps the input
-       buffer, which still holds argv[0] until we've printed and
-       encoded it. */
-    int error = mac(SECTOR_BUFFER);
+    int error = mac(query_buffer);
     if (error) {
         die("No NIC found\n");
     }
 
     printf("Querying %s...\n", argv[0]);
 
-    /* Build DNS query in SECTOR_BUFFER (safe during networking) */
-    uint8_t *query = SECTOR_BUFFER;
     /* Header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1 */
-    query[0] = 0;
-    query[1] = 1;
-    query[2] = 1;
-    query[3] = 0;
-    query[4] = 0;
-    query[5] = 1;
-    query[6] = 0;
-    query[7] = 0;
-    query[8] = 0;
-    query[9] = 0;
-    query[10] = 0;
-    query[11] = 0;
+    query_buffer[0] = 0;
+    query_buffer[1] = 1;
+    query_buffer[2] = 1;
+    query_buffer[3] = 0;
+    query_buffer[4] = 0;
+    query_buffer[5] = 1;
+    query_buffer[6] = 0;
+    query_buffer[7] = 0;
+    query_buffer[8] = 0;
+    query_buffer[9] = 0;
+    query_buffer[10] = 0;
+    query_buffer[11] = 0;
 
     /* Encode domain into QNAME starting at offset 12 */
-    uint8_t *qname = query + 12;
+    char *qname = query_buffer + 12;
     int name_length = encode_domain(argv[0], qname);
     if (name_length == 0) {
         die("DNS query failed\n");
     }
 
     /* QTYPE = A (0x0001), QCLASS = IN (0x0001) */
-    uint8_t *after_name = qname + name_length;
+    char *after_name = qname + name_length;
     after_name[0] = 0;
     after_name[1] = 1;
     after_name[2] = 0;
     after_name[3] = 1;
     int query_length = 12 + name_length + 4;
 
-    /* Send query via UDP socket */
-    uint8_t *dns_ip = BUFFER + 6;
     dns_ip[0] = 10;
     dns_ip[1] = 0;
     dns_ip[2] = 2;
@@ -140,18 +138,16 @@ int main(int argc, char *argv[]) {
     if (socket_fd < 0) {
         die("DNS query failed\n");
     }
-    int sent = sendto(socket_fd, query, query_length, dns_ip, 1024, 53);
+    int sent = sendto(socket_fd, query_buffer, query_length, dns_ip, 1024, 53);
     if (sent < 0) {
         close(socket_fd);
         die("DNS query failed\n");
     }
 
-    /* Receive response into SECTOR_BUFFER (reuse query buffer) */
-    uint8_t *response = SECTOR_BUFFER;
     int received = 0;
     int tries = 30000;
     while (tries > 0) {
-        received = recvfrom(socket_fd, response, 512, 1024);
+        received = recvfrom(socket_fd, query_buffer, 512, 1024);
         if (received > 0) {
             break;
         }
@@ -162,17 +158,14 @@ int main(int argc, char *argv[]) {
         die("DNS query failed\n");
     }
 
-    int answer_count = response[7];
+    int answer_count = query_buffer[7];
     if (answer_count == 0) {
         die("No answer in DNS response\n");
     }
 
     /* Skip header (12) + question QNAME + QTYPE(2) + QCLASS(2) */
-    int offset = skip_name(response, 12) + 4;
+    int offset = skip_name(query_buffer, 12) + 4;
 
-    /* Name decode buffers (reuse BUFFER; MAC/IP no longer needed) */
-    char *name_buf = BUFFER;
-    char *cname_buf = BUFFER + 128;
     int found_address = 0;
 
     /* Walk answer records */
@@ -180,28 +173,28 @@ int main(int argc, char *argv[]) {
         int record_offset = offset;
 
         /* Skip RR name */
-        offset = skip_name(response, offset);
+        offset = skip_name(query_buffer, offset);
 
         /* Read TYPE and RDLENGTH via a single base pointer */
-        uint8_t *record = response + offset;
+        char *record = query_buffer + offset;
         int type_high = record[0];
         int type_low = record[1];
         int rdlength = record[9];
 
         /* Decode RR name (needed by both A and CNAME) */
-        decode_domain(response, record_offset, name_buf);
+        decode_domain(query_buffer, record_offset, name_buffer);
 
         if (type_high == 0 && type_low == 1) {
             /* A record */
-            printf("%s is at ", name_buf);
-            uint8_t *ip_address = record + 10;
+            printf("%s is at ", name_buffer);
+            char *ip_address = record + 10;
             print_ip(ip_address);
             putchar('\n');
             found_address = 1;
         } else if (type_high == 0 && type_low == 5) {
             /* CNAME record */
-            decode_domain(response, offset + 10, cname_buf);
-            printf("%s is a CNAME for %s\n", name_buf, cname_buf);
+            decode_domain(query_buffer, offset + 10, cname_buffer);
+            printf("%s is a CNAME for %s\n", name_buffer, cname_buffer);
         }
         offset = offset + 10 + rdlength;
         answer_count = answer_count - 1;

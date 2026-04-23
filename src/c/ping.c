@@ -43,26 +43,29 @@ int skip_name(char *buf, int offset) {
     }
 }
 
-int resolve_dns(char *domain, uint8_t *target) {
-    uint8_t *query = SECTOR_BUFFER;
+char dns_ip[4];
+char packet_buffer[128];
+char query_buffer[512];
+char target_ip[4];
+
+int resolve_dns(char *domain, char *target) {
     /* DNS header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1, rest zero. */
-    memcpy(query, "\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
-    int name_length = encode_domain(domain, query + 12);
+    memcpy(query_buffer, "\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
+    int name_length = encode_domain(domain, query_buffer + 12);
     if (name_length == 0) {
         return 1;
     }
     /* QTYPE=A, QCLASS=IN, both 0x0001 big-endian. */
-    memcpy(query + 12 + name_length, "\x00\x01\x00\x01", 4);
+    memcpy(query_buffer + 12 + name_length, "\x00\x01\x00\x01", 4);
     int query_length = 16 + name_length;
 
-    /* DNS server IP 10.0.2.3 stashed just past target_ip in BUFFER. */
-    memcpy(BUFFER + 8, "\x0a\x00\x02\x03", 4);
+    memcpy(dns_ip, "\x0a\x00\x02\x03", 4);
 
     int fd = net_open(SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         return 1;
     }
-    if (sendto(fd, query, query_length, BUFFER + 8, 1024, 53) < 0) {
+    if (sendto(fd, query_buffer, query_length, dns_ip, 1024, 53) < 0) {
         close(fd);
         return 1;
     }
@@ -70,7 +73,7 @@ int resolve_dns(char *domain, uint8_t *target) {
     int received = 0;
     int tries = 30000;
     while (tries) {
-        received = recvfrom(fd, query, 512, 1024);
+        received = recvfrom(fd, query_buffer, 512, 1024);
         if (received > 0) {
             break;
         }
@@ -81,14 +84,14 @@ int resolve_dns(char *domain, uint8_t *target) {
         return 1;
     }
 
-    int answer_count = query[7];
+    int answer_count = query_buffer[7];
     if (answer_count == 0) {
         return 1;
     }
-    int offset = skip_name(query, 12) + 4;
+    int offset = skip_name(query_buffer, 12) + 4;
     while (answer_count) {
-        offset = skip_name(query, offset);
-        uint8_t *record = query + offset;
+        offset = skip_name(query_buffer, offset);
+        char *record = query_buffer + offset;
         int rdlength = record[9];
         if (record[0] == 0 && record[1] == 1) {
             memcpy(target, record + 10, 4);
@@ -101,15 +104,12 @@ int resolve_dns(char *domain, uint8_t *target) {
 }
 
 int main(int argc, char *argv[]) {
-    /* mac() writes into SECTOR_BUFFER to avoid clobbering argv, which
-       lives inside BUFFER. */
-    if (mac(SECTOR_BUFFER)) {
+    if (mac(query_buffer)) {
         die("No NIC found\n");
     }
     if (argc != 1) {
         die("Usage: ping <ip|hostname>\n");
     }
-    uint8_t *target_ip = BUFFER;
     if (parse_ip(argv[0], target_ip)) {
         if (resolve_dns(argv[0], target_ip)) {
             die("Could not resolve hostname\n");
@@ -124,29 +124,28 @@ int main(int argc, char *argv[]) {
         die("Socket error\n");
     }
 
-    uint8_t *packet = SECTOR_BUFFER;
     int seq = 1;
     int count = 4;
     while (count) {
         /* ICMP echo request: type=8 code=0 checksum=placeholder
            identifier=0x0001 sequence=<seq>. Payload (bytes 8..15) is
-           whatever happens to be in SECTOR_BUFFER — echo reply mirrors
+           whatever happens to be in packet_buffer — echo reply mirrors
            it back verbatim. */
-        memcpy(packet, "\x08\x00\x00\x00\x00\x01\x00\x00", 8);
-        packet[7] = seq;
-        int sum = checksum(packet, 16);
-        packet[2] = sum;
-        packet[3] = sum / 256;
+        memcpy(packet_buffer, "\x08\x00\x00\x00\x00\x01\x00\x00", 8);
+        packet_buffer[7] = seq;
+        int sum = checksum(packet_buffer, 16);
+        packet_buffer[2] = sum;
+        packet_buffer[3] = sum / 256;
 
         int t0 = ticks();
-        sendto(fd, packet, 16, target_ip, 0, 0);
+        sendto(fd, packet_buffer, 16, target_ip, 0, 0);
         /* ~32k tries fits signed 16-bit (our C subset compares signed)
            and is plenty for the local ring to surface a reply. */
         int got = 0;
         int tries = 30000;
         while (tries) {
-            int n = recvfrom(fd, packet, 128, 0);
-            if (n > 0 && packet[0] == '\0') {
+            int n = recvfrom(fd, packet_buffer, 128, 0);
+            if (n > 0 && packet_buffer[0] == '\0') {
                 got = 1;
                 break;
             }
