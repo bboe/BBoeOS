@@ -30,6 +30,8 @@
 ;;; ext2_remove_dir_entry:  AX=dir-inode, SI=name; CF on error
 ;;; ext2_resolve_path:      SI=path → AX=parent-inode, SI=basename; CF if parent not found
 ;;; ext2_search_dir:        AX=dir-inode, SI=name; AX=found-inode, CF=not-found
+;;; ext2_set_mtime_ctime_now: BX=inode-ptr; set mtime=ctime=now; clobbers AX,DX
+;;; ext2_set_timestamps_now:  BX=inode-ptr; set atime=mtime=ctime=now; clobbers AX,DX
 
 ;;; Superblock field offsets (all within the first 512-byte sector of block 1)
 %assign EXT2_SB_FIRST_DATA_BLOCK  20
@@ -487,6 +489,7 @@ ext2_mkdir:
         shl ax, cl                      ; AX = sectors_per_block
         mov [bx + EXT2_INODE_BLOCKS], ax
         mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .emkdir_err
@@ -1101,6 +1104,9 @@ ext2_chmod:
         .echm_clear:
         and word [bx + EXT2_INODE_MODE], ~EXT2_S_IXALL
         .echm_flush:
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .echm_err
@@ -1183,6 +1189,7 @@ ext2_create:
         mov [bx + EXT2_INODE_MODE], ax
         ;; links_count = 1
         mov word [bx + EXT2_INODE_LINKS_COUNT], 1
+        call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         ;; Flush inode sector
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -1752,6 +1759,40 @@ ext2_rename:
         jz .ern_filetype_set
         mov byte [ext2_ade_filetype], 2
         .ern_filetype_set:
+        ;; Cross-parent directory move: update '..' and adjust parent link counts
+        cmp byte [ext2_ade_filetype], 2
+        jne .ern_add_entry
+        mov ax, [ext2_rn_old_dir]
+        cmp ax, [ext2_rn_new_dir]
+        je .ern_add_entry
+        ;; Update '..' inode in the moved directory's data block
+        mov ax, [ext2_rn_old_inode]
+        call ext2_read_inode            ; BX = inode ptr; clobbers AX, CX, DX
+        mov ax, [bx + EXT2_INODE_BLOCK] ; AX = i_block[0]
+        xor bx, bx                      ; BX = sector 0 within block
+        call ext2_read_blk_sec          ; SECTOR_BUFFER = directory data; clobbers AX
+        jc .ern_err
+        mov ax, [ext2_rn_new_dir]
+        mov [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE], ax
+        mov word [SECTOR_BUFFER + 12 + EXT2_DIRENT_INODE + 2], 0
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        ;; Decrement old parent's i_links_count
+        mov ax, [ext2_rn_old_dir]
+        call ext2_read_inode
+        dec word [bx + EXT2_INODE_LINKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        ;; Increment new parent's i_links_count
+        mov ax, [ext2_rn_new_dir]
+        call ext2_read_inode
+        inc word [bx + EXT2_INODE_LINKS_COUNT]
+        mov ax, [ext2_last_blk_sec]
+        call write_sector
+        jc .ern_err
+        .ern_add_entry:
         ;; Add new directory entry
         mov ax, [ext2_rn_new_dir]
         mov di, [ext2_rn_new_name]
@@ -2033,6 +2074,30 @@ ext2_rmdir:
         stc
         ret
 
+ext2_set_mtime_ctime_now:
+        ;; Set inode mtime and ctime to the current wall-clock time.
+        ;; Input:  BX = pointer to inode in SECTOR_BUFFER
+        ;; Clobbers: AX, DX
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_MTIME], ax
+        mov [bx + EXT2_INODE_MTIME + 2], dx
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
+        ret
+
+ext2_set_timestamps_now:
+        ;; Set inode atime, mtime, and ctime to the current wall-clock time.
+        ;; Input:  BX = pointer to inode in SECTOR_BUFFER
+        ;; Clobbers: AX, DX
+        call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
+        mov [bx + EXT2_INODE_ATIME], ax
+        mov [bx + EXT2_INODE_ATIME + 2], dx
+        mov [bx + EXT2_INODE_MTIME], ax
+        mov [bx + EXT2_INODE_MTIME + 2], dx
+        mov [bx + EXT2_INODE_CTIME], ax
+        mov [bx + EXT2_INODE_CTIME + 2], dx
+        ret
+
 ext2_update_size:
         ;; Write fd position back to inode i_size (32-bit).
         ;; Grows i_size if position > current size; on shrink, frees orphaned blocks.
@@ -2099,18 +2164,37 @@ ext2_update_size:
         xor ax, ax
         rep stosw
         .eus_flush:
-        ;; Update i_blocks = total_blocks_kept * sectors_per_block
-        mov ax, [ext2_us_keep_blocks]
-        cmp ax, 12
-        jbe .eus_ib_no_ind
-        inc ax                          ; +1 for singly-indirect pointer block
-        .eus_ib_no_ind:
+        ;; Compute ptrs_per_blk = 256 << log_block_size; save for indirect/doubly sections
         xor cx, cx
         mov cl, [ext2_log_block_size]
-        inc cl                          ; sectors_per_block shift = log_block_size + 1
+        mov dx, 256
+        shl dx, cl                          ; DX = ptrs_per_blk
+        mov [ext2_us_ind_secs], dx
+        ;; i_blocks = (keep_blocks + ptr_block_overhead) << (log_block_size+1)
+        mov ax, [ext2_us_keep_blocks]
+        cmp ax, 12
+        jbe .eus_ib_shift                   ; <= 12 data: no pointer blocks
+        inc ax                              ; +1 singly-indirect pointer block
+        mov di, [ext2_us_keep_blocks]
+        sub di, 12                          ; DI = keep_blocks - 12
+        cmp di, dx                          ; vs ptrs_per_blk
+        jbe .eus_ib_shift                   ; no doubly overhead
+        inc ax                              ; +1 doubly-indirect top block
+        sub di, dx                          ; DI = dbl_data = keep_blocks - 12 - ptrs_per_blk
+        dec di                              ; DI = dbl_data - 1 (for ceil division)
+        push ax
+        xor dx, dx
+        mov ax, di
+        div word [ext2_us_ind_secs]         ; AX = ceil(dbl_data/ppb) - 1
+        inc ax                              ; AX = ceil(dbl_data/ppb) sub-indirect ptr blocks
+        pop dx
+        add ax, dx                          ; AX = keep_blocks + 2 + sub_ind
+        .eus_ib_shift:
+        inc cl                              ; CL = log_block_size + 1
         shl ax, cl
         mov [bx + EXT2_INODE_BLOCKS], ax
         mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        call ext2_set_mtime_ctime_now       ; mtime = ctime = now; clobbers AX, DX
         ;; Flush inode to disk before freeing blocks
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2157,11 +2241,6 @@ ext2_update_size:
         .eus_partial_ind:
         ;; Partial free: iterate from ind_start with index-based re-reads
         mov [ext2_us_cur_ptr], ax           ; flat index (= ind_start)
-        xor cx, cx
-        mov cl, [ext2_log_block_size]
-        mov ax, 256
-        shl ax, cl                          ; AX = ptrs_per_blk
-        mov [ext2_us_ind_secs], ax          ; repurposed: ptrs_per_blk
         .eus_partial_loop:
         mov ax, [ext2_us_cur_ptr]
         cmp ax, [ext2_us_ind_secs]
@@ -2184,25 +2263,27 @@ ext2_update_size:
         jmp .eus_partial_loop
         .eus_doubly:
         ;; Handle doubly-indirect block i_block[13]
+        ;; ext2_us_ind_secs = ptrs_per_blk (set at .eus_flush)
         mov ax, [ext2_us_blks + 26]
         test ax, ax
         jz .eus_done
-        ;; Compute ptrs_per_blk; skip if partial doubly-indirect needed
-        xor cx, cx
-        mov cl, [ext2_log_block_size]
-        mov ax, 256
-        shl ax, cl                          ; AX = ptrs_per_blk
-        mov cx, ax
-        mov dx, [ext2_us_keep_blocks]
-        cmp dx, 12
-        jbe .eus_dbl_full
-        sub dx, 12
-        cmp dx, cx
-        ja .eus_done                        ; keep_blocks > 12 + ptrs_per_blk: partial, skip
-        .eus_dbl_full:
-        mov [ext2_us_ind_secs], cx          ; ptrs_per_blk for doubly loop
-        mov [ext2_us_cur_sec], ax           ; doubly-indirect block number
+        mov [ext2_us_cur_sec], ax           ; save doubly-indirect block# first
+        ;; dbl_keep = max(0, keep_blocks - 12 - ptrs_per_blk)
+        mov ax, [ext2_us_keep_blocks]
+        cmp ax, 12
+        jbe .eus_dbl_kz
+        sub ax, 12
+        cmp ax, [ext2_us_ind_secs]
+        jbe .eus_dbl_kz
+        sub ax, [ext2_us_ind_secs]          ; AX = dbl_keep > 0
+        xor dx, dx
+        div word [ext2_us_ind_secs]         ; AX = first_free_sub, DX = data_off
+        mov [ext2_us_cur_ptr], ax
+        mov [ext2_us_ind_blk], dx           ; data_off within first sub-singly
+        jmp .eus_dbl_loop
+        .eus_dbl_kz:
         mov word [ext2_us_cur_ptr], 0
+        mov word [ext2_us_ind_blk], 0
         .eus_dbl_loop:
         mov ax, [ext2_us_cur_ptr]
         cmp ax, [ext2_us_ind_secs]
@@ -2215,23 +2296,62 @@ ext2_update_size:
         mov bx, [ext2_us_cur_ptr]
         and bx, 07Fh
         shl bx, 2
-        mov ax, [SECTOR_BUFFER + bx]
+        mov ax, [SECTOR_BUFFER + bx]        ; AX = sub-singly block pointer
         test ax, ax
         jz .eus_dbl_next
-        call ext2_free_ind_block
+        cmp word [ext2_us_ind_blk], 0
+        jne .eus_dbl_partial_sub            ; non-zero data_off: partial free
+        call ext2_free_ind_block            ; full free of sub-singly block
         jc .eus_err
+        jmp .eus_dbl_next
+        .eus_dbl_partial_sub:
+        ;; Free data entries [data_off..ptrs_per_blk-1] in sub-singly block AX
+        mov [ext2_us_ind_fptr], ax          ; save sub-singly block#
+        mov ax, [ext2_us_ind_blk]           ; AX = data_off
+        mov [ext2_us_ind_fsec], ax          ; inner iterator = data_off
+        mov word [ext2_us_ind_blk], 0       ; clear data_off for subsequent sub-singly
+        .eus_dbl_partial_loop:
+        mov ax, [ext2_us_ind_fsec]
+        cmp ax, [ext2_us_ind_secs]
+        jae .eus_dbl_next
+        mov bx, ax
+        shr bx, 7
+        mov ax, [ext2_us_ind_fptr]
+        call ext2_read_blk_sec
+        jc .eus_err
+        mov bx, [ext2_us_ind_fsec]
+        and bx, 07Fh
+        shl bx, 2
+        mov ax, [SECTOR_BUFFER + bx]
+        test ax, ax
+        jz .eus_dbl_partial_next
+        call ext2_free_block
+        jc .eus_err
+        .eus_dbl_partial_next:
+        inc word [ext2_us_ind_fsec]
+        jmp .eus_dbl_partial_loop
         .eus_dbl_next:
         inc word [ext2_us_cur_ptr]
         jmp .eus_dbl_loop
         .eus_dbl_free_self:
+        ;; Free doubly-indirect top block only when all sub-singly were freed (dbl_keep == 0)
+        mov ax, [ext2_us_keep_blocks]
+        cmp ax, 12
+        jbe .eus_dbl_do_free
+        sub ax, 12
+        cmp ax, [ext2_us_ind_secs]          ; keep_blocks - 12 vs ptrs_per_blk
+        ja .eus_done                        ; dbl_keep > 0: keep doubly top block
+        .eus_dbl_do_free:
         mov ax, [ext2_us_cur_sec]
         call ext2_free_block
         jc .eus_err
+        jmp .eus_done
         .eus_grow:
         mov ax, [si+FD_OFFSET_POSITION]
         mov [bx + EXT2_INODE_SIZE_LO], ax
         mov ax, [si+FD_OFFSET_POSITION+2]
         mov [bx + EXT2_INODE_SIZE_LO + 2], ax
+        call ext2_set_mtime_ctime_now   ; mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .eus_err
