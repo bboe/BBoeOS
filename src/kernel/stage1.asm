@@ -54,6 +54,7 @@ start:
         cmp al, STAGE2_SECTORS
         jne .error
 
+        call pic_remap          ; master → 0x20..0x27, slave → 0x28..0x2F, all masked
         call rtc_tick_init      ; install IRQ 0 handler, zero system_ticks
         call install_syscalls
         call network_initialize ; probe NIC once; sets net_present on success

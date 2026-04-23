@@ -56,7 +56,7 @@
         PIC1_CMD_PORT           equ 20h
         PIC1_DATA_PORT          equ 21h
         PIC_EOI                 equ 20h
-        IVT_IRQ6_OFFSET         equ 0Eh * 4    ; IRQ 6 = INT 0Eh
+        IVT_IRQ6_OFFSET         equ 26h * 4    ; remapped by pic_remap (was 0Eh*4 under BIOS)
 
 fdc_dma_setup:
         ;; Input: AL = DMA mode byte (DMA_MODE_READ or DMA_MODE_WRITE).
@@ -167,7 +167,8 @@ fdc_init:
         ret
 
 fdc_install_irq:
-        ;; Install fdc_irq6_handler at IVT entry 0xE and unmask IRQ 6.
+        ;; Install fdc_irq6_handler at IVT entry 0x26 (pic_remap'd) and
+        ;; unmask IRQ 6 on the master PIC.
         cli
         push ax
         push es

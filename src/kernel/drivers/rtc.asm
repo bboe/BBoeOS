@@ -27,9 +27,11 @@
         CMOS_UPDATE_IN_PROGRESS equ 80h
         CMOS_YEAR               equ 09h
 
-        IVT_IRQ0_OFFSET         equ 8*4
+        IVT_IRQ0_OFFSET         equ 20h * 4     ; remapped by pic_remap (was 8h*4 under BIOS)
         PIC1_CMD                equ 20h
+        PIC1_DATA               equ 21h
         PIC_EOI                 equ 20h
+        PIC_IRQ0_UNMASK         equ 0FEh        ; clear bit 0 of master mask
 
         PIT_CHANNEL0            equ 40h
         PIT_COMMAND             equ 43h
@@ -118,8 +120,9 @@ rtc_sleep_ms:
 
 rtc_tick_init:
         ;; Reprogram the PIT to 100 Hz, install our own IRQ 0 handler
-        ;; into the real-mode IVT, and zero the tick counter.  Call once,
-        ;; early in stage 2 boot.
+        ;; at the pic_remap'd vector 0x20, unmask IRQ 0 at the master
+        ;; PIC (pic_remap leaves every line masked), and zero the tick
+        ;; counter.  Call once, early in stage 2 boot, after pic_remap.
         cli
         push ax
         push es
@@ -134,6 +137,9 @@ rtc_tick_init:
         mov word [es:IVT_IRQ0_OFFSET], rtc_tick_irq0
         mov word [es:IVT_IRQ0_OFFSET + 2], cs
         mov dword [system_ticks], 0
+        in al, PIC1_DATA
+        and al, PIC_IRQ0_UNMASK
+        out PIC1_DATA, al
         pop es
         pop ax
         sti
