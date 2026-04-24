@@ -31,6 +31,7 @@ OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
+STAGE2_BYTES_OFFSET = 508  # offset of stage2_bytes word within the MBR
 _DD = shutil.which("dd") or "dd"
 _DEBUGFS = shutil.which("debugfs") or "debugfs"
 
@@ -62,7 +63,7 @@ def add_file(
         raise SystemExit(message)
     file_size = len(file_data)
 
-    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    ext2_start_sector = compute_directory_sector(image_path=image_path)
     if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
         ext2_add_file(
             executable=executable,
@@ -73,7 +74,7 @@ def add_file(
         )
         return
 
-    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sector = compute_directory_sector(image_path=image_path)
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
@@ -432,12 +433,12 @@ def make_directory(*, dirname: str, image_path: str) -> None:
             message,
         )
 
-    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    ext2_start_sector = compute_directory_sector(image_path=image_path)
     if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
         ext2_make_directory(dirname=dirname, ext2_start_sector=ext2_start_sector, image_path=image_path)
         return
 
-    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sector = compute_directory_sector(image_path=image_path)
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
@@ -468,6 +469,27 @@ def make_directory(*, dirname: str, image_path: str) -> None:
     save_image(image=image, image_path=image_path)
 
     print(f"Created directory '{dirname}' at sector {next_data_sector}")
+
+
+def compute_directory_sector(*, image_path: str) -> int:
+    """Return the sector where the filesystem directory starts on disk.
+
+    NASM embeds stage2's byte count in the MBR at ``STAGE2_BYTES_OFFSET``
+    (little-endian word).  Stage1 reads the same word at boot to size the
+    disk-read; here we mirror its arithmetic: sectors = ceil(bytes / 512),
+    directory starts at sectors + 1 (right after stage2 on disk).
+
+    Returns
+    -------
+    int
+        The 1-based LBA where directory entries (bbfs) or the ext2
+        partition (ext2) begin.
+
+    """
+    with pathlib.Path(image_path).open("rb") as file:
+        file.seek(STAGE2_BYTES_OFFSET)
+        stage2_bytes = struct.unpack("<H", file.read(2))[0]
+    return (stage2_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
 
 
 def read_assign(name: str, /) -> int:
