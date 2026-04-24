@@ -13,8 +13,6 @@
 ;;; not touch the PICs.
 ;;; ------------------------------------------------------------------------
 
-        COM1_DATA               equ 3F8h
-        COM1_LSR                equ 3FDh
         IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (pmode GDT[1])
         IDT_FLAGS_INT32         equ 8Eh          ; P=1 DPL=0 type=0xE
         LSR_THRE                equ 20h
