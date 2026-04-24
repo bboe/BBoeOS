@@ -1,7 +1,7 @@
 ;;; ------------------------------------------------------------------------
 ;;; vga.asm — native VGA text-mode driver.
 ;;;
-;;; Replaces the INT 10h subroutines the ANSI parser (ansi.asm) and the
+;;; Replaces the INT 10h subroutines the ANSI parser (console.asm) and the
 ;;; SYS_VIDEO_MODE handler relied on:
 ;;;     AH=0Eh teletype          → vga_teletype       (AL = char)
 ;;;     AH=03h get cursor        → vga_get_cursor     (returns DH=row, DL=col)

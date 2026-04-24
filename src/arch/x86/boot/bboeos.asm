@@ -173,7 +173,7 @@ pmode_gdtr:
         dd pmode_gdt_start
 
 [bits 32]
-%include "drivers/ansi.asm"             ; serial_character (COM1 output)
+%include "drivers/console.asm"          ; serial_character (COM1 output)
 %include "drivers/ps2.asm"              ; PS/2 keyboard driver (IRQ-driven)
 %include "drivers/rtc.asm"              ; system_ticks / PIT constants
 %include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
