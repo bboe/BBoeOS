@@ -94,24 +94,32 @@ renumbering is source-compatible — just rebuild.
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
-- `src/kernel/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character` — included in stage 1 MBR
-- `src/kernel/bboeos.asm` — Stage 1 boot code (includes `ansi.asm`), shell loader, `%include` directives, variables, strings
-- `src/kernel/arch/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
-- `src/kernel/arch/pmode.asm` — 16→32-bit protected-mode entry, GDT (not yet wired in)
-- `src/kernel/drivers/ata.asm`, `src/kernel/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
-- `src/kernel/drivers/ps2.asm` — PS/2 keyboard driver: `ps2_init`, `ps2_check`, `ps2_read`
-- `src/kernel/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
-- `src/kernel/drivers/vga.asm` — VGA driver: text and mode-13h helpers (`vga_set_mode`, `vga_clear_screen`, `vga_fill_block`, `vga_set_palette_color`, …) plus `fd_ioctl_vga` (the `/dev/vga` ioctl dispatcher for `VGA_IOCTL_MODE` / `VGA_IOCTL_FILL_BLOCK` / `VGA_IOCTL_SET_PALETTE`)
-- `src/kernel/fd.asm` — File descriptor table management: `fd_open` (synthesizes `/dev/vga` into `FD_TYPE_VGA` without touching the filesystem), `fd_read`, `fd_write`, `fd_close`, `fd_fstat`, `fd_ioctl`
-- `src/kernel/fs.asm` — Low-level sector I/O: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
-- `src/kernel/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
-- `src/kernel/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`
-- `src/kernel/lib/print.asm` — output utilities: `shared_print_*`, `shared_printf`, `shared_write_stdout`
-- `src/kernel/lib/proc.asm` — program utilities: `shared_die`, `shared_exit`, `shared_get_character`, `shared_parse_argv`
-- `src/kernel/net.asm` — 5-line orchestrator; includes `net/arp.asm`, `net/icmp.asm`, `net/ip.asm`, `net/ne2k.asm`, `net/udp.asm`
-- `src/kernel/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
-- `src/kernel/system.asm` — `reboot`, `shutdown`
-- `src/kernel/vfs.asm` — VFS layer: runtime function-pointer table (`vfs_find_fn`, etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`, `vfs_create`, `vfs_rmdir`, …); `%include`s `fs/bbfs.asm`
+- `src/arch/x86/boot/bboeos.asm` — Top-level flat-binary entry; `%include`s `stage1.asm`, `stage2.asm`, then `arch/x86/kernel.asm` to aggregate every kernel subsystem after the boot handoff
+- `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): boot init, loads stage 2 via BIOS INT 13h, saves boot geometry
+- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (`pic_remap` + driver inits, loads shell via VFS), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
+- `src/arch/x86/boot/ansi_minimal.asm` — Minimal ANSI parser used only by stage 1 (the full parser is in `drivers/ansi.asm`)
+- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
+- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
+- `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)
+- `src/arch/x86/pmode.asm` — 16→32-bit protected-mode entry, GDT (not yet wired in)
+- `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
+- `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
+- `src/drivers/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character`; delegates to `drivers/vga.asm` for screen writes
+- `src/drivers/ata.asm`, `src/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs/fs.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
+- `src/drivers/ne2k.asm` — NE2000 ISA NIC driver (polled-mode Ethernet); I/O base `0x300`, IRQ 3
+- `src/drivers/ps2.asm` — PS/2 keyboard driver: `ps2_init`, `ps2_check`, `ps2_read`
+- `src/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
+- `src/drivers/vga.asm` — VGA driver: text and mode-13h helpers (`vga_set_mode`, `vga_clear_screen`, `vga_fill_block`, `vga_set_palette_color`, …) plus `fd_ioctl_vga` (the `/dev/vga` ioctl dispatcher for `VGA_IOCTL_MODE` / `VGA_IOCTL_FILL_BLOCK` / `VGA_IOCTL_SET_PALETTE`)
+- `src/fs/fd.asm` — File descriptor table management: `fd_open` (synthesizes `/dev/vga` into `FD_TYPE_VGA` without touching the filesystem), `fd_read`, `fd_write`, `fd_close`, `fd_fstat`, `fd_ioctl`; includes `fs/fd/console.asm`, `fs/fd/fs.asm`, `fs/fd/net.asm`
+- `src/fs/fs.asm` — Block I/O dispatcher: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
+- `src/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
+- `src/fs/ext2.asm` — ext2 filesystem implementation (second VFS backend, auto-detected by `vfs_init`)
+- `src/fs/vfs.asm` — VFS layer: runtime function-pointer table (`vfs_find_fn`, etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`, `vfs_create`, `vfs_rmdir`, …); `%include`s `fs/bbfs.asm` and `fs/ext2.asm`
+- `src/lib/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`
+- `src/lib/print.asm` — output utilities: `shared_print_*`, `shared_printf`, `shared_write_stdout`
+- `src/lib/proc.asm` — program utilities: `shared_die`, `shared_exit`, `shared_get_character`, `shared_parse_argv`
+- `src/net/net.asm` — 4-line orchestrator; includes `net/arp.asm`, `net/icmp.asm`, `net/ip.asm`, `net/udp.asm`.  The NE2000 hardware driver itself lives in `drivers/ne2k.asm`
+- `src/syscall/` — syscall handler implementations: `fs.asm`, `io.asm`, `net.asm`, `rtc.asm`, `sys.asm`.  Dispatched from `arch/x86/syscall.asm` (the INT 30h entry)
 - `src/c/` programs written in the C subset: `arp`, `asm`, `asmesc`, `bits`, `booltest`, `cat`, `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `edit`, `gdemo`, `gtable`, `hello`, `inctest`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `ping`, `rm`, `rmdir`, `shell`, `uptime`. `asmesc` smoke-tests the `asm(...)` inline-asm escape (both file-scope and statement forms); `bits` is a smoke test for cc.py's bitwise operators (`|`, `^`, `~`, `<<`, `>>`, `&`) and their compound-assignment forms; `booltest` is a smoke test for cc.py's booleanized comparison BinOps used as expression values (`int x = (a == b);` etc.); `gdemo` and `gtable` are smoke tests for cc.py's file-scope globals; `inctest` is a smoke test for cc.py's `#include` directive (pairs with `src/c/inctest.h`).
 - `src/c/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. Gap buffer at `EDIT_BUFFER_BASE` (`0x2000`) up to the 2.5 KB kill buffer at `EDIT_KILL_BUFFER` (`0x7200`); sizes are defined in `constants.asm`. Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
 - `src/c/asm.c` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`). Phase 1 port: the driver and handlers still live inside a single file-scope `asm("...")` block that wraps `archive/asm.asm`'s original NASM source; follow-up PRs extract pieces into pure C one family at a time. Supported directives and mnemonics are documented in the inline-asm body.
@@ -147,7 +155,7 @@ renumbering is source-compatible — just rebuild.
 
 ## Releases
 
-Update `CHANGELOG.md` with new entries as features land. Group entries by date under the Unreleased section. After a batch of significant improvements, bump the version in `src/kernel/bboeos.asm` and move the Unreleased entries under a new version header with updated comparison links.
+Update `CHANGELOG.md` with new entries as features land. Group entries by date under the Unreleased section. After a batch of significant improvements, bump the version in `src/arch/x86/boot/stage1.asm` (the `WELCOME` string) and move the Unreleased entries under a new version header with updated comparison links.
 
 ## Testing
 

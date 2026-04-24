@@ -328,6 +328,6 @@ fd_ioctl_ops:
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         fd_write_buffer dw 0
 
-%include "fd/console.asm"
-%include "fd/fs.asm"
-%include "fd/net.asm"
+%include "fs/fd/console.asm"
+%include "fs/fd/fs.asm"
+%include "fs/fd/net.asm"

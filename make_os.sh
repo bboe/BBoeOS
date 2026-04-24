@@ -13,7 +13,7 @@ for arg in "$@"; do
     esac
 done
 
-nasm -f bin -i src/include/ -i src/kernel/ -o os.bin src/kernel/bboeos.asm
+nasm -f bin -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ -o os.bin src/arch/x86/boot/bboeos.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi

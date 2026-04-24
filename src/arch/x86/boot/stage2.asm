@@ -47,21 +47,6 @@ boot_shell:
         hlt
         jmp .shell_halt
 
-%include "ansi.asm"
-%include "arch/pic.asm"
-%include "drivers/ata.asm"
-%include "drivers/fdc.asm"
-%include "drivers/ps2.asm"
-%include "drivers/rtc.asm"
-%include "drivers/vga.asm"
-%include "fd.asm"
-%include "fs.asm"
-%include "lib.asm"
-%include "net.asm"
-%include "syscall.asm"
-%include "system.asm"
-%include "vfs.asm"
-
 bss_setup:
         ;; Zero the BSS region of the freshly-loaded program.
         ;; Reads binary size from vfs_found_size, checks for the 4-byte
