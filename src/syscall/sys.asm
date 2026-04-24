@@ -31,12 +31,13 @@
         jmp PROGRAM_BASE
 
         .sys_exit:
-        ;; Restore stack and reload shell
+        ;; Restore stack and reload shell (skips WELCOME and one-time
+        ;; boot inits — those run once from boot_shell).
         xor ax, ax
         mov ds, ax
         mov es, ax
         mov sp, [shell_sp]
-        jmp boot_shell
+        jmp shell_reload
 
         .sys_reboot:
         call reboot
