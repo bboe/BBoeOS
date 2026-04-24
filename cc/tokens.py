@@ -46,6 +46,7 @@ KEYWORDS = frozenset({
     "long",
     "return",
     "sizeof",
+    "struct",
     "uint8_t",
     "unsigned",
     "void",
@@ -91,6 +92,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<GT>>)
   | (?P<LT><)
   | (?P<MINUS_ASSIGN>-=)
+  | (?P<ARROW>->)
   | (?P<MINUS>-)
   | (?P<AND_AND>&&)
   | (?P<AMP_ASSIGN>&=)
@@ -116,9 +118,10 @@ TOKEN_PATTERN = re.compile(
   | (?P<RBRACKET>\])
   | (?P<RPAREN>\))
   | (?P<COMMA>,)
+  | (?P<DOT>\.)
   | (?P<SEMI>;)
 """,
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "UINT8_T", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "STRUCT", "UINT8_T", "UNSIGNED", "VOID"})

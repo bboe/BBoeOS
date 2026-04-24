@@ -31,9 +31,12 @@ from cc.ast_nodes import (
     Int,
     LogicalAnd,
     LogicalOr,
+    MemberAccess,
+    MemberAssign,
     Node,
     Param,
     String,
+    StructDecl,
     Var,
     VarDecl,
     While,
@@ -141,6 +144,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.division_remainder: tuple | None = None
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
+        # struct_layouts maps struct tag name → {field_name: (byte_offset, byte_size)}.
+        # Populated by _register_globals when StructDecl nodes are encountered.
+        self.struct_layouts: dict[str, dict[str, tuple[int, int]]] = {}
         self.store_target_register: str | None = None
 
     def _register_inline_body(self, function: Function, /) -> None:
@@ -502,7 +508,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             is_byte = declaration.type_name in self.BYTE_TYPES
-            stride = 1 if is_byte else self.target.int_size
+            if declaration.type_name.startswith("struct "):
+                stride = self._type_size(declaration.type_name)
+            elif is_byte:
+                stride = 1
+            else:
+                stride = self.target.int_size
             if declaration.init is not None:
                 directive = "db" if is_byte else int_directive
                 rendered = [
@@ -514,6 +525,97 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 size_expression = self._constant_expression(declaration.size)
                 byte_count = f"({size_expression})*{stride}" if stride != 1 else size_expression
                 self.bss_vars.append((name, byte_count))
+
+    def _type_size(self, type_name: str, /) -> int:
+        """Return the byte size of *type_name* including struct types.
+
+        Handles all primitive types via the target's ``type_sizes`` table,
+        pointer-to-struct (``"struct TAG*"``) as a pointer-sized word, and
+        value-struct (``"struct TAG"``) by summing the declared field sizes.
+        Raises ``CompileError`` for unknown types.
+        """
+        if type_name in self.target.type_sizes:
+            return self.target.type_sizes[type_name]
+        if type_name.startswith("struct "):
+            if type_name.endswith("*"):
+                return self.target.int_size
+            tag = type_name[7:]
+            if tag not in self.struct_layouts:
+                message = f"unknown struct '{tag}'"
+                raise CompileError(message)
+            return sum(size for _, size in self.struct_layouts[tag].values())
+        message = f"unknown type '{type_name}'"
+        raise CompileError(message)
+
+    def generate_member_access(self, expression: MemberAccess, /) -> None:
+        """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue."""
+        if not expression.arrow:
+            message = "dot member access on local struct values is not yet supported; use a pointer and '->'"
+            raise CompileError(message, line=expression.line)
+        object_name = expression.object_name
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=expression.line)
+        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+            raise CompileError(message, line=expression.line)
+        tag = struct_type[7:-1]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=expression.line)
+        if expression.member_name not in layout:
+            message = f"struct '{tag}' has no field '{expression.member_name}'"
+            raise CompileError(message, line=expression.line)
+        offset, field_size = layout[expression.member_name]
+        if field_size not in (1, 2):
+            message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=expression.line)
+        self.ax_clear()
+        self._emit_load_var(object_name, register=self.target.bx_register)
+        bx = self.target.bx_register
+        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        if field_size == 1:
+            self.emit_byte_load_zx(addr)
+        else:
+            self.emit(f"        mov {self.target.acc}, {addr}")
+        self.ax_clear()
+
+    def generate_member_assign(self, statement: MemberAssign, /) -> None:
+        """Generate code for ``ptr->field = expr;``."""
+        if not statement.arrow:
+            message = "dot member assign on local struct values is not yet supported; use a pointer and '->'"
+            raise CompileError(message, line=statement.line)
+        object_name = statement.object_name
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=statement.line)
+        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+            raise CompileError(message, line=statement.line)
+        tag = struct_type[7:-1]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=statement.line)
+        if statement.member_name not in layout:
+            message = f"struct '{tag}' has no field '{statement.member_name}'"
+            raise CompileError(message, line=statement.line)
+        offset, field_size = layout[statement.member_name]
+        if field_size not in (1, 2):
+            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=statement.line)
+        self.ax_clear()
+        self.generate_expression(statement.expr)
+        self._emit_load_var(object_name, register=self.target.bx_register)
+        bx = self.target.bx_register
+        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        if field_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        else:
+            self.emit(f"        mov {addr}, {self.target.acc}")
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.
@@ -871,6 +973,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for declaration in declarations:
             if isinstance(declaration, InlineAsm):
                 continue
+            if isinstance(declaration, StructDecl):
+                # Build a packed field layout: {field_name: (byte_offset, byte_size)}.
+                # Fields with array types (e.g. ``char _reserved[15]``) consume
+                # their total byte count.
+                layout: dict[str, tuple[int, int]] = {}
+                cursor = 0
+                for field in declaration.fields:
+                    ftype = field.type_name
+                    if "[" in ftype:
+                        # "char[15]" → element_type="char", count=15
+                        bracket = ftype.index("[")
+                        element_type = ftype[:bracket]
+                        count = int(ftype[bracket + 1 : -1])
+                        field_size = self._type_size(element_type) * count
+                    else:
+                        field_size = self._type_size(ftype)
+                    layout[field.field_name] = (cursor, field_size)
+                    cursor += field_size
+                self.struct_layouts[declaration.name] = layout
+                continue
             name = declaration.name
             if name in self.NAMED_CONSTANTS:
                 message = f"global '{name}' shadows a kernel constant"
@@ -905,8 +1027,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
-                if declaration.type_name not in ("char", "int", "uint8_t"):
-                    message = f"global array '{name}' must have element type 'char', 'int', or 'uint8_t'"
+                if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
+                    message = f"global array '{name}' must have element type 'char', 'int', 'uint8_t', or a struct type"
                     raise CompileError(message, line=declaration.line)
                 if declaration.type_name in self.BYTE_TYPES:
                     self.global_byte_arrays.add(name)
@@ -1990,7 +2112,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         continue
                 if statement.name in self.virtual_long_locals:
                     continue
-                size = self.target.type_sizes[statement.type_name]
+                size = self._type_size(statement.type_name)
                 # Byte-typed scalar body locals get a 1-byte slot; track
                 # them so load / store / compare paths use the byte-wide
                 # codegen shared with byte-scalar globals.  Parameters
@@ -2010,7 +2132,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
-                stride = 1 if statement.type_name in self.BYTE_TYPES else self.target.int_size
+                stride = (
+                    self._type_size(statement.type_name)
+                    if statement.type_name.startswith("struct ")
+                    else (1 if statement.type_name in self.BYTE_TYPES else self.target.int_size)
+                )
                 byte_count = self._eval_local_array_size(statement.size, stride=stride) if statement.size is not None else None
                 if byte_count is not None:
                     self.allocate_local(statement.name, size=byte_count)
