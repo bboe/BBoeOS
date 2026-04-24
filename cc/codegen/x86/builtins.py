@@ -491,6 +491,24 @@ class BuiltinsMixin:
         self._emit_syscall("NET_MAC")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
+    def builtin_memcmp(self, arguments: list[Node], /) -> None:
+        """Generate code for the memcmp(a, b, n) builtin.
+
+        Emits ``mov di, <a> / mov si, <b> / mov cx, <n> / cld / repe cmpsb
+        / setne al / xor ah, ah``.  Returns 0 in AX if equal, 1 if not.
+        DI, SI, AX, CX are clobbered.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="memcmp")
+        a_argument, b_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=a_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=b_argument, register=self.target.si_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self.emit("        cld")
+        self.emit("        repe cmpsb")
+        self.emit("        setne al")
+        self.emit("        xor ah, ah")
+        self.ax_clear()
+
     def builtin_memcpy(self, arguments: list[Node], /) -> None:
         """Generate code for the memcpy(destination, source, n) builtin.
 
@@ -505,6 +523,22 @@ class BuiltinsMixin:
         self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
         self.emit("        cld")
         self.emit("        rep movsb")
+        self.ax_clear()
+
+    def builtin_memset(self, arguments: list[Node], /) -> None:
+        """Generate code for the memset(destination, value, count) builtin.
+
+        Emits ``mov di, <destination> / mov ax, <value> / mov cx, <count>
+        / cld / rep stosb``.  Byte-wise fill; DI, AX, CX are clobbered.
+        The value is loaded into AX; AL is used as the fill byte.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="memset")
+        destination_argument, value_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=destination_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self.emit("        cld")
+        self.emit("        rep stosb")
         self.ax_clear()
 
     def builtin_mkdir(
