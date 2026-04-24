@@ -174,6 +174,7 @@ pmode_gdtr:
 
 [bits 32]
 %include "drivers/console.asm"          ; serial_character (COM1 output)
+%include "drivers/fdc.asm"              ; floppy DMA + IRQ 6 driver
 %include "drivers/ps2.asm"              ; PS/2 keyboard driver (IRQ-driven)
 %include "drivers/rtc.asm"              ; system_ticks / PIT constants
 %include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
