@@ -255,6 +255,11 @@ class LogicalOr(Node):
 class Param:
     """A function parameter: type, name, and whether it was declared with ``[]``.
 
+    ``in_register`` captures ``__attribute__((in_register("REG")))`` — the
+    caller loads the argument into the named register instead of pushing it;
+    the callee spills the register to a local slot at function entry and reads
+    it from there like any other local.
+
     ``out_register`` captures ``__attribute__((out_register("REG")))`` — the
     parameter is an output-only register: the caller passes ``&local`` but no
     push is emitted; after the call the named register is captured into the
@@ -262,6 +267,7 @@ class Param:
     rather than a pointer write.
     """
 
+    in_register: str | None = field(default=None, kw_only=True)
     is_array: bool
     name: str
     out_register: str | None = field(default=None, kw_only=True)

@@ -203,6 +203,13 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("always_inline", True)
+        if attr_name == "in_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("in_register", reg_token[1][1:-1])
         if attr_name == "out_register":
             self.eat("LPAREN")
             reg_token = self.eat("STRING")
@@ -575,6 +582,7 @@ class Parser:
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
+        in_register: str | None = None
         is_array = False
         out_register: str | None = None
         if self.peek()[0] == "LBRACKET":
@@ -583,12 +591,14 @@ class Parser:
             is_array = True
         if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=name_token[2])
-            if kind == "out_register":
+            if kind == "in_register":
+                in_register = value
+            elif kind == "out_register":
                 out_register = value
             else:
                 message = f"unsupported parameter attribute '{kind}'"
                 raise CompileError(message, line=name_token[2])
-        return Param(is_array=is_array, name=name, out_register=out_register, type=type_string)
+        return Param(in_register=in_register, is_array=is_array, name=name, out_register=out_register, type=type_string)
 
     def parse_parameters(self) -> list[Param]:
         """Parse a function parameter list.
@@ -859,18 +869,18 @@ class Parser:
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
                 raise CompileError(message, line=line)
-            stack_param_count = sum(1 for p in parameters if p.out_register is None)
+            stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
             if carry_return and stack_param_count > regparm_count:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
                 # must arrive via AX only (regparm(1)), take no args, or
-                # use only out_register params (no stack push, no cleanup).
-                message = "carry_return functions may not take stack args; use 0 params, out_register params, or regparm(1)"
+                # use only out_register/in_register params (no stack push, no cleanup).
+                message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
                 raise CompileError(message, line=line)
             if always_inline and stack_param_count > regparm_count:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take stack args; use 0 params, out_register params, or regparm(1)"
+                message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
                 # Function prototype (no body).  Retained in the AST so

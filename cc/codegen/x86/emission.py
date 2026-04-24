@@ -101,6 +101,8 @@ class EmissionMixin:
             for index, param in enumerate(function.params):
                 if param.out_register is not None:
                     self.out_register_params.setdefault(function.name, {})[index] = param.out_register
+                if param.in_register is not None:
+                    self.in_register_params.setdefault(function.name, {})[index] = param.in_register
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
 
@@ -380,6 +382,7 @@ class EmissionMixin:
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
             out_regs = self.out_register_params.get(name, {})
+            in_regs = self.in_register_params.get(name, {})
             fastcall_ax_arg: Node | None = None
             out_reg_captures: list[tuple[str, Node]] = []
             register_args: list[tuple[str, Node]] = []
@@ -387,6 +390,8 @@ class EmissionMixin:
             for index, arg in enumerate(arguments):
                 if index in out_regs:
                     out_reg_captures.append((out_regs[index], arg))
+                elif index in in_regs:
+                    register_args.append((in_regs[index], arg))
                 elif is_fastcall and index == 0:
                     fastcall_ax_arg = arg
                 elif index in callee_pins:
@@ -1115,6 +1120,10 @@ class EmissionMixin:
                     # Track it so DerefAssign in the body emits mov <reg>, <val>.
                     self.out_register_locals[param.name] = param.out_register
                     continue
+                if param.in_register is not None:
+                    # Input register param: caller puts arg in named register (no push).
+                    # Allocate a local slot below; spilled after sub sp,N in prologue.
+                    continue
                 if is_fastcall and i == 0:
                     # Param 0 gets a local slot allocated below; it has no
                     # caller-pushed address.
@@ -1130,15 +1139,19 @@ class EmissionMixin:
         if name == "main":
             param_candidates = []
         elif is_fastcall:
-            param_candidates = [p for p in parameters[1:] if p.out_register is None]
+            param_candidates = [p for p in parameters[1:] if p.out_register is None and p.in_register is None]
         else:
-            param_candidates = [p for p in parameters if p.out_register is None]
+            param_candidates = [p for p in parameters if p.out_register is None and p.in_register is None]
         self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
 
         # Reserve a local stack slot for fastcall param 0 before scan_locals
         # runs so its offset is stable against body-local allocations.
         if is_fastcall:
             self.allocate_local(parameters[0].name)
+        # Reserve local slots for in_register params (spilled at prologue entry).
+        for param in parameters:
+            if param.in_register is not None:
+                self.allocate_local(param.name)
 
         self.scan_locals(body)
 
@@ -1157,6 +1170,8 @@ class EmissionMixin:
                 if is_fastcall and i == 0:
                     continue
                 if param.out_register is not None:
+                    continue
+                if param.in_register is not None:
                     continue
                 if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
                     continue
@@ -1199,6 +1214,10 @@ class EmissionMixin:
                 # so the body can read it through the normal local path.
                 slot = self.locals[parameters[0].name]
                 self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
+            for param in parameters:
+                if param.in_register is not None:
+                    slot = self.locals[param.name]
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.

@@ -158,8 +158,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
         self.division_remainder: tuple | None = None
-        # out_register_params maps function name → {param_index → register}.
+        # in_register_params / out_register_params map function name → {param_index → register}.
         # Populated during the first pass over function definitions in generate().
+        self.in_register_params: dict[str, dict[int, str]] = {}
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
@@ -242,15 +243,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # MVP — they don't mix with register_convention.
             all_params = function.params
             if function.regparm_count > 0:
-                pin_params = [p for p in all_params[1:] if p.out_register is None]
+                pin_params = [p for p in all_params[1:] if p.out_register is None and p.in_register is None]
             else:
-                pin_params = [p for p in all_params if p.out_register is None]
+                pin_params = [p for p in all_params if p.out_register is None and p.in_register is None]
             assignments = self._select_auto_pin_candidates(body=function.body, parameters=pin_params)
             param_pins: dict[int, str] = {}
             for index, param in enumerate(all_params):
                 if function.regparm_count > 0 and index == 0:
                     continue
-                if param.out_register is not None:
+                if param.out_register is not None or param.in_register is not None:
                     continue
                 if param.name in assignments:
                     param_pins[index] = assignments[param.name]

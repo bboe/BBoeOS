@@ -488,6 +488,52 @@ def test_uint32_t_size_is_always_four_bytes_32bit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# in_register parameter attribute
+# ---------------------------------------------------------------------------
+
+
+def test_in_register_spills_to_local_slot() -> None:
+    """in_register param is spilled to a local stack slot at function entry."""
+    src = """
+        void f(int x __attribute__((in_register("bx")))) {
+            int y;
+            y = x;
+        }
+    """
+    asm = _kernel(src)
+    assert "mov [bp-" in asm, f"expected spill to local slot\n{asm}"
+    assert "mov [bp-2], bx" in asm, f"expected 'mov [bp-2], bx' spill\n{asm}"
+
+
+def test_in_register_no_caller_push() -> None:
+    """Caller passes in_register arg by loading the register, not pushing."""
+    src = """
+        void callee(int x __attribute__((in_register("bx"))));
+        void caller(int v) { callee(v); }
+    """
+    asm = _kernel(src)
+    # The call should load BX (not push) for the in_register param.
+    assert "mov bx," in asm, f"expected 'mov bx, ...' for in_register arg\n{asm}"
+    assert "push" not in asm.split("callee")[1].split("ret")[0], f"expected no push before callee call\n{asm}"
+
+
+def test_in_register_with_carry_return() -> None:
+    """in_register and carry_return can combine: spill bx, emit clc/stc."""
+    proto = (
+        "__attribute__((carry_return)) int fd_lookup("
+        'int fd __attribute__((in_register("bx"))),'
+        ' int *entry __attribute__((out_register("si"))));'
+    )
+    defn = proto.rstrip(";") + " { if (fd >= 8) { return 0; } *entry = fd; return 1; }"
+    src = proto + "\n" + defn
+    asm = _kernel(src)
+    assert "mov [bp-" in asm and "mov [bp-2], bx" in asm, f"expected bx spill\n{asm}"
+    assert "stc" in asm, f"expected stc for return 0\n{asm}"
+    assert "clc" in asm, f"expected clc for return 1\n{asm}"
+    assert "mov si," in asm, f"expected mov si for out_register\n{asm}"
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 
