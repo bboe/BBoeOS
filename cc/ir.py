@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from cc import ast_nodes
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
-Value = int | str
+Value = int | str | ast_nodes.AddressOf
 
 
 def _is_constant_true(condition: ast_nodes.Node) -> bool:
@@ -497,6 +497,10 @@ class Builder:
                     Label(name=end_lbl),
                 ])
                 return temp
+            case ast_nodes.AddressOf():
+                # Pass through as-is so generate_call can detect out_register
+                # arguments (&var) without the node being replaced by a temp.
+                return expr
             case _:
                 # Complex: use a temp + Block to let AST codegen handle it.
                 temp = self._tmp()

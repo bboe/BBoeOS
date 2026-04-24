@@ -30,6 +30,13 @@ class Node:
 
 
 @dataclass(kw_only=True, slots=True)
+class AddressOf(Node):
+    """Address-of expression ``&name``."""
+
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class ArrayDecl(Node):
     """Array declaration ``T name[] = {...};`` (local or global).
 
@@ -87,6 +94,14 @@ class Continue(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class DerefAssign(Node):
+    """Pointer dereference assignment ``*name = expr;``."""
+
+    expr: Node
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class DoWhile(Node):
     """``do { body } while (cond);`` loop."""
 
@@ -116,11 +131,18 @@ class Function(Node):
     splices the body text in place of ``call X`` (with local label
     uniquification); no free-standing function body is emitted, so
     there's nothing for inline-asm ``call X`` to resolve against.
+
+    ``is_prototype`` is ``True`` for forward declarations (no body) —
+    the node is retained in ``Program.functions`` so the generator can
+    register calling-convention info (e.g., ``out_register`` params and
+    ``carry_return``) for call sites that reference an externally-defined
+    function.  No code is emitted for prototype nodes.
     """
 
     always_inline: bool = field(default=False, kw_only=True)
     body: list[Node]
     carry_return: bool = field(default=False, kw_only=True)
+    is_prototype: bool = field(default=False, kw_only=True)
     name: str
     params: list[Param]
     regparm_count: int = field(default=0, kw_only=True)
@@ -231,10 +253,18 @@ class LogicalOr(Node):
 
 @dataclass(kw_only=True, slots=True)
 class Param:
-    """A function parameter: type, name, and whether it was declared with ``[]``."""
+    """A function parameter: type, name, and whether it was declared with ``[]``.
+
+    ``out_register`` captures ``__attribute__((out_register("REG")))`` — the
+    parameter is an output-only register: the caller passes ``&local`` but no
+    push is emitted; after the call the named register is captured into the
+    local.  In the callee body, ``*param = expr`` emits ``mov REG, expr``
+    rather than a pointer write.
+    """
 
     is_array: bool
     name: str
+    out_register: str | None = field(default=None, kw_only=True)
     type: str
 
 

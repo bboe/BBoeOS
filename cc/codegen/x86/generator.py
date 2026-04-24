@@ -157,12 +157,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
         self.division_remainder: tuple | None = None
+        # out_register_params maps function name → {param_index → register}.
+        # Populated during the first pass over function definitions in generate().
+        self.out_register_params: dict[str, dict[int, str]] = {}
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
+        self.store_target_register: str | None = None
         # struct_layouts maps struct tag name → {field_name: (byte_offset, byte_size)}.
         # Populated by _register_globals when StructDecl nodes are encountered.
         self.struct_layouts: dict[str, dict[str, tuple[int, int]]] = {}
-        self.store_target_register: str | None = None
         self.target_mode: str = target_mode
 
     def _register_inline_body(self, function: Function, /) -> None:
@@ -228,7 +231,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.register_convention_functions: set[str] = set()
 
         for function in functions:
-            if function.name == "main":
+            if function.name == "main" or function.is_prototype:
                 continue
             self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
             # Fastcall (regparm(1)) param 0 lives in AX on entry and is spilled
@@ -236,11 +239,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # candidate so auto-pin selection skips it entirely.  Params 1..N
             # of a fastcall function keep the standard stack convention in the
             # MVP — they don't mix with register_convention.
-            pin_params = function.params[1:] if function.regparm_count > 0 else function.params
+            all_params = function.params
+            if function.regparm_count > 0:
+                pin_params = [p for p in all_params[1:] if p.out_register is None]
+            else:
+                pin_params = [p for p in all_params if p.out_register is None]
             assignments = self._select_auto_pin_candidates(body=function.body, parameters=pin_params)
             param_pins: dict[int, str] = {}
-            for index, param in enumerate(function.params):
+            for index, param in enumerate(all_params):
                 if function.regparm_count > 0 and index == 0:
+                    continue
+                if param.out_register is not None:
                     continue
                 if param.name in assignments:
                     param_pins[index] = assignments[param.name]

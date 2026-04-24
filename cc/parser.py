@@ -8,6 +8,7 @@ Consumes the token stream produced by :mod:`cc.lexer` / processed by
 from __future__ import annotations
 
 from cc.ast_nodes import (
+    AddressOf,
     ArrayDecl,
     ArrayInit,
     Assign,
@@ -16,6 +17,7 @@ from cc.ast_nodes import (
     Call,
     Char,
     Continue,
+    DerefAssign,
     DoWhile,
     Function,
     If,
@@ -200,6 +202,13 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("always_inline", True)
+        if attr_name == "out_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("out_register", reg_token[1][1:-1])
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -532,13 +541,22 @@ class Parser:
 
         """
         type_string = self.parse_type()
-        name = self.eat("IDENT")[1]
+        name_token = self.eat("IDENT")
+        name = name_token[1]
         is_array = False
+        out_register: str | None = None
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             self.eat("RBRACKET")
             is_array = True
-        return Param(is_array=is_array, name=name, type=type_string)
+        if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=name_token[2])
+            if kind == "out_register":
+                out_register = value
+            else:
+                message = f"unsupported parameter attribute '{kind}'"
+                raise CompileError(message, line=name_token[2])
+        return Param(is_array=is_array, name=name, out_register=out_register, type=type_string)
 
     def parse_parameters(self) -> list[Param]:
         """Parse a function parameter list.
@@ -622,6 +640,10 @@ class Parser:
             if isinstance(operand, Int):
                 return Int(line=line, value=-operand.value)
             return BinaryOperation(left=Int(line=line, value=0), line=line, operation="-", right=operand)
+        if token[0] == "AMP":
+            self.eat()
+            name_token = self.eat("IDENT")
+            return AddressOf(line=line, name=name_token[1])
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
@@ -644,13 +666,9 @@ class Parser:
         globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
             declaration = self.parse_top_level_declaration()
-            if declaration is None:
-                # Function prototype — swallowed by parse_top_level_declaration
-                # for clang's benefit; cc.py doesn't need it in the AST.
-                continue
             if isinstance(declaration, Function):
                 functions.append(declaration)
-            else:
+            elif declaration is not None:
                 globals_list.append(declaration)
         return Program(functions=functions, globals=globals_list, line=line)
 
@@ -719,6 +737,13 @@ class Parser:
             return Return(line=token[2], value=value)
         if token[0] == "WHILE":
             return self.parse_while()
+        if token[0] == "STAR":
+            self.eat("STAR")
+            name_token = self.eat("IDENT")
+            self.eat("ASSIGN")
+            expr = self.parse_expression()
+            self.eat("SEMI")
+            return DerefAssign(expr=expr, line=token[2], name=name_token[1])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":
@@ -802,27 +827,36 @@ class Parser:
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
                 raise CompileError(message, line=line)
-            if carry_return and len(parameters) > regparm_count:
+            stack_param_count = sum(1 for p in parameters if p.out_register is None)
+            if carry_return and stack_param_count > regparm_count:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
-                # must arrive via AX only (regparm(1)) or take no args.
-                message = "carry_return functions may not take stack args; use 0 params or regparm(1)"
+                # must arrive via AX only (regparm(1)), take no args, or
+                # use only out_register params (no stack push, no cleanup).
+                message = "carry_return functions may not take stack args; use 0 params, out_register params, or regparm(1)"
                 raise CompileError(message, line=line)
-            if always_inline and len(parameters) > regparm_count:
+            if always_inline and stack_param_count > regparm_count:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take stack args; use 0 params or regparm(1)"
+                message = "always_inline functions may not take stack args; use 0 params, out_register params, or regparm(1)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
-                # Function prototype (no body).  cc.py's two-pass
-                # function-name resolution doesn't need prototypes, but
-                # clang's ISO C99 declare-before-use rule requires them
-                # when a pure-C caller references a function defined
-                # later in the same translation unit.  Parsed and
-                # swallowed here; ``parse_program`` drops the None
-                # return so nothing lands in the AST.
+                # Function prototype (no body).  Retained in the AST so
+                # the generator can register calling-convention metadata
+                # (carry_return, out_register params) for external
+                # functions called from C.  No code is emitted for
+                # prototype nodes.
                 self.eat("SEMI")
-                return None
+                return Function(
+                    always_inline=always_inline,
+                    body=[],
+                    carry_return=carry_return,
+                    is_prototype=True,
+                    line=line,
+                    name=name,
+                    params=parameters,
+                    regparm_count=regparm_count,
+                )
             self.eat("LBRACE")
             return Function(
                 always_inline=always_inline,
@@ -893,6 +927,9 @@ class Parser:
             return "void"
         if token[0] == "INT":
             self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "int*"
             return "int"
         if token[0] == "CHAR":
             self.eat()

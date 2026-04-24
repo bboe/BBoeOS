@@ -23,12 +23,14 @@ from __future__ import annotations
 
 from cc import ir
 from cc.ast_nodes import (
+    AddressOf,
     ArrayDecl,
     Assign,
     BinaryOperation,
     Break,
     Call,
     Continue,
+    DerefAssign,
     DoWhile,
     Function,
     If,
@@ -96,6 +98,9 @@ class EmissionMixin:
                 self.carry_return_functions.add(function.name)
             if function.always_inline:
                 self._register_inline_body(function)
+            for index, param in enumerate(function.params):
+                if param.out_register is not None:
+                    self.out_register_params.setdefault(function.name, {})[index] = param.out_register
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
 
@@ -104,13 +109,15 @@ class EmissionMixin:
         # its special handling (argc/argv startup, printf fusion, frame-
         # elide data labels) is deeply tied to the AST shape.
         ir_program = ir.Builder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
-        ir_by_name = {f.ast_node.name: f for f in ir_program.functions if not f.ast_node.always_inline}
+        ir_by_name = {f.ast_node.name: f for f in ir_program.functions if not f.ast_node.always_inline and not f.ast_node.is_prototype}
 
         if self.target_mode == "user":
             # Emit main first so execution starts at PROGRAM_BASE.
             main_func = None
             helpers: list[Node] = []
             for function in ast.functions:
+                if function.is_prototype:
+                    continue
                 if function.name == "main":
                     main_func = function
                 else:
@@ -126,6 +133,8 @@ class EmissionMixin:
         else:
             # Kernel mode: emit all functions in source order (no main allowed).
             for function in ast.functions:
+                if function.is_prototype:
+                    continue
                 ir_func = ir_by_name.get(function.name)
                 if ir_func is not None:
                     self.generate_function(ir_func)
@@ -368,11 +377,15 @@ class EmissionMixin:
                         self.emit(f"        push {register}")
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
+            out_regs = self.out_register_params.get(name, {})
             fastcall_ax_arg: Node | None = None
+            out_reg_captures: list[tuple[str, Node]] = []
             register_args: list[tuple[str, Node]] = []
             stack_args: list[Node] = []
             for index, arg in enumerate(arguments):
-                if is_fastcall and index == 0:
+                if index in out_regs:
+                    out_reg_captures.append((out_regs[index], arg))
+                elif is_fastcall and index == 0:
                     fastcall_ax_arg = arg
                 elif index in callee_pins:
                     register_args.append((callee_pins[index], arg))
@@ -401,6 +414,20 @@ class EmissionMixin:
                 self.emit(f"        call {name}")
             if stack_args:
                 self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
+            # Capture out_register outputs before any register restores so the
+            # callee-written registers haven't been overwritten by the pops yet.
+            for reg, arg in out_reg_captures:
+                if not isinstance(arg, AddressOf):
+                    message = "out_register argument must be an address-of expression (&var)"
+                    raise CompileError(message, line=statement.line)
+                dest_name = arg.name
+                if dest_name in self.pinned_register:
+                    dest_reg = self.pinned_register[dest_name]
+                    if dest_reg != reg:
+                        self.emit(f"        mov {dest_reg}, {reg}")
+                else:
+                    dest = self._local_address(dest_name)
+                    self.emit(f"        mov [{dest}], {reg}")
             if use_pusha:
                 self.emit("        popa")
             else:
@@ -857,6 +884,18 @@ class EmissionMixin:
             if protect_count:
                 self.emit(f"        pop {self.target.count_register}")
             self.ax_clear()
+        elif isinstance(expression, AddressOf):
+            name = expression.name
+            if name in self.out_register_locals:
+                message = f"cannot take address of out_register parameter '{name}'"
+                raise CompileError(message, line=expression.line)
+            addr = self._local_address(name)
+            if name in self.locals:
+                self.emit(f"        lea {self.target.acc}, [{addr}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+            self.ax_local = None
+            self.ax_is_byte = False
         elif isinstance(expression, MemberAccess):
             self.generate_member_access(expression)
         else:
@@ -871,6 +910,8 @@ class EmissionMixin:
         """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
         if isinstance(value, int):
             return Int(value=value)
+        if isinstance(value, AddressOf):
+            return value
         if value.startswith("_ir_s"):
             content = self._ir_string_map.get(value)
             if content is not None:
@@ -987,6 +1028,7 @@ class EmissionMixin:
         self.live_long_local = None
         self.local_stack_arrays = {}
         self.locals = {}
+        self.out_register_locals: dict[str, str] = {}
         self.pinned_register = {}
         self.variable_arrays = set()
         self.variable_types = {}
@@ -1052,16 +1094,22 @@ class EmissionMixin:
             # Non-main: record parameter types; stack offsets are kept
             # as fallbacks but parameters will be pinned to registers
             # when safe_pin_registers has room.
+            caller_push_index = 0
             for i, param in enumerate(parameters):
                 self.variable_types[param.name] = param.type
                 if param.is_array:
                     self.variable_arrays.add(param.name)
+                if param.out_register is not None:
+                    # Output-only register param: no caller-pushed stack slot.
+                    # Track it so DerefAssign in the body emits mov <reg>, <val>.
+                    self.out_register_locals[param.name] = param.out_register
+                    continue
                 if is_fastcall and i == 0:
                     # Param 0 gets a local slot allocated below; it has no
                     # caller-pushed address.
                     continue
-                stack_index = i - 1 if is_fastcall else i
-                self.locals[param.name] = -(self.target.param_slot_base + stack_index * self.target.int_size)  # negative = above bp
+                self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
+                caller_push_index += 1
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
@@ -1071,9 +1119,9 @@ class EmissionMixin:
         if name == "main":
             param_candidates = []
         elif is_fastcall:
-            param_candidates = parameters[1:]
+            param_candidates = [p for p in parameters[1:] if p.out_register is None]
         else:
-            param_candidates = parameters
+            param_candidates = [p for p in parameters if p.out_register is None]
         self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
 
         # Reserve a local stack slot for fastcall param 0 before scan_locals
@@ -1096,6 +1144,8 @@ class EmissionMixin:
         if name != "main":
             for i, param in enumerate(parameters):
                 if is_fastcall and i == 0:
+                    continue
+                if param.out_register is not None:
                     continue
                 if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
                     continue
@@ -1141,14 +1191,17 @@ class EmissionMixin:
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
+                caller_push_index = 0
                 for i, param in enumerate(parameters):
                     if is_fastcall and i == 0:
                         continue
+                    if param.out_register is not None:
+                        continue
                     if param.name in self.pinned_register:
                         register = self.pinned_register[param.name]
-                        stack_index = i - 1 if is_fastcall else i
-                        offset = self.target.param_slot_base + stack_index * self.target.int_size
+                        offset = self.target.param_slot_base + caller_push_index * self.target.int_size
                         self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
+                    caller_push_index += 1
 
         # IR path: register string literals discovered during IR building.
         self._ir_string_map: dict[str, str] = {}
@@ -1523,6 +1576,15 @@ class EmissionMixin:
             self.generate_return(statement)
         elif isinstance(statement, Call):
             self.generate_call(statement, discard_return=True)
+            self.ax_clear()
+        elif isinstance(statement, DerefAssign):
+            if statement.name not in self.out_register_locals:
+                message = f"pointer dereference write to non-out_register variable '{statement.name}' not supported"
+                raise CompileError(message, line=statement.line)
+            reg = self.out_register_locals[statement.name]
+            self.generate_expression(statement.expr)
+            if reg != self.target.acc:
+                self.emit(f"        mov {reg}, {self.target.acc}")
             self.ax_clear()
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
