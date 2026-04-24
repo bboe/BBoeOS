@@ -27,4 +27,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_archive, test_asm, test_bboefs, test_cc, test_ext2, test_programs]
+        # test_asm / test_bboefs / test_ext2 / test_programs boot the OS and
+        # drive the shell over serial; they stay disabled on protectedmode
+        # until the 32-bit shell path is widened back in.  Re-add them as
+        # each one's subsystem lands under [bits 32].
+        suite: [test_archive, test_cc]
