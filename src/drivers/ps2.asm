@@ -1,218 +1,203 @@
 ;;; ------------------------------------------------------------------------
-;;; ps2.asm — native PS/2 keyboard driver.
+;;; ps2.asm — PS/2 keyboard driver (32-bit protected mode).
 ;;;
-;;; Replaces INT 16h AH=00h and AH=01h for fd.asm's console-read path by
-;;; polling the 8042 directly: port 0x60 is the data register, port 0x64
-;;; carries the status byte (bit 0 = output-buffer full).
+;;; IRQ-driven.  pmode_irq1_handler (local to ps2_init) reads the raw
+;;; scancode from port 0x60 and calls ps2_handle_scancode, which tracks modifier
+;;; state (shift, ctrl, 0xE0 extended prefix), translates Set-1 make
+;;; codes to ASCII via ps2_map_unshift / ps2_map_shift, and queues the
+;;; result in a 16-byte ring buffer.
 ;;;
-;;; Translates Set 1 scan codes to ASCII via a small unshifted / shifted
-;;; keymap pair.  Tracks shift and ctrl state across make/break pairs, and
-;;; decodes the 0xE0 prefix just for the cursor-pad arrows.  A one-slot
-;;; buffer holds a decoded key so ps2_check can peek without consuming.
+;;; Surface:
+;;;   ps2_getc   Non-blocking read.  AL = ASCII char, or AL=0 (ZF set) if empty.
+;;;   ps2_init   Install IRQ 1 handler and unmask IRQ 1.  Call once before sti.
 ;;;
-;;; Surface (both return BIOS-compatible AL = ASCII / AH = scan code):
-;;;     ps2_init        - mask IRQ 1 at the master PIC so the BIOS IRQ
-;;;                       handler stops draining port 0x60 behind us.
-;;;                       Zeros the driver state.  Call once, early.
-;;;     ps2_check       - ZF=0 if a decoded key is ready, ZF=1 otherwise.
-;;;                       Non-blocking; does not consume the buffered key.
-;;;     ps2_read        - blocks until a key is ready, returns AL = ASCII
-;;;                       (0 for extended arrows) and AH = scan code.
+;;; Not supported (previously provided transparently by BIOS INT 16h):
+;;;   Caps Lock   — scancode 0x3A is in the table but toggle state is not tracked.
+;;;   Alt         — scancode 0x38 is in the table but modifier state is not tracked.
+;;;   F-keys      — scancodes 0x3B–0x44 are above the table boundary and discarded.
+;;;   Extended keys beyond arrows (Home/End/PgUp/PgDn/Insert/Delete) — discarded.
 ;;; ------------------------------------------------------------------------
 
-        PS2_DATA               equ 60h
-        PS2_STATUS             equ 64h
-        PS2_STATUS_OUTPUT_FULL equ 01h
-        PIC1_DATA              equ 21h
-        PIC_IRQ1_MASK          equ 02h
+        KB_BUFFER_SIZE          equ 16          ; must be a power of 2
+        PMODE_PIC1_CMD          equ 20h
+        PMODE_PIC1_DATA         equ 21h
+        PMODE_PIC_EOI           equ 20h
+        PMODE_IRQ1_VECTOR       equ 21h
+        PS2_DATA                equ 60h
 
-ps2_check:
-        ;; Drain any pending scan codes into the buffer, then report
-        ;; whether a decoded key landed there.  Preserves all registers.
-        push ax
-        call ps2_service
-        cmp byte [ps2_buffered], 0
-        pop ax
-        ret
-
-ps2_init:
-        ;; Mask IRQ 1 at the master 8259 so BIOS's keyboard IRQ handler
-        ;; stops racing us for port 0x60, and clear the driver state.
-        push ax
-        in al, PIC1_DATA
-        or al, PIC_IRQ1_MASK
-        out PIC1_DATA, al
-        xor al, al
-        mov [ps2_buffered], al
-        mov [ps2_buffered_al], al
-        mov [ps2_buffered_ah], al
-        mov [ps2_extended], al
-        mov [ps2_shift], al
-        mov [ps2_ctrl], al
-        pop ax
-        ret
-
-ps2_read:
-        ;; Block until a decoded key is ready, then return it.
-        ;; Output: AL = ASCII (0 for extended arrows), AH = scan code.
-        .wait:
-        call ps2_service
-        cmp byte [ps2_buffered], 0
-        je .wait
-        mov al, [ps2_buffered_al]
-        mov ah, [ps2_buffered_ah]
-        mov byte [ps2_buffered], 0
-        ret
-
-ps2_read_scancode:
-        ;; Output: CF=0 and AL = scancode if a byte is pending, CF=1 if
-        ;; the 8042's output buffer is empty.  Clobbers AX.
-        in al, PS2_STATUS
-        test al, PS2_STATUS_OUTPUT_FULL
-        jz .empty
-        in al, PS2_DATA
-        clc
+ps2_getc:
+        ;; Non-blocking read from the ring buffer.
+        ;; Returns AL = ASCII char, or AL=0 (ZF set) if buffer is empty.
+        movzx eax, byte [ps2_head]
+        cmp al, [ps2_tail]
+        je .empty
+        movzx ecx, byte [ps2_head]
+        mov al, [ps2_buf + ecx]
+        inc cl
+        and cl, KB_BUFFER_SIZE - 1
+        mov [ps2_head], cl
         ret
         .empty:
-        stc
+        xor al, al
         ret
 
-ps2_service:
-        ;; Consume any pending scan codes from the 8042, updating modifier
-        ;; state and populating the decoded-key buffer if a regular key
-        ;; (or one of the tracked extended arrows) arrives.  Returns when
-        ;; either the buffer is filled or the hardware queue is empty.
-        ;; Preserves all registers.
-        push ax
-        push bx
-        .loop:
-        cmp byte [ps2_buffered], 0
-        jne .done               ; a key is already ready; stop
-        call ps2_read_scancode
-        jc .done                ; hardware queue drained
-        cmp al, 0E0h
-        jne .not_prefix
-        mov byte [ps2_extended], 1
-        jmp .loop
-        .not_prefix:
-        mov bl, al
-        and bl, 7Fh             ; BL = scan code with release bit stripped
-        test al, 80h
-        jnz .release
+ps2_handle_scancode:
+        ;; AL = raw scancode from port 0x60.  Tracks shift/ctrl/extended
+        ;; state and pushes translated ASCII to the ring buffer.
+        push eax
+        push ecx
+        push edx
 
-        ;; Make (key press).
-        cmp bl, 2Ah             ; LShift
-        je .press_shift
-        cmp bl, 36h             ; RShift
-        je .press_shift
-        cmp bl, 1Dh             ; Ctrl (both sides)
-        je .press_ctrl
+        ;; Shift and ctrl break codes arrive with bit 7 set.
+        cmp al, 0AAh                    ; LShift release
+        je .shift_clear
+        cmp al, 0B6h                    ; RShift release
+        je .shift_clear
+        cmp al, 09Dh                    ; Ctrl release (0x1D | 0x80)
+        je .ctrl_clear
+
+        test al, 80h                    ; ignore all other break codes
+        jnz .discard
+
+        cmp al, 0E0h                    ; extended-key prefix
+        je .set_extended
+
+        cmp al, 2Ah                     ; LShift press
+        je .shift_set
+        cmp al, 36h                     ; RShift press
+        je .shift_set
+        cmp al, 1Dh                     ; Ctrl press
+        je .ctrl_set
+
         cmp byte [ps2_extended], 0
-        jne .extended
-        ;; Regular key.
-        cmp bl, 3Bh
-        jae .discard            ; above what we map
-        movzx bx, bl
+        jne .handle_extended
+
+        ;; Regular key: translate via unshift or shift table.
+        cmp al, 3Bh                     ; F-keys (0x3B–0x44) and above — not supported
+        jae .discard
+        movzx ecx, al
         cmp byte [ps2_shift], 0
         jne .shifted
-        mov al, [ps2_map_unshift + bx]
+        mov al, [ps2_map_unshift + ecx]
         jmp .have_ascii
         .shifted:
-        mov al, [ps2_map_shift + bx]
+        mov al, [ps2_map_shift + ecx]
         .have_ascii:
         test al, al
         jz .discard
+
+        ;; Ctrl+letter → control code (^A=1 … ^Z=26).
         cmp byte [ps2_ctrl], 0
-        je .store
-        ;; Ctrl+letter → control code (1..26).  Non-letters pass through.
+        je .push
         mov ah, al
-        and ah, 5Fh             ; uppercase if alpha
+        and ah, 5Fh                     ; force uppercase
         cmp ah, 'A'
-        jb .store
+        jb .push
         cmp ah, 'Z'
-        ja .store
+        ja .push
         sub ah, 'A' - 1
         mov al, ah
-        .store:
-        mov [ps2_buffered_al], al
-        mov byte [ps2_buffered_ah], 0
-        mov byte [ps2_buffered], 1
+        .push:
+        call ps2_putc
         jmp .discard
 
-        .extended:
-        ;; Extended prefix set.  Only cursor-pad arrows produce output,
-        ;; matching BIOS INT 16h AH=00 semantics (AL=0, AH=scan code).
-        cmp bl, 48h             ; UP
-        je .arrow
-        cmp bl, 50h             ; DOWN
-        je .arrow
-        cmp bl, 4Dh             ; RIGHT
-        je .arrow
-        cmp bl, 4Bh             ; LEFT
-        je .arrow
-        jmp .discard
-        .arrow:
-        mov byte [ps2_buffered_al], 0
-        mov [ps2_buffered_ah], bl
-        mov byte [ps2_buffered], 1
+        .handle_extended:
+        ;; Arrow keys (0xE0 prefix): emit ANSI CSI sequences ESC[A–D.
+        ;; Up=48h Left=4Bh Right=4Dh Down=50h.
+        ;; Other 0xE0 extended keys (Home/End/PgUp/PgDn/Insert/Delete) not supported.
+        cmp al, 48h
+        je .arrow_up
+        cmp al, 4Bh
+        je .arrow_left
+        cmp al, 4Dh
+        je .arrow_right
+        cmp al, 50h
+        je .arrow_down
         jmp .discard
 
-        .press_shift:
+        .arrow_down:  mov al, 1Bh; call ps2_putc; mov al, '['; call ps2_putc; mov al, 'B'; call ps2_putc; jmp .discard
+        .arrow_left:  mov al, 1Bh; call ps2_putc; mov al, '['; call ps2_putc; mov al, 'D'; call ps2_putc; jmp .discard
+        .arrow_right: mov al, 1Bh; call ps2_putc; mov al, '['; call ps2_putc; mov al, 'C'; call ps2_putc; jmp .discard
+        .arrow_up:    mov al, 1Bh; call ps2_putc; mov al, '['; call ps2_putc; mov al, 'A'; call ps2_putc; jmp .discard
+
+        .shift_set:
         mov byte [ps2_shift], 1
         jmp .discard
-        .press_ctrl:
+        .ctrl_set:
         mov byte [ps2_ctrl], 1
         jmp .discard
+        .set_extended:
+        mov byte [ps2_extended], 1
+        jmp .done                       ; do NOT clear extended flag yet
 
-        .release:
-        ;; Break (key release).  Only modifier releases matter.
-        cmp bl, 2Ah
-        je .release_shift
-        cmp bl, 36h
-        je .release_shift
-        cmp bl, 1Dh
-        je .release_ctrl
-        jmp .discard
-        .release_shift:
+        .shift_clear:
         mov byte [ps2_shift], 0
         jmp .discard
-        .release_ctrl:
+        .ctrl_clear:
         mov byte [ps2_ctrl], 0
-
         .discard:
-        ;; Any prefix applied only to the scan code we just processed.
         mov byte [ps2_extended], 0
-        jmp .loop
         .done:
-        pop bx
-        pop ax
+        pop edx
+        pop ecx
+        pop eax
         ret
 
-        ;; Set-1 scan code → ASCII.  Index 0 is a dummy; scan codes beyond
-        ;; 0x3A are function keys / CapsLock and are rejected before the
-        ;; table is consulted.
-ps2_map_unshift:
-        db 0, 1Bh                               ; 00 unused, 01 ESC
-        db '1','2','3','4','5','6','7','8','9','0'
-        db '-','='
-        db 08h, 09h                             ; BS, TAB
-        db 'q','w','e','r','t','y','u','i','o','p'
-        db '[',']'
-        db 0Dh                                  ; Enter
-        db 0                                    ; LCtrl
-        db 'a','s','d','f','g','h','j','k','l'
-        db ';',27h,'`'                          ; 27h = apostrophe
-        db 0                                    ; LShift
-        db '\'
-        db 'z','x','c','v','b','n','m'
-        db ',','.','/'
-        db 0                                    ; RShift
-        db '*'                                  ; keypad *
-        db 0                                    ; LAlt
-        db ' '
-        db 0                                    ; CapsLock
+ps2_init:
+        ;; Install pmode_irq1_handler at IDT vector 0x21 and unmask IRQ 1.
+        ;; Call once from entry.asm before sti.  Preserves all registers.
+        push eax
+        push ebx
+        mov eax, .pmode_irq1_handler
+        mov bl, PMODE_IRQ1_VECTOR
+        call idt_set_gate32
+        in al, PMODE_PIC1_DATA
+        and al, 0FDh                    ; clear bit 1 (unmask IRQ 1)
+        out PMODE_PIC1_DATA, al
+        pop ebx
+        pop eax
+        ret
 
-ps2_map_shift:
+        .pmode_irq1_handler:
+        ;; IRQ 1 (PS/2 keyboard).  Read raw scancode, delegate to
+        ;; ps2_handle_scancode for translation and buffering, then EOI.
+        push eax
+        in al, PS2_DATA
+        call ps2_handle_scancode
+        mov al, PMODE_PIC_EOI
+        out PMODE_PIC1_CMD, al
+        pop eax
+        iretd
+
+ps2_putc:
+        ;; Push AL into the ring buffer.  Called from ps2_handle_scancode
+        ;; (IRQ context, interrupts off).  Drops character silently if full.
+        push ecx
+        push edx
+        movzx ecx, byte [ps2_tail]
+        lea edx, [ecx + 1]
+        and dl, KB_BUFFER_SIZE - 1
+        cmp dl, [ps2_head]              ; full when next tail == head
+        je .full
+        mov [ps2_buf + ecx], al
+        mov [ps2_tail], dl
+        .full:
+        pop edx
+        pop ecx
+        ret
+
+;;; Ring buffer (single-producer IRQ / single-consumer main loop).
+ps2_buf   times KB_BUFFER_SIZE db 0
+ps2_head  db 0
+ps2_tail  db 0
+
+;;; Modifier state.
+ps2_ctrl     db 0
+ps2_extended db 0
+ps2_shift    db 0
+
+;;; Set-1 scan code → ASCII translation tables.
+ps2_map_shift:                                  ; shifted; same layout as unshifted
         db 0, 1Bh
         db '!','@','#','$','%','^','&','*','(',')'
         db '_','+'
@@ -222,7 +207,7 @@ ps2_map_shift:
         db 0Dh
         db 0
         db 'A','S','D','F','G','H','J','K','L'
-        db ':','"','~'
+        db ':', '"', '~'
         db 0
         db '|'
         db 'Z','X','C','V','B','N','M'
@@ -232,11 +217,23 @@ ps2_map_shift:
         db 0
         db ' '
         db 0
-
-        ;; Driver state
-        ps2_buffered    db 0
-        ps2_buffered_al db 0
-        ps2_buffered_ah db 0
-        ps2_extended    db 0
-        ps2_shift       db 0
-        ps2_ctrl        db 0
+ps2_map_unshift:                                ; unshifted; codes 0x00–0x3A only
+        db 0, 1Bh                               ; 00 unused, 01 ESC
+        db '1','2','3','4','5','6','7','8','9','0'
+        db '-','='
+        db 08h, 09h                             ; BS, TAB
+        db 'q','w','e','r','t','y','u','i','o','p'
+        db '[',']'
+        db 0Dh                                  ; Enter
+        db 0                                    ; LCtrl
+        db 'a','s','d','f','g','h','j','k','l'
+        db ';', 27h, '`'                        ; 27h = apostrophe
+        db 0                                    ; LShift
+        db '\'
+        db 'z','x','c','v','b','n','m'
+        db ',','.','/'
+        db 0                                    ; RShift
+        db '*'                                  ; keypad *
+        db 0                                    ; LAlt (modifier not tracked)
+        db ' '
+        db 0                                    ; CapsLock (toggle not tracked)
