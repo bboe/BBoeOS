@@ -167,6 +167,6 @@ pmode_gdtr:
 [bits 32]
 %include "drivers/ansi.asm"             ; serial_character (COM1 output)
 %include "drivers/rtc.asm"              ; system_ticks / PIT constants
-%include "drivers/vga.asm"              ; symbol stubs for ansi.asm (not yet called)
+%include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "entry.asm"                    ; protected_mode_entry + post-flip init
