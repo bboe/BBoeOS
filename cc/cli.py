@@ -31,6 +31,15 @@ def main() -> int:
         help="target CPU mode for emitted assembly (default 16)",
         type=int,
     )
+    parser.add_argument(
+        "--target",
+        choices=("user", "kernel"),
+        default="user",
+        help=(
+            "linkage target: 'user' (default) emits a stand-alone user program;"
+            " 'kernel' emits bare assembly suitable for %%include into the kernel blob"
+        ),
+    )
     arguments = parser.parse_args()
 
     try:
@@ -45,7 +54,12 @@ def main() -> int:
         # the generator can evaluate local array sizes at compile time.
         constants_asm = input_path.parent.parent / "include" / "constants.asm"
         constant_values = parse_asm_constants(constants_asm) if constants_asm.is_file() else {}
-        output = X86CodeGenerator(bits=arguments.bits, constant_values=constant_values, defines=defines).generate(ast)
+        output = X86CodeGenerator(
+            bits=arguments.bits,
+            constant_values=constant_values,
+            defines=defines,
+            target_mode=arguments.target,
+        ).generate(ast)
     except CompileError as error:
         location = f"{arguments.input}:{error.line}" if error.line else arguments.input
         print(f"{location}: error: {error.message}", file=sys.stderr)

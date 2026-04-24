@@ -111,7 +111,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename", "rmdir", "unlink"})
 
-    def __init__(self, *, bits: int = 16, constant_values: dict[str, int] | None = None, defines: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bits: int = 16,
+        constant_values: dict[str, int] | None = None,
+        defines: dict[str, str] | None = None,
+        target_mode: str = "user",
+    ) -> None:
         """Initialize code generator state.
 
         ``bits`` selects the target: 16 → ``X86CodegenTarget16``,
@@ -131,9 +138,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         by :meth:`_eval_local_array_size` to size stack-local arrays
         whose element counts are named constants.  When omitted or
         ``None`` the generator falls back to the empty mapping.
+
+        ``target_mode`` is either ``"user"`` (default, stand-alone program
+        at ``PROGRAM_BASE``) or ``"kernel"`` (bare assembly for ``%include``
+        into the kernel blob: no ``org``, no ``_program_end``, no BSS
+        trailer, no ``int 30h`` self-call builtins).
         """
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
+            raise ValueError(message)
+        if target_mode not in ("user", "kernel"):
+            message = f"unsupported target_mode={target_mode!r}; expected 'user' or 'kernel'"
             raise ValueError(message)
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         super().__init__(constant_values=constant_values, defines=defines, target=target)
@@ -148,6 +163,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # Populated by _register_globals when StructDecl nodes are encountered.
         self.struct_layouts: dict[str, dict[str, tuple[int, int]]] = {}
         self.store_target_register: str | None = None
+        self.target_mode: str = target_mode
 
     def _register_inline_body(self, function: Function, /) -> None:
         """Record an ``always_inline`` function's asm body for splicing.
@@ -483,10 +499,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         Scalars lay out as a single ``dw`` / ``dd`` cell (target's native
         int width) / ``db`` (byte scalars) with the constant initializer.
         Initialized arrays use ``db`` / ``dw`` / ``dd`` literals matching
-        the element type.  Zero-initialized globals (no initializer) are
-        deferred to BSS: they are collected in ``self.bss_vars`` and
-        emitted by ``_emit_bss_trailer`` as EQU definitions pointing past
-        the binary end.
+        the element type.
+
+        In *user* mode, zero-initialized globals are deferred to BSS:
+        collected in ``self.bss_vars`` and emitted by ``_emit_bss_trailer``
+        as EQU definitions pointing past the binary end.  In *kernel* mode,
+        zero-initialized globals are emitted inline as ``times N db 0``
+        labels — the BSS-EQU model requires ``_program_end:`` which is
+        absent in kernel output.
         """
         if not self.global_scalars and not self.global_arrays:
             return
@@ -500,7 +520,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 continue
             if declaration.init is None:
                 stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
-                self.bss_vars.append((name, str(stride)))
+                if self.target_mode == "kernel":
+                    self.emit(f"_g_{name}: times {stride} db 0")
+                else:
+                    self.bss_vars.append((name, str(stride)))
             else:
                 init_expression = self._constant_expression(declaration.init)
                 directive = "db" if self._is_byte_scalar_global(name) else int_directive
@@ -524,7 +547,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 size_expression = self._constant_expression(declaration.size)
                 byte_count = f"({size_expression})*{stride}" if stride != 1 else size_expression
-                self.bss_vars.append((name, byte_count))
+                if self.target_mode == "kernel":
+                    self.emit(f"_g_{name}: times {byte_count} db 0")
+                else:
+                    self.bss_vars.append((name, byte_count))
 
     def _type_size(self, type_name: str, /) -> int:
         """Return the byte size of *type_name* including struct types.
@@ -655,7 +681,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         reaches the kernel, so retargeting the OS to a different ABI
         (e.g., protected-mode ``syscall`` / ``sysenter``) is done by
         editing that table — no per-builtin edits required.
+
+        Raises :class:`CompileError` when ``target_mode`` is ``"kernel"``
+        — syscall self-calls are user-space only; kernel code calls
+        handler implementations directly.
         """
+        if self.target_mode == "kernel":
+            builtin_name = name.lower().replace("_", "")
+            message = f"syscall builtin '{builtin_name}' not available in --target kernel; call the implementation directly"
+            raise CompileError(message)
         if name not in self.target.syscall_sequences:
             message = f"unknown syscall: {name!r}"
             raise CompileError(message)

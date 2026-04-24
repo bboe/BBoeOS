@@ -5,3 +5,4 @@
 .claude/
 .venv/
 __pycache__/
+build/
