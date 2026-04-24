@@ -1,4 +1,5 @@
-;;; fd.asm -- File descriptor table management
+asm("
+;;; fd.c -- File descriptor table management
 ;;;
 ;;; fd_alloc:         Find the first free FD slot (AX = fd number, CF if full)
 ;;; fd_close:         SYS_IO_CLOSE -- BX=fd; flushes writable files
@@ -50,7 +51,7 @@ fd_close:
         jne .close_free
         test byte [si+FD_OFFSET_FLAGS], O_WRONLY
         jz .close_free
-        call vfs_update_size    ; SI = fd_table entry → updates dir entry size
+        call vfs_update_size    ; SI = fd_table entry -> updates dir entry size
         .close_free:
         push ax
         push cx
@@ -146,7 +147,7 @@ fd_open:
         mov [fd_open_name], si
         ;; Check synthetic device paths first (no filesystem lookup).
         mov di, DEV_VGA_PATH
-        mov cx, 9                       ; "/dev/vga" + null
+        mov cx, 9                       ; \"/dev/vga\" + null
         cld
         repe cmpsb
         jne .open_not_device
@@ -159,7 +160,7 @@ fd_open:
         jmp .open_done
         .open_not_device:
         mov si, [fd_open_name]
-        ;; Look up the file (vfs_find handles "." → root directory)
+        ;; Look up the file (vfs_find handles \".\" -> root directory)
         call vfs_find           ; populates vfs_found_*
         jc .open_not_found
         jmp .open_populate
@@ -169,7 +170,7 @@ fd_open:
         test byte [fd_open_flags], O_CREAT
         jz .open_err
         mov si, [fd_open_name]
-        call vfs_create         ; SI=path → vfs_found_*, CF on error
+        call vfs_create         ; SI=path -> vfs_found_*, CF on error
         jc .open_err
         jmp .open_populate
 
@@ -243,7 +244,7 @@ fd_pos_to_sector:
 ;;;
 ;;; fd_ops is a flat table of (read_fn, write_fn) word pairs indexed by
 ;;; FD_TYPE_*.  A zero entry means the operation is unsupported for that
-;;; type.  Adding a new fd type requires only a new row in fd_ops — the
+;;; type.  Adding a new fd type requires only a new row in fd_ops -- the
 ;;; dispatch functions need no changes.
 ;;; -----------------------------------------------------------------------
 fd_read:
@@ -320,7 +321,7 @@ fd_ioctl_ops:
         dw fd_ioctl_vga         ; FD_TYPE_VGA (7)
 
         ;; Variables
-        DEV_VGA_PATH    db `/dev/vga\0`
+        DEV_VGA_PATH    db \"/dev/vga\", 0
         fd_open_fd    dw 0
         fd_open_flags db 0
         fd_open_mode  db 0
@@ -328,6 +329,7 @@ fd_ioctl_ops:
         fd_table times FD_MAX * FD_ENTRY_SIZE db 0
         fd_write_buffer dw 0
 
-%include "fs/fd/console.asm"
-%include "fs/fd/fs.asm"
-%include "fs/fd/net.asm"
+%include \"fs/fd/console.asm\"
+%include \"fs/fd/fs.asm\"
+%include \"fs/fd/net.asm\"
+");
