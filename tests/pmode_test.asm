@@ -1,4 +1,4 @@
-;;; tests/pmode_test.asm — standalone smoke test for pmode.asm.
+;;; tests/pmode_test.asm — standalone smoke test for stage1_5.asm.
 ;;;
 ;;; Boots as an MBR, prints "R\n" from 16-bit real mode, switches to 32-bit
 ;;; flat pmode, prints "P\n" from the 32-bit code path, then halts.
@@ -41,7 +41,7 @@ protected_mode_entry:
         hlt
         jmp .halt
 
-%include "pmode.asm"
+%include "stage1_5.asm"
 
 [bits 16]
 serial_putc_16:

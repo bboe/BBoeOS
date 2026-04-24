@@ -100,7 +100,7 @@ renumbering is source-compatible — just rebuild.
 - `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
 - `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
 - `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)
-- `src/arch/x86/pmode.asm` — 16→32-bit protected-mode entry, GDT (not yet wired in)
+- `src/arch/x86/boot/stage1_5.asm` — 16→32-bit protected-mode entry, GDT (the "stage 1.5" of the boot flow; not yet wired in)
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
 - `src/drivers/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character`; delegates to `drivers/vga.asm` for screen writes

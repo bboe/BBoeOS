@@ -1,5 +1,10 @@
 ;;; ------------------------------------------------------------------------
-;;; pmode.asm — 16-bit → 32-bit flat ring-0 protected-mode entry.
+;;; stage1_5.asm — 16-bit → 32-bit flat ring-0 protected-mode entry.
+;;;
+;;; The "stage 1.5" of the boot flow: stage 1 (MBR) loads stage 2 into
+;;; memory, stage 2 runs real-mode init, then jumps here to switch CPU
+;;; modes.  Once `enter_protected_mode` returns (via far jmp) the rest of
+;;; stage 2 / the kernel runs in 32-bit flat pmode.
 ;;;
 ;;; Usage (from 16-bit real mode):
 ;;;     jmp enter_protected_mode
