@@ -6,6 +6,9 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### Boot
+- Flip into 32-bit flat ring-0 protected mode at the tail of `boot_shell`.  `src/arch/x86/kernel.asm` now `%include`s the three staged pmode modules — `boot/stage1_5.asm` (CR0.PE flip + GDT), `idt.asm` (32-bit exception handlers + INT 30h gate), and a new `src/arch/x86/entry.asm` whose `protected_mode_entry` is the 32-bit landing pad — and `boot_shell` finishes with `call idt_install` / `jmp enter_protected_mode` after the real-mode driver inits complete.  The post-flip path is a `cli/hlt` loop for now; the shell, `shell_reload`, and everything that used to run from `PROGRAM_BASE` are temporarily unreachable on this branch, and come back as subsequent PRs widen the driver inits + jump-table + shell into 32-bit code.  `DIRECTORY_SECTOR` bumps 34 → 35 to give stage 2 one more sector for the ~900 extra bytes of 32-bit code.  Verified via `qemu-system-i386 -d int,cpu_reset`: only the two normal BIOS resets fire — no CPU exceptions after the flip, no triple fault
+
 ### Drivers
 - vga: only reprogram VGA registers when the requested mode actually differs from the active one.  `fd_ioctl_vga`'s `.vga_mode` was unconditionally calling `vga_set_mode`, so every shell Ctrl+L flipped SR03 from BIOS-default `00h` to our table value `05h` (Character Map Select → font at plane 2 offset 0x4000) — which works only as long as `vga_font_load` populated 0x4000 correctly, and wastes the framebuffer-zeroing path on a no-op transition.  Track the current mode in a new `vga_current_mode` byte (initialised to 03h since the BIOS leaves us in text mode); same-mode requests now skip `vga_set_mode` and just call `vga_clear_screen` for text mode.  Real transitions (text → 13h via `draw`, 13h → text on quit) still reprogram everything and update the tracker.
 
