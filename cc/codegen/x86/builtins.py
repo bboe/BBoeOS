@@ -123,6 +123,9 @@ class BuiltinsMixin:
         Pre-loads SI and CX (string + length) and jumps to a shared
         ``.die`` label that calls ``write_stdout`` then exits.
         """
+        if self.target_mode == "kernel":
+            message = "die() not available in --target kernel"
+            raise CompileError(message)
         self._check_argument_count(arguments=arguments, expected=1, name="die")
         argument = arguments[0]
         if not isinstance(argument, String):
@@ -151,6 +154,9 @@ class BuiltinsMixin:
 
     def builtin_exit(self, arguments: list[Node], /) -> None:
         """Generate code for the exit() builtin."""
+        if self.target_mode == "kernel":
+            message = "exit() not available in --target kernel"
+            raise CompileError(message)
         self._check_argument_count(arguments=arguments, expected=0, name="exit")
         self.emit("        jmp FUNCTION_EXIT")
 

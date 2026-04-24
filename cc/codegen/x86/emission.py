@@ -74,23 +74,28 @@ class EmissionMixin:
         """
         for line in self.target.preamble_lines():
             self.emit(line)
-        self.emit("        org 0600h")
-        self.emit()
-        self.emit('%include "constants.asm"')
+        if self.target_mode == "user":
+            self.emit("        org 0600h")
+            self.emit()
+            self.emit('%include "constants.asm"')
         if self.defines:
             self.emit()
             for name in sorted(self.defines):
                 self.emit(f"%define {name} {self.defines[name]}")
         self.emit()
         for function in ast.functions:
-            if function.name != "main":
-                self.user_functions[function.name] = len(function.params)
-                if function.regparm_count > 0:
-                    self.fastcall_functions.add(function.name)
-                if function.carry_return:
-                    self.carry_return_functions.add(function.name)
-                if function.always_inline:
-                    self._register_inline_body(function)
+            if function.name == "main":
+                if self.target_mode == "kernel":
+                    message = "kernel-mode source may not define 'main'"
+                    raise CompileError(message)
+                continue
+            self.user_functions[function.name] = len(function.params)
+            if function.regparm_count > 0:
+                self.fastcall_functions.add(function.name)
+            if function.carry_return:
+                self.carry_return_functions.add(function.name)
+            if function.always_inline:
+                self._register_inline_body(function)
         self._register_globals(ast.globals)
         self._analyze_user_function_conventions(ast.functions)
 
@@ -101,22 +106,32 @@ class EmissionMixin:
         ir_program = ir.Builder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
         ir_by_name = {f.ast_node.name: f for f in ir_program.functions if not f.ast_node.always_inline}
 
-        # Emit main first so execution starts at PROGRAM_BASE.
-        main_func = None
-        helpers: list[Node] = []
-        for function in ast.functions:
-            if function.name == "main":
-                main_func = function
-            else:
-                helpers.append(function)
-        if main_func is not None:
-            self.generate_function(main_func)
-        for function in helpers:
-            ir_func = ir_by_name.get(function.name)
-            if ir_func is not None:
-                self.generate_function(ir_func)
-            else:
-                self.generate_function(function)
+        if self.target_mode == "user":
+            # Emit main first so execution starts at PROGRAM_BASE.
+            main_func = None
+            helpers: list[Node] = []
+            for function in ast.functions:
+                if function.name == "main":
+                    main_func = function
+                else:
+                    helpers.append(function)
+            if main_func is not None:
+                self.generate_function(main_func)
+            for function in helpers:
+                ir_func = ir_by_name.get(function.name)
+                if ir_func is not None:
+                    self.generate_function(ir_func)
+                else:
+                    self.generate_function(function)
+        else:
+            # Kernel mode: emit all functions in source order (no main allowed).
+            for function in ast.functions:
+                ir_func = ir_by_name.get(function.name)
+                if ir_func is not None:
+                    self.generate_function(ir_func)
+                else:
+                    self.generate_function(function)
+
         self.lines = Peepholer(lines=self.lines, target=self.target).run()
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
@@ -145,16 +160,17 @@ class EmissionMixin:
                 self.emit(";; --- array data ---")
                 for label, elements in live:
                     self.emit(f"{label}: dw {', '.join(elements)}")
-        self._emit_bss_trailer()
-        # Sentinel label at the very end so inline asm can address the
-        # first byte past the loaded image (scratch buffers, heap bases,
-        # etc.).  Zero bytes, so it does not affect programs that ignore
-        # it.
-        self.emit("_program_end:")
-        # BSS EQUs and _bss_end come *after* _program_end: so they are
-        # never forward references — the self-hosted assembler cannot
-        # resolve forward EQU references.
-        self._emit_bss_equs()
+        if self.target_mode == "user":
+            self._emit_bss_trailer()
+            # Sentinel label at the very end so inline asm can address the
+            # first byte past the loaded image (scratch buffers, heap bases,
+            # etc.).  Zero bytes, so it does not affect programs that ignore
+            # it.
+            self.emit("_program_end:")
+            # BSS EQUs and _bss_end come *after* _program_end: so they are
+            # never forward references — the self-hosted assembler cannot
+            # resolve forward EQU references.
+            self._emit_bss_equs()
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
@@ -196,7 +212,8 @@ class EmissionMixin:
             # Condition is emitted first so live registers are not clobbered by
             # the die-argument setup before the comparison runs.
             # AX tracking is preserved because the die path doesn't fall through.
-            if isinstance(statement, If) and statement.else_body is None and len(statement.body) == 1:
+            # Skipped in kernel mode — FUNCTION_DIE is a user-space jump-table slot.
+            if self.target_mode == "user" and isinstance(statement, If) and statement.else_body is None and len(statement.body) == 1:
                 inner = statement.body[0]
                 if (
                     isinstance(inner, Call)
