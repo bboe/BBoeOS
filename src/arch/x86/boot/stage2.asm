@@ -20,13 +20,7 @@
         jmp near shared_write_stdout
 
 boot_shell:
-        ;; Kernel init — moved up from stage 1 so the full console driver
-        ;; is available for the welcome banner and so the MBR stays
-        ;; focused on loading stage 2.
-        call pic_remap          ; master → 0x20..0x27, slave → 0x28..0x2F, all masked
-        call rtc_tick_init      ; install IRQ 0 handler, zero system_ticks
-        call install_syscalls
-        call network_initialize ; probe NIC once; sets net_present on success
+        call kernel_init        ; PIC remap, PIT + IRQ 0, INT 30h gate, NIC probe
 
         mov si, WELCOME
         call put_string

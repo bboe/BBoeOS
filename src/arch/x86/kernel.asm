@@ -33,7 +33,8 @@
         ;; Network protocol stack (NIC driver lives above in drivers/ne2k.asm)
 %include "net/net.asm"                  ; net/arp.asm + icmp.asm + ip.asm + udp.asm
 
-        ;; x86 / PC: 8259 PIC, INT 30h dispatcher, reboot / shutdown
+        ;; x86 / PC: 8259 PIC, INT 30h dispatcher, reboot / shutdown, kernel init
 %include "pic.asm"                      ; pic_remap
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
+%include "init.asm"                     ; kernel_init (called from boot_shell)

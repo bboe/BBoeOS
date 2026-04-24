@@ -97,7 +97,8 @@ renumbering is source-compatible — just rebuild.
 - `src/arch/x86/boot/bboeos.asm` — Top-level flat-binary entry; `%include`s `stage1.asm`, `stage2.asm`, then `arch/x86/kernel.asm` to aggregate every kernel subsystem after the boot handoff
 - `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): set DS/ES/SS:SP, reset disk, load stage 2 via BIOS INT 13h, jump to `boot_shell`.  On error prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init
 - `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (kernel init → welcome banner → driver inits → VFS load of the shell), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
-- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
+- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`, `init.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
+- `src/arch/x86/init.asm` — `kernel_init`: PIC remap, PIT + IRQ 0 init, INT 30h gate install, NIC probe.  Called once from `boot_shell` before the shell is loaded; the pmode port will refactor this (some steps move to post-flip once the 32-bit IDT is live)
 - `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
 - `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)
 - `src/arch/x86/boot/stage1_5.asm` — 16→32-bit protected-mode entry, GDT (the "stage 1.5" of the boot flow; not yet wired in)
