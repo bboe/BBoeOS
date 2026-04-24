@@ -186,6 +186,34 @@ class Char(Int):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberAccess(Node):
+    """Member access expression: ``ptr->field`` or ``obj.field``.
+
+    ``arrow=True`` for ``->``, ``False`` for ``.``.  Only the
+    ``arrow=True`` form (pointer dereference) is fully supported in the
+    first cycle; ``arrow=False`` is parsed but may raise CompileError
+    in codegen if the base is not a pointer.
+    """
+
+    arrow: bool
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class MemberAssign(Node):
+    """Member assignment statement: ``ptr->field = expr;``.
+
+    Like :class:`MemberAccess` but with an ``expr`` to store.
+    """
+
+    arrow: bool
+    expr: Node
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class LogicalAnd(Node):
     """Short-circuit ``left && right`` expression."""
 
@@ -243,6 +271,27 @@ class SizeofVar(Node):
     """``sizeof(name)`` expression (size of a declared variable)."""
 
     name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class StructDecl(Node):
+    """Struct type declaration ``struct NAME { fields... };`` at file scope.
+
+    Carries no storage: the generator builds a layout table from it and
+    emits nothing.  Lives in ``Program.globals`` before any variable
+    that uses the struct type.
+    """
+
+    fields: list  # list[StructField]
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class StructField(Node):
+    """A single field declaration inside a struct body."""
+
+    field_name: str
+    type_name: str
 
 
 @dataclass(kw_only=True, slots=True)

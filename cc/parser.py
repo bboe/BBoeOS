@@ -25,6 +25,8 @@ from cc.ast_nodes import (
     Int,
     LogicalAnd,
     LogicalOr,
+    MemberAccess,
+    MemberAssign,
     Node,
     Param,
     Program,
@@ -32,6 +34,8 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    StructDecl,
+    StructField,
     Var,
     VarDecl,
     While,
@@ -56,6 +60,7 @@ class Parser:
         """Initialize the parser with a token list."""
         self.tokens = tokens
         self.position = 0
+        self.struct_decls: dict[str, StructDecl] = {}
 
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
         """Consume and return the current token, optionally checking its kind.
@@ -197,6 +202,49 @@ class Parser:
             return ("always_inline", True)
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
+
+    def _parse_member_assignment(self) -> MemberAssign:
+        """Parse ``name (. | ->) member = expr ;``."""
+        token = self.eat("IDENT")
+        object_name = token[1]
+        arrow_token = self.eat()
+        arrow = arrow_token[0] == "ARROW"
+        member_token = self.eat("IDENT")
+        self.eat("ASSIGN")
+        expression = self.parse_expression()
+        self.eat("SEMI")
+        return MemberAssign(
+            arrow=arrow,
+            expr=expression,
+            line=token[2],
+            member_name=member_token[1],
+            object_name=object_name,
+        )
+
+    def _parse_struct_declaration(self) -> StructDecl:
+        """Parse ``struct NAME { type field; ... };`` at file scope."""
+        line = self.peek()[2]
+        self.eat("STRUCT")
+        name_token = self.eat("IDENT")
+        name = name_token[1]
+        self.eat("LBRACE")
+        fields: list[StructField] = []
+        while self.peek()[0] != "RBRACE":
+            field_type = self.parse_type()
+            field_name = self.eat("IDENT")[1]
+            # Optional [N] for fixed-size array fields (e.g. ``char _reserved[15]``).
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                count_token = self.eat("NUMBER")
+                self.eat("RBRACKET")
+                field_type = f"{field_type}[{count_token[1]}]"
+            self.eat("SEMI")
+            fields.append(StructField(field_name=field_name, line=line, type_name=field_type))
+        self.eat("RBRACE")
+        self.eat("SEMI")
+        decl = StructDecl(fields=fields, line=line, name=name)
+        self.struct_decls[name] = decl
+        return decl
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -545,6 +593,16 @@ class Parser:
                 index = self.parse_expression()
                 self.eat("RBRACKET")
                 return Index(index=index, line=line, name=token[1])
+            if self.peek()[0] in ("DOT", "ARROW"):
+                arrow_token = self.eat()
+                arrow = arrow_token[0] == "ARROW"
+                member_token = self.eat("IDENT")
+                return MemberAccess(
+                    arrow=arrow,
+                    line=line,
+                    member_name=member_token[1],
+                    object_name=token[1],
+                )
             return Var(line=line, name=token[1])
         if token[0] == "NOT":
             self.eat()
@@ -669,6 +727,8 @@ class Parser:
                 return self.parse_compound_assignment()
             if next_kind == "LBRACKET":
                 return self.parse_index_assignment()
+            if next_kind in ("DOT", "ARROW"):
+                return self._parse_member_assignment()
             return self.parse_call_statement()
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
@@ -682,6 +742,8 @@ class Parser:
         the output's data tail — useful for raw tables and labels.
         """
         line = self.peek()[2]
+        if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
+            return self._parse_struct_declaration()
         if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
             self.eat("IDENT")
             self.eat("LPAREN")
@@ -855,6 +917,14 @@ class Parser:
         if token[0] == "LONG":
             message = "bare 'long' is not supported; use 'unsigned long'"
             raise CompileError(message, line=token[2])
+        if token[0] == "STRUCT":
+            self.eat()
+            tag_token = self.eat("IDENT")
+            tag = tag_token[1]
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return f"struct {tag}*"
+            return f"struct {tag}"
         message = f"expected type, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 

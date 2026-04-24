@@ -36,6 +36,7 @@ from cc.ast_nodes import (
     Int,
     LogicalAnd,
     LogicalOr,
+    MemberAccess,
     Node,
     Return,
     SizeofType,
@@ -659,7 +660,7 @@ class CodeGeneratorBase:
                 return "integer"
             message = f"undefined operand: {node.name}"
             raise CompileError(message, line=node.line)
-        if isinstance(node, (BinaryOperation, Call, LogicalAnd, LogicalOr, SizeofType, SizeofVar)):
+        if isinstance(node, (BinaryOperation, Call, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
             return "integer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)

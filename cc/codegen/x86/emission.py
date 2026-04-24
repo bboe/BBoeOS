@@ -36,6 +36,8 @@ from cc.ast_nodes import (
     IndexAssign,
     InlineAsm,
     Int,
+    MemberAccess,
+    MemberAssign,
     Node,
     Return,
     SizeofType,
@@ -604,7 +606,7 @@ class EmissionMixin:
                     self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
-            self.emit(f"        mov {self.target.acc}, {self.target.type_sizes[expression.type_name]}")
+            self.emit(f"        mov {self.target.acc}, {self._type_size(expression.type_name)}")
         elif isinstance(expression, SizeofVar):
             self.ax_clear()
             vname = expression.name
@@ -838,6 +840,8 @@ class EmissionMixin:
             if protect_count:
                 self.emit(f"        pop {self.target.count_register}")
             self.ax_clear()
+        elif isinstance(expression, MemberAccess):
+            self.generate_member_access(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -1502,6 +1506,9 @@ class EmissionMixin:
             self.generate_return(statement)
         elif isinstance(statement, Call):
             self.generate_call(statement, discard_return=True)
+            self.ax_clear()
+        elif isinstance(statement, MemberAssign):
+            self.generate_member_assign(statement)
             self.ax_clear()
         else:
             message = f"unknown statement: {type(statement).__name__}"
