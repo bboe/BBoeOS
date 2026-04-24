@@ -53,16 +53,13 @@
         DMA_MASK_CH2            equ 06h        ; mask channel 2 bit | ch2
         DMA_UNMASK_CH2          equ 02h
 
-        PIC1_CMD_PORT           equ 20h
-        PIC1_DATA_PORT          equ 21h
-        PIC_EOI                 equ 20h
-        IVT_IRQ6_OFFSET         equ 26h * 4    ; remapped by pic_remap (was 0Eh*4 under BIOS)
+        FDC_IRQ6_VECTOR         equ 26h        ; pic_remap'd IRQ 6 vector
 
 fdc_dma_setup:
         ;; Input: AL = DMA mode byte (DMA_MODE_READ or DMA_MODE_WRITE).
         ;; Programs channel 2 for a 512 B transfer at SECTOR_BUFFER.
         ;; Preserves all registers.
-        push ax
+        push eax
 
         mov ah, al                      ; stash mode
 
@@ -93,27 +90,36 @@ fdc_dma_setup:
         mov al, DMA_UNMASK_CH2
         out DMA_MASK, al
 
-        pop ax
+        pop eax
         ret
 
 fdc_drain_result:
         ;; Read the 7 result bytes (ST0, ST1, ST2, C, H, R, N) — ignored.
-        push cx
-        mov cx, 7
+        push ecx
+        mov ecx, 7
         .loop:
         call fdc_recv
         loop .loop
-        pop cx
+        pop ecx
         ret
 
 fdc_init:
         ;; One-time init.  Install IRQ 6 handler + unmask, reset controller,
         ;; SPECIFY in DMA mode, motor 0 on, recalibrate.
-        push ax
-        push cx
-        push dx
+        push eax
+        push ecx
+        push edx
 
-        call fdc_install_irq
+        ;; Install IRQ 6 handler into IDT and unmask it at the PIC.
+        push ebx
+        mov eax, .irq6_handler
+        mov bl, FDC_IRQ6_VECTOR
+        call idt_set_gate32
+        in al, PIC1_DATA_PORT
+        and al, 0BFh                    ; clear bit 6 (unmask IRQ 6)
+        out PIC1_DATA_PORT, al
+        pop ebx
+
         mov byte [fdc_irq_flag], 0
 
         ;; Reset: clear DOR to assert reset, then raise RESET_NOT with
@@ -145,60 +151,26 @@ fdc_init:
         mov al, 02h
         call fdc_send
 
-        ;; Motor 0 on, wait for spin-up.
-        mov dx, FDC_DOR
-        mov al, DOR_MOTOR_0 | DOR_RESET_NOT | DOR_DMA_IRQ
-        out dx, al
-        mov cx, 500
-        call rtc_sleep_ms
-
-        ;; Recalibrate drive 0.
-        mov byte [fdc_irq_flag], 0
-        mov al, CMD_RECALIBRATE
-        call fdc_send
-        xor al, al
-        call fdc_send
-        call fdc_wait_irq
-        call fdc_sense_interrupt
-
-        pop dx
-        pop cx
-        pop ax
+        pop edx
+        pop ecx
+        pop eax
         ret
 
-fdc_install_irq:
-        ;; Install fdc_irq6_handler at IVT entry 0x26 (pic_remap'd) and
-        ;; unmask IRQ 6 on the master PIC.
-        cli
-        push ax
-        push es
-        xor ax, ax
-        mov es, ax
-        mov word [es:IVT_IRQ6_OFFSET], fdc_irq6_handler
-        mov word [es:IVT_IRQ6_OFFSET + 2], cs
-        pop es
-        in al, PIC1_DATA_PORT
-        and al, 0BFh                    ; clear bit 6 (IRQ 6 unmasked)
-        out PIC1_DATA_PORT, al
-        pop ax
-        sti
-        ret
-
-fdc_irq6_handler:
+.irq6_handler:
         ;; IRQ 6 fires on command completion for SEEK / RECAL / READ /
         ;; WRITE.  We just flag it and EOI; the main path polls the flag.
-        push ax
+        push eax
         mov byte [fdc_irq_flag], 1
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        pop ax
-        iret
+        pop eax
+        iretd
 
 fdc_issue_read_write:
         ;; Input: AL = command, CH = cyl, CL = sec (1-based), DH = head.
         ;; Sends the 9 parameter bytes.
-        push ax
-        push bx
+        push eax
+        push ebx
         mov bh, al
         call fdc_send
         mov al, dh
@@ -218,15 +190,15 @@ fdc_issue_read_write:
         call fdc_send
         mov al, 0FFh
         call fdc_send                   ; DTL (ignored when N>0)
-        pop bx
-        pop ax
+        pop ebx
+        pop eax
         ret
 
 fdc_lba_to_chs:
         ;; Input: AX = 0-based LBA.
         ;; Output: CH = cylinder, CL = sector (1-based), DH = head.
-        push ax
-        push bx
+        push eax
+        push ebx
         xor dx, dx
         mov bx, FDC_SECTORS_PER_TRACK
         div bx
@@ -237,18 +209,48 @@ fdc_lba_to_chs:
         div bx
         mov ch, al
         mov dh, dl
-        pop bx
-        pop ax
+        pop ebx
+        pop eax
+        ret
+
+fdc_motor_start:
+        ;; Turn motor 0 on, wait 500 ms for spin-up, recalibrate drive 0.
+        ;; Called lazily on the first read or write.  Motor stays on for the
+        ;; lifetime of the session; real hardware would want a 2-second
+        ;; inactivity timer to spin down, but that requires a timer callback.
+        push eax
+        push ecx
+        push edx
+        mov dx, FDC_DOR
+        mov al, DOR_MOTOR_0 | DOR_RESET_NOT | DOR_DMA_IRQ
+        out dx, al
+        mov cx, 500
+        call rtc_sleep_ms
+        mov byte [fdc_irq_flag], 0
+        mov al, CMD_RECALIBRATE
+        call fdc_send
+        xor al, al
+        call fdc_send
+        call fdc_wait_irq
+        call fdc_sense_interrupt
+        mov byte [fdc_motor_ready], 1
+        pop edx
+        pop ecx
+        pop eax
         ret
 
 fdc_read_sector:
         ;; Input:  AX = 0-based LBA.
         ;; Output: SECTOR_BUFFER filled via DMA.  CF=0 on success.
-        push ax
-        push bx
-        push cx
-        push dx
+        push eax
+        push ebx
+        push ecx
+        push edx
 
+        cmp byte [fdc_motor_ready], 0
+        jne .motor_ready
+        call fdc_motor_start
+        .motor_ready:
         call fdc_lba_to_chs
         call fdc_seek
 
@@ -262,15 +264,15 @@ fdc_read_sector:
         call fdc_drain_result
 
         clc
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 fdc_recv:
         ;; Output: AL = byte (waits for RQM=1, DIO=1).  Clobbers AX, DX.
-        push dx
+        push edx
         .wait:
         mov dx, FDC_MSR
         in al, dx
@@ -279,12 +281,12 @@ fdc_recv:
         jne .wait
         mov dx, FDC_DATA
         in al, dx
-        pop dx
+        pop edx
         ret
 
 fdc_seek:
         ;; Input: CH = cylinder, DH = head.  Completes via IRQ 6.
-        push ax
+        push eax
         mov byte [fdc_irq_flag], 0
         mov al, CMD_SEEK
         call fdc_send
@@ -295,13 +297,13 @@ fdc_seek:
         call fdc_send
         call fdc_wait_irq
         call fdc_sense_interrupt
-        pop ax
+        pop eax
         ret
 
 fdc_send:
         ;; Input: AL = byte.  Sends once RQM=1, DIO=0.  Preserves AX, DX.
-        push ax
-        push dx
+        push eax
+        push edx
         mov ah, al
         .wait:
         mov dx, FDC_MSR
@@ -312,17 +314,17 @@ fdc_send:
         mov dx, FDC_DATA
         mov al, ah
         out dx, al
-        pop dx
-        pop ax
+        pop edx
+        pop eax
         ret
 
 fdc_sense_interrupt:
-        push ax
+        push eax
         mov al, CMD_SENSE_INT
         call fdc_send
         call fdc_recv                   ; ST0
         call fdc_recv                   ; PCN
-        pop ax
+        pop eax
         ret
 
 fdc_wait_irq:
@@ -340,11 +342,15 @@ fdc_wait_irq:
 
 fdc_write_sector:
         ;; Input: AX = 0-based LBA.  CF=0 on success.
-        push ax
-        push bx
-        push cx
-        push dx
+        push eax
+        push ebx
+        push ecx
+        push edx
 
+        cmp byte [fdc_motor_ready], 0
+        jne .motor_ready
+        call fdc_motor_start
+        .motor_ready:
         call fdc_lba_to_chs
         call fdc_seek
 
@@ -358,10 +364,11 @@ fdc_write_sector:
         call fdc_drain_result
 
         clc
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
-        fdc_irq_flag db 0
+        fdc_irq_flag    db 0
+        fdc_motor_ready db 0
