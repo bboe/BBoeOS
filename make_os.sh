@@ -13,7 +13,18 @@ for arg in "$@"; do
     esac
 done
 
-nasm -f bin -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ -o os.bin src/arch/x86/boot/bboeos.asm
+KBUILD=build/kernel-c
+rm -rf "$KBUILD" && mkdir -p "$KBUILD"
+find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
+    rel="${source#src/}"; out="$KBUILD/${rel%.c}.kasm"
+    mkdir -p "$(dirname "$out")"
+    python3 cc.py --target kernel "$source" "$out" || exit 1
+done
+
+nasm -f bin \
+    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" \
+    -o os.bin src/arch/x86/boot/bboeos.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi

@@ -1,3 +1,4 @@
+asm("
 icmp_receive:
         ;; Poll for one ICMP packet destined for us
         ;; Output: DI = pointer to ICMP bytes (within NET_RECEIVE_BUFFER),
@@ -37,3 +38,4 @@ icmp_receive:
         stc
         pop ax
         ret
+");
