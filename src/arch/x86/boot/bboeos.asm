@@ -19,7 +19,6 @@
 
         org 7C00h               ; offset where bios loads our first stage
         %include "constants.asm"
-        %assign STAGE2_SECTORS (DIRECTORY_SECTOR - 1)
 
         ICW1_INIT       equ 11h         ; begin init, cascaded, expect ICW4
         ICW4_8086       equ 01h         ; 8086/88 mode, normal EOI
@@ -54,17 +53,24 @@ start:
         int 13h
         jc .error
 
-        ;; Read STAGE2_SECTORS sectors at CHS (cyl=0, head=0, sector=2)
-        ;; into linear 0x7E00 (segment 0, offset 0x7E00 via ES=0 / BX).
-        mov ax, 0200h | STAGE2_SECTORS
+        ;; Read stage2 at CHS (cyl=0, head=0, sector=2) into linear 0x7E00.
+        ;; The byte count lives in `stage2_bytes` (NASM-computed from
+        ;; kernel_end - 7E00h and placed at MBR offset 508), so host tools
+        ;; can read the same value from the drive image.  Here we shift right
+        ;; by 9 to get the sector count, and publish `directory_sector` =
+        ;; stage2_sectors + 1 for bbfs / ext2 to consume.
+        mov ax, [stage2_bytes]
+        add ax, 511
+        shr ax, 9
+        mov [directory_sector], ax
+        inc word [directory_sector]
+        mov ah, 02h             ; BIOS read-sectors function (AL = count)
         mov bx, 7E00h
         mov cx, 2
         mov dh, 0
         mov dl, [boot_disk]
         int 13h
         jc .error
-        cmp al, STAGE2_SECTORS
-        jne .error
 
         ;; Remap 8259A master/slave vectors to 0x20..0x27 / 0x28..0x2F.
         ;; Required before the pmode flip: CPU exceptions 0-31 occupy
@@ -131,8 +137,10 @@ start:
         jmp .halt
 
 boot_disk db 0
+directory_sector dw 0           ; stage2_sectors + 1; set at boot, read by bbfs
 
-        times 510-($-$$) db 0
+        times 508-($-$$) db 0
+stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
         dw 0AA55h
 
         ;; GDT descriptors. Encoded by hand rather than via `dq` math so the
@@ -171,3 +179,5 @@ pmode_gdtr:
 %include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "entry.asm"                    ; protected_mode_entry + post-flip init
+
+kernel_end:
