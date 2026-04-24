@@ -101,6 +101,8 @@ class CodeGeneratorBase:
         "IPPROTO_ICMP",
         "IPPROTO_UDP",
         "MAX_INPUT",
+        "NET_RECEIVE_BUFFER",
+        "NET_TRANSMIT_BUFFER",
         "NULL",
         "O_CREAT",
         "O_RDONLY",

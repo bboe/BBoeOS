@@ -381,6 +381,7 @@ class VarDecl(Node):
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
+    asm_symbol: str | None = field(default=None, kw_only=True)
     function_pointer_params: list[Param] | None = field(default=None, kw_only=True)
     init: Node | None
     name: str

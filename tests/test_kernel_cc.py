@@ -634,6 +634,51 @@ def test_function_pointer_arg_count_mismatch_raises_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# asm_name attribute
+# ---------------------------------------------------------------------------
+
+
+def test_asm_name_global_compiles() -> None:
+    """asm_name globals compile without emitting storage."""
+    source = textwrap.dedent("""
+        uint16_t my_sym __attribute__((asm_name("ext_sym")));
+        int read_sym(int *result __attribute__((out_register("ax")))) {
+            *result = my_sym;
+            return 1;
+        }
+    """)
+    output = _kernel(source)
+    assert "[ext_sym]" in output
+    assert "_g_my_sym" not in output
+    assert "ext_sym:" not in output
+
+
+def test_asm_name_with_offset_compiles() -> None:
+    """asm_name with expression offset emits correct symbol reference."""
+    source = textwrap.dedent("""
+        uint16_t size_hi __attribute__((asm_name("vfs_found_size+2")));
+        void set_size_hi(int v) {
+            size_hi = v;
+        }
+    """)
+    output = _kernel(source)
+    assert "[vfs_found_size+2]" in output
+
+
+def test_net_transmit_buffer_named_constant() -> None:
+    """NET_TRANSMIT_BUFFER resolves as a named constant (immediate), not a memory operand."""
+    source = """
+        void test_net_buf() {
+            uint8_t *buf;
+            buf = NET_TRANSMIT_BUFFER;
+        }
+    """
+    output = _kernel(source)
+    assert "NET_TRANSMIT_BUFFER" in output
+    assert "[NET_TRANSMIT_BUFFER]" not in output
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 

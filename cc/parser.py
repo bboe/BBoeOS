@@ -184,6 +184,13 @@ class Parser:
                 message = f"regparm({count}) not supported; only regparm(1) is implemented"
                 raise CompileError(message, line=line)
             return ("regparm", count)
+        if attr_name == "asm_name":
+            self.eat("LPAREN")
+            sym_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("asm_name", sym_token[1][1:-1])
         if attr_name == "asm_register":
             self.eat("LPAREN")
             reg_token = self.eat("STRING")
@@ -848,6 +855,7 @@ class Parser:
         # the function parameter list; ``asm_register`` is leading-only.
         regparm_count = 0
         asm_register: str | None = None
+        asm_symbol: str | None = None
         carry_return = False
         always_inline = False
         preserve_registers: list[str] = []
@@ -861,6 +869,8 @@ class Parser:
                 always_inline = True
             elif kind == "preserve_register":
                 preserve_registers.append(value)
+            elif kind == "asm_name":
+                asm_symbol = value
             else:
                 asm_register = value
         type_string = self.parse_type()
@@ -946,6 +956,17 @@ class Parser:
         if preserve_registers:
             message = "preserve_register attribute is not valid on global variables"
             raise CompileError(message, line=line)
+        # Trailing ``__attribute__`` on the variable name (e.g. ``uint16_t x __attribute__((asm_name("sym")))``)
+        # is equivalent to a leading one for global variable declarations.
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "asm_name":
+                asm_symbol = value
+            elif kind == "asm_register":
+                asm_register = value
+            else:
+                message = f"trailing {kind} attribute is not valid on global variable declarations"
+                raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
         # runtime initializer to imply one.
@@ -966,11 +987,14 @@ class Parser:
             if asm_register is not None:
                 message = "asm_register attribute is not valid on arrays"
                 raise CompileError(message, line=line)
+            if asm_symbol is not None:
+                message = "asm_name attribute is not valid on arrays"
+                raise CompileError(message, line=line)
             if size_expression is None and init is None:
                 message = f"global array '{name}' needs either a size or an initializer"
                 raise CompileError(message, line=line)
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(asm_register=asm_register, init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(asm_register=asm_register, asm_symbol=asm_symbol, init=init, line=line, name=name, type_name=type_string)
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).

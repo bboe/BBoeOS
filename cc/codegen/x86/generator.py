@@ -153,6 +153,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise ValueError(message)
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         super().__init__(constant_values=constant_values, defines=defines, target=target)
+        self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
@@ -565,6 +566,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # Storage lives in the aliased CPU register, not memory,
                 # so no ``_g_<name>`` label is emitted.
                 continue
+            if name in self.asm_symbol_globals:
+                # Storage lives in an existing asm symbol, not here,
+                # so no ``_g_<name>`` label is emitted.
+                continue
             if declaration.init is None:
                 stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 if self.target_mode == "kernel":
@@ -851,6 +856,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if name in self.register_aliased_globals:
             message = f"register-aliased global '{name}' has no memory address"
             raise CompileError(message)
+        if name in self.asm_symbol_globals:
+            return self.asm_symbol_globals[name]
         if name in self.global_scalars:
             return f"_g_{name}"
         message = f"no address for '{name}' (not a local or global scalar)"
@@ -1158,6 +1165,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     # read emits the right-width register without a
                     # per-use lookup.
                     self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
+                if declaration.asm_symbol is not None:
+                    self.asm_symbol_globals[name] = declaration.asm_symbol
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
