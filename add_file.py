@@ -492,6 +492,27 @@ def make_directory(*, dirname: str, image_path: str) -> None:
     print(f"Created directory '{dirname}' at sector {next_data_sector}")
 
 
+def compute_directory_sector(*, image_path: str) -> int:
+    """Return the sector where the filesystem directory starts on disk.
+
+    NASM embeds stage2's byte count in the MBR at ``STAGE2_BYTES_OFFSET``
+    (little-endian word).  Stage1 reads the same word at boot to size the
+    disk-read; here we mirror its arithmetic: sectors = ceil(bytes / 512),
+    directory starts at sectors + 1 (right after stage2 on disk).
+
+    Returns
+    -------
+    int
+        The 1-based LBA where directory entries (bbfs) or the ext2
+        partition (ext2) begin.
+
+    """
+    with pathlib.Path(image_path).open("rb") as file:
+        file.seek(STAGE2_BYTES_OFFSET)
+        stage2_bytes = struct.unpack("<H", file.read(2))[0]
+    return (stage2_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
+
+
 def read_assign(name: str, /) -> int:
     """Return the integer value of a `%assign NAME VALUE` line in constants.asm.
 
