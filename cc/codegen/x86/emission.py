@@ -361,6 +361,8 @@ class EmissionMixin:
         """
         name = statement.name
         arguments = statement.args
+        # Any call invalidates SI (callee may clobber it).
+        self.si_local = None
         if name in self.user_functions:
             expected = self.user_functions[name]
             if len(arguments) != expected:
@@ -416,6 +418,7 @@ class EmissionMixin:
                 self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             # Capture out_register outputs before any register restores so the
             # callee-written registers haven't been overwritten by the pops yet.
+            si_captured: str | None = None
             for reg, arg in out_reg_captures:
                 if not isinstance(arg, AddressOf):
                     message = "out_register argument must be an address-of expression (&var)"
@@ -428,12 +431,19 @@ class EmissionMixin:
                 else:
                     dest = self._local_address(dest_name)
                     self.emit(f"        mov [{dest}], {reg}")
+                    if reg == self.target.si_register:
+                        si_captured = dest_name
             if use_pusha:
                 self.emit("        popa")
+                si_captured = None  # popa restores all regs including SI
             else:
                 for register in reversed(saved):
                     self.emit(f"        pop {register}")
             self.ax_clear()
+            # Track SI as holding the captured variable until the next call.
+            # The stack slot is authoritative; this is a pure read-optimisation.
+            if si_captured is not None:
+                self.si_local = si_captured
             return
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
@@ -946,11 +956,11 @@ class EmissionMixin:
             case ir.Label(name=name):
                 # Control can arrive at an IR label from any preceding
                 # branch / jump, so AX-tracking state (``ax_local`` /
-                # ``ax_is_byte``) accumulated on the fall-through path
-                # is not guaranteed on the jump path.  Clear the
-                # tracking so downstream ``emit_comparison`` / similar
-                # do a real load instead of reusing a stale AX.
+                # ``ax_is_byte``) and SI-tracking (``si_local``)
+                # accumulated on the fall-through path are not guaranteed
+                # on the jump path.  Clear both.
                 self.ax_clear()
+                self.si_local = None
                 self.emit(f"{name}:")
             case ir.Jump(target=target):
                 self.emit(f"        jmp {target}")
@@ -1030,6 +1040,7 @@ class EmissionMixin:
         self.locals = {}
         self.out_register_locals: dict[str, str] = {}
         self.pinned_register = {}
+        self.si_local: str | None = None
         self.variable_arrays = set()
         self.variable_types = {}
         self.virtual_long_locals = set()

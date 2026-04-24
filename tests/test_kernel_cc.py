@@ -373,6 +373,56 @@ def test_out_register_nasm_assembles() -> None:
 
 
 # ---------------------------------------------------------------------------
+# si_local optimization: use SI register directly for struct member access
+# ---------------------------------------------------------------------------
+
+
+def test_out_register_si_used_directly_for_member_access() -> None:
+    """SI-cached pointer uses [si+offset] directly for struct writes.
+
+    When no call intervenes between the out_register capture and the member
+    writes, the code uses SI as the base register directly instead of the
+    ``mov bx, [bp-N]; [bx+offset]`` round-trip.
+    """
+    asm = _kernel("""
+        struct point { int x; int y; };
+
+        __attribute__((carry_return)) int make_point(struct point* out __attribute__((out_register("si"))));
+
+        void caller() {
+            struct point* p;
+            if (make_point(&p)) {
+                p->x = 1;
+                p->y = 2;
+            }
+        }
+    """)
+    # Both field writes should reference SI directly.
+    assert "[si]" in asm or "[si+" in asm, f"expected [si] or [si+N] in member writes\n{asm}"
+    assert "mov bx, [bp-" not in asm, f"unexpected BX reload for SI-cached pointer\n{asm}"
+
+
+def test_out_register_si_cleared_across_call() -> None:
+    """If a second call intervenes after the capture, the optimization falls back to BX."""
+    asm = _kernel("""
+        struct point { int x; int y; };
+
+        __attribute__((carry_return)) int make_point(struct point* out __attribute__((out_register("si"))));
+        void other_func();
+
+        void caller() {
+            struct point* p;
+            if (make_point(&p)) {
+                other_func();
+                p->x = 1;
+            }
+        }
+    """)
+    # After other_func(), SI is no longer trusted — fallback to BX.
+    assert "mov bx, [bp-" in asm, f"expected BX reload after intervening call\n{asm}"
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 

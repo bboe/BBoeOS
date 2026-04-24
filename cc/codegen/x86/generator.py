@@ -608,9 +608,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
-        self._emit_load_var(object_name, register=self.target.bx_register)
-        bx = self.target.bx_register
-        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        if self.si_local == object_name:
+            base_reg = self.target.si_register
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+            base_reg = self.target.bx_register
+        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit_byte_load_zx(addr)
         else:
@@ -644,9 +647,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise CompileError(message, line=statement.line)
         self.ax_clear()
         self.generate_expression(statement.expr)
-        self._emit_load_var(object_name, register=self.target.bx_register)
-        bx = self.target.bx_register
-        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        # If SI still holds the struct pointer (no intervening call), use it
+        # directly as the base register to avoid a BX round-trip.
+        if self.si_local == object_name:
+            base_reg = self.target.si_register
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+            base_reg = self.target.bx_register
+        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit(f"        mov byte {addr}, al")
         else:
