@@ -23,7 +23,7 @@
 %include "drivers/vga.asm"              ; VGA text + mode-13h helpers
 
         ;; File descriptors, block I/O dispatch, filesystems, VFS switch
-%include "fs/fd.asm"                    ; fd table + per-type backends
+%include "fs/fd.kasm"                   ; fd table + per-type backends
 %include "fs/block.asm"                 ; read_sector / write_sector dispatch
 %include "fs/vfs.asm"                   ; VFS layer (includes fs/bbfs.asm + fs/ext2.asm)
 

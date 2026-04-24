@@ -1,3 +1,4 @@
+asm("
 ip_checksum:
         ;; Compute ones-complement checksum over a buffer
         ;; Input: SI = data pointer, CX = length in bytes (must be even)
@@ -135,3 +136,4 @@ ip_send:
         gateway_ip db 10, 0, 2, 2
         ip_id dw 1
         our_ip db 10, 0, 2, 15
+");
