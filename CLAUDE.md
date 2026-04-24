@@ -20,8 +20,8 @@ Requires `nasm` (`brew install nasm`).
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
 - **Stage 1 (MBR, 512 bytes)**: Minimal boot loader — sets up DS/ES/SS:SP, resets disk, reads stage 2 via BIOS INT 13h, jumps to `boot_shell`.  On error, prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init.
-- **Stage 2**: `boot_shell` runs kernel init (`pic_remap`, `rtc_tick_init`, `install_syscalls`, `network_initialize`), prints the welcome banner via `drivers/ansi.asm`, initialises PS/2 / FDC / file descriptors / VFS, then loads and jumps to the shell.
-- **Shell** (`src/c/shell.c`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
+- **Stage 2**: `boot_shell` runs kernel init (`pic_remap`, `rtc_tick_init`, `install_syscalls`, `network_initialize`), prints the welcome banner via `drivers/ansi.asm`, initialises PS/2 / FDC / file descriptors / VFS, installs the 32-bit IDT, then far-jumps through `enter_protected_mode` into `protected_mode_entry`.  The post-flip path currently halts; widening the driver inits and shell load into 32-bit code is the next tranche of work.
+- **Shell** (`src/c/shell.c`): Loaded from filesystem at `program_base` (`0x0600`) in the pre-pmode real-mode boot path.  Currently unreachable on the `protectedmode` branch — the pmode flip happens before `shell_reload` — and will come back once the post-flip kernel widens enough to run a 32-bit shell.  Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
 - **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
@@ -96,12 +96,13 @@ renumbering is source-compatible — just rebuild.
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/arch/x86/boot/bboeos.asm` — Top-level flat-binary entry; `%include`s `stage1.asm`, `stage2.asm`, then `arch/x86/kernel.asm` to aggregate every kernel subsystem after the boot handoff
 - `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): set DS/ES/SS:SP, reset disk, load stage 2 via BIOS INT 13h, jump to `boot_shell`.  On error prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init
-- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (kernel init → welcome banner → driver inits → VFS load of the shell), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
-- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`, `init.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
-- `src/arch/x86/init.asm` — `kernel_init`: PIC remap, PIT + IRQ 0 init, INT 30h gate install, NIC probe.  Called once from `boot_shell` before the shell is loaded; the pmode port will refactor this (some steps move to post-flip once the 32-bit IDT is live)
-- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
+- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (kernel init → welcome banner → driver inits → VFS init → `idt_install` + `jmp enter_protected_mode`), `shell_reload` (currently unreachable: pre-pmode shell loader left in place for the eventual widened shell path), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
+- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`, `init.asm`, and the pmode flip trio (`boot/stage1_5.asm`, `idt.asm`, `entry.asm`).  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
+- `src/arch/x86/init.asm` — `kernel_init`: PIC remap, PIT + IRQ 0 init, INT 30h gate install, NIC probe.  Called once from `boot_shell` before the pmode flip; some steps (IDT-dependent IRQ handlers, 32-bit INT 30h gate) will move post-flip as subsystems widen
+- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate.  `idt_install` runs in `boot_shell` right before `enter_protected_mode`, so any post-flip exception lands in `exc_common` and prints `EXCnn` on COM1
+- `src/arch/x86/entry.asm` — `protected_mode_entry`: 32-bit post-flip landing pad.  Currently a `cli/hlt` loop; replaced by actual 32-bit kernel work (driver re-init, shell load) as subsystems widen
 - `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)
-- `src/arch/x86/boot/stage1_5.asm` — 16→32-bit protected-mode entry, GDT (the "stage 1.5" of the boot flow; not yet wired in)
+- `src/arch/x86/boot/stage1_5.asm` — 16→32-bit protected-mode entry, GDT (the "stage 1.5" of the boot flow).  `enter_protected_mode` fires at the tail of `boot_shell` after real-mode init completes
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
 - `src/drivers/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character`; delegates to `drivers/vga.asm` for screen writes

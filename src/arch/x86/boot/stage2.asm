@@ -32,7 +32,8 @@ boot_shell:
         call fdc_init           ; reset, motor, recalibrate drive A:
         .post_fdc:
         call vfs_init
-        ;; fall through to shell_reload
+        call idt_install        ; 32-bit IDT: exceptions + INT 30h gate
+        jmp enter_protected_mode ; never returns; resumes at protected_mode_entry
 
 shell_reload:
         ;; Re-entry point for SYS_EXIT: reload the shell binary without
