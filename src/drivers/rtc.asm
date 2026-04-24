@@ -182,3 +182,148 @@ rtc_wait_steady:
         ret
 
         system_ticks dd 0
+
+        epoch_day        db 0
+        epoch_hours      db 0
+        epoch_minutes    db 0
+        epoch_month      db 0
+        epoch_seconds    db 0
+        epoch_year       dw 0
+
+rtc_bcd_to_bin:
+        ;; AL (BCD) → AL (binary). Clobbers AX.
+        push cx
+        mov cl, al
+        shr al, 4
+        mov ch, 10
+        mul ch
+        and cl, 0Fh
+        add al, cl
+        pop cx
+        ret
+
+rtc_is_leap_year:
+        ;; AX = year. ZF=1 if leap, ZF=0 if not. Preserves CX. Clobbers AX, DX.
+        push cx
+        push ax
+        xor dx, dx
+        mov cx, 4
+        div cx
+        test dx, dx
+        jnz .rly_no
+        pop ax
+        push ax
+        xor dx, dx
+        mov cx, 100
+        div cx
+        test dx, dx
+        jnz .rly_yes
+        pop ax
+        push ax
+        xor dx, dx
+        mov cx, 400
+        div cx
+        test dx, dx
+        jnz .rly_no
+        .rly_yes:
+        pop ax
+        pop cx
+        xor ax, ax
+        ret
+        .rly_no:
+        pop ax
+        pop cx
+        or ax, 1
+        ret
+
+rtc_month_days:
+        dw 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+
+rtc_read_epoch:
+        ;; Returns DX:AX = unsigned epoch seconds (1970-01-01 UTC).
+        ;; Clobbers EBX, ECX, ESI (saves/restores them).
+        push ebx
+        push ecx
+        push esi
+
+        call rtc_read_date      ; CH=century BCD, CL=year BCD, DH=month BCD, DL=day BCD
+        mov al, ch
+        call rtc_bcd_to_bin
+        movzx si, al
+        imul si, si, 100
+        mov al, cl
+        call rtc_bcd_to_bin
+        movzx bx, al
+        add si, bx
+        mov [epoch_year], si
+        mov al, dh
+        call rtc_bcd_to_bin
+        mov [epoch_month], al
+        mov al, dl
+        call rtc_bcd_to_bin
+        mov [epoch_day], al
+
+        call rtc_read_time      ; CH=hours BCD, CL=minutes BCD, DH=seconds BCD
+        mov al, ch
+        call rtc_bcd_to_bin
+        mov [epoch_hours], al
+        mov al, cl
+        call rtc_bcd_to_bin
+        mov [epoch_minutes], al
+        mov al, dh
+        call rtc_bcd_to_bin
+        mov [epoch_seconds], al
+
+        xor esi, esi
+        mov cx, 1970
+        .re_year_loop:
+        cmp cx, [epoch_year]
+        jae .re_year_done
+        mov ax, cx
+        call rtc_is_leap_year
+        jz .re_leap
+        add esi, 365
+        jmp .re_next_year
+        .re_leap:
+        add esi, 366
+        .re_next_year:
+        inc cx
+        jmp .re_year_loop
+        .re_year_done:
+
+        movzx bx, byte [epoch_month]
+        dec bx
+        shl bx, 1
+        movzx eax, word [rtc_month_days + bx]
+        add esi, eax
+
+        cmp byte [epoch_month], 2
+        jbe .re_skip_leap
+        mov ax, [epoch_year]
+        call rtc_is_leap_year
+        jnz .re_skip_leap
+        inc esi
+        .re_skip_leap:
+
+        movzx eax, byte [epoch_day]
+        dec eax
+        add esi, eax
+
+        mov eax, esi
+        mov ecx, 86400
+        mul ecx
+        movzx ebx, byte [epoch_hours]
+        imul ebx, ebx, 3600
+        add eax, ebx
+        movzx ebx, byte [epoch_minutes]
+        imul ebx, ebx, 60
+        add eax, ebx
+        movzx ebx, byte [epoch_seconds]
+        add eax, ebx
+
+        pop esi
+        pop ecx
+        pop ebx
+        mov edx, eax
+        shr edx, 16             ; DX = high 16
+        ret                     ; AX = low 16, DX = high 16
