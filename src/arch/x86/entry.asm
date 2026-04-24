@@ -49,6 +49,7 @@ protected_mode_entry:
         call ata_init
         call fdc_init
         call ps2_init
+        call vfs_init
 
         ;; Zero the system tick counter before unmasking IRQ 0.
         mov dword [system_ticks], 0
