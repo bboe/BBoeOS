@@ -1,8 +1,87 @@
+// ip.c -- IP layer: checksum computation and packet send
+//
+// ip_checksum: Ones-complement 16-bit checksum over a buffer (asm; requires ADC)
+//   Input: SI = data pointer, CX = length in bytes (must be even)
+//   Output: AX = checksum (complemented, ready to store)
+//
+// ip_send: Send an IP packet wrapped in an Ethernet frame
+//   Input: BX = pointer to 4-byte dest IP, AL = IP protocol, SI = payload, CX = payload length
+//   Output: CF set on error (ARP timeout or NIC send failure)
+
+// asm_name aliases into asm-defined data (all three live in the ip_checksum asm block below)
+uint8_t our_ip_0 __attribute__((asm_name("our_ip")));
+uint8_t our_ip_1 __attribute__((asm_name("our_ip+1")));
+uint8_t our_ip_2 __attribute__((asm_name("our_ip+2")));
+uint8_t gateway_ip_0 __attribute__((asm_name("gateway_ip")));
+uint16_t ip_id __attribute__((asm_name("ip_id")));
+uint8_t mac_address_ref __attribute__((asm_name("mac_address")));
+
+// arp_resolve: Resolve IP to MAC address (SI=ip, DI=mac; CF on failure)
+__attribute__((carry_return)) int arp_resolve(uint8_t *ip __attribute__((in_register("si"))), uint8_t *mac __attribute__((out_register("di"))));
+
+// ip_checksum: Ones-complement 16-bit checksum (SI=data, CX=byte_count; AX=checksum)
+int ip_checksum(uint8_t *data __attribute__((in_register("si"))), int length __attribute__((in_register("cx"))));
+
+// ne2k_send: Transmit an Ethernet frame (SI=buffer, CX=length; CF on error)
+__attribute__((carry_return)) int ne2k_send(uint8_t *buffer __attribute__((in_register("si"))), int length __attribute__((in_register("cx"))));
+
+// ip_send: Send an IP packet wrapped in an Ethernet frame
+__attribute__((carry_return)) int ip_send(uint8_t *dest_ip __attribute__((in_register("bx"))), uint8_t *payload __attribute__((in_register("si"))), int payload_length __attribute__((in_register("cx"))), int protocol_ax __attribute__((in_register("ax")))) {
+    uint8_t protocol;
+    int total_len;
+    uint8_t *route_ip;
+    uint8_t *dest_mac;
+    uint8_t *txbuf;
+    int checksum;
+    protocol = protocol_ax & 0xFF;
+    // Subnet /24 check: same first 3 bytes → ARP to dest directly, else via gateway
+    if (dest_ip[0] == our_ip_0 && dest_ip[1] == our_ip_1 && dest_ip[2] == our_ip_2) {
+        route_ip = dest_ip;
+    } else {
+        route_ip = &gateway_ip_0;
+    }
+    if (!arp_resolve(route_ip, &dest_mac)) { return 0; }
+    txbuf = NET_TRANSMIT_BUFFER;
+    // Ethernet header (14 bytes)
+    memcpy(txbuf, dest_mac, 6);
+    memcpy(txbuf + 6, &mac_address_ref, 6);
+    txbuf[12] = 0x08;
+    txbuf[13] = 0x00;
+    // IP header (20 bytes at offset 14)
+    total_len = payload_length + 20;
+    txbuf[14] = 0x45;
+    txbuf[15] = 0;
+    txbuf[16] = (total_len >> 8) & 0xFF;
+    txbuf[17] = total_len & 0xFF;
+    txbuf[18] = (ip_id >> 8) & 0xFF;
+    txbuf[19] = ip_id & 0xFF;
+    ip_id = ip_id + 1;
+    txbuf[20] = 0x40;
+    txbuf[21] = 0;
+    txbuf[22] = 64;
+    txbuf[23] = protocol;
+    txbuf[24] = 0;
+    txbuf[25] = 0;
+    memcpy(txbuf + 26, &our_ip_0, 4);
+    memcpy(txbuf + 30, dest_ip, 4);
+    // Payload
+    memcpy(txbuf + 34, payload, payload_length);
+    // Compute and store IP header checksum (little-endian, matching ip_checksum's lodsw output)
+    checksum = ip_checksum(txbuf + 14, 20);
+    txbuf[24] = checksum & 0xFF;
+    txbuf[25] = (checksum >> 8) & 0xFF;
+    // Send the frame
+    total_len = payload_length + 34;
+    if (!ne2k_send(txbuf, total_len)) { return 0; }
+    return 1;
+}
+
 asm("
 ip_checksum:
-        ;; Compute ones-complement checksum over a buffer
+        ;; Ones-complement 16-bit checksum over a buffer
         ;; Input: SI = data pointer, CX = length in bytes (must be even)
         ;; Output: AX = checksum (complemented, ready to store)
+        ;; Uses ADC to fold carry — not expressible as pure 16-bit C.
         push bx
         push cx
         push si
@@ -23,116 +102,7 @@ ip_checksum:
         pop bx
         ret
 
-ip_send:
-        ;; Send an IP packet wrapped in an Ethernet frame
-        ;; Input: BX = pointer to 4-byte dest IP
-        ;;        AL = IP protocol number
-        ;;        SI = pointer to payload data
-        ;;        CX = payload length in bytes
-        ;; Output: CF set on error (ARP timeout or send failure)
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
-        push di
-
-        ;; Save inputs
-        mov [.is_proto], al
-        mov [.is_plen], cx
-        mov [.is_payload], si
-        mov [.is_destip], bx
-
-        ;; 1. Resolve destination MAC via ARP (may use NET_TRANSMIT_BUFFER)
-        ;;    If dest is not on local subnet (10.0.2.0/24), use gateway
-        mov si, bx
-        mov eax, [si]
-        and eax, 0FFFFFFh          ; Mask to first 3 bytes (subnet /24)
-        mov edx, [our_ip]
-        and edx, 0FFFFFFh
-        cmp eax, edx
-        je .ip_send_local
-        mov si, gateway_ip         ; Non-local: route via gateway
-        .ip_send_local:
-        call arp_resolve
-        jc .ip_send_done
-
-        ;; 2. Build Ethernet header at NET_TRANSMIT_BUFFER
-        mov si, di             ; SI = resolved dest MAC
-        mov di, NET_TRANSMIT_BUFFER
-        cld
-        movsw                  ; Dest MAC
-        movsw
-        movsw
-        mov si, mac_address       ; Src MAC
-        movsw
-        movsw
-        movsw
-        mov ax, 0008h          ; EtherType: IPv4 (0x0800 big-endian)
-        stosw
-
-        ;; 3. Build IP header at NET_TRANSMIT_BUFFER + 14 (DI is already there)
-        mov al, 45h            ; Version 4, IHL 5 (20 bytes)
-        stosb
-        xor al, al             ; DSCP/ECN = 0
-        stosb
-        mov ax, [.is_plen]     ; Total length = 20 + payload
-        add ax, 20
-        xchg al, ah            ; Big-endian
-        stosw
-        mov ax, [ip_id]        ; Identification
-        xchg al, ah
-        stosw
-        inc word [ip_id]
-        mov al, 40h            ; Flags: Don't Fragment
-        stosb
-        xor al, al             ; Fragment offset: 0
-        stosb
-        mov al, 64             ; TTL
-        stosb
-        mov al, [.is_proto]    ; Protocol
-        stosb
-        xor ax, ax             ; Header checksum (placeholder)
-        stosw
-        push si
-        mov si, our_ip         ; Source IP
-        movsd
-        mov si, [.is_destip]   ; Destination IP
-        movsd
-        pop si
-
-        ;; 4. Copy payload to NET_TRANSMIT_BUFFER + 34 (DI is already there)
-        mov si, [.is_payload]
-        mov cx, [.is_plen]
-        rep movsb
-
-        ;; 5. Compute and store IP header checksum
-        mov si, NET_TRANSMIT_BUFFER + 14
-        mov cx, 20
-        call ip_checksum
-        mov [NET_TRANSMIT_BUFFER + 24], ax ; Offset 14 + 10
-
-        ;; 6. Send the frame
-        mov si, NET_TRANSMIT_BUFFER
-        mov cx, [.is_plen]
-        add cx, 34             ; 14 (Eth) + 20 (IP) + payload
-        call ne2k_send
-
-        .ip_send_done:
-        pop di
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        ret
-
-        .is_destip dw 0
-        .is_payload dw 0
-        .is_plen dw 0
-        .is_proto db 0
-
-        ;; Variables
+        ;; Variables (arp.asm references our_ip; all three are asm_name'd above)
         gateway_ip db 10, 0, 2, 2
         ip_id dw 1
         our_ip db 10, 0, 2, 15

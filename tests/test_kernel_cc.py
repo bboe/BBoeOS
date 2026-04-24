@@ -941,6 +941,152 @@ def test_net_transmit_buffer_named_constant() -> None:
 
 
 # ---------------------------------------------------------------------------
+# fd.c kernel compilation
+# ---------------------------------------------------------------------------
+
+FD_C = REPO_ROOT / "src" / "fs" / "fd.c"
+KERNEL_CONSTANTS = REPO_ROOT / "src" / "include" / "constants.asm"
+
+
+def _compile_fd_c() -> str:
+    """Compile src/fs/fd.c in kernel mode; fail the test on error."""
+    with tempfile.TemporaryDirectory(prefix="test_fd_c_") as work:
+        work_path = Path(work)
+        asm_out = work_path / "fd.asm"
+        result = subprocess.run(
+            ["python3", str(CC), "--target", "kernel", str(FD_C), str(asm_out)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"cc.py --target kernel failed for fd.c:\n{result.stderr}")
+        return asm_out.read_text()
+
+
+def test_fd_c_compiles() -> None:
+    """src/fs/fd.c compiles without error in kernel mode."""
+    _compile_fd_c()
+
+
+def test_fd_c_fd_open_is_vga_emits_string_literal() -> None:
+    """fd_open_is_vga in fd.c emits /dev/vga as a string literal (converted from inline asm)."""
+    output = _compile_fd_c()
+    # The memcmp builtin inlines repe cmpsb; the "/dev/vga" string becomes a _ir_sN label.
+    assert "/dev/vga" in output, f"expected /dev/vga string literal in output\n{output[:500]}"
+
+
+def test_fd_c_fd_populate_from_vfs_uses_vfs_found_type() -> None:
+    """fd_populate_from_vfs in fd.c references vfs_found_type symbol."""
+    output = _compile_fd_c()
+    assert "vfs_found_type" in output, f"expected vfs_found_type reference\n{output[:500]}"
+
+
+def test_fd_c_fd_ioctl_calls_fd_ioctl_vga() -> None:
+    """fd_ioctl in fd.c calls fd_ioctl_vga (converted from inline asm dispatch table)."""
+    output = _compile_fd_c()
+    assert "fd_ioctl_vga" in output, f"expected fd_ioctl_vga call\n{output[:500]}"
+
+
+def test_fd_c_fd_read_in_asm_block() -> None:
+    """fd_read remains in the asm block in fd.c."""
+    output = _compile_fd_c()
+    assert "fd_read:" in output, f"expected fd_read: label in asm block\n{output[:500]}"
+
+
+def test_fd_c_fd_write_in_asm_block() -> None:
+    """fd_write remains in the asm block in fd.c."""
+    output = _compile_fd_c()
+    assert "fd_write:" in output, f"expected fd_write: label in asm block\n{output[:500]}"
+
+
+def test_fd_c_no_storage_for_vfs_found_globals() -> None:
+    """vfs_found_* asm_name globals do not emit _g_vfs_found_* storage labels."""
+    output = _compile_fd_c()
+    assert "_g_vfs_found_type" not in output
+    assert "_g_vfs_found_mode" not in output
+    assert "_g_vfs_found_inode" not in output
+
+
+# ---------------------------------------------------------------------------
+# ip.c kernel C port
+# ---------------------------------------------------------------------------
+
+
+def _compile_ip_c() -> str:
+    """Compile src/net/ip.c in kernel mode; return the asm output text."""
+    source_path = REPO_ROOT / "src" / "net" / "ip.c"
+    with tempfile.TemporaryDirectory(prefix="test_kernel_ip_") as work:
+        asm_out = Path(work) / "ip.kasm"
+        result = subprocess.run(
+            [
+                "python3",
+                str(CC),
+                "--bits",
+                "16",
+                "--target",
+                "kernel",
+                str(source_path),
+                str(asm_out),
+            ],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"cc.py --target kernel failed for ip.c:\n{result.stderr}")
+        return asm_out.read_text()
+
+
+def test_ip_c_compiles() -> None:
+    """src/net/ip.c compiles without error in kernel mode."""
+    _compile_ip_c()
+
+
+def test_ip_c_ip_send_in_c() -> None:
+    """ip_send is emitted as a regular NASM label (converted from inline asm)."""
+    output = _compile_ip_c()
+    assert "ip_send:" in output, f"expected ip_send: function label\n{output[:500]}"
+
+
+def test_ip_c_ip_checksum_in_asm_block() -> None:
+    """ip_checksum remains in the asm block (requires ADC, not expressible in 16-bit C)."""
+    output = _compile_ip_c()
+    assert "ip_checksum:" in output, f"expected ip_checksum: in asm block\n{output[:500]}"
+    assert "adc bx, 0" in output, f"expected ADC carry-fold instruction\n{output[:500]}"
+
+
+def test_ip_c_uses_net_transmit_buffer() -> None:
+    """ip_send references NET_TRANSMIT_BUFFER as a named constant (not a memory load)."""
+    output = _compile_ip_c()
+    assert "NET_TRANSMIT_BUFFER" in output, f"expected NET_TRANSMIT_BUFFER constant\n{output[:500]}"
+    assert "[NET_TRANSMIT_BUFFER]" not in output, f"NET_TRANSMIT_BUFFER must not be dereferenced\n{output}"
+
+
+def test_ip_c_calls_arp_resolve() -> None:
+    """ip_send calls arp_resolve for destination MAC lookup."""
+    output = _compile_ip_c()
+    assert "call arp_resolve" in output, f"expected call arp_resolve\n{output[:500]}"
+
+
+def test_ip_c_calls_ne2k_send() -> None:
+    """ip_send calls ne2k_send to transmit the frame."""
+    output = _compile_ip_c()
+    assert "call ne2k_send" in output, f"expected call ne2k_send\n{output[:500]}"
+
+
+def test_ip_c_no_storage_for_asm_name_globals() -> None:
+    """asm_name globals (our_ip_*, gateway_ip_0, ip_id, mac_address_ref) emit no _g_* storage."""
+    output = _compile_ip_c()
+    assert "_g_our_ip_0" not in output, f"_g_our_ip_0 storage emitted\n{output}"
+    assert "_g_gateway_ip_0" not in output, f"_g_gateway_ip_0 storage emitted\n{output}"
+    assert "_g_ip_id" not in output, f"_g_ip_id storage emitted\n{output}"
+    assert "_g_mac_address_ref" not in output, f"_g_mac_address_ref storage emitted\n{output}"
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 

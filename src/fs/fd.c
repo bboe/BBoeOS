@@ -30,6 +30,18 @@ struct fd fd_table[FD_MAX] = {
     {FD_TYPE_CONSOLE, O_WRONLY},
 };
 
+// vfs_found_* globals defined in fs/vfs.asm — accessed via asm_name
+uint8_t vfs_found_type __attribute__((asm_name("vfs_found_type")));
+uint8_t vfs_found_mode __attribute__((asm_name("vfs_found_mode")));
+uint16_t vfs_found_inode __attribute__((asm_name("vfs_found_inode")));
+uint16_t vfs_found_size_lo __attribute__((asm_name("vfs_found_size")));
+uint16_t vfs_found_size_hi __attribute__((asm_name("vfs_found_size+2")));
+uint16_t vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
+uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
+
+// fd_ioctl_vga: VGA device-control handler (AL=cmd, SI=entry; CF on unsupported cmd)
+__attribute__((carry_return)) int fd_ioctl_vga(struct fd *entry __attribute__((in_register("si"))), int ioctl_cmd __attribute__((in_register("ax"))));
+
 // fd_lookup: Validate fd in BX, return SI = entry pointer (CF set if invalid)
 __attribute__((carry_return)) __attribute__((preserve_register("cx"))) int fd_lookup(int file_descriptor __attribute__((in_register("bx"))), struct fd *result __attribute__((out_register("si"))));
 
@@ -41,12 +53,6 @@ __attribute__((carry_return)) int vfs_find(char *path __attribute__((in_register
 
 // vfs_create: create file at path in VFS, populates vfs_found_*; CF on error
 __attribute__((carry_return)) int vfs_create(char *path __attribute__((in_register("si"))));
-
-// fd_open_is_vga: return 1 if path == "/dev/vga", 0 otherwise
-__attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si"))));
-
-// fd_populate_from_vfs: fill fd entry from vfs_found_* globals; SI=entry, AX=open_flags
-void fd_populate_from_vfs(struct fd *entry __attribute__((in_register("si"))), int open_flags __attribute__((in_register("ax"))));
 
 // fd_alloc: Find first free FD slot (AX = fd number, SI = entry pointer; CF set if table full)
 __attribute__((carry_return)) int fd_alloc(int *file_descriptor __attribute__((out_register("ax"))), struct fd *entry __attribute__((out_register("si")))) {
@@ -90,6 +96,16 @@ __attribute__((carry_return)) int fd_fstat(int file_descriptor __attribute__((in
 
 void fd_init() {}
 
+// fd_ioctl: Device-control dispatch (BX=fd, AL=cmd; CF on error)
+__attribute__((carry_return)) int fd_ioctl(int file_descriptor __attribute__((in_register("bx"))), int ioctl_cmd __attribute__((in_register("ax")))) {
+    struct fd *entry;
+    uint8_t fd_type;
+    if (!fd_lookup(file_descriptor, &entry)) { return 0; }
+    fd_type = entry->type;
+    if (fd_type == FD_TYPE_VGA) { return fd_ioctl_vga(entry, ioctl_cmd); }
+    return 0;
+}
+
 // fd_lookup: Validate fd in BX, return SI = entry pointer (CF set if invalid)
 __attribute__((carry_return)) __attribute__((preserve_register("cx"))) int fd_lookup(int file_descriptor __attribute__((in_register("bx"))), struct fd *result __attribute__((out_register("si")))) {
     struct fd *entry;
@@ -127,6 +143,31 @@ __attribute__((carry_return)) int fd_open(int *result_fd __attribute__((out_regi
     return 1;
 }
 
+// fd_open_is_vga: Test if path equals "/dev/vga" (SI=path; CF clear = match)
+__attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si")))) {
+    return memcmp(path, "/dev/vga", 9) == 0;
+}
+
+// fd_populate_from_vfs: Fill fd entry from vfs_found_* globals (SI=entry, AX=open_flags)
+void fd_populate_from_vfs(struct fd *entry __attribute__((in_register("si"))), int open_flags __attribute__((in_register("ax")))) {
+    uint8_t trunc_flag;
+    entry->type = vfs_found_type;
+    entry->flags = open_flags;
+    entry->mode = vfs_found_mode;
+    entry->start = vfs_found_inode;
+    entry->size_lo = vfs_found_size_lo;
+    entry->size_hi = vfs_found_size_hi;
+    entry->position_lo = 0;
+    entry->position_hi = 0;
+    entry->directory_sector = vfs_found_dir_sec;
+    entry->directory_offset = vfs_found_dir_off;
+    trunc_flag = open_flags & O_TRUNC;
+    if (trunc_flag) {
+        entry->size_lo = 0;
+        entry->size_hi = 0;
+    }
+}
+
 // fd_pos_to_sector: Convert fd position to absolute sector + byte offset
 //   SI=entry → AX=sector, BX=byte_offset_in_sector
 int fd_pos_to_sector(struct fd *entry __attribute__((in_register("si"))), int *byte_offset __attribute__((out_register("bx")))) {
@@ -144,67 +185,9 @@ int fd_pos_to_sector(struct fd *entry __attribute__((in_register("si"))), int *b
 asm("
 
 ;;; -----------------------------------------------------------------------
-;;; fd_open_is_vga: Test if path equals \"/dev/vga\"
-;;; Input:  SI = path
-;;; Output: CF clear = match (return 1), CF set = no match (return 0)
-;;; -----------------------------------------------------------------------
-fd_open_is_vga:
-        push cx
-        push di
-        push si
-        mov di, DEV_VGA_PATH
-        mov cx, 9               ; \"/dev/vga\" + null
-        cld
-        repe cmpsb
-        pop si
-        pop di
-        pop cx
-        jne .not_vga
-        clc
-        ret
-        .not_vga:
-        stc
-        ret
-
-;;; -----------------------------------------------------------------------
-;;; fd_populate_from_vfs: Fill fd entry from vfs_found_* globals
-;;; Input:  SI = fd entry pointer, AX = open_flags (AL used)
-;;; Clobbers: CX
-;;; -----------------------------------------------------------------------
-fd_populate_from_vfs:
-        push cx
-        mov cl, [vfs_found_type]
-        mov [si+FD_OFFSET_TYPE], cl
-        mov [si+FD_OFFSET_FLAGS], al
-        mov cl, [vfs_found_mode]
-        mov [si+FD_OFFSET_MODE], cl
-        mov cx, [vfs_found_inode]
-        mov [si+FD_OFFSET_START], cx
-        mov cx, [vfs_found_size]
-        mov [si+FD_OFFSET_SIZE], cx
-        mov cx, [vfs_found_size+2]
-        mov [si+FD_OFFSET_SIZE+2], cx
-        mov word [si+FD_OFFSET_POSITION], 0
-        mov word [si+FD_OFFSET_POSITION+2], 0
-        mov cx, [vfs_found_dir_sec]
-        mov [si+FD_OFFSET_DIRECTORY_SECTOR], cx
-        mov cx, [vfs_found_dir_off]
-        mov [si+FD_OFFSET_DIRECTORY_OFFSET], cx
-        test al, O_TRUNC
-        jz .populate_done
-        mov word [si+FD_OFFSET_SIZE], 0
-        mov word [si+FD_OFFSET_SIZE+2], 0
-        .populate_done:
-        pop cx
-        ret
-
-;;; -----------------------------------------------------------------------
-;;; fd_read / fd_write: Table-driven dispatch via fd_ops.
-;;;
-;;; fd_ops is a flat table of (read_fn, write_fn) word pairs indexed by
-;;; FD_TYPE_*.  A zero entry means the operation is unsupported for that
-;;; type.  Adding a new fd type requires only a new row in fd_ops -- the
-;;; dispatch functions need no changes.
+;;; fd_read: Read from fd (BX=fd, DI=buf, CX=count -> AX=bytes, CF on err)
+;;; fd_write: Write to fd (BX=fd, SI=buf, CX=count -> AX=bytes, CF on err)
+;;; Table-driven dispatch via fd_ops (read_fn, write_fn pairs by FD_TYPE_*).
 ;;; -----------------------------------------------------------------------
 fd_read:
         call fd_lookup
@@ -249,38 +232,6 @@ fd_ops:
         dw 0,               0                 ; FD_TYPE_UDP (6)
         dw 0,               0                 ; FD_TYPE_VGA (7)
 
-;;; -----------------------------------------------------------------------
-;;; fd_ioctl: Device-control dispatch.  Looks up BX=fd, then jumps to the
-;;; per-type ioctl handler in fd_ioctl_ops.  Handler receives AL=cmd plus
-;;; cmd-specific args in other registers and returns CF=0/1.
-;;; -----------------------------------------------------------------------
-fd_ioctl:
-        call fd_lookup
-        jc .err
-        xor bh, bh
-        mov bl, [si+FD_OFFSET_TYPE]
-        shl bx, 1               ; one word per entry
-        mov bx, [fd_ioctl_ops+bx]
-        test bx, bx
-        jz .err
-        jmp bx
-        .err:
-        stc
-        ret
-
-        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.
-fd_ioctl_ops:
-        dw 0                    ; FD_TYPE_FREE (0)
-        dw 0                    ; FD_TYPE_CONSOLE (1)
-        dw 0                    ; FD_TYPE_DIRECTORY (2)
-        dw 0                    ; FD_TYPE_FILE (3)
-        dw 0                    ; FD_TYPE_ICMP (4)
-        dw 0                    ; FD_TYPE_NET (5)
-        dw 0                    ; FD_TYPE_UDP (6)
-        dw fd_ioctl_vga         ; FD_TYPE_VGA (7)
-
-        ;; Variables
-        DEV_VGA_PATH    db \"/dev/vga\", 0
         fd_write_buffer dw 0
 
 %include \"fs/fd/console.asm\"
