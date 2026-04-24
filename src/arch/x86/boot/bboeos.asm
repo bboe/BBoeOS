@@ -173,6 +173,7 @@ pmode_gdtr:
         dd pmode_gdt_start
 
 [bits 32]
+%include "drivers/ata.asm"              ; ATA PIO disk driver
 %include "drivers/console.asm"          ; serial_character (COM1 output)
 %include "drivers/fdc.asm"              ; floppy DMA + IRQ 6 driver
 %include "drivers/ps2.asm"              ; PS/2 keyboard driver (IRQ-driven)
