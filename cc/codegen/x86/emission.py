@@ -771,6 +771,19 @@ class EmissionMixin:
                     self.emit(f"        shr {self.target.acc}, {shift}")
                 self.ax_clear()
                 return
+            if operator == "*" and isinstance(right, Int):
+                n = right.value
+                self.generate_expression(left)
+                if n == 0:
+                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+                elif n > 0 and (n & (n - 1)) == 0:
+                    shift = (n).bit_length() - 1
+                    if shift > 0:
+                        self.emit(f"        shl {self.target.acc}, {shift}")
+                else:
+                    self.emit(f"        imul {self.target.acc}, {n}")
+                self.ax_clear()
+                return
             # Fast path for ``+`` / ``-`` with a stack-resident right
             # operand: ``add ax, [mem]`` is shorter than ``mov cx,
             # [mem] / add ax, cx``.  Logical ops could take the same
