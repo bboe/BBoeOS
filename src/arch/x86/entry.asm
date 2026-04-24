@@ -46,6 +46,7 @@ protected_mode_entry:
         mov eax, pmode_irq6_handler
         mov bl, PMODE_IRQ6_VECTOR
         call idt_set_gate32
+        call ata_init
         call fdc_init
         call ps2_init
 
