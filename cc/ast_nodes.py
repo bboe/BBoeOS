@@ -325,6 +325,18 @@ class StructField(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class StructInit(Node):
+    """Brace-initializer ``{a, b}`` for one struct element within an array initializer.
+
+    Fields are positional; unspecified trailing fields are zero-filled by
+    the code generator.  Nested struct-of-struct initializers are not
+    supported.
+    """
+
+    fields: list[Node]
+
+
+@dataclass(kw_only=True, slots=True)
 class String(Node):
     """String literal."""
 

@@ -423,6 +423,71 @@ def test_out_register_si_cleared_across_call() -> None:
 
 
 # ---------------------------------------------------------------------------
+# struct array initializers
+# ---------------------------------------------------------------------------
+
+
+def test_struct_array_initializer_emits_fields() -> None:
+    """A struct array with a partial initializer emits per-field directives."""
+    asm = _kernel("""
+        struct point { uint16_t x; uint16_t y; };
+        struct point points[4] = {
+            {1, 2},
+            {3, 4},
+        };
+        void f() {}
+    """)
+    assert "_g_points: dw 1" in asm
+    assert "dw 2" in asm
+    assert "dw 3" in asm
+    assert "dw 4" in asm
+    assert "times (4-2)*4 db 0" in asm
+
+
+def test_struct_array_initializer_unspecified_fields_zero() -> None:
+    """Unspecified trailing fields in a struct initializer are zero-filled."""
+    asm = _kernel("""
+        struct entry { uint8_t type; uint8_t flags; uint16_t value; };
+        struct entry table[2] = {
+            {1},
+        };
+        void f() {}
+    """)
+    assert "_g_table: db 1" in asm
+    assert "db 0" in asm
+    assert "dw 0" in asm
+
+
+# ---------------------------------------------------------------------------
+# uint16_t: fixed 2-byte type across both --bits modes
+# ---------------------------------------------------------------------------
+
+
+def test_uint16_t_size_is_always_two_bytes_16bit() -> None:
+    """sizeof(uint16_t) == 2 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=16)
+    assert "mov ax, 2" in asm, f"expected sizeof(uint16_t)==2 in 16-bit mode\n{asm}"
+
+
+def test_uint16_t_size_is_always_two_bytes_32bit() -> None:
+    """sizeof(uint16_t) == 2 in --bits 32 mode (not widened to 4)."""
+    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=32)
+    assert "mov eax, 2" in asm, f"expected sizeof(uint16_t)==2 in 32-bit mode\n{asm}"
+
+
+def test_uint32_t_size_is_always_four_bytes_16bit() -> None:
+    """sizeof(uint32_t) == 4 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=16)
+    assert "mov ax, 4" in asm, f"expected sizeof(uint32_t)==4 in 16-bit mode\n{asm}"
+
+
+def test_uint32_t_size_is_always_four_bytes_32bit() -> None:
+    """sizeof(uint32_t) == 4 in --bits 32 mode (not widened to 8 for future 64-bit)."""
+    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(uint32_t)==4 in 32-bit mode\n{asm}"
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 

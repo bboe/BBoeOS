@@ -179,6 +179,10 @@ class X86CodegenTarget16(X86CodegenTarget):
         "int*": 2,
         "uint8_t": 1,
         "uint8_t*": 2,
+        "uint16_t": 2,
+        "uint16_t*": 2,
+        "uint32_t": 4,
+        "uint32_t*": 2,
         "unsigned long": 4,
         "void": 0,
     }
@@ -217,6 +221,10 @@ class X86CodegenTarget32(X86CodegenTarget):
         "int*": 4,
         "uint8_t": 1,
         "uint8_t*": 4,
+        "uint16_t": 2,
+        "uint16_t*": 4,
+        "uint32_t": 4,
+        "uint32_t*": 4,
         "unsigned long": 4,
         "void": 0,
     }

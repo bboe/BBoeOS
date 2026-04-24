@@ -38,6 +38,7 @@ from cc.ast_nodes import (
     String,
     StructDecl,
     StructField,
+    StructInit,
     Var,
     VarDecl,
     While,
@@ -255,6 +256,27 @@ class Parser:
         self.struct_decls[name] = decl
         return decl
 
+    def _parse_struct_init(self) -> Node:
+        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
+
+        Fields are positional.  Trailing commas are accepted.
+
+        Returns:
+            A ``StructInit`` node.
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        fields = []
+        while self.peek()[0] != "RBRACE":
+            fields.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInit(fields=fields, line=line)
+
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
 
@@ -288,16 +310,26 @@ class Parser:
     def parse_array_init(self) -> Node:
         """Parse a brace-enclosed array initializer.
 
+        Each element may itself be a brace-enclosed struct initializer
+        ``{a, b, ...}``, in which case it is returned as a ``StructInit``
+        node.  Trailing commas are accepted.
+
         Returns:
             An AST node for the array initializer.
 
         """
         line = self.peek()[2]
         self.eat("LBRACE")
-        elems = [self.parse_expression()]
-        while self.peek()[0] == "COMMA":
-            self.eat("COMMA")
-            elems.append(self.parse_expression())
+        elems = []
+        while self.peek()[0] != "RBRACE":
+            if self.peek()[0] == "LBRACE":
+                elems.append(self._parse_struct_init())
+            else:
+                elems.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
         self.eat("RBRACE")
         return ArrayInit(elements=elems, line=line)
 
@@ -903,7 +935,7 @@ class Parser:
         return VarDecl(asm_register=asm_register, init=init, line=line, name=name, type_name=type_string)
 
     def parse_type(self) -> str:
-        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, unsigned long).
+        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).
 
         An optional leading ``const`` is accepted and discarded — the C
         subset has no notion of const-ness but tolerating the keyword
@@ -943,6 +975,18 @@ class Parser:
                 self.eat()
                 return "uint8_t*"
             return "uint8_t"
+        if token[0] == "UINT16_T":
+            self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "uint16_t*"
+            return "uint16_t"
+        if token[0] == "UINT32_T":
+            self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "uint32_t*"
+            return "uint32_t"
         if token[0] == "UNSIGNED":
             self.eat()
             if self.peek()[0] != "LONG":

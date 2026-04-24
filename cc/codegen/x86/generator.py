@@ -37,6 +37,7 @@ from cc.ast_nodes import (
     Param,
     String,
     StructDecl,
+    StructInit,
     Var,
     VarDecl,
     While,
@@ -540,13 +541,36 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             is_byte = declaration.type_name in self.BYTE_TYPES
-            if declaration.type_name.startswith("struct "):
+            is_struct = declaration.type_name.startswith("struct ")
+            if is_struct:
                 stride = self._type_size(declaration.type_name)
             elif is_byte:
                 stride = 1
             else:
                 stride = self.target.int_size
-            if declaration.init is not None:
+            if is_struct and declaration.init is not None:
+                struct_name = declaration.type_name[len("struct ") :]
+                layout = self.struct_layouts[struct_name]
+                lines: list[str] = []
+                for element in declaration.init.elements:
+                    assert isinstance(element, StructInit)
+                    for i, (field_name, (offset, field_size)) in enumerate(layout.items()):
+                        value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
+                        if field_size == 1:
+                            lines.append(f"db {value}")
+                        elif field_size == 2:
+                            lines.append(f"dw {value}")
+                        elif field_size == 4:
+                            lines.append(f"dd {value}")
+                        else:
+                            lines.append(f"times {field_size} db 0")
+                count = len(declaration.init.elements)
+                size_expression = self._constant_expression(declaration.size)
+                lines.append(f"times ({size_expression}-{count})*{stride} db 0")
+                self.emit(f"_g_{name}: {lines[0]}")
+                for line in lines[1:]:
+                    self.emit(f"        {line}")
+            elif declaration.init is not None:
                 directive = "db" if is_byte else int_directive
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
@@ -581,6 +605,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return sum(size for _, size in self.struct_layouts[tag].values())
         message = f"unknown type '{type_name}'"
         raise CompileError(message)
+
+    def _validate_array_init(self, elements: list[Node]) -> None:
+        """Validate global array initializer elements are all constant expressions."""
+        for element in elements:
+            if isinstance(element, String):
+                continue
+            if isinstance(element, StructInit):
+                for field in element.fields:
+                    if self._constant_expression(field) is None:
+                        message = "struct initializer fields must be constants"
+                        raise CompileError(message, line=field.line)
+                    for reference in self._collect_constant_references(field):
+                        self.emit_constant_reference(reference)
+                continue
+            if self._constant_expression(element) is None:
+                message = "global array initializer elements must be constants"
+                raise CompileError(message, line=element.line)
+            for reference in self._collect_constant_references(element):
+                self.emit_constant_reference(reference)
 
     def generate_member_access(self, expression: MemberAccess, /) -> None:
         """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue."""
@@ -1090,14 +1133,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     for constant in self._collect_constant_references(declaration.size):
                         self.emit_constant_reference(constant)
                 if declaration.init is not None:
-                    for element in declaration.init.elements:
-                        if isinstance(element, String):
-                            continue
-                        if self._constant_expression(element) is None:
-                            message = "global array initializer elements must be constants"
-                            raise CompileError(message, line=element.line)
-                        for reference in self._collect_constant_references(element):
-                            self.emit_constant_reference(reference)
+                    self._validate_array_init(declaration.init.elements)
                 self.global_arrays[name] = declaration
             else:
                 message = f"unexpected top-level declaration: {type(declaration).__name__}"
