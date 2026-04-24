@@ -86,28 +86,6 @@ protected_mode_entry:
         call put_character
         jmp .echo_loop
 
-;;; -----------------------------------------------------------------------
-;;; serial_getc — non-blocking COM1 read.
-;;; Returns: AL = char, or AL=0 (ZF set) if no data.
-;;; Translates DEL (0x7F) to BS (0x08) for serial terminal compatibility.
-;;; -----------------------------------------------------------------------
-serial_getc:
-        push edx
-        mov dx, COM1_LSR
-        in al, dx
-        test al, 1                      ; bit 0 = data ready
-        jz .no_data
-        mov dx, COM1_DATA
-        in al, dx
-        cmp al, 7Fh                     ; DEL → backspace
-        jne .done
-        mov al, 08h
-        jmp .done
-        .no_data:
-        xor al, al
-        .done:
-        pop edx
-        ret
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment `system_ticks` (dword in rtc.asm's
