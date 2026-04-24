@@ -303,6 +303,42 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
         return set()
 
+    def _arithmetic_element_size(self, var_name: str, /) -> int:
+        """Return the element stride for pointer/array arithmetic on *var_name*.
+
+        ``ptr + N`` scales ``N`` by the pointed-to element's byte size so that
+        ``struct fd *p; p + 1`` advances by ``sizeof(struct fd)`` rather than 1.
+
+        Rules:
+        - Array variables (in ``variable_arrays``): element size is the declared
+          element type's byte size.
+        - Pointer variables (type ends with ``*``): element size is the
+          pointed-to type's byte size.
+        - Byte types (``char``, ``uint8_t``) always return 1 so byte-string
+          arithmetic is never scaled.
+        - Unknown or non-pointer scalars: return 1 (no scaling).
+        """
+        type_name = self.variable_types.get(var_name, "")
+        if var_name in self.variable_arrays:
+            # Array: element type is the stored type_name directly.
+            if type_name in ("char", "uint8_t") or type_name in self.BYTE_TYPES:
+                return 1
+            if type_name.startswith("struct "):
+                tag = type_name[7:]
+                if tag in self.struct_layouts:
+                    return sum(size for _, size in self.struct_layouts[tag].values())
+            return self.target.type_sizes.get(type_name, 1)
+        if type_name.endswith("*"):
+            base = type_name[:-1]
+            if base in ("char", "uint8_t") or base in self.BYTE_TYPES:
+                return 1
+            if base.startswith("struct "):
+                tag = base[7:]
+                if tag in self.struct_layouts:
+                    return sum(size for _, size in self.struct_layouts[tag].values())
+            return self.target.type_sizes.get(base, 1)
+        return 1
+
     def _byte_index_direct(self, node: Index, /) -> str | None:
         """Return a direct NASM memory operand for a constant-base Index.
 

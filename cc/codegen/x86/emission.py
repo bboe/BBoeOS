@@ -699,6 +699,13 @@ class EmissionMixin:
                 self.ax_clear()
                 return
             operator, left, right = expression.operation, expression.left, expression.right
+            # Pointer arithmetic: scale the right operand by the element size when
+            # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
+            # For byte pointers (char*, uint8_t*) element_size is 1 so nothing changes.
+            if operator in ("+", "-") and isinstance(left, Var):
+                element_size = self._arithmetic_element_size(left.name)
+                if element_size > 1:
+                    right = BinaryOperation(left=right, operation="*", right=Int(value=element_size))
             if operator == "%" and self._has_remainder(left, right):
                 self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
                 self.ax_clear()
