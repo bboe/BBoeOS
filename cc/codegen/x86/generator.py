@@ -632,6 +632,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if type_name in self.target.type_sizes:
             return self.target.type_sizes[type_name]
+        if type_name == "function_pointer":
+            return self.target.int_size
         if type_name.startswith("struct "):
             if type_name.endswith("*"):
                 return self.target.int_size
@@ -1218,7 +1220,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for statement in nodes:
                 if isinstance(statement, VarDecl):
                     eligible = (
-                        statement.type_name != "unsigned long"
+                        statement.type_name not in ("unsigned long", "function_pointer")
                         and not (top_level and self._is_constant_alias(body=nodes, statement=statement))
                         and not isinstance(statement.init, Call)
                     )
@@ -1562,13 +1564,28 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
+        function_pointer_vars: set[str] = set()
+
+        def collect_function_pointer_vars(stmts: list[Node]) -> None:
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl) and stmt.type_name == "function_pointer":
+                    function_pointer_vars.add(stmt.name)
+                elif isinstance(stmt, If):
+                    collect_function_pointer_vars(stmt.body)
+                    if stmt.else_body:
+                        collect_function_pointer_vars(stmt.else_body)
+                elif isinstance(stmt, (DoWhile, While)):
+                    collect_function_pointer_vars(stmt.body)
+
+        collect_function_pointer_vars(body)
+
         def visit(node: Node) -> None:
             if isinstance(node, Call):
-                if node.name in self.user_functions:
-                    # User functions follow the standard cdecl prologue
-                    # (``push bp / mov bp, sp / … / pop bp``) which
-                    # preserves the caller's BP, so BP is omitted from
-                    # the user-call clobber set even when it's pinned.
+                if node.name in self.user_functions or node.name in function_pointer_vars:
+                    # User functions and function_pointer indirect calls follow the standard
+                    # cdecl prologue (``push bp / mov bp, sp / … / pop bp``) which
+                    # preserves the caller's BP, so BP is omitted from the
+                    # user-call clobber set even when it's pinned.
                     for register in self.target.register_pool:
                         clobber_counts[register] += 1
                 else:
@@ -2221,6 +2238,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=statement.line)
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
+                if statement.function_pointer_params:
+                    in_regs: dict[int, str] = {}
+                    for param_index, param in enumerate(statement.function_pointer_params):
+                        if param.in_register is not None:
+                            in_regs[param_index] = param.in_register
+                    if in_regs:
+                        self.function_pointer_in_registers[statement.name] = in_regs
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
                     alias = self._constant_expression(statement.init)
                     self.constant_aliases[statement.name] = alias
@@ -2229,7 +2253,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         if include is not None:
                             self.required_includes.add(include)
                     continue
-                if statement.type_name != "unsigned long" and statement.name in self.auto_pin_candidates:
+                if statement.type_name not in ("unsigned long", "function_pointer") and statement.name in self.auto_pin_candidates:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.auto_pin_candidates[statement.name]

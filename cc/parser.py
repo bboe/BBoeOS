@@ -255,7 +255,18 @@ class Parser:
         fields: list[StructField] = []
         while self.peek()[0] != "RBRACE":
             field_type = self.parse_type()
-            field_name = self.eat("IDENT")[1]
+            if self.peek()[0] == "LPAREN":
+                # Function pointer field: type (*field_name)(params)
+                self.eat("LPAREN")
+                self.eat("STAR")
+                field_name = self.eat("IDENT")[1]
+                self.eat("RPAREN")
+                self.eat("LPAREN")
+                self.parse_parameters()  # consume param list; size is always 2
+                self.eat("RPAREN")
+                field_type = "function_pointer"
+            else:
+                field_name = self.eat("IDENT")[1]
             # Optional [N] for fixed-size array fields (e.g. ``char _reserved[15]``).
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
@@ -1045,7 +1056,19 @@ class Parser:
         """
         line = self.peek()[2]
         type_string = self.parse_type()
-        name = self.eat("IDENT")[1]
+        function_pointer_params_list: list[Param] | None = None
+        if self.peek()[0] == "LPAREN":
+            # Function pointer variable: type (*name)(params)
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            function_pointer_params_list = self.parse_parameters()
+            self.eat("RPAREN")
+            type_string = "function_pointer"
+        else:
+            name = self.eat("IDENT")[1]
         # Optional [] or [N] for array declarations
         is_array = False
         size_expression: Node | None = None
@@ -1062,7 +1085,7 @@ class Parser:
         self.eat("SEMI")
         if is_array:
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(function_pointer_params=function_pointer_params_list, init=init, line=line, name=name, type_name=type_string)
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.

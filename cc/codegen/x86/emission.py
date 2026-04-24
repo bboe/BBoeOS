@@ -365,6 +365,32 @@ class EmissionMixin:
         arguments = statement.args
         # Any call invalidates SI (callee may clobber it).
         self.si_local = None
+        # Indirect call through a function pointer variable.
+        if name in self.variable_types and self.variable_types[name] == "function_pointer":
+            function_pointer_in_regs = self.function_pointer_in_registers.get(name, {})
+            if len(arguments) != len(function_pointer_in_regs):
+                message = f"function_pointer '{name}' expects {len(function_pointer_in_regs)} argument(s), got {len(arguments)}"
+                raise CompileError(message, line=statement.line)
+            clobbers: frozenset[str] = frozenset(self.target.register_pool)
+            saved = self._pinned_registers_to_save(clobbers)
+            use_pusha = discard_return and len(saved) >= 3
+            if use_pusha:
+                self.emit("        pusha")
+            else:
+                for register in saved:
+                    self.emit(f"        push {register}")
+            if function_pointer_in_regs:
+                register_args = [(function_pointer_in_regs[i], arg) for i, arg in enumerate(arguments)]
+                self._emit_register_arg_moves(register_args)
+            self._emit_load_var(name, register=self.target.acc)
+            self.emit(f"        call {self.target.acc}")
+            if use_pusha:
+                self.emit("        popa")
+            else:
+                for register in reversed(saved):
+                    self.emit(f"        pop {register}")
+            self.ax_clear()
+            return
         if name in self.user_functions:
             expected = self.user_functions[name]
             if len(arguments) != expected:
@@ -1061,6 +1087,7 @@ class EmissionMixin:
         self.byte_scalar_locals = set()
         self.current_preserve_registers: list[str] = list(function.preserve_registers)
         self.frame_size = 0
+        self.function_pointer_in_registers: dict[str, dict[int, str]] = {}
         self.live_long_local = None
         self.local_stack_arrays = {}
         self.locals = {}

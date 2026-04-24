@@ -373,9 +373,15 @@ class VarDecl(Node):
     aliased to the named CPU register, so reads compile as the register
     itself (no ``[_g_name]`` load) and writes compile as a direct
     ``mov REG, ...``.  ``None`` for ordinary scalars / locals.
+
+    ``function_pointer_params`` is set when the declaration uses function-pointer
+    syntax ``type (*name)(params)``.  The list carries each parameter's
+    ``in_register`` annotation so call sites know which CPU registers to
+    load before ``call ax``.  ``None`` for ordinary (non-function_pointer) scalars.
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
+    function_pointer_params: list[Param] | None = field(default=None, kw_only=True)
     init: Node | None
     name: str
     type_name: str

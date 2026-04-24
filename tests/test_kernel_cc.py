@@ -570,6 +570,70 @@ def test_preserve_register_multiple() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Function pointer (function_pointer) type support
+# ---------------------------------------------------------------------------
+
+
+def test_function_pointer_local_emits_call_ax() -> None:
+    """A local function_pointer variable called with no args emits 'call ax'."""
+    asm = _kernel("""
+        int get_fn();
+        void caller() {
+            int (*handler)();
+            handler = get_fn();
+            handler();
+        }
+    """)
+    assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
+
+
+def test_function_pointer_with_in_register_param_moves_arg_before_call() -> None:
+    """An function_pointer with an in_register param loads that register before 'call ax'."""
+    asm = _kernel("""
+        int get_fn();
+        void caller() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            handler(42);
+        }
+    """)
+    assert "call ax" in asm, "indirect call must emit 'call ax'"
+    assert "mov bx, 42" in asm, "in_register param must be loaded into bx before call"
+    call_pos = asm.index("call ax")
+    bx_pos = asm.index("mov bx, 42")
+    assert bx_pos < call_pos, "mov bx must appear before call ax"
+
+
+def test_function_pointer_struct_field_type() -> None:
+    """A struct with an function_pointer field compiles and the field has width 2."""
+    asm = _kernel("""
+        struct ops {
+            int (*read)();
+            int (*write)();
+        };
+        int do_read(struct ops *o) {
+            int (*fn)();
+            fn = o->read;
+            return fn();
+        }
+    """)
+    assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
+
+
+def test_function_pointer_arg_count_mismatch_raises_error() -> None:
+    """Calling an function_pointer with wrong arg count raises CompileError."""
+    error = _kernel_error("""
+        int get_fn();
+        void caller() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            handler();
+        }
+    """)
+    assert "function_pointer" in error, f"Expected function_pointer arity error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 
