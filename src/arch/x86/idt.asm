@@ -18,8 +18,8 @@
 ;;; point vectors through our stubs.  PIC remap is orthogonal (belongs
 ;;; with the pmode switch itself); this module does not touch the PICs.
 ;;;
-;;; Not yet wired into bboeos.asm.  Lives alongside pmode.asm as
-;;; standalone infrastructure until the final pmode integration.
+;;; Not yet wired into bboeos.asm.  Lives alongside boot/stage1_5.asm
+;;; as standalone infrastructure until the final pmode integration.
 ;;; ------------------------------------------------------------------------
 
         IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (pmode GDT[1])

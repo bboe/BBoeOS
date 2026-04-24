@@ -1,4 +1,4 @@
-;;; tests/idt_test.asm — standalone smoke test for idt.asm + pmode.asm.
+;;; tests/idt_test.asm — standalone smoke test for idt.asm + stage1_5.asm.
 ;;;
 ;;; Stage 1 MBR: set up real-mode state, print "R", load stage 2 from
 ;;; sectors 2..N via BIOS INT 13h, install IDTR, switch to pmode.
@@ -16,7 +16,7 @@
         COM1_DATA equ 3F8h
         COM1_LSR  equ 3FDh
         LSR_THRE  equ 20h
-        STAGE2_SECTORS equ 16           ; plenty of room for idt.asm + pmode.asm
+        STAGE2_SECTORS equ 16           ; plenty of room for idt.asm + stage1_5.asm
 
 [bits 16]
 start:
@@ -97,7 +97,7 @@ protected_mode_entry:
         jmp .unreached
 
 [bits 16]
-%include "pmode.asm"
+%include "stage1_5.asm"
 %include "idt.asm"
 
         ;; Pad to fill the sectors stage-1 tries to load.

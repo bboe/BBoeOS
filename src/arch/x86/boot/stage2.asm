@@ -20,6 +20,11 @@
         jmp near shared_write_stdout
 
 boot_shell:
+        call kernel_init        ; PIC remap, PIT + IRQ 0, INT 30h gate, NIC probe
+
+        mov si, WELCOME
+        call put_string
+
         call vga_font_load      ; load ROM 8x16 font into plane 2 offset 0x4000 before any mode 13h switch corrupts plane 2
         call ps2_init           ; mask BIOS IRQ 1 before anyone reads keys
         cmp byte [boot_disk], 80h
@@ -46,21 +51,6 @@ boot_shell:
         .shell_halt:
         hlt
         jmp .shell_halt
-
-%include "ansi.asm"
-%include "arch/pic.asm"
-%include "drivers/ata.asm"
-%include "drivers/fdc.asm"
-%include "drivers/ps2.asm"
-%include "drivers/rtc.asm"
-%include "drivers/vga.asm"
-%include "fd.asm"
-%include "fs.asm"
-%include "lib.asm"
-%include "net.asm"
-%include "syscall.asm"
-%include "system.asm"
-%include "vfs.asm"
 
 bss_setup:
         ;; Zero the BSS region of the freshly-loaded program.
@@ -91,3 +81,4 @@ bss_setup:
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
         SHELL_NAME db `bin/shell\0`
+        WELCOME db `Welcome to BBoeOS!\nVersion 0.6.0 (2026/04/21)\n\0`
