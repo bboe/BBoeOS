@@ -105,13 +105,13 @@ renumbering is source-compatible — just rebuild.
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
 - `src/drivers/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character`; delegates to `drivers/vga.asm` for screen writes
-- `src/drivers/ata.asm`, `src/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs/fs.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
+- `src/drivers/ata.asm`, `src/drivers/fdc.asm` — Hardware disk drivers (ATA PIO and floppy DMA); called via `fs/block.asm`'s `read_sector`/`write_sector` dispatch (AX = 0-based sector number)
 - `src/drivers/ne2k.asm` — NE2000 ISA NIC driver (polled-mode Ethernet); I/O base `0x300`, IRQ 3
 - `src/drivers/ps2.asm` — PS/2 keyboard driver: `ps2_init`, `ps2_check`, `ps2_read`
 - `src/drivers/rtc.asm` — RTC/timer: `rtc_tick_read`, `rtc_sleep_ms`, CMOS date read
 - `src/drivers/vga.asm` — VGA driver: text and mode-13h helpers (`vga_set_mode`, `vga_clear_screen`, `vga_fill_block`, `vga_set_palette_color`, …) plus `fd_ioctl_vga` (the `/dev/vga` ioctl dispatcher for `VGA_IOCTL_MODE` / `VGA_IOCTL_FILL_BLOCK` / `VGA_IOCTL_SET_PALETTE`)
 - `src/fs/fd.asm` — File descriptor table management: `fd_open` (synthesizes `/dev/vga` into `FD_TYPE_VGA` without touching the filesystem), `fd_read`, `fd_write`, `fd_close`, `fd_fstat`, `fd_ioctl`; includes `fs/fd/console.asm`, `fs/fd/fs.asm`, `fs/fd/net.asm`
-- `src/fs/fs.asm` — Block I/O dispatcher: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
+- `src/fs/block.asm` — Block I/O dispatcher: `read_sector`, `write_sector` (dispatches to fdc/ata based on `boot_disk`)
 - `src/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
 - `src/fs/ext2.asm` — ext2 filesystem implementation (second VFS backend, auto-detected by `vfs_init`)
 - `src/fs/vfs.asm` — VFS layer: runtime function-pointer table (`vfs_find_fn`, etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`, `vfs_create`, `vfs_rmdir`, …); `%include`s `fs/bbfs.asm` and `fs/ext2.asm`

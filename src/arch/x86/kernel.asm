@@ -24,7 +24,7 @@
 
         ;; File descriptors, block I/O dispatch, filesystems, VFS switch
 %include "fs/fd.asm"                    ; fd table + per-type backends
-%include "fs/fs.asm"                    ; read_sector / write_sector dispatch
+%include "fs/block.asm"                 ; read_sector / write_sector dispatch
 %include "fs/vfs.asm"                   ; VFS layer (includes fs/bbfs.asm + fs/ext2.asm)
 
         ;; Shared library utilities used by programs via the jump table
