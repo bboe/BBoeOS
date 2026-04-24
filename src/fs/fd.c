@@ -14,25 +14,25 @@ asm("
 fd_alloc:
         ;; Find first free FD slot
         ;; Returns: AX = fd number, SI = entry pointer; CF set if table full
-        push bx
-        push cx
-        mov si, fd_table
-        xor ax, ax
-        mov cx, FD_MAX
+        push ebx
+        push ecx
+        mov esi, fd_table
+        xor eax, eax
+        mov ecx, FD_MAX
         .scan:
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FREE
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FREE
         je .found
-        add si, FD_ENTRY_SIZE
-        inc ax
-        dec cx
+        add esi, FD_ENTRY_SIZE
+        inc eax
+        dec ecx
         jnz .scan
-        pop cx
-        pop bx
+        pop ecx
+        pop ebx
         stc
         ret
         .found:
-        pop cx
-        pop bx
+        pop ecx
+        pop ebx
         clc
         ret
 
@@ -47,23 +47,23 @@ fd_alloc:
 fd_close:
         call fd_lookup
         jc .close_err
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FILE
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FILE
         jne .close_free
-        test byte [si+FD_OFFSET_FLAGS], O_WRONLY
+        test byte [esi+FD_OFFSET_FLAGS], O_WRONLY
         jz .close_free
-        call vfs_update_size    ; SI = fd_table entry -> updates dir entry size
+        call vfs_update_size    ; ESI = fd_table entry -> updates dir entry size
         .close_free:
-        push ax
-        push cx
-        push di
-        mov di, si
-        xor ax, ax
-        mov cx, FD_ENTRY_SIZE / 2
+        push eax
+        push ecx
+        push edi
+        mov edi, esi
+        xor eax, eax
+        mov ecx, FD_ENTRY_SIZE / 2
         cld
         rep stosw
-        pop di
-        pop cx
-        pop ax
+        pop edi
+        pop ecx
+        pop eax
         clc
         ret
         .close_err:
@@ -79,9 +79,9 @@ fd_close:
 fd_fstat:
         call fd_lookup
         jc .fstat_err
-        mov al, [si+FD_OFFSET_MODE]
-        mov dx, [si+FD_OFFSET_SIZE]
-        mov cx, [si+FD_OFFSET_SIZE+2]
+        mov al, [esi+FD_OFFSET_MODE]
+        mov dx, [esi+FD_OFFSET_SIZE]
+        mov cx, [esi+FD_OFFSET_SIZE+2]
         clc
         ret
         .fstat_err:
@@ -90,27 +90,27 @@ fd_fstat:
 
 fd_init:
         ;; Zero the entire FD table
-        push ax
-        push cx
-        push di
-        mov di, fd_table
-        xor ax, ax
-        mov cx, FD_MAX * FD_ENTRY_SIZE / 2
+        push eax
+        push ecx
+        push edi
+        mov edi, fd_table
+        xor eax, eax
+        mov ecx, FD_MAX * FD_ENTRY_SIZE / 2
         cld
         rep stosw
         ;; Pre-open fd 0 (stdin), fd 1 (stdout), fd 2 (stderr) as console
-        mov si, fd_table
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFFSET_FLAGS], O_RDONLY
-        add si, FD_ENTRY_SIZE
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFFSET_FLAGS], O_WRONLY
-        add si, FD_ENTRY_SIZE
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [si+FD_OFFSET_FLAGS], O_WRONLY
-        pop di
-        pop cx
-        pop ax
+        mov esi, fd_table
+        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [esi+FD_OFFSET_FLAGS], O_RDONLY
+        add esi, FD_ENTRY_SIZE
+        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [esi+FD_OFFSET_FLAGS], O_WRONLY
+        add esi, FD_ENTRY_SIZE
+        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        mov byte [esi+FD_OFFSET_FLAGS], O_WRONLY
+        pop edi
+        pop ecx
+        pop eax
         ret
 
 fd_lookup:
@@ -118,18 +118,18 @@ fd_lookup:
         ;; CF set if invalid (out of range or slot is free)
         cmp bx, FD_MAX
         jae .invalid
-        push ax
-        mov ax, bx
-        shl ax, 5              ; ax = bx * FD_ENTRY_SIZE (32)
-        mov si, fd_table
-        add si, ax
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_FREE
+        push eax
+        movzx eax, bx
+        shl eax, 5              ; eax = fd_number * FD_ENTRY_SIZE (32)
+        mov esi, fd_table
+        add esi, eax
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FREE
         je .invalid_pop
-        pop ax
+        pop eax
         clc
         ret
         .invalid_pop:
-        pop ax
+        pop eax
         .invalid:
         stc
         ret
@@ -140,26 +140,26 @@ fd_lookup:
 ;;; Output: AX = fd number (CF clear), or -1 on error (CF set)
 ;;; -----------------------------------------------------------------------
 fd_open:
-        push cx
-        push dx
-        push di
+        push ecx
+        push edx
+        push edi
         mov [fd_open_flags], al
-        mov [fd_open_name], si
+        mov [fd_open_name], esi
         ;; Check synthetic device paths first (no filesystem lookup).
-        mov di, DEV_VGA_PATH
-        mov cx, 9                       ; \"/dev/vga\" + null
+        mov edi, DEV_VGA_PATH
+        mov ecx, 9                      ; \"/dev/vga\" + null
         cld
         repe cmpsb
         jne .open_not_device
         call fd_alloc
         jc .open_err
-        mov byte [si+FD_OFFSET_TYPE], FD_TYPE_VGA
+        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_VGA
         mov cl, [fd_open_flags]
-        mov [si+FD_OFFSET_FLAGS], cl
+        mov [esi+FD_OFFSET_FLAGS], cl
         mov [fd_open_fd], ax
         jmp .open_done
         .open_not_device:
-        mov si, [fd_open_name]
+        mov esi, [fd_open_name]
         ;; Look up the file (vfs_find handles \".\" -> root directory)
         call vfs_find           ; populates vfs_found_*
         jc .open_not_found
@@ -169,7 +169,7 @@ fd_open:
         ;; If O_CREAT is set, create the file
         test byte [fd_open_flags], O_CREAT
         jz .open_err
-        mov si, [fd_open_name]
+        mov esi, [fd_open_name]
         call vfs_create         ; SI=path -> vfs_found_*, CF on error
         jc .open_err
         jmp .open_populate
@@ -181,40 +181,39 @@ fd_open:
         mov [fd_open_fd], ax
         ;; Type, flags, mode, inode, size, position from vfs_found_*
         mov cl, [vfs_found_type]
-        mov [si+FD_OFFSET_TYPE], cl
+        mov [esi+FD_OFFSET_TYPE], cl
         mov cl, [fd_open_flags]
-        mov [si+FD_OFFSET_FLAGS], cl
+        mov [esi+FD_OFFSET_FLAGS], cl
         mov cl, [vfs_found_mode]
-        mov [si+FD_OFFSET_MODE], cl
+        mov [esi+FD_OFFSET_MODE], cl
         mov cx, [vfs_found_inode]
-        mov [si+FD_OFFSET_START], cx
+        mov [esi+FD_OFFSET_START], cx
         mov cx, [vfs_found_size]
-        mov [si+FD_OFFSET_SIZE], cx
+        mov [esi+FD_OFFSET_SIZE], cx
         mov cx, [vfs_found_size+2]
-        mov [si+FD_OFFSET_SIZE+2], cx
-        mov word [si+FD_OFFSET_POSITION], 0
-        mov word [si+FD_OFFSET_POSITION+2], 0
+        mov [esi+FD_OFFSET_SIZE+2], cx
+        mov dword [esi+FD_OFFSET_POSITION], 0
         mov cx, [vfs_found_dir_sec]
-        mov [si+FD_OFFSET_DIRECTORY_SECTOR], cx
+        mov [esi+FD_OFFSET_DIRECTORY_SECTOR], cx
         mov cx, [vfs_found_dir_off]
-        mov [si+FD_OFFSET_DIRECTORY_OFFSET], cx
+        mov [esi+FD_OFFSET_DIRECTORY_OFFSET], cx
         ;; O_TRUNC: reset size to 0
         test byte [fd_open_flags], O_TRUNC
         jz .open_done
-        mov word [si+FD_OFFSET_SIZE], 0
-        mov word [si+FD_OFFSET_SIZE+2], 0
+        mov word [esi+FD_OFFSET_SIZE], 0
+        mov word [esi+FD_OFFSET_SIZE+2], 0
         .open_done:
         mov ax, [fd_open_fd]
-        pop di
-        pop dx
-        pop cx
+        pop edi
+        pop edx
+        pop ecx
         clc
         ret
 
         .open_err:
-        pop di
-        pop dx
-        pop cx
+        pop edi
+        pop edx
+        pop ecx
         mov ax, -1
         stc
         ret
@@ -225,24 +224,20 @@ fd_open:
 ;;; Output: AX = absolute sector number, BX = byte offset within sector
 ;;; -----------------------------------------------------------------------
 fd_pos_to_sector:
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov bx, [si+FD_OFFSET_POSITION]
-        ;; AX:BX >> 9 = sector offset
-        shl ax, 7
-        push cx
-        mov cx, bx
-        shr cx, 9
-        or ax, cx
-        pop cx
-        add ax, [si+FD_OFFSET_START]
-        ;; BX = pos & 0x1FF
-        and bx, 01FFh
+        push ecx
+        mov eax, [esi+FD_OFFSET_POSITION]
+        mov ebx, eax
+        shr eax, 9
+        movzx ecx, word [esi+FD_OFFSET_START]
+        add eax, ecx
+        and ebx, 01FFh
+        pop ecx
         ret
 
 ;;; -----------------------------------------------------------------------
 ;;; fd_read / fd_write: Table-driven dispatch via fd_ops.
 ;;;
-;;; fd_ops is a flat table of (read_fn, write_fn) word pairs indexed by
+;;; fd_ops is a flat table of (read_fn, write_fn) dword pairs indexed by
 ;;; FD_TYPE_*.  A zero entry means the operation is unsupported for that
 ;;; type.  Adding a new fd type requires only a new row in fd_ops -- the
 ;;; dispatch functions need no changes.
@@ -250,45 +245,31 @@ fd_pos_to_sector:
 fd_read:
         call fd_lookup
         jc .err
-        xor bh, bh
-        mov bl, [si+FD_OFFSET_TYPE]
-        shl bx, 2               ; * 4: each ops entry is two words
-        mov ax, [fd_ops+bx]     ; read_fn
-        test ax, ax
+        movzx ebx, byte [esi+FD_OFFSET_TYPE]
+        shl ebx, 3              ; * 8: each ops entry is two dwords
+        mov eax, [fd_ops+ebx]  ; read_fn
+        test eax, eax
         jz .err
-        jmp ax
+        jmp eax
         .err:
         mov ax, -1
         stc
         ret
 
 fd_write:
-        mov [fd_write_buffer], si
+        mov [fd_write_buffer], esi
         call fd_lookup
         jc .err
-        xor bh, bh
-        mov bl, [si+FD_OFFSET_TYPE]
-        shl bx, 2               ; * 4: each ops entry is two words
-        mov ax, [fd_ops+bx+2]   ; write_fn
-        test ax, ax
+        movzx ebx, byte [esi+FD_OFFSET_TYPE]
+        shl ebx, 3              ; * 8: each ops entry is two dwords
+        mov eax, [fd_ops+ebx+4] ; write_fn
+        test eax, eax
         jz .err
-        jmp ax
+        jmp eax
         .err:
         mov ax, -1
         stc
         ret
-
-        ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
-        ;; A zero entry means unsupported for that type.
-fd_ops:
-        dw 0,               0                 ; FD_TYPE_FREE (0)
-        dw fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (1)
-        dw fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (2)
-        dw fd_read_file,    fd_write_file     ; FD_TYPE_FILE (3)
-        dw 0,               0                 ; FD_TYPE_ICMP (4)
-        dw fd_read_net,     fd_write_net      ; FD_TYPE_NET (5)
-        dw 0,               0                 ; FD_TYPE_UDP (6)
-        dw 0,               0                 ; FD_TYPE_VGA (7)
 
 ;;; -----------------------------------------------------------------------
 ;;; fd_ioctl: Device-control dispatch.  Looks up BX=fd, then jumps to the
@@ -298,38 +279,48 @@ fd_ops:
 fd_ioctl:
         call fd_lookup
         jc .err
-        xor bh, bh
-        mov bl, [si+FD_OFFSET_TYPE]
-        shl bx, 1               ; one word per entry
-        mov bx, [fd_ioctl_ops+bx]
-        test bx, bx
+        movzx ebx, byte [esi+FD_OFFSET_TYPE]
+        shl ebx, 2              ; one dword per entry
+        mov ebx, [fd_ioctl_ops+ebx]
+        test ebx, ebx
         jz .err
-        jmp bx
+        jmp ebx
         .err:
         stc
         ret
 
-        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.
-fd_ioctl_ops:
-        dw 0                    ; FD_TYPE_FREE (0)
-        dw 0                    ; FD_TYPE_CONSOLE (1)
-        dw 0                    ; FD_TYPE_DIRECTORY (2)
-        dw 0                    ; FD_TYPE_FILE (3)
-        dw 0                    ; FD_TYPE_ICMP (4)
-        dw 0                    ; FD_TYPE_NET (5)
-        dw 0                    ; FD_TYPE_UDP (6)
-        dw fd_ioctl_vga         ; FD_TYPE_VGA (7)
-
-        ;; Variables
-        DEV_VGA_PATH    db \"/dev/vga\", 0
-        fd_open_fd    dw 0
-        fd_open_flags db 0
-        fd_open_mode  db 0
-        fd_open_name  dw 0
-        fd_table times FD_MAX * FD_ENTRY_SIZE db 0
-        fd_write_buffer dw 0
-
 %include \"fs/fd/console.asm\"
 %include \"fs/fd/fs.asm\"
 %include \"fs/fd/net.asm\"
+
+        ;; Operations table: (read_fn, write_fn) dword pairs indexed by FD_TYPE_*
+        ;; A zero entry means unsupported for that type.
+fd_ops:
+        dd 0,               0                 ; FD_TYPE_FREE (0)
+        dd fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (1)
+        dd fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (2)
+        dd fd_read_file,    fd_write_file     ; FD_TYPE_FILE (3)
+        dd 0,               0                 ; FD_TYPE_ICMP (4)
+        dd fd_read_net,     fd_write_net      ; FD_TYPE_NET (5)
+        dd 0,               0                 ; FD_TYPE_UDP (6)
+        dd 0,               0                 ; FD_TYPE_VGA (7)
+
+        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.
+fd_ioctl_ops:
+        dd 0                    ; FD_TYPE_FREE (0)
+        dd 0                    ; FD_TYPE_CONSOLE (1)
+        dd 0                    ; FD_TYPE_DIRECTORY (2)
+        dd 0                    ; FD_TYPE_FILE (3)
+        dd 0                    ; FD_TYPE_ICMP (4)
+        dd 0                    ; FD_TYPE_NET (5)
+        dd 0                    ; FD_TYPE_UDP (6)
+        dd fd_ioctl_vga         ; FD_TYPE_VGA (7)
+
+        DEV_VGA_PATH    db \"/dev/vga\", 0
+        fd_open_fd      dw 0
+        fd_open_flags   db 0
+        fd_open_mode    db 0
+        fd_open_name    dd 0
+        fd_table        times FD_MAX * FD_ENTRY_SIZE db 0
+        fd_write_buffer dd 0
 ");

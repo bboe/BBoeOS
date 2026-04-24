@@ -176,11 +176,13 @@ pmode_gdtr:
 %include "drivers/ata.asm"              ; ATA PIO disk driver
 %include "drivers/console.asm"          ; ANSI escape parser + VGA output
 %include "drivers/fdc.asm"              ; floppy DMA + IRQ 6 driver
+%include "drivers/ne2k.asm"             ; NE2000 ISA NIC (polled; needs 32-bit port)
 %include "drivers/ps2.asm"              ; PS/2 keyboard driver (IRQ-driven)
 %include "drivers/rtc.asm"              ; system_ticks / PIT constants
 %include "drivers/serial.asm"           ; serial_character / serial_getc (COM1)
 %include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
 %include "fs/block.asm"                 ; read_sector / write_sector dispatch
+%include "fs/fd.kasm"                   ; fd table + per-type backends
 %include "fs/vfs.asm"                   ; VFS dispatch + bbfs + ext2
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "entry.asm"                    ; protected_mode_entry + post-flip init
