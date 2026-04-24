@@ -66,14 +66,15 @@ protected_mode_entry:
 
         sti
 
-        ;; Print welcome banner to COM1 via serial_character.
-        ;; VGA init deferred until vga.asm is ported to 32-bit flat addressing.
+        call vga_clear_screen
+
+        ;; Print welcome banner to COM1 and VGA via put_character.
         mov esi, WELCOME_MSG
         .banner:
         mov al, [esi]
         test al, al
         jz .banner_done
-        call serial_character
+        call put_character
         inc esi
         jmp .banner
         .banner_done:

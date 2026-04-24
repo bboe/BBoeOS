@@ -41,12 +41,9 @@ vga_clear_screen:
         push ax
         push cx
         push dx
-        push di
-        push es
+        push edi
 
-        mov ax, VGA_SEG
-        mov es, ax
-        xor di, di
+        mov edi, 0xB8000
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
         mov cx, VGA_COLS * VGA_ROWS
         cld
@@ -55,8 +52,7 @@ vga_clear_screen:
         xor dx, dx              ; DH=0 row, DL=0 col
         call vga_set_cursor
 
-        pop es
-        pop di
+        pop edi
         pop dx
         pop cx
         pop ax
@@ -303,30 +299,22 @@ vga_scroll_up:
         ;; Preserves all registers.
         push ax
         push cx
-        push si
-        push di
-        push ds
-        push es
+        push esi
+        push edi
 
-        mov ax, VGA_SEG
-        mov ds, ax
-        mov es, ax
-
-        mov si, VGA_COLS * 2                    ; source: row 1
-        xor di, di                              ; dest:   row 0
-        mov cx, (VGA_ROWS - 1) * VGA_COLS       ; word count
+        mov esi, 0xB8000 + VGA_COLS * 2         ; source: row 1
+        mov edi, 0xB8000                         ; dest:   row 0
+        mov cx, (VGA_ROWS - 1) * VGA_COLS        ; word count
         cld
         rep movsw
 
-        mov di, (VGA_ROWS - 1) * VGA_COLS * 2
+        mov edi, 0xB8000 + (VGA_ROWS - 1) * VGA_COLS * 2
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
         mov cx, VGA_COLS
         rep stosw
 
-        pop es
-        pop ds
-        pop di
-        pop si
+        pop edi
+        pop esi
         pop cx
         pop ax
         ret
@@ -566,12 +554,11 @@ vga_teletype:
         ;; Handles CR (col←0), LF (row++ with scroll), BS (col--, no wrap).
         ;; Advances the cursor for regular characters, scrolling on overflow.
         ;; Preserves all registers.
-        push ax
-        push bx
-        push cx
-        push dx
-        push di
-        push es
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push edi
 
         cmp al, 0Dh
         je .cr
@@ -585,18 +572,17 @@ vga_teletype:
         mov ch, [ansi_fg]               ; stash attribute
         call vga_get_cursor             ; DH=row, DL=col (clobbers AX)
 
-        movzx ax, dh
-        imul ax, ax, VGA_COLS           ; AX = row * 80 (DX not clobbered)
-        movzx bx, dl                    ; BX = col (DX still valid)
-        add ax, bx
-        shl ax, 1                       ; byte offset
-        mov di, ax
+        movzx eax, dh
+        imul eax, eax, VGA_COLS         ; EAX = row * 80
+        movzx ebx, dl                   ; EBX = col (DX still valid)
+        add eax, ebx
+        shl eax, 1                      ; byte offset
+        add eax, 0xB8000                ; linear VGA address
+        mov edi, eax
 
-        mov ax, VGA_SEG
-        mov es, ax
         mov al, cl                      ; char
         mov ah, ch                      ; attr
-        mov [es:di], ax
+        mov [edi], ax
 
         inc dl
         cmp dl, VGA_COLS
@@ -635,48 +621,44 @@ vga_teletype:
         dec dl
         call vga_set_cursor
 .done:
-        pop es
-        pop di
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 vga_write_attribute:
         ;; Input: AL = character, BL = attribute byte.  Writes at the current
         ;; cursor position with no advance and no scroll.  Preserves all
         ;; registers.
-        push ax
-        push bx
-        push cx
-        push dx
-        push di
-        push es
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push edi
 
         mov cl, al                      ; stash char
         mov ch, bl                      ; stash attr
         call vga_get_cursor             ; DH=row, DL=col (clobbers AX)
 
-        movzx ax, dh
-        imul ax, ax, VGA_COLS           ; AX = row * 80 (DX not clobbered)
-        movzx bx, dl                    ; BX = col (DX still valid)
-        add ax, bx
-        shl ax, 1
-        mov di, ax
+        movzx eax, dh
+        imul eax, eax, VGA_COLS         ; EAX = row * 80
+        movzx ebx, dl                   ; EBX = col (DX still valid)
+        add eax, ebx
+        shl eax, 1
+        add eax, 0xB8000                ; linear VGA address
+        mov edi, eax
 
-        mov ax, VGA_SEG
-        mov es, ax
         mov al, cl
         mov ah, ch
-        mov [es:di], ax
+        mov [edi], ax
 
-        pop es
-        pop di
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 ;;; -----------------------------------------------------------------------
