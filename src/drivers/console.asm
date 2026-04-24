@@ -222,23 +222,6 @@ put_string:
         pop eax
         ret
 
-serial_character:
-        ;; Write AL to COM1.  Polls LSR.THRE first.  Preserves EAX, EDX.
-        push eax
-        push edx
-        push eax
-        mov dx, 3FDh            ; LSR
-.wait:
-        in al, dx
-        test al, 20h            ; THRE
-        jz .wait
-        pop eax
-        mov dx, 3F8h            ; data port
-        out dx, al
-        pop edx
-        pop eax
-        ret
-
         ;; Parser state
         ansi_state db 0
         ansi_fg db 7
