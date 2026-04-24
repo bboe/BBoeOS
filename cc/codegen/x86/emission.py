@@ -482,6 +482,14 @@ class EmissionMixin:
                 self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             # Capture out_register outputs before any register restores so the
             # callee-written registers haven't been overwritten by the pops yet.
+            # Pre-compute which pinned registers will be overwritten by captures so
+            # we can skip popping them (popping would destroy the captured value).
+            capture_clobbered_pins: set[str] = set()
+            for reg, arg in out_reg_captures:
+                if isinstance(arg, AddressOf) and arg.name in self.pinned_register:
+                    dest_reg = self.pinned_register[arg.name]
+                    if dest_reg != reg:
+                        capture_clobbered_pins.add(dest_reg)
             si_captured: str | None = None
             for reg, arg in out_reg_captures:
                 if not isinstance(arg, AddressOf):
@@ -502,7 +510,8 @@ class EmissionMixin:
                 si_captured = None  # popa restores all regs including SI
             else:
                 for register in reversed(saved):
-                    self.emit(f"        pop {register}")
+                    if register not in capture_clobbered_pins:
+                        self.emit(f"        pop {register}")
             self.ax_clear()
             # Track SI as holding the captured variable until the next call.
             # The stack slot is authoritative; this is a pure read-optimisation.
