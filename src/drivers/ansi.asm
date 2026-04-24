@@ -8,23 +8,23 @@
         ;;   ESC[r;cH      cursor position (1-indexed)
         ;;   ESC[0m        reset foreground to 7, background to 0
         ;;   ESC[38;5;Nm   256-color foreground (stored in ansi_fg)
-        ;;   ESC[48;5;Nm   256-color background (palette via INT 10h AH=0B)
+        ;;   ESC[48;5;Nm   256-color background (palette via vga_set_bg)
         ;;   ESC[<N>@      write char code N at cursor, no advance or scroll
 
 put_character:
-        push ax
-        push bx
-        push cx
-        push dx
+        push eax
+        push ebx
+        push ecx
+        push edx
 
         ;; Convert \n to \r\n
         cmp al, 0Ah
         jne .serial
-        push ax
+        push eax
         mov al, 0Dh
         call serial_character
         call vga_teletype       ; CR on screen
-        pop ax
+        pop eax
 
 .serial:
         call serial_character
@@ -72,28 +72,26 @@ put_character:
         jmp .done
 
 .cursor_back:
-        push bx
-        call vga_get_cursor
-        pop cx
-        movzx ax, dh
-        push dx
-        mov bx, 80
-        mul bx
-        pop dx
-        movzx bx, dl
-        add ax, bx
-        sub ax, cx
-        xor dx, dx
-        mov bx, 80
-        div bx
+        push ebx
+        call vga_get_cursor          ; DH=row, DL=col
+        pop ecx                       ; ECX = backward count
+        movzx eax, dh
+        imul eax, eax, VGA_COLS
+        movzx edx, dl
+        add eax, edx                  ; EAX = linear position
+        movzx ecx, cx
+        sub eax, ecx
+        xor edx, edx
+        mov ecx, VGA_COLS
+        div ecx                       ; EAX = row, EDX = col
         mov dh, al
         call vga_set_cursor
         jmp .done
 
 .cursor_forward:
-        push bx
+        push ebx
         call vga_get_cursor
-        pop cx
+        pop ecx
         add dl, cl
         call vga_set_cursor
         jmp .done
@@ -113,9 +111,9 @@ put_character:
         jmp .done
 
 .cursor_up:
-        push bx
+        push ebx
         call vga_get_cursor     ; DH=row, DL=col
-        pop cx
+        pop ecx
         sub dh, cl
         jnb .cursor_up_set
         xor dh, dh
@@ -124,10 +122,10 @@ put_character:
         jmp .done
 
 .done:
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 .enter_csi:
@@ -145,7 +143,7 @@ put_character:
 .sgr:
         ;; ESC[0m          reset: fg=7, bg=0
         ;; ESC[38;5;Nm     256-color fg (N stored in ansi_fg)
-        ;; ESC[48;5;Nm     256-color bg (palette via INT 10h AH=0Bh BH=0)
+        ;; ESC[48;5;Nm     256-color bg (palette via vga_set_bg)
         mov ax, [ansi_params]
         test ax, ax
         jnz .sgr_fg_check
@@ -180,24 +178,23 @@ put_character:
         ja .csi_command
         ;; Accumulate digit into current slot
         sub al, '0'
-        movzx cx, al
-        mov bx, [ansi_param_index]
-        add bx, ansi_params
-        mov ax, [bx]
-        mov dx, 10
-        mul dx
+        movzx ecx, al
+        movzx ebx, word [ansi_param_index]
+        add ebx, ansi_params
+        mov ax, [ebx]
+        imul ax, ax, 10
         add ax, cx
-        mov [bx], ax
+        mov [ebx], ax
         jmp .done
 
 .state_esc:
         cmp al, '['
         je .enter_csi
         ;; Not CSI: emit ESC then char
-        push ax
+        push eax
         mov al, 1Bh
         call vga_teletype
-        pop ax
+        pop eax
         call vga_teletype
         mov byte [ansi_state], 0
         jmp .done
@@ -211,37 +208,38 @@ put_character:
         jmp .done
 
 put_string:
-        ;; Print null-terminated string at DS:SI via put_character
-        ;; (ANSI-aware).  Preserves AX.
-        push ax
+        ;; Print null-terminated string at ESI via put_character (ANSI-aware).
+        ;; Preserves EAX.
+        push eax
 .loop:
-        lodsb
+        mov al, [esi]
+        inc esi
         test al, al
         jz .done
         call put_character
         jmp .loop
 .done:
-        pop ax
+        pop eax
         ret
 
 serial_character:
-        ;; Write AL to COM1.  Polls LSR.THRE first.  Preserves AX, DX.
-        push ax
-        push dx
-        push ax
+        ;; Write AL to COM1.  Polls LSR.THRE first.  Preserves EAX, EDX.
+        push eax
+        push edx
+        push eax
         mov dx, 3FDh            ; LSR
 .wait:
         in al, dx
         test al, 20h            ; THRE
         jz .wait
-        pop ax
+        pop eax
         mov dx, 3F8h            ; data port
         out dx, al
-        pop dx
-        pop ax
+        pop edx
+        pop eax
         ret
 
-        ;; Parser state (stage 2)
+        ;; Parser state
         ansi_state db 0
         ansi_fg db 7
         ansi_params dw 0, 0, 0
