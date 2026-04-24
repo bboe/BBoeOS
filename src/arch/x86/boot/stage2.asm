@@ -31,8 +31,13 @@ boot_shell:
         jae .post_fdc
         call fdc_init           ; reset, motor, recalibrate drive A:
         .post_fdc:
-        call fd_init
         call vfs_init
+        ;; fall through to shell_reload
+
+shell_reload:
+        ;; Re-entry point for SYS_EXIT: reload the shell binary without
+        ;; repeating one-time boot work (kernel_init, WELCOME, driver inits).
+        call fd_init
         ;; Load shell program from filesystem
         mov si, SHELL_NAME
         call vfs_find           ; populates vfs_found_*
@@ -81,4 +86,4 @@ bss_setup:
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
         SHELL_NAME db `bin/shell\0`
-        WELCOME db `Welcome to BBoeOS!\nVersion 0.6.0 (2026/04/21)\n\0`
+        WELCOME db `Welcome to BBoeOS!\nVersion 0.7.0 (2026/04/23)\n\0`
