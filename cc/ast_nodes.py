@@ -132,6 +132,13 @@ class Function(Node):
     uniquification); no free-standing function body is emitted, so
     there's nothing for inline-asm ``call X`` to resolve against.
 
+    ``preserve_registers`` captures zero or more
+    ``__attribute__((preserve_register("REG")))`` annotations.  Each
+    named register is pushed immediately before the BP frame setup and
+    popped (in reverse order) just before every ``ret``.  ``pop REG``
+    does not affect flags, so CF from ``carry_return`` functions
+    survives.
+
     ``is_prototype`` is ``True`` for forward declarations (no body) —
     the node is retained in ``Program.functions`` so the generator can
     register calling-convention info (e.g., ``out_register`` params and
@@ -145,6 +152,7 @@ class Function(Node):
     is_prototype: bool = field(default=False, kw_only=True)
     name: str
     params: list[Param]
+    preserve_registers: list[str] = field(default_factory=list, kw_only=True)
     regparm_count: int = field(default=0, kw_only=True)
 
 

@@ -217,6 +217,13 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("out_register", reg_token[1][1:-1])
+        if attr_name == "preserve_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("preserve_register", reg_token[1][1:-1])
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -832,6 +839,7 @@ class Parser:
         asm_register: str | None = None
         carry_return = False
         always_inline = False
+        preserve_registers: list[str] = []
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
             if kind == "regparm":
@@ -840,6 +848,8 @@ class Parser:
                 carry_return = True
             elif kind == "always_inline":
                 always_inline = True
+            elif kind == "preserve_register":
+                preserve_registers.append(value)
             else:
                 asm_register = value
         type_string = self.parse_type()
@@ -863,6 +873,8 @@ class Parser:
                     carry_return = True
                 elif kind == "always_inline":
                     always_inline = True
+                elif kind == "preserve_register":
+                    preserve_registers.append(value)
                 else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
@@ -897,6 +909,7 @@ class Parser:
                     line=line,
                     name=name,
                     params=parameters,
+                    preserve_registers=preserve_registers,
                     regparm_count=regparm_count,
                 )
             self.eat("LBRACE")
@@ -907,6 +920,7 @@ class Parser:
                 line=line,
                 name=name,
                 params=parameters,
+                preserve_registers=preserve_registers,
                 regparm_count=regparm_count,
             )
         if regparm_count != 0:
@@ -917,6 +931,9 @@ class Parser:
             raise CompileError(message, line=line)
         if always_inline:
             message = "always_inline attribute is not valid on global variables"
+            raise CompileError(message, line=line)
+        if preserve_registers:
+            message = "preserve_register attribute is not valid on global variables"
             raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no

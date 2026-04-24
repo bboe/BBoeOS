@@ -533,6 +533,42 @@ def test_in_register_with_carry_return() -> None:
     assert "mov si," in asm, f"expected mov si for out_register\n{asm}"
 
 
+def test_preserve_register_push_pop() -> None:
+    """preserve_register("cx") emits push cx before frame and pop cx before every ret."""
+    src = textwrap.dedent("""\
+        __attribute__((carry_return)) __attribute__((preserve_register("cx")))
+        int f(int x __attribute__((in_register("bx")))) {
+            if (x >= 8) { return 0; }
+            return 1;
+        }
+    """)
+    asm = _compile(src, target="kernel")[1]
+    # push cx must appear before push bp (prologue order).
+    push_cx = asm.index("push cx")
+    push_bp = asm.index("push bp")
+    assert push_cx < push_bp, "push cx must precede push bp"
+    # Every ret must be preceded by pop cx (pop cx does not affect CF).
+    ret_positions = [i for i in range(len(asm)) if asm[i : i + 3] == "ret"]
+    for ret_pos in ret_positions:
+        before_ret = asm[max(0, ret_pos - 40) : ret_pos]
+        assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
+
+
+def test_preserve_register_multiple() -> None:
+    """Multiple preserve_register attributes push/pop in declaration order."""
+    src = textwrap.dedent("""\
+        __attribute__((preserve_register("cx"))) __attribute__((preserve_register("dx")))
+        int g() { return 0; }
+    """)
+    asm = _compile(src, target="kernel")[1]
+    push_cx = asm.index("push cx")
+    push_dx = asm.index("push dx")
+    pop_cx = asm.rindex("pop cx")
+    pop_dx_last = asm.rindex("pop dx")
+    assert push_cx < push_dx, "cx pushed before dx"
+    assert pop_dx_last < pop_cx, "dx popped before cx (reverse order)"
+
+
 # ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------

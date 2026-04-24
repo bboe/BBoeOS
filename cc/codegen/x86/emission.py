@@ -1059,6 +1059,7 @@ class EmissionMixin:
         if naked_asm or frameless_calls:
             self.elide_frame = True
         self.byte_scalar_locals = set()
+        self.current_preserve_registers: list[str] = list(function.preserve_registers)
         self.frame_size = 0
         self.live_long_local = None
         self.local_stack_arrays = {}
@@ -1225,6 +1226,8 @@ class EmissionMixin:
 
         self.emit(f"{name}:")
         if not self.elide_frame:
+            for reg in self.current_preserve_registers:
+                self.emit(f"        push {reg}")
             self.emit(f"        push {self.target.base_register}")
             self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
             if self.frame_size > 0:
@@ -1308,6 +1311,8 @@ class EmissionMixin:
                 if self.frame_size > 0:
                     self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
                 self.emit(f"        pop {self.target.base_register}")
+                for reg in reversed(self.current_preserve_registers):
+                    self.emit(f"        pop {reg}")
                 self.emit("        ret")
             elif self.elide_frame:
                 self.emit("        ret")
@@ -1323,6 +1328,8 @@ class EmissionMixin:
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
             self.emit(f"        pop {self.target.base_register}")
+            for reg in reversed(self.current_preserve_registers):
+                self.emit(f"        pop {reg}")
             self.emit("        ret")
         self.emit()
 
@@ -1536,6 +1543,8 @@ class EmissionMixin:
                 if self.frame_size > 0:
                     self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
                 self.emit(f"        pop {self.target.base_register}")
+                for reg in reversed(self.current_preserve_registers):
+                    self.emit(f"        pop {reg}")
                 self.emit("        ret")
                 return
             # Bool-valued expression: evaluate it into the CF via the
@@ -1549,12 +1558,16 @@ class EmissionMixin:
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
             self.emit(f"        pop {self.target.base_register}")
+            for reg in reversed(self.current_preserve_registers):
+                self.emit(f"        pop {reg}")
             self.emit("        ret")
             self.emit(f"{true_label}:")
             self.emit("        clc")
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
             self.emit(f"        pop {self.target.base_register}")
+            for reg in reversed(self.current_preserve_registers):
+                self.emit(f"        pop {reg}")
             self.emit("        ret")
             return
         if statement.value is not None:
@@ -1562,6 +1575,8 @@ class EmissionMixin:
         if self.frame_size > 0:
             self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
         self.emit(f"        pop {self.target.base_register}")
+        for reg in reversed(self.current_preserve_registers):
+            self.emit(f"        pop {reg}")
         self.emit("        ret")
 
     def generate_statement(self, statement: Node, /) -> None:
