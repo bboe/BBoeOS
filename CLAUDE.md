@@ -19,8 +19,8 @@ Requires `nasm` (`brew install nasm`).
 
 Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
 
-- **Stage 1 (MBR, 512 bytes)**: Boot init, loads stage 2 via INT 13h, saves boot tick count. Contains `clear_screen`, minimal output (`put_string`, `put_character_raw`), `serial_character`.  The full ANSI parser lives in stage 2.
-- **Stage 2**: Installs syscall interface (INT 30h), loads shell from filesystem.
+- **Stage 1 (MBR, 512 bytes)**: Minimal boot loader — sets up DS/ES/SS:SP, resets disk, reads stage 2 via BIOS INT 13h, jumps to `boot_shell`.  On error, prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init.
+- **Stage 2**: `boot_shell` runs kernel init (`pic_remap`, `rtc_tick_init`, `install_syscalls`, `network_initialize`), prints the welcome banner via `drivers/ansi.asm`, initialises PS/2 / FDC / file descriptors / VFS, then loads and jumps to the shell.
 - **Shell** (`src/c/shell.c`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
@@ -49,7 +49,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_character` (in stage 1 MBR) includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to INT 10h calls for the screen. The parser lives in stage 2; stage 1 includes a minimal variant (`ansi_minimal.asm`) used only for boot messages. `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1. `put_character` in `drivers/ansi.asm` includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to INT 10h calls for the screen. `put_string` and `serial_character` live in the same file.  Stage 1 does no string output; on boot it's BIOS text mode until stage 2 initialises the driver.  `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -95,9 +95,8 @@ renumbering is source-compatible — just rebuild.
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
 - `src/arch/x86/boot/bboeos.asm` — Top-level flat-binary entry; `%include`s `stage1.asm`, `stage2.asm`, then `arch/x86/kernel.asm` to aggregate every kernel subsystem after the boot handoff
-- `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): boot init, loads stage 2 via BIOS INT 13h, saves boot geometry
-- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (`pic_remap` + driver inits, loads shell via VFS), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
-- `src/arch/x86/boot/ansi_minimal.asm` — Minimal ANSI parser used only by stage 1 (the full parser is in `drivers/ansi.asm`)
+- `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): set DS/ES/SS:SP, reset disk, load stage 2 via BIOS INT 13h, jump to `boot_shell`.  On error prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init
+- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (kernel init → welcome banner → driver inits → VFS load of the shell), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
 - `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
 - `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
 - `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)

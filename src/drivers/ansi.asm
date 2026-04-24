@@ -210,6 +210,37 @@ put_character:
         call vga_write_attribute
         jmp .done
 
+put_string:
+        ;; Print null-terminated string at DS:SI via put_character
+        ;; (ANSI-aware).  Preserves AX.
+        push ax
+.loop:
+        lodsb
+        test al, al
+        jz .done
+        call put_character
+        jmp .loop
+.done:
+        pop ax
+        ret
+
+serial_character:
+        ;; Write AL to COM1.  Polls LSR.THRE first.  Preserves AX, DX.
+        push ax
+        push dx
+        push ax
+        mov dx, 3FDh            ; LSR
+.wait:
+        in al, dx
+        test al, 20h            ; THRE
+        jz .wait
+        pop ax
+        mov dx, 3F8h            ; data port
+        out dx, al
+        pop dx
+        pop ax
+        ret
+
         ;; Parser state (stage 2)
         ansi_state db 0
         ansi_fg db 7

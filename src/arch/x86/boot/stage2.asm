@@ -20,6 +20,17 @@
         jmp near shared_write_stdout
 
 boot_shell:
+        ;; Kernel init — moved up from stage 1 so the full console driver
+        ;; is available for the welcome banner and so the MBR stays
+        ;; focused on loading stage 2.
+        call pic_remap          ; master → 0x20..0x27, slave → 0x28..0x2F, all masked
+        call rtc_tick_init      ; install IRQ 0 handler, zero system_ticks
+        call install_syscalls
+        call network_initialize ; probe NIC once; sets net_present on success
+
+        mov si, WELCOME
+        call put_string
+
         call vga_font_load      ; load ROM 8x16 font into plane 2 offset 0x4000 before any mode 13h switch corrupts plane 2
         call ps2_init           ; mask BIOS IRQ 1 before anyone reads keys
         cmp byte [boot_disk], 80h
@@ -76,3 +87,4 @@ bss_setup:
         shell_sp dw 0
         SHELL_ERROR db `Shell not found\n\0`
         SHELL_NAME db `bin/shell\0`
+        WELCOME db `Welcome to BBoeOS!\nVersion 0.6.0 (2026/04/21)\n\0`

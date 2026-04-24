@@ -1,91 +1,63 @@
+;;; ------------------------------------------------------------------------
+;;; stage1.asm — 512-byte MBR.
+;;;
+;;; Minimal boot loader: set up segments + stack, load stage 2 from the
+;;; boot device via BIOS INT 13h, jump into stage 2.  All kernel init
+;;; (pic_remap, rtc_tick_init, install_syscalls, network_initialize) and
+;;; the user-visible welcome message run from stage 2's `boot_shell` so
+;;; they can use the full console driver (drivers/ansi.asm) instead of
+;;; something that has to fit inside 512 bytes.
+;;;
+;;; On disk error we print a single '!' via INT 10h AH=0Eh and halt; the
+;;; character is enough to distinguish "MBR booted but couldn't read
+;;; stage 2" from "MBR didn't load at all" without pulling a string
+;;; printer into the MBR.
+;;; ------------------------------------------------------------------------
+
 start:
-        ;; Set initial state
         xor ax, ax
         mov ds, ax
         mov es, ax
         mov [boot_disk], dl
 
-        ;; Dedicated stack segment: SS=0x9000, SP=0xFFF0 puts the stack in
-        ;; the top 64 KB of conventional memory (linear 0x90000-0x9FFF0),
-        ;; physically isolated from SECTOR_BUFFER, NET_RECEIVE_BUFFER, the kernel,
-        ;; and every program buffer in segment 0.  The stack owns its
-        ;; entire segment and can never collide with data memory.
-        cli                     ; Disable interrupts while adjusting stack
+        ;; Dedicated stack at SS=0x9000, SP=0xFFF0 (linear 0x90000-0x9FFF0)
+        ;; owns its entire segment and can never collide with the
+        ;; kernel, disk buffers, or loaded programs in segment 0.
+        cli
         mov ax, 9000h
         mov ss, ax
         mov sp, 0FFF0h
-        xor ax, ax              ; restore AX=0 for callers below
-        sti                     ; Enable interrupts
+        sti
 
-        call clear_screen
-        mov si, WELCOME
-        call put_string
-
+        ;; Reset disk controllers before the first read; defensive on
+        ;; real hardware, no-op on QEMU.
         xor ax, ax
-        int 13h                 ; reset disk
+        int 13h
         jc .error
 
-        ;; Query drive geometry for LBA-to-CHS conversion
-        push es                 ; INT 13h AH=08h clobbers ES:DI
-        mov ah, 08h
-        mov dl, [boot_disk]
-        int 13h                 ; CH=max cyl low, CL=max sector|cyl high, DH=max head
-        pop es
-        jc .default_geo         ; fallback if query fails
-        mov al, cl
-        and al, 3Fh             ; sectors per track (bits 0-5 of CL)
-        mov [sectors_per_track], al
-        inc dh                  ; max head is 0-based, convert to count
-        mov [heads_per_cylinder], dh
-        jmp .geo_done
-        .default_geo:
-        mov byte [sectors_per_track], 63
-        mov byte [heads_per_cylinder], 16
-        .geo_done:
-
+        ;; Read STAGE2_SECTORS sectors at CHS (cyl=0, head=0, sector=2)
+        ;; into linear 0x7E00 (segment 0, offset 0x7E00 via ES=0 / BX).
         mov ax, 0200h | STAGE2_SECTORS
-        mov bx, 7E00h           ; 0x7C00 + 512
-        mov cx, 2               ; start at cylinder 0 sector 2
-        mov dh, 0               ; start at head 0
+        mov bx, 7E00h
+        mov cx, 2
+        mov dh, 0
         mov dl, [boot_disk]
-        int 13h                 ; read
-
+        int 13h
         jc .error
         cmp al, STAGE2_SECTORS
         jne .error
 
-        call pic_remap          ; master → 0x20..0x27, slave → 0x28..0x2F, all masked
-        call rtc_tick_init      ; install IRQ 0 handler, zero system_ticks
-        call install_syscalls
-        call network_initialize ; probe NIC once; sets net_present on success
         jmp boot_shell
 
         .error:
-        mov si, DISK_FAILURE
-        call put_string
-
+        mov ax, 0E00h | '!'
+        xor bx, bx
+        int 10h
         .halt:
         hlt
         jmp .halt
 
-clear_screen:
-        push ax
-        mov ax, 03h
-        int 10h                 ; Set 80x25 color text mode
-        pop ax
-        ret
-
-%include "ansi_minimal.asm"
-
-        ;; Variables
         boot_disk db 0
-        heads_per_cylinder db 16
-        sectors_per_track db 63
 
-        ;; Strings
-        DISK_FAILURE db `Disk failure\n\0`
-        WELCOME db `Welcome to BBoeOS!\nVersion 0.6.0 (2026/04/21)\n\0`
-
-        ;; End of MBR
-        times 510-($-$$) db 0   ; Pad remainder of boot sector with 0s
-        dw 0AA55h               ; The standard PC boot signature
+        times 510-($-$$) db 0
+        dw 0AA55h
