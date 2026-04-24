@@ -38,3 +38,10 @@
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
 %include "init.asm"                     ; kernel_init (called from boot_shell)
+
+        ;; Pmode flip: 16→32-bit mode switch + 32-bit IDT + post-flip entry.
+        ;; boot_shell jumps to `enter_protected_mode` after real-mode init
+        ;; completes; control resumes at `protected_mode_entry`.
+%include "boot/stage1_5.asm"            ; enter_protected_mode + 32-bit GDT
+%include "idt.asm"                      ; 32-bit IDT + exception stubs + idt_install
+%include "entry.asm"                    ; protected_mode_entry (halts for now)
