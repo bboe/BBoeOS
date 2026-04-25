@@ -143,6 +143,37 @@ directory_sector dw 0           ; stage2_sectors + 1; set at boot, read by bbfs
 stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
         dw 0AA55h
 
+[bits 32]
+        ;; Kernel jump table at FUNCTION_TABLE (= 0x7E00 — the byte
+        ;; immediately after the MBR signature).  Each slot is a 5-byte
+        ;; `jmp strict near` so the stride matches constants.asm's FUNCTION_*
+        ;; offsets.  Programs `jmp FUNCTION_DIE` etc. and land here; the
+        ;; stubs tail-call into the ported shared_* helpers in lib/proc.asm.
+        ;; Slots whose body isn't ported yet point at shared_not_impl,
+        ;; which halts — misuse is noisy rather than silent.
+        ;;
+        ;; Asserts the table starts exactly at FUNCTION_TABLE: zero bytes
+        ;; emitted in the normal case, but if the MBR ever overflows 512
+        ;; bytes the count goes negative and NASM fails the build instead
+        ;; of silently sliding the table.  Section-relative form so NASM
+        ;; can fold the expression to a constant.
+        times (FUNCTION_TABLE - 7C00h) - ($ - $$) db 0
+function_table:
+        jmp strict near shared_die              ; FUNCTION_DIE
+        jmp strict near shared_exit             ; FUNCTION_EXIT
+        jmp strict near shared_get_character    ; FUNCTION_GET_CHARACTER
+        jmp strict near shared_not_impl         ; FUNCTION_PARSE_ARGV
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_BYTE_DECIMAL
+        jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_DATETIME
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_DECIMAL
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_HEX
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_IP
+        jmp strict near shared_not_impl         ; FUNCTION_PRINT_MAC
+        jmp strict near shared_print_string     ; FUNCTION_PRINT_STRING
+        jmp strict near shared_printf           ; FUNCTION_PRINTF
+        jmp strict near shared_write_stdout     ; FUNCTION_WRITE_STDOUT
+
         ;; GDT descriptors. Encoded by hand rather than via `dq` math so the
         ;; field meanings stay visible to a reader.
         align 8
@@ -172,7 +203,6 @@ pmode_gdtr:
         dw pmode_gdt_end - pmode_gdt_start - 1
         dd pmode_gdt_start
 
-[bits 32]
 %include "drivers/ata.asm"              ; ATA PIO disk driver
 %include "drivers/console.asm"          ; ANSI escape parser + VGA output
 %include "drivers/fdc.asm"              ; floppy DMA + IRQ 6 driver
@@ -181,11 +211,13 @@ pmode_gdtr:
 %include "drivers/rtc.asm"              ; system_ticks / PIT constants
 %include "drivers/serial.asm"           ; serial_character / serial_getc (COM1)
 %include "drivers/vga.asm"              ; VGA text driver (32-bit flat addressing)
+%include "entry.asm"                    ; protected_mode_entry + post-flip init
 %include "fs/block.asm"                 ; read_sector / write_sector dispatch
 %include "fs/fd.kasm"                   ; fd table + per-type backends
 %include "fs/vfs.asm"                   ; VFS dispatch + bbfs + ext2
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
-%include "entry.asm"                    ; protected_mode_entry + post-flip init
+%include "lib/print.asm"                ; shared_print_* / shared_printf / shared_write_stdout
+%include "lib/proc.asm"                 ; shared_die / shared_exit / shared_get_character / shared_not_impl
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
 
