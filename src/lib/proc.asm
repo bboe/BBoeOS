@@ -1,28 +1,60 @@
+;;; ---------------------------------------------------------------------
+;;; proc.asm — shared kernel helpers jumped to from user programs via the
+;;; FUNCTION_TABLE (see arch/x86/boot/bboeos.asm).  The table sits at
+;;; 0x7E00 with 5-byte `jmp strict near` slots; entries here define the
+;;; targets.
+;;;
+;;; Only the ones needed by the current program set are ported — the rest
+;;; stub to shared_not_impl (halt) for now, and the 16-bit originals are
+;;; preserved under `%if 0` at the bottom of the file for future porters.
+;;; ---------------------------------------------------------------------
+
 shared_die:
-        ;; Write CX bytes from SI to stdout, then exit
-        call shared_write_stdout
+        ;; SI = message, CX = length (cc.py's `jmp FUNCTION_DIE` shape).
+        ;; Writes to stdout, then falls through to shared_exit — never
+        ;; returns.  Mirrors the 16-bit `call shared_write_stdout; fall
+        ;; through` so cc.py's terminal printf optimisation works under
+        ;; the pmode kernel without changes.
+        mov bx, STDOUT
+        mov ah, SYS_IO_WRITE
+        int 30h
+        ;; Fall through.
+
 shared_exit:
-        ;; Exit program (reload shell)
-        mov ah, SYS_EXIT
+        ;; SYS_EXIT never returns.  The kernel restores its own ESP from
+        ;; shell_esp and jumps wherever it pleases (the echo loop today,
+        ;; eventually `shell_reload` to respawn the shell), so the stack
+        ;; state at the moment of `int 30h` doesn't matter.  Programs
+        ;; can `jmp FUNCTION_EXIT` from any call depth and be cleanly
+        ;; torn down.
+        mov ah, SYS_SYS_EXIT
         int 30h
 
 shared_get_character:
-        ;; Read one byte from stdin via read syscall
-        ;; Returns: AL = byte read
-        push bx
-        push cx
-        push di
+        ;; Read one byte from stdin via SYS_IO_READ and return it in AL.
+        ;; Preserves EBX, ECX, EDI.
+        push ebx
+        push ecx
+        push edi
         mov bx, STDIN
-        mov di, SECTOR_BUFFER
-        mov cx, 1
+        mov edi, SECTOR_BUFFER
+        mov ecx, 1
         mov ah, SYS_IO_READ
         int 30h
-        pop di
-        pop cx
-        pop bx
         mov al, [SECTOR_BUFFER]
+        pop edi
+        pop ecx
+        pop ebx
         ret
 
+shared_not_impl:
+        ;; Placeholder for jump-table slots whose shared_* body hasn't
+        ;; been ported yet.  Halt so misuse is noisy.
+        cli
+        hlt
+        jmp $-1
+
+%if 0   ; 16-bit original — kept for reference until the rest of lib/ is ported
 shared_parse_argv:
         ;; Split [EXEC_ARG] at spaces into an argv-style pointer array.
         ;; Input:  DI = buffer for argv pointers (caller-provided)
@@ -56,3 +88,4 @@ shared_parse_argv:
         jmp .parse_argv_scan
         .parse_argv_done:
         ret
+%endif
