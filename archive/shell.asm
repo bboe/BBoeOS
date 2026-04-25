@@ -69,7 +69,7 @@ prompt:
 .not_found:
         ;; Try to execute as external program by literal name
         mov si, BUFFER
-        mov ah, SYS_EXEC
+        mov ah, SYS_SYS_EXEC
         int 30h                 ; Does not return on success
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
@@ -90,7 +90,7 @@ prompt:
         .copy_done:
         mov byte [di], 0        ; ensure null-termination
         mov si, exec_path
-        mov ah, SYS_EXEC
+        mov ah, SYS_SYS_EXEC
         int 30h                 ; Does not return on success
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
@@ -134,11 +134,11 @@ cmd_help:
         ret
 
 cmd_reboot:
-        mov ah, SYS_REBOOT
+        mov ah, SYS_SYS_REBOOT
         jmp syscall_null
 
 cmd_shutdown:
-        mov ah, SYS_SHUTDOWN
+        mov ah, SYS_SYS_SHUTDOWN
         int 30h
         mov si, SHUTDOWN_FAIL
         ret
@@ -249,7 +249,7 @@ read_line:
         jmp .return
 
         .ctrl_d:
-        mov ah, SYS_SHUTDOWN
+        mov ah, SYS_SYS_SHUTDOWN
         int 30h
         jmp .read_char          ; If shutdown fails, continue
 
