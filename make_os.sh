@@ -29,5 +29,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+python3 cc.py --bits 32 src/c/hello.c build/hello.asm || exit 1
+nasm -f bin -i src/include/ -o hello build/hello.asm || exit 1
+
+python3 cc.py --bits 32 src/c/shell.c build/shell.asm || exit 1
+nasm -f bin -i src/include/ -o shell build/shell.asm || exit 1
+
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
+./add_file.py --mkdir --image "$IMAGE" bin || exit 1
+./add_file.py -x --image "$IMAGE" hello || exit 1
+./add_file.py -x -d bin --image "$IMAGE" shell || exit 1
