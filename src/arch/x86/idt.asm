@@ -133,14 +133,6 @@ exc_puthex:
         add al, '0'
         jmp exc_putc
 
-int30_handler:
-        ;; Placeholder pmode INT 30h gate.  The widened syscall handler
-        ;; replaces this once the kernel moves to 32-bit (phase 4+).
-        cli
-        .halt:
-        hlt
-        jmp .halt
-
         ;; ----- IDT data -----
         ;; Vectors 0..31: CPU exceptions. Vectors 32..47: reserved for
         ;; remapped IRQs (filled in later by entry.asm via idt_set_gate32).
@@ -182,7 +174,7 @@ idt_start:
         ;; not-present (all zeros) — a stray IRQ before they're filled in
         ;; will #GP, which lands in exc_common with exception 13.
         times (0x30 - 32) * 8 db 0
-        IDT_ENTRY int30_handler         ; vector 0x30
+        IDT_ENTRY syscall_handler       ; vector 0x30 (INT 30h syscall gate)
 idt_end:
 
 idtr:

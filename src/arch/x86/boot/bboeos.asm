@@ -186,5 +186,7 @@ pmode_gdtr:
 %include "fs/vfs.asm"                   ; VFS dispatch + bbfs + ext2
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "entry.asm"                    ; protected_mode_entry + post-flip init
+%include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
+%include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
 
 kernel_end:
