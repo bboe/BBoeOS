@@ -140,7 +140,7 @@ class X86CodegenTarget(CodegenTarget):
 
     #: BBoeOS kernel ABI: every syscall uses ``int 30h``.
     SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
-        "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
+        "EXEC": ("mov ah, SYS_SYS_EXEC", "int 30h"),
         "FS_CHMOD": ("mov ah, SYS_FS_CHMOD", "int 30h"),
         "FS_MKDIR": ("mov ah, SYS_FS_MKDIR", "int 30h"),
         "FS_RENAME": ("mov ah, SYS_FS_RENAME", "int 30h"),
@@ -156,12 +156,12 @@ class X86CodegenTarget(CodegenTarget):
         "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),
         "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
         "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
-        "REBOOT": ("mov ah, SYS_REBOOT", "int 30h"),
+        "REBOOT": ("mov ah, SYS_SYS_REBOOT", "int 30h"),
         "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
         "RTC_MILLIS": ("mov ah, SYS_RTC_MILLIS", "int 30h"),
         "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
         "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
-        "SHUTDOWN": ("mov ah, SYS_SHUTDOWN", "int 30h"),
+        "SHUTDOWN": ("mov ah, SYS_SYS_SHUTDOWN", "int 30h"),
     }
     syscall_sequences = SYSCALL_SEQUENCES
 
