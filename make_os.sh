@@ -29,14 +29,24 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-python3 cc.py --bits 32 src/c/hello.c build/hello.asm || exit 1
-nasm -f bin -i src/include/ -o hello build/hello.asm || exit 1
+# Curated list of pmode-ready user programs.  A program belongs here once
+# every FUNCTION_TABLE slot it calls (see src/include/constants.asm) is
+# routed to a real ported helper rather than `shared_not_impl` — otherwise
+# invoking it halts the kernel.  Programs that need PARSE_ARGV /
+# PRINT_DATETIME / PRINT_IP / PRINT_MAC / PRINT_BYTE_DECIMAL / PRINT_HEX /
+# PRINT_DECIMAL stay out of this list until those helpers are ported.
+PROGRAMS="asmesc bits booltest cftest draw fctest gdemo gtable hello inctest loop pintest shell uptime"
 
-python3 cc.py --bits 32 src/c/shell.c build/shell.asm || exit 1
-nasm -f bin -i src/include/ -o shell build/shell.asm || exit 1
+PBUILD=build/c
+rm -rf "$PBUILD" && mkdir -p "$PBUILD"
+for name in $PROGRAMS; do
+    python3 cc.py --bits 32 "src/c/$name.c" "$PBUILD/$name.asm" || exit 1
+    nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || exit 1
+done
 
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
 ./add_file.py --mkdir --image "$IMAGE" bin || exit 1
-./add_file.py -x --image "$IMAGE" hello || exit 1
-./add_file.py -x -d bin --image "$IMAGE" shell || exit 1
+for name in $PROGRAMS; do
+    ./add_file.py -x -d bin --image "$IMAGE" "$PBUILD/$name" || exit 1
+done
