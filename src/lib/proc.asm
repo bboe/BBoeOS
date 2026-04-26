@@ -3,10 +3,6 @@
 ;;; FUNCTION_TABLE (see arch/x86/boot/bboeos.asm).  The table sits at
 ;;; 0x7E00 with 5-byte `jmp strict near` slots; entries here define the
 ;;; targets.
-;;;
-;;; Only the ones needed by the current program set are ported — the rest
-;;; stub to shared_not_impl (halt) for now, and the 16-bit originals are
-;;; preserved under `%if 0` at the bottom of the file for future porters.
 ;;; ---------------------------------------------------------------------
 
 shared_die:
@@ -46,13 +42,6 @@ shared_get_character:
         pop ecx
         pop ebx
         ret
-
-shared_not_impl:
-        ;; Placeholder for jump-table slots whose shared_* body hasn't
-        ;; been ported yet.  Halt so misuse is noisy.
-        cli
-        hlt
-        jmp $-1
 
 shared_parse_argv:
         ;; Split [EXEC_ARG] (a dword pointer to the raw argument string)
