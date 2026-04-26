@@ -38,11 +38,17 @@ syscall_handler:
         pushad
 
         ;; AH lives at the second byte of the saved EAX slot.  movzx so the
-        ;; jump-table index is a clean 0..255.
+        ;; jump-table index is a clean 0..255.  Look up the handler address,
+        ;; push it on the stack, then restore EAX from the saved slot so
+        ;; handlers see the user's full EAX (specifically AL — fs_chmod /
+        ;; io_open / io_ioctl / net_open all read flags from AL).  ret
+        ;; pops the handler address and jumps to it.
         movzx eax, byte [esp + SYSCALL_SAVED_EAX + 1]
         cmp eax, SYSCALL_COUNT
         jae .iret_invalid
-        jmp [.table + eax*4]
+        push dword [.table + eax*4]
+        mov eax, [esp + 4 + SYSCALL_SAVED_EAX]  ; +4 accounts for the push above
+        ret
 
         .iret_invalid:
         ;; Out-of-range syscall: surface CF=1 and AX=-1 like a kernel error.
