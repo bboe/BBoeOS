@@ -148,9 +148,8 @@ stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on
         ;; immediately after the MBR signature).  Each slot is a 5-byte
         ;; `jmp strict near` so the stride matches constants.asm's FUNCTION_*
         ;; offsets.  Programs `jmp FUNCTION_DIE` etc. and land here; the
-        ;; stubs tail-call into the ported shared_* helpers in lib/proc.asm.
-        ;; Slots whose body isn't ported yet point at shared_not_impl,
-        ;; which halts — misuse is noisy rather than silent.
+        ;; stubs tail-call into the ported shared_* helpers in lib/proc.asm
+        ;; and lib/print.asm.
         ;;
         ;; Asserts the table starts exactly at FUNCTION_TABLE: zero bytes
         ;; emitted in the normal case, but if the MBR ever overflows 512
@@ -163,13 +162,13 @@ function_table:
         jmp strict near shared_exit             ; FUNCTION_EXIT
         jmp strict near shared_get_character    ; FUNCTION_GET_CHARACTER
         jmp strict near shared_parse_argv       ; FUNCTION_PARSE_ARGV
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_BYTE_DECIMAL
+        jmp strict near shared_print_byte_decimal ; FUNCTION_PRINT_BYTE_DECIMAL
         jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_DATETIME
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_DECIMAL
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_HEX
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_IP
-        jmp strict near shared_not_impl         ; FUNCTION_PRINT_MAC
+        jmp strict near shared_print_datetime   ; FUNCTION_PRINT_DATETIME
+        jmp strict near shared_print_decimal    ; FUNCTION_PRINT_DECIMAL
+        jmp strict near shared_print_hex        ; FUNCTION_PRINT_HEX
+        jmp strict near shared_print_ip         ; FUNCTION_PRINT_IP
+        jmp strict near shared_print_mac        ; FUNCTION_PRINT_MAC
         jmp strict near shared_print_string     ; FUNCTION_PRINT_STRING
         jmp strict near shared_printf           ; FUNCTION_PRINTF
         jmp strict near shared_write_stdout     ; FUNCTION_WRITE_STDOUT
@@ -217,7 +216,7 @@ pmode_gdtr:
 %include "fs/vfs.asm"                   ; VFS dispatch + bbfs + ext2
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "lib/print.asm"                ; shared_print_* / shared_printf / shared_write_stdout
-%include "lib/proc.asm"                 ; shared_die / shared_exit / shared_get_character / shared_not_impl
+%include "lib/proc.asm"                 ; shared_die / shared_exit / shared_get_character / shared_parse_argv
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
 

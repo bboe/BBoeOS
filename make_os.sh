@@ -29,13 +29,11 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Curated list of pmode-ready user programs.  A program belongs here once
-# every FUNCTION_TABLE slot it calls (see src/include/constants.asm) is
-# routed to a real ported helper rather than `shared_not_impl` — otherwise
-# invoking it halts the kernel.  Programs that need PARSE_ARGV /
-# PRINT_DATETIME / PRINT_IP / PRINT_MAC / PRINT_BYTE_DECIMAL / PRINT_HEX /
-# PRINT_DECIMAL stay out of this list until those helpers are ported.
-PROGRAMS="asmesc bits booltest cat cftest chmod cp draw echo fctest gdemo gtable hello inctest loop loop_array ls mkdir mv pintest rm rmdir shell uptime"
+# Curated list of pmode-ready user programs.  arp / dns / netinit /
+# netrecv / netsend / ping stay out of the list until ne2k.asm and
+# net/*.asm get ported to 32-bit and `network_initialize` runs from
+# `protected_mode_entry`.
+PROGRAMS="asmesc bits booltest cat cftest chmod cp date draw echo fctest gdemo gtable hello inctest loop loop_array ls mkdir mv pintest rm rmdir shell uptime"
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"

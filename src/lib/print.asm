@@ -1,45 +1,37 @@
 ;;; ---------------------------------------------------------------------
 ;;; print.asm — pmode user-side print helpers, jumped to via FUNCTION_TABLE
-;;; from cc.py-emitted code.
-;;;
-;;; Helpers stay in their original alphabetical positions.  The ones cc.py
-;;; needs for the current program set (`shared_print_character`,
-;;; `shared_print_string`, `shared_printf`, `shared_write_stdout`) carry
-;;; pmode bodies.  The rest keep their 16-bit bodies wrapped in `%if 0`
-;;; so a future port can diff against the original in place; the jump
-;;; table routes those slots through `shared_not_impl` (halt) until the
-;;; body lands.
+;;; from cc.py-emitted code.  Helpers stay in alphabetical order.
 ;;; ---------------------------------------------------------------------
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_byte_decimal:
-        ;; Print AL as 1-3 digit decimal (no leading zeros)
-        push ax
-        push bx
-        push cx
+        ;; AL = byte: print 1-3 decimal digits, no leading zeros.
+        ;; Preserves EAX, EBX, ECX (everything else through
+        ;; shared_print_character).
+        push eax
+        push ebx
+        push ecx
         xor ah, ah
-        xor bx, bx             ; Digit count
+        xor ebx, ebx                    ; digit count
         mov cl, 10
         .div_loop:
-        div cl                 ; AL = quotient, AH = remainder
-        push ax
-        inc bx
+        div cl                          ; AL = quotient, AH = remainder
+        push eax
+        inc ebx
         test al, al
         jz .print_digits
         xor ah, ah
         jmp .div_loop
         .print_digits:
-        pop ax
+        pop eax
         mov al, ah
         add al, '0'
         call shared_print_character
-        dec bx
+        dec ebx
         jnz .print_digits
-        pop cx
-        pop bx
-        pop ax
+        pop ecx
+        pop ebx
+        pop eax
         ret
-%endif
 
 shared_print_character:
         ;; AL = byte to write to stdout.  Preserves all registers.
@@ -59,18 +51,18 @@ shared_print_character:
         pop eax
         ret
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_datetime:
-        ;; Input: DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
-        ;; Prints: YYYY-MM-DD HH:MM:SS (no trailing newline).
-        ;; Full Gregorian leap rule. Valid through year 2106.
+        ;; DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
+        ;; Prints YYYY-MM-DD HH:MM:SS (no trailing newline).
+        ;; Full Gregorian leap rule.  Valid through year 2106 (32-bit
+        ;; epoch overflow).  Preserves EAX, EBX, ECX, EDX, ESI.
         push eax
         push ebx
         push ecx
         push edx
-        push si
+        push esi
 
-        ;; Combine DX:AX into EAX (zero-extend AX, shift DX into high 16).
+        ;; Combine DX:AX into a single 32-bit EAX.
         movzx ebx, ax
         movzx edx, dx
         shl edx, 16
@@ -79,26 +71,26 @@ shared_print_datetime:
 
         mov ecx, 86400
         xor edx, edx
-        div ecx                 ; EAX = day count, EDX = seconds within day
+        div ecx                         ; EAX = days, EDX = seconds within day
         mov [.pd_days], eax
         mov eax, edx
 
         mov ecx, 3600
         xor edx, edx
-        div ecx                 ; EAX = hours, EDX = seconds within hour
+        div ecx                         ; EAX = hours, EDX = seconds within hour
         mov [.pd_hours], al
         mov eax, edx
 
         mov ecx, 60
         xor edx, edx
-        div ecx                 ; EAX = minutes, EDX = seconds
+        div ecx                         ; EAX = minutes, EDX = seconds
         mov [.pd_minutes], al
         mov [.pd_seconds], dl
 
         ;; Walk years from 1970, peeling off 365 or 366 days each time.
-        mov bx, 1970
+        mov ebx, 1970
         .pd_year_loop:
-        mov ax, bx
+        mov eax, ebx
         call .pd_is_leap
         jz .pd_year_leap
         mov ecx, 365
@@ -109,32 +101,31 @@ shared_print_datetime:
         cmp [.pd_days], ecx
         jb .pd_year_done
         sub [.pd_days], ecx
-        inc bx
+        inc ebx
         jmp .pd_year_loop
         .pd_year_done:
         mov [.pd_year], bx
 
         ;; Walk months within the year.
-        mov cx, 1               ; CX = candidate month (1..12)
+        mov ecx, 1                      ; ECX = candidate month (1..12)
         .pd_month_loop:
-        mov bx, cx
-        dec bx
-        shl bx, 1
-        movzx eax, word [.pd_month_lengths + bx]
-        cmp cx, 2
+        mov ebx, ecx
+        dec ebx
+        shl ebx, 1
+        movzx eax, word [.pd_month_lengths + ebx]
+        cmp ecx, 2
         jne .pd_month_len_ready
-        push ax
-        mov ax, [.pd_year]
+        push eax
+        movzx eax, word [.pd_year]
         call .pd_is_leap
-        pop ax
+        pop eax
         jnz .pd_month_len_ready
-        movzx eax, ax
-        inc eax                 ; February in leap year = 29
+        inc eax                         ; February in leap year = 29
         .pd_month_len_ready:
         cmp [.pd_days], eax
         jb .pd_month_done
         sub [.pd_days], eax
-        inc cx
+        inc ecx
         jmp .pd_month_loop
         .pd_month_done:
         mov [.pd_month], cl
@@ -143,7 +134,7 @@ shared_print_datetime:
         mov [.pd_day], al
 
         ;; Emit YYYY-MM-DD HH:MM:SS
-        mov ax, [.pd_year]
+        movzx eax, word [.pd_year]
         call .pd_print_4digit
         mov al, '-'
         call shared_print_character
@@ -166,7 +157,7 @@ shared_print_datetime:
         mov al, [.pd_seconds]
         call shared_print_decimal
 
-        pop si
+        pop esi
         pop edx
         pop ecx
         pop ebx
@@ -174,65 +165,66 @@ shared_print_datetime:
         ret
 
         .pd_print_4digit:
-        ;; AX = value 0..9999. Print 4 zero-padded decimal digits.
-        push bx
-        push dx
-        xor dx, dx
-        mov bx, 1000
-        div bx
+        ;; EAX = value 0..9999.  Print 4 zero-padded decimal digits.
+        push ebx
+        push edx
+        xor edx, edx
+        mov ebx, 1000
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
-        xor dx, dx
-        mov bx, 100
-        div bx
+        mov eax, edx
+        xor edx, edx
+        mov ebx, 100
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
-        xor dx, dx
-        mov bx, 10
-        div bx
+        mov eax, edx
+        xor edx, edx
+        mov ebx, 10
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
+        mov eax, edx
         add al, '0'
         call shared_print_character
-        pop dx
-        pop bx
+        pop edx
+        pop ebx
         ret
 
         .pd_is_leap:
-        ;; AX = year. Returns ZF=1 if leap, ZF=0 otherwise. Clobbers AX, DX.
-        push cx
-        push ax
-        xor dx, dx
-        mov cx, 4
-        div cx
-        test dx, dx
+        ;; EAX = year.  Returns ZF=1 if leap, ZF=0 otherwise.
+        ;; Clobbers EAX, EDX.
+        push ecx
+        push eax
+        xor edx, edx
+        mov ecx, 4
+        div ecx
+        test edx, edx
         jnz .pd_leap_no
-        pop ax
-        push ax
-        xor dx, dx
-        mov cx, 100
-        div cx
-        test dx, dx
+        pop eax
+        push eax
+        xor edx, edx
+        mov ecx, 100
+        div ecx
+        test edx, edx
         jnz .pd_leap_yes
-        pop ax
-        push ax
-        xor dx, dx
-        mov cx, 400
-        div cx
-        test dx, dx
+        pop eax
+        push eax
+        xor edx, edx
+        mov ecx, 400
+        div ecx
+        test edx, edx
         jnz .pd_leap_no
         .pd_leap_yes:
-        pop ax
-        pop cx
-        xor ax, ax              ; ZF=1
+        pop eax
+        pop ecx
+        xor eax, eax                    ; ZF=1
         ret
         .pd_leap_no:
-        pop ax
-        pop cx
-        or ax, 1                ; ZF=0
+        pop eax
+        pop ecx
+        or eax, 1                       ; ZF=0
         ret
 
         .pd_month_lengths:
@@ -244,34 +236,31 @@ shared_print_datetime:
         .pd_hours:   db 0
         .pd_minutes: db 0
         .pd_seconds: db 0
-%endif
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_decimal:
-        ;; Print AL as 2 zero-padded decimal digits
-        aam                     ; AH = AL/10, AL = AL%10
-        xchg al, ah             ; AL = tens, AH = ones
-        push ax
+        ;; AL = byte 0..99: print 2 zero-padded decimal digits.
+        ;; aam still works in pmode (only invalid in long mode).
+        aam                             ; AH = AL/10, AL = AL%10
+        xchg al, ah                     ; AL = tens, AH = ones
+        push eax
         add al, '0'
         call shared_print_character
-        pop ax
+        pop eax
         mov al, ah
         add al, '0'
         call shared_print_character
         ret
-%endif
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_hex:
-        ;; Print AL as two uppercase hex digits
-        push ax
+        ;; AL = byte: print 2 uppercase hex digits.
+        push eax
         shr al, 4
         call .nibble
-        pop ax
-        push ax
+        pop eax
+        push eax
         and al, 0Fh
         call .nibble
-        pop ax
+        pop eax
         ret
         .nibble:
         cmp al, 10
@@ -283,49 +272,46 @@ shared_print_hex:
         .hex_print:
         call shared_print_character
         ret
-%endif
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_ip:
-        ;; Print 4-byte IP address as dotted decimal
-        ;; Input: SI = pointer to 4-byte IP
-        push ax
-        push cx
-        mov cx, 4
+        ;; ESI = pointer to 4-byte IP.  Print as dotted decimal.
+        ;; ESI advances 4 bytes (lodsb under cleared DF — cc.py's
+        ;; entry stub `cld`s before any inline string op).  Preserves
+        ;; EAX, ECX.
+        push eax
+        push ecx
+        mov ecx, 4
         .ip_loop:
         lodsb
         call shared_print_byte_decimal
-        dec cx
+        dec ecx
         jz .ip_done
         mov al, '.'
         call shared_print_character
         jmp .ip_loop
         .ip_done:
-        pop cx
-        pop ax
+        pop ecx
+        pop eax
         ret
-%endif
 
-%if 0   ; not yet ported — pmode body lands when cc.py emits this helper
 shared_print_mac:
-        ;; Print a 6-byte MAC address as XX:XX:XX:XX:XX:XX
-        ;; Input: SI = pointer to 6-byte MAC address
-        push ax
-        push cx
-        mov cx, 6
+        ;; ESI = pointer to 6-byte MAC.  Print as XX:XX:XX:XX:XX:XX.
+        ;; ESI advances 6 bytes.  Preserves EAX, ECX.
+        push eax
+        push ecx
+        mov ecx, 6
         .mac_loop:
         lodsb
         call shared_print_hex
-        dec cx
+        dec ecx
         jz .mac_done
         mov al, ':'
         call shared_print_character
         jmp .mac_loop
         .mac_done:
-        pop cx
-        pop ax
+        pop ecx
+        pop eax
         ret
-%endif
 
 shared_print_string:
         ;; DI = null-terminated string.  Computes length via repne scasb,
