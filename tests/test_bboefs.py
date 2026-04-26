@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import FLAG_DIRECTORY, SECTOR_SIZE, find_entry, read_assign  # noqa: E402
+from add_file import FLAG_DIRECTORY, SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = 30
@@ -41,7 +41,6 @@ def main() -> int:
     parser.add_argument("test", nargs="?", help="run only the named test")
     arguments = parser.parse_args()
 
-    directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
 
     tests = [
@@ -69,6 +68,7 @@ def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        directory_sector = compute_directory_sector(image_path=str(image))
         for name, test_function in tests:
             started = time.monotonic()
             try:

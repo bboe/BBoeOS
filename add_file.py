@@ -31,8 +31,35 @@ OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
+STAGE2_BYTES_OFFSET = 508  # offset of stage2_bytes word within the MBR
 _DD = shutil.which("dd") or "dd"
 _DEBUGFS = shutil.which("debugfs") or "debugfs"
+
+
+@contextmanager
+def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str, None, None]:
+    """Extract the ext2 partition to a temp file, yield its path, splice it back.
+
+    Yields
+    ------
+    str
+        Path to the temporary file containing only the ext2 partition.
+
+    """
+    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as f:
+        tmp = pathlib.Path(f.name)
+    try:
+        subprocess.run(
+            [_DD, f"if={image_path}", f"of={tmp}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
+            check=True,
+        )
+        yield str(tmp)
+        subprocess.run(
+            [_DD, f"if={tmp}", f"of={image_path}", "bs=512", f"seek={ext2_start_sector}", "conv=notrunc", "status=none"],
+            check=True,
+        )
+    finally:
+        tmp.unlink()
 
 
 def add_file(
@@ -62,7 +89,7 @@ def add_file(
         raise SystemExit(message)
     file_size = len(file_data)
 
-    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    ext2_start_sector = compute_directory_sector(image_path=image_path)
     if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
         ext2_add_file(
             executable=executable,
@@ -73,7 +100,7 @@ def add_file(
         )
         return
 
-    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sector = compute_directory_sector(image_path=image_path)
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
@@ -108,34 +135,25 @@ def add_file(
     print(f"Added '{relative_path}' ({file_size} bytes) at sector {next_data_sector}")
 
 
-def find_entry(
-    *,
-    directory_sectors: int,
-    directory_start_sector: int,
-    image: bytes | bytearray,
-    name: str,
-) -> tuple[int, int, int] | None:
-    """Return (flags, start_sector, size) for `name` in a directory, or None.
+def compute_directory_sector(*, image_path: str) -> int:
+    """Return the sector where the filesystem directory starts on disk.
+
+    NASM embeds stage2's byte count in the MBR at ``STAGE2_BYTES_OFFSET``
+    (little-endian word).  Stage1 reads the same word at boot to size the
+    disk-read; here we mirror its arithmetic: sectors = ceil(bytes / 512),
+    directory starts at sectors + 1 (right after stage2 on disk).
 
     Returns
     -------
-    tuple[int, int, int] | None
-        ``(flags, start_sector, size)`` if found, else ``None``.
+    int
+        The 1-based LBA where directory entries (bbfs) or the ext2
+        partition (ext2) begin.
 
     """
-    base = (directory_start_sector) * SECTOR_SIZE
-    target = name.encode()
-    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
-        if image[entry_offset] == 0:
-            continue
-        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00")
-        if entry_name != target:
-            continue
-        flags = image[entry_offset + OFFSET_FLAGS]
-        sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-        return (flags, sector, size)
-    return None
+    with pathlib.Path(image_path).open("rb") as file:
+        file.seek(STAGE2_BYTES_OFFSET)
+        stage2_bytes = struct.unpack("<H", file.read(2))[0]
+    return (stage2_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
 
 
 def compute_next_data_sector(
@@ -168,21 +186,6 @@ def compute_next_data_sector(
     return next_sector
 
 
-def entry_end_sector(*, entry_offset: int, image: bytearray) -> int:
-    """Return the first sector past the data for the given directory entry.
-
-    Returns
-    -------
-    int
-        Sector number immediately after the entry's data.
-
-    """
-    start = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
-    size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
-    sectors_used = (size + SECTOR_SIZE - 1) // SECTOR_SIZE
-    return start + sectors_used
-
-
 def detect_fs_type(*, ext2_start_sector: int, image_path: str) -> str:
     """Return "ext2" if the image has a valid ext2 superblock magic, else "bbfs".
 
@@ -205,30 +208,19 @@ def detect_fs_type(*, ext2_start_sector: int, image_path: str) -> str:
         return "ext2" if magic == EXT2_MAGIC else "bbfs"
 
 
-@contextmanager
-def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str, None, None]:
-    """Extract the ext2 partition to a temp file, yield its path, splice it back.
+def entry_end_sector(*, entry_offset: int, image: bytearray) -> int:
+    """Return the first sector past the data for the given directory entry.
 
-    Yields
-    ------
-    str
-        Path to the temporary file containing only the ext2 partition.
+    Returns
+    -------
+    int
+        Sector number immediately after the entry's data.
 
     """
-    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as f:
-        tmp = pathlib.Path(f.name)
-    try:
-        subprocess.run(
-            [_DD, f"if={image_path}", f"of={tmp}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
-            check=True,
-        )
-        yield str(tmp)
-        subprocess.run(
-            [_DD, f"if={tmp}", f"of={image_path}", "bs=512", f"seek={ext2_start_sector}", "conv=notrunc", "status=none"],
-            check=True,
-        )
-    finally:
-        tmp.unlink()
+    start = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
+    size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
+    sectors_used = (size + SECTOR_SIZE - 1) // SECTOR_SIZE
+    return start + sectors_used
 
 
 def ext2_add_file(
@@ -288,6 +280,36 @@ def ext2_make_directory(*, dirname: str, ext2_start_sector: int, image_path: str
             message = f"Error: debugfs mkdir failed:\n{result.stderr.decode()}"
             raise SystemExit(message)
     print(f"Created directory '{dirname}' [ext2]")
+
+
+def find_entry(
+    *,
+    directory_sectors: int,
+    directory_start_sector: int,
+    image: bytes | bytearray,
+    name: str,
+) -> tuple[int, int, int] | None:
+    """Return (flags, start_sector, size) for `name` in a directory, or None.
+
+    Returns
+    -------
+    tuple[int, int, int] | None
+        ``(flags, start_sector, size)`` if found, else ``None``.
+
+    """
+    base = (directory_start_sector) * SECTOR_SIZE
+    target = name.encode()
+    for entry_offset in iter_entries(base_offset=base, sector_count=directory_sectors):
+        if image[entry_offset] == 0:
+            continue
+        entry_name = bytes(image[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00")
+        if entry_name != target:
+            continue
+        flags = image[entry_offset + OFFSET_FLAGS]
+        sector = struct.unpack_from("<H", image, entry_offset + OFFSET_SECTOR)[0]
+        size = struct.unpack_from("<I", image, entry_offset + OFFSET_SIZE)[0]
+        return (flags, sector, size)
+    return None
 
 
 def find_free_entry(
@@ -432,12 +454,12 @@ def make_directory(*, dirname: str, image_path: str) -> None:
             message,
         )
 
-    ext2_start_sector = read_assign("EXT2_START_SECTOR")
+    ext2_start_sector = compute_directory_sector(image_path=image_path)
     if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
         ext2_make_directory(dirname=dirname, ext2_start_sector=ext2_start_sector, image_path=image_path)
         return
 
-    directory_sector = read_assign("DIRECTORY_SECTOR")
+    directory_sector = compute_directory_sector(image_path=image_path)
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
