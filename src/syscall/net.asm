@@ -1,12 +1,14 @@
         ;; ------------------------------------------------------------
         ;; Network syscalls.
         ;;
-        ;; net_mac and net_open touch only kernel code that's already
-        ;; linked in (ne2k.asm, fd_alloc).  net_recvfrom and net_sendto
-        ;; need the udp / icmp / ip stack that isn't pulled into the
-        ;; pmode kernel yet — they fail with CF set once they'd reach
-        ;; into the missing stack.  16-bit originals are preserved
-        ;; under `%if 0` so the port can pick up where they left off.
+        ;; net_recvfrom and net_sendto stage user buffers through
+        ;; SECTOR_BUFFER before calling the (still-16-bit-pointer)
+        ;; udp / icmp / ip stack.  The stack assumes its inputs live
+        ;; in low memory (NET_TRANSMIT_BUFFER, kernel statics, etc.)
+        ;; and stores them in 16-bit slots — passing a 32-bit user
+        ;; stack pointer directly truncates the high half.  Staging
+        ;; sidesteps that until the net protocol files get their own
+        ;; pmode port.
         ;; ------------------------------------------------------------
 
         .net_mac:
@@ -57,128 +59,121 @@
         .net_open_type db 0
 
         .net_recvfrom:
-        ;; BX = fd, DI = buf, CX = max len, DX = local port.  The actual
-        ;; receive path needs the net stack; until it's ported we just
-        ;; surface CF=1 after a fd_lookup sanity check.
-        call fd_lookup
-        jc .net_recv_err
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_UDP
-        je .net_recv_err
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_ICMP
-        je .net_recv_err
-        .net_recv_err:
-        stc
-        jmp .iret_cf
-
-%if 0   ; 16-bit original — kept for reference until the net stack lands
-        .net_recvfrom:
         ;; Receive datagram via fd.
-        ;;   UDP (FD_TYPE_UDP):  BX=fd, DI=recv buf, CX=max len, DX=local_port
-        ;;   ICMP (FD_TYPE_ICMP): BX=fd, DI=recv buf, CX=max len, DX ignored
-        mov [.rf_buf], di
-        mov [.rf_max], cx
+        ;;   UDP (FD_TYPE_UDP):  BX=fd, EDI=recv buf, ECX=max len, DX=local_port
+        ;;   ICMP (FD_TYPE_ICMP): same shape; DX ignored
+        mov [.rf_buf], edi
+        mov [.rf_max], ecx
         mov [.rf_port], dx
-        call fd_lookup                          ; SI = entry pointer
-        jc .net_recvfrom_none
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
+        call fd_lookup                          ; ESI = entry pointer
+        jc .rf_none
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_UDP
         je .rf_udp
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_ICMP
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_ICMP
         je .rf_icmp
-        jmp .net_recvfrom_none
+        jmp .rf_none
         .rf_udp:
-        call udp_receive                        ; DI = payload, CX = len, CF if none
-        jc .net_recvfrom_none
-        ;; Check dest port: UDP dest port is at NET_RECEIVE_BUFFER+36 (big-endian)
+        call udp_receive                        ; DI=payload (low 16), CX=len, CF if none
+        jc .rf_none
+        ;; Check dest port: UDP dest port is at NET_RECEIVE_BUFFER+36 (big-endian).
         mov ax, [.rf_port]
-        xchg al, ah                             ; Convert to big-endian for comparison
+        xchg al, ah                             ; user port → big-endian
         cmp ax, [NET_RECEIVE_BUFFER+36]
-        jne .net_recvfrom_none
-        jmp .rf_common_copy
+        jne .rf_none
+        jmp .rf_copy
         .rf_icmp:
-        call icmp_receive                       ; DI = ICMP payload, CX = len, CF if none
-        jc .net_recvfrom_none
-        .rf_common_copy:
-        ;; Copy min(CX payload, rf_max) bytes from DI to rf_buf
-        cmp cx, [.rf_max]
-        jbe .rf_copy
-        mov cx, [.rf_max]
+        call icmp_receive                       ; DI=ICMP payload, CX=len, CF if none
+        jc .rf_none
         .rf_copy:
-        mov ax, cx                              ; AX = bytes to copy (return value)
-        mov si, di                              ; SI = source payload pointer
-        mov di, [.rf_buf]                       ; DI = destination (caller's buffer)
+        ;; CX = payload length, DI = payload offset (in NET_RECEIVE_BUFFER, fits 16 bits).
+        ;; Copy min(CX, rf_max) bytes to user's buffer at [.rf_buf].
+        movzx ecx, cx
+        cmp ecx, [.rf_max]
+        jbe .rf_have_count
+        mov ecx, [.rf_max]
+        .rf_have_count:
+        mov eax, ecx                            ; return value = bytes copied
+        movzx esi, di                           ; flat 32-bit source
+        mov edi, [.rf_buf]                      ; flat 32-bit destination
         cld
         rep movsb
         clc
         jmp .iret_cf
-        .net_recvfrom_none:
-        xor ax, ax
+        .rf_none:
+        xor eax, eax                            ; AX = 0 = no bytes
         clc
         jmp .iret_cf
-        .rf_buf dw 0
-        .rf_max dw 0
+        .rf_buf dd 0
+        .rf_max dd 0
         .rf_port dw 0
-%endif
 
-        .net_sendto:
-        ;; BX = fd, SI = payload, CX = len, DI = ip ptr, DX = src port,
-        ;; BP = dst port.  Same story as recvfrom — fail with CF.
-        call fd_lookup
-        jc .net_send_err
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_UDP
-        je .net_send_err
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_ICMP
-        je .net_send_err
-        .net_send_err:
-        stc
-        jmp .iret_cf
-
-%if 0   ; 16-bit original — kept for reference until the net stack lands
         .net_sendto:
         ;; Send datagram via fd.
-        ;;   UDP (FD_TYPE_UDP):   BX=fd, SI=payload, CX=len,
-        ;;                         DI=ip_ptr, DX=src_port, BP=dst_port
-        ;;   ICMP (FD_TYPE_ICMP): BX=fd, SI=icmp_bytes, CX=len,
-        ;;                         DI=ip_ptr; DX/BP ignored
-        mov [.st_buf], si
+        ;;   UDP (FD_TYPE_UDP):   BX=fd, ESI=payload, ECX=len,
+        ;;                         EDI=ip_ptr, DX=src_port,
+        ;;                         user EBP (saved at [esp+8]) = dst_port
+        ;;   ICMP (FD_TYPE_ICMP): same shape; DX/dst_port ignored
+        ;;
+        ;; Stage user IP and payload into SECTOR_BUFFER (4-byte IP +
+        ;; payload starting at +4) so the net stack sees kernel-
+        ;; resident addresses.  Caps payload at SECTOR_BUFFER - 4 = 508
+        ;; bytes; larger UDP datagrams land when the staging buffer
+        ;; widens.
+        mov [.st_fd], bx
         mov [.st_len], cx
-        mov [.st_ip], di
         mov [.st_sport], dx
-        ;; BP holds our pusha frame pointer; the user's BP (dst_port)
-        ;; lives at [bp+4] in the saved area.
-        mov ax, [bp+4]
+        mov eax, [esp+8]                        ; saved user EBP = dst port
         mov [.st_dport], ax
-        call fd_lookup                          ; SI = entry pointer
-        jc .net_sendto_err
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_UDP
+
+        ;; Stage 4-byte dest IP at SECTOR_BUFFER+0.
+        push esi                                ; save user payload ptr
+        mov esi, edi                            ; user EDI = IP source
+        mov edi, SECTOR_BUFFER
+        cld
+        movsd
+        pop esi                                 ; restore payload ptr
+
+        ;; Stage payload at SECTOR_BUFFER+4.
+        movzx ecx, word [.st_len]
+        rep movsb
+
+        mov bx, [.st_fd]
+        call fd_lookup                          ; ESI = fd entry pointer
+        jc .st_err
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_UDP
         je .st_udp
-        cmp byte [si+FD_OFFSET_TYPE], FD_TYPE_ICMP
+        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_ICMP
         je .st_icmp
-        jmp .net_sendto_err
+        jmp .st_err
+
         .st_udp:
-        mov bx, [.st_ip]                        ; BX = dest IP pointer
-        mov di, [.st_sport]                     ; DI = source port
-        mov dx, [.st_dport]                     ; DX = dest port
-        mov si, [.st_buf]                       ; SI = payload buffer
-        mov cx, [.st_len]                       ; CX = payload length
+        mov bx, SECTOR_BUFFER                   ; staged dest IP
+        mov di, [.st_sport]
+        mov dx, [.st_dport]
+        mov si, SECTOR_BUFFER + 4               ; staged payload
+        mov cx, [.st_len]
         call udp_send
-        jc .net_sendto_err
-        mov ax, [.st_len]                       ; AX = bytes sent
+        jc .st_err
+        movzx eax, word [.st_len]               ; bytes sent
+        clc
         jmp .iret_cf
+
         .st_icmp:
-        mov bx, [.st_ip]                        ; BX = dest IP pointer
-        mov al, 1                               ; AL = protocol = ICMP
-        mov si, [.st_buf]                       ; SI = ICMP bytes (header + data)
-        mov cx, [.st_len]                       ; CX = length
+        mov bx, SECTOR_BUFFER
+        mov al, IPPROTO_ICMP
+        mov si, SECTOR_BUFFER + 4
+        mov cx, [.st_len]
         call ip_send
-        jc .net_sendto_err
-        mov ax, [.st_len]
+        jc .st_err
+        movzx eax, word [.st_len]
+        clc
         jmp .iret_cf
-        .net_sendto_err:
+
+        .st_err:
         stc
         jmp .iret_cf
-        .st_buf dw 0
-        .st_len dw 0
-        .st_ip dw 0
+
+        .st_fd    dw 0
+        .st_len   dw 0
         .st_sport dw 0
         .st_dport dw 0
-%endif

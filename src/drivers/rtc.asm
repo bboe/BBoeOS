@@ -169,6 +169,20 @@ rtc_tick_read:
         popf
         ret
 
+uptime_seconds:
+        ;; Output: EAX = elapsed seconds since boot (low 16 bits = AX
+        ;; for callers that only need short-range timestamps, e.g.
+        ;; ARP cache TTL).  Preserves ECX, EDX.
+        push ecx
+        push edx
+        call rtc_tick_read      ; EAX = ticks since boot
+        xor edx, edx
+        mov ecx, TICKS_PER_SECOND
+        div ecx                 ; EAX = elapsed seconds
+        pop edx
+        pop ecx
+        ret
+
 rtc_wait_steady:
         ;; Spin until the CMOS is not in an update cycle (UIP bit clear).
         ;; Gives us the ~244 µs window in which all time-of-day registers
