@@ -217,6 +217,7 @@ pmode_gdtr:
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
 %include "lib/print.asm"                ; shared_print_* / shared_printf / shared_write_stdout
 %include "lib/proc.asm"                 ; shared_die / shared_exit / shared_get_character / shared_parse_argv
+%include "net/net.asm"                  ; net/arp.asm + net/icmp.kasm + net/ip.kasm + net/udp.asm
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)
 
