@@ -1126,7 +1126,7 @@ scan_directory_entries:
         pop eax
         shr al, 4
         add al, byte [directory_sector]
-        pop dx
+        pop edx
         mov ah, byte [directory_sector]
         add ah, DIRECTORY_SECTORS
         cmp al, ah
