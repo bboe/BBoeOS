@@ -48,3 +48,9 @@ dd conv=notrunc if=os.bin of="$IMAGE"
 for name in $PROGRAMS; do
     ./add_file.py -x -d bin --image "$IMAGE" "$PBUILD/$name" || exit 1
 done
+
+# Static reference files used by cat / cp / asm tests.
+./add_file.py --mkdir --image "$IMAGE" src || exit 1
+for f in static/*; do
+    [ -f "$f" ] && ./add_file.py -d src --image "$IMAGE" "$f" || exit 1
+done
