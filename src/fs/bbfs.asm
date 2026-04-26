@@ -173,7 +173,8 @@ bbfs_find:
         jne .normal_find
         cmp byte [si+1], 0
         jne .normal_find
-        mov word [vfs_found_inode], DIRECTORY_SECTOR
+        mov ax, [directory_sector]
+        mov [vfs_found_inode], ax
         mov word [vfs_found_size], DIRECTORY_SECTORS * 512
         mov word [vfs_found_size+2], 0
         mov byte [vfs_found_mode], FLAG_DIRECTORY
@@ -511,7 +512,7 @@ bbfs_rename:
         inc di
         jmp .frc_scan
         .frc_dst_root:
-        mov ax, DIRECTORY_SECTOR
+        mov ax, [directory_sector]
         jmp .frc_alloc
         .frc_dst_subdir:
         mov byte [di], 0
@@ -720,7 +721,7 @@ directory_load_entry:
         mov ax, bx
         mov cl, 4                       ; 16 entries per sector = 2^4
         shr ax, cl
-        add ax, DIRECTORY_SECTOR
+        add ax, [directory_sector]
         mov [directory_loaded_sector], ax
         mov ax, bx
         and ax, 0Fh                     ; index % 16
@@ -768,7 +769,8 @@ find_file:
         jmp .ff_scan_slash
         .ff_no_slash:
         mov dx, si
-        mov word [directory_search_start], DIRECTORY_SECTOR
+        mov ax, [directory_sector]
+        mov [directory_search_start], ax
         jmp .ff_search_root
         .ff_has_slash:
         ;; Split path at '/': DI points to '/'
@@ -791,7 +793,7 @@ find_file:
         jmp .ff_load_sector
         .ff_search_root:
         xor bx, bx
-        mov ax, DIRECTORY_SECTOR
+        mov ax, [directory_sector]
         .ff_load_sector:
         mov [directory_loaded_sector], ax
         call read_sector
@@ -843,7 +845,7 @@ find_file:
         .ff_do_root_search:
         ;; Helper: search root directory for name in DX → BX = entry ptr, CF on miss
         xor bx, bx
-        mov al, DIRECTORY_SECTOR
+        mov al, byte [directory_sector]
         .fdr_load:
         xor ah, ah
         call read_sector
@@ -874,8 +876,10 @@ find_file:
         add bx, cx
         mov al, bl
         shr al, 4
-        add al, DIRECTORY_SECTOR
-        cmp al, DIRECTORY_SECTOR + DIRECTORY_SECTORS
+        add al, byte [directory_sector]
+        mov ah, byte [directory_sector]
+        add ah, DIRECTORY_SECTORS
+        cmp al, ah
         jb .fdr_load
         stc
         .fdr_done:
@@ -926,9 +930,10 @@ scan_directory_entries:
         ;; Clobbers: AX, CX, SI
         push di
         mov bx, 0FFFFh
-        mov dx, DIRECTORY_SECTOR + DIRECTORY_SECTORS
+        mov dx, [directory_sector]
+        add dx, DIRECTORY_SECTORS
         xor di, di
-        mov al, DIRECTORY_SECTOR
+        mov al, byte [directory_sector]
         .sd_next_sector:
         xor ah, ah
         call read_sector
@@ -1024,7 +1029,7 @@ scan_directory_entries:
         push di
         pop ax
         shr al, 4
-        add al, DIRECTORY_SECTOR
+        add al, byte [directory_sector]
         xor ah, ah
         call read_sector
         pop dx
@@ -1047,9 +1052,11 @@ scan_directory_entries:
         push di
         pop ax
         shr al, 4
-        add al, DIRECTORY_SECTOR
+        add al, byte [directory_sector]
         pop dx
-        cmp al, DIRECTORY_SECTOR + DIRECTORY_SECTORS
+        mov ah, byte [directory_sector]
+        add ah, DIRECTORY_SECTORS
+        cmp al, ah
         jb .sd_next_sector
         .sd_done:
         pop di

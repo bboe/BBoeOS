@@ -189,8 +189,9 @@ ext2_init:
         push ax
         push bx
         push cx
-        ;; Superblock is at byte 1024 from partition start = sector EXT2_START_SECTOR+2
-        mov ax, EXT2_START_SECTOR + 2
+        ;; Superblock is at byte 1024 from partition start = directory_sector+2
+        mov ax, [directory_sector]
+        add ax, 2
         call read_sector
         jc .ei_err
         cmp word [SECTOR_BUFFER+EXT2_SB_MAGIC], EXT2_MAGIC
@@ -532,7 +533,7 @@ ext2_mkdir:
         inc cl
         mov ax, [ext2_mk_new_blk]
         shl ax, cl
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         mov [ext2_last_blk_sec], ax
         pop cx
         call write_sector
@@ -1027,10 +1028,12 @@ ext2_bgd_block_alloc:
         dec word [SECTOR_BUFFER + EXT2_BGD_FREE_BLOCKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call read_sector
         dec word [SECTOR_BUFFER + EXT2_SB_FREE_BLOCKS_COUNT]
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call write_sector
         ret
 
@@ -1043,10 +1046,12 @@ ext2_bgd_block_free:
         inc word [SECTOR_BUFFER + EXT2_BGD_FREE_BLOCKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call read_sector
         inc word [SECTOR_BUFFER + EXT2_SB_FREE_BLOCKS_COUNT]
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call write_sector
         ret
 
@@ -1081,10 +1086,12 @@ ext2_bgd_inode_alloc:
         dec word [SECTOR_BUFFER + EXT2_BGD_FREE_INODES_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call read_sector
         dec word [SECTOR_BUFFER + EXT2_SB_FREE_INODES_COUNT]
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call write_sector
         ret
 
@@ -1097,10 +1104,12 @@ ext2_bgd_inode_free:
         inc word [SECTOR_BUFFER + EXT2_BGD_FREE_INODES_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call read_sector
         inc word [SECTOR_BUFFER + EXT2_SB_FREE_INODES_COUNT]
-        mov ax, EXT2_START_SECTOR + 2
+        mov ax, [directory_sector]
+        add ax, 2
         call write_sector
         ret
 
@@ -1524,7 +1533,7 @@ ext2_prepare_write_sec:
         push bx
         mov ax, [ext2_pws_ind_blk]
         shl ax, cl                      ; AX = first relative sector of ind_blk
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         add ax, bx
         call write_sector
         pop bx
@@ -1629,7 +1638,7 @@ ext2_prepare_write_sec:
         push bx
         mov ax, [ext2_pws_dbl_blk]
         shl ax, cl
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         add ax, bx
         call write_sector
         pop bx
@@ -1690,7 +1699,7 @@ ext2_prepare_write_sec:
         push bx
         mov ax, [ext2_pws_sub_blk]
         shl ax, cl
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         add ax, bx
         call write_sector
         pop bx
@@ -1802,7 +1811,7 @@ ext2_prepare_write_sec:
         movzx cx, byte [ext2_log_block_size]
         inc cx
         shl ax, cl
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         add ax, [ext2_pws_sec_in_blk]
         mov [ext2_last_blk_sec], ax
         pop cx
@@ -2805,7 +2814,7 @@ ext2_read_blk_sec:
         mov cl, [ext2_log_block_size]
         inc cl                          ; sectors_per_block = 2^(log+1)
         shl ax, cl                      ; AX = first disk sector of block (relative)
-        add ax, EXT2_START_SECTOR
+        add ax, [directory_sector]
         add ax, bx
         mov [ext2_last_blk_sec], ax
         call read_sector

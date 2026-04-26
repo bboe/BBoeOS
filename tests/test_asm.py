@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import COMMAND_TIMEOUT, run_commands  # noqa: E402
 
-from add_file import SECTOR_SIZE, find_entry, read_assign  # noqa: E402
+from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
 C_DIR = Path("src/c")
@@ -86,7 +86,6 @@ def _build_references(
 
 def _run_tests(*, arguments: argparse.Namespace) -> int:
     """Execute the test loop: build OS, discover programs, compare outputs."""
-    directory_sector = read_assign("DIRECTORY_SECTOR")
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     keep_artifacts = arguments.program is not None
 
@@ -96,6 +95,7 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
             only=arguments.program,
             temporary_directory=temporary_directory,
         )
+        directory_sector = compute_directory_sector(image_path=str(temporary_directory / BASE_IMAGE))
         if not programs:
             if arguments.program:
                 print(f"No program named '{arguments.program}' in static/")

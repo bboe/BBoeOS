@@ -39,9 +39,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import ext2_add_file, read_assign  # noqa: E402
-
-EXT2_SECTOR_OFFSET = read_assign("DIRECTORY_SECTOR")
+from add_file import compute_directory_sector, ext2_add_file  # noqa: E402
 
 
 @dataclass
@@ -174,7 +172,7 @@ def _add_large_test_file(*, image: Path) -> None:
         large_file.write_bytes(content)
         ext2_add_file(
             executable=False,
-            ext2_start_sector=EXT2_SECTOR_OFFSET,
+            ext2_start_sector=compute_directory_sector(image_path=str(image)),
             file_path=str(large_file),
             image_path=str(image),
             subdirectory="src",
@@ -199,7 +197,7 @@ def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
 
 def _fsck(*, image: Path) -> str | None:
     """Run e2fsck on the ext2 partition; return an error string or None if clean."""
-    ext2_offset = EXT2_SECTOR_OFFSET * 512
+    ext2_offset = compute_directory_sector(image_path=str(image)) * 512
     with Path(image).open("rb") as f:
         f.seek(ext2_offset)
         ext2_data = f.read()
