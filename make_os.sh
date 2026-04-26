@@ -35,7 +35,7 @@ fi
 # invoking it halts the kernel.  Programs that need PARSE_ARGV /
 # PRINT_DATETIME / PRINT_IP / PRINT_MAC / PRINT_BYTE_DECIMAL / PRINT_HEX /
 # PRINT_DECIMAL stay out of this list until those helpers are ported.
-PROGRAMS="asmesc bits booltest cftest draw fctest gdemo gtable hello inctest loop loop_array pintest shell uptime"
+PROGRAMS="asmesc bits booltest cat cftest chmod cp draw echo fctest gdemo gtable hello inctest loop loop_array ls mkdir mv pintest rm rmdir shell uptime"
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"

@@ -54,38 +54,41 @@ shared_not_impl:
         hlt
         jmp $-1
 
-%if 0   ; 16-bit original — kept for reference until the rest of lib/ is ported
 shared_parse_argv:
-        ;; Split [EXEC_ARG] at spaces into an argv-style pointer array.
-        ;; Input:  DI = buffer for argv pointers (caller-provided)
-        ;; Output: CX = argc (number of arguments)
-        ;; Clobbers: AX, SI
-        xor cx, cx
-        mov si, [EXEC_ARG]
-        test si, si
+        ;; Split [EXEC_ARG] (a dword pointer to the raw argument string)
+        ;; into an argv-style array of dword pointers.  cc.py emits
+        ;; `mov edi, ARGV; call FUNCTION_PARSE_ARGV` at program entry
+        ;; whenever main takes argv, then reads ECX as argc — the same
+        ;; shape as the 16-bit ABI, just widened to E-regs and a 4-byte
+        ;; pointer stride.
+        ;; Input:  EDI = buffer for argv pointers
+        ;; Output: ECX = argc
+        ;; Clobbers: EAX, ESI (and EDI advances past the populated slots)
+        xor ecx, ecx
+        mov esi, [EXEC_ARG]
+        test esi, esi
         jz .parse_argv_done
         .parse_argv_scan:
-        cmp byte [si], ' '
+        cmp byte [esi], ' '
         jne .parse_argv_check
-        inc si
+        inc esi
         jmp .parse_argv_scan
         .parse_argv_check:
-        cmp byte [si], 0
+        cmp byte [esi], 0
         je .parse_argv_done
-        mov [di], si
-        add di, 2
-        inc cx
+        mov [edi], esi
+        add edi, 4
+        inc ecx
         .parse_argv_end:
-        cmp byte [si], 0
+        cmp byte [esi], 0
         je .parse_argv_done
-        cmp byte [si], ' '
+        cmp byte [esi], ' '
         je .parse_argv_term
-        inc si
+        inc esi
         jmp .parse_argv_end
         .parse_argv_term:
-        mov byte [si], 0
-        inc si
+        mov byte [esi], 0
+        inc esi
         jmp .parse_argv_scan
         .parse_argv_done:
         ret
-%endif
