@@ -106,16 +106,20 @@ class Peepholer:
                 value = source
             elif stripped.endswith(":") or stripped.startswith(clobber_prefixes):
                 value = None
-            elif value is not None and "[" not in value:
-                # Source is a register or immediate.  Check whether this
-                # instruction writes to the source register, invalidating
-                # the stored value.  e.g. ``mov si, ax / inc ax`` — the
-                # tracked ``ax`` in SI no longer matches the current AX.
+            elif value is not None:
+                # Check whether this instruction writes to either the
+                # destination register itself (direct clobber, e.g. ``shl
+                # esi, 2`` after ``mov esi, edx`` — esi no longer holds
+                # edx) or, for register-sourced caches, the source
+                # register (e.g. ``mov si, ax / inc ax`` — the tracked
+                # ``ax`` in SI now diverges from the current AX).
                 for operation in source_clobber_operations:
                     if not stripped.startswith(operation):
                         continue
                     target = stripped[len(operation) :].split(",", 1)[0].strip()
-                    if target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]):
+                    if target == register or (
+                        "[" not in value and (target == value or (len(target) == 2 and target[1] in "lh" and target[0] == value[0]))
+                    ):
                         value = None
                     break
             result.append(line)
