@@ -33,7 +33,7 @@ fi
 # netrecv / netsend / ping stay out of the list until ne2k.asm and
 # net/*.asm get ported to 32-bit and `network_initialize` runs from
 # `protected_mode_entry`.
-PROGRAMS="asmesc bits booltest cat cftest chmod cp date draw echo fctest gdemo gtable hello inctest loop loop_array ls mkdir mv pintest rm rmdir shell uptime"
+PROGRAMS="arp asmesc bits booltest cat cftest chmod cp date dns draw echo fctest gdemo gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend pintest ping rm rmdir shell uptime"
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"
