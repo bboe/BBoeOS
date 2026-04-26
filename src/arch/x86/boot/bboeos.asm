@@ -162,7 +162,7 @@ function_table:
         jmp strict near shared_die              ; FUNCTION_DIE
         jmp strict near shared_exit             ; FUNCTION_EXIT
         jmp strict near shared_get_character    ; FUNCTION_GET_CHARACTER
-        jmp strict near shared_not_impl         ; FUNCTION_PARSE_ARGV
+        jmp strict near shared_parse_argv       ; FUNCTION_PARSE_ARGV
         jmp strict near shared_not_impl         ; FUNCTION_PRINT_BYTE_DECIMAL
         jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER
         jmp strict near shared_not_impl         ; FUNCTION_PRINT_DATETIME
