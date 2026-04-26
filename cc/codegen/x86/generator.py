@@ -526,26 +526,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         elif isinstance(index, Var) and index.name in self.pinned_register:
             self.emit(f"        mov {si}, {self.pinned_register[index.name]}")
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {si}, 2")
-                else:
-                    self.emit(f"        add {si}, {si}")
+                self._emit_scale_int_index(si)
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
             self.emit(f"        mov {si}, [{self._local_address(index.name)}]")
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {si}, 2")
-                else:
-                    self.emit(f"        add {si}, {si}")
+                self._emit_scale_int_index(si)
         else:
             if preserve_ax:
                 self.emit(f"        push {self.target.acc}")
             self.generate_expression(index)
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {self.target.acc}, 2")
-                else:
-                    self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                self._emit_scale_int_index(self.target.acc)
             self.emit(f"        mov {si}, {self.target.acc}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
