@@ -228,6 +228,457 @@ def test_kernel_compiles_and_assembles() -> None:
 
 
 # ---------------------------------------------------------------------------
+# out_register attribute
+# ---------------------------------------------------------------------------
+
+
+def test_out_register_callee_no_spill() -> None:
+    """out_register param is not spilled to a stack slot in the callee prologue."""
+    asm = _kernel("""
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si")))) {
+            *entry = 0;
+            return 1;
+        }
+    """)
+    # No sub sp instruction — out_register params don't occupy stack space.
+    assert "sub sp" not in asm
+
+
+def test_out_register_callee_deref_assign_emits_to_register() -> None:
+    """*param = expr in callee emits to the named register, not a memory slot."""
+    asm = _kernel("""
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si")))) {
+            *entry = 5;
+            return 1;
+        }
+    """)
+    assert "mov si," in asm
+    # No dereference write to a bp-relative address.
+    assert "[bp-" not in asm
+
+
+def test_out_register_caller_no_push() -> None:
+    """Caller emits no push for an out_register argument — only call + capture."""
+    asm = _kernel("""
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
+
+        __attribute__((carry_return)) int do_alloc() {
+            int* entry;
+            if (fd_alloc(&entry)) {
+                return 1;
+            }
+            return 0;
+        }
+    """)
+    # The register capture happens right after the call, with no push before it.
+    lines = [line.strip() for line in asm.splitlines()]
+    call_idx = next(i for i, line in enumerate(lines) if line == "call fd_alloc")
+    # No argument push immediately before the call.
+    assert lines[call_idx - 1] != "push ax", "unexpected argument push before call fd_alloc"
+    assert lines[call_idx + 1] == "mov [bp-2], si"
+
+
+def test_out_register_caller_captures_register_into_local() -> None:
+    """After the call, the named register is stored into the caller's local variable."""
+    asm = _kernel("""
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
+
+        void caller() {
+            int* entry;
+            fd_alloc(&entry);
+        }
+    """)
+    assert "mov [bp-2], si" in asm
+
+
+def test_out_register_prototype_registers_convention() -> None:
+    """A function prototype with out_register is retained in the AST and registers the convention."""
+    # If the prototype is silently dropped, generate_call won't know about out_register
+    # and will try to push the &entry argument — causing an error or wrong code.
+    ok, output = _compile(
+        """
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
+
+        void caller() {
+            int* entry;
+            fd_alloc(&entry);
+        }
+    """,
+        target="kernel",
+    )
+    assert ok, f"Compilation failed:\n{output}"
+    assert "mov [bp-2], si" in output
+
+
+def test_out_register_carry_return_condition() -> None:
+    """carry_return + out_register: correct CF-based branch and register capture."""
+    asm = _kernel("""
+        __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
+
+        __attribute__((carry_return)) int wrapper() {
+            int* entry;
+            if (fd_alloc(&entry)) {
+                return 1;
+            }
+            return 0;
+        }
+    """)
+    lines = [line.strip() for line in asm.splitlines()]
+    call_idx = next(i for i, line in enumerate(lines) if line == "call fd_alloc")
+    # Capture happens before the branch.
+    assert lines[call_idx + 1] == "mov [bp-2], si"
+    assert any(line.startswith(("jc", "jnc")) for line in lines[call_idx + 2 : call_idx + 5])
+
+
+def test_out_register_nasm_assembles() -> None:
+    """Generated out_register caller code assembles cleanly with nasm."""
+    with tempfile.TemporaryDirectory(prefix="test_out_reg_") as work:
+        work_path = Path(work)
+        src = work_path / "t.c"
+        asm_out = work_path / "t.asm"
+        binary = work_path / "t.bin"
+        src.write_text(
+            textwrap.dedent("""
+            __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
+
+            __attribute__((carry_return)) int do_alloc() {
+                int* entry;
+                if (fd_alloc(&entry)) {
+                    return 1;
+                }
+                return 0;
+            }
+        """)
+        )
+        result = subprocess.run(
+            ["python3", str(CC), "--target", "kernel", str(src), str(asm_out)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"cc.py failed:\n{result.stderr}")
+        # Append a stub for the external asm function so nasm can resolve the call.
+        with asm_out.open("a") as fh:
+            fh.write("\nfd_alloc:\n        clc\n        ret\n")
+        nasm_result = subprocess.run(
+            ["nasm", "-f", "bin", str(asm_out), "-o", str(binary)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if nasm_result.returncode != 0:
+            pytest.fail(f"nasm failed:\n{nasm_result.stderr}\n--- asm ---\n{asm_out.read_text()}")
+
+
+# ---------------------------------------------------------------------------
+# si_local optimization: use SI register directly for struct member access
+# ---------------------------------------------------------------------------
+
+
+def test_out_register_si_used_directly_for_member_access() -> None:
+    """SI-cached pointer uses [si+offset] directly for struct writes.
+
+    When no call intervenes between the out_register capture and the member
+    writes, the code uses SI as the base register directly instead of the
+    ``mov bx, [bp-N]; [bx+offset]`` round-trip.
+    """
+    asm = _kernel("""
+        struct point { int x; int y; };
+
+        __attribute__((carry_return)) int make_point(struct point* out __attribute__((out_register("si"))));
+
+        void caller() {
+            struct point* p;
+            if (make_point(&p)) {
+                p->x = 1;
+                p->y = 2;
+            }
+        }
+    """)
+    # Both field writes should reference SI directly.
+    assert "[si]" in asm or "[si+" in asm, f"expected [si] or [si+N] in member writes\n{asm}"
+    assert "mov bx, [bp-" not in asm, f"unexpected BX reload for SI-cached pointer\n{asm}"
+
+
+def test_out_register_si_cleared_across_call() -> None:
+    """If a second call intervenes after the capture, the optimization falls back to BX."""
+    asm = _kernel("""
+        struct point { int x; int y; };
+
+        __attribute__((carry_return)) int make_point(struct point* out __attribute__((out_register("si"))));
+        void other_func();
+
+        void caller() {
+            struct point* p;
+            if (make_point(&p)) {
+                other_func();
+                p->x = 1;
+            }
+        }
+    """)
+    # After other_func(), SI is no longer trusted — fallback to BX.
+    assert "mov bx, [bp-" in asm, f"expected BX reload after intervening call\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# struct array initializers
+# ---------------------------------------------------------------------------
+
+
+def test_struct_array_initializer_emits_fields() -> None:
+    """A struct array with a partial initializer emits per-field directives."""
+    asm = _kernel("""
+        struct point { uint16_t x; uint16_t y; };
+        struct point points[4] = {
+            {1, 2},
+            {3, 4},
+        };
+        void f() {}
+    """)
+    assert "_g_points: dw 1" in asm
+    assert "dw 2" in asm
+    assert "dw 3" in asm
+    assert "dw 4" in asm
+    assert "times (4-2)*4 db 0" in asm
+
+
+def test_struct_array_initializer_unspecified_fields_zero() -> None:
+    """Unspecified trailing fields in a struct initializer are zero-filled."""
+    asm = _kernel("""
+        struct entry { uint8_t type; uint8_t flags; uint16_t value; };
+        struct entry table[2] = {
+            {1},
+        };
+        void f() {}
+    """)
+    assert "_g_table: db 1" in asm
+    assert "db 0" in asm
+    assert "dw 0" in asm
+
+
+# ---------------------------------------------------------------------------
+# uint16_t: fixed 2-byte type across both --bits modes
+# ---------------------------------------------------------------------------
+
+
+def test_uint16_t_size_is_always_two_bytes_16bit() -> None:
+    """sizeof(uint16_t) == 2 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=16)
+    assert "mov ax, 2" in asm, f"expected sizeof(uint16_t)==2 in 16-bit mode\n{asm}"
+
+
+def test_uint16_t_size_is_always_two_bytes_32bit() -> None:
+    """sizeof(uint16_t) == 2 in --bits 32 mode (not widened to 4)."""
+    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=32)
+    assert "mov eax, 2" in asm, f"expected sizeof(uint16_t)==2 in 32-bit mode\n{asm}"
+
+
+def test_uint32_t_size_is_always_four_bytes_16bit() -> None:
+    """sizeof(uint32_t) == 4 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=16)
+    assert "mov ax, 4" in asm, f"expected sizeof(uint32_t)==4 in 16-bit mode\n{asm}"
+
+
+def test_uint32_t_size_is_always_four_bytes_32bit() -> None:
+    """sizeof(uint32_t) == 4 in --bits 32 mode (not widened to 8 for future 64-bit)."""
+    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(uint32_t)==4 in 32-bit mode\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# in_register parameter attribute
+# ---------------------------------------------------------------------------
+
+
+def test_in_register_spills_to_local_slot() -> None:
+    """in_register param is spilled to a local stack slot at function entry."""
+    src = """
+        void f(int x __attribute__((in_register("bx")))) {
+            int y;
+            y = x;
+        }
+    """
+    asm = _kernel(src)
+    assert "mov [bp-" in asm, f"expected spill to local slot\n{asm}"
+    assert "mov [bp-2], bx" in asm, f"expected 'mov [bp-2], bx' spill\n{asm}"
+
+
+def test_in_register_no_caller_push() -> None:
+    """Caller passes in_register arg by loading the register, not pushing."""
+    src = """
+        void callee(int x __attribute__((in_register("bx"))));
+        void caller(int v) { callee(v); }
+    """
+    asm = _kernel(src)
+    # The call should load BX (not push) for the in_register param.
+    assert "mov bx," in asm, f"expected 'mov bx, ...' for in_register arg\n{asm}"
+    assert "push" not in asm.split("callee")[1].split("ret")[0], f"expected no push before callee call\n{asm}"
+
+
+def test_in_register_with_carry_return() -> None:
+    """in_register and carry_return can combine: spill bx, emit clc/stc."""
+    proto = (
+        "__attribute__((carry_return)) int fd_lookup("
+        'int fd __attribute__((in_register("bx"))),'
+        ' int *entry __attribute__((out_register("si"))));'
+    )
+    defn = proto.rstrip(";") + " { if (fd >= 8) { return 0; } *entry = fd; return 1; }"
+    src = proto + "\n" + defn
+    asm = _kernel(src)
+    assert "mov [bp-" in asm and "mov [bp-2], bx" in asm, f"expected bx spill\n{asm}"
+    assert "stc" in asm, f"expected stc for return 0\n{asm}"
+    assert "clc" in asm, f"expected clc for return 1\n{asm}"
+    assert "mov si," in asm, f"expected mov si for out_register\n{asm}"
+
+
+def test_preserve_register_push_pop() -> None:
+    """preserve_register("cx") emits push cx before frame and pop cx before every ret."""
+    src = textwrap.dedent("""\
+        __attribute__((carry_return)) __attribute__((preserve_register("cx")))
+        int f(int x __attribute__((in_register("bx")))) {
+            if (x >= 8) { return 0; }
+            return 1;
+        }
+    """)
+    asm = _compile(src, target="kernel")[1]
+    # push cx must appear before push bp (prologue order).
+    push_cx = asm.index("push cx")
+    push_bp = asm.index("push bp")
+    assert push_cx < push_bp, "push cx must precede push bp"
+    # Every ret must be preceded by pop cx (pop cx does not affect CF).
+    ret_positions = [i for i in range(len(asm)) if asm[i : i + 3] == "ret"]
+    for ret_pos in ret_positions:
+        before_ret = asm[max(0, ret_pos - 40) : ret_pos]
+        assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
+
+
+def test_preserve_register_multiple() -> None:
+    """Multiple preserve_register attributes push/pop in declaration order."""
+    src = textwrap.dedent("""\
+        __attribute__((preserve_register("cx"))) __attribute__((preserve_register("dx")))
+        int g() { return 0; }
+    """)
+    asm = _compile(src, target="kernel")[1]
+    push_cx = asm.index("push cx")
+    push_dx = asm.index("push dx")
+    pop_cx = asm.rindex("pop cx")
+    pop_dx_last = asm.rindex("pop dx")
+    assert push_cx < push_dx, "cx pushed before dx"
+    assert pop_dx_last < pop_cx, "dx popped before cx (reverse order)"
+
+
+# ---------------------------------------------------------------------------
+# Function pointer (function_pointer) type support
+# ---------------------------------------------------------------------------
+
+
+def test_function_pointer_local_emits_call_ax() -> None:
+    """A local function_pointer variable called with no args emits 'call ax'."""
+    asm = _kernel("""
+        int get_fn();
+        void caller() {
+            int (*handler)();
+            handler = get_fn();
+            handler();
+        }
+    """)
+    assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
+
+
+def test_function_pointer_with_in_register_param_moves_arg_before_call() -> None:
+    """An function_pointer with an in_register param loads that register before 'call ax'."""
+    asm = _kernel("""
+        int get_fn();
+        void caller() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            handler(42);
+        }
+    """)
+    assert "call ax" in asm, "indirect call must emit 'call ax'"
+    assert "mov bx, 42" in asm, "in_register param must be loaded into bx before call"
+    call_pos = asm.index("call ax")
+    bx_pos = asm.index("mov bx, 42")
+    assert bx_pos < call_pos, "mov bx must appear before call ax"
+
+
+def test_function_pointer_struct_field_type() -> None:
+    """A struct with an function_pointer field compiles and the field has width 2."""
+    asm = _kernel("""
+        struct ops {
+            int (*read)();
+            int (*write)();
+        };
+        int do_read(struct ops *o) {
+            int (*fn)();
+            fn = o->read;
+            return fn();
+        }
+    """)
+    assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
+
+
+def test_function_pointer_arg_count_mismatch_raises_error() -> None:
+    """Calling an function_pointer with wrong arg count raises CompileError."""
+    error = _kernel_error("""
+        int get_fn();
+        void caller() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            handler();
+        }
+    """)
+    assert "function_pointer" in error, f"Expected function_pointer arity error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
+# asm_name attribute
+# ---------------------------------------------------------------------------
+
+
+def test_asm_name_global_compiles() -> None:
+    """asm_name globals compile without emitting storage."""
+    source = textwrap.dedent("""
+        uint16_t my_sym __attribute__((asm_name("ext_sym")));
+        int read_sym(int *result __attribute__((out_register("ax")))) {
+            *result = my_sym;
+            return 1;
+        }
+    """)
+    output = _kernel(source)
+    assert "[ext_sym]" in output
+    assert "_g_my_sym" not in output
+    assert "ext_sym:" not in output
+
+
+def test_asm_name_with_offset_compiles() -> None:
+    """asm_name with expression offset emits correct symbol reference."""
+    source = textwrap.dedent("""
+        uint16_t size_hi __attribute__((asm_name("vfs_found_size+2")));
+        void set_size_hi(int v) {
+            size_hi = v;
+        }
+    """)
+    output = _kernel(source)
+    assert "[vfs_found_size+2]" in output
+
+
+def test_net_transmit_buffer_named_constant() -> None:
+    """NET_TRANSMIT_BUFFER resolves as a named constant (immediate), not a memory operand."""
+    source = """
+        void test_net_buf() {
+            uint8_t *buf;
+            buf = NET_TRANSMIT_BUFFER;
+        }
+    """
+    output = _kernel(source)
+    assert "NET_TRANSMIT_BUFFER" in output
+    assert "[NET_TRANSMIT_BUFFER]" not in output
+
+
+# ---------------------------------------------------------------------------
 # Regression: --target user output is byte-for-byte identical to default
 # ---------------------------------------------------------------------------
 
@@ -258,3 +709,98 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
             f"--- default ---\n{default_text[:500]}\n"
             f"--- user ---\n{user_text[:500]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# __tail_call statement
+# ---------------------------------------------------------------------------
+
+
+def test_tail_call_emits_jmp_ax() -> None:
+    """``__tail_call`` emits a frame teardown then ``jmp ax``."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(int x __attribute__((in_register("si"))));
+            handler = get_fn();
+            __tail_call(handler, 42);
+        }
+    """)
+    assert "jmp ax" in asm, "__tail_call must emit 'jmp ax'"
+    assert "pop bp" in asm, "__tail_call must tear down frame"
+    assert "call ax" not in asm, "__tail_call must not emit 'call ax'"
+
+
+def test_tail_call_args_loaded_before_jmp() -> None:
+    """``__tail_call`` loads arguments into registers before the jump."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(
+                int x __attribute__((in_register("si"))),
+                int y __attribute__((in_register("cx"))));
+            handler = get_fn();
+            __tail_call(handler, 1, 2);
+        }
+    """)
+    jmp_pos = asm.index("jmp ax")
+    assert "mov si," in asm[:jmp_pos], "si arg must be set before jmp ax"
+    assert "mov cx," in asm[:jmp_pos], "cx arg must be set before jmp ax"
+
+
+def test_tail_call_no_ret_after_jmp() -> None:
+    """``__tail_call`` does not emit ``ret`` — control flows through the jmp."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            __tail_call(handler, 99);
+        }
+    """)
+    lines = asm.splitlines()
+    jmp_idx = next(i for i, ln in enumerate(lines) if "jmp ax" in ln)
+    trailing = "\n".join(lines[jmp_idx + 1 :])
+    assert "ret" not in trailing, "no 'ret' should appear after 'jmp ax'"
+
+
+def test_tail_call_is_terminal() -> None:
+    """``__tail_call`` is recognised as always-exiting; no dead code after it."""
+    asm = _kernel("""
+        int get_fn();
+        __attribute__((carry_return)) int dispatch(int x __attribute__((in_register("bx")))) {
+            int (*handler)(int a __attribute__((in_register("bx"))));
+            handler = get_fn();
+            __tail_call(handler, x);
+        }
+    """)
+    assert "jmp ax" in asm, "__tail_call must emit 'jmp ax'"
+    jmp_pos = asm.index("jmp ax")
+    trailing = asm[jmp_pos + len("jmp ax") :]
+    assert "stc" not in trailing, "no fall-through stc after __tail_call"
+    assert "clc" not in trailing, "no fall-through clc after __tail_call"
+
+
+def test_tail_call_wrong_fn_raises_error() -> None:
+    """``__tail_call`` on a non-function_pointer variable raises CompileError."""
+    error = _kernel_error("""
+        void bad() {
+            int x;
+            x = 5;
+            __tail_call(x, 1);
+        }
+    """)
+    assert "__tail_call" in error, f"Expected __tail_call error, got: {error}"
+
+
+def test_tail_call_arg_count_mismatch_raises_error() -> None:
+    """``__tail_call`` with wrong arg count raises CompileError."""
+    error = _kernel_error("""
+        int get_fn();
+        void bad() {
+            int (*handler)(int x __attribute__((in_register("si"))));
+            handler = get_fn();
+            __tail_call(handler, 1, 2, 3);
+        }
+    """)
+    assert "__tail_call" in error, f"Expected __tail_call arity error, got: {error}"

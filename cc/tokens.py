@@ -48,6 +48,8 @@ KEYWORDS = frozenset({
     "sizeof",
     "struct",
     "uint8_t",
+    "uint16_t",
+    "uint32_t",
     "unsigned",
     "void",
     "while",
@@ -124,4 +126,4 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "STRUCT", "UINT8_T", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "STRUCT", "UINT16_T", "UINT32_T", "UINT8_T", "UNSIGNED", "VOID"})

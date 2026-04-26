@@ -8,6 +8,7 @@ Consumes the token stream produced by :mod:`cc.lexer` / processed by
 from __future__ import annotations
 
 from cc.ast_nodes import (
+    AddressOf,
     ArrayDecl,
     ArrayInit,
     Assign,
@@ -16,6 +17,7 @@ from cc.ast_nodes import (
     Call,
     Char,
     Continue,
+    DerefAssign,
     DoWhile,
     Function,
     If,
@@ -36,6 +38,8 @@ from cc.ast_nodes import (
     String,
     StructDecl,
     StructField,
+    StructInit,
+    TailCall,
     Var,
     VarDecl,
     While,
@@ -181,6 +185,13 @@ class Parser:
                 message = f"regparm({count}) not supported; only regparm(1) is implemented"
                 raise CompileError(message, line=line)
             return ("regparm", count)
+        if attr_name == "asm_name":
+            self.eat("LPAREN")
+            sym_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("asm_name", sym_token[1][1:-1])
         if attr_name == "asm_register":
             self.eat("LPAREN")
             reg_token = self.eat("STRING")
@@ -200,6 +211,27 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("always_inline", True)
+        if attr_name == "in_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("in_register", reg_token[1][1:-1])
+        if attr_name == "out_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("out_register", reg_token[1][1:-1])
+        if attr_name == "preserve_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("preserve_register", reg_token[1][1:-1])
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -231,7 +263,18 @@ class Parser:
         fields: list[StructField] = []
         while self.peek()[0] != "RBRACE":
             field_type = self.parse_type()
-            field_name = self.eat("IDENT")[1]
+            if self.peek()[0] == "LPAREN":
+                # Function pointer field: type (*field_name)(params)
+                self.eat("LPAREN")
+                self.eat("STAR")
+                field_name = self.eat("IDENT")[1]
+                self.eat("RPAREN")
+                self.eat("LPAREN")
+                self.parse_parameters()  # consume param list; size is always 2
+                self.eat("RPAREN")
+                field_type = "function_pointer"
+            else:
+                field_name = self.eat("IDENT")[1]
             # Optional [N] for fixed-size array fields (e.g. ``char _reserved[15]``).
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
@@ -245,6 +288,47 @@ class Parser:
         decl = StructDecl(fields=fields, line=line, name=name)
         self.struct_decls[name] = decl
         return decl
+
+    def _parse_struct_init(self) -> Node:
+        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
+
+        Fields are positional.  Trailing commas are accepted.
+
+        Returns:
+            A ``StructInit`` node.
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        fields = []
+        while self.peek()[0] != "RBRACE":
+            fields.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInit(fields=fields, line=line)
+
+    def _parse_tail_call(self) -> Node:
+        """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.
+
+        The first token is the ``__tail_call`` identifier; the
+        remaining syntax is ``(fn_ptr_name, arg_expr, ...) ;``.
+        ``fn_ptr_name`` must name a local ``function_pointer`` variable;
+        the arguments map to its ``in_register`` parameters in order.
+        """
+        token = self.eat("IDENT")  # __tail_call
+        self.eat("LPAREN")
+        fn_token = self.eat("IDENT")
+        fn = fn_token[1]
+        args = []
+        while self.peek()[0] == "COMMA":
+            self.eat("COMMA")
+            args.append(self.parse_expression())
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return TailCall(args=args, fn=fn, line=token[2])
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -279,16 +363,26 @@ class Parser:
     def parse_array_init(self) -> Node:
         """Parse a brace-enclosed array initializer.
 
+        Each element may itself be a brace-enclosed struct initializer
+        ``{a, b, ...}``, in which case it is returned as a ``StructInit``
+        node.  Trailing commas are accepted.
+
         Returns:
             An AST node for the array initializer.
 
         """
         line = self.peek()[2]
         self.eat("LBRACE")
-        elems = [self.parse_expression()]
-        while self.peek()[0] == "COMMA":
-            self.eat("COMMA")
-            elems.append(self.parse_expression())
+        elems = []
+        while self.peek()[0] != "RBRACE":
+            if self.peek()[0] == "LBRACE":
+                elems.append(self._parse_struct_init())
+            else:
+                elems.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
         self.eat("RBRACE")
         return ArrayInit(elements=elems, line=line)
 
@@ -532,13 +626,25 @@ class Parser:
 
         """
         type_string = self.parse_type()
-        name = self.eat("IDENT")[1]
+        name_token = self.eat("IDENT")
+        name = name_token[1]
+        in_register: str | None = None
         is_array = False
+        out_register: str | None = None
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             self.eat("RBRACKET")
             is_array = True
-        return Param(is_array=is_array, name=name, type=type_string)
+        if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=name_token[2])
+            if kind == "in_register":
+                in_register = value
+            elif kind == "out_register":
+                out_register = value
+            else:
+                message = f"unsupported parameter attribute '{kind}'"
+                raise CompileError(message, line=name_token[2])
+        return Param(in_register=in_register, is_array=is_array, name=name, out_register=out_register, type=type_string)
 
     def parse_parameters(self) -> list[Param]:
         """Parse a function parameter list.
@@ -622,6 +728,10 @@ class Parser:
             if isinstance(operand, Int):
                 return Int(line=line, value=-operand.value)
             return BinaryOperation(left=Int(line=line, value=0), line=line, operation="-", right=operand)
+        if token[0] == "AMP":
+            self.eat()
+            name_token = self.eat("IDENT")
+            return AddressOf(line=line, name=name_token[1])
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
@@ -644,13 +754,9 @@ class Parser:
         globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
             declaration = self.parse_top_level_declaration()
-            if declaration is None:
-                # Function prototype — swallowed by parse_top_level_declaration
-                # for clang's benefit; cc.py doesn't need it in the AST.
-                continue
             if isinstance(declaration, Function):
                 functions.append(declaration)
-            else:
+            elif declaration is not None:
                 globals_list.append(declaration)
         return Program(functions=functions, globals=globals_list, line=line)
 
@@ -719,6 +825,13 @@ class Parser:
             return Return(line=token[2], value=value)
         if token[0] == "WHILE":
             return self.parse_while()
+        if token[0] == "STAR":
+            self.eat("STAR")
+            name_token = self.eat("IDENT")
+            self.eat("ASSIGN")
+            expr = self.parse_expression()
+            self.eat("SEMI")
+            return DerefAssign(expr=expr, line=token[2], name=name_token[1])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":
@@ -729,6 +842,8 @@ class Parser:
                 return self.parse_index_assignment()
             if next_kind in ("DOT", "ARROW"):
                 return self._parse_member_assignment()
+            if token[1] == "__tail_call":
+                return self._parse_tail_call()
             return self.parse_call_statement()
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
@@ -763,8 +878,10 @@ class Parser:
         # the function parameter list; ``asm_register`` is leading-only.
         regparm_count = 0
         asm_register: str | None = None
+        asm_symbol: str | None = None
         carry_return = False
         always_inline = False
+        preserve_registers: list[str] = []
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
             if kind == "regparm":
@@ -773,6 +890,10 @@ class Parser:
                 carry_return = True
             elif kind == "always_inline":
                 always_inline = True
+            elif kind == "preserve_register":
+                preserve_registers.append(value)
+            elif kind == "asm_name":
+                asm_symbol = value
             else:
                 asm_register = value
         type_string = self.parse_type()
@@ -796,33 +917,45 @@ class Parser:
                     carry_return = True
                 elif kind == "always_inline":
                     always_inline = True
+                elif kind == "preserve_register":
+                    preserve_registers.append(value)
                 else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
             if regparm_count > 0 and not parameters:
                 message = "regparm(1) requires at least one parameter"
                 raise CompileError(message, line=line)
-            if carry_return and len(parameters) > regparm_count:
+            stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
+            if carry_return and stack_param_count > regparm_count:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
-                # must arrive via AX only (regparm(1)) or take no args.
-                message = "carry_return functions may not take stack args; use 0 params or regparm(1)"
+                # must arrive via AX only (regparm(1)), take no args, or
+                # use only out_register/in_register params (no stack push, no cleanup).
+                message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
                 raise CompileError(message, line=line)
-            if always_inline and len(parameters) > regparm_count:
+            if always_inline and stack_param_count > regparm_count:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take stack args; use 0 params or regparm(1)"
+                message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
-                # Function prototype (no body).  cc.py's two-pass
-                # function-name resolution doesn't need prototypes, but
-                # clang's ISO C99 declare-before-use rule requires them
-                # when a pure-C caller references a function defined
-                # later in the same translation unit.  Parsed and
-                # swallowed here; ``parse_program`` drops the None
-                # return so nothing lands in the AST.
+                # Function prototype (no body).  Retained in the AST so
+                # the generator can register calling-convention metadata
+                # (carry_return, out_register params) for external
+                # functions called from C.  No code is emitted for
+                # prototype nodes.
                 self.eat("SEMI")
-                return None
+                return Function(
+                    always_inline=always_inline,
+                    body=[],
+                    carry_return=carry_return,
+                    is_prototype=True,
+                    line=line,
+                    name=name,
+                    params=parameters,
+                    preserve_registers=preserve_registers,
+                    regparm_count=regparm_count,
+                )
             self.eat("LBRACE")
             return Function(
                 always_inline=always_inline,
@@ -831,6 +964,7 @@ class Parser:
                 line=line,
                 name=name,
                 params=parameters,
+                preserve_registers=preserve_registers,
                 regparm_count=regparm_count,
             )
         if regparm_count != 0:
@@ -842,6 +976,20 @@ class Parser:
         if always_inline:
             message = "always_inline attribute is not valid on global variables"
             raise CompileError(message, line=line)
+        if preserve_registers:
+            message = "preserve_register attribute is not valid on global variables"
+            raise CompileError(message, line=line)
+        # Trailing ``__attribute__`` on the variable name (e.g. ``uint16_t x __attribute__((asm_name("sym")))``)
+        # is equivalent to a leading one for global variable declarations.
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "asm_name":
+                asm_symbol = value
+            elif kind == "asm_register":
+                asm_register = value
+            else:
+                message = f"trailing {kind} attribute is not valid on global variable declarations"
+                raise CompileError(message, line=line)
         # File-scope variable: scalar or array.  Globals may specify a
         # size inside ``[...]`` (unlike locals) since there is no
         # runtime initializer to imply one.
@@ -862,14 +1010,17 @@ class Parser:
             if asm_register is not None:
                 message = "asm_register attribute is not valid on arrays"
                 raise CompileError(message, line=line)
+            if asm_symbol is not None:
+                message = "asm_name attribute is not valid on arrays"
+                raise CompileError(message, line=line)
             if size_expression is None and init is None:
                 message = f"global array '{name}' needs either a size or an initializer"
                 raise CompileError(message, line=line)
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(asm_register=asm_register, init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(asm_register=asm_register, asm_symbol=asm_symbol, init=init, line=line, name=name, type_name=type_string)
 
     def parse_type(self) -> str:
-        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, unsigned long).
+        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).
 
         An optional leading ``const`` is accepted and discarded — the C
         subset has no notion of const-ness but tolerating the keyword
@@ -893,6 +1044,9 @@ class Parser:
             return "void"
         if token[0] == "INT":
             self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "int*"
             return "int"
         if token[0] == "CHAR":
             self.eat()
@@ -906,6 +1060,18 @@ class Parser:
                 self.eat()
                 return "uint8_t*"
             return "uint8_t"
+        if token[0] == "UINT16_T":
+            self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "uint16_t*"
+            return "uint16_t"
+        if token[0] == "UINT32_T":
+            self.eat()
+            if self.peek()[0] == "STAR":
+                self.eat()
+                return "uint32_t*"
+            return "uint32_t"
         if token[0] == "UNSIGNED":
             self.eat()
             if self.peek()[0] != "LONG":
@@ -937,7 +1103,19 @@ class Parser:
         """
         line = self.peek()[2]
         type_string = self.parse_type()
-        name = self.eat("IDENT")[1]
+        function_pointer_params_list: list[Param] | None = None
+        if self.peek()[0] == "LPAREN":
+            # Function pointer variable: type (*name)(params)
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            function_pointer_params_list = self.parse_parameters()
+            self.eat("RPAREN")
+            type_string = "function_pointer"
+        else:
+            name = self.eat("IDENT")[1]
         # Optional [] or [N] for array declarations
         is_array = False
         size_expression: Node | None = None
@@ -954,7 +1132,7 @@ class Parser:
         self.eat("SEMI")
         if is_array:
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(function_pointer_params=function_pointer_params_list, init=init, line=line, name=name, type_name=type_string)
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.

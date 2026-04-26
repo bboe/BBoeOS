@@ -42,6 +42,7 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    TailCall,
     Var,
     VarDecl,
 )
@@ -84,6 +85,16 @@ class CodeGeneratorBase:
         "ERROR_NOT_FOUND",
         "ERROR_PROTECTED",
         "EXEC_ARG",
+        "FD_ENTRY_SIZE",
+        "FD_MAX",
+        "FD_TYPE_CONSOLE",
+        "FD_TYPE_DIRECTORY",
+        "FD_TYPE_FILE",
+        "FD_TYPE_FREE",
+        "FD_TYPE_ICMP",
+        "FD_TYPE_NET",
+        "FD_TYPE_UDP",
+        "FD_TYPE_VGA",
         "_bss_end",
         "_program_end",
         "FLAG_DIRECTORY",
@@ -91,6 +102,8 @@ class CodeGeneratorBase:
         "IPPROTO_ICMP",
         "IPPROTO_UDP",
         "MAX_INPUT",
+        "NET_RECEIVE_BUFFER",
+        "NET_TRANSMIT_BUFFER",
         "NULL",
         "O_CREAT",
         "O_RDONLY",
@@ -684,6 +697,8 @@ class CodeGeneratorBase:
         if isinstance(last, Return):
             return True
         if isinstance(last, Call) and last.name in {"die", "exit"}:
+            return True
+        if isinstance(last, TailCall):
             return True
         # Exhaustive if-else: both branches always exit.
         if isinstance(last, If) and last.else_body is not None:

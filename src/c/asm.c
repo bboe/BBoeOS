@@ -1275,6 +1275,28 @@ void handle_in() {
     }
 }
 
+/* ``imul dst, imm`` — signed multiply register by constant.  Uses
+   the three-operand form with dst=src (``6B /r ib`` for imm8,
+   ``69 /r iw`` for imm16). */
+void handle_imul() {
+    skip_ws();
+    int packed_register = parse_register();
+    skip_comma();
+    int imm = resolve_value();
+    int register_id = packed_register & 0xFF;
+    int size = (packed_register >> 8) & 0xFF;
+    int modrm = 0xC0 | (register_id << 3) | register_id;
+    if (imm >= -128 && imm <= 127) {
+        emit_sized(0x6A, size);
+        emit_byte(modrm);
+        emit_byte(imm & 0xFF);
+    } else {
+        emit_sized(0x68, size);
+        emit_byte(modrm);
+        emit_word(imm);
+    }
+}
+
 void handle_inc() {
     inc_dec_handler(0);
 }
@@ -3547,6 +3569,7 @@ asm(
     "        dw STR_CMP, handle_cmp\n"
     "        dw STR_DEC, handle_dec\n"
     "        dw STR_DIV, handle_div\n"
+    "        dw STR_IMUL, handle_imul\n"
     "        dw STR_IN,  handle_in\n"
     "        dw STR_INC, handle_inc\n"
     "        dw STR_INT, handle_int\n"
@@ -3622,6 +3645,7 @@ asm(
     "STR_DEFINE  db 'define',0\n"
     "STR_DW      db 'dw',0\n"
     "STR_ENDMACRO db 'endmacro',0\n"
+    "STR_IMUL    db 'imul',0\n"
     "STR_IN      db 'in',0\n"
     "STR_INC     db 'inc',0\n"
     "STR_INCLUDE db 'include',0\n"

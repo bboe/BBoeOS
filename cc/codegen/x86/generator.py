@@ -37,6 +37,7 @@ from cc.ast_nodes import (
     Param,
     String,
     StructDecl,
+    StructInit,
     Var,
     VarDecl,
     While,
@@ -152,17 +153,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise ValueError(message)
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         super().__init__(constant_values=constant_values, defines=defines, target=target)
+        self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
         self.division_remainder: tuple | None = None
+        # in_register_params / out_register_params map function name → {param_index → register}.
+        # Populated during the first pass over function definitions in generate().
+        self.in_register_params: dict[str, dict[int, str]] = {}
+        self.out_register_params: dict[str, dict[int, str]] = {}
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
+        self.store_target_register: str | None = None
         # struct_layouts maps struct tag name → {field_name: (byte_offset, byte_size)}.
         # Populated by _register_globals when StructDecl nodes are encountered.
         self.struct_layouts: dict[str, dict[str, tuple[int, int]]] = {}
-        self.store_target_register: str | None = None
         self.target_mode: str = target_mode
 
     def _register_inline_body(self, function: Function, /) -> None:
@@ -228,7 +234,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.register_convention_functions: set[str] = set()
 
         for function in functions:
-            if function.name == "main":
+            if function.name == "main" or function.is_prototype:
                 continue
             self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
             # Fastcall (regparm(1)) param 0 lives in AX on entry and is spilled
@@ -236,11 +242,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # candidate so auto-pin selection skips it entirely.  Params 1..N
             # of a fastcall function keep the standard stack convention in the
             # MVP — they don't mix with register_convention.
-            pin_params = function.params[1:] if function.regparm_count > 0 else function.params
+            all_params = function.params
+            if function.regparm_count > 0:
+                pin_params = [p for p in all_params[1:] if p.out_register is None and p.in_register is None]
+            else:
+                pin_params = [p for p in all_params if p.out_register is None and p.in_register is None]
             assignments = self._select_auto_pin_candidates(body=function.body, parameters=pin_params)
             param_pins: dict[int, str] = {}
-            for index, param in enumerate(function.params):
+            for index, param in enumerate(all_params):
                 if function.regparm_count > 0 and index == 0:
+                    continue
+                if param.out_register is not None or param.in_register is not None:
                     continue
                 if param.name in assignments:
                     param_pins[index] = assignments[param.name]
@@ -291,6 +303,42 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(arg, BinaryOperation):
             return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
         return set()
+
+    def _arithmetic_element_size(self, var_name: str, /) -> int:
+        """Return the element stride for pointer/array arithmetic on *var_name*.
+
+        ``ptr + N`` scales ``N`` by the pointed-to element's byte size so that
+        ``struct fd *p; p + 1`` advances by ``sizeof(struct fd)`` rather than 1.
+
+        Rules:
+        - Array variables (in ``variable_arrays``): element size is the declared
+          element type's byte size.
+        - Pointer variables (type ends with ``*``): element size is the
+          pointed-to type's byte size.
+        - Byte types (``char``, ``uint8_t``) always return 1 so byte-string
+          arithmetic is never scaled.
+        - Unknown or non-pointer scalars: return 1 (no scaling).
+        """
+        type_name = self.variable_types.get(var_name, "")
+        if var_name in self.variable_arrays:
+            # Array: element type is the stored type_name directly.
+            if type_name in ("char", "uint8_t") or type_name in self.BYTE_TYPES:
+                return 1
+            if type_name.startswith("struct "):
+                tag = type_name[7:]
+                if tag in self.struct_layouts:
+                    return sum(size for _, size in self.struct_layouts[tag].values())
+            return self.target.type_sizes.get(type_name, 1)
+        if type_name.endswith("*"):
+            base = type_name[:-1]
+            if base in ("char", "uint8_t") or base in self.BYTE_TYPES:
+                return 1
+            if base.startswith("struct "):
+                tag = base[7:]
+                if tag in self.struct_layouts:
+                    return sum(size for _, size in self.struct_layouts[tag].values())
+            return self.target.type_sizes.get(base, 1)
+        return 1
 
     def _byte_index_direct(self, node: Index, /) -> str | None:
         """Return a direct NASM memory operand for a constant-base Index.
@@ -518,6 +566,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # Storage lives in the aliased CPU register, not memory,
                 # so no ``_g_<name>`` label is emitted.
                 continue
+            if name in self.asm_symbol_globals:
+                # Storage lives in an existing asm symbol, not here,
+                # so no ``_g_<name>`` label is emitted.
+                continue
             if declaration.init is None:
                 stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 if self.target_mode == "kernel":
@@ -531,13 +583,36 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             is_byte = declaration.type_name in self.BYTE_TYPES
-            if declaration.type_name.startswith("struct "):
+            is_struct = declaration.type_name.startswith("struct ")
+            if is_struct:
                 stride = self._type_size(declaration.type_name)
             elif is_byte:
                 stride = 1
             else:
                 stride = self.target.int_size
-            if declaration.init is not None:
+            if is_struct and declaration.init is not None:
+                struct_name = declaration.type_name[len("struct ") :]
+                layout = self.struct_layouts[struct_name]
+                lines: list[str] = []
+                for element in declaration.init.elements:
+                    assert isinstance(element, StructInit)
+                    for i, (field_name, (offset, field_size)) in enumerate(layout.items()):
+                        value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
+                        if field_size == 1:
+                            lines.append(f"db {value}")
+                        elif field_size == 2:
+                            lines.append(f"dw {value}")
+                        elif field_size == 4:
+                            lines.append(f"dd {value}")
+                        else:
+                            lines.append(f"times {field_size} db 0")
+                count = len(declaration.init.elements)
+                size_expression = self._constant_expression(declaration.size)
+                lines.append(f"times ({size_expression}-{count})*{stride} db 0")
+                self.emit(f"_g_{name}: {lines[0]}")
+                for line in lines[1:]:
+                    self.emit(f"        {line}")
+            elif declaration.init is not None:
                 directive = "db" if is_byte else int_directive
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
@@ -562,6 +637,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if type_name in self.target.type_sizes:
             return self.target.type_sizes[type_name]
+        if type_name == "function_pointer":
+            return self.target.int_size
         if type_name.startswith("struct "):
             if type_name.endswith("*"):
                 return self.target.int_size
@@ -572,6 +649,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return sum(size for _, size in self.struct_layouts[tag].values())
         message = f"unknown type '{type_name}'"
         raise CompileError(message)
+
+    def _validate_array_init(self, elements: list[Node]) -> None:
+        """Validate global array initializer elements are all constant expressions."""
+        for element in elements:
+            if isinstance(element, String):
+                continue
+            if isinstance(element, StructInit):
+                for field in element.fields:
+                    if self._constant_expression(field) is None:
+                        message = "struct initializer fields must be constants"
+                        raise CompileError(message, line=field.line)
+                    for reference in self._collect_constant_references(field):
+                        self.emit_constant_reference(reference)
+                continue
+            if self._constant_expression(element) is None:
+                message = "global array initializer elements must be constants"
+                raise CompileError(message, line=element.line)
+            for reference in self._collect_constant_references(element):
+                self.emit_constant_reference(reference)
 
     def generate_member_access(self, expression: MemberAccess, /) -> None:
         """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue."""
@@ -599,9 +695,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
-        self._emit_load_var(object_name, register=self.target.bx_register)
-        bx = self.target.bx_register
-        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        if self.si_local == object_name:
+            base_reg = self.target.si_register
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+            base_reg = self.target.bx_register
+        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit_byte_load_zx(addr)
         else:
@@ -635,9 +734,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise CompileError(message, line=statement.line)
         self.ax_clear()
         self.generate_expression(statement.expr)
-        self._emit_load_var(object_name, register=self.target.bx_register)
-        bx = self.target.bx_register
-        addr = f"[{bx}+{offset}]" if offset else f"[{bx}]"
+        # If SI still holds the struct pointer (no intervening call), use it
+        # directly as the base register to avoid a BX round-trip.
+        if self.si_local == object_name:
+            base_reg = self.target.si_register
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+            base_reg = self.target.bx_register
+        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit(f"        mov byte {addr}, al")
         else:
@@ -752,6 +856,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if name in self.register_aliased_globals:
             message = f"register-aliased global '{name}' has no memory address"
             raise CompileError(message)
+        if name in self.asm_symbol_globals:
+            return self.asm_symbol_globals[name]
         if name in self.global_scalars:
             return f"_g_{name}"
         message = f"no address for '{name}' (not a local or global scalar)"
@@ -1059,6 +1165,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     # read emits the right-width register without a
                     # per-use lookup.
                     self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
+                if declaration.asm_symbol is not None:
+                    self.asm_symbol_globals[name] = declaration.asm_symbol
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
@@ -1073,14 +1181,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     for constant in self._collect_constant_references(declaration.size):
                         self.emit_constant_reference(constant)
                 if declaration.init is not None:
-                    for element in declaration.init.elements:
-                        if isinstance(element, String):
-                            continue
-                        if self._constant_expression(element) is None:
-                            message = "global array initializer elements must be constants"
-                            raise CompileError(message, line=element.line)
-                        for reference in self._collect_constant_references(element):
-                            self.emit_constant_reference(reference)
+                    self._validate_array_init(declaration.init.elements)
                 self.global_arrays[name] = declaration
             else:
                 message = f"unexpected top-level declaration: {type(declaration).__name__}"
@@ -1128,7 +1229,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for statement in nodes:
                 if isinstance(statement, VarDecl):
                     eligible = (
-                        statement.type_name != "unsigned long"
+                        statement.type_name not in ("unsigned long", "function_pointer")
                         and not (top_level and self._is_constant_alias(body=nodes, statement=statement))
                         and not isinstance(statement.init, Call)
                     )
@@ -1472,13 +1573,28 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
+        function_pointer_vars: set[str] = set()
+
+        def collect_function_pointer_vars(stmts: list[Node]) -> None:
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl) and stmt.type_name == "function_pointer":
+                    function_pointer_vars.add(stmt.name)
+                elif isinstance(stmt, If):
+                    collect_function_pointer_vars(stmt.body)
+                    if stmt.else_body:
+                        collect_function_pointer_vars(stmt.else_body)
+                elif isinstance(stmt, (DoWhile, While)):
+                    collect_function_pointer_vars(stmt.body)
+
+        collect_function_pointer_vars(body)
+
         def visit(node: Node) -> None:
             if isinstance(node, Call):
-                if node.name in self.user_functions:
-                    # User functions follow the standard cdecl prologue
-                    # (``push bp / mov bp, sp / … / pop bp``) which
-                    # preserves the caller's BP, so BP is omitted from
-                    # the user-call clobber set even when it's pinned.
+                if node.name in self.user_functions or node.name in function_pointer_vars:
+                    # User functions and function_pointer indirect calls follow the standard
+                    # cdecl prologue (``push bp / mov bp, sp / … / pop bp``) which
+                    # preserves the caller's BP, so BP is omitted from the
+                    # user-call clobber set even when it's pinned.
                     for register in self.target.register_pool:
                         clobber_counts[register] += 1
                 else:
@@ -2131,6 +2247,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=statement.line)
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
+                if statement.function_pointer_params:
+                    in_regs: dict[int, str] = {}
+                    for param_index, param in enumerate(statement.function_pointer_params):
+                        if param.in_register is not None:
+                            in_regs[param_index] = param.in_register
+                    if in_regs:
+                        self.function_pointer_in_registers[statement.name] = in_regs
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
                     alias = self._constant_expression(statement.init)
                     self.constant_aliases[statement.name] = alias
@@ -2139,7 +2262,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         if include is not None:
                             self.required_includes.add(include)
                     continue
-                if statement.type_name != "unsigned long" and statement.name in self.auto_pin_candidates:
+                if statement.type_name not in ("unsigned long", "function_pointer") and statement.name in self.auto_pin_candidates:
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.auto_pin_candidates[statement.name]

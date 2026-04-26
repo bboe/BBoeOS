@@ -30,6 +30,13 @@ class Node:
 
 
 @dataclass(kw_only=True, slots=True)
+class AddressOf(Node):
+    """Address-of expression ``&name``."""
+
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class ArrayDecl(Node):
     """Array declaration ``T name[] = {...};`` (local or global).
 
@@ -87,6 +94,14 @@ class Continue(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class DerefAssign(Node):
+    """Pointer dereference assignment ``*name = expr;``."""
+
+    expr: Node
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class DoWhile(Node):
     """``do { body } while (cond);`` loop."""
 
@@ -116,13 +131,28 @@ class Function(Node):
     splices the body text in place of ``call X`` (with local label
     uniquification); no free-standing function body is emitted, so
     there's nothing for inline-asm ``call X`` to resolve against.
+
+    ``preserve_registers`` captures zero or more
+    ``__attribute__((preserve_register("REG")))`` annotations.  Each
+    named register is pushed immediately before the BP frame setup and
+    popped (in reverse order) just before every ``ret``.  ``pop REG``
+    does not affect flags, so CF from ``carry_return`` functions
+    survives.
+
+    ``is_prototype`` is ``True`` for forward declarations (no body) —
+    the node is retained in ``Program.functions`` so the generator can
+    register calling-convention info (e.g., ``out_register`` params and
+    ``carry_return``) for call sites that reference an externally-defined
+    function.  No code is emitted for prototype nodes.
     """
 
     always_inline: bool = field(default=False, kw_only=True)
     body: list[Node]
     carry_return: bool = field(default=False, kw_only=True)
+    is_prototype: bool = field(default=False, kw_only=True)
     name: str
     params: list[Param]
+    preserve_registers: list[str] = field(default_factory=list, kw_only=True)
     regparm_count: int = field(default=0, kw_only=True)
 
 
@@ -231,10 +261,24 @@ class LogicalOr(Node):
 
 @dataclass(kw_only=True, slots=True)
 class Param:
-    """A function parameter: type, name, and whether it was declared with ``[]``."""
+    """A function parameter: type, name, and whether it was declared with ``[]``.
 
+    ``in_register`` captures ``__attribute__((in_register("REG")))`` — the
+    caller loads the argument into the named register instead of pushing it;
+    the callee spills the register to a local slot at function entry and reads
+    it from there like any other local.
+
+    ``out_register`` captures ``__attribute__((out_register("REG")))`` — the
+    parameter is an output-only register: the caller passes ``&local`` but no
+    push is emitted; after the call the named register is captured into the
+    local.  In the callee body, ``*param = expr`` emits ``mov REG, expr``
+    rather than a pointer write.
+    """
+
+    in_register: str | None = field(default=None, kw_only=True)
     is_array: bool
     name: str
+    out_register: str | None = field(default=None, kw_only=True)
     type: str
 
 
@@ -295,10 +339,36 @@ class StructField(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class StructInit(Node):
+    """Brace-initializer ``{a, b}`` for one struct element within an array initializer.
+
+    Fields are positional; unspecified trailing fields are zero-filled by
+    the code generator.  Nested struct-of-struct initializers are not
+    supported.
+    """
+
+    fields: list[Node]
+
+
+@dataclass(kw_only=True, slots=True)
 class String(Node):
     """String literal."""
 
     content: str
+
+
+@dataclass(kw_only=True, slots=True)
+class TailCall(Node):
+    """``__tail_call(fn_ptr, arg1, arg2, ...)`` statement.
+
+    Tears down the current stack frame and jumps to ``fn_ptr`` (a
+    function-pointer local) with the given arguments loaded into their
+    declared registers.  The callee returns directly to the current
+    function's caller — AX and CF flow through unmodified.
+    """
+
+    args: list[Node]
+    fn: str
 
 
 @dataclass(kw_only=True, slots=True)
@@ -317,9 +387,16 @@ class VarDecl(Node):
     aliased to the named CPU register, so reads compile as the register
     itself (no ``[_g_name]`` load) and writes compile as a direct
     ``mov REG, ...``.  ``None`` for ordinary scalars / locals.
+
+    ``function_pointer_params`` is set when the declaration uses function-pointer
+    syntax ``type (*name)(params)``.  The list carries each parameter's
+    ``in_register`` annotation so call sites know which CPU registers to
+    load before ``call ax``.  ``None`` for ordinary (non-function_pointer) scalars.
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
+    asm_symbol: str | None = field(default=None, kw_only=True)
+    function_pointer_params: list[Param] | None = field(default=None, kw_only=True)
     init: Node | None
     name: str
     type_name: str
