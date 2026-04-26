@@ -143,9 +143,52 @@ __attribute__((carry_return)) int fd_open(int *result_fd __attribute__((out_regi
     return 1;
 }
 
+// fd_get_read_fn: Return the read handler for an fd (SI=entry → AX=fn or 0)
+int fd_get_read_fn(struct fd *entry __attribute__((in_register("si"))));
+
+// fd_get_write_fn: Return the write handler for an fd (SI=entry → AX=fn or 0)
+int fd_get_write_fn(struct fd *entry __attribute__((in_register("si"))));
+
 // fd_open_is_vga: Test if path equals "/dev/vga" (SI=path; CF clear = match)
 __attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si")))) {
     return memcmp(path, "/dev/vga", 9) == 0;
+}
+
+// fd_write_buffer: global buffer pointer used by write handlers (defined in asm block)
+uint16_t fd_write_buffer __attribute__((asm_name("fd_write_buffer")));
+
+// fd_read: Read from fd (BX=fd, DI=buf, CX=count → AX=bytes, CF on error)
+__attribute__((carry_return)) int fd_read(
+    int file_descriptor __attribute__((in_register("bx"))),
+    uint8_t *buffer __attribute__((in_register("di"))),
+    int count __attribute__((in_register("cx"))))
+{
+    struct fd *entry;
+    int (*read_handler)(
+        struct fd *e __attribute__((in_register("si"))),
+        uint8_t *b __attribute__((in_register("di"))),
+        int n __attribute__((in_register("cx"))));
+    if (!fd_lookup(file_descriptor, &entry)) { return 0; }
+    read_handler = fd_get_read_fn(entry);
+    if (read_handler == 0) { return 0; }
+    __tail_call(read_handler, entry, buffer, count);
+}
+
+// fd_write: Write to fd (BX=fd, SI=buf, CX=count → AX=bytes, CF on error)
+__attribute__((carry_return)) int fd_write(
+    int file_descriptor __attribute__((in_register("bx"))),
+    uint8_t *buffer __attribute__((in_register("si"))),
+    int count __attribute__((in_register("cx"))))
+{
+    struct fd *entry;
+    int (*write_handler)(
+        struct fd *e __attribute__((in_register("si"))),
+        int n __attribute__((in_register("cx"))));
+    fd_write_buffer = buffer;
+    if (!fd_lookup(file_descriptor, &entry)) { return 0; }
+    write_handler = fd_get_write_fn(entry);
+    if (write_handler == 0) { return 0; }
+    __tail_call(write_handler, entry, count);
 }
 
 // fd_populate_from_vfs: Fill fd entry from vfs_found_* globals (SI=entry, AX=open_flags)
@@ -185,39 +228,23 @@ int fd_pos_to_sector(struct fd *entry __attribute__((in_register("si"))), int *b
 asm("
 
 ;;; -----------------------------------------------------------------------
-;;; fd_read: Read from fd (BX=fd, DI=buf, CX=count -> AX=bytes, CF on err)
-;;; fd_write: Write to fd (BX=fd, SI=buf, CX=count -> AX=bytes, CF on err)
-;;; Table-driven dispatch via fd_ops (read_fn, write_fn pairs by FD_TYPE_*).
+;;; fd_get_read_fn: get read handler pointer from fd_ops (SI=entry → AX)
+;;; fd_get_write_fn: get write handler pointer from fd_ops (SI=entry → AX)
+;;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*.
+;;; fd_write_buffer: global holding the write buffer pointer for handlers.
 ;;; -----------------------------------------------------------------------
-fd_read:
-        call fd_lookup
-        jc .err
+fd_get_read_fn:
         xor bh, bh
         mov bl, [si+FD_OFFSET_TYPE]
         shl bx, 2               ; * 4: each ops entry is two words
         mov ax, [fd_ops+bx]     ; read_fn
-        test ax, ax
-        jz .err
-        jmp ax
-        .err:
-        mov ax, -1
-        stc
         ret
 
-fd_write:
-        mov [fd_write_buffer], si
-        call fd_lookup
-        jc .err
+fd_get_write_fn:
         xor bh, bh
         mov bl, [si+FD_OFFSET_TYPE]
         shl bx, 2               ; * 4: each ops entry is two words
         mov ax, [fd_ops+bx+2]   ; write_fn
-        test ax, ax
-        jz .err
-        jmp ax
-        .err:
-        mov ax, -1
-        stc
         ret
 
         ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
