@@ -112,6 +112,10 @@ protected_mode_entry:
         call fdc_init
         call ps2_init
         call vfs_init
+        ;; Probe the NE2000 NIC and bring it up if present.  CF set =
+        ;; no NIC, which is fine — netinit / net programs surface that
+        ;; via a "no NIC" message rather than halting the kernel.
+        call network_initialize
 
         ;; Zero the system tick counter before unmasking IRQ 0.
         mov dword [system_ticks], 0

@@ -4,12 +4,12 @@
         %assign NE2K_TX_PAGE 40h   ; TX buffer start page
 
 ne2k_init:
-        ;; Fully initialize the NE2000 for sending and receiving packets
-        ;; Must be called after successful ne2k_probe
-        push ax
-        push cx
-        push dx
-        push si
+        ;; Fully initialize the NE2000 for sending and receiving packets.
+        ;; Must be called after successful ne2k_probe.
+        push eax
+        push ecx
+        push edx
+        push esi
 
         ;; Page 0, stop, DMA abort
         mov dx, NE2K_BASE
@@ -44,9 +44,9 @@ ne2k_init:
 
         ;; Program physical address registers PAR0-PAR5 (page 1, regs 01h-06h)
         cld
-        mov si, mac_address
+        mov esi, mac_address
         mov dx, NE2K_BASE + 01h
-        mov cx, 6
+        mov ecx, 6
         .set_mac:
         lodsb
         out dx, al
@@ -55,7 +55,7 @@ ne2k_init:
 
         ;; Set multicast filter to accept all (MAR0-MAR7, page 1, regs 08h-0Fh)
         mov dx, NE2K_BASE + 08h
-        mov cx, 8
+        mov ecx, 8
         mov al, 0FFh
         .set_mar:
         out dx, al
@@ -92,19 +92,19 @@ ne2k_init:
         mov al, 22h             ; Page 0, start, DMA abort
         out dx, al
 
-        pop si
-        pop dx
-        pop cx
-        pop ax
+        pop esi
+        pop edx
+        pop ecx
+        pop eax
         ret
 
 ne2k_probe:
-        ;; Probe and reset NE2000 NIC, read MAC address into mac_address
-        ;; Output: CF clear on success, CF set on failure (no NIC or timeout)
-        push ax
-        push cx
-        push dx
-        push di
+        ;; Probe and reset NE2000 NIC, read MAC address into mac_address.
+        ;; Output: CF clear on success, CF set on failure.
+        push eax
+        push ecx
+        push edx
+        push edi
 
         ;; Reset the NIC
         mov dx, NE2K_BASE + 1Fh ; Reset port
@@ -112,7 +112,7 @@ ne2k_probe:
         out dx, al              ; Write back to trigger reset
 
         ;; Wait for ISR reset bit (bit 7)
-        mov cx, 0FFFFh
+        mov ecx, 0FFFFh
         mov dx, NE2K_BASE + 07h ; ISR
         .wait_reset:
         in al, dx
@@ -183,8 +183,8 @@ ne2k_probe:
         out dx, al
 
         ;; Read 6 MAC bytes (word mode: low byte of each word is the MAC byte)
-        mov di, mac_address
-        mov cx, 6
+        mov edi, mac_address
+        mov ecx, 6
         mov dx, NE2K_BASE + 10h ; Data port
         cld
         .read_mac:
@@ -193,7 +193,7 @@ ne2k_probe:
         loop .read_mac
 
         ;; Drain remaining 10 words to complete the 32-byte DMA transfer
-        mov cx, 10
+        mov ecx, 10
         .drain:
         in ax, dx
         loop .drain
@@ -214,20 +214,20 @@ ne2k_probe:
         stc
 
         .probe_done:
-        pop di
-        pop dx
-        pop cx
-        pop ax
+        pop edi
+        pop edx
+        pop ecx
+        pop eax
         ret
 
 ne2k_receive:
-        ;; Receive a packet from the NE2000 RX ring buffer (polled)
-        ;; Output: DI = NET_RECEIVE_BUFFER (packet data), CX = packet length
+        ;; Receive a packet from the NE2000 RX ring buffer (polled).
+        ;; Output: EDI = NET_RECEIVE_BUFFER (packet data), ECX = packet length
         ;;         CF clear if packet received, CF set if no packet available
-        push ax
-        push bx
-        push dx
-        push si
+        push eax
+        push ebx
+        push edx
+        push esi
 
         ;; Read CURR from page 1
         mov dx, NE2K_BASE       ; CR
@@ -282,7 +282,7 @@ ne2k_receive:
         mov bl, ah              ; BL = next page pointer
         in ax, dx               ; AX = total length (including 4-byte header)
         sub ax, 4
-        mov cx, ax              ; CX = Ethernet frame length
+        movzx ecx, ax           ; ECX = Ethernet frame length
 
         ;; Wait for header DMA complete
         mov dx, NE2K_BASE + 07h ; ISR
@@ -294,13 +294,13 @@ ne2k_receive:
         out dx, al              ; Acknowledge
 
         ;; Read packet data at (read_page * 256 + 4)
-        push cx                 ; Save packet length
+        push ecx                ; Save packet length
 
         ;; Round up to even for word-mode DMA
-        mov ax, cx
-        inc ax
-        and ax, 0FFFEh
-        mov cx, ax
+        mov eax, ecx
+        inc eax
+        and eax, 0FFFEh
+        mov ecx, eax
 
         mov dx, NE2K_BASE + 08h ; RSAR0
         mov al, 4               ; Past the 4-byte header
@@ -321,8 +321,8 @@ ne2k_receive:
         out dx, al
 
         ;; Read packet data into NET_RECEIVE_BUFFER
-        shr cx, 1              ; Word count
-        mov di, NET_RECEIVE_BUFFER
+        shr ecx, 1              ; Word count
+        mov edi, NET_RECEIVE_BUFFER
         mov dx, NE2K_BASE + 10h ; Data port
         cld
         rep insw
@@ -346,8 +346,8 @@ ne2k_receive:
         mov dx, NE2K_BASE + 03h ; BOUNDARY
         out dx, al
 
-        pop cx                 ; Restore packet length
-        mov di, NET_RECEIVE_BUFFER
+        pop ecx                 ; Restore packet length
+        mov edi, NET_RECEIVE_BUFFER
         clc
         jmp .recv_done
 
@@ -355,32 +355,32 @@ ne2k_receive:
         stc
 
         .recv_done:
-        pop si
-        pop dx
-        pop bx
-        pop ax
+        pop esi
+        pop edx
+        pop ebx
+        pop eax
         ret
 
 ne2k_send:
-        ;; Send a raw Ethernet frame via the NE2000
-        ;; Input: SI = pointer to frame data, CX = frame length in bytes
+        ;; Send a raw Ethernet frame via the NE2000.
+        ;; Input: ESI = pointer to frame data, ECX = frame length in bytes
         ;; Output: CF clear on success, CF set on error
-        push ax
-        push cx
-        push dx
-        push si
+        push eax
+        push ecx
+        push edx
+        push esi
 
         ;; Ensure minimum Ethernet frame size (60 bytes, NIC adds 4-byte FCS)
-        cmp cx, 60
+        cmp ecx, 60
         jae .len_ok
-        mov cx, 60
+        mov ecx, 60
         .len_ok:
 
-        push cx                ; Save frame length for TX byte count
+        push ecx               ; Save frame length for TX byte count
 
         ;; Round up to even byte count for word-mode DMA
-        inc cx
-        and cx, 0FFFEh
+        inc ecx
+        and ecx, 0FFFEh
 
         ;; Set remote DMA start address to TX buffer (page * 256)
         mov dx, NE2K_BASE + 08h ; RSAR0
@@ -404,7 +404,7 @@ ne2k_send:
         out dx, al
 
         ;; Write frame data to NIC via data port
-        shr cx, 1              ; Word count
+        shr ecx, 1              ; Word count
         mov dx, NE2K_BASE + 10h ; Data port
         cld
         rep outsw
@@ -418,7 +418,7 @@ ne2k_send:
         mov al, 40h
         out dx, al             ; Acknowledge RDC
 
-        pop cx                 ; Restore frame length
+        pop ecx                ; Restore frame length
 
         ;; Set TX page start register
         mov dx, NE2K_BASE + 04h ; TPSR
@@ -440,7 +440,7 @@ ne2k_send:
 
         ;; Wait for transmit complete (PTX or TXE bit in ISR)
         mov dx, NE2K_BASE + 07h ; ISR
-        mov cx, 0FFFFh
+        mov ecx, 0FFFFh
         .wait_tx:
         in al, dx
         test al, 0Ah           ; PTX (02h) or TXE (08h)
@@ -463,10 +463,10 @@ ne2k_send:
         stc
 
         .send_done:
-        pop si
-        pop dx
-        pop cx
-        pop ax
+        pop esi
+        pop edx
+        pop ecx
+        pop eax
         ret
 
 network_initialize:

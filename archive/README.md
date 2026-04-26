@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 451         | 454       | +3    |
+| arp     | 466         | 469       | +3    |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
@@ -21,7 +21,7 @@ source is kept here for reference.
 | netinit | 72          | 69        | -3    |
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1291      | +272  |
+| ping    | 1034        | 1306      | +272  |
 | shell   | 950         | 1337      | +387  |
 | uptime  | 50          | 78        | +28   |
 
@@ -122,7 +122,7 @@ length-bearing messages without null terminators.  The C version uses
 a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
 uses ``BUFFER``.
 
-**ping (+346):** Both versions build ICMP echo requests in userspace
+**ping (+272):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
 arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,
