@@ -709,3 +709,98 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
             f"--- default ---\n{default_text[:500]}\n"
             f"--- user ---\n{user_text[:500]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# __tail_call statement
+# ---------------------------------------------------------------------------
+
+
+def test_tail_call_emits_jmp_ax() -> None:
+    """``__tail_call`` emits a frame teardown then ``jmp ax``."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(int x __attribute__((in_register("si"))));
+            handler = get_fn();
+            __tail_call(handler, 42);
+        }
+    """)
+    assert "jmp ax" in asm, "__tail_call must emit 'jmp ax'"
+    assert "pop bp" in asm, "__tail_call must tear down frame"
+    assert "call ax" not in asm, "__tail_call must not emit 'call ax'"
+
+
+def test_tail_call_args_loaded_before_jmp() -> None:
+    """``__tail_call`` loads arguments into registers before the jump."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(
+                int x __attribute__((in_register("si"))),
+                int y __attribute__((in_register("cx"))));
+            handler = get_fn();
+            __tail_call(handler, 1, 2);
+        }
+    """)
+    jmp_pos = asm.index("jmp ax")
+    assert "mov si," in asm[:jmp_pos], "si arg must be set before jmp ax"
+    assert "mov cx," in asm[:jmp_pos], "cx arg must be set before jmp ax"
+
+
+def test_tail_call_no_ret_after_jmp() -> None:
+    """``__tail_call`` does not emit ``ret`` — control flows through the jmp."""
+    asm = _kernel("""
+        int get_fn();
+        void dispatch() {
+            int (*handler)(int x __attribute__((in_register("bx"))));
+            handler = get_fn();
+            __tail_call(handler, 99);
+        }
+    """)
+    lines = asm.splitlines()
+    jmp_idx = next(i for i, ln in enumerate(lines) if "jmp ax" in ln)
+    trailing = "\n".join(lines[jmp_idx + 1 :])
+    assert "ret" not in trailing, "no 'ret' should appear after 'jmp ax'"
+
+
+def test_tail_call_is_terminal() -> None:
+    """``__tail_call`` is recognised as always-exiting; no dead code after it."""
+    asm = _kernel("""
+        int get_fn();
+        __attribute__((carry_return)) int dispatch(int x __attribute__((in_register("bx")))) {
+            int (*handler)(int a __attribute__((in_register("bx"))));
+            handler = get_fn();
+            __tail_call(handler, x);
+        }
+    """)
+    assert "jmp ax" in asm, "__tail_call must emit 'jmp ax'"
+    jmp_pos = asm.index("jmp ax")
+    trailing = asm[jmp_pos + len("jmp ax") :]
+    assert "stc" not in trailing, "no fall-through stc after __tail_call"
+    assert "clc" not in trailing, "no fall-through clc after __tail_call"
+
+
+def test_tail_call_wrong_fn_raises_error() -> None:
+    """``__tail_call`` on a non-function_pointer variable raises CompileError."""
+    error = _kernel_error("""
+        void bad() {
+            int x;
+            x = 5;
+            __tail_call(x, 1);
+        }
+    """)
+    assert "__tail_call" in error, f"Expected __tail_call error, got: {error}"
+
+
+def test_tail_call_arg_count_mismatch_raises_error() -> None:
+    """``__tail_call`` with wrong arg count raises CompileError."""
+    error = _kernel_error("""
+        int get_fn();
+        void bad() {
+            int (*handler)(int x __attribute__((in_register("si"))));
+            handler = get_fn();
+            __tail_call(handler, 1, 2, 3);
+        }
+    """)
+    assert "__tail_call" in error, f"Expected __tail_call arity error, got: {error}"

@@ -358,6 +358,20 @@ class String(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class TailCall(Node):
+    """``__tail_call(fn_ptr, arg1, arg2, ...)`` statement.
+
+    Tears down the current stack frame and jumps to ``fn_ptr`` (a
+    function-pointer local) with the given arguments loaded into their
+    declared registers.  The callee returns directly to the current
+    function's caller — AX and CF flow through unmodified.
+    """
+
+    args: list[Node]
+    fn: str
+
+
+@dataclass(kw_only=True, slots=True)
 class Var(Node):
     """Reference to a named variable or named constant."""
 

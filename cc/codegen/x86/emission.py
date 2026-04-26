@@ -45,6 +45,7 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    TailCall,
     Var,
     VarDecl,
     While,
@@ -1681,9 +1682,39 @@ class EmissionMixin:
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
             self.ax_clear()
+        elif isinstance(statement, TailCall):
+            self.generate_tail_call(statement)
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)
+
+    def generate_tail_call(self, statement: TailCall, /) -> None:
+        """Generate a ``__tail_call`` tail-dispatch statement.
+
+        Tears down the current frame, loads each argument into its
+        declared ``in_register``, loads the function pointer into AX,
+        and emits ``jmp ax`` so the callee returns directly to the
+        current function's caller — AX and CF flow through unchanged.
+        """
+        fn = statement.fn
+        if fn not in self.variable_types or self.variable_types[fn] != "function_pointer":
+            message = f"__tail_call: '{fn}' is not a function_pointer variable"
+            raise CompileError(message, line=statement.line)
+        function_pointer_in_regs = self.function_pointer_in_registers.get(fn, {})
+        if len(statement.args) != len(function_pointer_in_regs):
+            message = f"__tail_call: '{fn}' expects {len(function_pointer_in_regs)} argument(s), got {len(statement.args)}"
+            raise CompileError(message, line=statement.line)
+        if function_pointer_in_regs:
+            register_args = [(function_pointer_in_regs[i], arg) for i, arg in enumerate(statement.args)]
+            self._emit_register_arg_moves(register_args)
+        self._emit_load_var(fn, register=self.target.acc)
+        if not self.elide_frame:
+            if self.frame_size > 0:
+                self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
+            self.emit(f"        pop {self.target.base_register}")
+            for reg in reversed(self.current_preserve_registers):
+                self.emit(f"        pop {reg}")
+        self.emit(f"        jmp {self.target.acc}")
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.

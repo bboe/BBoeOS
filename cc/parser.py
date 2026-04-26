@@ -39,6 +39,7 @@ from cc.ast_nodes import (
     StructDecl,
     StructField,
     StructInit,
+    TailCall,
     Var,
     VarDecl,
     While,
@@ -308,6 +309,26 @@ class Parser:
                 break
         self.eat("RBRACE")
         return StructInit(fields=fields, line=line)
+
+    def _parse_tail_call(self) -> Node:
+        """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.
+
+        The first token is the ``__tail_call`` identifier; the
+        remaining syntax is ``(fn_ptr_name, arg_expr, ...) ;``.
+        ``fn_ptr_name`` must name a local ``function_pointer`` variable;
+        the arguments map to its ``in_register`` parameters in order.
+        """
+        token = self.eat("IDENT")  # __tail_call
+        self.eat("LPAREN")
+        fn_token = self.eat("IDENT")
+        fn = fn_token[1]
+        args = []
+        while self.peek()[0] == "COMMA":
+            self.eat("COMMA")
+            args.append(self.parse_expression())
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return TailCall(args=args, fn=fn, line=token[2])
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -821,6 +842,8 @@ class Parser:
                 return self.parse_index_assignment()
             if next_kind in ("DOT", "ARROW"):
                 return self._parse_member_assignment()
+            if token[1] == "__tail_call":
+                return self._parse_tail_call()
             return self.parse_call_statement()
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])

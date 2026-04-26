@@ -42,6 +42,7 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    TailCall,
     Var,
     VarDecl,
 )
@@ -696,6 +697,8 @@ class CodeGeneratorBase:
         if isinstance(last, Return):
             return True
         if isinstance(last, Call) and last.name in {"die", "exit"}:
+            return True
+        if isinstance(last, TailCall):
             return True
         # Exhaustive if-else: both branches always exit.
         if isinstance(last, If) and last.else_body is not None:
