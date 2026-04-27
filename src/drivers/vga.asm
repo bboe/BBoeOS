@@ -39,13 +39,13 @@ vga_clear_screen:
         ;; Fills the text buffer with space + default attribute and moves
         ;; the cursor to (0,0).  Preserves all registers.
         push ax
-        push cx
+        push ecx
         push dx
         push edi
 
         mov edi, 0xB8000
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
-        mov cx, VGA_COLS * VGA_ROWS
+        mov ecx, VGA_COLS * VGA_ROWS
         cld
         rep stosw
 
@@ -54,7 +54,7 @@ vga_clear_screen:
 
         pop edi
         pop dx
-        pop cx
+        pop ecx
         pop ax
         ret
 
@@ -670,10 +670,10 @@ vga_write_attribute:
 ;;; -----------------------------------------------------------------------
 fd_ioctl_vga:
         ;; Every VGA ioctl mutates device state (mode, framebuffer, DAC),
-        ;; so the fd must have been opened O_WRONLY.  fd_lookup left SI
+        ;; so the fd must have been opened O_WRONLY.  fd_lookup left ESI
         ;; pointing at the fd entry; the dispatch table jump into here
-        ;; clobbered BX but SI survives.
-        test byte [si+FD_OFFSET_FLAGS], O_WRONLY
+        ;; clobbered EBX but ESI survives.
+        test byte [esi+FD_OFFSET_FLAGS], O_WRONLY
         jz .vga_bad
         cmp al, VGA_IOCTL_FILL_BLOCK
         je .vga_fill_block
