@@ -51,7 +51,7 @@ from cc.ast_nodes import (
     VarDecl,
     While,
 )
-from cc.codegen.x86.jumps import JUMP_WHEN_FALSE
+from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
 from cc.target import X86CodegenTarget16
@@ -113,7 +113,11 @@ class EmissionMixin:
         # its special handling (argc/argv startup, printf fusion, frame-
         # elide data labels) is deeply tied to the AST shape.
         ir_program = ir.Builder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
-        ir_by_name = {f.ast_node.name: f for f in ir_program.functions if not f.ast_node.always_inline and not f.ast_node.is_prototype}
+        ir_by_name = {
+            f.ast_node.name: f
+            for f in ir_program.functions
+            if not f.ast_node.always_inline and not f.ast_node.is_prototype and not f.ast_node.naked
+        }
 
         if self.target_mode == "user":
             # Emit main first so execution starts at PROGRAM_BASE.
@@ -237,8 +241,8 @@ class EmissionMixin:
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
-                    operator = self.emit_condition(condition=statement.cond, context="if")
-                    false_jump = JUMP_WHEN_FALSE[operator]
+                    operator, unsigned = self.emit_condition(condition=statement.cond, context="if")
+                    false_jump = (JUMP_WHEN_FALSE_UNSIGNED if unsigned else JUMP_WHEN_FALSE)[operator]
                     skip_label = f".if_{self.new_label()}"
                     self.emit(f"        {false_jump} {skip_label}")
                     self.emit(f"        mov {self.target.si_register}, {die_label}")
@@ -307,6 +311,29 @@ class EmissionMixin:
         if saved is not None:
             self.visible_vars = saved
 
+    def _has_tail_dispatch_shape(self, body: list[Node], /) -> bool:
+        """``body[-1]`` is an ``If/else`` whose branches both tail-call.
+
+        Each branch's last statement must be a tail-call-eligible
+        ``Call``; the whole ``if`` then becomes a register-preserving
+        dispatcher (``cmp ... ; jcc .else ; ... ; jmp fn1 ; .else: ... ; jmp fn2``).
+        Used for ``naked`` dispatchers like ``read_sector`` that pick
+        between two drivers based on a flag byte.
+        """
+        if not body or not isinstance(body[-1], If):
+            return False
+        if_stmt = body[-1]
+        if if_stmt.else_body is None:
+            return False
+        return (
+            bool(if_stmt.body)
+            and isinstance(if_stmt.body[-1], Call)
+            and self._is_tail_call_eligible(if_stmt.body[-1])
+            and bool(if_stmt.else_body)
+            and isinstance(if_stmt.else_body[-1], Call)
+            and self._is_tail_call_eligible(if_stmt.else_body[-1])
+        )
+
     def _is_tail_call_eligible(self, call: Call, /) -> bool:
         """Check whether a tail-call replacement (``jmp`` for ``call; ret``) is safe.
 
@@ -330,10 +357,14 @@ class EmissionMixin:
             return False
         callee_pins = self.user_function_pin_params.get(call.name, {}) if call.name in self.register_convention_functions else {}
         is_fastcall = call.name in self.fastcall_functions
+        in_regs = self.in_register_params.get(call.name, {})
+        out_regs = self.out_register_params.get(call.name, {})
         for index in range(len(call.args)):
             if is_fastcall and index == 0:
                 continue
             if index in callee_pins:
+                continue
+            if index in in_regs or index in out_regs:
                 continue
             return False  # stack arg — can't clean up after a jmp
         return True
@@ -938,7 +969,8 @@ class EmissionMixin:
                 skip_label = f".bool_{self.new_label()}"
                 self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
                 self.emit(f"        mov {self.target.acc}, 0")
-                self.emit(f"        {JUMP_WHEN_FALSE[operator]} {skip_label}")
+                table = JUMP_WHEN_FALSE_UNSIGNED if self._is_unsigned_comparison(left, right) else JUMP_WHEN_FALSE
+                self.emit(f"        {table[operator]} {skip_label}")
                 self.emit(f"        inc {self.target.acc}")
                 self.emit(f"{skip_label}:")
             else:
@@ -1064,6 +1096,7 @@ class EmissionMixin:
         self.constant_aliases = {}
         self.current_carry_return = function.carry_return
         self.current_function_is_main = name == "main"
+        self.current_function_is_naked = function.naked
         self.elide_frame = name == "main"
         # Frame-elide criteria for non-main functions.  The bp frame
         # becomes dead weight whenever the body makes no BP-relative
@@ -1087,8 +1120,17 @@ class EmissionMixin:
         frameless_calls = (
             name != "main" and not parameters and len(body) >= 1 and all(isinstance(stmt, Call) and stmt.name != "asm" for stmt in body)
         )
-        if naked_asm or frameless_calls:
+        if naked_asm or frameless_calls or function.naked:
             self.elide_frame = True
+        if function.naked:
+            for param in parameters:
+                if param.in_register is None and param.out_register is None:
+                    message = f"naked function '{name}': parameter '{param.name}' must have in_register or out_register"
+                    raise CompileError(message, line=function.line)
+            for stmt in body:
+                if isinstance(stmt, (VarDecl, ArrayDecl)):
+                    message = f"naked function '{name}': body must not declare locals (found '{stmt.name}')"
+                    raise CompileError(message, line=function.line)
         self.byte_scalar_locals = set()
         self.current_preserve_registers: list[str] = list(function.preserve_registers)
         self.frame_size = 0
@@ -1202,9 +1244,14 @@ class EmissionMixin:
         if is_fastcall:
             self.allocate_local(parameters[0].name)
         # Reserve local slots for in_register params (spilled at prologue entry).
+        # Naked functions skip the spill: in_register params are pinned to
+        # their register and the body reads them directly without a stack slot.
         for param in parameters:
             if param.in_register is not None:
-                self.allocate_local(param.name)
+                if function.naked:
+                    self.pinned_register[param.name] = param.in_register
+                else:
+                    self.allocate_local(param.name)
 
         self.scan_locals(body)
 
@@ -1311,9 +1358,13 @@ class EmissionMixin:
             # function call that qualifies, emit everything before it as
             # usual and lower the trailing call as ``jmp`` (no ``ret``).
             tail_call_last = name != "main" and body and isinstance(body[-1], Call) and self._is_tail_call_eligible(body[-1])
+            tail_dispatch_last = name != "main" and not tail_call_last and self._has_tail_dispatch_shape(body)
             if tail_call_last:
                 self.generate_body(body[:-1])
                 self.generate_call(body[-1], tail_call=True)
+            elif tail_dispatch_last:
+                self.generate_body(body[:-1])
+                self._generate_tail_dispatch_if(body[-1])
             else:
                 self.generate_body(body)
 
@@ -1348,7 +1399,7 @@ class EmissionMixin:
                 self.emit("        ret")
             elif self.elide_frame:
                 self.emit("        ret")
-        elif tail_call_last:
+        elif tail_call_last or tail_dispatch_last:
             # The tail ``jmp`` already transferred control; no ``ret`` needed.
             pass
         elif self.elide_frame:
@@ -1364,6 +1415,22 @@ class EmissionMixin:
                 self.emit(f"        pop {reg}")
             self.emit("        ret")
         self.emit()
+
+    def _generate_tail_dispatch_if(self, statement: If, /) -> None:
+        """Emit an ``if/else`` where each branch's last call is a tail jmp.
+
+        Used for ``naked`` dispatchers: both branches end the function
+        via ``jmp <target>``, so the only labels needed are the else
+        entry point.  No common end label, no fall-through ``jmp``
+        skip-around, no ``ret`` after the structure.
+        """
+        label_index = self.new_label()
+        self.emit_condition_false_jump(condition=statement.cond, context="if", fail_label=f".if_{label_index}_else")
+        self.generate_body(statement.body[:-1], scoped=True)
+        self.generate_call(statement.body[-1], tail_call=True)
+        self.emit(f".if_{label_index}_else:")
+        self.generate_body(statement.else_body[:-1], scoped=True)
+        self.generate_call(statement.else_body[-1], tail_call=True)
 
     def generate_if(self, statement: If, /) -> None:
         """Generate assembly for an if statement.

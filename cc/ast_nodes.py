@@ -139,6 +139,12 @@ class Function(Node):
     does not affect flags, so CF from ``carry_return`` functions
     survives.
 
+    ``naked`` captures ``__attribute__((naked))`` — the function emits
+    no prologue or epilogue.  ``in_register`` parameters are pinned to
+    their declared register (no slot, no spill); the body must not
+    declare locals or take stack-passed parameters.  Useful for thin
+    register-preserving dispatchers that tail-jump to another routine.
+
     ``is_prototype`` is ``True`` for forward declarations (no body) —
     the node is retained in ``Program.functions`` so the generator can
     register calling-convention info (e.g., ``out_register`` params and
@@ -150,6 +156,7 @@ class Function(Node):
     body: list[Node]
     carry_return: bool = field(default=False, kw_only=True)
     is_prototype: bool = field(default=False, kw_only=True)
+    naked: bool = field(default=False, kw_only=True)
     name: str
     params: list[Param]
     preserve_registers: list[str] = field(default_factory=list, kw_only=True)
