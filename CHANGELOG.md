@@ -7,6 +7,7 @@ at the time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
 ### Tooling
+- cc.py: fix `return` from `main` when `main` has a local stack array.  Previously the array forced `elide_frame=False`, and `generate_return` keyed on `elide_frame` as its "is main" check, so `return` emitted `mov sp, bp; pop bp; ret` instead of `jmp FUNCTION_EXIT`.  Since the kernel jumps to `PROGRAM_BASE` directly (no caller pushed a return address), the `ret` popped a garbage word and the program hung instead of reloading the shell — visible as `edit` never returning to `$ ` after Ctrl+Q (with or without a preceding Ctrl+S).  Tracked separately as `current_function_is_main`; `generate_return` now keys on it.
 - cc.py: add `inb` / `outb` / `inw` / `outw` builtins gated on `--target kernel`.  Each call site emits 2-3 instructions (`mov dx, <port>` + `in al, dx; xor ah, ah` for byte reads, `in ax, dx` for word, `out dx, al`/`out dx, ax` for writes); constant-value `outb` / `outw` skip the AX push/pop guard.  Calls in `--target user` raise CompileError ("inb() is kernel-only; not available in --target user") at parse time, so userspace ring 3 (post-pmode) cannot accidentally try a #GP-triggering IN/OUT.  Names match Linux's `<asm/io.h>` convention.  Nine new test cases in `tests/test_kernel_cc.py` cover each shape (byte/word, constant/variable value, kernel-emit/user-reject).
 
 ## [0.7.0](https://github.com/bboe/BBoeOS/compare/0.6.0...0.7.0) (2026-04-23)
