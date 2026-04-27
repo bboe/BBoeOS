@@ -212,6 +212,10 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("always_inline", True)
+        if attr_name == "naked":
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("naked", True)
         if attr_name == "in_register":
             self.eat("LPAREN")
             reg_token = self.eat("STRING")
@@ -907,6 +911,7 @@ class Parser:
         asm_symbol: str | None = None
         carry_return = False
         always_inline = False
+        naked = False
         preserve_registers: list[str] = []
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
@@ -916,6 +921,8 @@ class Parser:
                 carry_return = True
             elif kind == "always_inline":
                 always_inline = True
+            elif kind == "naked":
+                naked = True
             elif kind == "preserve_register":
                 preserve_registers.append(value)
             elif kind == "asm_name":
@@ -943,6 +950,8 @@ class Parser:
                     carry_return = True
                 elif kind == "always_inline":
                     always_inline = True
+                elif kind == "naked":
+                    naked = True
                 elif kind == "preserve_register":
                     preserve_registers.append(value)
                 else:
@@ -977,6 +986,7 @@ class Parser:
                     carry_return=carry_return,
                     is_prototype=True,
                     line=line,
+                    naked=naked,
                     name=name,
                     params=parameters,
                     preserve_registers=preserve_registers,
@@ -988,6 +998,7 @@ class Parser:
                 body=self.parse_block(),
                 carry_return=carry_return,
                 line=line,
+                naked=naked,
                 name=name,
                 params=parameters,
                 preserve_registers=preserve_registers,
@@ -1001,6 +1012,9 @@ class Parser:
             raise CompileError(message, line=line)
         if always_inline:
             message = "always_inline attribute is not valid on global variables"
+            raise CompileError(message, line=line)
+        if naked:
+            message = "naked attribute is not valid on global variables"
             raise CompileError(message, line=line)
         if preserve_registers:
             message = "preserve_register attribute is not valid on global variables"

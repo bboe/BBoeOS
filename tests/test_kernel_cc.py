@@ -988,3 +988,99 @@ def test_tail_call_arg_count_mismatch_raises_error() -> None:
         }
     """)
     assert "__tail_call" in error, f"Expected __tail_call arity error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
+# naked attribute + tail-call dispatch through if/else
+# ---------------------------------------------------------------------------
+
+
+def test_naked_no_prologue_no_epilogue() -> None:
+    """A naked function emits its label and body with no push/pop bp or ret."""
+    src = """
+        __attribute__((carry_return)) int target(int x __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int dispatch(int x __attribute__((in_register("ax")))) { target(x); }
+    """
+    asm = _kernel(src)
+    body = asm.split("dispatch:")[1].split("\n\n")[0]
+    assert "push bp" not in body, f"naked function must not push bp\n{asm}"
+    assert "mov bp, sp" not in body, f"naked function must not set up bp\n{asm}"
+    assert "pop bp" not in body, f"naked function must not pop bp\n{asm}"
+
+
+def test_naked_in_register_param_pinned_no_spill() -> None:
+    """A naked function does not spill in_register params to a local slot."""
+    src = """
+        __attribute__((carry_return)) int target(int x __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int dispatch(int x __attribute__((in_register("ax")))) { target(x); }
+    """
+    asm = _kernel(src)
+    assert "[bp-" not in asm, f"naked must not allocate stack slots for in_register params\n{asm}"
+    assert "mov [bp-2], ax" not in asm, f"naked must not spill in_register param\n{asm}"
+
+
+def test_naked_single_call_becomes_tail_jmp() -> None:
+    """A naked function whose body is one Call emits ``jmp target`` and no ``ret``."""
+    src = """
+        __attribute__((carry_return)) int target(int x __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int dispatch(int x __attribute__((in_register("ax")))) { target(x); }
+    """
+    asm = _kernel(src)
+    body = asm.split("dispatch:")[1].split("\n\n")[0]
+    assert "jmp target" in body, f"expected 'jmp target' tail jump\n{asm}"
+    assert "call target" not in body, f"naked tail call must use jmp, not call\n{asm}"
+    assert "        ret" not in body, f"naked function with tail jmp must not emit ret\n{asm}"
+
+
+def test_naked_if_else_dispatch_both_branches_tail_jmp() -> None:
+    """A naked function whose body is ``if/else`` with calls in both branches emits two tail jmps.
+
+    The peephole optimizer collapses ``jne .else_label ; jmp fn_a ; .else_label: jmp fn_b``
+    into ``je fn_a ; jmp fn_b`` (3 instructions for a clean dispatcher).  Either form
+    is acceptable — both transfer control without a ``ret`` and without ``call``.
+    """
+    src = """
+        uint8_t flag __attribute__((asm_name("flag")));
+        __attribute__((carry_return)) int fn_a(int x __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) int fn_b(int x __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int dispatch(int x __attribute__((in_register("ax")))) {
+            if (flag == 0) {
+                fn_a(x);
+            } else {
+                fn_b(x);
+            }
+        }
+    """
+    asm = _kernel(src)
+    body = asm.split("dispatch:")[1].split("\n\n")[0]
+    # Both call targets must appear, but only as branch / jmp targets — never ``call <name>``.
+    assert "fn_a" in body and "fn_b" in body, f"expected both targets in body\n{asm}"
+    assert "call fn_a" not in body and "call fn_b" not in body, f"naked dispatch must not use 'call'\n{asm}"
+    assert "        ret" not in body, f"naked dispatch with full coverage must not emit ret\n{asm}"
+
+
+def test_naked_rejects_stack_param() -> None:
+    """Naked functions reject parameters without in_register / out_register."""
+    error = _kernel_error("""
+        void target();
+        __attribute__((naked)) void f(int x) { target(); }
+    """)
+    assert "naked" in error and "in_register" in error, f"Expected naked-stack-param error, got: {error}"
+
+
+def test_naked_rejects_local_decl() -> None:
+    """Naked functions reject body-local variable declarations."""
+    error = _kernel_error("""
+        __attribute__((carry_return)) int target(int x __attribute__((in_register("ax"))));
+        __attribute__((naked))
+        void f(int x __attribute__((in_register("ax")))) {
+            int tmp;
+            tmp = 1;
+            target(tmp);
+        }
+    """)
+    assert "naked" in error and "locals" in error, f"Expected naked-locals error, got: {error}"
