@@ -149,6 +149,17 @@ int fd_get_read_fn(struct fd *entry __attribute__((in_register("si"))));
 // fd_get_write_fn: Return the write handler for an fd (SI=entry → AX=fn or 0)
 int fd_get_write_fn(struct fd *entry __attribute__((in_register("si"))));
 
+// ne2k_receive: Poll the NIC for one frame
+//   Output: DI = NET_RECEIVE_BUFFER, CX = frame length, CF set if no packet.
+__attribute__((carry_return)) int ne2k_receive(
+    uint8_t *frame __attribute__((out_register("di"))),
+    int *length __attribute__((out_register("cx"))));
+
+// ne2k_send: Transmit an Ethernet frame (SI=buffer, CX=length; CF on error)
+__attribute__((carry_return)) int ne2k_send(
+    uint8_t *buffer __attribute__((in_register("si"))),
+    int length __attribute__((in_register("cx"))));
+
 // fd_open_is_vga: Test if path equals "/dev/vga" (SI=path; CF clear = match)
 __attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si")))) {
     return memcmp(path, "/dev/vga", 9) == 0;
@@ -174,6 +185,25 @@ __attribute__((carry_return)) int fd_read(
     __tail_call(read_handler, entry, buffer, count);
 }
 
+// fd_read_net: Poll NIC for one frame; copy min(pkt_len, count) bytes to user_buf.
+//   AX = bytes copied (0 = no packet ready), CF clear (never errors).
+__attribute__((carry_return)) int fd_read_net(
+    struct fd *entry __attribute__((in_register("si"))),
+    uint8_t *user_buffer __attribute__((in_register("di"))),
+    int user_count __attribute__((in_register("cx"))),
+    int *bytes_read __attribute__((out_register("ax")))) {
+    uint8_t *frame;
+    int packet_length;
+    if (!ne2k_receive(&frame, &packet_length)) {
+        *bytes_read = 0;
+        return 1;
+    }
+    if (packet_length > user_count) { packet_length = user_count; }
+    memcpy(user_buffer, frame, packet_length);
+    *bytes_read = packet_length;
+    return 1;
+}
+
 // fd_write: Write to fd (BX=fd, SI=buf, CX=count → AX=bytes, CF on error)
 __attribute__((carry_return)) int fd_write(
     int file_descriptor __attribute__((in_register("bx"))),
@@ -189,6 +219,20 @@ __attribute__((carry_return)) int fd_write(
     write_handler = fd_get_write_fn(entry);
     if (write_handler == 0) { return 0; }
     __tail_call(write_handler, entry, count);
+}
+
+// fd_write_net: Send a raw Ethernet frame from the user buffer.
+//   AX = count on success / -1 on error; CF set on error.
+__attribute__((carry_return)) int fd_write_net(
+    struct fd *entry __attribute__((in_register("si"))),
+    int count __attribute__((in_register("cx"))),
+    int *bytes_written __attribute__((out_register("ax")))) {
+    if (!ne2k_send(fd_write_buffer, count)) {
+        *bytes_written = -1;
+        return 0;
+    }
+    *bytes_written = count;
+    return 1;
 }
 
 // fd_populate_from_vfs: Fill fd entry from vfs_found_* globals (SI=entry, AX=open_flags)
@@ -263,5 +307,4 @@ fd_ops:
 
 %include \"fs/fd/console.asm\"
 %include \"fs/fd/fs.asm\"
-%include \"fs/fd/net.asm\"
 ");
