@@ -1383,3 +1383,35 @@ def test_peephole_redundant_register_swap_drops_second_mov() -> None:
     swap_lines = [line.strip() for line in out if line.strip().startswith("mov ")]
     assert "mov ax, cx" in swap_lines, f"first mov clobbered: {out}"
     assert "mov cx, ax" not in swap_lines, f"redundant swap survived: {out}"
+
+
+def test_peephole_register_arithmetic_skips_when_ax_read_after() -> None:
+    """``mov ax, X / op ax, Y / mov reg, ax`` is left alone if AX is read next.
+
+    The transform leaves AX holding its pre-sequence value, so a
+    following ``cmp ax, ...`` or any other AX read would see stale
+    data.  Regression for the kernel-c-ports ``fd_read_file`` bug: the
+    sequence below appeared at the ``min(512 - byte_offset, left)``
+    site and the cmp consumed the just-computed AX value — when the
+    peephole fired blindly ping / cp / dns lost their copy-loop bound.
+    """
+    out = _peephole_run([
+        "        mov ax, 512",
+        "        sub ax, [bp-14]",
+        "        mov dx, ax",
+        "        cmp ax, bx",
+    ])
+    assert any("mov ax, 512" in line for line in out), f"AX prep clobbered: {out}"
+    assert any("mov dx, ax" in line for line in out), f"pinned-reg copy dropped: {out}"
+
+
+def test_peephole_register_arithmetic_fires_when_ax_overwritten_after() -> None:
+    """The transform still fires when the next instruction overwrites AX."""
+    out = _peephole_run([
+        "        mov ax, dx",
+        "        inc ax",
+        "        mov dx, ax",
+        "        mov ax, 42",
+    ])
+    assert any("inc dx" in line for line in out), f"transform skipped wrongly: {out}"
+    assert not any("inc ax" in line for line in out), f"AX-detour survived: {out}"
