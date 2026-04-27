@@ -51,7 +51,7 @@ from cc.ast_nodes import (
     VarDecl,
     While,
 )
-from cc.codegen.x86.jumps import JUMP_WHEN_FALSE
+from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
 from cc.target import X86CodegenTarget16
@@ -241,8 +241,8 @@ class EmissionMixin:
                     die_message = inner.args[0]
                     die_label = self.new_string_label(die_message.content)
                     die_length = string_byte_length(die_message.content)
-                    operator = self.emit_condition(condition=statement.cond, context="if")
-                    false_jump = JUMP_WHEN_FALSE[operator]
+                    operator, unsigned = self.emit_condition(condition=statement.cond, context="if")
+                    false_jump = (JUMP_WHEN_FALSE_UNSIGNED if unsigned else JUMP_WHEN_FALSE)[operator]
                     skip_label = f".if_{self.new_label()}"
                     self.emit(f"        {false_jump} {skip_label}")
                     self.emit(f"        mov {self.target.si_register}, {die_label}")
@@ -969,7 +969,8 @@ class EmissionMixin:
                 skip_label = f".bool_{self.new_label()}"
                 self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
                 self.emit(f"        mov {self.target.acc}, 0")
-                self.emit(f"        {JUMP_WHEN_FALSE[operator]} {skip_label}")
+                table = JUMP_WHEN_FALSE_UNSIGNED if self._is_unsigned_comparison(left, right) else JUMP_WHEN_FALSE
+                self.emit(f"        {table[operator]} {skip_label}")
                 self.emit(f"        inc {self.target.acc}")
                 self.emit(f"{skip_label}:")
             else:

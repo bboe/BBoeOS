@@ -46,7 +46,12 @@ from cc.ast_nodes import (
 from cc.codegen.base import CodeGeneratorBase
 from cc.codegen.x86.builtins import BuiltinsMixin
 from cc.codegen.x86.emission import EmissionMixin
-from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_TRUE
+from cc.codegen.x86.jumps import (
+    JUMP_WHEN_FALSE,
+    JUMP_WHEN_FALSE_UNSIGNED,
+    JUMP_WHEN_TRUE,
+    JUMP_WHEN_TRUE_UNSIGNED,
+)
 from cc.errors import CompileError
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.utils import decode_string_escapes, string_byte_length
@@ -2013,8 +2018,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if count_pinned:
                 self.emit(f"        pop {self.target.count_register}")
 
-    def emit_condition(self, *, condition: Node, context: str) -> str:
-        """Validate a condition, emit a comparison, and return the operator.
+    def emit_condition(self, *, condition: Node, context: str) -> tuple[str, bool]:
+        """Validate a condition, emit a comparison, and return ``(operator, unsigned)``.
+
+        ``unsigned`` is True when at least one operand is an unsigned
+        type (``uint8_t`` / ``uint16_t`` / ``uint32_t`` / ``unsigned
+        long``, plus the corresponding pointers).  Callers pick the
+        signed or unsigned jump table accordingly.
 
         ``carry_return`` call conditions — ``if (foo())`` / ``while
         (foo())`` / ``if (foo() == 0)`` where ``foo`` is declared with
@@ -2043,13 +2053,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             and condition.left.name in self.carry_return_functions
         ):
             self.generate_call(condition.left, discard_return=True)
-            return "carry" if condition.operation == "!=" else "not_carry"
+            return ("carry" if condition.operation == "!=" else "not_carry", False)
         # Skip type validation for IR-generated conditions — the AST was
         # already validated by the parser before IR construction.
         if context != "ir":
             self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
-        return condition.operation
+        return condition.operation, self._is_unsigned_comparison(condition.left, condition.right)
 
     def emit_condition_false_jump(self, *, condition: Node, fail_label: str, context: str) -> None:
         """Emit a condition that jumps to ``fail_label`` when false.
@@ -2074,8 +2084,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit_condition_false_jump(condition=condition.right, context=context, fail_label=fail_label)
             self.emit(f"{pass_label}:")
             return
-        operator = self.emit_condition(condition=condition, context=context)
-        self.emit(f"        {JUMP_WHEN_FALSE[operator]} {fail_label}")
+        operator, unsigned = self.emit_condition(condition=condition, context=context)
+        table = JUMP_WHEN_FALSE_UNSIGNED if unsigned else JUMP_WHEN_FALSE
+        self.emit(f"        {table[operator]} {fail_label}")
 
     def emit_condition_true_jump(self, *, condition: Node, success_label: str, context: str) -> None:
         """Emit a condition that jumps to ``success_label`` when true.
@@ -2093,8 +2104,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit_condition_true_jump(condition=condition.right, context=context, success_label=success_label)
             self.emit(f"{skip_label}:")
             return
-        operator = self.emit_condition(condition=condition, context=context)
-        self.emit(f"        {JUMP_WHEN_TRUE[operator]} {success_label}")
+        operator, unsigned = self.emit_condition(condition=condition, context=context)
+        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
+        self.emit(f"        {table[operator]} {success_label}")
 
     def emit_error_syscall_tail(
         self,

@@ -1084,3 +1084,85 @@ def test_naked_rejects_local_decl() -> None:
         }
     """)
     assert "naked" in error and "locals" in error, f"Expected naked-locals error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
+# Unsigned comparison codegen (uint8_t / uint16_t / uint32_t / unsigned long)
+# ---------------------------------------------------------------------------
+
+
+def test_unsigned_byte_global_less_than_emits_jb() -> None:
+    """``uint8_t < literal`` uses unsigned ``jb`` (false-branch ``jae``)."""
+    src = """
+        uint8_t flag __attribute__((asm_name("flag")));
+        void test() {
+            if (flag < 0x80) {
+                outb(0, 1);
+            }
+        }
+    """
+    asm = _kernel(src)
+    # ``cc.py`` either folds the conditional into the tail jmp (``jae``)
+    # or jumps past the body on the false branch (``jae``).  Either way
+    # the unsigned mnemonic must appear and the signed equivalent ``jge``
+    # must not.
+    assert "jae" in asm or "jb " in asm, f"expected unsigned 'jae' / 'jb' for uint8_t < 0x80\n{asm}"
+    assert "jge" not in asm, f"signed 'jge' must not appear for uint8_t comparison\n{asm}"
+
+
+def test_unsigned_uint16_t_greater_or_equal_emits_jae() -> None:
+    """``uint16_t >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
+    src = """
+        uint16_t timeout __attribute__((asm_name("timeout")));
+        int check() { return timeout >= 32768; }
+    """
+    asm = _kernel(src)
+    assert "jae" in asm or "jb " in asm, f"expected unsigned mnemonic for uint16_t >= 32768\n{asm}"
+    assert "jge" not in asm and "jl " not in asm, f"signed mnemonic must not appear\n{asm}"
+
+
+def test_signed_int_less_than_still_emits_jge() -> None:
+    """``int < literal`` keeps the signed ``jge`` (false-branch).
+
+    Regression guard for the unsigned-jump tables — the old behavior
+    must still apply when both operands are signed.
+    """
+    src = """
+        int n;
+        void test(int v) {
+            if (v < 100) {
+                outb(0, 1);
+            }
+        }
+    """
+    asm = _kernel(src)
+    assert "jge" in asm, f"signed 'jge' expected for int < literal\n{asm}"
+    assert "jae" not in asm, f"unsigned 'jae' must not appear for signed int comparison\n{asm}"
+
+
+def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
+    """The ``read_sector`` shape (uint8_t global ``< 0x80``, naked, tail dispatch) compiles to ``cmp / jb / jmp``.
+
+    Regression test for the entire change: the unsigned compare picks
+    the right mnemonic, the naked attribute elides the frame, and the
+    tail-call detection through if/else turns both branches into jmps.
+    The peephole optimizer fuses ``jae .else ; jmp fdc ; .else: jmp ata``
+    into ``jb fdc ; jmp ata``.
+    """
+    src = """
+        uint8_t boot_disk __attribute__((asm_name("boot_disk")));
+        __attribute__((carry_return)) int fdc(int s __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) int ata(int s __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int read_sector(int sector __attribute__((in_register("ax")))) {
+            if (boot_disk < 0x80) {
+                fdc(sector);
+            } else {
+                ata(sector);
+            }
+        }
+    """
+    asm = _kernel(src)
+    body = asm.split("read_sector:")[1].split("\n\n")[0]
+    assert "jb fdc" in body and "jmp ata" in body, f"expected fused 'jb fdc ; jmp ata' dispatcher\n{asm}"
+    assert "push bp" not in body and "        ret" not in body, f"naked must not emit prologue/ret\n{asm}"

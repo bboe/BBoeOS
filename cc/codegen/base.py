@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from cc import ir
 from cc.ast_nodes import (
+    AddressOf,
     ArrayDecl,
     Assign,
     BinaryOperation,
@@ -157,6 +158,24 @@ class CodeGeneratorBase:
     #: pretending the literal is a character.
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
+
+    #: Type names whose values must be treated as unsigned in comparisons.
+    #: Pointers compare as offsets within a 16-bit segment (always
+    #: non-negative), so they're grouped with the unsigned ints.  ``int``
+    #: stays signed (the C subset's default integer type), ``char`` stays
+    #: signed by historical convention.
+    UNSIGNED_TYPES: ClassVar[frozenset[str]] = frozenset({
+        "uint8_t",
+        "uint8_t*",
+        "uint16_t",
+        "uint16_t*",
+        "uint32_t",
+        "uint32_t*",
+        "unsigned long",
+        "char*",
+        "int*",
+        "void*",
+    })
 
     def __init__(
         self,
@@ -443,6 +462,38 @@ class CodeGeneratorBase:
         aren't in :attr:`locals` at all.
         """
         return name in self.byte_scalar_locals
+
+    def _is_unsigned_comparison(self, left: Node, right: Node, /) -> bool:
+        """Return True if a comparison ``left op right`` should use unsigned mnemonics.
+
+        Per C usual arithmetic conversions, an unsigned operand on either
+        side causes the whole comparison to be unsigned.  Detection is a
+        leaf-aware walk over ``Var`` / ``Index`` / ``MemberAccess`` /
+        ``BinaryOperation`` / ``AddressOf``; ``Int`` literals stay
+        unsigned-neutral (they pick up the other operand's signedness).
+        Conservative for shapes we don't recognise — falls back to
+        signed, matching the historical default.
+        """
+        return self._is_unsigned_operand(left) or self._is_unsigned_operand(right)
+
+    def _is_unsigned_operand(self, node: Node, /) -> bool:
+        """Return True if *node*'s C type is in :attr:`UNSIGNED_TYPES`.
+
+        Conservative for shapes we don't recognise (struct member access,
+        function calls, pointer dereferences) — falls back to signed,
+        matching the historical default.  Extend on demand as kernel C
+        runs into new patterns that need unsigned semantics.
+        """
+        if isinstance(node, AddressOf):
+            # ``&x`` produces a pointer; pointers compare as unsigned offsets.
+            return True
+        if isinstance(node, Var):
+            return self.variable_types.get(node.name) in self.UNSIGNED_TYPES
+        if isinstance(node, Index):
+            return self.variable_types.get(node.name) in self.UNSIGNED_TYPES
+        if isinstance(node, BinaryOperation):
+            return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
+        return False
 
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.
