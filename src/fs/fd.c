@@ -183,6 +183,26 @@ void fd_advance_position(
     struct fd *entry __attribute__((in_register("si"))),
     int delta __attribute__((in_register("cx"))));
 
+// ps2_has_key: CF-returning wrapper around drivers/ps2.asm's ZF-returning
+// ps2_check (defined in fd.c's asm block).  cc.py's carry_return convention
+// expects CF, not ZF — and ps2_check is the only ZF-returning function the
+// kernel exposes.
+__attribute__((carry_return)) int ps2_has_key();
+
+// ps2_read: Block until a decoded key is ready; returns AL=ASCII / AH=scan-code
+// packed into AX (so the int return holds both halves; callers split via
+// ``& 0xFF`` and ``>> 8``).
+int ps2_read();
+
+// put_character: Write one byte to screen + serial (AL = byte; preserves regs).
+void put_character(int byte __attribute__((in_register("ax"))));
+
+// serial_pushback_*: 2-slot FIFO drained at the top of fd_read_console.
+// No fill site exists today; the drain path is preserved verbatim from the
+// asm version.  When/if pushback gains a writer, it'll plug in here.
+uint8_t serial_pushback_buffer[2];
+uint8_t serial_pushback_count;
+
 // fd_open_is_vga: Test if path equals "/dev/vga" (SI=path; CF clear = match)
 __attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si")))) {
     return memcmp(path, "/dev/vga", 9) == 0;
@@ -206,6 +226,64 @@ __attribute__((carry_return)) int fd_read(
     read_handler = fd_get_read_fn(entry);
     if (read_handler == 0) { return 0; }
     __tail_call(read_handler, entry, buffer, count);
+}
+
+// fd_read_console: Read up to count bytes from keyboard / serial / pushback.
+//   Returns after the first key event:
+//     - normal ASCII key: 1 byte
+//     - serial byte: 1 byte (passed through as-is)
+//     - keyboard arrow key: 3 bytes (ESC '[' A/B/C/D); requires count >= 3
+//   AX=bytes returned (0 if count==0); CF clear (no error path).
+__attribute__((carry_return)) int fd_read_console(
+    struct fd *entry __attribute__((in_register("si"))),
+    uint8_t *user_buffer __attribute__((in_register("di"))),
+    int count __attribute__((in_register("cx"))),
+    int *bytes_read __attribute__((out_register("ax")))) {
+    int status;
+    int packed;
+    int ascii;
+    int scan_code;
+    int third;
+    if (count == 0) { *bytes_read = 0; return 1; }
+    if (serial_pushback_count > 0) {
+        user_buffer[0] = serial_pushback_buffer[0];
+        serial_pushback_buffer[0] = serial_pushback_buffer[1];
+        serial_pushback_count = serial_pushback_count - 1;
+        *bytes_read = 1;
+        return 1;
+    }
+    while (1) {
+        // sti so PIT IRQ 0 advances system_ticks while the shell idles —
+        // INT 30h enters with IF=0 and nothing else re-enables it before us.
+        asm("sti");
+        status = inb(0x3FD);
+        if (status & 0x01) {
+            user_buffer[0] = inb(0x3F8);
+            *bytes_read = 1;
+            return 1;
+        }
+        if (!ps2_has_key()) { continue; }
+        packed = ps2_read();
+        ascii = packed & 0xFF;
+        if (ascii != 0) {
+            user_buffer[0] = ascii;
+            *bytes_read = 1;
+            return 1;
+        }
+        // Extended key — need ESC '[' <letter>; skip if buffer < 3.
+        if (count < 3) { continue; }
+        scan_code = (packed >> 8) & 0xFF;
+        if (scan_code == 0x48) { third = 'A'; }
+        else if (scan_code == 0x50) { third = 'B'; }
+        else if (scan_code == 0x4D) { third = 'C'; }
+        else if (scan_code == 0x4B) { third = 'D'; }
+        else { continue; }
+        user_buffer[0] = 0x1B;
+        user_buffer[1] = '[';
+        user_buffer[2] = third;
+        *bytes_read = 3;
+        return 1;
+    }
 }
 
 // fd_read_file: Read from a file fd
@@ -287,6 +365,24 @@ __attribute__((carry_return)) int fd_write(
     write_handler = fd_get_write_fn(entry);
     if (write_handler == 0) { return 0; }
     __tail_call(write_handler, entry, count);
+}
+
+// fd_write_console: Write count bytes from fd_write_buffer through put_character
+//   (which mirrors them to screen + COM1 with ANSI parsing).  AX=count; CF clear.
+__attribute__((carry_return)) int fd_write_console(
+    struct fd *entry __attribute__((in_register("si"))),
+    int count __attribute__((in_register("cx"))),
+    int *bytes_written __attribute__((out_register("ax")))) {
+    uint8_t *src;
+    int written;
+    src = fd_write_buffer;
+    written = 0;
+    while (written < count) {
+        put_character(src[written]);
+        written = written + 1;
+    }
+    *bytes_written = written;
+    return 1;
 }
 
 // fd_write_file: Write to a file fd
@@ -399,6 +495,17 @@ fd_advance_position:
         adc word [si+FD_OFFSET_POSITION+2], 0
         ret
 
+        ;; ps2_has_key: CF-returning wrapper around ps2_check (drivers/ps2.asm).
+        ;; ps2_check reports via ZF; cc.py's carry_return convention reads CF.
+ps2_has_key:
+        call ps2_check
+        jz .phk_none
+        clc
+        ret
+        .phk_none:
+        stc
+        ret
+
         ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
         ;; A zero entry means unsupported for that type.  vfs_read_dir is
         ;; routed directly (its own jmp-trampoline matches the read_fn ABI).
@@ -413,6 +520,4 @@ fd_ops:
         dw 0,               0                 ; FD_TYPE_VGA (7)
 
         fd_write_buffer dw 0
-
-%include \"fs/fd/console.asm\"
 ");
