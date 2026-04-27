@@ -40,14 +40,14 @@
 __attribute__((preserve_register("bx"))) __attribute__((preserve_register("cx"))) __attribute__((preserve_register("dx")))
 void ata_issue(int lba __attribute__((in_register("ax"))),
                int command __attribute__((in_register("bx")))) {
-    while ((inb(ATA_STATUS) & ATA_STATUS_BSY) != 0) {
+    while ((kernel_inb(ATA_STATUS) & ATA_STATUS_BSY) != 0) {
     }
-    outb(ATA_DRIVE, ATA_DRIVE_MASTER_LBA);
-    outb(ATA_SEC_COUNT, 1);
-    outb(ATA_LBA0, lba & 0xFF);
-    outb(ATA_LBA1, (lba >> 8) & 0xFF);
-    outb(ATA_LBA2, 0);
-    outb(ATA_COMMAND, command);
+    kernel_outb(ATA_DRIVE, ATA_DRIVE_MASTER_LBA);
+    kernel_outb(ATA_SEC_COUNT, 1);
+    kernel_outb(ATA_LBA0, lba & 0xFF);
+    kernel_outb(ATA_LBA1, (lba >> 8) & 0xFF);
+    kernel_outb(ATA_LBA2, 0);
+    kernel_outb(ATA_COMMAND, command);
 }
 
 // ata_wait_drq: spin until BSY clears, then return success (DRQ set) /
@@ -56,7 +56,7 @@ __attribute__((carry_return)) __attribute__((preserve_register("dx")))
 int ata_wait_drq() {
     int status;
     while (1) {
-        status = inb(ATA_STATUS);
+        status = kernel_inb(ATA_STATUS);
         if ((status & ATA_STATUS_BSY) != 0) {
             continue;
         }
@@ -70,7 +70,6 @@ int ata_wait_drq() {
 }
 
 // ata_read_sector: read one 512-byte sector (LBA28) into SECTOR_BUFFER.
-// rep insw stays as inline asm — cc.py has no insw / outsw builtins.
 __attribute__((carry_return))
 __attribute__((preserve_register("bx"))) __attribute__((preserve_register("cx"))) __attribute__((preserve_register("dx"))) __attribute__((preserve_register("di")))
 int ata_read_sector(int lba __attribute__((in_register("ax")))) {
@@ -78,11 +77,7 @@ int ata_read_sector(int lba __attribute__((in_register("ax")))) {
     if (!ata_wait_drq()) {
         return 0;
     }
-    asm("mov dx, 0x1F0\n"
-        "mov di, SECTOR_BUFFER\n"
-        "mov cx, 256\n"
-        "cld\n"
-        "rep insw");
+    kernel_insw(ATA_DATA, SECTOR_BUFFER, 256);
     return 1;
 }
 
@@ -97,14 +92,10 @@ int ata_write_sector(int lba __attribute__((in_register("ax")))) {
     if (!ata_wait_drq()) {
         return 0;
     }
-    asm("mov dx, 0x1F0\n"
-        "mov si, SECTOR_BUFFER\n"
-        "mov cx, 256\n"
-        "cld\n"
-        "rep outsw");
-    while ((inb(ATA_STATUS) & ATA_STATUS_BSY) != 0) {
+    kernel_outsw(ATA_DATA, SECTOR_BUFFER, 256);
+    while ((kernel_inb(ATA_STATUS) & ATA_STATUS_BSY) != 0) {
     }
-    status = inb(ATA_STATUS);
+    status = kernel_inb(ATA_STATUS);
     if ((status & ATA_STATUS_ERR) != 0) {
         return 0;
     }

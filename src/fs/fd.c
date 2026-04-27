@@ -256,9 +256,9 @@ __attribute__((carry_return)) int fd_read_console(
         // sti so PIT IRQ 0 advances system_ticks while the shell idles —
         // INT 30h enters with IF=0 and nothing else re-enables it before us.
         asm("sti");
-        status = inb(0x3FD);
+        status = kernel_inb(0x3FD);
         if (status & 0x01) {
-            user_buffer[0] = inb(0x3F8);
+            user_buffer[0] = kernel_inb(0x3F8);
             *bytes_read = 1;
             return 1;
         }
