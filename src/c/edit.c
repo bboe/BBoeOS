@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
     int kill_length = 0;
     int dirty = 0;
     int confirm_quit = 0;
-    char *status_message;
+    char *status_message = NULL;
     char sector[512];
 
     int vga_fd = open("/dev/vga", O_WRONLY);
