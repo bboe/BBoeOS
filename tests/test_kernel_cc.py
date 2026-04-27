@@ -148,6 +148,128 @@ def test_kernel_rejects_open() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Port I/O builtins (inb/outb/inw/outw): kernel-only, gated by target_mode
+# ---------------------------------------------------------------------------
+
+
+def test_kernel_inb_emits_in_al_dx() -> None:
+    """``inb(port)`` emits ``in al, dx`` followed by ``xor ah, ah`` to zero-extend."""
+    asm = _kernel("""
+        void poll() {
+            int status;
+            status = inb(0x3FD);
+        }
+    """)
+    assert "in al, dx" in asm, f"Expected 'in al, dx' in:\n{asm}"
+    assert "xor ah, ah" in asm, f"Expected 'xor ah, ah' (zero-extend) in:\n{asm}"
+
+
+def test_kernel_inw_emits_in_ax_dx() -> None:
+    """``inw(port)`` emits ``in ax, dx`` (no zero-extend needed for 16-bit)."""
+    asm = _kernel("""
+        void poll() {
+            int word;
+            word = inw(0x300);
+        }
+    """)
+    assert "in ax, dx" in asm, f"Expected 'in ax, dx' in:\n{asm}"
+
+
+def test_kernel_outb_constant_value_short_form() -> None:
+    """``outb(port, const)`` compiles to ``mov al, <const>`` (no AX push/pop)."""
+    asm = _kernel("""
+        void eoi() {
+            outb(0x20, 0x20);
+        }
+    """)
+    assert "out dx, al" in asm, f"Expected 'out dx, al' in:\n{asm}"
+    assert "mov al, 32" in asm, f"Expected 'mov al, 32' (constant value 0x20) in:\n{asm}"
+    assert "push ax" not in asm, f"Constant outb should not push AX:\n{asm}"
+
+
+def test_kernel_outw_constant_value_short_form() -> None:
+    """``outw(port, const)`` compiles to a constant ``mov ax, ...`` then ``out dx, ax``."""
+    asm = _kernel("""
+        void send_word() {
+            outw(0x300, 0x1234);
+        }
+    """)
+    assert "out dx, ax" in asm, f"Expected 'out dx, ax' in:\n{asm}"
+    assert "mov ax, 4660" in asm, f"Expected 'mov ax, 4660' (constant value 0x1234) in:\n{asm}"
+
+
+def test_kernel_outb_variable_value_uses_push_pop() -> None:
+    """Non-constant ``outb`` value evaluates to AX, push/port-eval/pop, then ``out dx, al``."""
+    asm = _kernel("""
+        void send(int port, int value) {
+            outb(port, value);
+        }
+    """)
+    # The push/pop guard around port-evaluation matches builtin_far_write8's shape.
+    assert "push ax" in asm, f"Expected 'push ax' guard in:\n{asm}"
+    assert "pop ax" in asm, f"Expected 'pop ax' restore in:\n{asm}"
+    assert "out dx, al" in asm, f"Expected 'out dx, al' in:\n{asm}"
+
+
+def test_user_rejects_inb() -> None:
+    """``inb()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        int poll() {
+            return inb(0x3FD);
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode inb() rejection; got asm:\n{output}"
+    assert "inb" in output.lower() and "kernel" in output.lower(), f"Error should mention inb/kernel:\n{output}"
+
+
+def test_user_rejects_inw() -> None:
+    """``inw()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        int read_word() {
+            return inw(0x300);
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode inw() rejection; got asm:\n{output}"
+    assert "inw" in output.lower() and "kernel" in output.lower(), f"Error should mention inw/kernel:\n{output}"
+
+
+def test_user_rejects_outb() -> None:
+    """``outb()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        int main() {
+            outb(0x20, 0x20);
+            return 0;
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode outb() rejection; got asm:\n{output}"
+    assert "outb" in output.lower() and "kernel" in output.lower(), f"Error should mention outb/kernel:\n{output}"
+
+
+def test_user_rejects_outw() -> None:
+    """``outw()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        int main() {
+            outw(0x300, 0x1234);
+            return 0;
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode outw() rejection; got asm:\n{output}"
+    assert "outw" in output.lower() and "kernel" in output.lower(), f"Error should mention outw/kernel:\n{output}"
+
+
+# ---------------------------------------------------------------------------
 # Positive: kernel-mode source compiles and assembles correctly
 # ---------------------------------------------------------------------------
 

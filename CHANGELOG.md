@@ -6,6 +6,9 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### Tooling
+- cc.py: add `inb` / `outb` / `inw` / `outw` builtins gated on `--target kernel`.  Each call site emits 2-3 instructions (`mov dx, <port>` + `in al, dx; xor ah, ah` for byte reads, `in ax, dx` for word, `out dx, al`/`out dx, ax` for writes); constant-value `outb` / `outw` skip the AX push/pop guard.  Calls in `--target user` raise CompileError ("inb() is kernel-only; not available in --target user") at parse time, so userspace ring 3 (post-pmode) cannot accidentally try a #GP-triggering IN/OUT.  Names match Linux's `<asm/io.h>` convention.  Nine new test cases in `tests/test_kernel_cc.py` cover each shape (byte/word, constant/variable value, kernel-emit/user-reject).
+
 ## [0.7.0](https://github.com/bboe/BBoeOS/compare/0.6.0...0.7.0) (2026-04-23)
 
 ### Boot
