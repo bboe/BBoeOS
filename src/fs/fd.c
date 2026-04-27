@@ -160,6 +160,29 @@ __attribute__((carry_return)) int ne2k_send(
     uint8_t *buffer __attribute__((in_register("si"))),
     int length __attribute__((in_register("cx"))));
 
+// vfs_read_sec: Read sector containing fd's current position into SECTOR_BUFFER
+//   Input: SI=fd_entry; Output: BX=byte offset within sector, CF on err
+__attribute__((carry_return)) int vfs_read_sec(
+    struct fd *entry __attribute__((in_register("si"))),
+    int *byte_offset __attribute__((out_register("bx"))));
+
+// vfs_prepare_write_sec: Prep SECTOR_BUFFER for write at fd's current position
+//   Input: SI=fd_entry; Output: BX=byte offset within sector, CF on err
+__attribute__((carry_return)) int vfs_prepare_write_sec(
+    struct fd *entry __attribute__((in_register("si"))),
+    int *byte_offset __attribute__((out_register("bx"))));
+
+// vfs_commit_write_sec: Flush SECTOR_BUFFER back to disk (SI=fd_entry; CF on err)
+__attribute__((carry_return)) int vfs_commit_write_sec(
+    struct fd *entry __attribute__((in_register("si"))));
+
+// fd_advance_position: Advance fd entry's 32-bit position by `delta` bytes.
+//   Defined in fd.c's asm block; uses sub/sbb to propagate carry to position_hi,
+//   which the pure-C idiom can't express through cc.py's signed-only compares.
+void fd_advance_position(
+    struct fd *entry __attribute__((in_register("si"))),
+    int delta __attribute__((in_register("cx"))));
+
 // fd_open_is_vga: Test if path equals "/dev/vga" (SI=path; CF clear = match)
 __attribute__((carry_return)) int fd_open_is_vga(char *path __attribute__((in_register("si")))) {
     return memcmp(path, "/dev/vga", 9) == 0;
@@ -183,6 +206,51 @@ __attribute__((carry_return)) int fd_read(
     read_handler = fd_get_read_fn(entry);
     if (read_handler == 0) { return 0; }
     __tail_call(read_handler, entry, buffer, count);
+}
+
+// fd_read_file: Read from a file fd
+//   Input: SI=fd_entry, DI=user_buf, CX=count; Output: AX=bytes_read, CF on disk error.
+//   Reads sector-by-sector via vfs_read_sec, copying min(512-byte_offset, left) bytes
+//   from SECTOR_BUFFER to the user buffer each iteration.
+__attribute__((carry_return)) int fd_read_file(
+    struct fd *entry __attribute__((in_register("si"))),
+    uint8_t *user_buffer __attribute__((in_register("di"))),
+    int count __attribute__((in_register("cx"))),
+    int *bytes_read __attribute__((out_register("ax")))) {
+    uint16_t size_lo;
+    uint16_t size_hi;
+    uint16_t pos_lo;
+    uint16_t pos_hi;
+    int byte_offset;
+    int chunk;
+    int done;
+    int left;
+    int remaining;
+    uint8_t *src;
+    size_lo = entry->size_lo;
+    size_hi = entry->size_hi;
+    pos_lo = entry->position_lo;
+    pos_hi = entry->position_hi;
+    if (pos_hi > size_hi) { *bytes_read = 0; return 1; }
+    if (pos_hi == size_hi && pos_lo >= size_lo) { *bytes_read = 0; return 1; }
+    if (pos_hi == size_hi) {
+        remaining = size_lo - pos_lo;
+        if (count > remaining) { count = remaining; }
+    }
+    done = 0;
+    left = count;
+    while (left > 0) {
+        if (!vfs_read_sec(entry, &byte_offset)) { *bytes_read = -1; return 0; }
+        chunk = 512 - byte_offset;
+        if (chunk > left) { chunk = left; }
+        src = SECTOR_BUFFER;
+        memcpy(user_buffer + done, src + byte_offset, chunk);
+        done = done + chunk;
+        left = left - chunk;
+        fd_advance_position(entry, chunk);
+    }
+    *bytes_read = done;
+    return 1;
 }
 
 // fd_read_net: Poll NIC for one frame; copy min(pkt_len, count) bytes to user_buf.
@@ -219,6 +287,38 @@ __attribute__((carry_return)) int fd_write(
     write_handler = fd_get_write_fn(entry);
     if (write_handler == 0) { return 0; }
     __tail_call(write_handler, entry, count);
+}
+
+// fd_write_file: Write to a file fd
+//   Input: SI=fd_entry, CX=count (buffer in fd_write_buffer global)
+//   Output: AX=bytes_written, CF on disk error.
+//   Each iteration reads-modify-writes one sector via the prepare/commit helpers.
+__attribute__((carry_return)) int fd_write_file(
+    struct fd *entry __attribute__((in_register("si"))),
+    int count __attribute__((in_register("cx"))),
+    int *bytes_written __attribute__((out_register("ax")))) {
+    int byte_offset;
+    int chunk;
+    int done;
+    int left;
+    uint8_t *dst;
+    uint8_t *src;
+    done = 0;
+    left = count;
+    while (left > 0) {
+        if (!vfs_prepare_write_sec(entry, &byte_offset)) { *bytes_written = -1; return 0; }
+        chunk = 512 - byte_offset;
+        if (chunk > left) { chunk = left; }
+        dst = SECTOR_BUFFER;
+        src = fd_write_buffer;
+        memcpy(dst + byte_offset, src + done, chunk);
+        if (!vfs_commit_write_sec(entry)) { *bytes_written = -1; return 0; }
+        done = done + chunk;
+        left = left - chunk;
+        fd_advance_position(entry, chunk);
+    }
+    *bytes_written = done;
+    return 1;
 }
 
 // fd_write_net: Send a raw Ethernet frame from the user buffer.
@@ -274,6 +374,9 @@ asm("
 ;;; -----------------------------------------------------------------------
 ;;; fd_get_read_fn: get read handler pointer from fd_ops (SI=entry → AX)
 ;;; fd_get_write_fn: get write handler pointer from fd_ops (SI=entry → AX)
+;;; fd_advance_position: 32-bit add of CX into entry's position field
+;;;     (sub/sbb-style carry propagation; pure-C cannot express this through
+;;;     cc.py's signed-only `<` codegen).
 ;;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*.
 ;;; fd_write_buffer: global holding the write buffer pointer for handlers.
 ;;; -----------------------------------------------------------------------
@@ -291,12 +394,18 @@ fd_get_write_fn:
         mov ax, [fd_ops+bx+2]   ; write_fn
         ret
 
+fd_advance_position:
+        add [si+FD_OFFSET_POSITION], cx
+        adc word [si+FD_OFFSET_POSITION+2], 0
+        ret
+
         ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
-        ;; A zero entry means unsupported for that type.
+        ;; A zero entry means unsupported for that type.  vfs_read_dir is
+        ;; routed directly (its own jmp-trampoline matches the read_fn ABI).
 fd_ops:
         dw 0,               0                 ; FD_TYPE_FREE (0)
         dw fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (1)
-        dw fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (2)
+        dw vfs_read_dir,    0                 ; FD_TYPE_DIRECTORY (2)
         dw fd_read_file,    fd_write_file     ; FD_TYPE_FILE (3)
         dw 0,               0                 ; FD_TYPE_ICMP (4)
         dw fd_read_net,     fd_write_net      ; FD_TYPE_NET (5)
@@ -306,5 +415,4 @@ fd_ops:
         fd_write_buffer dw 0
 
 %include \"fs/fd/console.asm\"
-%include \"fs/fd/fs.asm\"
 ");
