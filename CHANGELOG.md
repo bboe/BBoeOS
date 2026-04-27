@@ -6,6 +6,9 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### Drivers
+- vga: only reprogram VGA registers when the requested mode actually differs from the active one.  `fd_ioctl_vga`'s `.vga_mode` was unconditionally calling `vga_set_mode`, so every shell Ctrl+L flipped SR03 from BIOS-default `00h` to our table value `05h` (Character Map Select → font at plane 2 offset 0x4000) — which works only as long as `vga_font_load` populated 0x4000 correctly, and wastes the framebuffer-zeroing path on a no-op transition.  Track the current mode in a new `vga_current_mode` byte (initialised to 03h since the BIOS leaves us in text mode); same-mode requests now skip `vga_set_mode` and just call `vga_clear_screen` for text mode.  Real transitions (text → 13h via `draw`, 13h → text on quit) still reprogram everything and update the tracker.
+
 ### Programs
 - edit: initialize `status_message` to `NULL`.  The variable was declared but never assigned before the first render, so its stack slot held whatever bytes `read()` left behind when an existing file was opened.  The status-bar branch `status_message != NULL` would then take the truthy path and `printf("%s", status_message)` would dump from a random address — visible as a row of high-bit garbage at the bottom of the screen and embedded control bytes (form feed, ESC) that scrolled the rendered file content off.  When the file did not exist, the `read()` codepath was skipped, the slot stayed zero, and the status bar rendered correctly — masking the bug for new files.
 
