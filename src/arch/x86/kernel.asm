@@ -31,7 +31,7 @@
 %include "lib/lib.asm"                  ; lib/print.asm + lib/proc.asm
 
         ;; Network protocol stack (NIC driver lives above in drivers/ne2k.asm)
-%include "net/net.asm"                  ; net/arp.asm + icmp.asm + ip.asm + udp.asm
+%include "net/net.kasm"                 ; net/arp.c + icmp.c + ip.c + udp.c (compiled)
 
         ;; x86 / PC: 8259 PIC, INT 30h dispatcher, reboot / shutdown, kernel init
 %include "pic.asm"                      ; pic_remap
