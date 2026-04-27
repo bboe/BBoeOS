@@ -243,29 +243,29 @@ ext2_init:
 ext2_load:
         ;; Load file data into memory using vfs_found_inode and vfs_found_size.
         ;; Supports direct (0..11), singly-indirect (i_block[12]), doubly-indirect (i_block[13]).
-        ;; Input:  DI = destination address
+        ;; Input:  EDI = destination address (32-bit linear)
         ;; Output: CF set on disk error
-        push bx
-        push cx
-        push si
+        push ebx
+        push ecx
+        push esi
         ;; Read inode; save 12 direct block numbers, indirect ptr, doubly-indirect ptr
         mov ax, [vfs_found_inode]
         call ext2_read_inode            ; BX = pointer to inode
-        mov si, bx
-        add si, EXT2_INODE_BLOCK
-        push di
-        mov di, ext2_load_blks
-        mov cx, 12
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        push edi
+        mov edi, ext2_load_blks
+        mov ecx, 12
         .el_save:
-        mov ax, [si]                    ; low 16 bits of each 32-bit block ptr
+        mov ax, [esi]                   ; low 16 bits of each 32-bit block ptr
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .el_save
-        mov ax, [si]                    ; i_block[12] = singly-indirect block pointer
+        mov ax, [esi]                   ; i_block[12] = singly-indirect block pointer
         mov [ext2_load_indirect_ptr], ax
-        add si, 4
-        mov ax, [si]                    ; i_block[13] = doubly-indirect block pointer
+        add esi, 4
+        mov ax, [esi]                   ; i_block[13] = doubly-indirect block pointer
         mov [ext2_load_dbl_ptr], ax
         ;; ptrs_per_blk = 256 << log_block_size
         xor cx, cx
@@ -273,7 +273,7 @@ ext2_load:
         mov ax, 256
         shl ax, cl
         mov [ext2_load_ptrs], ax
-        pop di
+        pop edi
         mov cx, [vfs_found_size]        ; remaining bytes (low 16 bits)
         mov word [ext2_load_rem], cx
         mov word [ext2_load_blk_counter], 0
@@ -381,11 +381,12 @@ ext2_load:
         inc cx
         shr cx, 1
         .el_copy:
-        push si
-        mov si, SECTOR_BUFFER
+        push esi
+        mov esi, SECTOR_BUFFER
+        movzx ecx, cx
         cld
         rep movsw
-        pop si
+        pop esi
         pop cx
         ;; Subtract 512 from remaining
         sub cx, 512
@@ -407,15 +408,15 @@ ext2_load:
         inc word [ext2_load_blk_counter]
         jmp .el_block
         .el_done:
-        pop si
-        pop cx
-        pop bx
+        pop esi
+        pop ecx
+        pop ebx
         clc
         ret
         .el_err:
-        pop si
-        pop cx
-        pop bx
+        pop esi
+        pop ecx
+        pop ebx
         stc
         ret
 
@@ -595,62 +596,61 @@ ext2_mkdir:
         ret
 
 ext2_read_dir:
-        ;; Read the next non-empty ext2 directory entry in bbfs format into [DI]
-        ;; SI = FD entry pointer (FD_OFFSET_START = inode number, FD_OFFSET_SIZE = dir data size)
-        ;; DI = output buffer (DIRECTORY_ENTRY_SIZE bytes)
+        ;; Read the next non-empty ext2 directory entry in bbfs format into [EDI]
+        ;; ESI = FD entry pointer (FD_OFFSET_START = inode number, FD_OFFSET_SIZE = dir data size)
+        ;; EDI = output buffer (DIRECTORY_ENTRY_SIZE bytes), full 32-bit user pointer
         ;; Returns AX = DIRECTORY_ENTRY_SIZE if found, 0 at EOF, CF on error
         ;;
         ;; Name is staged through ext2_rd_name (static buffer) because ext2_read_inode
-        ;; clobbers SECTOR_BUFFER — which may alias the caller's output buffer DI.
-        push bx
-        push cx
-        push dx
-        push di
-        mov [ext2_rd_outbuf], di        ; save for use after ext2_read_inode
+        ;; clobbers SECTOR_BUFFER — which may alias the caller's output buffer EDI.
+        push ebx
+        push ecx
+        push edx
+        push edi
+        mov [ext2_rd_outbuf], edi       ; save user buffer ptr across ext2_read_inode
         .erd_loop:
         ;; 32-bit EOF: pos >= size
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        cmp ax, [si+FD_OFFSET_SIZE+2]
+        mov ax, [esi+FD_OFFSET_POSITION+2]
+        cmp ax, [esi+FD_OFFSET_SIZE+2]
         ja .erd_eof
         jb .erd_not_eof
-        mov ax, [si+FD_OFFSET_POSITION]
-        cmp ax, [si+FD_OFFSET_SIZE]
+        mov ax, [esi+FD_OFFSET_POSITION]
+        cmp ax, [esi+FD_OFFSET_SIZE]
         jae .erd_eof
         .erd_not_eof:
-        call ext2_read_sec              ; SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset
+        call ext2_read_sec              ; ESI=fd_entry → SECTOR_BUFFER filled, BX=byte offset
         jc .erd_err
+        movzx ebx, bx
         ;; rec_len (used to advance position)
-        mov dx, [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN]
+        mov dx, [SECTOR_BUFFER + ebx + EXT2_DIRENT_REC_LEN]
         cmp dx, EXT2_DIRENT_NAME        ; < 8 is invalid
         jb .erd_err
         ;; inode (low 16 bits)
-        mov ax, [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE]
+        mov ax, [SECTOR_BUFFER + ebx + EXT2_DIRENT_INODE]
         test ax, ax
         jz .erd_skip                    ; deleted entry: advance and retry
         ;; Save rec_len and inode across ext2_read_inode (which clobbers SECTOR_BUFFER)
         mov [ext2_rd_rec_len], dx
         mov [ext2_rd_inode], ax
         ;; Stage name into ext2_rd_name static buffer (safe across ext2_read_inode)
-        push si
-        mov cl, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN]
-        xor ch, ch
-        cmp cx, DIRECTORY_NAME_LENGTH - 1
+        push esi
+        movzx ecx, byte [SECTOR_BUFFER + ebx + EXT2_DIRENT_NAME_LEN]
+        cmp ecx, DIRECTORY_NAME_LENGTH - 1
         jbe .erd_namelen_ok
-        mov cx, DIRECTORY_NAME_LENGTH - 1
+        mov ecx, DIRECTORY_NAME_LENGTH - 1
         .erd_namelen_ok:
-        mov si, SECTOR_BUFFER
-        add si, bx
-        add si, EXT2_DIRENT_NAME        ; SI = entry name in SECTOR_BUFFER
-        mov di, ext2_rd_name
+        lea esi, [SECTOR_BUFFER + ebx + EXT2_DIRENT_NAME]    ; ESI = entry name
+        mov edi, ext2_rd_name
         cld
         rep movsb                       ; copy name bytes to static buffer
-        mov byte [di], 0                ; null-terminate
-        pop si                          ; restore fd_entry pointer
+        mov byte [edi], 0               ; null-terminate
+        pop esi                         ; restore fd_entry pointer
         ;; Read inode to get mode and size (clobbers SECTOR_BUFFER, AX, BX, CX, DX)
         mov ax, [ext2_rd_inode]
         call ext2_read_inode            ; BX = pointer to inode in SECTOR_BUFFER
-        mov cx, [bx+EXT2_INODE_MODE]
-        mov dx, [bx+EXT2_INODE_SIZE_LO] ; read size before writes to output
+        movzx ebx, bx
+        mov cx, [ebx+EXT2_INODE_MODE]
+        mov dx, [ebx+EXT2_INODE_SIZE_LO] ; read size before writes to output
         ;; Compute flags
         xor al, al
         test cx, EXT2_S_IFDIR
@@ -662,49 +662,49 @@ ext2_read_dir:
         jz .erd_set_flags
         or al, FLAG_EXECUTE
         .erd_set_flags:
-        ;; Copy name from static buffer to output [DI+0..DI+24]
-        push si
-        mov di, [ext2_rd_outbuf]
-        mov si, ext2_rd_name
-        mov cx, DIRECTORY_NAME_LENGTH   ; copy all 25 bytes (name + null + padding)
+        ;; Copy name from static buffer to output [EDI+0..EDI+24]
+        push esi                        ; save fd_entry pointer
+        mov edi, [ext2_rd_outbuf]
+        mov esi, ext2_rd_name
+        mov ecx, DIRECTORY_NAME_LENGTH  ; copy all 25 bytes (name + null + padding)
         rep movsb
-        pop si                          ; restore fd_entry pointer
+        pop esi                         ; restore fd_entry pointer
         ;; Write flags, inode, size into output
-        mov di, [ext2_rd_outbuf]
-        mov [di+DIRECTORY_OFFSET_FLAGS], al
+        mov edi, [ext2_rd_outbuf]
+        mov [edi+DIRECTORY_OFFSET_FLAGS], al
         mov ax, [ext2_rd_inode]
-        mov [di+DIRECTORY_OFFSET_SECTOR], ax
-        mov [di+DIRECTORY_OFFSET_SIZE], dx
-        mov word [di+DIRECTORY_OFFSET_SIZE+2], 0
+        mov [edi+DIRECTORY_OFFSET_SECTOR], ax
+        mov [edi+DIRECTORY_OFFSET_SIZE], dx
+        mov word [edi+DIRECTORY_OFFSET_SIZE+2], 0
         ;; Advance position by rec_len
         mov ax, [ext2_rd_rec_len]
-        add [si+FD_OFFSET_POSITION], ax
-        adc word [si+FD_OFFSET_POSITION+2], 0
+        add [esi+FD_OFFSET_POSITION], ax
+        adc word [esi+FD_OFFSET_POSITION+2], 0
         mov ax, DIRECTORY_ENTRY_SIZE
-        pop di
-        pop dx
-        pop cx
-        pop bx
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
         clc
         ret
         .erd_skip:
         ;; Deleted entry: advance position by rec_len and retry
-        add [si+FD_OFFSET_POSITION], dx
-        adc word [si+FD_OFFSET_POSITION+2], 0
+        add [esi+FD_OFFSET_POSITION], dx
+        adc word [esi+FD_OFFSET_POSITION+2], 0
         jmp .erd_loop
         .erd_eof:
-        pop di
-        pop dx
-        pop cx
-        pop bx
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
         xor ax, ax
         clc
         ret
         .erd_err:
-        pop di
-        pop dx
-        pop cx
-        pop bx
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
         mov ax, -1
         stc
         ret
@@ -733,15 +733,15 @@ ext2_add_dir_entry:
         mov [ext2_ade_min_rec], cx
         ;; Read dir inode; save 12 direct block pointers
         call ext2_read_inode            ; AX = dir inode → BX = inode ptr
-        mov si, bx
-        add si, EXT2_INODE_BLOCK
-        mov di, ext2_dir_blks
-        mov cx, 12
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_dir_blks
+        mov ecx, 12
         .ead_save_blks:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .ead_save_blks
         ;; Scan each direct block for insertion slot
         mov word [ext2_ade_cur_blk], 0
@@ -857,13 +857,13 @@ ext2_add_dir_entry:
         call ext2_read_blk_sec          ; AX=block, BX=0 → SECTOR_BUFFER; ext2_last_blk_sec set
         jc .ead_err
         ;; Zero SECTOR_BUFFER (directory entries must be zeroed before writing)
-        push di
-        mov di, SECTOR_BUFFER
-        mov cx, 256
+        push edi
+        mov edi, SECTOR_BUFFER
+        mov ecx, 256
         xor ax, ax
         cld
         rep stosw
-        pop di
+        pop edi
         ;; rec_len for first entry = block_size
         xor ch, ch
         mov cl, [ext2_log_block_size]
@@ -876,16 +876,17 @@ ext2_add_dir_entry:
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE], ax
         mov word [SECTOR_BUFFER + bx + EXT2_DIRENT_INODE + 2], 0
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_REC_LEN], dx
-        mov cx, [ext2_ade_namelen]
+        movzx ecx, word [ext2_ade_namelen]
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN], cl
         mov al, [ext2_ade_filetype]
         mov [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME_LEN + 1], al
-        push si
-        mov si, [ext2_ade_name]
-        lea di, [SECTOR_BUFFER + bx + EXT2_DIRENT_NAME]
+        push esi
+        movzx esi, word [ext2_ade_name]
+        movzx edi, bx
+        add edi, SECTOR_BUFFER + EXT2_DIRENT_NAME
         cld
         rep movsb
-        pop si
+        pop esi
         mov ax, [ext2_last_blk_sec]     ; sector set by read_blk_sec or alloc path
         call write_sector
         pop bp
@@ -1270,18 +1271,19 @@ ext2_delete:
         test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
         jnz .edl_not_found
         ;; Save block pointers (direct 0-11, indirect 12, doubly-indirect 13)
-        push si
-        lea si, [bx + EXT2_INODE_BLOCK]
-        mov di, ext2_dl_blks
-        mov cx, 14
+        push esi
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_dl_blks
+        mov ecx, 14
         cld
         .edl_save_blks:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .edl_save_blks
-        pop si
+        pop esi
         ;; Set i_dtime, zero i_links_count, flush inode before freeing blocks
         call rtc_read_epoch             ; DX:AX = epoch; BX and SECTOR_BUFFER preserved
         mov [bx + EXT2_INODE_DTIME], ax
@@ -1514,13 +1516,13 @@ ext2_prepare_write_sec:
         call ext2_alloc_block           ; AX = ind_blk; SI clobbered; SECTOR_BUFFER clobbered
         jc .epws_err
         mov [ext2_pws_ind_blk], ax
-        push di
-        mov di, SECTOR_BUFFER
-        mov cx, 256
+        push edi
+        mov edi, SECTOR_BUFFER
+        mov ecx, 256
         xor ax, ax
         cld
         rep stosw
-        pop di
+        pop edi
         ;; Write zeros to each sector of the new indirect block
         xor bx, bx                      ; BX = sector counter
         .epws_zero_ind:
@@ -1620,13 +1622,13 @@ ext2_prepare_write_sec:
         call ext2_alloc_block           ; AX = dbl_blk; SI clobbered; SECTOR_BUFFER clobbered
         jc .epws_err
         mov [ext2_pws_dbl_blk], ax
-        push di
-        mov di, SECTOR_BUFFER
-        mov cx, 256
+        push edi
+        mov edi, SECTOR_BUFFER
+        mov ecx, 256
         xor ax, ax
         cld
         rep stosw
-        pop di
+        pop edi
         xor bx, bx
         .epws_zero_dbl:
         movzx cx, byte [ext2_log_block_size]
@@ -1681,13 +1683,13 @@ ext2_prepare_write_sec:
         call ext2_alloc_block           ; AX = sub_blk; SI clobbered; SECTOR_BUFFER clobbered
         jc .epws_err
         mov [ext2_pws_sub_blk], ax
-        push di
-        mov di, SECTOR_BUFFER
-        mov cx, 256
+        push edi
+        mov edi, SECTOR_BUFFER
+        mov ecx, 256
         xor ax, ax
         cld
         rep stosw
-        pop di
+        pop edi
         xor bx, bx
         .epws_zero_sub:
         movzx cx, byte [ext2_log_block_size]
@@ -1848,15 +1850,15 @@ ext2_remove_dir_entry:
         mov [ext2_rde_name], si
         ;; Read dir inode; save direct block pointers
         call ext2_read_inode            ; BX = inode ptr in SECTOR_BUFFER
-        mov si, bx
-        add si, EXT2_INODE_BLOCK
-        mov di, ext2_dir_blks
-        mov cx, 12
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_dir_blks
+        mov ecx, 12
         .erde_save:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .erde_save
         ;; Scan sector 0 of each direct block
         xor cx, cx
@@ -2166,18 +2168,19 @@ ext2_rmdir:
         test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
         jz .erdr_not_found
         ;; Save block pointers (direct 0-11, indirect 12, doubly-indirect 13)
-        push si
-        lea si, [bx + EXT2_INODE_BLOCK]
-        mov di, ext2_rdr_blks
-        mov cx, 14
+        push esi
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_rdr_blks
+        mov ecx, 14
         cld
         .erdr_save_blks:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .erdr_save_blks
-        pop si
+        pop esi
         ;; Check each direct block for non-./.. entries (indirect blocks unsupported for dirs)
         mov bx, ext2_rdr_blks
         .erdr_check_blk:
@@ -2369,18 +2372,19 @@ ext2_update_size:
         shr eax, cl                         ; EAX = keep_blocks
         mov [ext2_us_keep_blocks], ax
         ;; Save i_block[0..13] (low 16 bits of each 4-byte entry)
-        push si
-        lea si, [bx + EXT2_INODE_BLOCK]
-        mov di, ext2_us_blks
-        mov cx, 14
+        push esi
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_us_blks
+        mov ecx, 14
         cld
         .eus_save_blks:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .eus_save_blks
-        pop si
+        pop esi
         ;; Update i_size and zero freed i_block[] entries in SECTOR_BUFFER
         mov ax, [si+FD_OFFSET_POSITION]
         mov [bx + EXT2_INODE_SIZE_LO], ax
@@ -2389,13 +2393,15 @@ ext2_update_size:
         mov cx, [ext2_us_keep_blocks]
         cmp cx, 14
         jae .eus_flush
-        mov di, cx
-        shl di, 2
-        add di, EXT2_INODE_BLOCK
-        add di, bx                          ; DI → i_block[keep_blocks] in SECTOR_BUFFER
-        mov cx, 14
-        sub cx, [ext2_us_keep_blocks]
-        shl cx, 1                           ; words to zero (each entry = 4 bytes = 2 words)
+        movzx edi, cx
+        shl edi, 2
+        add edi, EXT2_INODE_BLOCK
+        movzx eax, bx
+        add edi, eax                        ; EDI → i_block[keep_blocks] in SECTOR_BUFFER
+        movzx ecx, word [ext2_us_keep_blocks]
+        neg ecx
+        add ecx, 14
+        shl ecx, 1                          ; words to zero (each entry = 4 bytes = 2 words)
         xor ax, ax
         rep stosw
         .eus_flush:
@@ -2785,6 +2791,9 @@ ext2_names_match:
         jne .enm_no_match
         test cx, cx
         jz .enm_match                   ; both empty
+        movzx ecx, cx
+        movzx esi, si
+        movzx edi, di
         repe cmpsb
         jne .enm_no_match
         .enm_match:
@@ -2859,15 +2868,15 @@ ext2_search_dir:
         mov [ext2_sd_name], si
         ;; Read directory inode; save direct block pointers
         call ext2_read_inode            ; BX = pointer to inode
-        mov si, bx
-        add si, EXT2_INODE_BLOCK
-        mov di, ext2_dir_blks
-        mov cx, 12
+        movzx esi, bx
+        add esi, EXT2_INODE_BLOCK
+        mov edi, ext2_dir_blks
+        mov ecx, 12
         .esd_save:
-        mov ax, [si]
+        mov ax, [esi]
         stosw
-        add si, 4
-        dec cx
+        add esi, 4
+        dec ecx
         jnz .esd_save
         ;; Search each direct block
         mov bx, ext2_dir_blks           ; BX = pointer into block list
@@ -3143,7 +3152,7 @@ ext2_resolve_path:
         ext2_pws_sub_blk       dw 0     ; ext2_prepare_write_sec: sub-singly-indirect block
         ext2_rd_inode          dw 0
         ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
-        ext2_rd_outbuf         dw 0
+        ext2_rd_outbuf         dd 0     ; user buffer (32-bit) saved across ext2_read_inode
         ext2_rd_rec_len        dw 0
         ext2_rde_blk_num       dw 0     ; ext2_remove_dir_entry: block number for multi-sector scan
         ext2_rde_cur_sec       dw 0     ; ext2_remove_dir_entry: sector within current block
