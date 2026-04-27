@@ -376,21 +376,22 @@ vga_set_mode:
         ;; Input: AL = mode (VIDEO_MODE_TEXT_80x25=03h, VIDEO_MODE_VGA_320x200_256=13h).
         ;; Programs VGA registers from the mode table.  CF set if unsupported.
         ;; Preserves all registers.
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push esi
+        push edi
 
         mov ah, al                      ; save requested mode
 
-        mov si, vga_mode_table
+        mov esi, vga_mode_table
 .find_mode:
-        cmp si, vga_mode_table_end
+        cmp esi, vga_mode_table_end
         jae .unsupported
-        cmp byte [si], ah
+        cmp byte [esi], ah
         je .found_mode
-        add si, VGA_MODE_ENTRY_SIZE
+        add esi, VGA_MODE_ENTRY_SIZE
         jmp .find_mode
 
 .unsupported:
@@ -398,7 +399,7 @@ vga_set_mode:
         jmp .set_mode_done
 
 .found_mode:
-        inc si                          ; skip mode-ID byte, SI → Misc Output
+        inc esi                         ; skip mode-ID byte, ESI → Misc Output
 
         ;; 1. Miscellaneous Output
         mov dx, VGA_MISC_WRITE
@@ -500,7 +501,7 @@ vga_set_mode:
         ;; mode 13h uses palette indices directly and would otherwise see
         ;; DAC[8..15] at whatever garbage BIOS left there (often a copy of
         ;; 0-7, which collapses draw's 14 trail colours into ~8 uniques).
-        mov si, vga_default_palette
+        mov esi, vga_default_palette
         mov dx, 03C8h           ; DAC write-address port
         xor al, al
         out dx, al              ; start at palette entry 0
@@ -513,40 +514,37 @@ vga_set_mode:
         dec cx
         jnz .dac_restore_loop
 
-        ;; 11. Clear framebuffer.
-        push di
-        push es
+        ;; 11. Clear framebuffer using flat 32-bit addressing — DS / ES
+        ;; already point to the pmode flat data segment, so we just write
+        ;; to the linear framebuffer address (0xB8000 for text, 0xA0000
+        ;; for mode 13h).  No ES reload (a real-mode segment value would
+        ;; #GP in pmode).
         cmp ah, 13h
         je .clear_graphics
-        ;; Text mode: fill 0xB800 with space + default attribute
-        mov ax, VGA_SEG
-        mov es, ax
-        xor di, di
+        ;; Text mode: fill 0xB8000 with space + default attribute
+        mov edi, 0xB8000
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
-        mov cx, VGA_COLS * VGA_ROWS
+        mov ecx, VGA_COLS * VGA_ROWS
         rep stosw
         jmp .clear_done
 .clear_graphics:
-        ;; Mode 13h: zero 320×200 = 64000 bytes at 0xA000
-        mov ax, VGA_SEG_GRAPHICS
-        mov es, ax
-        xor di, di
-        xor ax, ax
-        mov cx, 320 * 200 / 2
+        ;; Mode 13h: zero 320×200 = 64000 bytes at 0xA0000
+        mov edi, 0xA0000
+        xor eax, eax
+        mov ecx, 320 * 200 / 2
         cld
         rep stosw
 .clear_done:
-        pop es
-        pop di
 
         clc
 
 .set_mode_done:
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edi
+        pop esi
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 vga_teletype:
