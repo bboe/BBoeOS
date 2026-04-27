@@ -716,9 +716,12 @@ fd_ioctl_vga:
 
 .vga_mode:
         ;; DL = requested video mode.  Send CR+form-feed to serial, then
-        ;; program the VGA registers.  On text-mode switches, follow up
-        ;; with a buffer clear so the 80×25 framebuffer isn't left with
-        ;; stale content from the previous mode.
+        ;; reprogram the VGA registers ONLY if the requested mode differs
+        ;; from the currently-active mode.  Reprogramming on every call
+        ;; flips SR03 (Character Map Select) and zeros the framebuffer,
+        ;; which is wasteful for Ctrl+L (already-in-text → text) and risks
+        ;; exposing font-load bugs unnecessarily.  On text-mode requests,
+        ;; always finish with vga_clear_screen so Ctrl+L visibly clears.
         push ax
         mov al, `\r`
         call serial_character
@@ -726,8 +729,12 @@ fd_ioctl_vga:
         call serial_character
         pop ax
         mov al, dl
+        cmp al, [vga_current_mode]
+        je .vga_mode_already
         call vga_set_mode       ; CF=1 on unsupported mode
         jc .vga_mode_done
+        mov [vga_current_mode], al
+.vga_mode_already:
         cmp al, VIDEO_MODE_TEXT_80x25
         jne .vga_mode_clear_done
         call vga_clear_screen
@@ -768,6 +775,13 @@ vga_set_palette_color:
 ;;; -----------------------------------------------------------------------
 ;;; Data tables (kept at end of file, sorted alphabetically by label).
 ;;; -----------------------------------------------------------------------
+
+;;; Currently-active video mode.  Initialised to mode 03h since the BIOS
+;;; leaves us in 80×25 text after boot; vga_font_load runs against that
+;;; state without programming our register table.  .vga_mode skips the
+;;; full register reprogram (and SR03 flip) when the requested mode
+;;; matches this value.
+vga_current_mode db VIDEO_MODE_TEXT_80x25
 
 ;;; Default VGA 16-colour DAC palette (6-bit R, G, B per entry).
 ;;; Matches the standard BIOS palette for mode 03h; restored on every
