@@ -14,10 +14,12 @@ at the time.
   everywhere so far-memory accessors no longer need a segment
   override.  `mnemonic_table` widens to 8-byte entries
   (`dd name_ptr, dd handler_ptr`) and the dispatcher scales the index
-  by 8.  `asm` ships in `PROGRAMS` again — 32 of 35 programs in the
-  self-host smoke suite assemble byte-identical to NASM; `arp.asm`,
-  `ping.asm`, and `asm.asm` itself are off by 1-2 bytes from
-  jump-size convergence edge cases (followups will pin them down).
+  by 8.  `inc_dec_handler` now emits the operand-size prefix for
+  e-register operands so `inc edi` in `[bits 16]` source assembles
+  as `66 47` (parse_ip's octet loop relies on it).  `asm` ships in
+  `PROGRAMS` again — 34 of 35 programs in the self-host smoke suite
+  assemble byte-identical to NASM; `asm.asm` itself is off by 2
+  bytes from a jump-size convergence edge case (followup).
 - 2026-04-26: Port `edit` to pmode.  The gap buffer (1 MB) and kill
   buffer (2.5 KB) move from real-mode addresses inside segment 0 to
   extended memory above the 1 MB mark

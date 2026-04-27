@@ -1993,6 +1993,7 @@ void inc_dec_handler(int rfield) {
             emit_byte(0xFE);
             emit_byte(0xC0 | reg_shift | register_id);
         } else {
+            emit_operand_size_prefix(size);
             emit_byte(0x40 | reg_shift | register_id);
         }
     } else {
