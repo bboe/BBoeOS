@@ -33,11 +33,13 @@
         jmp .iret_cf
 
         .io_read:
-        ;; BX = fd, DI = buffer, CX = count.
+        ;; BX = fd, EDI = buffer, ECX = count.  fd_read returns the full
+        ;; 32-bit byte count in EAX (or -1 on error), so route through the
+        ;; .iret_cf_eax path that skips the sign-extend.
         call fd_read
-        jmp .iret_cf
+        jmp .iret_cf_eax
 
         .io_write:
-        ;; BX = fd, SI = buffer, CX = count.
+        ;; BX = fd, ESI = buffer, ECX = count.  Same return shape as io_read.
         call fd_write
-        jmp .iret_cf
+        jmp .iret_cf_eax

@@ -61,18 +61,23 @@ syscall_handler:
 
         .iret_cf:
         ;; Handlers reach here after their kernel call returns with CF and AX
-        ;; carrying the result.  Propagate CF to the user's saved EFLAGS,
-        ;; sign-extend AX into the saved EAX so 32-bit user code can compare
-        ;; the result directly (AX=-1 → EAX=-1 for error tests, AX=0 → EAX=0
-        ;; for EOF tests), then iretd.  Syscalls that return DX:AX are
-        ;; expected to recompose the 32-bit value via DX in user code.
+        ;; carrying the result.  Sign-extend AX into EAX so 32-bit user code
+        ;; can compare the result directly (AX=-1 → EAX=-1 for error tests,
+        ;; AX=0 → EAX=0 for EOF tests), then propagate CF and iretd.
+        ;; Syscalls that return DX:AX are expected to recompose the 32-bit
+        ;; value via DX in user code.
+        movsx eax, ax
+        ;; Fall through to .iret_cf_eax — handlers wanting to return a full
+        ;; 32-bit value in EAX (currently io_read / io_write, whose byte
+        ;; counts can exceed 32767) prepare EAX themselves and ``jmp
+        ;; .iret_cf_eax`` to skip the sign-extend.
+        .iret_cf_eax:
         jnc .iret_cf_clear
         or dword [esp + SYSCALL_SAVED_EFLAGS], 1
         jmp .iret_cf_write
         .iret_cf_clear:
         and dword [esp + SYSCALL_SAVED_EFLAGS], ~1
         .iret_cf_write:
-        movsx eax, ax
         mov [esp + SYSCALL_SAVED_EAX], eax
         popad
         iretd

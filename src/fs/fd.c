@@ -252,7 +252,7 @@ fd_read:
         jz .err
         jmp eax
         .err:
-        mov ax, -1
+        mov eax, -1
         stc
         ret
 
@@ -267,7 +267,7 @@ fd_write:
         jz .err
         jmp eax
         .err:
-        mov ax, -1
+        mov eax, -1
         stc
         ret
 
