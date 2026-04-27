@@ -17,12 +17,15 @@
    ES-window scheme retired with the 16-bit port — every far-memory
    access is now a plain 32-bit load.  JUMP_TABLE is the flat address
    where pass 1's per-jump size-choice bitmap starts; SYMBOL_ENTRY
-   (36) covers 32 name bytes + 2 value + 1 type + 1 scope. */
+   (38) covers 32 name bytes + 4 value + 1 type + 1 scope.  The
+   value field is dword-wide so symbols whose value exceeds 16 bits
+   (``%define JUMP_TABLE = SYMBOL_BASE + 0xF000`` = 0x30F000 is the
+   canonical case) round-trip cleanly. */
 
 #define JUMP_MAX            4096
 #define SYMBOL_BASE         0x300000
 #define JUMP_TABLE          (SYMBOL_BASE + 0xF000)
-#define SYMBOL_ENTRY        36
+#define SYMBOL_ENTRY        38
 #define SYMBOL_MAX          1706
 #define SYMBOL_NAME_LENGTH  32
 
