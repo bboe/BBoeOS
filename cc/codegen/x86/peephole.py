@@ -141,6 +141,31 @@ class Peepholer:
             return line[: line.index(":")]
         return None
 
+    def _reads_acc(self, line: str, /) -> bool:
+        """Return True if *line* reads AX / AL / AH (any width).
+
+        Conservative: any appearance of the accumulator name in a
+        non-destination position counts as a read.  ``mov ax, X``
+        overwrites AX without reading it (destination); everything
+        else (``cmp ax, X``, ``add ax, X``, ``mov X, ax``, etc.)
+        reads.  ``mov al, X`` and ``mov ah, X`` only overwrite the
+        named half — the OTHER half is preserved, which counts as
+        an AX read for our purposes (the post-transform AX value
+        differs from the pre-transform one).
+        """
+        acc = self.target.acc
+        # Destination-only writes that fully overwrite AX.
+        full_writes = (
+            f"mov {acc}, ",
+            f"xor {acc}, {acc}",
+            f"pop {acc}",
+            f"movzx {acc}, ",
+        )
+        if any(line.startswith(prefix) for prefix in full_writes):
+            return False
+        # Anywhere else: any mention of ax / al / ah is a read.
+        return any(re.search(rf"\b{token}\b", line) for token in (acc, "al", "ah"))
+
     def peephole_compare_through_register(self) -> None:
         """Fold ``mov ax, <reg> / cmp ax, <X>`` into ``cmp <reg>, <X>``.
 
@@ -367,6 +392,39 @@ class Peepholer:
                 continue
             i += 1
 
+    def peephole_dead_stores(self) -> None:
+        """Remove stores to local variables that are never loaded."""
+        # Collect all _l_ labels referenced anywhere except as a store
+        # destination.  Stores are "mov ... [_l_X], <source>"; reads include
+        # "mov <dst>, [_l_X]", "cmp word [_l_X], ...", etc.
+        loaded: set[str] = set()
+        for line in self.lines:
+            stripped = line.strip()
+            if self._extract_local_label(stripped) is not None:
+                continue
+            cursor = 0
+            while True:
+                start = stripped.find("[_l_", cursor)
+                if start < 0:
+                    break
+                # Extract the bare label — stop at the first non-identifier
+                # byte. `[_l_sum+1]` must count as a reference to `_l_sum`,
+                # not `_l_sum+1`.
+                label_end = start + 1
+                while label_end < len(stripped) and (stripped[label_end].isalnum() or stripped[label_end] == "_"):
+                    label_end += 1
+                loaded.add(stripped[start + 1 : label_end])
+                cursor = stripped.index("]", label_end) + 1
+        # Remove stores and declarations for labels never loaded.
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            label = self._extract_local_label(stripped)
+            if label is not None and label not in loaded:
+                continue
+            result.append(line)
+        self.lines = result
+
     def peephole_dead_temp_slots(self) -> None:
         """Drop stores to bp-relative temp slots that are never read.
 
@@ -408,39 +466,6 @@ class Peepholer:
             stripped = line.strip()
             store_match = store_pattern.match(stripped)
             if store_match is not None and int(store_match.group(1)) not in read_slots:
-                continue
-            result.append(line)
-        self.lines = result
-
-    def peephole_dead_stores(self) -> None:
-        """Remove stores to local variables that are never loaded."""
-        # Collect all _l_ labels referenced anywhere except as a store
-        # destination.  Stores are "mov ... [_l_X], <source>"; reads include
-        # "mov <dst>, [_l_X]", "cmp word [_l_X], ...", etc.
-        loaded: set[str] = set()
-        for line in self.lines:
-            stripped = line.strip()
-            if self._extract_local_label(stripped) is not None:
-                continue
-            cursor = 0
-            while True:
-                start = stripped.find("[_l_", cursor)
-                if start < 0:
-                    break
-                # Extract the bare label — stop at the first non-identifier
-                # byte. `[_l_sum+1]` must count as a reference to `_l_sum`,
-                # not `_l_sum+1`.
-                label_end = start + 1
-                while label_end < len(stripped) and (stripped[label_end].isalnum() or stripped[label_end] == "_"):
-                    label_end += 1
-                loaded.add(stripped[start + 1 : label_end])
-                cursor = stripped.index("]", label_end) + 1
-        # Remove stores and declarations for labels never loaded.
-        result: list[str] = []
-        for line in self.lines:
-            stripped = line.strip()
-            label = self._extract_local_label(stripped)
-            if label is not None and label not in loaded:
                 continue
             result.append(line)
         self.lines = result
@@ -1020,6 +1045,30 @@ class Peepholer:
                     continue
             i += 1
 
+    def peephole_redundant_register_swap(self) -> None:
+        """Drop ``mov B, A`` immediately after ``mov A, B`` — A still holds B's value.
+
+        Common after :meth:`peephole_register_arithmetic`'s sibling
+        cases and at out_register function epilogues, where
+        ``*argc = count`` (with ``count`` pinned to CX and ``argc``
+        having ``out_register("cx")``) emits the redundant pair
+        ``mov ax, cx ; mov cx, ax``.  The second ``mov cx, ax`` is a
+        no-op — CX already holds count.  The first ``mov ax, cx`` is
+        also dead at the function epilogue, but liveness analysis is
+        beyond a peephole; the trailing dead store stays.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a.startswith("mov ") and b.startswith("mov "):
+                a_parts = a[len("mov ") :].split(", ")
+                b_parts = b[len("mov ") :].split(", ")
+                if len(a_parts) == 2 and len(b_parts) == 2 and a_parts[0] == b_parts[1] and a_parts[1] == b_parts[0]:
+                    del self.lines[i + 1]
+                    continue
+            i += 1
+
     def peephole_register_arithmetic(self) -> None:
         """Compute directly into a pinned-local target register.
 
@@ -1032,9 +1081,12 @@ class Peepholer:
         Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
         arithmetic result is being piped straight into a register
         (typically a pinned local).  After the transform AX retains
-        whatever it held before the sequence, which is safe because
-        pinned-register locals aren't referenced via AX tracking
-        post-codegen.
+        whatever it held before the sequence — the original sequence
+        ended with AX holding the result, so the rewrite changes AX's
+        post-sequence value.  Skip the transform when the next
+        instruction reads AX so cc.py's post-emit code paths that
+        consume the just-stored value via ``cmp ax, ...`` etc. still
+        see the correct value.
 
         Also handles the unary forms ``inc ax`` / ``dec ax`` between
         the two ``mov``s — same shape, no immediate operand.
@@ -1071,6 +1123,14 @@ class Peepholer:
                 if target in operand.split():
                     i += 1
                     continue
+            # Skip when the instruction after the sequence reads AX —
+            # cc.py occasionally pipes the result both into a pinned
+            # register and through AX (e.g., ``mov dx, ax ; cmp ax, bx``).
+            # Dropping the trailing ``mov reg, ax`` would leave AX
+            # holding its pre-sequence value, breaking that read.
+            if i + 3 < len(self.lines) and self._reads_acc(self.lines[i + 3].strip()):
+                i += 1
+                continue
             source = a[len(mov_acc_prefix) :]
             if is_unary:
                 op_name = "inc" if b.startswith("inc ") else "dec"
@@ -1083,30 +1143,6 @@ class Peepholer:
                 self.lines[i + 1] = f"        {new_op}"
                 del self.lines[i + 2]
             continue
-
-    def peephole_redundant_register_swap(self) -> None:
-        """Drop ``mov B, A`` immediately after ``mov A, B`` — A still holds B's value.
-
-        Common after :meth:`peephole_register_arithmetic`'s sibling
-        cases and at out_register function epilogues, where
-        ``*argc = count`` (with ``count`` pinned to CX and ``argc``
-        having ``out_register("cx")``) emits the redundant pair
-        ``mov ax, cx ; mov cx, ax``.  The second ``mov cx, ax`` is a
-        no-op — CX already holds count.  The first ``mov ax, cx`` is
-        also dead at the function epilogue, but liveness analysis is
-        beyond a peephole; the trailing dead store stays.
-        """
-        i = 0
-        while i < len(self.lines) - 1:
-            a = self.lines[i].strip()
-            b = self.lines[i + 1].strip()
-            if a.startswith("mov ") and b.startswith("mov "):
-                a_parts = a[len("mov ") :].split(", ")
-                b_parts = b[len("mov ") :].split(", ")
-                if len(a_parts) == 2 and len(b_parts) == 2 and a_parts[0] == b_parts[1] and a_parts[1] == b_parts[0]:
-                    del self.lines[i + 1]
-                    continue
-            i += 1
 
     def peephole_self_move(self) -> None:
         """Drop ``mov X, X`` no-ops.

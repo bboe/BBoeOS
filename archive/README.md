@@ -22,7 +22,7 @@ source is kept here for reference.
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
 | ping    | 1019        | 1291      | +272  |
-| shell   | 950         | 1335      | +385  |
+| shell   | 950         | 1337      | +387  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+3):** The three scratch arrays (`mac_buffer[6]`,
@@ -141,7 +141,7 @@ ICMP echo template) use ``memcpy`` from short string-literal
 constants instead of per-byte assignments, which collapses each
 ~8 × ``mov byte [...], imm`` burst into a single ``rep movsb``.
 
-**shell (+405):** The archived ``shell.asm`` has been edited so
+**shell (+387):** The archived ``shell.asm`` has been edited so
 that both versions share the same scratch layout — ``SECTOR_BUFFER
 + 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
 exec path — instead of carrying ~290 bytes of zero-initialized
