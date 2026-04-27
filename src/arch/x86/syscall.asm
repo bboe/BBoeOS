@@ -42,7 +42,12 @@ syscall_handler:
         movzx eax, byte [esp + SYSCALL_SAVED_EAX + 1]
         cmp eax, SYSCALL_COUNT
         jae .iret_invalid
-        jmp [.table + eax*4]
+        ;; Resolve the handler address into a scratch reg that pushad saved
+        ;; (EBP), then restore the user's AL so handlers see the cmd/flags
+        ;; byte they document — not the syscall number we used for dispatch.
+        mov ebp, [.table + eax*4]
+        mov al, [esp + SYSCALL_SAVED_EAX]
+        jmp ebp
 
         .iret_invalid:
         ;; Out-of-range syscall: surface CF=1 and AX=-1 like a kernel error.
