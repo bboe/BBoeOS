@@ -8,10 +8,10 @@
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTORS 3
-        %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
-        %assign EDIT_BUFFER_SIZE 5200h       ; Gap buffer size (EDIT_KILL_BUFFER - EDIT_BUFFER_BASE)
-        %assign EDIT_KILL_BUFFER 7200h       ; Kill buffer start (7C00h - EDIT_KILL_BUFFER_SIZE)
-        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Kill buffer size (2560 bytes)
+        %assign EDIT_BUFFER_BASE 100000h        ; Edit gap-buffer base (extended memory, 1 MB mark; clears VGA/BIOS at 0xA0000-0xFFFFF)
+        %assign EDIT_BUFFER_SIZE 100000h        ; Edit gap-buffer size (1 MB)
+        %assign EDIT_KILL_BUFFER (EDIT_BUFFER_BASE + EDIT_BUFFER_SIZE)
+        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Edit kill-buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty

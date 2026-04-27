@@ -489,9 +489,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Set up ``[CONST + disp + si]`` addressing for a constant-base index.
 
         Folds a trailing ``±Int`` off a ``Var ± Int`` index into the
-        displacement so ``buf[gap_start - 1]`` becomes
-        ``[EDIT_BUFFER_BASE-1+si]`` after a single
-        ``mov si, [_l_gap_start]``.  Byte-indexed references skip the
+        displacement so ``BUFFER[i - 1]`` becomes
+        ``[BUFFER-1+si]`` after a single ``mov si, [_l_i]``.  Byte-indexed references skip the
         load entirely when the index variable is pinned to DI or BX
         (``[CONST+di]`` / ``[CONST+bx]`` are valid 8086 addressing);
         BP-pinned vars don't qualify because BP would resolve through
