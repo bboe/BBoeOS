@@ -29,6 +29,7 @@ from cc.ast_nodes import (
     LogicalOr,
     MemberAccess,
     MemberAssign,
+    MemberIndex,
     Node,
     Param,
     Program,
@@ -703,6 +704,18 @@ class Parser:
                 arrow_token = self.eat()
                 arrow = arrow_token[0] == "ARROW"
                 member_token = self.eat("IDENT")
+                # ``ptr->field[i]`` indexes into an array-typed member.
+                if self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return MemberIndex(
+                        arrow=arrow,
+                        index=index,
+                        line=line,
+                        member_name=member_token[1],
+                        object_name=token[1],
+                    )
                 return MemberAccess(
                     arrow=arrow,
                     line=line,
@@ -731,6 +744,19 @@ class Parser:
         if token[0] == "AMP":
             self.eat()
             name_token = self.eat("IDENT")
+            # ``&array[i]`` desugars to ``array + i`` — cc.py's typed pointer
+            # arithmetic already scales by element size, so the resulting
+            # BinaryOperation produces the same address.
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                index = self.parse_expression()
+                self.eat("RBRACKET")
+                return BinaryOperation(
+                    left=Var(line=line, name=name_token[1]),
+                    line=line,
+                    operation="+",
+                    right=index,
+                )
             return AddressOf(line=line, name=name_token[1])
         if token[0] == "LPAREN":
             self.eat()

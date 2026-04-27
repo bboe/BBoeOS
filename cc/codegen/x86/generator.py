@@ -33,6 +33,7 @@ from cc.ast_nodes import (
     LogicalOr,
     MemberAccess,
     MemberAssign,
+    MemberIndex,
     Node,
     Param,
     String,
@@ -331,7 +332,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if type_name.startswith("struct "):
                 tag = type_name[7:]
                 if tag in self.struct_layouts:
-                    return sum(size for _, size in self.struct_layouts[tag].values())
+                    return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
             return self.target.type_sizes.get(type_name, 1)
         if type_name.endswith("*"):
             base = type_name[:-1]
@@ -340,7 +341,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if base.startswith("struct "):
                 tag = base[7:]
                 if tag in self.struct_layouts:
-                    return sum(size for _, size in self.struct_layouts[tag].values())
+                    return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
             return self.target.type_sizes.get(base, 1)
         return 1
 
@@ -600,7 +601,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 lines: list[str] = []
                 for element in declaration.init.elements:
                     assert isinstance(element, StructInit)
-                    for i, (field_name, (offset, field_size)) in enumerate(layout.items()):
+                    for i, (field_name, (offset, field_size, _element_size)) in enumerate(layout.items()):
                         value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
                         if field_size == 1:
                             lines.append(f"db {value}")
@@ -650,7 +651,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if tag not in self.struct_layouts:
                 message = f"unknown struct '{tag}'"
                 raise CompileError(message)
-            return sum(size for _, size in self.struct_layouts[tag].values())
+            return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
         message = f"unknown type '{type_name}'"
         raise CompileError(message)
 
@@ -694,7 +695,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if expression.member_name not in layout:
             message = f"struct '{tag}' has no field '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        offset, field_size = layout[expression.member_name]
+        offset, field_size, element_size = layout[expression.member_name]
+        is_array_field = field_size != element_size
+        # Array fields evaluate to the field's address (so callers can pass
+        # them to memcpy / memcmp / a function expecting a pointer).  Element
+        # access uses the dedicated MemberIndex node.
+        if is_array_field:
+            self.ax_clear()
+            if self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_load_var(object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            if offset:
+                self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, {base_reg}")
+            self.ax_clear()
+            return
         if field_size not in (1, 2):
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
@@ -732,7 +750,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if statement.member_name not in layout:
             message = f"struct '{tag}' has no field '{statement.member_name}'"
             raise CompileError(message, line=statement.line)
-        offset, field_size = layout[statement.member_name]
+        offset, field_size, _element_size = layout[statement.member_name]
         if field_size not in (1, 2):
             message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=statement.line)
@@ -750,6 +768,72 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov byte {addr}, al")
         else:
             self.emit(f"        mov {addr}, {self.target.acc}")
+
+    def generate_member_index(self, expression: MemberIndex, /) -> None:
+        """Generate code for ``ptr->field[index]`` as an rvalue.
+
+        Loads one element (byte for ``element_size == 1``, word for
+        ``element_size == 2``) from ``base + field_offset + index *
+        element_size``.  Constant indices fold into the displacement.
+        """
+        if not expression.arrow:
+            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
+            raise CompileError(message, line=expression.line)
+        object_name = expression.object_name
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=expression.line)
+        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+            raise CompileError(message, line=expression.line)
+        tag = struct_type[7:-1]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=expression.line)
+        if expression.member_name not in layout:
+            message = f"struct '{tag}' has no field '{expression.member_name}'"
+            raise CompileError(message, line=expression.line)
+        field_offset, _field_size, element_size = layout[expression.member_name]
+        if element_size not in (1, 2):
+            message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=expression.line)
+        # Constant index: fold offset + index*element_size into a single displacement.
+        if isinstance(expression.index, Int):
+            total_offset = field_offset + expression.index.value * element_size
+            self.ax_clear()
+            if self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_load_var(object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
+            if element_size == 1:
+                self.emit_byte_load_zx(addr)
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+            self.ax_clear()
+            return
+        # Variable index: AX = index, scale, add base+offset, load.
+        self.ax_clear()
+        self.generate_expression(expression.index)
+        if element_size == 2:
+            self.emit(f"        shl {self.target.acc}, 1")
+        # Save scaled index, load base.
+        self.emit(f"        push {self.target.acc}")
+        if self.si_local == object_name:
+            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+        self.emit(f"        pop {self.target.acc}")
+        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
+        addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+        if element_size == 1:
+            self.emit_byte_load_zx(addr)
+        else:
+            self.emit(f"        mov {self.target.acc}, {addr}")
+        self.ax_clear()
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.
@@ -1118,10 +1202,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if isinstance(declaration, InlineAsm):
                 continue
             if isinstance(declaration, StructDecl):
-                # Build a packed field layout: {field_name: (byte_offset, byte_size)}.
-                # Fields with array types (e.g. ``char _reserved[15]``) consume
-                # their total byte count.
-                layout: dict[str, tuple[int, int]] = {}
+                # Build a packed field layout:
+                # {field_name: (byte_offset, total_byte_size, element_byte_size)}.
+                # For scalar fields total == element.  For array fields
+                # (``uint8_t ip[4]``) total = element_size * count, while
+                # element_size is the per-element width — needed by
+                # ``entry->field[i]`` indexing to scale the index.
+                layout: dict[str, tuple[int, int, int]] = {}
                 cursor = 0
                 for field in declaration.fields:
                     ftype = field.type_name
@@ -1130,10 +1217,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         bracket = ftype.index("[")
                         element_type = ftype[:bracket]
                         count = int(ftype[bracket + 1 : -1])
-                        field_size = self._type_size(element_type) * count
+                        element_size = self._type_size(element_type)
+                        field_size = element_size * count
                     else:
                         field_size = self._type_size(ftype)
-                    layout[field.field_name] = (cursor, field_size)
+                        element_size = field_size
+                    layout[field.field_name] = (cursor, field_size, element_size)
                     cursor += field_size
                 self.struct_layouts[declaration.name] = layout
                 continue

@@ -244,6 +244,22 @@ class MemberAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberIndex(Node):
+    """Indexed access into a struct's array-typed member: ``ptr->field[i]``.
+
+    Loads one element (byte or word, per the field's element type) from
+    ``base + field_offset + index * element_size``.  ``ptr->field`` (no
+    index) is :class:`MemberAccess`, which yields the field's address for
+    array fields.
+    """
+
+    arrow: bool
+    index: Node
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class LogicalAnd(Node):
     """Short-circuit ``left && right`` expression."""
 
