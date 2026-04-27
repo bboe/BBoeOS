@@ -125,6 +125,19 @@ class X86CodegenTarget(CodegenTarget):
     #: (``mov``, ``die``, ``exec``, ``write``, ``sendto``, …).
     si_register: str
 
+    #: Sizes of fixed-width C types, shared by every x86 target.  ``int``
+    #: tracks :attr:`int_size` (2 bytes in 16-bit mode, 4 in 32-bit) and
+    #: pointer types resolve via :meth:`type_size`, so neither appears
+    #: here.  Subclasses inherit this table verbatim.
+    type_sizes: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "uint8_t": 1,
+        "uint16_t": 2,
+        "uint32_t": 4,
+        "unsigned long": 4,
+        "void": 0,
+    }
+
     #: BBoeOS kernel ABI: every syscall uses ``int 30h``.
     SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
         "EXEC": ("mov ah, SYS_EXEC", "int 30h"),
@@ -157,6 +170,20 @@ class X86CodegenTarget(CodegenTarget):
         """Return the 16-bit low-word alias of *reg*, or *reg* unchanged."""
         return EREG_LOW_WORD.get(reg, reg)
 
+    def type_size(self, name: str, /) -> int:
+        """Return the byte size of *name*.
+
+        ``int`` and any type whose name contains ``*`` resolve to the
+        target's native integer width (:attr:`int_size` — 2 bytes on
+        x86-16, 4 on x86-32).  All other types come from
+        :attr:`type_sizes`, the shared fixed-width base table.  Raises
+        :class:`KeyError` for unknown types — callers handle struct,
+        function_pointer, and array variants before reaching here.
+        """
+        if name == "int" or "*" in name:
+            return self.int_size
+        return self.type_sizes[name]
+
 
 class X86CodegenTarget16(X86CodegenTarget):
     """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
@@ -172,20 +199,6 @@ class X86CodegenTarget16(X86CodegenTarget):
     word_size = "word"
     int_size = 2
     param_slot_base = 4
-    type_sizes: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "char*": 2,
-        "int": 2,
-        "int*": 2,
-        "uint8_t": 1,
-        "uint8_t*": 2,
-        "uint16_t": 2,
-        "uint16_t*": 2,
-        "uint32_t": 4,
-        "uint32_t*": 2,
-        "unsigned long": 4,
-        "void": 0,
-    }
     register_pool: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
     non_acc_registers: ClassVar[frozenset[str]] = frozenset({"bx", "cx", "dx", "si", "di", "bp"})
 
@@ -214,20 +227,6 @@ class X86CodegenTarget32(X86CodegenTarget):
     word_size = "dword"
     int_size = 4
     param_slot_base = 8
-    type_sizes: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "char*": 4,
-        "int": 4,
-        "int*": 4,
-        "uint8_t": 1,
-        "uint8_t*": 4,
-        "uint16_t": 2,
-        "uint16_t*": 4,
-        "uint32_t": 4,
-        "uint32_t*": 4,
-        "unsigned long": 4,
-        "void": 0,
-    }
     register_pool: ClassVar[tuple[str, ...]] = ("edx", "ecx", "ebx", "edi")
     non_acc_registers: ClassVar[frozenset[str]] = frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
 

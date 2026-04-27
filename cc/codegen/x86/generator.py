@@ -338,7 +338,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 tag = type_name[7:]
                 if tag in self.struct_layouts:
                     return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
-            return self.target.type_sizes.get(type_name, 1)
+            return self.target.type_size(type_name)
         if type_name.endswith("*"):
             base = type_name[:-1]
             if base in ("char", "uint8_t") or base in self.BYTE_TYPES:
@@ -347,7 +347,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 tag = base[7:]
                 if tag in self.struct_layouts:
                     return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
-            return self.target.type_sizes.get(base, 1)
+            return self.target.type_size(base)
         return 1
 
     def _byte_index_direct(self, node: Index, /) -> str | None:
@@ -645,13 +645,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         value-struct (``"struct TAG"``) by summing the declared field sizes.
         Raises ``CompileError`` for unknown types.
         """
-        if type_name in self.target.type_sizes:
-            return self.target.type_sizes[type_name]
+        if type_name == "int" or "*" in type_name or type_name in self.target.type_sizes:
+            return self.target.type_size(type_name)
         if type_name == "function_pointer":
             return self.target.int_size
         if type_name.startswith("struct "):
-            if type_name.endswith("*"):
-                return self.target.int_size
             tag = type_name[7:]
             if tag not in self.struct_layouts:
                 message = f"unknown struct '{tag}'"

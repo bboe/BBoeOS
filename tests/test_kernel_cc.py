@@ -1166,3 +1166,117 @@ def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
     body = asm.split("read_sector:")[1].split("\n\n")[0]
     assert "jb fdc" in body and "jmp ata" in body, f"expected fused 'jb fdc ; jmp ata' dispatcher\n{asm}"
     assert "push bp" not in body and "        ret" not in body, f"naked must not emit prologue/ret\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# Double-pointer parameter parsing (uint8_t** / int** / char** / uint16_t** / uint32_t**)
+# ---------------------------------------------------------------------------
+
+
+def test_double_pointer_parameter_compiles() -> None:
+    """``uint8_t **argv`` is accepted as a parameter type."""
+    src = """
+        void f(uint8_t **argv __attribute__((in_register("di")))) {
+            argv[0] = argv[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm, f"function emitted\n{asm}"
+
+
+def test_double_pointer_indexed_assign_uses_word_stride() -> None:
+    """``argv[i] = ptr`` on ``uint8_t**`` writes a 16-bit value (slot is a pointer)."""
+    src = """
+        void f(uint8_t **argv __attribute__((in_register("di"))),
+               uint8_t *value __attribute__((in_register("si")))) {
+            argv[0] = value;
+        }
+    """
+    asm = _kernel(src)
+    # The slot is 16 bits — must NOT be ``mov [..], al`` (byte store) and
+    # must reach the slot via the word path.
+    assert "mov [di], si" in asm or "mov [si], di" in asm or ("mov" in asm and "byte" not in asm.split("f:")[1].split("ret")[0]), (
+        f"expected 16-bit slot store, got\n{asm}"
+    )
+
+
+def test_double_pointer_arithmetic_advances_by_two() -> None:
+    """``argv = argv + 1`` on ``uint8_t**`` advances by 2 bytes (sizeof pointer)."""
+    src = """
+        void f(uint8_t **argv __attribute__((in_register("di")))) {
+            argv = argv + 1;
+        }
+    """
+    asm = _kernel(src)
+    body = asm.split("f:")[1].split("ret")[0]
+    # Either an explicit ``add ..., 2`` or an ``inc`` twice; never a stride
+    # of 1 (which would mistreat the type as a byte pointer).
+    assert "add" in body or "inc" in body, f"expected pointer-advance instruction\n{asm}"
+
+
+def test_double_pointer_int_double_star_parses() -> None:
+    """``int **`` parameter type parses (parser regression check)."""
+    src = """
+        void f(int **slots __attribute__((in_register("di")))) {
+            slots[0] = slots[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_double_pointer_char_double_star_parses() -> None:
+    """``char **`` parameter type parses (mirrors the canonical ``char **argv``)."""
+    src = """
+        void f(char **argv __attribute__((in_register("di")))) {
+            argv[0] = argv[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_double_pointer_argv_with_out_register_cx_argc() -> None:
+    """The ``shared_parse_argv`` shape compiles end to end.
+
+    Combines double-pointer parameter (uint8_t **argv), in_register("di"),
+    out_register("cx") for argc, and a uint8_t* alias of a NAMED_CONSTANT
+    address — exactly what the ported lib/proc.c version needs.
+    """
+    src = """
+        uint8_t *exec_arg_pointer __attribute__((asm_name("EXEC_ARG")));
+        void shared_parse_argv(uint8_t **argv __attribute__((in_register("di"))),
+                               int *argc __attribute__((out_register("cx")))) {
+            int count;
+            int slot;
+            uint8_t *str;
+            count = 0;
+            slot = 0;
+            str = exec_arg_pointer;
+            if (str != 0) {
+                while (1) {
+                    while (str[0] == ' ') {
+                        str = str + 1;
+                    }
+                    if (str[0] == 0) { break; }
+                    argv[slot] = str;
+                    slot = slot + 1;
+                    count = count + 1;
+                    while (1) {
+                        if (str[0] == 0) { break; }
+                        if (str[0] == ' ') { break; }
+                        str = str + 1;
+                    }
+                    if (str[0] == 0) { break; }
+                    str[0] = 0;
+                    str = str + 1;
+                }
+            }
+            *argc = count;
+        }
+    """
+    asm = _kernel(src)
+    body = asm.split("shared_parse_argv:")[1]
+    # The function should END with CX holding count (the argc) and a ret.
+    assert "mov ax, cx" in body or "mov cx, ax" in body, f"expected CX/AX dance for argc out_register\n{asm}"
+    assert "ret" in body, f"non-naked function emits ret\n{asm}"

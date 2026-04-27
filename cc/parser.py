@@ -258,6 +258,19 @@ class Parser:
             object_name=object_name,
         )
 
+    def _parse_pointer_suffix(self, base: str, /, *, max_stars: int) -> str:
+        """Greedily consume up to ``max_stars`` trailing ``*`` tokens.
+
+        Returns ``base`` with one ``*`` per consumed token appended.
+        Used by :meth:`parse_type` to keep the per-base-type branches
+        free of repeated star-counting logic.
+        """
+        stars = 0
+        while stars < max_stars and self.peek()[0] == "STAR":
+            self.eat("STAR")
+            stars += 1
+        return base + ("*" * stars)
+
     def _parse_struct_declaration(self) -> StructDecl:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
         line = self.peek()[2]
@@ -1082,36 +1095,16 @@ class Parser:
         if token[0] == "VOID":
             self.eat()
             return "void"
-        if token[0] == "INT":
+        pointer_bases = {
+            "INT": "int",
+            "CHAR": "char",
+            "UINT8_T": "uint8_t",
+            "UINT16_T": "uint16_t",
+            "UINT32_T": "uint32_t",
+        }
+        if token[0] in pointer_bases:
             self.eat()
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return "int*"
-            return "int"
-        if token[0] == "CHAR":
-            self.eat()
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return "char*"
-            return "char"
-        if token[0] == "UINT8_T":
-            self.eat()
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return "uint8_t*"
-            return "uint8_t"
-        if token[0] == "UINT16_T":
-            self.eat()
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return "uint16_t*"
-            return "uint16_t"
-        if token[0] == "UINT32_T":
-            self.eat()
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return "uint32_t*"
-            return "uint32_t"
+            return self._parse_pointer_suffix(pointer_bases[token[0]], max_stars=2)
         if token[0] == "UNSIGNED":
             self.eat()
             if self.peek()[0] != "LONG":
@@ -1126,11 +1119,7 @@ class Parser:
         if token[0] == "STRUCT":
             self.eat()
             tag_token = self.eat("IDENT")
-            tag = tag_token[1]
-            if self.peek()[0] == "STAR":
-                self.eat()
-                return f"struct {tag}*"
-            return f"struct {tag}"
+            return self._parse_pointer_suffix(f"struct {tag_token[1]}", max_stars=1)
         message = f"expected type, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
