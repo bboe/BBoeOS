@@ -6,6 +6,17 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### Drivers
+- Port `vga_set_mode` to pmode.  The framebuffer-clear path used a
+  real-mode segment-register load (`mov ax, VGA_SEG; mov es, ax`)
+  that #GP'd in pmode, and `mov si, table` references writing only
+  the low 16 of ESI corrupted any caller-saved high bits.  Widen
+  pushes/pops and table walks to E-regs and replace the ES reload
+  with flat 32-bit addressing (`mov edi, 0xB8000` for text mode,
+  `0xA0000` for mode 13h).  Unblocks shell's Ctrl+L handler (which
+  previously crashed with EXC0D = #GP) and any other program that
+  calls `video_mode(...)` to clear the screen.
+
 ### Boot
 - Flip into 32-bit flat ring-0 protected mode at the tail of `boot_shell`.  `src/arch/x86/kernel.asm` now `%include`s the three staged pmode modules — `boot/stage1_5.asm` (CR0.PE flip + GDT), `idt.asm` (32-bit exception handlers + INT 30h gate), and a new `src/arch/x86/entry.asm` whose `protected_mode_entry` is the 32-bit landing pad — and `boot_shell` finishes with `call idt_install` / `jmp enter_protected_mode` after the real-mode driver inits complete.  The post-flip path is a `cli/hlt` loop for now; the shell, `shell_reload`, and everything that used to run from `PROGRAM_BASE` are temporarily unreachable on this branch, and come back as subsequent PRs widen the driver inits + jump-table + shell into 32-bit code.  `DIRECTORY_SECTOR` bumps 34 → 35 to give stage 2 one more sector for the ~900 extra bytes of 32-bit code.  Verified via `qemu-system-i386 -d int,cpu_reset`: only the two normal BIOS resets fire — no CPU exceptions after the flip, no triple fault
 
