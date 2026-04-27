@@ -1060,6 +1060,7 @@ class EmissionMixin:
         self.ax_clear()
         self.constant_aliases = {}
         self.current_carry_return = function.carry_return
+        self.current_function_is_main = name == "main"
         self.elide_frame = name == "main"
         # Frame-elide criteria for non-main functions.  The bp frame
         # becomes dead weight whenever the body makes no BP-relative
@@ -1553,14 +1554,16 @@ class EmissionMixin:
     def generate_return(self, statement: Return, /) -> None:
         """Generate assembly for a return statement.
 
-        In ``main``, ``return`` maps to ``jmp FUNCTION_EXIT``.  In other
+        In ``main``, ``return`` maps to ``jmp FUNCTION_EXIT`` regardless
+        of whether the frame was elided — main has no caller, so a normal
+        ``pop bp; ret`` would jump to a garbage address.  In other
         functions it evaluates the return expression into AX, tears down
         the stack frame, and emits ``ret``.  For ``carry_return``
         functions, ``return 1`` / ``return 0`` bypass AX entirely and
         set CF instead (``clc`` / ``stc``); any other return value is
         rejected at codegen time.
         """
-        if self.elide_frame:
+        if self.current_function_is_main:
             # main: return [expr]; → exit() (discard return value)
             self.emit("        jmp FUNCTION_EXIT")
             return
