@@ -7,6 +7,17 @@ at the time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
 ### User programs
+- 2026-04-27: Port the self-hosted `asm` assembler to pmode.  The
+  symbol and jump tables move from a dedicated ES segment
+  (`SYMBOL_SEGMENT = 0x2000`, linear 0x20000) to a flat extended-memory
+  region at `SYMBOL_BASE = 0x300000`; flat 32-bit DS reaches
+  everywhere so far-memory accessors no longer need a segment
+  override.  `mnemonic_table` widens to 8-byte entries
+  (`dd name_ptr, dd handler_ptr`) and the dispatcher scales the index
+  by 8.  `asm` ships in `PROGRAMS` again — 32 of 35 programs in the
+  self-host smoke suite assemble byte-identical to NASM; `arp.asm`,
+  `ping.asm`, and `asm.asm` itself are off by 1-2 bytes from
+  jump-size convergence edge cases (followups will pin them down).
 - 2026-04-26: Port `edit` to pmode.  The gap buffer (1 MB) and kill
   buffer (2.5 KB) move from real-mode addresses inside segment 0 to
   extended memory above the 1 MB mark
