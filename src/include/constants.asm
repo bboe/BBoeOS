@@ -101,6 +101,13 @@
         %assign SYS_SYS_REBOOT 0F2h
         %assign SYS_SYS_SHUTDOWN 0F3h
 
+        ;; VGA hardware register ports (used by both the real-mode boot
+        ;; path's vga_font_load and the post-flip vga driver).
+        %assign VGA_GC_DATA     03CFh
+        %assign VGA_GC_INDEX    03CEh
+        %assign VGA_SEQ_DATA    03C5h
+        %assign VGA_SEQ_INDEX   03C4h
+
         ;; VGA ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_VGA)
         %assign VGA_IOCTL_FILL_BLOCK    00h  ; CL=col, CH=row, DL=color (mode 13h 8x8 tile)
         %assign VGA_IOCTL_MODE          01h  ; DL=mode; also clears screen and serial

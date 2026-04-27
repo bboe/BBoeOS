@@ -24,16 +24,11 @@
         VGA_CRTC_DATA           equ 03D5h
         VGA_CRTC_INDEX          equ 03D4h
         VGA_DEFAULT_ATTRIBUTE   equ 07h
-        VGA_GC_DATA             equ 03CFh
-        VGA_GC_INDEX            equ 03CEh
         VGA_INPUT_STATUS_1      equ 03DAh
         VGA_MISC_WRITE          equ 03C2h
         VGA_MODE_ENTRY_SIZE     equ 61  ; 1 mode-id + 1 misc + 4 seq + 25 crtc + 9 gc + 21 ac
         VGA_ROWS                equ 25
         VGA_SEG                 equ 0B800h
-        VGA_SEG_GRAPHICS        equ 0A000h
-        VGA_SEQ_DATA            equ 03C5h
-        VGA_SEQ_INDEX           equ 03C4h
 
 vga_clear_screen:
         ;; Fills the text buffer with space + default attribute and moves
@@ -61,205 +56,45 @@ vga_clear_screen:
 vga_fill_block:
         ;; Fill an 8×8 tile at (BL=col, BH=row) with color AL in mode 13h.
         ;; Tile coordinates: 0-39 columns, 0-24 rows.  Preserves all registers.
-        push ax
-        push bx
-        push cx
-        push dx
-        push di
-        push es
+        ;; Uses flat 32-bit addressing — DS already covers the linear VGA
+        ;; framebuffer at 0xA0000, no ES reload (a real-mode segment value
+        ;; would #GP in pmode).
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push edi
 
         mov cl, al                      ; stash color
 
-        ;; DI = row * 2560 + col * 8  (pixel offset of tile's top-left corner)
-        movzx ax, bh                    ; AX = row
-        mov dx, 2560
-        mul dx                          ; AX = row × 2560 (max 24×2560=61440, no overflow)
-        mov di, ax
+        ;; EDI = 0xA0000 + row * 2560 + col * 8  (linear pixel offset)
+        movzx edi, bh                   ; EDI = row
+        imul edi, 2560                  ; EDI = row × 2560
+        movzx eax, bl                   ; EAX = col
+        shl eax, 3                      ; EAX = col × 8
+        add edi, eax
+        add edi, 0xA0000                ; flat VGA framebuffer base
 
-        movzx ax, bl                    ; AX = col
-        mov dx, 8
-        mul dx                          ; AX = col × 8 (max 39×8=312, no overflow)
-        add di, ax
-
-        mov ax, VGA_SEG_GRAPHICS
-        mov es, ax
         mov al, cl                      ; restore color
 
-        mov cx, 8                       ; 8 tile rows
+        mov ecx, 8                      ; 8 tile rows
         cld
 .fill_row:
-        push di
-        push cx
-        mov cx, 8
+        push edi
+        push ecx
+        mov ecx, 8
         rep stosb                       ; write 8 pixels with color AL
-        pop cx
-        pop di
-        add di, 320                     ; advance to next screen row
-        dec cx
+        pop ecx
+        pop edi
+        add edi, 320                    ; advance to next screen row
+        dec ecx
         jnz .fill_row
 
-        pop es
-        pop di
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        ret
-
-vga_font_load:
-        ;; Copy the BIOS ROM 8×16 font into char-gen at plane 2 offset 0x4000.
-        ;; INT 10h AH=11h AL=30h BH=06h is a query-only subfunction that
-        ;; returns ES:BP pointing to the ROM font — unlike the font-LOAD
-        ;; subfunctions (AL=04h/14h/00h), which touch VGA state and are
-        ;; unreliable in QEMU when called after a non-BIOS mode set, the
-        ;; query is just a lookup and works everywhere.  We then drive the
-        ;; planar write path ourselves to copy the 4 KB ROM data (256
-        ;; glyphs × 16 bytes) into the char-gen, zero-padding each glyph
-        ;; up to the VGA's fixed 32-byte slot size.
-        ;;
-        ;; We target plane 2 offset 0x4000 (not 0x0000) because mode 13h's
-        ;; framebuffer clear writes zeros to plane 2 bytes 0–15999 — plane
-        ;; 2 is shared between the mode 13h display area and the char-gen.
-        ;; Offset 0x4000 lies above the display range and survives every
-        ;; switch.  The matching SR03 value (05h) in the mode 03h table
-        ;; routes both char sets there.
-        ;;
-        ;; Every GC register the write path consults is initialised
-        ;; explicitly: if GR01 (enable set/reset) is left non-zero for
-        ;; plane 2, or GR03 non-zero (data rotate / logic op), the copy
-        ;; silently writes a uniform pattern from GR00 instead of CPU
-        ;; data and every glyph ends up as a solid block.
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
-        push di
-        push bp
-        push ds
-        push es
-
-        ;; Fetch ROM 8×16 font pointer → ES:BP (CX = 16 pts/char).
-        mov ax, 1130h
-        mov bh, 06h
-        int 10h
-        ;; Move ROM pointer into DS:SI for the copy loop.
-        push es
-        pop ds
-        mov si, bp
-
-        ;; Configure planar write path: plane 2 only, A000h window.
-        mov dx, VGA_SEQ_INDEX
-        mov al, 04h
-        out dx, al
-        mov dx, VGA_SEQ_DATA
-        mov al, 06h                     ; SR04: extended, no chain-4, no odd/even
-        out dx, al
-
-        mov dx, VGA_SEQ_INDEX
-        mov al, 02h
-        out dx, al
-        mov dx, VGA_SEQ_DATA
-        mov al, 04h                     ; SR02: write plane 2 only
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 00h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        xor al, al                      ; GR00: set/reset data = 0
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 01h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        xor al, al                      ; GR01: disable set/reset on all planes
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 03h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        xor al, al                      ; GR03: no rotate, replace (no ALU op)
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 05h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        xor al, al                      ; GR05: write mode 0
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 06h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        mov al, 05h                     ; GR06: A000h base, 64KB, graphics mode
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 08h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        mov al, 0FFh                    ; GR08: bit mask = all bits writable
-        out dx, al
-
-        ;; Copy 256 glyphs × (16 bytes bitmap + 16 bytes zero padding) from
-        ;; DS:SI (ROM) to ES:DI (VRAM plane 2 offset 0x4000).  The VGA
-        ;; char-gen uses fixed 32-byte slots regardless of glyph height.
-        mov ax, VGA_SEG_GRAPHICS
-        mov es, ax
-        mov di, 4000h
-        mov bx, 256                     ; glyph count
-        cld
-.char_loop:
-        mov cx, 8                       ; 16 bytes / 2 = 8 words of bitmap
-        rep movsw
-        mov cx, 8                       ; 16 bytes of zero padding
-        xor ax, ax
-        rep stosw
-        dec bx
-        jnz .char_loop
-
-        ;; Restore text-mode planar state (matches mode 03h defaults).
-        mov dx, VGA_SEQ_INDEX
-        mov al, 04h
-        out dx, al
-        mov dx, VGA_SEQ_DATA
-        mov al, 02h                     ; SR04: extended, odd/even
-        out dx, al
-
-        mov dx, VGA_SEQ_INDEX
-        mov al, 02h
-        out dx, al
-        mov dx, VGA_SEQ_DATA
-        mov al, 03h                     ; SR02: planes 0+1
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 05h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        mov al, 10h                     ; GR05: odd/even read enabled
-        out dx, al
-
-        mov dx, VGA_GC_INDEX
-        mov al, 06h
-        out dx, al
-        mov dx, VGA_GC_DATA
-        mov al, 0Eh                     ; GR06: B800h 32KB, odd/even, text
-        out dx, al
-
-        pop es
-        pop ds
-        pop bp
-        pop di
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop edi
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 vga_get_cursor:
