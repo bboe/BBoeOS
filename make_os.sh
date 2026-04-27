@@ -44,6 +44,12 @@ done
 
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
+
+if [ "$FS_TYPE" = "ext2" ]; then
+    EXT2_START=$(python3 -c "from add_file import compute_directory_sector; print(compute_directory_sector(image_path='$IMAGE'))") || exit 1
+    mke2fs -b "$EXT2_BLOCK_SIZE" -t ext2 -m 0 -E offset=$((EXT2_START * 512)) "$IMAGE" $(( (2880 - EXT2_START) / 2 )) || exit 1
+fi
+
 ./add_file.py --mkdir --image "$IMAGE" bin || exit 1
 for name in $PROGRAMS; do
     ./add_file.py -x -d bin --image "$IMAGE" "$PBUILD/$name" || exit 1
