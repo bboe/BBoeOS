@@ -6,6 +6,28 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### User programs
+- 2026-04-26: Port `edit` to pmode.  The gap buffer (1 MB) and kill
+  buffer (2.5 KB) move from real-mode addresses inside segment 0 to
+  extended memory above the 1 MB mark
+  (`EDIT_BUFFER_BASE` = 0x100000, `EDIT_KILL_BUFFER` = 0x200000) — clear
+  of the VGA/BIOS regions at 0xA0000-0xFFFFF.  Cursor /
+  view / dirty / kill / status state lifts to file-scope globals (BSS)
+  so cc.py doesn't auto-pin to registers that `buffer_character_at`
+  uses as scratch.  Disk read chunks at 32767 bytes per call —
+  `SYS_IO_READ` returns `AX` and the dispatcher sign-extends, so a
+  single read returning ≥ 32768 bytes looks like a negative error.
+  The render's EOF detection now compares `offset < buffer_length()`
+  rather than reading a sentinel from the helper (the previous
+  ``if (character < 0)`` mis-interpreted any UTF-8 high byte as EOF
+  because cc.py types the call result as a signed byte).  edit calls
+  `video_mode(vga_fd, VIDEO_MODE_TEXT_80x25)` at the top of every
+  render to clear the VGA framebuffer; without it, successive renders
+  layered text over the old contents (typing "hello" displayed as
+  "hhhhhello").  `archive/edit.asm` is retired — the 16-bit C build
+  can't represent a 256 KB buffer base, same precedent as
+  `archive/asm.asm`.
+
 ### Drivers
 - Port `vga_set_mode` to pmode.  The framebuffer-clear path used a
   real-mode segment-register load (`mov ax, VGA_SEG; mov es, ax`)
@@ -16,6 +38,14 @@ at the time.
   `0xA0000` for mode 13h).  Unblocks shell's Ctrl+L handler (which
   previously crashed with EXC0D = #GP) and any other program that
   calls `video_mode(...)` to clear the screen.
+
+### Toolchain
+- cc.py's ``return`` from main now always emits ``jmp FUNCTION_EXIT``
+  by tracking ``current_is_main`` separately from ``elide_frame``.  A
+  local stack array forced ``elide_frame=False``, which previously
+  emitted ``mov esp, ebp; pop ebp; ret`` — broken in pmode because
+  ``program_enter`` ``jmp``s into the program rather than ``call``ing
+  it, so the stack has no return address.
 
 ### Boot
 - Flip into 32-bit flat ring-0 protected mode at the tail of `boot_shell`.  `src/arch/x86/kernel.asm` now `%include`s the three staged pmode modules — `boot/stage1_5.asm` (CR0.PE flip + GDT), `idt.asm` (32-bit exception handlers + INT 30h gate), and a new `src/arch/x86/entry.asm` whose `protected_mode_entry` is the 32-bit landing pad — and `boot_shell` finishes with `call idt_install` / `jmp enter_protected_mode` after the real-mode driver inits complete.  The post-flip path is a `cli/hlt` loop for now; the shell, `shell_reload`, and everything that used to run from `PROGRAM_BASE` are temporarily unreachable on this branch, and come back as subsequent PRs widen the driver inits + jump-table + shell into 32-bit code.  `DIRECTORY_SECTOR` bumps 34 → 35 to give stage 2 one more sector for the ~900 extra bytes of 32-bit code.  Verified via `qemu-system-i386 -d int,cpu_reset`: only the two normal BIOS resets fire — no CPU exceptions after the flip, no triple fault

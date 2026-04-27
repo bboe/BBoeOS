@@ -1649,7 +1649,9 @@ class EmissionMixin:
         rejected at codegen time.
         """
         if self.current_function_is_main:
-            # main: return [expr]; → exit() (discard return value)
+            # main: return [expr]; → exit() (discard return value).
+            # SYS_EXIT discards the program's stack entirely, so any
+            # bp frame can be left in place — no teardown needed.
             self.emit("        jmp FUNCTION_EXIT")
             return
         if self.current_carry_return:
