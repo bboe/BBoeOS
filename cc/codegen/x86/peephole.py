@@ -367,6 +367,51 @@ class Peepholer:
                 continue
             i += 1
 
+    def peephole_dead_temp_slots(self) -> None:
+        """Drop stores to bp-relative temp slots that are never read.
+
+        Compiler-generated IR temps (``_ir_*``) get a stack slot at
+        function entry and are typically written once via ``mov [bp-N],
+        reg`` then consumed directly from the register without ever
+        re-reading the slot.  :meth:`peephole_store_reload` deletes the
+        reload when one is emitted, but the write itself remains; this
+        pass deletes writes whose slot is never read at all within the
+        function.
+
+        Only negative-offset slots qualify (``[bp-N]``).  Positive
+        offsets (``[bp+N]``) reference caller-pushed parameters, which
+        a callee mustn't reorder.
+
+        Read detection covers compound forms (``[bp-N+1]``, ``[bp-N+si]``,
+        ``[bp-N-2]``) as well as the bare ``[bp-N]`` — partial-byte
+        reads of a word slot land at ``[bp-N+1]`` and would be missed
+        by a bare-form regex, so any ``[bp-N...]`` operand counts as
+        a read of slot N.
+        """
+        base_register = self.target.base_register
+        slot_pattern = re.compile(rf"\[{base_register}-(\d+)(?:[+\-][^\]]+)?\]")
+        store_pattern = re.compile(rf"^mov \[{base_register}-(\d+)\],")
+        # Collect every slot that's READ anywhere.  For ``mov [bp-N], <src>``
+        # the destination ``[bp-N]`` is a write — skip past the closing
+        # ``]`` before scanning the rest for reads.  Other instructions
+        # treat any ``[bp-N...]`` reference as a read.
+        read_slots: set[int] = set()
+        for line in self.lines:
+            stripped = line.strip()
+            scan_start = 0
+            if store_pattern.match(stripped):
+                scan_start = stripped.index("]") + 1
+            read_slots.update(int(match.group(1)) for match in slot_pattern.finditer(stripped, scan_start))
+        # Drop writes whose slot is never read.
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            store_match = store_pattern.match(stripped)
+            if store_match is not None and int(store_match.group(1)) not in read_slots:
+                continue
+            result.append(line)
+        self.lines = result
+
     def peephole_dead_stores(self) -> None:
         """Remove stores to local variables that are never loaded."""
         # Collect all _l_ labels referenced anywhere except as a store
@@ -980,7 +1025,9 @@ class Peepholer:
 
         Turns ``mov ax, X / <operation> ax, Y / mov <reg>, ax`` into
         ``mov <reg>, X / <operation> <reg>, Y`` when <reg> isn't already
-        read by Y (e.g., ``sub reg, reg`` would zero it).
+        read by Y (e.g., ``sub reg, reg`` would zero it).  The
+        ``mov <reg>, X`` step collapses to nothing when X is the same
+        register as <reg> — handled by :meth:`peephole_self_move`.
 
         Saves the trailing ``mov <reg>, ax`` (2 bytes) whenever the
         arithmetic result is being piped straight into a register
@@ -988,9 +1035,13 @@ class Peepholer:
         whatever it held before the sequence, which is safe because
         pinned-register locals aren't referenced via AX tracking
         post-codegen.
+
+        Also handles the unary forms ``inc ax`` / ``dec ax`` between
+        the two ``mov``s — same shape, no immediate operand.
         """
         registers = self.target.non_acc_registers
-        operations = tuple(f"{operation} {self.target.acc}," for operation in ("add", "sub", "and", "or", "xor"))
+        binary_operations = tuple(f"{operation} {self.target.acc}," for operation in ("add", "sub", "and", "or", "xor"))
+        unary_operations = (f"inc {self.target.acc}", f"dec {self.target.acc}")
         mov_acc_prefix = f"mov {self.target.acc}, "
         i = 0
         while i < len(self.lines) - 2:
@@ -1000,7 +1051,9 @@ class Peepholer:
             if not a.startswith(mov_acc_prefix):
                 i += 1
                 continue
-            if not any(b.startswith(operation) for operation in operations):
+            is_binary = any(b.startswith(operation) for operation in binary_operations)
+            is_unary = b in unary_operations
+            if not (is_binary or is_unary):
                 i += 1
                 continue
             if not c.startswith("mov "):
@@ -1013,19 +1066,65 @@ class Peepholer:
             target = parts[0]
             # Skip when the operand of the arithmetic references the
             # target register — rewriting would make it self-referential.
-            operand = b.split(", ", 1)[1]
-            if target in operand.split():
-                i += 1
-                continue
+            if is_binary:
+                operand = b.split(", ", 1)[1]
+                if target in operand.split():
+                    i += 1
+                    continue
             source = a[len(mov_acc_prefix) :]
-            if target in source.split():
-                i += 1
-                continue
-            new_op = b.replace(f"{self.target.acc},", f"{target},", 1)
-            self.lines[i] = f"        mov {target}, {source}"
-            self.lines[i + 1] = f"        {new_op}"
-            del self.lines[i + 2]
+            if is_unary:
+                op_name = "inc" if b.startswith("inc ") else "dec"
+                self.lines[i] = f"        mov {target}, {source}"
+                self.lines[i + 1] = f"        {op_name} {target}"
+                del self.lines[i + 2]
+            else:
+                new_op = b.replace(f"{self.target.acc},", f"{target},", 1)
+                self.lines[i] = f"        mov {target}, {source}"
+                self.lines[i + 1] = f"        {new_op}"
+                del self.lines[i + 2]
             continue
+
+    def peephole_redundant_register_swap(self) -> None:
+        """Drop ``mov B, A`` immediately after ``mov A, B`` — A still holds B's value.
+
+        Common after :meth:`peephole_register_arithmetic`'s sibling
+        cases and at out_register function epilogues, where
+        ``*argc = count`` (with ``count`` pinned to CX and ``argc``
+        having ``out_register("cx")``) emits the redundant pair
+        ``mov ax, cx ; mov cx, ax``.  The second ``mov cx, ax`` is a
+        no-op — CX already holds count.  The first ``mov ax, cx`` is
+        also dead at the function epilogue, but liveness analysis is
+        beyond a peephole; the trailing dead store stays.
+        """
+        i = 0
+        while i < len(self.lines) - 1:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            if a.startswith("mov ") and b.startswith("mov "):
+                a_parts = a[len("mov ") :].split(", ")
+                b_parts = b[len("mov ") :].split(", ")
+                if len(a_parts) == 2 and len(b_parts) == 2 and a_parts[0] == b_parts[1] and a_parts[1] == b_parts[0]:
+                    del self.lines[i + 1]
+                    continue
+            i += 1
+
+    def peephole_self_move(self) -> None:
+        """Drop ``mov X, X`` no-ops.
+
+        These typically arise from :meth:`peephole_register_arithmetic`
+        rewriting ``mov ax, R / op ax, K / mov R, ax`` into
+        ``mov R, R / op R, K`` when source and target collide on the
+        same pinned register.
+        """
+        result: list[str] = []
+        for line in self.lines:
+            stripped = line.strip()
+            if stripped.startswith("mov "):
+                parts = stripped[len("mov ") :].split(", ")
+                if len(parts) == 2 and parts[0] == parts[1]:
+                    continue
+            result.append(line)
+        self.lines = result
 
     def peephole_store_reload(self) -> None:
         """Remove redundant store-then-reload sequences.
@@ -1139,8 +1238,11 @@ class Peepholer:
         self.peephole_memory_arithmetic_byte()
         self.peephole_dx_to_memory()
         self.peephole_store_reload()
+        self.peephole_dead_temp_slots()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()
+        self.peephole_self_move()
+        self.peephole_redundant_register_swap()
         self.peephole_index_through_memory()
         self.peephole_fold_zero_save()
         self.peephole_compare_through_register()

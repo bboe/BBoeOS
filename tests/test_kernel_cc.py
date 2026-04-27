@@ -14,6 +14,7 @@ Verifies structural correctness of kernel-mode output:
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -23,6 +24,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
+
+sys.path.insert(0, str(REPO_ROOT))
+
+from cc.codegen.x86.peephole import Peepholer  # noqa: E402
+from cc.target import X86CodegenTarget16  # noqa: E402
 
 
 def _compile(source_text: str, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
@@ -442,13 +448,19 @@ def test_out_register_callee_deref_assign_emits_to_register() -> None:
 
 
 def test_out_register_caller_no_push() -> None:
-    """Caller emits no push for an out_register argument — only call + capture."""
+    """Caller emits no push for an out_register argument — only call + capture.
+
+    The local ``entry`` is used (assigned to a global) so the capture's
+    ``mov [bp-2], si`` survives ``peephole_dead_temp_slots``.
+    """
     asm = _kernel("""
+        int *captured __attribute__((asm_name("captured")));
         __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
 
         __attribute__((carry_return)) int do_alloc() {
             int* entry;
             if (fd_alloc(&entry)) {
+                captured = entry;
                 return 1;
             }
             return 0;
@@ -465,11 +477,13 @@ def test_out_register_caller_no_push() -> None:
 def test_out_register_caller_captures_register_into_local() -> None:
     """After the call, the named register is stored into the caller's local variable."""
     asm = _kernel("""
+        int *captured __attribute__((asm_name("captured")));
         __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
 
         void caller() {
             int* entry;
             fd_alloc(&entry);
+            captured = entry;
         }
     """)
     assert "mov [bp-2], si" in asm
@@ -481,11 +495,13 @@ def test_out_register_prototype_registers_convention() -> None:
     # and will try to push the &entry argument — causing an error or wrong code.
     ok, output = _compile(
         """
+        int *captured __attribute__((asm_name("captured")));
         __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
 
         void caller() {
             int* entry;
             fd_alloc(&entry);
+            captured = entry;
         }
     """,
         target="kernel",
@@ -497,11 +513,13 @@ def test_out_register_prototype_registers_convention() -> None:
 def test_out_register_carry_return_condition() -> None:
     """carry_return + out_register: correct CF-based branch and register capture."""
     asm = _kernel("""
+        int *captured __attribute__((asm_name("captured")));
         __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
 
         __attribute__((carry_return)) int wrapper() {
             int* entry;
             if (fd_alloc(&entry)) {
+                captured = entry;
                 return 1;
             }
             return 0;
@@ -1280,3 +1298,88 @@ def test_double_pointer_argv_with_out_register_cx_argc() -> None:
     # The function should END with CX holding count (the argc) and a ret.
     assert "mov ax, cx" in body or "mov cx, ax" in body, f"expected CX/AX dance for argc out_register\n{asm}"
     assert "ret" in body, f"non-naked function emits ret\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# Codegen-tightening peepholes (dead temp slots, register-direct ops, self-move)
+# ---------------------------------------------------------------------------
+
+
+def _peephole_run(lines: list[str]) -> list[str]:
+    """Run the x86-16 peephole pipeline over a synthetic instruction list."""
+    return Peepholer(lines=lines, target=X86CodegenTarget16()).run()
+
+
+def test_peephole_dead_temp_slot_dropped() -> None:
+    """A ``mov [bp-N], reg`` whose slot is never read elsewhere is dropped."""
+    out = _peephole_run([
+        "f:",
+        "        push bp",
+        "        mov bp, sp",
+        "        sub sp, 4",
+        "        mov ax, dx",
+        "        mov [bp-2], ax",
+        "        mov sp, bp",
+        "        pop bp",
+        "        ret",
+    ])
+    assert "        mov [bp-2], ax" not in out, f"dead temp-slot store survived: {out}"
+
+
+def test_peephole_dead_temp_slot_kept_when_read() -> None:
+    """A live temp slot survives the peephole.
+
+    ``peephole_store_reload`` deletes the reload form ``mov reg, [bp-N]``,
+    so the test reads the slot via ``cmp word [bp-N], imm`` which the
+    reload-collapse pass leaves alone.
+    """
+    out = _peephole_run([
+        "f:",
+        "        mov [bp-2], ax",
+        "        cmp word [bp-2], 5",
+        "        ret",
+    ])
+    assert "        mov [bp-2], ax" in out, f"live temp-slot store dropped: {out}"
+
+
+def test_peephole_register_arithmetic_inc_collapses() -> None:
+    """``mov ax, R / inc ax / mov R, ax`` collapses to ``inc R``."""
+    out = _peephole_run([
+        "        mov ax, dx",
+        "        inc ax",
+        "        mov dx, ax",
+    ])
+    assert "        inc dx" in out, f"expected direct 'inc dx', got {out}"
+    assert "        mov ax, dx" not in out, f"AX detour survived: {out}"
+
+
+def test_peephole_register_arithmetic_dec_collapses() -> None:
+    """``mov ax, R / dec ax / mov R, ax`` collapses to ``dec R``."""
+    out = _peephole_run([
+        "        mov ax, dx",
+        "        dec ax",
+        "        mov dx, ax",
+    ])
+    assert "        dec dx" in out, f"expected direct 'dec dx', got {out}"
+
+
+def test_peephole_self_move_drops_no_op() -> None:
+    """``mov X, X`` is dropped."""
+    out = _peephole_run([
+        "        mov dx, dx",
+        "        add dx, 5",
+    ])
+    assert "        mov dx, dx" not in out, f"self-move survived: {out}"
+    assert "        add dx, 5" in out, f"surrounding instructions clobbered: {out}"
+
+
+def test_peephole_redundant_register_swap_drops_second_mov() -> None:
+    """``mov A, B`` followed by ``mov B, A`` drops the second."""
+    out = _peephole_run([
+        "        mov ax, cx",
+        "        mov cx, ax",
+        "        ret",
+    ])
+    swap_lines = [line.strip() for line in out if line.strip().startswith("mov ")]
+    assert "mov ax, cx" in swap_lines, f"first mov clobbered: {out}"
+    assert "mov cx, ax" not in swap_lines, f"redundant swap survived: {out}"
