@@ -7,7 +7,7 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 451         | 454       | +3    |
+| arp     | 466         | 469       | +3    |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
@@ -21,7 +21,7 @@ source is kept here for reference.
 | netinit | 72          | 69        | -3    |
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1368      | +349  |
+| ping    | 1034        | 1383      | +349  |
 | shell   | 950         | 1357      | +407  |
 | uptime  | 50          | 78        | +28   |
 
