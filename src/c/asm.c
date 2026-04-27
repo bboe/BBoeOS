@@ -595,7 +595,13 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
        sign-extended ``83 /r ib`` shape is identical between 16 and
        32 bits — only the prefix distinguishes them. */
     emit_operand_size_prefix(size);
+    int short_form = 0;
     if (imm >= -128 && imm <= 127) {
+        short_form = 1;
+    } else if (size == 16 && (imm & 0xFFFF) >= 0xFF80) {
+        short_form = 1;
+    }
+    if (short_form) {
         emit_byte(0x83);
         emit_byte(modrm_base | reg);
         emit_byte(imm & 0xFF);
@@ -865,11 +871,8 @@ __attribute__((regparm(1)))
 void emit_dword(int value) {
     emit_byte(value);
     emit_byte(value >> 8);
-    /* cc.py's 16-bit codegen can't reach bits above 15 from a
-       single ``int`` — write the upper half as zeros, which matches
-       every 32-bit address the self-host needs to emit (all labels
-       live below 64 KB). */
-    emit_word(0);
+    emit_byte(value >> 16);
+    emit_byte(value >> 24);
 }
 
 /* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
@@ -1215,6 +1218,14 @@ void handle_cmp() {
         opcode = 0x80;
         is_imm8 = 1;
     } else if (imm >= -128 && imm <= 127) {
+        opcode = 0x83;
+        is_imm8 = 1;
+    } else if (size1 == 16 && (imm & 0xFFFF) >= 0xFF80) {
+        /* NASM-equivalent shrink: any imm whose low 16 bits sign-extend
+           from a byte (i.e. ``(int16_t) imm`` in [-128, -1]) compresses
+           to the 0x83 imm8 form.  ``cmp word [_g_last_symbol_index],
+           65535`` is the canonical case — imm = 0xFFFF, low 16 = 0xFFFF,
+           sign-extends from byte 0xFF (= -1). */
         opcode = 0x83;
         is_imm8 = 1;
     } else {
@@ -1750,7 +1761,16 @@ void handle_push() {
     }
     int value = resolve_value();
     emit_operand_size_prefix(size);
+    int short_form = 0;
     if (value >= -128 && value <= 127) {
+        short_form = 1;
+    } else if (size == 16 && (value & 0xFFFF) >= 0xFF80) {
+        /* ``push 65535`` in 16-bit mode lands here — value's low 16
+           bits sign-extend from byte 0xFF (= -1), so the short imm8
+           form pushes the same word value with two bytes saved. */
+        short_form = 1;
+    }
+    if (short_form) {
         emit_byte(0x6A);
         emit_byte(value & 0xFF);
     } else if (size == 32) {
@@ -2186,12 +2206,18 @@ int make_modrm_reg_reg_impl(int register_id, int rm) {
    leaves the cursor alone and returns 0. */
 __attribute__((regparm(1)))
 int match_seg_ds_es(int ds_opcode, int es_opcode) {
-    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
+    /* Boundary check on source_cursor[2] — without it ``push esi`` /
+       ``push edi`` greedily match ``es`` / ``ds`` and emit the segment
+       opcode instead of a register push.  cc.py's auto-spill of an
+       asm_register("si") global emits ``push esi`` around inline-asm
+       blocks; before this guard the assembler turned that into
+       ``push es`` (0x06) and the corresponding pop into ``pop es``. */
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(ds_opcode);
         return 1;
     }
-    if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(es_opcode);
         return 1;
