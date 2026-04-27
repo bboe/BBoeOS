@@ -6,6 +6,9 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
+### Networking
+- Port `udp_receive` / `udp_send` from `net/udp.asm` to C in a new `src/net/udp.c`, retiring the asm file.  `udp_receive` returns DI=payload + CX=length via out_register, calling the C-ported `ne2k_receive` and `arp_handle_packet` (then validates EtherType=IPv4 and IP protocol=UDP via `frame[12]` / `frame[13]` / `frame[23]` reads).  `udp_send` declares the 5 in_register inputs (BX/DI/DX/SI/CX), constructs the 8-byte UDP header in a file-scope `udp_buffer[256]` with manual big-endian byte writes, `memcpy`s the payload, and calls `ip_send` with protocol 17.  The asm version's BX=source_port / SI=source_ip outputs were dropped — neither the syscall layer nor any userspace caller consumed them, and keeping SI live as an output conflicted with cc.py's use of SI as a scratch base register for `frame[N]` reads.  `dns` (the only UDP-using program) and all other 26 program tests stay green.
+
 ### Drivers
 - vga: only reprogram VGA registers when the requested mode actually differs from the active one.  `fd_ioctl_vga`'s `.vga_mode` was unconditionally calling `vga_set_mode`, so every shell Ctrl+L flipped SR03 from BIOS-default `00h` to our table value `05h` (Character Map Select → font at plane 2 offset 0x4000) — which works only as long as `vga_font_load` populated 0x4000 correctly, and wastes the framebuffer-zeroing path on a no-op transition.  Track the current mode in a new `vga_current_mode` byte (initialised to 03h since the BIOS leaves us in text mode); same-mode requests now skip `vga_set_mode` and just call `vga_clear_screen` for text mode.  Real transitions (text → 13h via `draw`, 13h → text on quit) still reprogram everything and update the tracker.
 
