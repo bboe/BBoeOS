@@ -350,7 +350,7 @@ class BuiltinsMixin:
         self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
-    def builtin_inb(self, arguments: list[Node], /) -> None:
+    def builtin_kernel_inb(self, arguments: list[Node], /) -> None:
         """Generate code for inb(port). Reads one byte from an I/O port.
 
         Emits ``mov dx, <port>; in al, dx; xor ah, ah``.  Result is
@@ -361,25 +361,116 @@ class BuiltinsMixin:
         are rejected at compile time.
         """
         if self.target_mode != "kernel":
-            message = "inb() is kernel-only; not available in --target user"
+            message = "kernel_inb() is kernel-only; not available in --target user"
             raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=1, name="inb")
+        self._check_argument_count(arguments=arguments, expected=1, name="kernel_inb")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.dx_register)
         self.emit("        in al, dx")
         self.emit("        xor ah, ah")
         self.ax_clear()
 
-    def builtin_inw(self, arguments: list[Node], /) -> None:
-        """Generate code for inw(port). Reads one 16-bit word from an I/O port.
+    def builtin_kernel_insw(self, arguments: list[Node], /) -> None:
+        """Generate code for insw(port, buffer, count).
 
-        Emits ``mov dx, <port>; in ax, dx``.  Kernel-only (see :meth:`builtin_inb`).
+        Reads ``count`` 16-bit words from I/O port ``port`` into the
+        memory region at ``ES:DI = buffer``.  Emits ``mov dx, <port>;
+        mov di, <buffer>; mov cx, <count>; cld; rep insw`` — same shape
+        as :meth:`builtin_memcpy` but using the ``insw`` string-I/O
+        instruction.  Caller's DI / CX are clobbered.  Kernel-only
+        (see :meth:`builtin_inb` for the rationale).
         """
         if self.target_mode != "kernel":
-            message = "inw() is kernel-only; not available in --target user"
+            message = "kernel_insw() is kernel-only; not available in --target user"
             raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=1, name="inw")
+        self._check_argument_count(arguments=arguments, expected=3, name="kernel_insw")
+        port_argument, buffer_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=port_argument, register=self.target.dx_register)
+        self.emit_register_from_argument(argument=buffer_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self.emit("        cld")
+        self.emit("        rep insw")
+        self.ax_clear()
+
+    def builtin_kernel_inw(self, arguments: list[Node], /) -> None:
+        """Generate code for kernel_inw(port). Reads one 16-bit word from an I/O port.
+
+        Emits ``mov dx, <port>; in ax, dx``.  Kernel-only (see :meth:`builtin_kernel_inb`).
+        """
+        if self.target_mode != "kernel":
+            message = "kernel_inw() is kernel-only; not available in --target user"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=1, name="kernel_inw")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.dx_register)
         self.emit("        in ax, dx")
+        self.ax_clear()
+
+    def builtin_kernel_outb(self, arguments: list[Node], /) -> None:
+        """Generate code for kernel_outb(port, value). Writes one byte to an I/O port.
+
+        Constant ``value`` compiles to ``mov dx, <port>; mov al, <value>;
+        out dx, al``.  Non-constant ``value`` evaluates first into AX,
+        is pushed across the port-evaluation, then popped — the same
+        save-around-eval shape :meth:`builtin_far_write8` uses.
+        Kernel-only (see :meth:`builtin_kernel_inb` for the rationale).
+        """
+        if self.target_mode != "kernel":
+            message = "kernel_outb() is kernel-only; not available in --target user"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=2, name="kernel_outb")
+        port_arg, value_arg = arguments
+        if isinstance(value_arg, Int):
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        mov al, {value_arg.value & 0xFF}")
+        else:
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        pop {self.target.acc}")
+        self.emit("        out dx, al")
+        self.ax_clear()
+
+    def builtin_kernel_outsw(self, arguments: list[Node], /) -> None:
+        """Generate code for kernel_outsw(port, buffer, count).
+
+        Writes ``count`` 16-bit words from the memory region at
+        ``DS:SI = buffer`` out to I/O port ``port``.  Emits ``mov dx,
+        <port>; mov si, <buffer>; mov cx, <count>; cld; rep outsw`` —
+        the symmetric pair to :meth:`builtin_kernel_insw`.  Caller's
+        SI / CX are clobbered.  Kernel-only (see :meth:`builtin_kernel_inb`).
+        """
+        if self.target_mode != "kernel":
+            message = "kernel_outsw() is kernel-only; not available in --target user"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=3, name="kernel_outsw")
+        port_argument, buffer_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=port_argument, register=self.target.dx_register)
+        self.emit_register_from_argument(argument=buffer_argument, register=self.target.si_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self.emit("        cld")
+        self.emit("        rep outsw")
+        self.ax_clear()
+
+    def builtin_kernel_outw(self, arguments: list[Node], /) -> None:
+        """Generate code for kernel_outw(port, value). Writes one 16-bit word to an I/O port.
+
+        Constant ``value`` compiles to ``mov dx, <port>; mov ax, <value>;
+        out dx, ax``.  Non-constant ``value`` uses the same push/pop guard
+        as :meth:`builtin_kernel_outb`.  Kernel-only.
+        """
+        if self.target_mode != "kernel":
+            message = "kernel_outw() is kernel-only; not available in --target user"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=2, name="kernel_outw")
+        port_arg, value_arg = arguments
+        if isinstance(value_arg, Int):
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        mov {self.target.acc}, {value_arg.value & 0xFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        pop {self.target.acc}")
+        self.emit("        out dx, ax")
         self.ax_clear()
 
     def builtin_mac(
@@ -482,54 +573,6 @@ class BuiltinsMixin:
         if len(arguments) == 3:
             self.emit_register_from_argument(argument=arguments[2], register="dl")
         self._emit_syscall("IO_OPEN")
-        self.ax_clear()
-
-    def builtin_outb(self, arguments: list[Node], /) -> None:
-        """Generate code for outb(port, value). Writes one byte to an I/O port.
-
-        Constant ``value`` compiles to ``mov dx, <port>; mov al, <value>;
-        out dx, al``.  Non-constant ``value`` evaluates first into AX,
-        is pushed across the port-evaluation, then popped — the same
-        save-around-eval shape :meth:`builtin_far_write8` uses.
-        Kernel-only (see :meth:`builtin_inb` for the rationale).
-        """
-        if self.target_mode != "kernel":
-            message = "outb() is kernel-only; not available in --target user"
-            raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=2, name="outb")
-        port_arg, value_arg = arguments
-        if isinstance(value_arg, Int):
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        mov al, {value_arg.value & 0xFF}")
-        else:
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        pop {self.target.acc}")
-        self.emit("        out dx, al")
-        self.ax_clear()
-
-    def builtin_outw(self, arguments: list[Node], /) -> None:
-        """Generate code for outw(port, value). Writes one 16-bit word to an I/O port.
-
-        Constant ``value`` compiles to ``mov dx, <port>; mov ax, <value>;
-        out dx, ax``.  Non-constant ``value`` uses the same push/pop guard
-        as :meth:`builtin_outb`.  Kernel-only.
-        """
-        if self.target_mode != "kernel":
-            message = "outw() is kernel-only; not available in --target user"
-            raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=2, name="outw")
-        port_arg, value_arg = arguments
-        if isinstance(value_arg, Int):
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        mov {self.target.acc}, {value_arg.value & 0xFFFF}")
-        else:
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        pop {self.target.acc}")
-        self.emit("        out dx, ax")
         self.ax_clear()
 
     def builtin_parse_ip(

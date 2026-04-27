@@ -159,11 +159,11 @@ def test_kernel_rejects_open() -> None:
 
 
 def test_kernel_inb_emits_in_al_dx() -> None:
-    """``inb(port)`` emits ``in al, dx`` followed by ``xor ah, ah`` to zero-extend."""
+    """``kernel_inb(port)`` emits ``in al, dx`` followed by ``xor ah, ah`` to zero-extend."""
     asm = _kernel("""
         void poll() {
             int status;
-            status = inb(0x3FD);
+            status = kernel_inb(0x3FD);
         }
     """)
     assert "in al, dx" in asm, f"Expected 'in al, dx' in:\n{asm}"
@@ -171,21 +171,21 @@ def test_kernel_inb_emits_in_al_dx() -> None:
 
 
 def test_kernel_inw_emits_in_ax_dx() -> None:
-    """``inw(port)`` emits ``in ax, dx`` (no zero-extend needed for 16-bit)."""
+    """``kernel_inw(port)`` emits ``in ax, dx`` (no zero-extend needed for 16-bit)."""
     asm = _kernel("""
         void poll() {
             int word;
-            word = inw(0x300);
+            word = kernel_inw(0x300);
         }
     """)
     assert "in ax, dx" in asm, f"Expected 'in ax, dx' in:\n{asm}"
 
 
 def test_kernel_outb_constant_value_short_form() -> None:
-    """``outb(port, const)`` compiles to ``mov al, <const>`` (no AX push/pop)."""
+    """``kernel_outb(port, const)`` compiles to ``mov al, <const>`` (no AX push/pop)."""
     asm = _kernel("""
         void eoi() {
-            outb(0x20, 0x20);
+            kernel_outb(0x20, 0x20);
         }
     """)
     assert "out dx, al" in asm, f"Expected 'out dx, al' in:\n{asm}"
@@ -194,10 +194,10 @@ def test_kernel_outb_constant_value_short_form() -> None:
 
 
 def test_kernel_outw_constant_value_short_form() -> None:
-    """``outw(port, const)`` compiles to a constant ``mov ax, ...`` then ``out dx, ax``."""
+    """``kernel_outw(port, const)`` compiles to a constant ``mov ax, ...`` then ``out dx, ax``."""
     asm = _kernel("""
         void send_word() {
-            outw(0x300, 0x1234);
+            kernel_outw(0x300, 0x1234);
         }
     """)
     assert "out dx, ax" in asm, f"Expected 'out dx, ax' in:\n{asm}"
@@ -208,7 +208,7 @@ def test_kernel_outb_variable_value_uses_push_pop() -> None:
     """Non-constant ``outb`` value evaluates to AX, push/port-eval/pop, then ``out dx, al``."""
     asm = _kernel("""
         void send(int port, int value) {
-            outb(port, value);
+            kernel_outb(port, value);
         }
     """)
     # The push/pop guard around port-evaluation matches builtin_far_write8's shape.
@@ -218,61 +218,121 @@ def test_kernel_outb_variable_value_uses_push_pop() -> None:
 
 
 def test_user_rejects_inb() -> None:
-    """``inb()`` in --target user is rejected at compile time."""
+    """``kernel_inb()`` in --target user is rejected at compile time."""
     ok, output = _compile(
         """
         int poll() {
-            return inb(0x3FD);
+            return kernel_inb(0x3FD);
         }
     """,
         target="user",
     )
-    assert not ok, f"Expected user-mode inb() rejection; got asm:\n{output}"
+    assert not ok, f"Expected user-mode kernel_inb() rejection; got asm:\n{output}"
     assert "inb" in output.lower() and "kernel" in output.lower(), f"Error should mention inb/kernel:\n{output}"
 
 
 def test_user_rejects_inw() -> None:
-    """``inw()`` in --target user is rejected at compile time."""
+    """``kernel_inw()`` in --target user is rejected at compile time."""
     ok, output = _compile(
         """
         int read_word() {
-            return inw(0x300);
+            return kernel_inw(0x300);
         }
     """,
         target="user",
     )
-    assert not ok, f"Expected user-mode inw() rejection; got asm:\n{output}"
+    assert not ok, f"Expected user-mode kernel_inw() rejection; got asm:\n{output}"
     assert "inw" in output.lower() and "kernel" in output.lower(), f"Error should mention inw/kernel:\n{output}"
 
 
 def test_user_rejects_outb() -> None:
-    """``outb()`` in --target user is rejected at compile time."""
+    """``kernel_outb()`` in --target user is rejected at compile time."""
     ok, output = _compile(
         """
         int main() {
-            outb(0x20, 0x20);
+            kernel_outb(0x20, 0x20);
             return 0;
         }
     """,
         target="user",
     )
-    assert not ok, f"Expected user-mode outb() rejection; got asm:\n{output}"
+    assert not ok, f"Expected user-mode kernel_outb() rejection; got asm:\n{output}"
     assert "outb" in output.lower() and "kernel" in output.lower(), f"Error should mention outb/kernel:\n{output}"
 
 
 def test_user_rejects_outw() -> None:
-    """``outw()`` in --target user is rejected at compile time."""
+    """``kernel_outw()`` in --target user is rejected at compile time."""
     ok, output = _compile(
         """
         int main() {
-            outw(0x300, 0x1234);
+            kernel_outw(0x300, 0x1234);
             return 0;
         }
     """,
         target="user",
     )
-    assert not ok, f"Expected user-mode outw() rejection; got asm:\n{output}"
+    assert not ok, f"Expected user-mode kernel_outw() rejection; got asm:\n{output}"
     assert "outw" in output.lower() and "kernel" in output.lower(), f"Error should mention outw/kernel:\n{output}"
+
+
+def test_kernel_insw_emits_rep_insw() -> None:
+    """``kernel_insw(port, buffer, count)`` emits the rep insw setup."""
+    asm = _kernel("""
+        void f() {
+            char buf[512];
+            kernel_insw(0x1F0, buf, 256);
+        }
+    """)
+    assert "mov dx, 496" in asm, f"expected port load 'mov dx, 496' (0x1F0):\n{asm}"
+    assert "lea di, [bp-512]" in asm, f"expected buffer in DI:\n{asm}"
+    assert "mov cx, 256" in asm, f"expected count in CX:\n{asm}"
+    assert "        cld" in asm, f"expected cld:\n{asm}"
+    assert "        rep insw" in asm, f"expected rep insw:\n{asm}"
+
+
+def test_kernel_outsw_emits_rep_outsw() -> None:
+    """``kernel_outsw(port, buffer, count)`` emits the rep outsw setup."""
+    asm = _kernel("""
+        void f() {
+            char buf[512];
+            kernel_outsw(0x1F0, buf, 256);
+        }
+    """)
+    assert "mov dx, 496" in asm, f"expected port load:\n{asm}"
+    assert "lea si, [bp-512]" in asm, f"expected buffer in SI:\n{asm}"
+    assert "mov cx, 256" in asm, f"expected count in CX:\n{asm}"
+    assert "        cld" in asm, f"expected cld:\n{asm}"
+    assert "        rep outsw" in asm, f"expected rep outsw:\n{asm}"
+
+
+def test_user_rejects_insw() -> None:
+    """``kernel_insw()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        void f() {
+            char buf[2];
+            kernel_insw(0x300, buf, 1);
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode kernel_insw() rejection; got asm:\n{output}"
+    assert "insw" in output.lower() and "kernel" in output.lower(), f"Error should mention insw/kernel:\n{output}"
+
+
+def test_user_rejects_outsw() -> None:
+    """``kernel_outsw()`` in --target user is rejected at compile time."""
+    ok, output = _compile(
+        """
+        void f() {
+            char buf[2];
+            kernel_outsw(0x300, buf, 1);
+        }
+    """,
+        target="user",
+    )
+    assert not ok, f"Expected user-mode kernel_outsw() rejection; got asm:\n{output}"
+    assert "outsw" in output.lower() and "kernel" in output.lower(), f"Error should mention outsw/kernel:\n{output}"
 
 
 # ---------------------------------------------------------------------------
@@ -1115,7 +1175,7 @@ def test_unsigned_byte_global_less_than_emits_jb() -> None:
         uint8_t flag __attribute__((asm_name("flag")));
         void test() {
             if (flag < 0x80) {
-                outb(0, 1);
+                kernel_outb(0, 1);
             }
         }
     """
@@ -1149,7 +1209,7 @@ def test_signed_int_less_than_still_emits_jge() -> None:
         int n;
         void test(int v) {
             if (v < 100) {
-                outb(0, 1);
+                kernel_outb(0, 1);
             }
         }
     """
