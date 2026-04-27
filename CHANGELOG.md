@@ -12,14 +12,24 @@ at the time.
   (`SYMBOL_SEGMENT = 0x2000`, linear 0x20000) to a flat extended-memory
   region at `SYMBOL_BASE = 0x300000`; flat 32-bit DS reaches
   everywhere so far-memory accessors no longer need a segment
-  override.  `mnemonic_table` widens to 8-byte entries
-  (`dd name_ptr, dd handler_ptr`) and the dispatcher scales the index
-  by 8.  `inc_dec_handler` now emits the operand-size prefix for
-  e-register operands so `inc edi` in `[bits 16]` source assembles
-  as `66 47` (parse_ip's octet loop relies on it).  `asm` ships in
-  `PROGRAMS` again — 34 of 35 programs in the self-host smoke suite
-  assemble byte-identical to NASM; `asm.asm` itself is off by 2
-  bytes from a jump-size convergence edge case (followup).
+  override.  Symbol values widen from 2 bytes to 4 bytes — necessary
+  for `%define JUMP_TABLE = SYMBOL_BASE + 0xF000` (= 0x30F000) to
+  round-trip cleanly — bumping `SYMBOL_ENTRY` 36 → 38 with the type
+  byte at offset +4 and scope byte at offset +5.  cc.py gains
+  `far_read32` / `far_write32` builtins for the wider load / store.
+  `mnemonic_table` widens to 8-byte entries (`dd name_ptr, dd
+  handler_ptr`) and the dispatcher scales the index by 8.  Several
+  encoding edges land in this PR for NASM byte-parity: `inc edi` /
+  `dec edi` emit the operand-size prefix; `cmp` / `sub` / `and` /
+  `push` shrink to the sign-extended imm8 form whenever the imm's
+  low 16 bits sign-extend cleanly from a byte (`cmp ax, 65535`,
+  `push 65535` etc.); `emit_dword` writes all four bytes (was
+  zero-filling the high half from the legacy 16-bit codegen);
+  `emit_modrm_disp` truncates disp to the addressing width before
+  the `disp == 0` check; `match_seg_ds_es` adds an identifier
+  boundary so `push esi` / `push edi` no longer match `es` / `ds`
+  greedily.  `asm` ships in `PROGRAMS` again — all 35 self-host
+  programs assemble byte-identical to NASM.
 - 2026-04-26: Port `edit` to pmode.  The gap buffer (1 MB) and kill
   buffer (2.5 KB) move from real-mode addresses inside segment 0 to
   extended memory above the 1 MB mark

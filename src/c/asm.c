@@ -598,8 +598,16 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
     int short_form = 0;
     if (imm >= -128 && imm <= 127) {
         short_form = 1;
-    } else if (size == 16 && (imm & 0xFFFF) >= 0xFF80) {
-        short_form = 1;
+    } else if (size == 16) {
+        /* low 16 bits of imm sign-extend cleanly from a byte iff
+           the byte-mask-and-up is either all zero (small positive
+           values) or all 0xFF (small negative values).  Catches
+           ``sub ax, 65536`` (low 16 = 0) and ``and ax, 65535``
+           (low 16 = 0xFFFF) — both NASM-equivalent. */
+        int high = imm & 0xFF80;
+        if (high == 0 || high == 0xFF80) {
+            short_form = 1;
+        }
     }
     if (short_form) {
         emit_byte(0x83);
@@ -788,14 +796,24 @@ void emit_modrm_direct(int reg, int disp) {
    for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
 __attribute__((regparm(1)))
 void emit_modrm_disp(int modrm, int disp) {
-    if (disp == 0) {
+    /* Truncate to the addressing width (16-bit) so a disp whose high
+       bits exceed 0xFFFF still narrows to its on-the-wire encoding —
+       NASM treats ``[0x100000+si]`` as ``[si]`` because the disp16
+       window of 0x100000 is zero, and our pmode symbol table now
+       round-trips the full 32-bit value (so EDIT_BUFFER_BASE arrives
+       here as 0x100000 rather than the 16-bit-truncated 0). */
+    int low = disp & 0xFFFF;
+    if (low >= 0x8000) {
+        low -= 0x10000;
+    }
+    if (low == 0) {
         emit_byte(modrm);
-    } else if (disp >= -128 && disp <= 127) {
+    } else if (low >= -128 && low <= 127) {
         emit_byte(modrm | 0x40);
-        emit_byte(disp);
+        emit_byte(low);
     } else {
         emit_byte(modrm | 0x80);
-        emit_word(disp);
+        emit_word(low);
     }
 }
 
@@ -1220,12 +1238,11 @@ void handle_cmp() {
     } else if (imm >= -128 && imm <= 127) {
         opcode = 0x83;
         is_imm8 = 1;
-    } else if (size1 == 16 && (imm & 0xFFFF) >= 0xFF80) {
+    } else if (size1 == 16 && ((imm & 0xFF80) == 0 || (imm & 0xFF80) == 0xFF80)) {
         /* NASM-equivalent shrink: any imm whose low 16 bits sign-extend
-           from a byte (i.e. ``(int16_t) imm`` in [-128, -1]) compresses
-           to the 0x83 imm8 form.  ``cmp word [_g_last_symbol_index],
-           65535`` is the canonical case — imm = 0xFFFF, low 16 = 0xFFFF,
-           sign-extends from byte 0xFF (= -1). */
+           cleanly from a byte compresses to the 0x83 imm8 form.
+           Covers ``cmp word [...], 65535`` (low 16 = 0xFFFF) and
+           ``cmp word [...], 65536`` (low 16 = 0, after wrap). */
         opcode = 0x83;
         is_imm8 = 1;
     } else {
@@ -1764,11 +1781,13 @@ void handle_push() {
     int short_form = 0;
     if (value >= -128 && value <= 127) {
         short_form = 1;
-    } else if (size == 16 && (value & 0xFFFF) >= 0xFF80) {
-        /* ``push 65535`` in 16-bit mode lands here — value's low 16
-           bits sign-extend from byte 0xFF (= -1), so the short imm8
-           form pushes the same word value with two bytes saved. */
-        short_form = 1;
+    } else if (size == 16) {
+        /* ``push 65535`` etc — sign-extension window covers low 16
+           bits in [0..0x7F] OR [0xFF80..0xFFFF]. */
+        int high = value & 0xFF80;
+        if (high == 0 || high == 0xFF80) {
+            short_form = 1;
+        }
     }
     if (short_form) {
         emit_byte(0x6A);
@@ -3375,9 +3394,9 @@ void symbol_add(int value, int scope) {
         n += 1;
     }
     source_cursor = saved;
-    far_write16(entry + SYMBOL_NAME_LENGTH, value);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 2, 0);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 3, scope & 0xFF);
+    far_write32(entry + SYMBOL_NAME_LENGTH, value);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 4, 0);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 5, scope & 0xFF);
     symbol_count += 1;
 }
 
@@ -3389,7 +3408,7 @@ void symbol_add(int value, int scope) {
 __attribute__((regparm(1)))
 void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
-    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 2;
+    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 4;
     far_write8(offset, 1);
 }
 
@@ -3406,8 +3425,8 @@ int symbol_entry_address(int index) {
 }
 
 /* Linear scan of the symbol table starting at SYMBOL_BASE.  Each
-   entry is SYMBOL_ENTRY (36) bytes: 32-char null-padded name,
-   2-byte value, 1-byte type, 1-byte scope.  Caller passes scope via
+   entry is SYMBOL_ENTRY (38) bytes: 32-char null-padded name,
+   4-byte value, 1-byte type, 1-byte scope.  Caller passes scope via
    regparm(1) AX (low byte is compared against the entry's scope
    byte; 0xFFFF selects globals since the low byte stored is 0xFF).
    Name pointer is ``source_cursor`` (SI-pinned).  On hit: returns
@@ -3415,7 +3434,7 @@ int symbol_entry_address(int index) {
    miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF
    return — all remaining callers test ``last_symbol_index`` for
    hit/miss.  Accesses the symbol region via ``far_read8`` /
-   ``far_read16`` builtins; under pmode flat DS this is a plain
+   ``far_read32`` builtins; under pmode flat DS this is a plain
    ``mov`` indexed by the absolute address. */
 __attribute__((regparm(1)))
 int symbol_lookup(int scope) {
@@ -3425,7 +3444,7 @@ int symbol_lookup(int scope) {
     char *saved = source_cursor;
     last_symbol_index = 0xFFFF;
     while (index < count) {
-        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 3);
+        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 5);
         if (entry_scope == (scope & 0xFF)) {
             /* Walk source_cursor (= SI) and an entry cursor in
                parallel.  Reading ``source_cursor[0]`` lowers to a
@@ -3451,7 +3470,7 @@ int symbol_lookup(int scope) {
             source_cursor = saved;
             if (mismatch == 0) {
                 last_symbol_index = index;
-                return far_read16(entry + SYMBOL_NAME_LENGTH);
+                return far_read32(entry + SYMBOL_NAME_LENGTH);
             }
         }
         entry += SYMBOL_ENTRY;
@@ -3472,7 +3491,7 @@ void symbol_set(int value, int scope) {
         symbol_add(value, scope);
         last_symbol_index = symbol_count - 1;
     } else {
-        far_write16(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
+        far_write32(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
     }
 }
 
