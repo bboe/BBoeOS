@@ -15,7 +15,7 @@
 
         ;; Hardware drivers
 %include "drivers/ansi.asm"             ; put_character / serial_character (console)
-%include "drivers/ata.asm"              ; IDE ATA PIO disk driver
+%include "drivers/ata.kasm"             ; IDE ATA PIO disk driver (compiled)
 %include "drivers/fdc.asm"              ; floppy DMA + IRQ 6 driver
 %include "drivers/ne2k.asm"             ; NE2000 ISA NIC (polled)
 %include "drivers/ps2.asm"              ; PS/2 keyboard driver
