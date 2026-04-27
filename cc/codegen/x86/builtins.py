@@ -179,6 +179,48 @@ class BuiltinsMixin:
             self.emit(f"        movzx {self.target.acc}, word {self.target.far_ref(self.target.bx_register)}")
         self.ax_clear()
 
+    def builtin_far_read32(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_read32(offset)`` builtin.
+
+        Reads a 32-bit dword from ``offset`` into the accumulator.
+        Real mode: ``mov bx, <offset> / mov ax, [es:bx]`` (legacy
+        16-bit fallback — only the low 16 bits land, sufficient for
+        the asm.c self-host's symbol table when run under --bits 16).
+        Pmode flat: ``mov ebx, <offset> / mov eax, [ebx]`` — full
+        dword for symbol values that exceed 16 bits (``mov edi,
+        JUMP_TABLE`` where JUMP_TABLE = SYMBOL_BASE + 0xF000 needs
+        the upper bits intact).
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="far_read32")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self.emit(f"        mov {self.target.acc}, {self.target.far_ref(self.target.bx_register)}")
+        self.ax_clear()
+
+    def builtin_far_write32(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_write32(offset, value)`` builtin.
+
+        Stores a 32-bit dword to ``offset``.  Pmode-only contract —
+        the 16-bit codegen paths intentionally emit a word-width
+        store so the on-disk image keeps the 36-byte symbol entry
+        layout from the legacy 16-bit asm.  Asm.c gates use of this
+        builtin to the pmode build.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="far_write32")
+        offset_argument, value_argument = arguments
+        if isinstance(value_argument, Int):
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            if self.target.int_size == 2:
+                self.emit(f"        mov word {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}")
+            else:
+                self.emit(f"        mov dword {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFFFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            self.emit(f"        pop {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
+        self.ax_clear()
+
     def builtin_far_read8(self, arguments: list[Node], /) -> None:
         """Generate code for the ``far_read8(offset)`` builtin.
 
