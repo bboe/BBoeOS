@@ -40,6 +40,7 @@ from cc.ast_nodes import (
     Int,
     MemberAccess,
     MemberAssign,
+    MemberIndex,
     Node,
     Return,
     SizeofType,
@@ -960,6 +961,8 @@ class EmissionMixin:
             self.ax_is_byte = False
         elif isinstance(expression, MemberAccess):
             self.generate_member_access(expression)
+        elif isinstance(expression, MemberIndex):
+            self.generate_member_index(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)

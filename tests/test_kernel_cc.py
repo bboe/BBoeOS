@@ -270,6 +270,68 @@ def test_user_rejects_outw() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Address-of array element (``&array[i]``) and struct array-member indexing
+# ---------------------------------------------------------------------------
+
+
+def test_address_of_array_element_compiles() -> None:
+    """``&array[i]`` parses and lowers to scaled pointer arithmetic."""
+    asm = _kernel("""
+        struct entry { uint8_t ip[4]; };
+        struct entry table[8];
+        void test() {
+            struct entry *e;
+            e = &table[3];
+        }
+    """)
+    # Each entry is sizeof(struct entry) = 4 bytes; index 3 → +12 from base.
+    assert "_g_table" in asm, f"Expected base reference '_g_table' in:\n{asm}"
+    assert "3*4" in asm or "12" in asm, f"Expected stride-scaled offset (3*4 or 12) in:\n{asm}"
+
+
+def test_struct_array_member_index_emits_byte_load() -> None:
+    """``ptr->byte_array[i]`` loads one byte (zero-extended), not its address."""
+    asm = _kernel("""
+        struct entry { uint8_t ip[4]; };
+        void test(struct entry *e) {
+            int b;
+            b = e->ip[2];
+        }
+    """)
+    assert "mov al, [bx+2]" in asm, f"Expected 'mov al, [bx+2]' (constant-fold byte load) in:\n{asm}"
+    assert "xor ah, ah" in asm, f"Expected 'xor ah, ah' (zero-extend) in:\n{asm}"
+    # Crucially: should NOT emit a 'lea' for the indexed read — that would be
+    # the address, not the value.
+    assert "lea" not in asm.split("test:", 1)[1].split("ret", 1)[0], f"Indexed access must not emit 'lea' (would be an address):\n{asm}"
+
+
+def test_struct_array_member_no_index_emits_field_address() -> None:
+    """``ptr->byte_array`` (no index) decays to the field's address."""
+    asm = _kernel("""
+        struct entry { uint8_t mac[6]; uint16_t ts; };
+        void copy_mac(struct entry *e, uint8_t *dst) {
+            memcpy(dst, e->mac, 6);
+        }
+    """)
+    # The field address goes into SI for the inlined rep movsb.  Field
+    # offset is 0 so cc.py emits ``mov reg, base`` rather than ``lea``.
+    assert "rep movsb" in asm, f"Expected memcpy inline in:\n{asm}"
+
+
+def test_struct_array_member_index_variable() -> None:
+    """``ptr->byte_array[var_index]`` scales the index and loads a byte."""
+    asm = _kernel("""
+        struct entry { uint8_t mac[6]; };
+        int byte_at(struct entry *e, int i) {
+            return e->mac[i];
+        }
+    """)
+    # Variable byte-array index: scale by element_size=1 (no shift), add base+offset.
+    assert "mov al," in asm, f"Expected byte load (mov al,...) in:\n{asm}"
+    assert "xor ah, ah" in asm, f"Expected zero-extend in:\n{asm}"
+
+
+# ---------------------------------------------------------------------------
 # Positive: kernel-mode source compiles and assembles correctly
 # ---------------------------------------------------------------------------
 
