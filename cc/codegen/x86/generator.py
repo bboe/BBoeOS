@@ -81,8 +81,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "exec": frozenset({"ax", "si"}),
         "exit": frozenset(),
         "far_read16": frozenset({"ax", "bx"}),
+        "far_read32": frozenset({"ax", "bx"}),
         "far_read8": frozenset({"ax", "bx"}),
         "far_write16": frozenset({"ax", "bx"}),
+        "far_write32": frozenset({"ax", "bx"}),
         "far_write8": frozenset({"ax", "bx"}),
         "fill_block": frozenset({"ax", "bx", "cx", "dx"}),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
@@ -1183,13 +1185,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         nest correctly.  ``ax`` is never pinned, so never saved here.
 
         ``BUILTIN_CLOBBERS`` uses canonical 16-bit names (``cx``,
-        ``bx``, etc.).  In 32-bit mode the register pool holds
-        E-register names, so we normalise both sides through
-        ``target.low_word`` before comparing.
+        ``bx``, etc.).  Caller-side clobber sets (the
+        ``register_pool`` passed for user-function calls) name
+        E-registers in pmode and 16-bit aliases in real mode.
+        Normalise both sides through ``target.low_word`` so the
+        comparison still matches when the two halves disagree.
         """
         low_word = self.target.low_word
+        normalised_clobbers = frozenset(low_word(register) for register in clobbers)
         return sorted(
-            register for register in self.pinned_register.values() if low_word(register) in clobbers and low_word(register) != "ax"
+            register
+            for register in self.pinned_register.values()
+            if low_word(register) in normalised_clobbers and low_word(register) != "ax"
         )
 
     def _register_globals(self, declarations: list[Node], /) -> None:

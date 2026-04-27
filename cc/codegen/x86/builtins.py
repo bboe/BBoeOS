@@ -163,17 +163,62 @@ class BuiltinsMixin:
     def builtin_far_read16(self, arguments: list[Node], /) -> None:
         """Generate code for the ``far_read16(offset)`` builtin.
 
-        Reads a 16-bit word at ``ES:offset``.  In real mode, emits
-        ``mov bx, <offset> / mov ax, [es:bx]``.  This is the paired
-        read half of the far-memory accessors used by asm.c's symbol
-        table (which lives in SYMBOL_SEGMENT rather than DS).  When
-        the OS later moves to protected mode with a flat address
-        space, this builtin can emit a plain ``mov ax, [<offset>]``
-        without touching C callers.
+        Reads a 16-bit word from ``offset`` into the accumulator.
+        Real mode: ``mov bx, <offset> / mov ax, [es:bx]`` — the ES
+        prefix routes the access through the symbol-table segment.
+        Pmode flat: ``mov ebx, <offset> / movzx eax, word [ebx]``;
+        the ``movzx`` keeps the high half of EAX clean so the symbol
+        table's per-entry 16-bit value sits in a value-comparable
+        full-width int.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="far_read16")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        if self.target.int_size == 2:
+            self.emit(f"        mov {self.target.acc}, {self.target.far_ref(self.target.bx_register)}")
+        else:
+            self.emit(f"        movzx {self.target.acc}, word {self.target.far_ref(self.target.bx_register)}")
+        self.ax_clear()
+
+    def builtin_far_read32(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_read32(offset)`` builtin.
+
+        Reads a 32-bit dword from ``offset`` into the accumulator.
+        Real mode: ``mov bx, <offset> / mov ax, [es:bx]`` (legacy
+        16-bit fallback — only the low 16 bits land, sufficient for
+        the asm.c self-host's symbol table when run under --bits 16).
+        Pmode flat: ``mov ebx, <offset> / mov eax, [ebx]`` — full
+        dword for symbol values that exceed 16 bits (``mov edi,
+        JUMP_TABLE`` where JUMP_TABLE = SYMBOL_BASE + 0xF000 needs
+        the upper bits intact).
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="far_read32")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
         self.emit(f"        mov {self.target.acc}, {self.target.far_ref(self.target.bx_register)}")
+        self.ax_clear()
+
+    def builtin_far_write32(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_write32(offset, value)`` builtin.
+
+        Stores a 32-bit dword to ``offset``.  Pmode-only contract —
+        the 16-bit codegen paths intentionally emit a word-width
+        store so the on-disk image keeps the 36-byte symbol entry
+        layout from the legacy 16-bit asm.  Asm.c gates use of this
+        builtin to the pmode build.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="far_write32")
+        offset_argument, value_argument = arguments
+        if isinstance(value_argument, Int):
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            if self.target.int_size == 2:
+                self.emit(f"        mov word {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}")
+            else:
+                self.emit(f"        mov dword {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFFFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            self.emit(f"        pop {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
         self.ax_clear()
 
     def builtin_far_read8(self, arguments: list[Node], /) -> None:
@@ -193,25 +238,25 @@ class BuiltinsMixin:
     def builtin_far_write16(self, arguments: list[Node], /) -> None:
         """Generate code for the ``far_write16(offset, value)`` builtin.
 
-        Stores a 16-bit word to ``ES:offset``.  When the value is a
-        constant, emits ``mov bx, <offset> / mov word [es:bx],
-        <value>`` (single store).  For register / local / expression
-        values, the value lands in AX first (pushed if the offset
-        eval could clobber it) and stores via ``mov [es:bx], ax``.
+        Stores a 16-bit word to ``offset``.  Constant values compile
+        to ``mov word [<offset>], <value>``; non-constant values
+        route the low 16 bits of the accumulator (``ax``) through a
+        push/pop guard around the offset eval.  In pmode the asm.c
+        symbol table reserves only 2 bytes for the value field, so
+        the store width must be word-sized regardless of int_size.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="far_write16")
         offset_argument, value_argument = arguments
+        accumulator_word = self.target.low_word(self.target.acc)
         if isinstance(value_argument, Int):
             self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
-            self.emit(
-                f"        mov {self.target.word_size} {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}"
-            )
+            self.emit(f"        mov word {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}")
         else:
             self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
             self.emit(f"        push {self.target.acc}")
             self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
             self.emit(f"        pop {self.target.acc}")
-            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {accumulator_word}")
         self.ax_clear()
 
     def builtin_far_write8(self, arguments: list[Node], /) -> None:

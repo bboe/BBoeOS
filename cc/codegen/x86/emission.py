@@ -1508,7 +1508,8 @@ class EmissionMixin:
             else:
                 guarded = self._si_scratch_guard_begin(name)
                 self._emit_load_var(name, register=self.target.si_register)
-                addr = f"si+{offset}" if offset else "si"
+                si = self.target.si_register
+                addr = f"{si}+{offset}" if offset else si
             if is_byte:
                 self.emit(f"        mov byte [{addr}], {statement.expr.value}")
             else:

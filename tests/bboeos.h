@@ -79,8 +79,10 @@ int exec(const char *name);
    Compile to ``[es:<offset>]`` memory accesses; will retarget to flat
    ``[<offset>]`` loads/stores when the OS ports to protected mode. */
 int far_read16(int offset);
+int far_read32(int offset);
 int far_read8(int offset);
 void far_write16(int offset, int value);
+void far_write32(int offset, int value);
 void far_write8(int offset, int value);
 /* Fill an 8x8 pixel tile at (col, row) with palette index color in VGA mode 13h */
 void fill_block(int fd, int col, int row, int color);
