@@ -12,17 +12,17 @@ source is kept here for reference.
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
-| dns     | 724         | 1210      | +486  |
-| edit    | 2018        | 2484      | +466  |
+| dns     | 724         | 1129      | +405  |
+| edit    | 2018        | 2480      | +462  |
 | hello   | 22          | 23        | +1    |
-| ls      | 135         | 174       | +39   |
+| ls      | 135         | 165       | +30   |
 | mkdir   | 123         | 127       | +4    |
 | mv      | 217         | 220       | +3    |
 | netinit | 72          | 69        | -3    |
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1368      | +349  |
-| shell   | 950         | 1357      | +407  |
+| ping    | 1019        | 1291      | +272  |
+| shell   | 950         | 1335      | +385  |
 | uptime  | 50          | 78        | +28   |
 
 **arp (+3):** The three scratch arrays (`mac_buffer[6]`,
@@ -34,7 +34,7 @@ remaining +3 is null terminators on the two `die()` strings.
 `lodsb` (1 byte per character read); the C version reloads the base
 pointer and indexes for each character check.
 
-**dns (+492):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
+**dns (+405):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals;
 the assembly version reused `SECTOR_BUFFER` and `BUFFER`.  Most of
 the delta comes from `decode_domain` and `encode_domain` carrying
@@ -97,7 +97,7 @@ data label in the binary.
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
 
-**ls (+39):** The assembly version uses inline `repne scasb` with a
+**ls (+30):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` (full 0xFFFF scan
 setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
