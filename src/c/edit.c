@@ -91,26 +91,10 @@ int main(int argc, char *argv[]) {
             close(fd);
             die("Is a directory\n");
         }
-        /* Chunk the read at 32767 bytes.  SYS_IO_READ counts left/done in
-           16-bit registers and the dispatcher sign-extends AX into EAX,
-           so a single read returning >= 32768 bytes looks like a
-           negative error code; passing EDIT_BUFFER_SIZE (256 KB) directly
-           wraps to ECX & 0xFFFF and returns 0 bytes anyway. */
-        int bytes = 0;
-        while (bytes < EDIT_BUFFER_SIZE) {
-            int chunk_size = EDIT_BUFFER_SIZE - bytes;
-            if (chunk_size > 32767) {
-                chunk_size = 32767;
-            }
-            int chunk = read(fd, buffer + bytes, chunk_size);
-            if (chunk < 0) {
-                close(fd);
-                die("Load error\n");
-            }
-            if (chunk == 0) {
-                break;
-            }
-            bytes += chunk;
+        int bytes = read(fd, buffer, EDIT_BUFFER_SIZE);
+        if (bytes < 0) {
+            close(fd);
+            die("Load error\n");
         }
         /* Detect overflow by attempting one more byte past the buffer. */
         int extra = read(fd, kill_buf, 1);

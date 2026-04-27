@@ -1,8 +1,15 @@
 fd_read_dir:
-        jmp vfs_read_dir
+        ;; vfs_read_dir returns the entry size in AX (DIRECTORY_ENTRY_SIZE
+        ;; or 0 at EOF) plus -1/CF on error.  io_read now skips the
+        ;; dispatcher's movsx, so sign-extend AX into EAX here so callers
+        ;; see a clean 32-bit return.
+        call vfs_read_dir
+        movsx eax, ax
+        ret
 
 fd_read_file:
-        ;; ESI = FD entry pointer
+        ;; ESI = FD entry pointer.  ECX = byte count (full dword; capped
+        ;; only by the remaining-bytes-in-file clamp below).
         mov [fd_rw_descriptor_pointer], esi
         push ebx
         push ecx
@@ -17,21 +24,23 @@ fd_read_file:
         jbe .rf_start
         mov ecx, eax            ; clamp to remaining
         .rf_start:
-        mov [fd_rw_left], cx
-        mov word [fd_rw_done], 0
+        mov [fd_rw_left], ecx
+        mov dword [fd_rw_done], 0
         .rf_loop:
-        cmp word [fd_rw_left], 0
+        cmp dword [fd_rw_left], 0
         je .rf_done
         mov esi, [fd_rw_descriptor_pointer]
         call vfs_read_sec       ; ESI = fd entry → SECTOR_BUFFER filled, BX = byte offset
         jc .rf_disk_err
-        ;; Chunk size = min(512 - offset, bytes_left)
+        ;; Chunk size = min(512 - offset, bytes_left).  Per-iteration chunk
+        ;; never exceeds 512, but ``fd_rw_left`` is dword so the compare /
+        ;; reload widen to ECX (no operand-size mismatch).
         movzx ebx, bx           ; zero-extend byte offset (0-511)
         mov ecx, 512
         sub ecx, ebx            ; ECX = available in sector
-        cmp cx, [fd_rw_left]
+        cmp ecx, [fd_rw_left]
         jbe .rf_chunk_ok
-        mov cx, [fd_rw_left]
+        mov ecx, [fd_rw_left]   ; left < 512: clamp chunk to remaining
         .rf_chunk_ok:
         ;; Copy ECX bytes from SECTOR_BUFFER+EBX to [EDI]
         push esi
@@ -42,12 +51,11 @@ fd_read_file:
         rep movsb
         pop ecx
         pop esi
-        ;; Update bookkeeping
-        add word [fd_rw_done], cx
-        sub word [fd_rw_left], cx
+        ;; Update bookkeeping (ECX still holds the just-copied chunk size)
+        add [fd_rw_done], ecx
+        sub [fd_rw_left], ecx
         mov esi, [fd_rw_descriptor_pointer]
-        movzx ecx, cx
-        add dword [esi+FD_OFFSET_POSITION], ecx
+        add [esi+FD_OFFSET_POSITION], ecx
         jmp .rf_loop
         .rf_eof:
         pop edi
@@ -62,11 +70,11 @@ fd_read_file:
         pop edx
         pop ecx
         pop ebx
-        mov ax, -1
+        mov eax, -1
         stc
         ret
         .rf_done:
-        movzx eax, word [fd_rw_done]
+        mov eax, [fd_rw_done]
         pop edi
         pop edx
         pop ecx
@@ -75,16 +83,16 @@ fd_read_file:
         ret
 
 fd_write_file:
-        ;; ESI = FD entry pointer
+        ;; ESI = FD entry pointer.  ECX = byte count (full dword).
         mov [fd_rw_descriptor_pointer], esi
         push ebx
         push ecx
         push edx
         push edi
-        mov [fd_rw_left], cx
-        mov word [fd_rw_done], 0
+        mov [fd_rw_left], ecx
+        mov dword [fd_rw_done], 0
         .wf_loop:
-        cmp word [fd_rw_left], 0
+        cmp dword [fd_rw_left], 0
         je .wf_done
         mov esi, [fd_rw_descriptor_pointer]
         call vfs_prepare_write_sec  ; ESI=fd_entry → SECTOR_BUFFER ready, BX=byte offset
@@ -93,17 +101,16 @@ fd_write_file:
         movzx ebx, bx           ; zero-extend byte offset (0-511)
         mov ecx, 512
         sub ecx, ebx            ; ECX = space in sector
-        cmp cx, [fd_rw_left]
+        cmp ecx, [fd_rw_left]
         jbe .wf_chunk_ok
-        mov cx, [fd_rw_left]
+        mov ecx, [fd_rw_left]
         .wf_chunk_ok:
         ;; Copy ECX bytes from user buffer to SECTOR_BUFFER+EBX
         push esi
         mov edi, SECTOR_BUFFER
         add edi, ebx
         mov esi, [fd_write_buffer]
-        movzx ebx, word [fd_rw_done]
-        add esi, ebx
+        add esi, [fd_rw_done]
         cld
         push ecx
         rep movsb
@@ -113,22 +120,21 @@ fd_write_file:
         call vfs_commit_write_sec
         jc .wf_disk_err
         ;; Update bookkeeping
-        add word [fd_rw_done], cx
-        sub word [fd_rw_left], cx
+        add [fd_rw_done], ecx
+        sub [fd_rw_left], ecx
         mov esi, [fd_rw_descriptor_pointer]
-        movzx ecx, cx
-        add dword [esi+FD_OFFSET_POSITION], ecx
+        add [esi+FD_OFFSET_POSITION], ecx
         jmp .wf_loop
         .wf_disk_err:
         pop edi
         pop edx
         pop ecx
         pop ebx
-        mov ax, -1
+        mov eax, -1
         stc
         ret
         .wf_done:
-        movzx eax, word [fd_rw_done]
+        mov eax, [fd_rw_done]
         pop edi
         pop edx
         pop ecx
@@ -137,5 +143,5 @@ fd_write_file:
         ret
 
         fd_rw_descriptor_pointer dd 0
-        fd_rw_done    dw 0
-        fd_rw_left    dw 0
+        fd_rw_done    dd 0
+        fd_rw_left    dd 0

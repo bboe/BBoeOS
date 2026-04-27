@@ -58,6 +58,6 @@ fd_write_net:
         pop edx
         pop ecx
         pop ebx
-        mov ax, -1
+        mov eax, -1
         stc
         ret
