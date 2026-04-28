@@ -959,17 +959,23 @@ void encode_rel8_jump(int opcode) {
         }
     } else {
         /* Currently long; attempt to shrink in pass 1 if the
-           target has moved into rel8 range.  Forward jumps need
-           an extra +4/-1 correction because the 4-byte near form
-           straddles the comparison point (and the ``jmp rel8``
-           0xEB opcode shrinks to 2 bytes rather than 3). */
+           target has moved into rel8 range.  Forward jumps straddle
+           the comparison point: under bits=16 jcc-near is 4 bytes
+           (jmp-near 3), under bits=32 jcc-near is 6 (jmp-near 5),
+           so the shrink check picks the matching long-form size.
+           Backward targets are fixed addresses so the comparison is
+           always against the post-short-instruction tail (+2). */
         use_short = 0;
         if (pass == 1) {
             if (peek_label_target()) {
                 int target = peek_label_value;
                 int base = current_address;
                 if (target >= base) {
-                    base += 4;
+                    if (default_bits == 32) {
+                        base += 6;
+                    } else {
+                        base += 4;
+                    }
                     if (opcode == 0xEB) {
                         base -= 1;
                     }
@@ -996,8 +1002,13 @@ void encode_rel8_jump(int opcode) {
             emit_byte(0x0F);
             emit_byte(opcode + 0x10);
         }
-        int disp = resolve_label() - (current_address + 2);
-        emit_word(disp);
+        if (default_bits == 32) {
+            int disp = resolve_label() - (current_address + 4);
+            emit_dword(disp);
+        } else {
+            int disp = resolve_label() - (current_address + 2);
+            emit_word(disp);
+        }
     }
 }
 
