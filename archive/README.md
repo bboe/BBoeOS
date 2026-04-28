@@ -33,7 +33,7 @@ so the comparison stays apples-to-apples.
 | date    | 15             | 21          | 21        |  0    |
 | dns     | 724            | 724         | 1129      | +405  |
 | hello   | 22             | 28          | 29        | +1    |
-| ls      | 135            | 135         | 165       | +30   |
+| ls      | 135            | 179         | 196       | +17   |
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 217         | 220       | +3    |
 | netinit | 72             | 72          | 69        | -3    |
@@ -81,13 +81,15 @@ loads in main account for the +4, the wider PC-relative jump
 displacement and the [bits 32] directive's effect on rel-jump
 encoding contribute the rest.
 
-**ls (+30):** The assembly version uses inline `repne scasb` with a
+**ls (+17):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
-directly; the C version routes through `strlen()` (full 0xFFFF scan
-setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
-`entry[DIRECTORY_ENTRY_SIZE]` is a local stack array, triggering a BP
-frame for `main` (+6 bytes for prologue, +6 bytes for `lea`-vs-`mov`
-addressing on `entry` accesses).
+directly; the C version routes through `strlen()` and
+`write(STDOUT, ...)`.  `entry[DIRECTORY_ENTRY_SIZE]` is a local stack
+array, triggering a BP frame for `main`.  Δ shrunk from +30 to +17
+in 32-bit because the asm grew faster (+44 vs C's +31) — both the
+``repne scasb`` walk-and-subtract and the ``test byte
+[entry_buf+OFFSET]`` flag checks gain operand-size overhead in the
+hand-written form, which narrows the compiler-vs-handwritten gap.
 
 **mkdir (+20):** The asm version stores fd / pointer / count in
 registers; cc.py 32-bit spills several into BP-relative locals

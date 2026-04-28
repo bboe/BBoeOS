@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,45 +7,45 @@ main:
         cld
 
         ;; Parse arguments (0 or 1)
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 1
+        cmp ecx, 1
         ja .not_found
 
         ;; Open directory: use argument or "." for root
         je .have_arg
         .open_root:
-        mov si, DOT
+        mov esi, DOT
         jmp .open_dir
         .have_arg:
-        mov si, [ARGV]
+        mov esi, [ARGV]
         .open_dir:
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h
         jc .not_found
 
-        mov bp, ax             ; BP = dir fd
+        mov ebp, eax           ; EBP = dir fd
 
         ;; Read entries one at a time
 .read_loop:
-        mov bx, bp
-        mov di, entry_buf
-        mov cx, DIRECTORY_ENTRY_SIZE
+        mov ebx, ebp
+        mov edi, entry_buf
+        mov ecx, DIRECTORY_ENTRY_SIZE
         mov ah, SYS_IO_READ
         int 30h
-        test ax, ax
+        test eax, eax
         jz .done                ; EOF
 
         ;; Print the entry name (find length, then write)
-        mov di, entry_buf
+        mov edi, entry_buf
         xor al, al
-        mov cx, DIRECTORY_NAME_LENGTH
+        mov ecx, DIRECTORY_NAME_LENGTH
         repne scasb
-        sub di, entry_buf
-        dec di                 ; DI = string length
-        mov cx, di
-        mov si, entry_buf
+        sub edi, entry_buf
+        dec edi                ; EDI = string length
+        mov ecx, edi
+        mov esi, entry_buf
         call FUNCTION_WRITE_STDOUT
 
         ;; Check flags for suffix
@@ -65,14 +66,14 @@ main:
         jmp .read_loop
 
 .done:
-        mov bx, bp
+        mov ebx, ebp
         mov ah, SYS_IO_CLOSE
         int 30h
         jmp FUNCTION_EXIT
 
 .not_found:
-        mov si, MESSAGE_NOT_FOUND
-        mov cx, MESSAGE_NOT_FOUND_LENGTH
+        mov esi, MESSAGE_NOT_FOUND
+        mov ecx, MESSAGE_NOT_FOUND_LENGTH
         jmp FUNCTION_DIE
 
 ;; Strings
