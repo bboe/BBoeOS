@@ -39,6 +39,7 @@ def run_commands(
     boot_timeout: float = BOOT_TIMEOUT,
     command_timeout: float = COMMAND_TIMEOUT,
     drive: Path = DEFAULT_IMAGE,
+    floppy: bool = False,
     pcap: Path | None = None,
     snapshot: bool = False,
     with_net: bool = False,
@@ -48,6 +49,11 @@ def run_commands(
     QEMU is always killed when this returns (normal or error path). The shell
     prompt ('$ ') is used as the synchronisation marker: the function returns
     after it has seen the prompt once per command.
+
+    *floppy* attaches the drive image as the primary floppy (``if=floppy``)
+    instead of the default IDE/HDD attachment — boots route through
+    INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
+    which is the harder path to keep working as the kernel evolves.
     """
     with tempfile.TemporaryDirectory(prefix="run_qemu_") as temp_dir:
         temporary_directory = Path(temp_dir)
@@ -56,6 +62,8 @@ def run_commands(
         os.mkfifo(f"{serial_base}.out")
 
         drive_spec = f"file={drive},format=raw"
+        if floppy:
+            drive_spec += ",if=floppy"
         if snapshot:
             drive_spec += ",snapshot=on"
         qemu_args = [

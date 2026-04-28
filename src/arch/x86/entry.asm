@@ -145,6 +145,21 @@ protected_mode_entry:
         mov eax, pmode_irq6_handler
         mov bl, PMODE_IRQ6_VECTOR
         call idt_set_gate32
+
+        ;; Zero the system tick counter and unmask IRQ 0 (PIT) before
+        ;; the driver inits run, so any timing primitive that runs
+        ;; during init (e.g. fdc_motor_start's rtc_sleep_ms during
+        ;; vfs_init's first read on a floppy boot) sees ticks
+        ;; advancing.  IRQ 0 needs an unmasked PIC slot AND ``sti``
+        ;; AND a properly-installed handler — all three are true here.
+        ;; Other IRQs are unmasked by their own driver inits (IRQ 1
+        ;; by ps2_init, IRQ 6 by fdc_init).
+        mov dword [system_ticks], 0
+        in al, PMODE_PIC1_DATA
+        and al, 0FEh                    ; clear bit 0 (unmask IRQ 0)
+        out PMODE_PIC1_DATA, al
+        sti
+
         call ata_init
         call fd_init
         call fdc_init
@@ -154,16 +169,6 @@ protected_mode_entry:
         ;; no NIC, which is fine — netinit / net programs surface that
         ;; via a "no NIC" message rather than halting the kernel.
         call network_initialize
-
-        ;; Zero the system tick counter before unmasking IRQ 0.
-        mov dword [system_ticks], 0
-
-        ;; Unmask IRQ 0 (PIT) and IRQ 6 (FDC).  IRQ 1 is unmasked by ps2_init.
-        in al, PMODE_PIC1_DATA
-        and al, 0BEh                    ; clear bits 0, 6 (unmask IRQ 0, IRQ 6)
-        out PMODE_PIC1_DATA, al
-
-        sti
 
         call vga_clear_screen
 
