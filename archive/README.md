@@ -27,7 +27,7 @@ so the comparison stays apples-to-apples.
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
 |---------|----------------|-------------|-----------|-------|
 | arp     | 466            | 466         | 469       | +3    |
-| cat     | 145            | 145         | 145       |  0    |
+| cat     | 145            | 175         | 181       | +6    |
 | chmod   | 149            | 149         | 174       | +25   |
 | cp      | 268            | 268         | 227       | -41   |
 | date    | 15             | 21          | 21        |  0    |

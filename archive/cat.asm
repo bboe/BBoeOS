@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,35 +7,35 @@ main:
         cld
 
         ;; Require exactly one argument
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 1
+        cmp ecx, 1
         jne .usage
 
         ;; Open file for reading
-        mov si, [ARGV]
+        mov esi, [ARGV]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h
         jc .not_found
 
-        mov bx, ax             ; BX = fd
+        mov ebx, eax            ; EBX = fd
 
 .read_loop:
-        mov di, SECTOR_BUFFER
-        mov cx, 512
+        mov edi, SECTOR_BUFFER
+        mov ecx, 512
         mov ah, SYS_IO_READ
         int 30h
         jc .disk_err
-        test ax, ax
+        test eax, eax
         jz .done                ; EOF
 
-        ;; Write AX bytes from SECTOR_BUFFER
-        push bx                 ; Save fd
-        mov cx, ax
-        mov si, SECTOR_BUFFER
+        ;; Write EAX bytes from SECTOR_BUFFER
+        push ebx                ; Save fd
+        mov ecx, eax
+        mov esi, SECTOR_BUFFER
         call FUNCTION_WRITE_STDOUT
-        pop bx                  ; Restore fd
+        pop ebx                 ; Restore fd
         jmp .read_loop
 
 .done:
@@ -43,20 +44,20 @@ main:
         jmp FUNCTION_EXIT
 
 .not_found:
-        mov si, FILE_NOT_FOUND
-        mov cx, FILE_NOT_FOUND_LENGTH
+        mov esi, FILE_NOT_FOUND
+        mov ecx, FILE_NOT_FOUND_LENGTH
         jmp .output
 
 .disk_err:
         mov ah, SYS_IO_CLOSE
         int 30h
-        mov si, DISK_ERROR
-        mov cx, DISK_ERROR_LENGTH
+        mov esi, DISK_ERROR
+        mov ecx, DISK_ERROR_LENGTH
         jmp .output
 
 .usage:
-        mov si, USAGE
-        mov cx, USAGE_LENGTH
+        mov esi, USAGE
+        mov ecx, USAGE_LENGTH
 
 .output:
         jmp FUNCTION_DIE
