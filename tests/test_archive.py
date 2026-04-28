@@ -2,11 +2,11 @@
 """Verify the archive/*.asm and src/c/*.c byte counts match the README table.
 
 The archive directory holds the last-known-good assembly form of each
-program that has since been rewritten in C.  The three-column byte-size
-comparison in archive/README.md is only meaningful if every cell stays
-honest — the ASM side must still assemble under the current kernel ABI,
-the C side must still compile (via cc.py) under the current constants
-and builtins, and the delta must equal ``c - asm``.
+program that has since been rewritten in C.  The byte-size comparison
+in archive/README.md is only meaningful if every cell stays honest —
+the ASM side must still assemble under the current kernel ABI, the C
+side must still compile (via cc.py) under the current constants and
+builtins, and the delta must equal ``c - asm``.
 
 This test:
   1. Assembles every archive/*.asm with nasm.
@@ -40,9 +40,8 @@ INCLUDE_DIR = REPO_ROOT / "src" / "include"
 README_PATH = ARCHIVE_DIR / "README.md"
 
 # ``| name | asm_16 | asm | c | delta |`` rows.  asm_16 is the frozen
-# 16-bit byte size (historical reference; the row's archive .asm may
-# now be 32-bit and gives a different ``asm`` value).  Delta may have
-# a leading sign and may be 0 (no sign).
+# 16-bit byte size (historical reference, never re-verified).  Delta
+# may have a leading sign and may be 0 (no sign).
 TABLE_ROW = re.compile(
     r"^\|\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
     r"\|\s*(?P<asm_16>\d+)\s*"
@@ -57,9 +56,8 @@ class Expected:
     """Expected byte counts for a single program row.
 
     ``asm_16`` is frozen — the 16-bit baseline preserved for historical
-    comparison.  ``asm`` and ``c`` reflect the current bits mode of
-    the row's archive .asm; once converted to 32-bit those numbers
-    update and stay updated.
+    comparison and never re-verified.  ``asm`` and ``c`` are 32-bit byte
+    counts checked against the actual archive .asm and cc.py output.
     """
 
     asm_16: int
@@ -86,11 +84,6 @@ def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
     return rows
 
 
-def detect_bits(*, source: Path) -> int:
-    """Return 32 if *source* declares ``[bits 32]``, else 16."""
-    return 32 if "[bits 32]" in source.read_text(encoding="utf-8") else 16
-
-
 def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
     """Run nasm on *source* writing to *output*.  Return (ok, stderr)."""
     result = subprocess.run(
@@ -111,18 +104,11 @@ def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr.strip()
 
 
-def compile_c(*, source: Path, output: Path, scratch: Path, bits: int) -> tuple[bool, str]:
-    """Run cc.py + nasm on *source*, writing the binary to *output*.
-
-    *bits* picks 16-bit or 32-bit codegen so the C output matches the
-    archive .asm's bits mode — the archive is mid-conversion from
-    16-bit to 32-bit, so each program carries its current mode (auto-
-    detected from a ``[bits 32]`` directive).  Production user
-    programs ship at 32-bit (see make_os.sh).
-    """
+def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
+    """Run cc.py + nasm on *source*, writing the binary to *output*."""
     asm_path = scratch / f"{source.stem}.asm"
     result = subprocess.run(
-        [sys.executable, str(CC_PY), "--bits", str(bits), str(source), str(asm_path)],
+        [sys.executable, str(CC_PY), str(source), str(asm_path)],
         capture_output=True,
         check=False,
         text=True,
@@ -145,8 +131,7 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
     ok, stderr = assemble(source=asm_source, output=asm_output)
     if not ok:
         return False, f"nasm failed on archive asm: {stderr}"
-    bits = detect_bits(source=asm_source)
-    ok, stderr = compile_c(source=c_source, output=c_output, scratch=scratch, bits=bits)
+    ok, stderr = compile_c(source=c_source, output=c_output, scratch=scratch)
     if not ok:
         return False, stderr
     actual_asm = asm_output.stat().st_size
