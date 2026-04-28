@@ -41,6 +41,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
+| drivers/vga | 37190 | 37510 | +320 |
 
 ## Annotations
 
@@ -192,3 +193,32 @@ hit (`push ebp; mov ebp, esp; sub esp, N` × 4 functions plus the
 `preserve_register` push/pops on `ne2k_send`); `ne2k_probe`'s two
 `while` loops over `mac_address[i]` add ~20 bytes vs the asm
 `mov esi, mac_address; lodsb; out dx, al; loop` shape.
+
+**drivers/vga (+320):** Eleven functions covering text-mode framebuffer,
+mode-13h pixel I/O, the CRTC cursor pair, mode programming, and the
+`/dev/vga` ioctl backend.  The C-shaped pieces are the register-
+banging helpers (`vga_get_cursor`, `vga_set_cursor`, `vga_set_bg`,
+`vga_set_palette_color`) and `vga_fill_block`'s 8x8 mode-13h tile
+fill (a nested while loop over `far_write8` calls — the asm
+version's `rep stosb` per row is more compact, but per-byte stores
+fit cc.py's natural codegen and stay self-contained without an
+asm() escape).  The framebuffer-touching functions stay in
+file-scope `asm()` blocks: `vga_clear_screen` and `vga_scroll_up`
+(`rep stosw` over 2000 cells / `rep movsw` over 1920 cells beat
+per-cell `far_write16` loops both for runtime and emitted bytes),
+`vga_teletype` and `vga_write_attribute` (cursor-fetch + linear-
+offset arithmetic + cell write are short enough that cc.py's
+prologue/preserve_register overhead would dominate the function),
+and `vga_set_mode` (the `lodsb`-driven traversal of `vga_mode_table`
+is the natural shape).  `fd_ioctl_vga` stays in asm because it's a
+syscall-jmp target with a register-state contract cc.py's
+prologue/epilogue would clobber.  Trailing data tables
+(`vga_current_mode`, `vga_default_palette[48]`, `vga_mode_table[122]`)
+become cc.py global byte arrays; `vga_mode_table_end` is an `equ`
+against `vga_mode_table + 122` so the asm() loop's bound check
+still folds.  +328 is mostly cc.py's per-function frame overhead
+(push ebp / sub esp / preserve_register pushes) on the five pure-C
+helpers, plus the C-shaped `vga_get_cursor`'s divmod-by-80 (~+96
+vs the asm version's `div bx`), plus the new `movzx eax, ax`
+prologue prefix on every narrow-pinned in_register parameter (PR
+#241 fix).
