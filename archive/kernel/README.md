@@ -33,8 +33,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
-
-(no rows yet — first port lands the first row)
+| drivers/ps2 | 37102 | 37510 | +408 |
 
 ## Annotations
 
@@ -45,3 +44,22 @@ hand-written asm.  Useful for spotting cc.py optimization
 opportunities — e.g. "spilling X to a stack slot the asm kept in BX",
 "materializing a `&array[i]` address that constant-folded in asm",
 etc.
+
+**drivers/ps2 (+408):** cc.py's IR-based codegen materialises every
+intermediate to a local stack slot and then loads it back.  The asm
+version of `ps2_handle_scancode` reads the scancode once into AL and
+keeps it in EAX through the whole modifier-key dispatch chain; the C
+port spills the parameter to `[ebp-N]` at the prologue and reloads
+it for each `cmp` against the modifier scancode constants.  Same
+shape for the local `code` / `ascii` / `upper` variables in the
+regular-key path — each gets its own slot.  `ps2_putc` shows the
+same pattern: the asm version uses `[ps2_tail]` directly with byte
+arithmetic on `ECX/EDX`; the C version stores `tail` to a local,
+computes `next` to another, branches on `[ebp-next]`, etc.  The 32-
+bit prologue / epilogue overhead (`push ebp; mov ebp, esp; sub esp,
+N` then `mov esp, ebp; pop ebp`) costs a fixed ~7 bytes per function
+× 5 functions = ~35 bytes more than the asm version's bare `push
+eax; ...; pop eax; ret` shape.  Candidate cc.py optimizations: keep
+single-use locals in registers across straight-line code (avoid the
+spill/reload roundtrip), and recognise the "param read once, used
+many cmps" pattern where the spill is unnecessary.

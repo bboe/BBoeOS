@@ -18,7 +18,7 @@ rm -rf "$KBUILD" && mkdir -p "$KBUILD"
 find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
     rel="${source#src/}"; out="$KBUILD/${rel%.c}.kasm"
     mkdir -p "$(dirname "$out")"
-    python3 cc.py --target kernel "$source" "$out" || exit 1
+    python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
 done
 
 # Build the vDSO blob (FUNCTION_TABLE + shared_* helpers).  The kernel
