@@ -1483,22 +1483,22 @@ def test_double_pointer_argv_with_out_register_cx_argc() -> None:
             count = 0;
             slot = 0;
             str = exec_arg_pointer;
-            if (str != 0) {
+            if (str != NULL) {
                 while (1) {
                     while (str[0] == ' ') {
                         str = str + 1;
                     }
-                    if (str[0] == 0) { break; }
+                    if (str[0] == '\0') { break; }
                     argv[slot] = str;
                     slot = slot + 1;
                     count = count + 1;
                     while (1) {
-                        if (str[0] == 0) { break; }
+                        if (str[0] == '\0') { break; }
                         if (str[0] == ' ') { break; }
                         str = str + 1;
                     }
-                    if (str[0] == 0) { break; }
-                    str[0] = 0;
+                    if (str[0] == '\0') { break; }
+                    str[0] = '\0';
                     str = str + 1;
                 }
             }
@@ -1627,3 +1627,203 @@ def test_peephole_register_arithmetic_fires_when_ax_overwritten_after() -> None:
     ])
     assert any("inc dx" in line for line in out), f"transform skipped wrongly: {out}"
     assert not any("inc ax" in line for line in out), f"AX-detour survived: {out}"
+
+
+# ---------------------------------------------------------------------------
+# Comparison type validation (char-vs-int, pointer-vs-int)
+#
+# ``validate_comparison_types`` rejects operand-type mismatches in
+# ``==`` / ``!=`` / ordered comparisons.  Before this commit the check
+# fired only on AST-direct codegen paths; conditions lowered through
+# the IR pipeline (``_ir_value_to_ast`` rebuilds operands as bare
+# ``Int`` even when the AST had a ``Char`` literal) skipped the check
+# entirely, so ``char c; if (c == 0)`` and ``char *p; if (p != 0)``
+# slipped through silently.  The tests below pin the now-walked AST
+# coverage so that fix can't regress.
+# ---------------------------------------------------------------------------
+
+
+def test_char_compared_inside_logical_and_is_validated() -> None:
+    """``&&`` legs each go through the validator independently."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            int n;
+            c = 'A';
+            n = 0;
+            if (c == 'A' && n == c) {
+                c = 'B';
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected per-leg validation, got: {error}"
+
+
+def test_char_compared_inside_nested_if_is_validated() -> None:
+    """Comparisons nested inside ``if`` body are walked, not just top-level conditions."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            c = 'A';
+            if (c == 'A') {
+                if (c == 0) {
+                    c = 'B';
+                }
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected nested-if validation, got: {error}"
+
+
+def test_char_compared_inside_while_condition_is_validated() -> None:
+    """``while`` conditions reach the validator the same as ``if``."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            c = 'A';
+            while (c != 0) {
+                c = c + 1;
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected while-condition validation, got: {error}"
+
+
+def test_char_index_compared_to_int_literal_is_rejected() -> None:
+    """``char *p; if (p[0] == 0)`` raises — element type carries through."""
+    error = _kernel_error("""
+        void f(char *p) {
+            if (p[0] == 0) {
+                p = p + 1;
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
+
+
+def test_char_local_compared_to_char_literal_compiles() -> None:
+    r"""``char c; if (c == '\0')`` is the supported spelling."""
+    asm = _kernel("""
+        void f() {
+            char c;
+            c = 'A';
+            if (c == '\\0') {
+                c = 'B';
+            }
+            if (c >= 'A' && c <= 'Z') {
+                c = ' ';
+            }
+            if (c < ' ') {
+                c = '\\0';
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_char_local_compared_to_int_literal_is_rejected() -> None:
+    r"""``char c; if (c == 0)`` raises — must use ``c == '\0'``."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            c = 'A';
+            if (c == 0) {
+                c = 'B';
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
+
+
+def test_char_local_compared_to_int_var_is_rejected() -> None:
+    """``char c; int n; if (c == n)`` raises — int-typed RHS isn't a Char literal."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            int n;
+            c = 'A';
+            n = 65;
+            if (c == n) {
+                c = 'B';
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
+
+
+def test_char_local_ordered_compare_int_literal_is_rejected() -> None:
+    """``char c; if (c < 32)`` raises — ordered comparison goes through the same rule."""
+    error = _kernel_error("""
+        void f() {
+            char c;
+            c = 'A';
+            if (c < 32) {
+                c = ' ';
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
+
+
+def test_char_param_compared_to_int_literal_is_rejected() -> None:
+    """``char`` parameter compared to bare integer literal is also rejected."""
+    error = _kernel_error("""
+        void f(char byte) {
+            if (byte == 10) {
+                byte = 13;
+            }
+        }
+    """)
+    assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
+
+
+def test_int_local_compared_to_int_literal_compiles() -> None:
+    """Plain ``int x; if (x == 0)`` is unaffected — both operands classify as integer."""
+    asm = _kernel("""
+        void f() {
+            int x;
+            x = 0;
+            if (x == 0) {
+                x = 1;
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_pointer_compared_to_int_literal_is_rejected() -> None:
+    """``char *p; if (p == 0)`` raises — must spell as ``p == NULL``."""
+    error = _kernel_error("""
+        void f(char *p) {
+            if (p != 0) {
+                p = p + 1;
+            }
+        }
+    """)
+    assert "pointer compared to non-pointer" in error, f"expected pointer-vs-int rejection, got: {error}"
+
+
+def test_pointer_compared_to_null_compiles() -> None:
+    """``char *p; if (p != NULL)`` is the supported spelling."""
+    asm = _kernel("""
+        void f(char *p) {
+            if (p != NULL) {
+                p = p + 1;
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
+    """``uint8_t`` classifies as integer (per the docstring), so ``b == 0`` is allowed."""
+    asm = _kernel("""
+        void f() {
+            uint8_t b;
+            b = 0;
+            if (b == 0) {
+                b = 1;
+            }
+        }
+    """)
+    assert "f:" in asm

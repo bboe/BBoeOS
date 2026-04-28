@@ -1268,6 +1268,12 @@ class EmissionMixin:
                     self.allocate_local(param.name)
 
         self.scan_locals(body)
+        # Type-check every comparison in the body now that ``variable_types``
+        # is populated.  The codegen-level check in ``emit_condition`` skips
+        # IR-lowered conditions because ``_ir_value_to_ast`` reconstructs
+        # operands as bare ``Int`` even when the source was a ``Char``
+        # literal; the AST-level walk preserves the original types.
+        self.validate_body_comparisons(body)
 
         # IR path: pre-allocate compiler-generated temporaries so the
         # frame size is correct before the prologue is emitted.

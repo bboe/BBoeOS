@@ -54,6 +54,7 @@ from cc.codegen.x86.jumps import (
 )
 from cc.errors import CompileError
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
+from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
 
@@ -1606,6 +1607,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
+    def _validate_node_comparisons(self, node: Node | None, /) -> None:
+        """Recursively visit *node*, validating any comparison ``BinaryOperation``.
+
+        Walks every :class:`Node`-typed dataclass field plus list-of-Node
+        fields (e.g. ``Call.args``, ``If.body``).  Stops at literal
+        leaves (``Int`` / ``Char`` / ``String``) which carry no children.
+        """
+        if node is None or not isinstance(node, Node):
+            return
+        if isinstance(node, BinaryOperation) and node.operation in COMPARISON_OPERATIONS:
+            self.validate_comparison_types(node.left, node.right)
+        for descriptor in fields(node):
+            value = getattr(node, descriptor.name)
+            if isinstance(value, Node):
+                self._validate_node_comparisons(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        self._validate_node_comparisons(item)
+
     def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.
 
@@ -2054,8 +2075,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ):
             self.generate_call(condition.left, discard_return=True)
             return ("carry" if condition.operation == "!=" else "not_carry", False)
-        # Skip type validation for IR-generated conditions — the AST was
-        # already validated by the parser before IR construction.
+        # Skip type validation for IR-generated conditions: the IR
+        # builder rebuilds operands as bare ``Int`` (``_ir_value_to_ast``
+        # does not preserve ``Char``), which would mis-flag legitimate
+        # ``char_var == 'A'`` shapes here.  The AST-level walk in
+        # :meth:`validate_body_comparisons` already covered the body
+        # before IR construction, so this skip is safe.
         if context != "ir":
             self.validate_comparison_types(condition.left, condition.right)
         self.emit_comparison(condition.left, condition.right)
@@ -2411,6 +2436,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.scan_locals(statement.else_body, top_level=False)
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
+
+    def validate_body_comparisons(self, statements: list[Node], /) -> None:
+        """Walk a function body, validating every comparison's operand types.
+
+        Catches the char-vs-int and pointer-vs-non-pointer shapes that
+        the codegen-time check in :meth:`emit_condition` skips when its
+        ``context`` is ``"ir"``.  ``_ir_value_to_ast`` reconstructs IR
+        ``Value``s as bare :class:`Int` even when the original AST
+        operand was a :class:`Char` literal, so type info is lost
+        before codegen sees the condition; running the check up here
+        on the original AST nodes preserves it.
+
+        Call after parameters and ``scan_locals`` have populated
+        ``self.variable_types`` for the current function — the
+        :meth:`_type_of_operand` lookup uses that map to classify
+        :class:`Var` references.
+        """
+        for statement in statements:
+            self._validate_node_comparisons(statement)
 
     def validate_comparison_types(self, left: Node, right: Node, /) -> None:
         r"""Ensure ``==``/``!=``/``<``/``<=``/``>``/``>=`` operand types match.
