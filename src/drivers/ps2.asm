@@ -19,9 +19,6 @@
 ;;; ------------------------------------------------------------------------
 
         KB_BUFFER_SIZE          equ 16          ; must be a power of 2
-        PMODE_PIC1_CMD          equ 20h
-        PMODE_PIC1_DATA         equ 21h
-        PMODE_PIC_EOI           equ 20h
         PMODE_IRQ1_VECTOR       equ 21h
         PS2_DATA                equ 60h
 
@@ -151,9 +148,9 @@ ps2_init:
         mov eax, .pmode_irq1_handler
         mov bl, PMODE_IRQ1_VECTOR
         call idt_set_gate32
-        in al, PMODE_PIC1_DATA
+        in al, PIC1_DATA_PORT
         and al, 0FDh                    ; clear bit 1 (unmask IRQ 1)
-        out PMODE_PIC1_DATA, al
+        out PIC1_DATA_PORT, al
         pop ebx
         pop eax
         ret
@@ -164,8 +161,8 @@ ps2_init:
         push eax
         in al, PS2_DATA
         call ps2_handle_scancode
-        mov al, PMODE_PIC_EOI
-        out PMODE_PIC1_CMD, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
         pop eax
         iretd
 

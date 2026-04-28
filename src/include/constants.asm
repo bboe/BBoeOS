@@ -67,6 +67,13 @@
         %assign O_RDONLY 00h
         %assign O_TRUNC  20h
         %assign O_WRONLY 01h
+        ;; 8259A PIC ports + EOI byte.  Used by the boot path's pic_remap
+        ;; sequence and by the kernel-side IRQ handlers / drivers.
+        %assign PIC1_CMD_PORT   0x20
+        %assign PIC1_DATA_PORT  0x21
+        %assign PIC2_CMD_PORT   0xA0
+        %assign PIC2_DATA_PORT  0xA1
+        %assign PIC_EOI         0x20
         %assign PROGRAM_BASE 0600h
         %assign SECTOR_BUFFER 0F000h    ; 512 bytes (one sector); kept below 0x10000 so FDC DMA channel 2 (page register at 0x81) reaches it
         %assign SOCK_DGRAM 1

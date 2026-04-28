@@ -62,16 +62,16 @@ pmode_irq0_handler:
         ;; single CPU we don't need the LOCK prefix.
         push eax
         inc dword [system_ticks]
-        mov al, PMODE_PIC_EOI
-        out PMODE_PIC1_CMD, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
         pop eax
         iretd
 
 pmode_irq6_handler:
         ;; FDC command complete.  EOI.
         push eax
-        mov al, PMODE_PIC_EOI
-        out PMODE_PIC1_CMD, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
         pop eax
         iretd
 
@@ -162,9 +162,9 @@ protected_mode_entry:
         ;; Other IRQs are unmasked by their own driver inits (IRQ 1
         ;; by ps2_init, IRQ 6 by fdc_init).
         mov dword [system_ticks], 0
-        in al, PMODE_PIC1_DATA
+        in al, PIC1_DATA_PORT
         and al, 0FEh                    ; clear bit 0 (unmask IRQ 0)
-        out PMODE_PIC1_DATA, al
+        out PIC1_DATA_PORT, al
         sti
 
         ;; Install the vDSO blob at FUNCTION_TABLE so user programs can

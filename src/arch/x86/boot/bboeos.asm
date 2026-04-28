@@ -28,12 +28,8 @@
         ICW1_INIT       equ 11h         ; begin init, cascaded, expect ICW4
         ICW4_8086       equ 01h         ; 8086/88 mode, normal EOI
         PIC1_CASCADE    equ 04h         ; master: slave present on IRQ 2
-        PIC1_CMD_PORT   equ 20h
-        PIC1_DATA_PORT  equ 21h
         PIC1_VECTOR     equ 20h         ; master IRQ 0..7 → 0x20..0x27
         PIC2_CASCADE_ID equ 02h         ; slave: cascade identity = 2
-        PIC2_CMD_PORT   equ 0A0h
-        PIC2_DATA_PORT  equ 0A1h
         PIC2_VECTOR     equ 28h         ; slave  IRQ 8..15 → 0x28..0x2F
         PIC_MASK_ALL    equ 0FFh
 
