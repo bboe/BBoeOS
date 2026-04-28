@@ -220,6 +220,9 @@ at the time.
   paging path before per-vector handlers in `arch/x86/exc.asm`
   land.
 
+### Drivers
+- Port `serial_character` from `drivers/serial.asm` to C in a new `src/drivers/serial.c`, retiring the asm file.  Tiny one-function port — the polled COM1 output path that mirrors every `put_character` byte to serial.  `__attribute__((preserve_register("ax")))` / `("dx")` envelope keeps the asm-side ABI (`drivers/console.c` calls `vga_teletype` immediately after, expecting AL to round-trip).  Drop the unused `serial_getc` entry point at the same time — `fs/fd/console.asm` polls COM1 inline (port `0x3FD` for data-ready, `0x3F8` for the byte) so the DEL→BS handler had no live callers.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
