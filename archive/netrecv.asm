@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -8,75 +9,75 @@ main:
         cld
 
         ;; Read our MAC into the shell's idle input buffer (no embedded cell).
-        mov di, BUFFER
+        mov edi, BUFFER
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
-        ;; Build ARP request (copy our MAC into frame)
-        mov si, BUFFER
-        mov di, arp_frame + 6
-        mov cx, 3
-        rep movsw
-        mov si, BUFFER
-        mov di, arp_frame + 22
-        mov cx, 3
-        rep movsw
+        ;; Build ARP request (copy our MAC into frame, 6 bytes = movsd+movsw)
+        mov esi, BUFFER
+        mov edi, arp_frame + 6
+        movsd
+        movsw
+        mov esi, BUFFER
+        mov edi, arp_frame + 22
+        movsd
+        movsw
 
         ;; Open raw Ethernet socket
         mov al, SOCK_RAW
         mov ah, SYS_NET_OPEN
         int 30h
         jc .no_nic
-        mov [net_fd], ax
+        mov [net_fd], eax
 
         ;; Send ARP request
-        mov bx, [net_fd]
-        mov si, arp_frame
-        mov cx, 60
+        mov ebx, [net_fd]
+        mov esi, arp_frame
+        mov ecx, 60
         mov ah, SYS_IO_WRITE
         int 30h
         jc .error
 
-        mov si, MESSAGE_SENT
-        mov cx, MESSAGE_SENT_LENGTH
+        mov esi, MESSAGE_SENT
+        mov ecx, MESSAGE_SENT_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         ;; Poll for reply, reading into BUFFER + 128 (leaves room below for MAC)
-        mov word [poll_remaining], 30000
+        mov dword [poll_remaining], 30000
         .poll:
-        mov bx, [net_fd]
-        mov di, BUFFER + 128
-        mov cx, RECEIVE_BUFFER_SIZE
+        mov ebx, [net_fd]
+        mov edi, BUFFER + 128
+        mov ecx, RECEIVE_BUFFER_SIZE
         mov ah, SYS_IO_READ
         int 30h
         jc .error
-        test ax, ax
+        test eax, eax
         jnz .got_packet
-        dec word [poll_remaining]
+        dec dword [poll_remaining]
         jnz .poll
 
-        mov si, MESSAGE_TIMEOUT
-        mov cx, MESSAGE_TIMEOUT_LENGTH
+        mov esi, MESSAGE_TIMEOUT
+        mov ecx, MESSAGE_TIMEOUT_LENGTH
         jmp FUNCTION_DIE
 
         .got_packet:
-        ;; AX = bytes read, [BUFFER + 128] = packet
-        mov [packet_length], ax
-        mov bx, [net_fd]
+        ;; EAX = bytes read, [BUFFER + 128] = packet
+        mov [packet_length], eax
+        mov ebx, [net_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
 
-        mov si, MESSAGE_RECEIVE
-        mov cx, MESSAGE_RECEIVE_LENGTH
+        mov esi, MESSAGE_RECEIVE
+        mov ecx, MESSAGE_RECEIVE_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         ;; Print first 32 bytes as hex
-        mov si, BUFFER + 128
-        mov cx, [packet_length]
-        cmp cx, 32
+        mov esi, BUFFER + 128
+        mov ecx, [packet_length]
+        cmp ecx, 32
         jbe .use_length
-        mov cx, 32
+        mov ecx, 32
         .use_length:
         .hex_loop:
         lodsb
@@ -90,19 +91,19 @@ main:
         jmp FUNCTION_EXIT
 
         .no_nic:
-        mov si, MESSAGE_NO_NIC
-        mov cx, MESSAGE_NO_NIC_LENGTH
+        mov esi, MESSAGE_NO_NIC
+        mov ecx, MESSAGE_NO_NIC_LENGTH
         jmp FUNCTION_DIE
 
         .error:
-        mov si, MESSAGE_ERROR
-        mov cx, MESSAGE_ERROR_LENGTH
+        mov esi, MESSAGE_ERROR
+        mov ecx, MESSAGE_ERROR_LENGTH
         jmp FUNCTION_DIE
 
         ;; Data
-        net_fd dw 0
-        packet_length dw 0
-        poll_remaining dw 0
+        net_fd dd 0
+        packet_length dd 0
+        poll_remaining dd 0
 
         MESSAGE_ERROR db `Send failed\n`
         MESSAGE_ERROR_LENGTH equ $ - MESSAGE_ERROR

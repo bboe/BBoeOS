@@ -37,7 +37,7 @@ so the comparison stays apples-to-apples.
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 253         | 278       | +25   |
 | netinit | 72             | 94          | 85        | -9    |
-| netrecv | 334            | 334         | 403       | +69   |
+| netrecv | 334            | 424         | 452       | +28   |
 | netsend | 187            | 215         | 255       | +40   |
 | ping    | 1034           | 1034        | 1306      | +272  |
 | shell   | 950            | 950         | 1337      | +387  |
