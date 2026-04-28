@@ -796,6 +796,103 @@ def test_in_register_with_carry_return() -> None:
     assert "mov si," in asm, f"expected mov si for out_register\n{asm}"
 
 
+def test_in_register_32bit_widens_narrow_to_full_slot() -> None:
+    """32-bit target: a 16-bit ``in_register`` pin gets ``movzx`` before the spill.
+
+    Without the widening, the prologue would write only the low 2 bytes
+    of a 4-byte slot, leaving the upper 2 bytes uninitialised — a
+    later 32-bit reload picks up garbage stack content.  An intervening
+    call forces the spill (cc.py elides the spill+reload entirely when
+    the value can flow through registers without clobber).
+    """
+    asm = _kernel(
+        """
+        void clobber();
+        void f(int x __attribute__((in_register("ax")))) {
+            int y;
+            clobber();
+            y = x;
+            kernel_outb(0x60, y);
+        }
+        """,
+        bits=32,
+    )
+    assert "movzx eax, ax" in asm, f"expected 'movzx eax, ax' before spill\n{asm}"
+    assert "mov [ebp-4], eax" in asm, f"expected 4-byte spill of widened value\n{asm}"
+
+
+def test_in_register_32bit_full_width_skips_widen() -> None:
+    """32-bit target: an ``ecx``-pinned param spills directly without ``movzx``."""
+    asm = _kernel(
+        """
+        void clobber();
+        void f(int x __attribute__((in_register("ecx")))) {
+            int y;
+            clobber();
+            y = x;
+            kernel_outb(0x60, y);
+        }
+        """,
+        bits=32,
+    )
+    assert "movzx ecx" not in asm, f"unexpected widening for full-width pin\n{asm}"
+    assert "mov [ebp-4], ecx" in asm, f"expected direct spill of ecx\n{asm}"
+
+
+def test_in_register_32bit_char_param() -> None:
+    """32-bit target: ``char`` parameter pinned to ``ax`` widens via ``movzx``.
+
+    The 8-bit byte arrives in AL but the AX pin is 16 bits — the
+    fix widens AX into EAX so the slot reload reads a clean
+    zero-extended value.
+    """
+    asm = _kernel(
+        """
+        void putc(char byte __attribute__((in_register("ax")))) {
+            int copy;
+            copy = byte;
+            kernel_outb(0x3F8, copy);
+        }
+        """,
+        bits=32,
+    )
+    assert "movzx eax, ax" in asm, f"expected widening of char-pinned ax\n{asm}"
+
+
+def test_out_register_32bit_narrow_target_uses_low_word() -> None:
+    """32-bit target: writing through ``out_register("dx")`` uses ``mov dx, ax``.
+
+    cc.py would otherwise emit ``mov dx, eax`` (size mismatch — NASM
+    rejects it) when the source value lives in the 32-bit accumulator.
+    """
+    asm = _kernel(
+        """
+        void f(int *out __attribute__((out_register("dx")))) {
+            *out = 0x4142;
+        }
+        """,
+        bits=32,
+    )
+    assert "mov dx, ax" in asm, f"expected 'mov dx, ax' (low-word source)\n{asm}"
+    assert "mov dx, eax" not in asm, f"unexpected size-mismatched 'mov dx, eax'\n{asm}"
+
+
+def test_out_register_32bit_full_width_target_uses_eax() -> None:
+    """32-bit target: an ``edx``-typed out_register writes from full ``eax``."""
+    asm = _kernel(
+        """
+        void f(int *out __attribute__((out_register("edx")))) {
+            *out = 0x12345678;
+        }
+        """,
+        bits=32,
+    )
+    # Either an explicit ``mov edx, eax`` or no move at all when the
+    # accumulator already happens to hold the value via constant-prop.
+    if "mov edx, eax" not in asm:
+        assert "mov edx, 0x12345678" in asm or "mov edx, 305419896" in asm, f"expected full-width edx store\n{asm}"
+
+
 def test_preserve_register_push_pop() -> None:
     """preserve_register("cx") emits push cx before frame and pop cx before every ret."""
     src = textwrap.dedent("""\

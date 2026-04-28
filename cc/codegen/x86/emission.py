@@ -1333,7 +1333,17 @@ class EmissionMixin:
             for param in parameters:
                 if param.in_register is not None:
                     slot = self.locals[param.name]
-                    self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
+                    # Zero-extend narrower in_register values into the
+                    # full int-width slot so subsequent reads (which load
+                    # the whole slot via the accumulator) don't pick up
+                    # uninitialised stack bytes.  For full-width E-register
+                    # pins the named register already covers the slot.
+                    widened = self.target.widen_gp(param.in_register)
+                    if widened != param.in_register:
+                        self.emit(f"        movzx {widened}, {param.in_register}")
+                        self.emit(f"        mov [{self.target.base_register}-{slot}], {widened}")
+                    else:
+                        self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
             if not register_convention:
                 # Load pinned parameters from caller-pushed stack slots
                 # into their registers.
@@ -1766,8 +1776,15 @@ class EmissionMixin:
                 raise CompileError(message, line=statement.line)
             reg = self.out_register_locals[statement.name]
             self.generate_expression(statement.expr)
-            if reg != self.target.acc:
-                self.emit(f"        mov {reg}, {self.target.acc}")
+            # Source defaults to the accumulator; if the out_register
+            # target is narrower (e.g. 16-bit ``dx`` against 32-bit
+            # ``eax``) take the matching low-width alias so NASM doesn't
+            # reject the size-mismatched ``mov dx, eax``.
+            source = self.target.acc
+            if len(reg) < len(source):
+                source = self.target.low_word(source)
+            if reg != source:
+                self.emit(f"        mov {reg}, {source}")
             self.ax_clear()
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
