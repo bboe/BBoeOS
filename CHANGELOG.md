@@ -227,6 +227,8 @@ at the time.
 
 - Port the ANSI escape parser (`put_character` / `put_string`) from `drivers/console.asm` to C in a new `src/drivers/console.c`.  Full CSI sequence handling — `\n`/`\r` translation, `ESC[nA` cursor up, `ESC[nC` forward, `ESC[nD` back, `ESC[r;cH` position, `ESC[0m` reset, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background, `ESC[N@` write-at-cursor — all dispatched against five `vga_*` cross-asm callees declared with `in_register` / `out_register` pinning.  `ansi_fg` keeps its bare asm symbol via `equ _g_ansi_fg` so `drivers/vga.asm` (the only outside reader) links unchanged.
 
+- Port the ATA PIO disk driver (`ata_init`, `ata_issue`, `ata_wait_drq`, `ata_read_sector`, `ata_write_sector`) from `drivers/ata.asm` to C in a new `src/drivers/ata.c`.  LBA28 single-sector PIO transfers via `kernel_inb` / `kernel_outb` for register programming and `kernel_insw` / `kernel_outsw` for the 256-word data move.  `__attribute__((carry_return))` keeps the asm CF=err contract (`return 1` = success / CF clear, `return 0` = error / CF set) intact for callers reached through `fs/block.asm`.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
