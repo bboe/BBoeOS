@@ -41,7 +41,7 @@ so the comparison stays apples-to-apples.
 | netsend | 187            | 187         | 221       | +34   |
 | ping    | 1034           | 1034        | 1306      | +272  |
 | shell   | 950            | 950         | 1337      | +387  |
-| uptime  | 50             | 50          | 78        | +28   |
+| uptime  | 50             | 67          | 100       | +33   |
 
 **arp (+3):** The three scratch arrays (`mac_buffer[6]`,
 `receive_buffer[128]`, `target_ip[4]`) are file-scope BSS globals;
@@ -142,7 +142,10 @@ longer per comparison than the asm's ``dw string, handler``
 table, and char locals spill to word slots so every byte load
 comes with ``xor ah, ah`` zero-extension.
 
-**uptime (+28):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
+**uptime (+33):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes
 3 args and a format string onto the stack, calls `FUNCTION_PRINTF`,
 and cleans up. The assembly version uses inline `FUNCTION_PRINT_DECIMAL`
-calls with no stack overhead.
+calls with no stack overhead.  The 32-bit asm rewrite drops the
+``mov cl, 60 / div cl`` byte-divide trick (which left AH=remainder)
+in favour of two uniform ``xor edx, edx / div ecx`` 32-bit divides
+with EDX as remainder — slightly bigger but consistent.
