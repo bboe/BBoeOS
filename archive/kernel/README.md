@@ -36,6 +36,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | arch/x86/system | 37486 | 37510 | +24 |
 | drivers/ata | 37238 | 37510 | +272 |
 | drivers/console | 37030 | 37510 | +480 |
+| drivers/fdc | 37286 | 37510 | +224 |
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
@@ -146,3 +147,23 @@ epilogue overhead on the substantial helper chain
 intermediate (`year`, `days`, `month_index`, `seconds`,
 `cx`, `dx`).  The asm version kept these in BX/CX/SI through
 the year-loop.
+
+**drivers/fdc (+224):** Thirteen functions covering DMA + IRQ-driven
+floppy I/O.  The substantive C content is the public surface
+(`fdc_init`, `fdc_drain_result`, `fdc_sense_interrupt`, `fdc_dma_setup`)
+plus the read/write entry points (`fdc_read_sector`, `fdc_write_sector`)
+which orchestrate calls into the asm-shaped helpers.  The helpers
+themselves stay in file-scope `asm()` blocks because they don't fit
+cc.py's natural codegen shape: `fdc_send` / `fdc_recv` (tight
+poll-then-port-IO, preserve AX/DX), `fdc_wait_irq` (pushf/sti
+envelope plus a tight flag spin), `fdc_lba_to_chs_internal`
+(multi-byte CH:CL/DH:DL return via two `out_register` parameters),
+`fdc_motor_start` / `fdc_seek` / `fdc_issue_read_write` (multi-step
+asm-state-machine sequences with all-register preservation), the
+IRQ 6 stub (`iretd`), and `fdc_install_irq` (address-of-label).
++240 is the per-function frame overhead on the C wrappers
+(`fdc_drain_result`'s while loop, `fdc_sense_interrupt`'s three
+calls, `fdc_dma_setup`'s ten `kernel_outb`s, `fdc_init`'s reset +
+sense × 4 + SPECIFY × 3, the read/write `cx`/`dx` spill+reload
+pattern around the `out_register` capture from
+`fdc_lba_to_chs_internal`).
