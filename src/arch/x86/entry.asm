@@ -216,12 +216,12 @@ shell_reload:
 
 vdso_install:
         ;; Copy the embedded vDSO blob (vdso_image..vdso_image_end, 4 KB)
-        ;; to physical FUNCTION_TABLE (0x08046000).  User programs `call`
-        ;; FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. and land in this
-        ;; blob.  Pre-paging the virt = phys identity holds, so the
-        ;; programs running at PROGRAM_BASE see the vDSO as ordinary RAM.
-        ;; Once paging lands, the kernel will map this same physical
-        ;; frame as a user-readable code page in every PD instead.
+        ;; into the page at FUNCTION_TABLE (= 0x10000).  User programs
+        ;; `call` FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. and land
+        ;; in this blob.  Pre-paging the virt = phys identity holds, so
+        ;; the programs running at PROGRAM_BASE see the vDSO as ordinary
+        ;; RAM.  Phase 4 will instead map the same physical frame as a
+        ;; user-readable code page in every per-program PD.
         push esi
         push edi
         push ecx
