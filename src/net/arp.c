@@ -25,7 +25,7 @@ uint16_t arp_evict;
 // drivers/ne2k.asm plants mac_address).  asm_name aliases give us a
 // uint8_t handle whose address is the start of the multi-byte block.
 uint8_t our_ip_0 __attribute__((asm_name("our_ip")));
-uint8_t mac_address_ref __attribute__((asm_name("mac_address")));
+uint8_t mac_address_ref __attribute__((asm_name("_g_mac_address")));
 
 // uptime_seconds: seconds since boot (16-bit; wraps ~18h).  Defined in
 // src/arch/x86/syscall.asm.

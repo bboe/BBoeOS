@@ -14,7 +14,7 @@ uint8_t our_ip_1 __attribute__((asm_name("our_ip+1")));
 uint8_t our_ip_2 __attribute__((asm_name("our_ip+2")));
 uint8_t gateway_ip_0 __attribute__((asm_name("gateway_ip")));
 uint16_t ip_id __attribute__((asm_name("ip_id")));
-uint8_t mac_address_ref __attribute__((asm_name("mac_address")));
+uint8_t mac_address_ref __attribute__((asm_name("_g_mac_address")));
 
 // arp_resolve: Resolve IP to MAC address (SI=ip, DI=mac; CF on failure)
 __attribute__((carry_return)) int arp_resolve(uint8_t *ip __attribute__((in_register("si"))), uint8_t *mac __attribute__((out_register("di"))));

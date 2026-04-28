@@ -55,10 +55,12 @@ int ip_send(uint8_t *dest_ip __attribute__((in_register("bx"))),
             int length __attribute__((in_register("cx"))),
             int protocol __attribute__((in_register("ax"))));
 
-// Module globals from drivers/ne2k.asm — asm_name aliases reference the
-// existing storage there (cc.py doesn't emit its own copy).
-uint8_t net_present __attribute__((asm_name("net_present")));
-uint8_t mac_address_byte0 __attribute__((asm_name("mac_address")));
+// Module globals from drivers/ne2k.c — asm_name aliases redirect to
+// cc.py's ``_g_``-prefixed storage in that file (cc.py rejects asm_name
+// on arrays, so the consumer side aliases a single byte at the array's
+// base address; pointer arithmetic gets us the rest if needed).
+uint8_t net_present __attribute__((asm_name("_g_net_present")));
+uint8_t mac_address_byte0 __attribute__((asm_name("_g_mac_address")));
 
 // sys_net_mac: copy the 6-byte cached MAC into the caller's buffer at DI.
 // CF set if no NIC was ever probed (net_present stays zero).
