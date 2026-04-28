@@ -137,6 +137,7 @@ def _build_os(*, image_path: Path) -> None:
 
 def _run_draw_session(
     *,
+    floppy: bool,
     image_path: Path,
     monitor_path: Path,
     screenshot_path: Path,
@@ -150,7 +151,7 @@ def _run_draw_session(
         "-display",
         "none",
         "-drive",
-        f"file={image_path},format=raw,snapshot=on",
+        f"file={image_path},format=raw,snapshot=on" + (",if=floppy" if floppy else ""),
         "-monitor",
         f"unix:{monitor_path},server,nowait",
         "-serial",
@@ -205,7 +206,13 @@ def _run_draw_session(
 
 def main() -> int:
     """Boot, exercise draw, screendump, verify pixel content."""
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy)",
+    )
+    arguments = parser.parse_args()
     os.chdir(REPO_ROOT)
 
     with tempfile.TemporaryDirectory(prefix="test_draw_") as temporary_path:
@@ -220,6 +227,7 @@ def main() -> int:
         try:
             _build_os(image_path=image_path)
             buffer = _run_draw_session(
+                floppy=arguments.floppy,
                 image_path=image_path,
                 monitor_path=monitor_path,
                 screenshot_path=screenshot_path,

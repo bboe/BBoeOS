@@ -4,7 +4,9 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
+
+## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
   file=drive.img,format=raw,if=floppy`) works again after being

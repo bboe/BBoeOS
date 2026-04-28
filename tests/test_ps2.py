@@ -13,6 +13,7 @@ Run standalone:
 
 from __future__ import annotations
 
+import argparse
 import os
 import select
 import socket
@@ -76,12 +77,12 @@ def _send_keys(*, monitor_path: Path, keys: list[str]) -> None:
     monitor.close()
 
 
-def _launch_qemu(*, serial_base: Path, monitor_path: Path) -> subprocess.Popen:
+def _launch_qemu(*, floppy: bool, serial_base: Path, monitor_path: Path) -> subprocess.Popen:
     """Start QEMU with a serial fifo and a unix-socket monitor."""
     return subprocess.Popen([
         "qemu-system-i386",
         "-drive",
-        f"file={DRIVE},format=raw,snapshot=on",
+        f"file={DRIVE},format=raw,snapshot=on" + (",if=floppy" if floppy else ""),
         "-chardev",
         f"pipe,id=s,path={serial_base}",
         "-serial",
@@ -93,7 +94,7 @@ def _launch_qemu(*, serial_base: Path, monitor_path: Path) -> subprocess.Popen:
     ])
 
 
-def inject_keys(*, keys: list[str], expected: bytes) -> None:
+def inject_keys(*, expected: bytes, floppy: bool, keys: list[str]) -> None:
     """Boot BBoeOS, send `keys` via the monitor, expect `expected` on serial."""
     with tempfile.TemporaryDirectory(prefix="test_ps2_") as temp_dir:
         serial_base = Path(temp_dir) / "ser"
@@ -101,7 +102,7 @@ def inject_keys(*, keys: list[str], expected: bytes) -> None:
         os.mkfifo(f"{serial_base}.in")
         os.mkfifo(f"{serial_base}.out")
 
-        qemu = _launch_qemu(serial_base=serial_base, monitor_path=monitor_path)
+        qemu = _launch_qemu(floppy=floppy, serial_base=serial_base, monitor_path=monitor_path)
         output_fd: int | None = None
         try:
             _wait_path(path=monitor_path, timeout=MONITOR_APPEAR_TIMEOUT)
@@ -125,13 +126,22 @@ def inject_keys(*, keys: list[str], expected: bytes) -> None:
 
 def main() -> int:
     """Run the PS/2 smoke cases: unshifted and shifted letter injection."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy)",
+    )
+    arguments = parser.parse_args()
     inject_keys(
-        keys=["e", "c", "h", "o", "spc", "h", "i", "ret"],
         expected=b"hi\r\n",
+        floppy=arguments.floppy,
+        keys=["e", "c", "h", "o", "spc", "h", "i", "ret"],
     )
     inject_keys(
-        keys=["e", "c", "h", "o", "spc", "shift-h", "i", "ret"],
         expected=b"Hi\r\n",
+        floppy=arguments.floppy,
+        keys=["e", "c", "h", "o", "spc", "shift-h", "i", "ret"],
     )
     print("2 passed, 0 failed")
     return 0

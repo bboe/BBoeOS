@@ -222,7 +222,7 @@ def _fsck(*, image: Path) -> str | None:
         ext2_path.unlink(missing_ok=True)
 
 
-def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
+def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
     """Run one ProgramTest; return (passed, short message for report)."""
     test_image = temporary_directory / f"test_{test.name}.img"
     shutil.copy2(temporary_directory / BASE_IMAGE, test_image)
@@ -231,6 +231,7 @@ def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, st
             test.commands,
             command_timeout=test.timeout,
             drive=test_image,
+            floppy=floppy,
             snapshot=False,
         )
     except TimeoutError as error:
@@ -248,6 +249,7 @@ def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, st
 
 def _run_suite(
     *,
+    floppy: bool,
     tests: list[ProgramTest],
     temporary_directory: Path,
     label: str = "",
@@ -259,7 +261,7 @@ def _run_suite(
     for test in tests:
         name = f"{label}{test.name}" if label else test.name
         started = time.monotonic()
-        ok, message = _run_test(temporary_directory=temporary_directory, test=test)
+        ok, message = _run_test(floppy=floppy, temporary_directory=temporary_directory, test=test)
         elapsed = time.monotonic() - started
         if ok:
             print(f"  PASS  {name:<20}              {elapsed:6.2f}s")
@@ -305,6 +307,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'hello')")
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy); "
+        "skips the 2 KB-block-size matrix because the resulting image "
+        "exceeds the 1.44 MB floppy capacity",
+    )
     arguments = parser.parse_args()
 
     tests = [t for t in TESTS if arguments.program is None or t.name == arguments.program]
@@ -319,18 +328,21 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="test_ext2_") as temporary_path:
         temporary_directory = Path(temporary_path)
         _build_os(temporary_directory=temporary_directory, block_size=1024)
-        p, f, failed = _run_suite(tests=tests, temporary_directory=temporary_directory)
+        p, f, failed = _run_suite(floppy=arguments.floppy, tests=tests, temporary_directory=temporary_directory)
         total_pass += p
         total_fail += f
         all_failed += failed
 
-    # 2 KB block-size tests (only when running the full suite)
-    if arguments.program is None:
+    # 2 KB block-size tests (only when running the full suite, and not under --floppy:
+    # mke2fs grows a 2 KB-block image past 1.44 MB so it can't be addressed via
+    # QEMU's floppy backend).
+    if arguments.program is None and not arguments.floppy:
         blk2_tests = BLOCK_SIZE_TESTS
         with tempfile.TemporaryDirectory(prefix="test_ext2_2k_") as temporary_path:
             temporary_directory = Path(temporary_path)
             _build_os(temporary_directory=temporary_directory, block_size=2048)
             p, f, failed = _run_suite(
+                floppy=arguments.floppy,
                 tests=blk2_tests,
                 temporary_directory=temporary_directory,
                 label="2k/",
@@ -338,6 +350,8 @@ def main() -> int:
             total_pass += p
             total_fail += f
             all_failed += failed
+    elif arguments.program is None and arguments.floppy:
+        print(f"  SKIP  2k/* ({len(BLOCK_SIZE_TESTS)} tests) — image exceeds 1.44 MB floppy capacity")
 
     print()
     print(f"{total_pass} passed, {total_fail} failed")
