@@ -25,7 +25,7 @@ uint8_t changed_flag;
 int current_address;
 /* Default operand size set by the ``[bits N]`` directive.  Starts at
    16 (real-mode default); a ``[bits 32]`` line flips it to 32 and
-   pmode encodings that match the default size emit without the 0x66
+   protected mode encodings that match the default size emit without the 0x66
    prefix, while 16-bit encodings acquire the prefix.  Reset to 16 at
    the start of every pass so the directive's effect on each pass
    matches the source order. */
@@ -799,7 +799,7 @@ void emit_modrm_disp(int modrm, int disp) {
     /* Truncate to the addressing width (16-bit) so a disp whose high
        bits exceed 0xFFFF still narrows to its on-the-wire encoding —
        NASM treats ``[0x100000+si]`` as ``[si]`` because the disp16
-       window of 0x100000 is zero, and our pmode symbol table now
+       window of 0x100000 is zero, and our protected mode symbol table now
        round-trips the full 32-bit value (so EDIT_BUFFER_BASE arrives
        here as 0x100000 rather than the 16-bit-truncated 0). */
     int low = disp & 0xFFFF;
@@ -837,7 +837,7 @@ void emit_modrm_disp8(int rm, int disp) {
    that disagrees with the current ``default_bits``.  Under the
    default bits=16 mode a 32-bit operand acquires the prefix; under
    bits=32 a 16-bit operand does.  Used by ``emit_sized`` and every
-   hand-written pmode-encoding site that used to emit 0x66 directly. */
+   hand-written protected mode-encoding site that used to emit 0x66 directly. */
 __attribute__((regparm(1)))
 void emit_operand_size_prefix(int size) {
     if (size != 16 && size != 32) {
@@ -883,7 +883,7 @@ void emit_sized_mem(int base, int size) {
 }
 
 /* Emit a little-endian dword — the 32-bit companion to ``emit_word``.
-   Used by the pmode-specific paths that widen imm16 / disp16 to
+   Used by the protected mode-specific paths that widen imm16 / disp16 to
    imm32 / disp32 behind a 0x66 operand-size prefix. */
 __attribute__((regparm(1)))
 void emit_dword(int value) {
@@ -1437,7 +1437,7 @@ void handle_lea() {
 }
 
 /* ``lgdt [mem]`` / ``lidt [mem]`` — load the GDT / IDT descriptor
-   register from a 6-byte memory operand.  Both are pmode bootstrap
+   register from a 6-byte memory operand.  Both are protected mode bootstrap
    essentials.  Encoded as ``0F 01 /r`` with reg field 2 for lgdt
    and 3 for lidt; the shared ``emit_modrm_direct`` helper packs
    the reg field into mod=00 rm=110 (direct disp16) for the only
@@ -2049,7 +2049,7 @@ void inc_dec_handler(int rfield) {
    parent file's fd / buffer / position / valid fields, and copy the
    saved SOURCE_BUFFER contents back.  Called from do_pass (via
    ``call include_pop`` in the pass-loop inline asm) when read_line
-   hits EOF while include_depth > 0.  Flat pmode addressing reaches
+   hits EOF while include_depth > 0.  Flat protected mode addressing reaches
    anywhere in 4 GB so the rep movsw below copies straight from the
    stash address back into SOURCE_BUFFER without an ES-segment
    override. */
@@ -2790,7 +2790,7 @@ int parse_operand() {
     skip_ws();
     /* ``byte`` / ``word`` / ``dword`` size prefix — match_word already
        rewinds ``source_cursor`` on miss, so no manual backtrack
-       needed.  The ``dword`` form appears in pmode sources with
+       needed.  The ``dword`` form appears in protected mode sources with
        ``cmp dword [reg], imm`` / ``inc dword [reg]`` shapes. */
     if (match_word(STR_BYTE)) {
         op1_size = 8;
@@ -3417,7 +3417,7 @@ void symbol_add_constant(int value) {
    ``regparm(1)`` so the index arrives in EAX directly.  Returning
    the absolute address (rather than an ES-relative offset like the
    16-bit version) lets every caller hand the result straight to
-   far_read* / far_write*, which under flat pmode addressing is just
+   far_read* / far_write*, which under flat protected mode addressing is just
    a normal indexed load. */
 __attribute__((regparm(1)))
 int symbol_entry_address(int index) {
@@ -3434,7 +3434,7 @@ int symbol_entry_address(int index) {
    miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF
    return — all remaining callers test ``last_symbol_index`` for
    hit/miss.  Accesses the symbol region via ``far_read8`` /
-   ``far_read32`` builtins; under pmode flat DS this is a plain
+   ``far_read32`` builtins; under protected mode flat DS this is a plain
    ``mov`` indexed by the absolute address. */
 __attribute__((regparm(1)))
 int symbol_lookup(int scope) {

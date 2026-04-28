@@ -203,7 +203,7 @@ class BuiltinsMixin:
         the 16-bit codegen paths intentionally emit a word-width
         store so the on-disk image keeps the 36-byte symbol entry
         layout from the legacy 16-bit asm.  Asm.c gates use of this
-        builtin to the pmode build.
+        builtin to the protected mode build.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="far_write32")
         offset_argument, value_argument = arguments
@@ -241,7 +241,7 @@ class BuiltinsMixin:
         Stores a 16-bit word to ``offset``.  Constant values compile
         to ``mov word [<offset>], <value>``; non-constant values
         route the low 16 bits of the accumulator (``ax``) through a
-        push/pop guard around the offset eval.  In pmode the asm.c
+        push/pop guard around the offset eval.  In protected mode the asm.c
         symbol table reserves only 2 bytes for the value field, so
         the store width must be word-sized regardless of int_size.
         """

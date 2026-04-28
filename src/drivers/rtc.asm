@@ -9,7 +9,7 @@
 ;;;     INT 15h AH=86h (sleep)→ rtc_sleep_ms    (CX = milliseconds)
 ;;;
 ;;; The PIT is reprogrammed to 100 Hz (10 ms/tick) and the IRQ 0 handler
-;;; (`pmode_irq0_handler` in entry.asm) is wired into the pmode IDT during
+;;; (`pmode_irq0_handler` in entry.asm) is wired into the protected mode IDT during
 ;;; `protected_mode_entry`, replacing the BIOS default ~18.2 Hz tick. The
 ;;; PIT_* constants below are consumed by entry.asm; PIC_EOI is consumed
 ;;; by drivers/fdc.asm.

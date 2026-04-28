@@ -58,7 +58,7 @@ vga_fill_block:
         ;; Tile coordinates: 0-39 columns, 0-24 rows.  Preserves all registers.
         ;; Uses flat 32-bit addressing — DS already covers the linear VGA
         ;; framebuffer at 0xA0000, no ES reload (a real-mode segment value
-        ;; would #GP in pmode).
+        ;; would #GP in protected mode).
         push eax
         push ebx
         push ecx
@@ -350,10 +350,10 @@ vga_set_mode:
         jnz .dac_restore_loop
 
         ;; 11. Clear framebuffer using flat 32-bit addressing — DS / ES
-        ;; already point to the pmode flat data segment, so we just write
+        ;; already point to the protected mode flat data segment, so we just write
         ;; to the linear framebuffer address (0xB8000 for text, 0xA0000
         ;; for mode 13h).  No ES reload (a real-mode segment value would
-        ;; #GP in pmode).
+        ;; #GP in protected mode).
         cmp ah, 13h
         je .clear_graphics
         ;; Text mode: fill 0xB8000 with space + default attribute

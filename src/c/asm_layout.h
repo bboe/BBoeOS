@@ -13,7 +13,7 @@
 
    The symbol and jump tables live in extended memory at SYMBOL_BASE
    (3 MB mark, well clear of the kernel and edit's gap buffer).  Flat
-   pmode addressing reaches anywhere in 4 GB so the previous segmented
+   protected mode addressing reaches anywhere in 4 GB so the previous segmented
    ES-window scheme retired with the 16-bit port — every far-memory
    access is now a plain 32-bit load.  JUMP_TABLE is the flat address
    where pass 1's per-jump size-choice bitmap starts; SYMBOL_ENTRY

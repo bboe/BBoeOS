@@ -8,7 +8,7 @@
         ;; and stores them in 16-bit slots — passing a 32-bit user
         ;; stack pointer directly truncates the high half.  Staging
         ;; sidesteps that until the net protocol files get their own
-        ;; pmode port.
+        ;; protected mode port.
         ;; ------------------------------------------------------------
 
         .net_mac:

@@ -6,95 +6,86 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
 
-### User programs
-- 2026-04-27: Port the self-hosted `asm` assembler to pmode.  The
-  symbol and jump tables move from a dedicated ES segment
-  (`SYMBOL_SEGMENT = 0x2000`, linear 0x20000) to a flat extended-memory
-  region at `SYMBOL_BASE = 0x300000`; flat 32-bit DS reaches
-  everywhere so far-memory accessors no longer need a segment
-  override.  Symbol values widen from 2 bytes to 4 bytes — necessary
-  for `%define JUMP_TABLE = SYMBOL_BASE + 0xF000` (= 0x30F000) to
-  round-trip cleanly — bumping `SYMBOL_ENTRY` 36 → 38 with the type
-  byte at offset +4 and scope byte at offset +5.  cc.py gains
-  `far_read32` / `far_write32` builtins for the wider load / store.
-  `mnemonic_table` widens to 8-byte entries (`dd name_ptr, dd
-  handler_ptr`) and the dispatcher scales the index by 8.  Several
-  encoding edges land in this PR for NASM byte-parity: `inc edi` /
-  `dec edi` emit the operand-size prefix; `cmp` / `sub` / `and` /
-  `push` shrink to the sign-extended imm8 form whenever the imm's
-  low 16 bits sign-extend cleanly from a byte (`cmp ax, 65535`,
-  `push 65535` etc.); `emit_dword` writes all four bytes (was
-  zero-filling the high half from the legacy 16-bit codegen);
-  `emit_modrm_disp` truncates disp to the addressing width before
-  the `disp == 0` check; `match_seg_ds_es` adds an identifier
-  boundary so `push esi` / `push edi` no longer match `es` / `ds`
-  greedily.  `asm` ships in `PROGRAMS` again — all 35 self-host
-  programs assemble byte-identical to NASM.
-- 2026-04-26: Port `edit` to pmode.  The gap buffer (1 MB) and kill
-  buffer (2.5 KB) move from real-mode addresses inside segment 0 to
-  extended memory above the 1 MB mark
-  (`EDIT_BUFFER_BASE` = 0x100000, `EDIT_KILL_BUFFER` = 0x200000) — clear
-  of the VGA/BIOS regions at 0xA0000-0xFFFFF.  Cursor /
-  view / dirty / kill / status state lifts to file-scope globals (BSS)
-  so cc.py doesn't auto-pin to registers that `buffer_character_at`
-  uses as scratch.  Disk read chunks at 32767 bytes per call —
-  `SYS_IO_READ` returns `AX` and the dispatcher sign-extends, so a
-  single read returning ≥ 32768 bytes looks like a negative error.
-  The render's EOF detection now compares `offset < buffer_length()`
-  rather than reading a sentinel from the helper (the previous
-  ``if (character < 0)`` mis-interpreted any UTF-8 high byte as EOF
-  because cc.py types the call result as a signed byte).  edit calls
-  `video_mode(vga_fd, VIDEO_MODE_TEXT_80x25)` at the top of every
-  render to clear the VGA framebuffer; without it, successive renders
-  layered text over the old contents (typing "hello" displayed as
-  "hhhhhello").  `archive/edit.asm` is retired — the 16-bit C build
-  can't represent a 256 KB buffer base, same precedent as
-  `archive/asm.asm`.
-
-### Drivers
-- Port `vga_set_mode` to pmode.  The framebuffer-clear path used a
-  real-mode segment-register load (`mov ax, VGA_SEG; mov es, ax`)
-  that #GP'd in pmode, and `mov si, table` references writing only
-  the low 16 of ESI corrupted any caller-saved high bits.  Widen
-  pushes/pops and table walks to E-regs and replace the ES reload
-  with flat 32-bit addressing (`mov edi, 0xB8000` for text mode,
-  `0xA0000` for mode 13h).  Unblocks shell's Ctrl+L handler (which
-  previously crashed with EXC0D = #GP) and any other program that
-  calls `video_mode(...)` to clear the screen.
-
-### Toolchain
-- cc.py's ``return`` from main now always emits ``jmp FUNCTION_EXIT``
-  by tracking ``current_is_main`` separately from ``elide_frame``.  A
-  local stack array forced ``elide_frame=False``, which previously
-  emitted ``mov esp, ebp; pop ebp; ret`` — broken in pmode because
-  ``program_enter`` ``jmp``s into the program rather than ``call``ing
-  it, so the stack has no return address.
-
 ### Boot
-- Flip into 32-bit flat ring-0 protected mode at the tail of `boot_shell`.  `src/arch/x86/kernel.asm` now `%include`s the three staged pmode modules — `boot/stage1_5.asm` (CR0.PE flip + GDT), `idt.asm` (32-bit exception handlers + INT 30h gate), and a new `src/arch/x86/entry.asm` whose `protected_mode_entry` is the 32-bit landing pad — and `boot_shell` finishes with `call idt_install` / `jmp enter_protected_mode` after the real-mode driver inits complete.  The post-flip path is a `cli/hlt` loop for now; the shell, `shell_reload`, and everything that used to run from `PROGRAM_BASE` are temporarily unreachable on this branch, and come back as subsequent PRs widen the driver inits + jump-table + shell into 32-bit code.  `DIRECTORY_SECTOR` bumps 34 → 35 to give stage 2 one more sector for the ~900 extra bytes of 32-bit code.  Verified via `qemu-system-i386 -d int,cpu_reset`: only the two normal BIOS resets fire — no CPU exceptions after the flip, no triple fault
-
-### Kernel
-- syscall: restore the user's `AL` before dispatching to per-syscall handlers.  `syscall_handler`'s `movzx eax, byte [esp + SYSCALL_SAVED_EAX + 1]` loaded `AH` (the syscall number) into `EAX` for the dispatch index, clobbering `AL` along the way.  Handlers documented as `AL = cmd/flags` (e.g. `.io_ioctl`, `.io_open`, `.fs_chmod`, `.net_open`) saw the syscall number instead of the user value, so `video_mode(03h)` from the shell's Ctrl+L handler arrived at `fd_ioctl_vga` with `AL = 0x12` (SYS_IO_IOCTL), missed every `cmp al, VGA_IOCTL_*`, and bailed to `.vga_bad`.  `open("/dev/vga", O_WRONLY)` was equally broken: `fd_open` stashed `AL = 0x13` (SYS_IO_OPEN) into `[fd_table+FLAGS]` instead of `0x01`, which only happened to clear `fd_ioctl_vga`'s O_WRONLY guard because both bytes have bit 0 set.  Stash the resolved handler address in `EBP` (saved by the `pushad`) and reload `AL` from `[esp + SYSCALL_SAVED_EAX]` before `jmp ebp`.
+- Port the kernel to flat 32-bit ring-0 protected mode.  The MBR keeps
+  its real-mode preamble through the disk read, BIOS font load, PIC
+  remap, A20, and 32-bit GDT load, then far-jumps into
+  `protected_mode_entry` and stays in protected mode.  The previous
+  `stage1.asm` / `stage1_5.asm` / `stage2.asm` / `kernel.asm` split
+  collapses into one flat-binary `src/arch/x86/boot/bboeos.asm` whose
+  [bits 16] MBR fronts a [bits 32] stage 2.  CPU exceptions vector
+  through `idt.asm`'s `exc_common` and print `EXCnn` on COM1.
+- Wire IRQ 0 (PIT @ 100 Hz) and IRQ 6 (FDC) handlers into the
+  protected-mode IDT in `entry.asm`; the BIOS IVT-based handlers retire.
+- `program_enter` resets fds, zeros the program's BSS region, snapshots
+  ESP, and `jmp PROGRAM_BASE`.  `sys_exit` from any program restores
+  ESP and re-enters `shell_reload`.
 
 ### Drivers
-- vga: fix `vga_clear_screen` to use `ECX` for the `rep stosw` count.  The pmode port left `mov cx, VGA_COLS * VGA_ROWS` in place, but `rep stosw` consumes `ECX` under `[bits 32]` — so any user pre-syscall ECX with non-zero high bits would walk the framebuffer way past 4000 bytes.  Latent today (kernel-internal callers happened to leave `ECX_high == 0`), but observable as soon as the shell's Ctrl+L path stops bailing early in `fd_ioctl_vga`.  Same fix on the surrounding `push cx`/`pop cx`.
-- vga: switch `fd_ioctl_vga`'s O_WRONLY guard from `[si+FD_OFFSET_FLAGS]` to `[esi+FD_OFFSET_FLAGS]`.  `fd_lookup` returns a flat 32-bit pointer in `ESI`; the 16-bit form in pmode silently masked the high half and only worked because the kernel currently sits below `0x10000`.
-- vga: only reprogram VGA registers when the requested mode actually differs from the active one.  `fd_ioctl_vga`'s `.vga_mode` was unconditionally calling `vga_set_mode`, so every shell Ctrl+L flipped SR03 from BIOS-default `00h` to our table value `05h` (Character Map Select → font at plane 2 offset 0x4000) — which works only as long as `vga_font_load` populated 0x4000 correctly, and wastes the framebuffer-zeroing path on a no-op transition.  Track the current mode in a new `vga_current_mode` byte (initialised to 03h since the BIOS leaves us in text mode); same-mode requests now skip `vga_set_mode` and just call `vga_clear_screen` for text mode.  Real transitions (text → 13h via `draw`, 13h → text on quit) still reprogram everything and update the tracker.
+- Port ATA, FDC, NE2000, PS/2, RTC, and VGA to flat 32-bit addressing.
+  Segment register loads removed; framebuffer / device-buffer writes
+  use linear addresses (`0xB8000` for VGA text, `0xA0000` for mode 13h).
+- Restore the boot-time `vga_font_load` that copies the BIOS ROM 8x16
+  font into char-gen plane 2 offset 0x4000 — required for
+  `vga_set_mode(VIDEO_MODE_TEXT_80x25)` to render glyphs (mode 03h's
+  SR03=0x05 selects that slot).  Lives in
+  `src/arch/x86/boot/vga_font.asm`, included in the MBR's [bits 16]
+  region so it runs while INT 10h is still mapped.
+- Drop the dead `rtc_tick_init` / `rtc_tick_irq0` from `drivers/rtc.asm`
+  — the IVT-based PIT handler was orphaned by the protected-mode port
+  (`protected_mode_entry` does the equivalent setup against the
+  protected-mode IDT).
+- Extract the COM1 driver from `ansi.asm` and `entry.asm` into
+  `drivers/serial.asm`; rename `drivers/ansi.asm` to
+  `drivers/console.asm`.
+
+### Filesystem
+- Port block I/O, VFS, bbfs, and ext2 to flat 32-bit addressing.
+
+### Syscalls
+- 32-bit INT 30h dispatcher.  Handlers receive args in E-regs with the
+  same semantic shape as the 16-bit ABI (BX=fd, ESI/EDI=buffer,
+  ECX=count, AL=flags).  Saved-EFLAGS CF propagates to the user via
+  the iretd frame.
+- Widen `io_read` / `io_write` to return full 32-bit byte counts so
+  e.g. `edit` can read its 1 MB gap buffer in one call.
 
 ### Programs
-- edit: initialize `status_message` to `NULL`.  The variable was declared but never assigned before the first render, so its stack slot held whatever bytes `read()` left behind when an existing file was opened.  The status-bar branch `status_message != NULL` would then take the truthy path and `printf("%s", status_message)` would dump from a random address — visible as a row of high-bit garbage at the bottom of the screen and embedded control bytes (form feed, ESC) that scrolled the rendered file content off.  When the file did not exist, the `read()` codepath was skipped, the slot stayed zero, and the status bar rendered correctly — masking the bug for new files.
+- Port the self-hosted `asm` assembler to protected mode.  The symbol
+  and jump tables move from a dedicated ES segment to flat extended
+  memory at `SYMBOL_BASE = 0x300000`; flat 32-bit DS reaches everywhere
+  so far-memory accessors no longer need a segment override.  Symbol
+  values widen to 4 bytes for `JUMP_TABLE = 0x30F000` to round-trip
+  cleanly.  All 35 self-host programs assemble byte-identical to NASM.
+- Port `edit` to protected mode.  The 1 MB gap buffer and 2.5 KB kill
+  buffer move from segment 0 to extended memory above the 1 MB mark
+  (`EDIT_BUFFER_BASE` = 0x100000, `EDIT_KILL_BUFFER` = 0x200000).
+  `archive/edit.asm` retired — the 16-bit C build can't represent a
+  256 KB buffer base.
+- Port `draw` and `vga_fill_block` to protected mode.  Drop the ES
+  reload (real-mode segment 0xA000 #GPs in protected mode), widen DI
+  to EDI, fold the framebuffer base 0xA0000 into the offset.
 
-### Tooling
-- cc.py: parse `&array[i]` as `array + i` so the existing typed-pointer-arithmetic codegen handles the stride.  No new IR / codegen path; the parser desugars `&IDENT[expr]` into a `BinaryOperation(Var(IDENT), '+', expr)` before the pointer-scaling pipeline sees it.
-- cc.py: add `MemberIndex` AST node + parser + codegen for `ptr->array_field[index]` indexed reads, plus `ptr->array_field` (no index) returning the field's address (standard C array-to-pointer decay).  Struct layouts now track `(offset, total_size, element_size)` per field; element access uses the element width and constant-fold-vs-scaled-load split that mirrors cc.py's existing array-base-index codegen.  Four new test cases in `tests/test_kernel_cc.py` cover constant-offset address-of, byte-load (constant index), array-decay-to-address (no index), and variable-index byte-load.
-- cc.py: fix `return` from `main` when `main` has a local stack array.  Previously the array forced `elide_frame=False`, and `generate_return` keyed on `elide_frame` as its "is main" check, so `return` emitted `mov sp, bp; pop bp; ret` instead of `jmp FUNCTION_EXIT`.  Since the kernel jumps to `PROGRAM_BASE` directly (no caller pushed a return address), the `ret` popped a garbage word and the program hung instead of reloading the shell — visible as `edit` never returning to `$ ` after Ctrl+Q (with or without a preceding Ctrl+S).  Tracked separately as `current_function_is_main`; `generate_return` now keys on it.
-- cc.py: add `inb` / `outb` / `inw` / `outw` builtins gated on `--target kernel`.  Each call site emits 2-3 instructions (`mov dx, <port>` + `in al, dx; xor ah, ah` for byte reads, `in ax, dx` for word, `out dx, al`/`out dx, ax` for writes); constant-value `outb` / `outw` skip the AX push/pop guard.  Calls in `--target user` raise CompileError ("inb() is kernel-only; not available in --target user") at parse time, so userspace ring 3 (post-pmode) cannot accidentally try a #GP-triggering IN/OUT.  Names match Linux's `<asm/io.h>` convention.  Nine new test cases in `tests/test_kernel_cc.py` cover each shape (byte/word, constant/variable value, kernel-emit/user-reject).
-- cc.py: add `__attribute__((naked))` (matches gcc's semantics) — the function emits no prologue / epilogue, `in_register` parameters are pinned to their register (no stack slot, no spill), and the body must not declare locals or take stack-passed parameters.  Pairs with a new tail-call-through-if/else detector: when a function body's last statement is an `if/else` whose two branches both end in tail-call-eligible `Call`s, both calls become `jmp` (no `ret` after the structure).  Naked functions are also kept on the AST codegen path (excluded from the IR pipeline that doesn't yet apply tail-call optimization).  `_is_tail_call_eligible` was tightened along the way: callees with `in_register` / `out_register` parameters are no longer treated as having stack args, so they qualify for the existing tail-call autodetect too.  Six new tests in `tests/test_kernel_cc.py` cover the no-prologue / no-spill / single-call tail-jmp / if-else dispatch / stack-param rejection / locals rejection paths.  Useful for thin register-preserving dispatchers like `read_sector` / `write_sector`.
-- cc.py: emit unsigned conditional jumps (`jb` / `jae` / `jbe` / `ja`) when a comparison has at least one unsigned operand (`uint8_t` / `uint16_t` / `uint32_t` / `unsigned long`, plus pointers).  Previously every comparison used the signed mnemonic family (`jl` / `jge` / `jle` / `jg`), so `uint8_t boot_disk; if (boot_disk < 0x80)` routed values 0x80–0xFF (signed-negative as bytes) the wrong way — long-noted in CLAUDE.md as a hand-correction for the user.  Operand walking covers `Var` / `Index` / `BinaryOperation` / `AddressOf` (recursive on the binary case); struct member access and call-result types fall back to signed (extend on demand).  `emit_condition` now returns `(operator, unsigned)`; the three callers (`emit_condition_false_jump`, `emit_condition_true_jump`, the booleanized-comparison expression path) pick the right table.  No test asserts on specific signed mnemonics, so existing tests stay green.  Three new test cases in `tests/test_kernel_cc.py` cover: `uint8_t < 0x80` emits `jb` (and never `jge`), `int < literal` keeps `jge` (signed regression guard), and the full `read_sector` shape (uint8_t global + `<` + naked + tail dispatch) collapses to a 3-instruction `cmp / jb / jmp` dispatcher matching the original asm.
-- cc.py: parse double-pointer types (`uint8_t**` / `int**` / `char**` / `uint16_t**` / `uint32_t**`) as parameters and locals.  Previously `parse_type` accepted at most a single `*`, so `void f(uint8_t **argv)` raised "expected IDENT, got STAR".  The parser now factors the trailing-star count into a `_parse_pointer_suffix(base, max_stars=N)` helper (also reused by the struct-pointer case) and a small `pointer_bases` dispatch table; each branch consumes up to two `*` tokens.  `target.type_sizes` is now a base-types-only dict — a new `target.type_size(name, *, default=None)` method returns the target's pointer width (`int_size`) for any name containing `*`, removing the per-pointer-type entries that previously had to be enumerated.  Indexed reads/writes (`argv[i]`) automatically get word-sized stride because `T**` doesn't appear in `BYTE_SCALAR_TYPES`.  Five new tests in `tests/test_kernel_cc.py` cover each base type plus the full `shared_parse_argv` shape (uint8_t** + in_register/out_register + uint8_t* alias of EXEC_ARG).  Note: cc.py still doesn't have `*ptr` as an expression form (only `*ptr = x` as a statement), so callers must use `ptr[0]` for byte reads — orthogonal limitation.
-- cc.py: tighten codegen with four new peephole passes — meaningful cleanup of the IR-lowered output that used to materialise every intermediate to a stack slot.  (1) `peephole_dead_temp_slots` walks the function body and drops `mov [bp-N], reg` writes whose slot is never subsequently read; positive offsets (`[bp+N]` parameter slots) are left alone.  Read detection covers compound forms (`[bp-N+1]` / `[bp-N+si]` / `[bp-N-2]`) so partial-byte reads of a word slot don't get dropped — without this, `ping` lost the high-byte read of its RTC millisecond word and started timing out instead of replying.  (2) `peephole_register_arithmetic` extends to handle the unary `inc` / `dec` forms in addition to `add` / `sub` / `and` / `or` / `xor`, so `mov ax, dx ; inc ax ; mov dx, ax` collapses to `inc dx`.  Same pass also relaxes the "target appears in source" guard — when the source is the same register as the target, the rewritten `mov reg, reg` is just a self-move.  (3) `peephole_self_move` drops `mov X, X` no-ops produced by the relaxed (2).  (4) `peephole_redundant_register_swap` drops the second mov in `mov A, B ; mov B, A` (A still holds B); the canonical case is the out_register epilogue (`*argc = count` with count pinned to CX and argc having `out_register("cx")` emits `mov ax, cx ; mov cx, ax`, the second being redundant).  Net effect on `shared_parse_argv` (the parse-argv tokenizer in lib/proc.c): ~80 instructions → 59 (~25% smaller); the user-program corpus shrinks by 81 bytes for `dns`, 81 for `ping`, 22 for `shell`, etc.  Six new tests in `tests/test_kernel_cc.py` cover each peephole independently via a `_peephole_run` helper that drives the `Peepholer` class on synthetic input; `tests/test_archive.py` and `tests/test_programs.py` (all 27 program runtime tests) confirm the size shifts and behaviour.
-- cc.py: add `kernel_insw` / `kernel_outsw` builtins gated on `--target kernel`, and rename the existing `inb` / `inw` / `outb` / `outw` to `kernel_inb` / `kernel_inw` / `kernel_outb` / `kernel_outw` so the privileged port-I/O family wears its kernel-only nature in the call-site name.  Each call site emits `mov dx, <port>; mov di/si, <buffer>; mov cx, <count>; cld; rep insw/outsw` for the new pair — same shape as `memcpy` but using the string-I/O instructions.  Completes the family so block-mode device transfers (ATA sector I/O, NE2K frame buffers) can drop their last bit of inline asm.  Works equivalently in `--bits 16` and `--bits 32` because cc.py's `target.<reg>_register` resolves to the right width and BBoeOS's flat pmode neutralises the implicit `ES:EDI` / `DS:ESI` segmentation.  Calls in `--target user` raise CompileError ("kernel_insw() is kernel-only; not available in --target user") at parse time — userspace ring 3 cannot execute IN/OUT under the planned CPL/IOPL configuration.  Four new test cases in `tests/test_kernel_cc.py` cover the rep-insw / rep-outsw emit shape and both user-mode rejections; existing inb/inw/outb/outw tests updated to the new names.
-- cc.py: gate `peephole_register_arithmetic` on AX-deadness — the transform `mov ax, X ; <op> ax, Y ; mov reg, ax` → `mov reg, X ; <op> reg, Y` leaves AX holding its pre-sequence value (the original ended with AX = result), so a following ``cmp ax, ...`` or other AX read would see stale data.  cc.py occasionally emits exactly that shape (e.g., `min(512 - byte_offset, left)` in `fd_read_file` pipes the result both into a pinned register AND through AX for the cmp).  Without the guard, dead-temp-slot removal exposed the latent unsoundness — `cp` of `src/asm.c` (the >64KB self-host-assembler source) wrote 166 extra bytes into the destination because the read-loop bound came out wrong.  New `_reads_acc(line)` helper recognises full-width AX writers (`mov ax, ...` / `xor ax, ax` / `pop ax` / `movzx ax, ...`) and refuses the transform on anything else that mentions ``ax`` / ``al`` / ``ah`` in a non-destination position.  Two new regression tests in `tests/test_kernel_cc.py` cover the skip-when-AX-read-after and fire-when-AX-overwritten-after paths.  `shell` grew by 2 bytes as a side effect of the safer transform; the rest of the user-program corpus is unchanged.
+### Toolchain
+- cc.py gains a `--bits 32` target backing the protected-mode port,
+  along with a tide of orthogonal improvements: kernel-only port-I/O
+  builtins (`kernel_inb` / `kernel_outb` / `kernel_inw` / `kernel_outw`
+  / `kernel_insw` / `kernel_outsw`), `__attribute__((naked))` with
+  if/else tail-call dispatch, double-pointer types, unsigned
+  conditional jumps where comparisons have unsigned operands,
+  `&array[i]` parse desugaring, `MemberIndex` AST node for
+  `ptr->array[i]` reads, `far_read32` / `far_write32` for the wider
+  symbol-table accessors, and four new peephole passes
+  (`peephole_dead_temp_slots`, `peephole_register_arithmetic`,
+  `peephole_self_move`, `peephole_redundant_register_swap`) that
+  collectively shrink the user-program corpus by ~80 bytes per program.
+- Fix `return` from `main` when `main` has a local stack array — now
+  always emits `jmp FUNCTION_EXIT` regardless of `elide_frame`.
+
+### Tests
+- Add `tests/test_draw.py` covering draw + post-exit font restoration.
+- Restore the full CI matrix (`test_archive`, `test_asm`,
+  `test_bboefs`, `test_cc`, `test_draw`, `test_ext2`, `test_programs`).
 
 ## [0.7.0](https://github.com/bboe/BBoeOS/compare/0.6.0...0.7.0) (2026-04-23)
 
@@ -104,15 +95,15 @@ at the time.
 - `sys_exit` no longer re-prints the welcome banner on every shell reload.  Split `boot_shell` so `kernel_init`, `WELCOME`, and the one-time driver inits (`vga_font_load`, `ps2_init`, `fdc_init`, `vfs_init`) stay in the boot path, and a new `shell_reload` entry handles just `fd_init` plus the shell VFS load.  `sys_exit` now `jmp shell_reload` instead of `jmp boot_shell`.
 
 ### Tree layout
-- Reorganize `src/kernel/` into Linux-style subtrees.  Only genuinely x86/PC-specific code lives under `src/arch/x86/`: `boot/` (bootloader: `bboeos.asm`, `stage1.asm`, `stage1_5.asm` — the pmode switch, née `pmode.asm`; `stage2.asm`), `idt.asm`, `pic.asm`, `syscall.asm` (INT 30h dispatcher), `system.asm` (8042 reboot + ACPI shutdown), and a new `kernel.asm` aggregator.  Hardware drivers lift to `src/drivers/` (`ata.asm`, `fdc.asm`, `ps2.asm`, `rtc.asm`, `vga.asm`, plus the NE2000 NIC moved out of `net/`, and `ansi.asm` as the console driver delegating to vga).  Filesystem code consolidates under `src/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`, `block.asm` block dispatcher, `vfs.asm`).  Network stack in `src/net/` keeps the protocol layer only (`arp.asm`, `icmp.asm`, `ip.asm`, `udp.asm`).  Shared utilities in `src/lib/`, syscall handlers in `src/syscall/`.  `make_os.sh` adds `-i src/` so `%include "drivers/ata.asm"` / `"fs/fd.asm"` / `"net/net.asm"` / … resolve at the top level.  `src/arch/x86/boot/stage2.asm` no longer `%include`s the kernel itself — it contains only the boot handoff (jump table, `boot_shell`, `bss_setup`).  `bboeos.asm` now composes the flat binary as `stage1 + stage2 + kernel.asm`, where `kernel.asm` is the new aggregator that lists every subsystem in one place.  Motivation: the pmode port is about to land on a dedicated `protectedmode` branch cut from `main`; the subtree is its natural home, and the boot / kernel split keeps `stage2.asm` focused on the boot-to-shell handoff instead of doubling as a kernel catalog.  `tests/test_pmode.sh` and `tests/test_idt.sh` both run green again (they had broken on the earlier `arch/` sub-move)
+- Reorganize `src/kernel/` into Linux-style subtrees.  Only genuinely x86/PC-specific code lives under `src/arch/x86/`: `boot/` (bootloader: `bboeos.asm`, `stage1.asm`, `stage1_5.asm` — the protected mode switch, née `protected mode.asm`; `stage2.asm`), `idt.asm`, `pic.asm`, `syscall.asm` (INT 30h dispatcher), `system.asm` (8042 reboot + ACPI shutdown), and a new `kernel.asm` aggregator.  Hardware drivers lift to `src/drivers/` (`ata.asm`, `fdc.asm`, `ps2.asm`, `rtc.asm`, `vga.asm`, plus the NE2000 NIC moved out of `net/`, and `ansi.asm` as the console driver delegating to vga).  Filesystem code consolidates under `src/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`, `block.asm` block dispatcher, `vfs.asm`).  Network stack in `src/net/` keeps the protocol layer only (`arp.asm`, `icmp.asm`, `ip.asm`, `udp.asm`).  Shared utilities in `src/lib/`, syscall handlers in `src/syscall/`.  `make_os.sh` adds `-i src/` so `%include "drivers/ata.asm"` / `"fs/fd.asm"` / `"net/net.asm"` / … resolve at the top level.  `src/arch/x86/boot/stage2.asm` no longer `%include`s the kernel itself — it contains only the boot handoff (jump table, `boot_shell`, `bss_setup`).  `bboeos.asm` now composes the flat binary as `stage1 + stage2 + kernel.asm`, where `kernel.asm` is the new aggregator that lists every subsystem in one place.  Motivation: the protected mode port is about to land on a dedicated `protectedmode` branch cut from `main`; the subtree is its natural home, and the boot / kernel split keeps `stage2.asm` focused on the boot-to-shell handoff instead of doubling as a kernel catalog.  `tests/test_pmode.sh` and `tests/test_idt.sh` both run green again (they had broken on the earlier `arch/` sub-move)
 
 ### Kernel
-- New `pic.asm` / `pic_remap`: reprograms both 8259s so master IRQ 0-7 vector to 0x20-0x27 and slave IRQ 8-15 to 0x28-0x2F, leaving every line masked.  Called from `stage1.asm` right before `rtc_tick_init`, i.e. after the last BIOS INT 13h read but before any IRQ handler installs.  `rtc_tick_init` moves its IVT slot from 8*4 to 0x20*4 and now unmasks IRQ 0 at the master PIC itself (pic_remap leaves it masked); `fdc_install_irq` moves from 0Eh*4 to 26h*4.  Prerequisite for the upcoming pmode flip — CPU exceptions 0-31 overlap the legacy BIOS PIC vectors, so IRQ 0 under BIOS defaults would alias onto the double-fault vector and IRQ 5 onto #GP
+- New `pic.asm` / `pic_remap`: reprograms both 8259s so master IRQ 0-7 vector to 0x20-0x27 and slave IRQ 8-15 to 0x28-0x2F, leaving every line masked.  Called from `stage1.asm` right before `rtc_tick_init`, i.e. after the last BIOS INT 13h read but before any IRQ handler installs.  `rtc_tick_init` moves its IVT slot from 8*4 to 0x20*4 and now unmasks IRQ 0 at the master PIC itself (pic_remap leaves it masked); `fdc_install_irq` moves from 0Eh*4 to 26h*4.  Prerequisite for the upcoming protected mode flip — CPU exceptions 0-31 overlap the legacy BIOS PIC vectors, so IRQ 0 under BIOS defaults would alias onto the double-fault vector and IRQ 5 onto #GP
 - `rtc_tick_init` reprograms the PIT from the BIOS default ~18.2 Hz to 100 Hz (10 ms/tick), giving `rtc_sleep_ms` 10 ms granularity (was 55 ms) and `uptime` sub-second precision underneath the `HH:MM:SS` display.  `TICKS_PER_SECOND` becomes 100; `rtc_sleep_ms` rounds to whole 10 ms ticks
 - `fd_read_console`: `sti` at the top of the idle polling loop so PIT IRQ 0 can advance `system_ticks` while the shell is waiting for input.  Prior behaviour held IF=0 for the entire wait (syscalls enter with IF=0 and nothing re-enabled it), which silently starved the tick counter and kept `uptime` pinned at `00:00:00`
 - New `SYS_RTC_MILLIS` (31h) returns `DX:AX` = milliseconds since boot, derived from `system_ticks × MS_PER_TICK` so the ms count is exact.  Existing `SYS_RTC_SLEEP` / `SYS_RTC_UPTIME` shift up to 32h / 33h to keep the group alphabetical.  cc.py's `ticks()` builtin (which emitted `int 1Ah`, dead since `rtc_tick_init` replaced the BIOS IRQ 0 handler) is replaced by `uptime_ms()` — full 32-bit `DX:AX` return when the caller assigns to `unsigned long`, low 16 bits when assigned to `int`.  `ping` prints `time=N ms` accordingly
-- Extract `kernel_init` out of `boot_shell` into a new `src/arch/x86/init.asm`: single-entry routine running `pic_remap` / `rtc_tick_init` / `install_syscalls` / `network_initialize`.  Motivation is pmode prep — once the flip lands, `rtc_tick_init` / `install_syscalls` become IDT-dependent and either move post-flip or gain 32-bit variants; encapsulating the sequence means that refactor edits `init.asm`, not `stage2.asm`.
-- Rename `src/arch/x86/pmode.asm` → `src/arch/x86/boot/stage1_5.asm` and colocate it under `boot/`.  The file is already the stage-1.5 of the boot flow (16→32-bit mode switch between the MBR and the pmode kernel), so give it the positional name.  `tests/pmode_test.asm` and `tests/idt_test.asm` `%include` paths and their shell wrappers' `nasm -i` search paths follow.
+- Extract `kernel_init` out of `boot_shell` into a new `src/arch/x86/init.asm`: single-entry routine running `pic_remap` / `rtc_tick_init` / `install_syscalls` / `network_initialize`.  Motivation is protected mode prep — once the flip lands, `rtc_tick_init` / `install_syscalls` become IDT-dependent and either move post-flip or gain 32-bit variants; encapsulating the sequence means that refactor edits `init.asm`, not `stage2.asm`.
+- Rename `src/arch/x86/protected mode.asm` → `src/arch/x86/boot/stage1_5.asm` and colocate it under `boot/`.  The file is already the stage-1.5 of the boot flow (16→32-bit mode switch between the MBR and the protected mode kernel), so give it the positional name.  `tests/pmode_test.asm` and `tests/idt_test.asm` `%include` paths and their shell wrappers' `nasm -i` search paths follow.
 
 ### Drivers
 - New native VGA mode-set driver (`vga_set_mode`) replaces the last INT 10h in stage 2 (the former `SYS_VIDEO_MODE`).  Table-driven register writer covering modes 03h (80x25 text) and 13h (320x200 256-colour): programs Misc Output, Sequencer 1-4, CRTC 0-18h, GC 0-8, and AC 0-14h in the standard unlock / reset / re-enable sequence.  New `vga_fill_block` writes an 8x8 tile into the mode-13h framebuffer at A000h:0 at a grid position with a palette-index colour.  `draw.c` rewritten to use mode 13h with real pixel tiles: 40x25 grid, WASD navigation, J/K palette cycle across 16 standard VGA colours, Q to quit back to text mode.
@@ -153,7 +144,7 @@ at the time.
 - Self-hosted assembler: `%macro` / `%endmacro` support.  Single-parameter-token macros shaped to match `idt.asm`'s needs: `macro_names[]` / `macro_argcounts[]` / `macro_body_starts[]` / `macro_body_lengths[]` / `macro_body_buffer[]` hold the table; `macro_args_text[]` / `macro_arg_starts[9]` are per-invocation scratch.  `define_macro` (from `parse_directive`'s `%macro` branch) slurps lines into the body buffer until `%endmacro`; `find_macro` linear-scans the name table at `parse_mnemonic`'s top; `expand_macro` substitutes `%1..%9` into `line_buffer` and re-runs `parse_line` on each expanded line, so labels (`exc_%1:`) and directives (`dw`, `db`) work without special handling.  `static/macro_sm.asm` smoke-tests an `IDT_ENTRY` data macro and an `EXC_NOERR` label-defining / push / jump macro.
 - Self-hosted assembler: add `in al, dx` / `in ax, dx` / `out dx, al` / `out dx, ax` (opcodes EC/ED/EE/EF).  Each handler validates that one operand is DX and the other is AL/AX, then the data-register size picks between byte and word encodings.  Needed so the self-hosted assembler can reassemble programs that talk directly to ports (e.g. `draw.c`'s DAC writes to 3C8h/3C9h).
 - Self-hosted assembler: add `lea` and fix the alu-binop `[reg+disp]` encoding.
-- Self-hosted assembler (`src/c/asm.c`): protected-mode extension (phase 5).  `parse_register` accepts the `e`-prefixed 32-bit general register file (eax / ecx / edx / ebx / esp / ebp / esi / edi); a dedicated `parse_creg` handles cr0..cr7; `emit_sized` prepends the 0x66 operand-size prefix for 32-bit widths; new `emit_dword` emits little-endian imm32 / disp32.  `handle_mov` gains `mov crN, r32` / `mov r32, crN` (0F 22 /r, 0F 20 /r) and `mov r32, imm32` with the 0x66 prefix; `emit_alu_reg_imm` extends to 32-bit operand size for the `or eax, 1` style encodings.  New `handle_lgdt` / `handle_lidt` (0F 01 /2, /3) and `jmp dword SEL:OFS` (0x66 0xEA ptr16:32) round out the pmode bootstrap encodings.  `static/pmode_sm.asm` exercises the full set against NASM; byte-identical on the self-host test
+- Self-hosted assembler (`src/c/asm.c`): protected-mode extension (phase 5).  `parse_register` accepts the `e`-prefixed 32-bit general register file (eax / ecx / edx / ebx / esp / ebp / esi / edi); a dedicated `parse_creg` handles cr0..cr7; `emit_sized` prepends the 0x66 operand-size prefix for 32-bit widths; new `emit_dword` emits little-endian imm32 / disp32.  `handle_mov` gains `mov crN, r32` / `mov r32, crN` (0F 22 /r, 0F 20 /r) and `mov r32, imm32` with the 0x66 prefix; `emit_alu_reg_imm` extends to 32-bit operand size for the `or eax, 1` style encodings.  New `handle_lgdt` / `handle_lidt` (0F 01 /2, /3) and `jmp dword SEL:OFS` (0x66 0xEA ptr16:32) round out the protected mode bootstrap encodings.  `static/pmode_sm.asm` exercises the full set against NASM; byte-identical on the self-host test
 - Self-hosted assembler phase 5.4: `push [word|dword] imm` is bits-aware.  Optional `word` / `dword` size token overrides `default_bits`; the imm tail widens to imm32 when the push is 32-bit.  `0x6A ib` short form still applies whenever the value fits ±128, independent of push width; only the 0x66 operand-size prefix reflects the push size.
 - Self-hosted assembler phase 5.5: `mov` and `lgdt` / `lidt` direct-memory encodings are now bits-aware.  ModR/M `rm` flips 110 ↔ 101 for mod=00, and the displacement widens 16 ↔ 32.  Refactor `emit_modrm_direct` to pick both off `default_bits`; add `emit_address_disp` for the accumulator-direct `moffs` short form (A0/A1/A2/A3).  Adds the missing 0x66 operand-size prefix on the accumulator-short form so `mov eax, [foo]` under bits=16 emits `66 A1 disp16` instead of the old `A1 disp16`.
 - Self-hosted assembler phase 5.6: 32-bit addressing — `[eax]..[edi]` base registers (with ESP's mandatory SIB byte and EBP's disp8=0 quirk for mod=00), plus the 0x67 address-size prefix when the address size disagrees with `default_bits`.  New state `parse_operand_address_size` set by `parse_operand`; new helpers `emit_address_size_prefix` / `emit_sized_mem` / `emit_indexed_mem`.  Ten call sites across `emit_alu_binop` / `handle_call` / `handle_cmp` / `handle_mov` / `handle_movzx` / `handle_test` / `inc_dec_handler` / `handle_lgdt` / `handle_lidt` route through them.  `parse_operand` learns the `dword` size prefix alongside `byte` / `word` for shapes like `cmp dword [reg], imm` and `inc dword [reg]`; `emit_sized_imm` widens to imm32 when requested.

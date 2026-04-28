@@ -7,13 +7,13 @@
 ;;; exception number, and jumps to exc_common which prints "EXCnn\r\n" to
 ;;; COM1 and halts.  No recovery — a panic is a panic.
 ;;;
-;;; The IDTR is loaded via `lidt [idtr]` in bboeos.asm before the pmode
+;;; The IDTR is loaded via `lidt [idtr]` in bboeos.asm before the protected mode
 ;;; switch; any fault from that point vectors through our stubs.  PIC remap
-;;; is orthogonal (belongs with the pmode switch itself); this module does
+;;; is orthogonal (belongs with the protected mode switch itself); this module does
 ;;; not touch the PICs.
 ;;; ------------------------------------------------------------------------
 
-        IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (pmode GDT[1])
+        IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (protected mode GDT[1])
         IDT_FLAGS_INT32         equ 8Eh          ; P=1 DPL=0 type=0xE
         LSR_THRE                equ 20h
 

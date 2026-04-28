@@ -1,6 +1,6 @@
 # BBoeOS
 
-A minimal x86 operating system with a two-stage bootloader, shell, filesystem, networking stack, self-hosted assembler, and C compiler — all running in 16-bit real mode on a floppy disk.
+A minimal x86 operating system with a single-file bootloader-plus-kernel, shell, filesystem, networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit ring-0 protected mode, and runs the shell and user programs from there.
 
 ## Dependencies
 
@@ -34,19 +34,22 @@ A minimal x86 operating system with a two-stage bootloader, shell, filesystem, n
 ## File Structure
 
 ```
-src/include/          Shared includes
-  constants.asm       Shared constants (memory addresses, filesystem params)
-src/kernel/           Kernel assembly source
-  ansi.asm            ANSI escape sequence parser, serial output
-  bboeos.asm          Stage 1 boot code, shell loader, shared functions
-  fd.asm              File descriptor table management (open, read, write, close)
-  io.asm              Filesystem I/O (find_file, read_sector), visual_bell
-  net.asm             NE2000 NIC driver: ARP, IP, ICMP, UDP
-  syscall.asm         INT 30h syscall handler
-  system.asm          Graphics mode, reboot, shutdown
-src/asm/              User-space programs (assembly sources)
+src/arch/x86/         Architecture-specific code
+  boot/bboeos.asm     Single flat-binary kernel: MBR + stage 2 in one file
+  boot/vga_font.asm   Boot-time BIOS ROM font copy into char-gen slot 0x4000
+  entry.asm           protected_mode_entry, IRQ 0 / IRQ 6 handlers, shell respawn
+  idt.asm             32-bit IDT, exception stubs, INT 30h gate
+  syscall.asm         INT 30h dispatch table
+  system.asm          reboot (8042), shutdown (APM / QEMU / Bochs)
+src/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
+src/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
+src/include/          Shared constants and helper includes
+src/lib/              shared_print_*, shared_die / shared_exit / shared_parse_argv
+src/net/              ARP, IP, ICMP, UDP
+src/syscall/          per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
 src/c/                User-space programs (C sources, compiled by cc.py)
 add_file.py           Host-side script to add files to drive image
+cc.py                 Host-side C subset compiler
 make_os.sh            Build script
 ```
 

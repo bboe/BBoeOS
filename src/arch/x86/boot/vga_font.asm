@@ -2,7 +2,7 @@
 ;;; vga_font.asm — boot-time VGA font loader (real mode only).
 ;;;
 ;;; Copies the BIOS ROM 8x16 font into char-gen at plane 2 offset 0x4000
-;;; before the pmode flip.  The mode-03h table in drivers/vga.asm sets
+;;; before the protected mode flip.  The mode-03h table in drivers/vga.asm sets
 ;;; SR03=05h, which selects this slot for both character maps; without
 ;;; this loader, switching back to text mode after a graphics mode (e.g.
 ;;; via `draw`) leaves the character generator pointed at empty VRAM and

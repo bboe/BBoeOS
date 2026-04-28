@@ -29,7 +29,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Curated list of pmode-ready user programs.  arp / dns / netinit /
+# Curated list of protected mode-ready user programs.  arp / dns / netinit /
 # netrecv / netsend / ping stay out of the list until ne2k.asm and
 # net/*.asm get ported to 32-bit and `network_initialize` runs from
 # `protected_mode_entry`.

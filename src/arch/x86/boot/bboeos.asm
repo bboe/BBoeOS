@@ -6,8 +6,9 @@
 ;;;   [0x7E00] GDT + kernel binary — 32-bit flat descriptor tables then code
 ;;;
 ;;; MBR execution order:
-;;;   start: setup → disk read → pic_remap → lidt → A20 → lgdt → CR0.PE flip
-;;;   → far-jmp to `protected_mode_entry` in entry.asm.
+;;;   start: setup → disk read → vga_font_load (BIOS ROM font copy into
+;;;   char-gen plane 2 offset 0x4000) → pic_remap → lidt → A20 → lgdt
+;;;   → CR0.PE flip → far-jmp to `protected_mode_entry` in entry.asm.
 ;;;
 ;;; On disk error we print a single '!' via INT 10h AH=0Eh and halt.
 ;;;
@@ -74,7 +75,7 @@ start:
 
         ;; Copy the BIOS ROM 8x16 font into char-gen plane 2 offset 0x4000
         ;; (slot the mode-03h table's SR03=05h points at) before BIOS goes
-        ;; away with the pmode flip.  Without this, switching back to text
+        ;; away with the protected mode flip.  Without this, switching back to text
         ;; mode after running a graphics program (e.g. draw) leaves the
         ;; character generator pointed at empty VRAM and the screen
         ;; renders as blank glyphs.  vga_font_load lives in the [bits 16]
@@ -82,7 +83,7 @@ start:
         call vga_font_load
 
         ;; Remap 8259A master/slave vectors to 0x20..0x27 / 0x28..0x2F.
-        ;; Required before the pmode flip: CPU exceptions 0-31 occupy
+        ;; Required before the protected mode flip: CPU exceptions 0-31 occupy
         ;; 0x08-0x1F, aliasing IRQ 0 onto double-fault and IRQ 5 onto #GP
         ;; under the BIOS default layout.  Leaves all IRQ lines masked.
 

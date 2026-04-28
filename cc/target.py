@@ -27,7 +27,7 @@ EREG_LOW_WORD: dict[str, str] = {
 #: Inverse of :data:`EREG_LOW_WORD`: widen a 16-bit GP name to its
 #: 32-bit E-register.  Used by :meth:`X86CodegenTarget32.widen_gp` to
 #: promote user-supplied ``asm_register("si")`` aliases and other
-#: stored 16-bit names when the target is 32-bit flat pmode.
+#: stored 16-bit names when the target is 32-bit flat protected mode.
 LOW_WORD_EREG: dict[str, str] = {v: k for k, v in EREG_LOW_WORD.items()}
 
 
@@ -99,7 +99,7 @@ class CodegenTarget(ABC):
 class X86CodegenTarget(CodegenTarget):
     """Shared state for all x86 BBoeOS targets.
 
-    Both the 16-bit real-mode and 32-bit flat-pmode targets use the
+    Both the 16-bit real-mode and 32-bit flat-protected mode targets use the
     same BBoeOS ``int 30h`` syscall ABI and x86 E-register aliasing.
     The ``bx`` / ``dx`` / ``si`` / ``di`` register fields live on this
     class (not ``CodegenTarget``) because they name physical x86
@@ -214,7 +214,7 @@ class X86CodegenTarget16(X86CodegenTarget):
 
 
 class X86CodegenTarget32(X86CodegenTarget):
-    """32-bit flat-pmode x86 target (BBoeOS ring-0 protected mode)."""
+    """32-bit flat-protected mode x86 target (BBoeOS ring-0 protected mode)."""
 
     acc = "eax"
     base_register = "ebp"

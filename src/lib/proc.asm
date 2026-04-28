@@ -10,7 +10,7 @@ shared_die:
         ;; Writes to stdout, then falls through to shared_exit — never
         ;; returns.  Mirrors the 16-bit `call shared_write_stdout; fall
         ;; through` so cc.py's terminal printf optimisation works under
-        ;; the pmode kernel without changes.
+        ;; the protected mode kernel without changes.
         mov bx, STDOUT
         mov ah, SYS_IO_WRITE
         int 30h

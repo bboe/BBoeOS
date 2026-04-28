@@ -1,5 +1,5 @@
 ;;; ---------------------------------------------------------------------
-;;; print.asm — pmode user-side print helpers, jumped to via FUNCTION_TABLE
+;;; print.asm — protected mode user-side print helpers, jumped to via FUNCTION_TABLE
 ;;; from cc.py-emitted code.  Helpers stay in alphabetical order.
 ;;; ---------------------------------------------------------------------
 
@@ -239,7 +239,7 @@ shared_print_datetime:
 
 shared_print_decimal:
         ;; AL = byte 0..99: print 2 zero-padded decimal digits.
-        ;; aam still works in pmode (only invalid in long mode).
+        ;; aam still works in protected mode (only invalid in long mode).
         aam                             ; AH = AL/10, AL = AL%10
         xchg al, ah                     ; AL = tens, AH = ones
         push eax

@@ -49,7 +49,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1.  `put_character` in `drivers/console.asm` includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`.  Raw bytes go to serial via `serial_character` (in `drivers/serial.asm`); ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to native VGA driver calls (`vga_set_cursor`, `vga_teletype`, `vga_set_palette_color`, etc. in `drivers/vga.asm`) for the screen — no INT 10h post-pmode-flip.  `put_string` lives in `drivers/console.asm`.  The MBR does no string output; on boot it's BIOS text mode until the post-MBR path initialises the console driver.  Input from both PS/2 (`drivers/ps2.asm`, IRQ 1) and COM1 (`drivers/serial.asm`, polled in `fd_read_console`) feeds the same fd-0 console.  Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1.  `put_character` in `drivers/console.asm` includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`.  Raw bytes go to serial via `serial_character` (in `drivers/serial.asm`); ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to native VGA driver calls (`vga_set_cursor`, `vga_teletype`, `vga_set_palette_color`, etc. in `drivers/vga.asm`) for the screen — no INT 10h post-protected-mode-flip.  `put_string` lives in `drivers/console.asm`.  The MBR does no string output; on boot it's BIOS text mode until the post-MBR path initialises the console driver.  Input from both PS/2 (`drivers/ps2.asm`, IRQ 1) and COM1 (`drivers/serial.asm`, polled in `fd_read_console`) feeds the same fd-0 console.  Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -94,8 +94,8 @@ renumbering is source-compatible — just rebuild.
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
-- `src/arch/x86/boot/bboeos.asm` — Single flat-binary entry: 16-bit MBR setup, stage-2 disk read, PIC remap, A20, GDT load, far-jmp into pmode, then `%include`s every kernel subsystem (drivers, fs, lib helpers, net stack, syscall dispatcher, system reboot/shutdown, IDT, post-flip entry).  No more `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split — they were collapsed into this file
-- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate; `idt_install` runs in the bootstrap right before the pmode flip so any post-flip exception lands in `exc_common` and prints `EXCnn` on COM1
+- `src/arch/x86/boot/bboeos.asm` — Single flat-binary entry: 16-bit MBR setup, stage-2 disk read, PIC remap, A20, GDT load, far-jmp into protected mode, then `%include`s every kernel subsystem (drivers, fs, lib helpers, net stack, syscall dispatcher, system reboot/shutdown, IDT, post-flip entry).  No more `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split — they were collapsed into this file
+- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate; `idt_install` runs in the bootstrap right before the protected mode flip so any post-flip exception lands in `exc_common` and prints `EXCnn` on COM1
 - `src/arch/x86/entry.asm` — `protected_mode_entry` (segment reload, PIT + IRQ handler install, driver / VFS / NIC inits, banner) flowing into `shell_reload` (loads `bin/shell` and jumps), `program_enter` (fd reset, BSS zero, ESP snapshot, jump to `PROGRAM_BASE`), and the IRQ 0 / IRQ 6 handlers
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
@@ -130,16 +130,16 @@ renumbering is source-compatible — just rebuild.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
 - All output goes through `put_character` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `FUNCTION_PRINT_CHARACTER` for all output.
 
-## 16-bit Real Mode Constraints
+## Bootloader (real mode) constraints
+
+The MBR + `boot/vga_font.asm` (~700 bytes total) are the only real-mode
+code in the tree.  Everything past the `jmp dword 0x08:protected_mode_entry`
+is flat 32-bit protected mode.  Real-mode constraints that still apply
+inside the bootloader:
 
 - Only BX, BP, SI, DI are valid base/index registers in memory operands (not AX, CX, DX, SP).
-- BIOS interrupts: INT 10h (video), INT 13h (disk), INT 16h (keyboard), INT 1Ah (RTC/timer).
-- INT 10h AH=03h clobbers CX (returns cursor scanline shape) — save any value in CX before calling.
-- `mul` clobbers DX (result in DX:AX) — save DX if needed.
-- 32-bit registers (EAX, ECX, EDX) are usable with operand-size prefix (386+).
-- Use unsigned conditional jumps (`jb`/`jbe`/`ja`/`jae`) for byte counts, file sizes, and buffer lengths — not signed (`jl`/`jle`/`jg`/`jge`). Signed jumps misinterpret values > 32767.
-- Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.) — the direction flag may be in an unknown state at program entry.
-- Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
+- BIOS interrupts: INT 10h (video), INT 13h (disk).  Available only before the CR0.PE flip.
+- Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.).
 
 ## Python conventions
 

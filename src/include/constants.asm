@@ -39,7 +39,7 @@
         %assign FD_TYPE_VGA 7
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
-        %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (5 bytes per entry in pmode — `jmp strict near`)
+        %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (5 bytes per entry in protected mode — `jmp strict near`)
         %assign FUNCTION_DIE            FUNCTION_TABLE      ; SI=msg, CX=len: write to stdout then exit
         %assign FUNCTION_EXIT           FUNCTION_DIE + 5    ; Exit program (reload shell)
         %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 5   ; Read one byte from stdin; returns AL
