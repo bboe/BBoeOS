@@ -162,6 +162,6 @@ shell_reload:
 
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.7.0 (2026/04/23)", 13, 10, 0
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.0 (2026/04/27)", 13, 10, 0
 
 ;;; -----------------------------------------------------------------------
