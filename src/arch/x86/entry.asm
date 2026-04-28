@@ -167,6 +167,10 @@ protected_mode_entry:
         out PMODE_PIC1_DATA, al
         sti
 
+        ;; Install the vDSO blob at FUNCTION_TABLE so user programs can
+        ;; call FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. before the
+        ;; first shell_reload.
+        call vdso_install
         call ata_init
         call fd_init
         call fdc_init
@@ -209,6 +213,27 @@ shell_reload:
         cli
         hlt
         jmp $-1
+
+vdso_install:
+        ;; Copy the embedded vDSO blob (vdso_image..vdso_image_end, 4 KB)
+        ;; to physical FUNCTION_TABLE (0x08046000).  User programs `call`
+        ;; FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. and land in this
+        ;; blob.  Pre-paging the virt = phys identity holds, so the
+        ;; programs running at PROGRAM_BASE see the vDSO as ordinary RAM.
+        ;; Once paging lands, the kernel will map this same physical
+        ;; frame as a user-readable code page in every PD instead.
+        push esi
+        push edi
+        push ecx
+        mov esi, vdso_image
+        mov edi, FUNCTION_TABLE
+        mov ecx, (vdso_image_end - vdso_image) / 4
+        cld
+        rep movsd
+        pop ecx
+        pop edi
+        pop esi
+        ret
 
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0

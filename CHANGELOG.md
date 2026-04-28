@@ -7,6 +7,16 @@ at the time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
 ### Paging prep (2026-04-28)
+- Move the FUNCTION_TABLE and `shared_*` helpers (`lib/print.asm`,
+  `lib/proc.asm`) into a separately-assembled vDSO blob (`src/vdso/vdso.asm`)
+  loaded at virtual `0x00010000`.  The kernel embeds `vdso.bin` via
+  `incbin` and copies it to physical `FUNCTION_TABLE` once at boot via
+  `vdso_install`.  Helper bodies relocate their `SECTOR_BUFFER` and
+  internal-static references to per-AS data at `0x00011000`.  User
+  programs call `FUNCTION_DIE` / `FUNCTION_PRINT_STRING` / etc. exactly
+  as before — only the addresses change.  Decouples user-side helper
+  code from kernel-virt addressing ahead of paging.  Design at
+  `docs/superpowers/specs/2026-04-28-vdso-design.md`.
 - Probe the BIOS memory map via INT 15h AX=E820 in the MBR and stash
   24-byte entries at physical 0x500 (terminated by a zero entry).
   Result is unconsumed at this point — the post-paging bitmap frame
