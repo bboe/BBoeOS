@@ -5,7 +5,7 @@
    logically occupies [0, gap_start) and [gap_end, EDIT_BUFFER_SIZE);
    the gap sits between.  The buffer itself lives in extended memory
    above the 1 MB mark (`EDIT_BUFFER_BASE` = 0x100000) so it can be
-   1 MB without colliding with the resident kernel at 0x7C00..0xE000
+   1 MB without colliding with the resident kernel at 0x7C00..0xF000
    or the VGA/BIOS regions at 0xA0000-0xFFFFF; BSS would also
    collide, since it grows up from PROGRAM_BASE = 0x600. */
 int confirm_quit;

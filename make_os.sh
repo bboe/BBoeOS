@@ -29,6 +29,30 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Kernel binary fits in [0x7C00, SECTOR_BUFFER) — overflow would silently
+# corrupt the disk buffer on the first ata_read_sector / fdc DMA.  Read
+# SECTOR_BUFFER from constants.asm so the budget tracks the layout.
+# (read_assign in add_file.py doesn't handle NASM-style ``0F000h`` hex,
+# so a small inline parser handles both ``0xN`` and ``Nh`` forms.)
+KERNEL_BUDGET=$(python3 - <<'PY'
+import re
+text = open('src/include/constants.asm').read()
+match = re.search(r'%assign\s+SECTOR_BUFFER\s+(\S+)', text)
+literal = match.group(1)
+if literal.lower().endswith('h'):
+    value = int(literal[:-1], 16)
+else:
+    value = int(literal, 0)
+print(value - 0x7C00)
+PY
+)
+KERNEL_SIZE=$(stat -c %s os.bin)
+if [ "$KERNEL_SIZE" -gt "$KERNEL_BUDGET" ]; then
+    echo "os.bin is $KERNEL_SIZE bytes; budget is $KERNEL_BUDGET (SECTOR_BUFFER - 0x7C00)." >&2
+    echo "The kernel has overflowed into the disk buffer at SECTOR_BUFFER; ata_read_sector / fdc DMA will corrupt it on the first read.  Move SECTOR_BUFFER (and the NET_*_BUFFER pair if needed) up in src/include/constants.asm, or shrink the kernel." >&2
+    exit 1
+fi
+
 # Curated list of protected mode-ready user programs.  arp / dns / netinit /
 # netrecv / netsend / ping stay out of the list until ne2k.asm and
 # net/*.asm get ported to 32-bit and `network_initialize` runs from

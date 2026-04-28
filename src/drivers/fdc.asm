@@ -84,7 +84,7 @@ fdc_dma_setup:
         mov al, ah
         out DMA_MODE, al
 
-        xor al, al                      ; SECTOR_BUFFER = 0x0000E000, page = 0
+        xor al, al                      ; SECTOR_BUFFER = 0x0000F000, page = 0
         out DMA_CH2_PAGE, al
 
         mov al, DMA_UNMASK_CH2
