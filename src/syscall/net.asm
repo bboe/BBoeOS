@@ -89,7 +89,11 @@
         call icmp_receive                       ; DI=ICMP payload, CX=len, CF if none
         jc .rf_none
         .rf_copy:
-        ;; CX = payload length, DI = payload offset (in net_receive_buffer, fits 16 bits).
+        ;; CX = payload length, EDI = payload pointer into net_receive_buffer.
+        ;; The buffer used to live at fixed phys 0xF800 (low 16 bits sufficed
+        ;; for any pointer into it); post-paging it's a kernel BSS label at
+        ;; virt 0xC0xxxxxx, so the source address must be the full EDI, not
+        ;; ``movzx esi, di`` which would zero out the kernel-virt high half.
         ;; Copy min(CX, rf_max) bytes to user's buffer at [.rf_buf].
         movzx ecx, cx
         cmp ecx, [.rf_max]
@@ -97,8 +101,8 @@
         mov ecx, [.rf_max]
         .rf_have_count:
         mov eax, ecx                            ; return value = bytes copied
-        movzx esi, di                           ; flat 32-bit source
-        mov edi, [.rf_buf]                      ; flat 32-bit destination
+        mov esi, edi                            ; flat 32-bit kernel-virt source
+        mov edi, [.rf_buf]                      ; flat 32-bit user-virt destination
         cld
         rep movsb
         clc

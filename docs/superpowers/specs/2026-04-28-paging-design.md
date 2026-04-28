@@ -104,7 +104,7 @@ The kernel splits into two flat-binary nasm outputs to handle the `org` change:
 
 ## Data structures and core helpers
 
-### Frame allocator (`mm/frame.asm`)
+### Frame allocator (`memory_management/frame.asm`)
 
 ```nasm
 frame_bitmap:       times (256*1024/32) db 0   ; 8 KB, one bit per 4 KB frame, 256 MB ceiling
@@ -121,7 +121,7 @@ Public interface (CPL=0 only):
 
 The 256 MB ceiling is enforced statically by the bitmap size. RAM beyond 256 MB is ignored. Easy to widen later by changing one constant.
 
-### Address-space helpers (`mm/as.asm`)
+### Address-space helpers (`memory_management/as.asm`)
 
 Public interface (CPL=0 only):
 

@@ -1,9 +1,9 @@
 udp_receive:
         ;; Receive a UDP datagram (polls once, handles ARP transparently).
-        ;; Output: EDI = payload pointer (within net_receive_buffer, fits 16 bits)
+        ;; Output: EDI = full 32-bit pointer to payload inside net_receive_buffer
         ;;         ECX = payload length
         ;;         BX = source port
-        ;;         ESI = pointer to 4-byte source IP (within net_receive_buffer)
+        ;;         ESI = full 32-bit pointer to 4-byte source IP inside net_receive_buffer
         ;;         CF set if no UDP packet available
         push eax
 

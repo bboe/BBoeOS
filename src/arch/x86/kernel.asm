@@ -48,26 +48,24 @@ fd_table         equ 0xC000E000
         ;; addressing.
 sector_buffer    equ 0xC000F000
 
-        BOOT_LOAD_PHYS          equ 0x7C00      ; boot.bin region (free post-paging)
-        BOOT_PD_PHYS            equ 0x1000
-        BOOT_REGION_BYTES       equ 0x10000 - 0x7C00     ; through end of staging area
+        BOOT_PD_PHYS            equ 0x200000
         ;; Kernel-virt base of the direct map.  Subtract from any
         ;; kernel-virt address to recover its physical alias.
         DIRECT_MAP_BASE         equ 0C0000000h
-        FIRST_KERNEL_PT_PHYS    equ 0x2000
+        FIRST_KERNEL_PT_PHYS    equ 0x201000
         KERNEL_FINAL_PHYS       equ 0x100000
-        VGA_BIOS_BYTES          equ 0x60000     ; 0xA0000..0xFFFFF
-        VGA_BIOS_PHYS           equ 0xA0000
+        LOW_RESERVE_BYTES       equ FIRST_KERNEL_PT_PHYS + 0x1000  ; 0x202000 — bitmap-allocator sweep ceiling
         ;; Ring-0 stack: 16 KB at phys 0x180000, accessed through the
         ;; direct map at virt 0xC0180000.  Lives outside kernel.bin to
         ;; avoid burning 16 KB of zero padding on disk; the bitmap
         ;; allocator reserves the underlying frames at boot via the
-        ;; explicit frame_reserve_range call below.  Reachable from
-        ;; the very first instructions in `high_entry` because
-        ;; early-PE's PDE[768] direct map already covers phys
-        ;; 0..0x3FFFFF.  Sits above the kernel image (0x100000+) and
-        ;; below the 4 MB early-PE direct-map ceiling, outside the
-        ;; user shim's user-accessible windows.
+        ;; LOW_RESERVE_BYTES sweep above (the sweep covers 0..0x202000,
+        ;; which naturally includes the stack).  Reachable from the
+        ;; very first instructions in `high_entry` because early-PE's
+        ;; PDE[768] direct map already covers phys 0..0x3FFFFF.  Sits
+        ;; above the kernel image (0x100000+) and below the 4 MB
+        ;; early-PE direct-map ceiling, outside the user shim's
+        ;; user-accessible windows.
         KERNEL_STACK_BYTES      equ 0x4000                       ; 16 KB
         KERNEL_STACK_PHYS       equ 0x180000
         KERNEL_STACK_TOP_PHYS   equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
@@ -78,9 +76,8 @@ sector_buffer    equ 0xC000F000
         ;; the stack) reached through the direct map, so the buffers
         ;; don't burn 3 KB of zero padding inside kernel.bin.  1536
         ;; bytes apiece — one max-size Ethernet frame each (1500 MTU
-        ;; + 14-byte header + slop).  Reserved explicitly below
-        ;; alongside the kernel stack (no LOW_RESERVE_BYTES sweep
-        ;; yet — that lands with the boot-PD relocate work).
+        ;; + 14-byte header + slop).  LOW_RESERVE_BYTES above covers
+        ;; the entire region.
         NET_BUFFER_BYTES        equ 1536
         NET_RECEIVE_BUFFER_PHYS equ KERNEL_STACK_TOP_PHYS               ; 0x184000
         NET_TRANSMIT_BUFFER_PHYS equ NET_RECEIVE_BUFFER_PHYS + NET_BUFFER_BYTES
@@ -163,44 +160,17 @@ high_entry:
         mov esi, E820_TABLE_VIRT
         call frame_init
 
-        ;; Reserve regions used at boot so the allocator never hands
-        ;; them back out:
-        ;;   * VGA / BIOS at 0xA0000..0xFFFFF
-        ;;   * Boot.bin / staging region at 0x7C00..0x0FFFF (boot
-        ;;     code + the 0x10000 staging area where kernel.bin lived
-        ;;     before relocation; safe to reserve since we're done
-        ;;     with both)
-        ;;   * Kernel image at 0x100000..__pa(kernel_end)
-        ;;   * Kernel stack at KERNEL_STACK_PHYS..+KERNEL_STACK_BYTES
-        ;;   * NE2000 RX/TX scratch at NET_RECEIVE_BUFFER_PHYS..+2*NET_BUFFER_BYTES
-        ;;   * Boot PD at 0x1000
-        ;;   * First kernel PT at 0x2000
-        mov eax, VGA_BIOS_PHYS
-        mov ecx, VGA_BIOS_BYTES
-        call frame_reserve_range
-
-        mov eax, BOOT_LOAD_PHYS
-        mov ecx, BOOT_REGION_BYTES
-        call frame_reserve_range
-
-        mov eax, KERNEL_FINAL_PHYS
-        mov ecx, kernel_end - DIRECT_MAP_BASE - KERNEL_FINAL_PHYS
-        call frame_reserve_range
-
-        mov eax, KERNEL_STACK_PHYS
-        mov ecx, KERNEL_STACK_BYTES
-        call frame_reserve_range
-
-        mov eax, NET_RECEIVE_BUFFER_PHYS
-        mov ecx, NET_BUFFER_BYTES * 2
-        call frame_reserve_range
-
-        mov eax, BOOT_PD_PHYS
-        mov ecx, 0x1000
-        call frame_reserve_range
-
-        mov eax, FIRST_KERNEL_PT_PHYS
-        mov ecx, 0x1000
+        ;; Reserve everything from phys 0 up to and including the
+        ;; boot PD and first kernel PT in one sweep.  Covers BIOS /
+        ;; VGA / staging region / kernel image / kernel stack (at
+        ;; phys 0x180000) / NE2000 RX/TX scratch (0x184000+) / boot
+        ;; PD / first kernel PT.  The bitmap allocator only ever
+        ;; returns frames at phys LOW_RESERVE_BYTES (0x202000) and
+        ;; above, so the kernel PTs allocated next and the Phase 3
+        ;; user shim PT all land outside the user shim's
+        ;; 0..0xFFFFF user-accessible range.
+        xor eax, eax
+        mov ecx, LOW_RESERVE_BYTES
         call frame_reserve_range
 
         ;; --- Allocate the remaining 63 kernel PTs to fill out the
@@ -257,23 +227,23 @@ high_entry:
         ;; --- Phase 3 user shim ---
         ;;
         ;; Allocate one PT covering virt 0..0x3FFFFF (4 MB), install
-        ;; at PDE[0] in kernel_pd_template, and populate the first 256
-        ;; PTEs as user-accessible R/W (mapping virt 0..0xFFFFF to
-        ;; phys 0..0xFFFFF).  The remaining 768 PTEs stay zero
-        ;; (not-present); user code at this layer can't reach virt
-        ;; >= 0x100000.
+        ;; at PDE[0] in kernel_pd_template, and populate two
+        ;; user-accessible R/W windows:
+        ;;   * PTEs 0..0xFF map virt 0..0xFFFFF (1 MB) → phys 0..0xFFFFF
+        ;;     — covers the legacy program / stack / vDSO / BUFFER
+        ;;     layout.
+        ;;   * PTEs 0x300..0x3FF map virt 0x300000..0x3FFFFF (1 MB at
+        ;;     the 3 MB mark) → phys 0x300000..0x3FFFFF — covers
+        ;;     ``asm.c``'s SYMBOL_BASE / JUMP_TABLE region (3 MB+).
+        ;; The 0x100..0x2FF window stays not-present so user code
+        ;; can't see or write the kernel image (phys 0x100000..),
+        ;; the boot PD (phys 0x200000), the first kernel PT (phys
+        ;; 0x201000), or the frames the bitmap allocator handed out
+        ;; for the 64 kernel PTs + this shim PT (phys 0x202000+,
+        ;; well within 0x300000).
         ;;
-        ;; This is enough to run small programs at the legacy
-        ;; PROGRAM_BASE / USER_STACK_TOP layout, which is the Phase 3
-        ;; success criterion.  It is NOT enough for programs that
-        ;; reach into low-memory kernel structures — boot PD (phys
-        ;; 0x1000), first kernel PT (phys 0x2000), or any frame the
-        ;; bitmap allocator returned during the kernel-PT loop.  A
-        ;; program whose code or BSS extends past virt 0x1000 will
-        ;; corrupt the boot PD on load and triple-fault the kernel.
         ;; Phase 4's per-program PDs replace this whole arrangement
-        ;; with private user frames; until then, anything larger than
-        ;; ~0xA00 bytes at PROGRAM_BASE is out of scope.
+        ;; with private user frames and proper memory protection.
         call frame_alloc
         jc .panic
         mov esi, eax                            ; preserve phys of shim PT
@@ -281,14 +251,18 @@ high_entry:
         add edi, DIRECT_MAP_BASE                ; kernel-virt to populate
         xor ecx, ecx
 .shim_pt_loop:
-        cmp ecx, 256
-        jae .shim_pt_unmap
+        cmp ecx, 0x100
+        jb .shim_pt_user                        ; PTEs 0..0xFF: low 1 MB
+        cmp ecx, 0x300
+        jb .shim_pt_unmap                       ; PTEs 0x100..0x2FF: kernel-only
+        ;; PTEs 0x300..0x3FF: extended 1 MB at 3 MB mark.
+.shim_pt_user:
         mov eax, ecx
         shl eax, 12
         or eax, 0x107                           ; P | RW | U
         jmp .shim_pt_store
 .shim_pt_unmap:
-        xor eax, eax                            ; not-present beyond 1 MB
+        xor eax, eax
 .shim_pt_store:
         mov [edi + ecx*4], eax
         inc ecx

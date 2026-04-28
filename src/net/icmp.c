@@ -1,7 +1,7 @@
 asm("
 icmp_receive:
         ;; Poll for one ICMP packet destined for us.
-        ;; Output: EDI = pointer to ICMP bytes (within net_receive_buffer),
+        ;; Output: EDI = full 32-bit pointer to ICMP bytes inside net_receive_buffer,
         ;;         ECX = ICMP byte count, CF clear if packet received.
         ;;         CF set if no packet (transparently handles ARP while polling).
         ;; Assumes a 20-byte IP header (no IP options) — matches what our

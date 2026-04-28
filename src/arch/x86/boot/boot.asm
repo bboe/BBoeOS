@@ -60,9 +60,11 @@
         BOOT_CODE_SELECTOR      equ 08h
         BOOT_DATA_SELECTOR      equ 10h
 
-        ;; Physical addresses for early-PE page-table setup.
-        BOOT_PD_PHYS            equ 0x1000
-        FIRST_KERNEL_PT_PHYS    equ 0x2000
+        ;; Physical addresses for early-PE page-table setup.  Boot PD
+        ;; and the first kernel PT live above 1 MB so the Phase 3
+        ;; user shim's 0..0xFFFFF identity mapping can't reach them.
+        BOOT_PD_PHYS            equ 0x200000
+        FIRST_KERNEL_PT_PHYS    equ 0x201000
         KERNEL_LOAD_PHYS        equ 0x10000     ; INT 13h read destination
         KERNEL_FINAL_PHYS       equ 0x100000    ; final post-relocation phys
         HIGH_ENTRY_VIRT         equ 0xC0100000  ; kernel.bin org / first byte

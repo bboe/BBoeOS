@@ -44,8 +44,8 @@ frame_alloc:
 .scan_dword:
         mov eax, [edi]
         not eax                                 ; invert: 1 = free
+        bsf eax, eax                            ; lowest free bit (0..31); ZF=1 if all bits clear
         jz .next_dword                          ; nothing free in this dword
-        bsf eax, eax                            ; lowest free bit (0..31)
         cmp eax, ecx
         jb .next_dword                          ; below the hint within this dword
         ;; Found a free bit.  Frame number = ((edi - frame_bitmap) * 8) + bit.
