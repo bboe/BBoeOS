@@ -1,12 +1,12 @@
 encode_domain:
         ;; Encode null-terminated domain string into DNS QNAME wire format
-        ;; Input: SI = domain string, DI = output buffer
-        ;; Output: DI advanced past encoded name, CF set on error
-        ;; Clobbers: AX, BX, CX
+        ;; Input: ESI = domain string, EDI = output buffer
+        ;; Output: EDI advanced past encoded name, CF set on error
+        ;; Clobbers: EAX, EBX, ECX
         .label_start:
-        mov bx, di             ; BX = position of length byte (fill in later)
-        inc di                 ; Skip length byte
-        xor cx, cx             ; CX = character count for this label
+        mov ebx, edi           ; EBX = position of length byte (fill in later)
+        inc edi                ; Skip length byte
+        xor ecx, ecx           ; ECX = character count for this label
         .char_loop:
         lodsb
         cmp al, '.'
@@ -14,17 +14,17 @@ encode_domain:
         test al, al
         jz .end
         stosb
-        inc cx
+        inc ecx
         jmp .char_loop
         .dot:
-        test cx, cx
+        test ecx, ecx
         jz .error              ; Empty label (leading or consecutive dots)
-        mov [bx], cl           ; Fill in length byte
+        mov [ebx], cl          ; Fill in length byte
         jmp .label_start
         .end:
-        test cx, cx
+        test ecx, ecx
         jz .error              ; Empty input or trailing dot
-        mov [bx], cl           ; Fill in length byte
+        mov [ebx], cl          ; Fill in length byte
         xor al, al
         stosb                  ; Null terminator
         clc

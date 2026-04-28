@@ -1,32 +1,32 @@
 dns_query:
         ;; Send DNS A query and return pointer to first answer record
-        ;; Input: SI = null-terminated domain string
-        ;; Output: DI = pointer to first answer record
+        ;; Input: ESI = null-terminated domain string
+        ;; Output: EDI = pointer to first answer record
         ;;         AL = ANCOUNT (may be 0; check before walking answers)
         ;;         CF set on send/receive error
-        ;; Caller must define: dns_base (dw), dns_server_ip (4 db),
-        ;;                     dns_socket_fd (dw)
-        push bx
-        push cx
-        push dx
-        push si
-        push bp
+        ;; Caller must define: dns_base (dd), dns_server_ip (4 db),
+        ;;                     dns_socket_fd (dd)
+        push ebx
+        push ecx
+        push edx
+        push esi
+        push ebp
 
         ;; Build query: fixed header + QNAME + QTYPE + QCLASS
-        mov di, SECTOR_BUFFER
-        push si
-        mov si, .hdr_template
-        mov cx, 12
+        mov edi, SECTOR_BUFFER
+        push esi
+        mov esi, .hdr_template
+        mov ecx, 12
         rep movsb
-        pop si
+        pop esi
         call encode_domain
         jc .err
         mov ax, 0100h          ; QTYPE: A (big-endian 0x0001)
         stosw
         mov ax, 0100h          ; QCLASS: IN (big-endian 0x0001)
         stosw
-        mov cx, di
-        sub cx, SECTOR_BUFFER  ; CX = total query length
+        mov ecx, edi
+        sub ecx, SECTOR_BUFFER ; ECX = total query length
 
         ;; Open UDP socket
         mov al, SOCK_DGRAM
@@ -34,73 +34,73 @@ dns_query:
         mov ah, SYS_NET_OPEN
         int 30h
         jc .err
-        mov [dns_socket_fd], ax
+        mov [dns_socket_fd], eax
 
         ;; Send UDP query to DNS server
-        mov bx, [dns_socket_fd]
-        mov si, SECTOR_BUFFER
-        mov di, dns_server_ip
+        mov ebx, [dns_socket_fd]
+        mov esi, SECTOR_BUFFER
+        mov edi, dns_server_ip
         mov dx, 1024           ; Source port
-        mov bp, 53             ; Dest port (DNS)
+        mov ebp, 53            ; Dest port (DNS)
         mov ah, SYS_NET_SENDTO
         int 30h
         jc .err_close
 
         ;; Poll for response
-        mov si, 0FFFFh
+        mov esi, 0FFFFh
         .poll:
-        mov bx, [dns_socket_fd]
-        mov di, SECTOR_BUFFER  ; Receive into separate buffer
-        mov cx, 512
+        mov ebx, [dns_socket_fd]
+        mov edi, SECTOR_BUFFER ; Receive into separate buffer
+        mov ecx, 512
         mov dx, 1024           ; Filter on our source port
         mov ah, SYS_NET_RECVFROM
         int 30h
-        test ax, ax
+        test eax, eax
         jnz .got_response
-        dec si
+        dec esi
         jnz .poll
         jmp .err_close
 
         .got_response:
         ;; Close socket before processing response
-        push ax
-        mov bx, [dns_socket_fd]
+        push eax
+        mov ebx, [dns_socket_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
-        pop ax
+        pop eax
 
         ;; Response is in SECTOR_BUFFER; save base for compression pointers
-        mov word [dns_base], SECTOR_BUFFER
-        mov di, SECTOR_BUFFER
-        mov al, [di+7]         ; ANCOUNT low byte (big-endian offset 6-7)
+        mov dword [dns_base], SECTOR_BUFFER
+        mov edi, SECTOR_BUFFER
+        mov al, [edi+7]        ; ANCOUNT low byte (big-endian offset 6-7)
 
         ;; Skip header (12 bytes) + question QNAME + QTYPE(2) + QCLASS(2)
-        add di, 12
+        add edi, 12
         .skip_qname:
-        cmp byte [di], 0
+        cmp byte [edi], 0
         je .qname_done
-        movzx bx, byte [di]
-        inc di
-        add di, bx
+        movzx ebx, byte [edi]
+        inc edi
+        add edi, ebx
         jmp .skip_qname
         .qname_done:
-        inc di
-        add di, 4
-        ;; DI = first answer record; AL = ANCOUNT
+        inc edi
+        add edi, 4
+        ;; EDI = first answer record; AL = ANCOUNT
         clc
         jmp .done
         .err_close:
-        mov bx, [dns_socket_fd]
+        mov ebx, [dns_socket_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
         .err:
         stc
         .done:
-        pop bp
-        pop si
-        pop dx
-        pop cx
-        pop bx
+        pop ebp
+        pop esi
+        pop edx
+        pop ecx
+        pop ebx
         ret
 
         .hdr_template:

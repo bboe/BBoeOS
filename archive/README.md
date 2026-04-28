@@ -31,7 +31,7 @@ so the comparison stays apples-to-apples.
 | chmod   | 149            | 175         | 228       | +53   |
 | cp      | 268            | 338         | 300       | -38   |
 | date    | 15             | 21          | 21        |  0    |
-| dns     | 724            | 724         | 1129      | +405  |
+| dns     | 724            | 935         | 1435      | +500  |
 | hello   | 22             | 28          | 29        | +1    |
 | ls      | 135            | 179         | 196       | +17   |
 | mkdir   | 123            | 151         | 171       | +20   |
@@ -62,7 +62,7 @@ to 4-byte argv pointer slots (``[ARGV+4]`` was ``[ARGV+2]``); cc.py's
 proportionally more byte-load + zero-extend overhead than 16-bit, so
 the delta inflates from +25 to +53.
 
-**dns (+405):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
+**dns (+500):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals;
 the assembly version reused `SECTOR_BUFFER` and `BUFFER`.  Most of
 the delta comes from `decode_domain` and `encode_domain` carrying
@@ -75,6 +75,17 @@ with no frame setup for every helper.  The C compiler also generates
 word-sized loads with `xor ah,ah` zero-extension for every byte read,
 whereas the assembly version uses `lodsb` / `stosb` / `rep movsb`
 for compact byte-oriented loops.
+
+The 32-bit asm widens dns_query.asm / encode_domain.asm helpers to
+ESI/EDI plus dns_base / dns_socket_fd / domain_arg / rr_name_ptr to
+``dd 0`` (cc.py 32-bit stores full EAX through them).  ``mov si, ax``
+in decode_domain's pointer-resolution path becomes ``movzx eax, ax;
+add eax, [dns_base]; mov esi, eax`` (the 16-bit form added a 16-bit
+offset to a 16-bit base; the 32-bit form needs the zero-extend
+because [dns_base] is now a 32-bit linear address).  Δ jumped from
++405 to +500 mostly because cc.py's 32-bit codegen pays the
+``movzx`` zero-extend cost on every byte read in the answer-walking
+loop, which the asm version still avoids.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
