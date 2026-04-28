@@ -261,7 +261,7 @@ high_entry:
 
 %include "memory_management/address_space.asm"
 %include "memory_management/frame.asm"
-%include "drivers/ata.asm"
+%include "drivers/ata.kasm"
 %include "drivers/console.kasm"
 %include "drivers/fdc.asm"
 %include "drivers/ne2k.asm"

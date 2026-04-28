@@ -34,6 +34,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
 | arch/x86/system | 37486 | 37510 | +24 |
+| drivers/ata | 37238 | 37510 | +272 |
 | drivers/console | 37030 | 37510 | +480 |
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/serial | 37478 | 37510 | +32 |
@@ -105,3 +106,19 @@ call sites each pay the full out-register-capture sequence
 pinning across straight-line code in fastcall-ish paths, and a
 narrower default storage for `int`-typed globals when their value
 range fits a smaller width.
+
+**drivers/ata (+272):** Five functions (`ata_init`, `ata_issue`,
+`ata_wait_drq`, `ata_read_sector`, `ata_write_sector`) all riding
+on `kernel_inb` / `kernel_outb` plus `kernel_insw` / `kernel_outsw`
+for the 256-word PIO data transfer.  `carry_return` carries
+the asm CF=err contract intact (`return 1` → CF clear / success;
+`return 0` → CF set / error — the inverted mapping from cc.py's
+convention).  The +264 is mostly the same per-function frame
+overhead pattern as serial: cc.py's `push ebp; sub esp, N; ...
+mov esp, ebp; pop ebp` envelope on every helper, plus the
+`preserve_register("eXx")` pushes/pops on each E-reg the asm
+version preserved (saving full 32-bit regs is critical here —
+bbfs holds full 32-bit ECX file sizes that 16-bit `push cx`
+would silently truncate).  The wider `mov edx, [ebp-N]; and edx,
+65535` reload-and-mask on `lba` is also paid once per call
+where the asm version stayed in CX through the port writes.
