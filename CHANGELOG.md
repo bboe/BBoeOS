@@ -281,12 +281,18 @@ at the time.
   Privileged instructions (`cli`/`sti`/`in`/`out`/CR writes) now #GP
   from user code.
 
+### Drivers
+- Port `ps2_init` / `ps2_getc` / `ps2_handle_scancode` / `ps2_putc` from `drivers/ps2.asm` to C in a new `src/drivers/ps2.c`, retiring the asm file.  The IRQ-driven Set-1 scan-code translator (16-byte ring buffer, modifier state, ANSI CSI sequences for arrow keys) becomes ~140 lines of C against `kernel_inb` / `kernel_outb`; the IRQ stub (`ps2_irq1_handler`, must `iretd`) and the install wrapper (`ps2_install_irq`, needs `address-of-label` for `idt_set_gate32`) sit in a file-scope `asm("...")` block at the bottom because cc.py can't express either pattern in C.  The two 59-byte keymap arrays carry the same byte sequences as the asm version.  `PMODE_PIC1_CMD` / `PMODE_PIC1_DATA` / `PMODE_PIC_EOI` `equ` definitions move from `ps2.asm` to `entry.asm` (the only remaining consumer).
+
 ### Programs
 - Close the self-hosted `asm` assembler's 32-bit codegen gaps so its output is byte-identical to NASM under `[bits 32]`, and move `tests/test_asm.py` from its `--bits 16` pin to `--bits 32` (matching `make_os.sh`'s production path).  Six fixes in `src/c/asm.c`: 32-bit displacement (rel32) for `call`, `jmp`, and conditional-jump near forms (plus the convergence loop's short-vs-long sizing math); 3-character e-prefixed register names like `esi`/`edi` parse at the trailing `[disp+reg]` position; `handle_movzx` handles the direct-memory operand (`type2 == 2`); operand-size-prefix emission for `unary_f6f7` (mul/div/neg/not), `adc_sbb_handler`, and the 16-bit string ops (`lodsw`/`movsw`/`stosw`); and `emit_alu_mem_imm` (`add/and/or/sub/xor [mem], imm`) gains `dword` support and bits-aware encoding via `emit_modrm_direct`.  All 35 self-host programs assemble byte-identical to NASM at `--bits 32`.
 
 ### Toolchain
 - `cc.py` now defaults to `--bits 32`.  The protected-mode merge made 32-bit the only production target (kernel + user programs both pass `--bits 32` explicitly in `make_os.sh`); the 16-bit default was a holdover.  `--bits 16` stays a working option (`tests/test_cc_bits.py` exercises both modes for cc.py front-end coverage), but production user programs and the self-host assembler regression both run at `--bits 32`.
+- `make_os.sh` now passes `--bits 32` to `cc.py --target kernel` so kernel C ports emit 32-bit prologues / register names matching the protected-mode runtime.  The pre-existing kernel C files (`fs/fd.c`, `net/ip.c`, `net/icmp.c`) are pure `asm("...")` blocks with no compiler-emitted code, so the flag is a no-op for them; first real C port (`drivers/ps2.c`) needed it.
 
+### Tests
+- Add `archive/kernel/` (size-tracking tree mirroring `archive/` for kernel-side ports, with a separate `README.md` and the same column layout) plus `tests/test_kernel_archive.py` (verifies snapshot files exist for every README row and the delta math is internally consistent).  `tests/measure_kernel_port.sh <path>` runs `os.bin` builds with the C port and the archived asm in turn, prints the byte sizes and delta — the workflow each port commit uses to fill in its README row.
 
 ## [0.8.0](https://github.com/bboe/BBoeOS/compare/0.7.0...0.8.0) (2026-04-27)
 
