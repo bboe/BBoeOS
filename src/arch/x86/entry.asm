@@ -237,7 +237,7 @@ vdso_install:
 
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.0 (2026/04/27)", 13, 10, 0
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.1 (2026/04/28)", 13, 10, 0
 
         ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
         ;; protected_mode_entry); all other fields stay zero because we
