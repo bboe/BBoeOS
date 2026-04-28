@@ -4,7 +4,9 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.7.0...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
+
+## [0.8.0](https://github.com/bboe/BBoeOS/compare/0.7.0...0.8.0) (2026-04-27)
 
 ### Boot
 - Port the kernel to flat 32-bit ring-0 protected mode.  The MBR keeps
