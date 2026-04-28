@@ -39,8 +39,15 @@ uint16_t vfs_found_size_hi __attribute__((asm_name("vfs_found_size+2")));
 uint16_t vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
 uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 
-// fd_ioctl_vga: VGA device-control handler (AL=cmd, SI=entry; CF on unsupported cmd)
-__attribute__((carry_return)) int fd_ioctl_vga(struct fd *entry __attribute__((in_register("si"))), int ioctl_cmd __attribute__((in_register("ax"))));
+// fd_ioctl_vga: VGA device-control handler.  AL=cmd, SI=entry, plus
+// CX / DX carrying the per-cmd args (col/row for FILL_BLOCK, palette
+// channels for SET_PALETTE, requested mode for MODE).  fd_ioctl spills
+// CX / DX to its local frame so they survive fd_lookup before being
+// forwarded here — without that path cc.py would clobber them.
+__attribute__((carry_return)) int fd_ioctl_vga(struct fd *entry __attribute__((in_register("si"))),
+                                               int ioctl_cmd __attribute__((in_register("ax"))),
+                                               int row_col __attribute__((in_register("cx"))),
+                                               int dx_arg __attribute__((in_register("dx"))));
 
 // fd_lookup: Validate fd in BX, return SI = entry pointer (CF set if invalid)
 __attribute__((carry_return)) __attribute__((preserve_register("cx"))) int fd_lookup(int file_descriptor __attribute__((in_register("bx"))), struct fd *result __attribute__((out_register("si"))));
@@ -96,13 +103,21 @@ __attribute__((carry_return)) int fd_fstat(int file_descriptor __attribute__((in
 
 void fd_init() {}
 
-// fd_ioctl: Device-control dispatch (BX=fd, AL=cmd; CF on error)
-__attribute__((carry_return)) int fd_ioctl(int file_descriptor __attribute__((in_register("bx"))), int ioctl_cmd __attribute__((in_register("ax")))) {
+// fd_ioctl: Device-control dispatch (BX=fd, AL=cmd, plus CX / DX
+// carrying per-handler args; CF on error).  CX and DX arrive from the
+// user's INT 30h registers via the syscall dispatcher's pusha frame —
+// declaring them as in_register parameters spills them into fd_ioctl's
+// local frame so fd_lookup (which clobbers DX) can't lose them before
+// the per-fd-type handler runs.
+__attribute__((carry_return)) int fd_ioctl(int file_descriptor __attribute__((in_register("bx"))),
+                                            int ioctl_cmd __attribute__((in_register("ax"))),
+                                            int row_col __attribute__((in_register("cx"))),
+                                            int dx_arg __attribute__((in_register("dx")))) {
     struct fd *entry;
     uint8_t fd_type;
     if (!fd_lookup(file_descriptor, &entry)) { return 0; }
     fd_type = entry->type;
-    if (fd_type == FD_TYPE_VGA) { return fd_ioctl_vga(entry, ioctl_cmd); }
+    if (fd_type == FD_TYPE_VGA) { return fd_ioctl_vga(entry, ioctl_cmd, row_col, dx_arg); }
     return 0;
 }
 

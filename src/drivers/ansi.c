@@ -20,10 +20,11 @@
 //     put_string(SI=string)  — preserves AX
 //     serial_character(AL=byte) — preserves AX, DX
 //
-// ansi_fg keeps its bare symbol name (asm_name override) because vga.asm's
-// vga_teletype / vga_write_attribute read it directly.  The other state
-// (ansi_state, ansi_params, ansi_param_index) is internal to this file
-// and uses cc.py's default _g_ prefix.
+// ansi_fg is shared with vga.c's vga_teletype / vga_write_attribute
+// (the attribute byte every emitted character carries); it lives here
+// as a plain C global and the consumer side aliases _g_ansi_fg.  The
+// rest of the parser state (ansi_state, ansi_params, ansi_param_index)
+// is internal to this file.
 
 #define ANSI_STATE_NORMAL 0
 #define ANSI_STATE_ESC    1
@@ -39,12 +40,11 @@
 // expand inside vga.asm to ``80 equ 80`` (same trap that bit ps2.c).
 #define ANSI_COLS         80
 
-// ansi_fg lives at the bare symbol ``ansi_fg`` (asm_name override) so
-// vga.asm's vga_teletype / vga_write_attribute can keep reading it
-// directly.  cc.py treats asm_name globals as extern (no storage emitted)
-// — the file-scope asm() block at the bottom of this file plants the
-// ``ansi_fg db 7`` byte itself.
-uint8_t ansi_fg __attribute__((asm_name("ansi_fg")));
+// ansi_fg: 256-color foreground index, 7 (light gray) at boot.  Plain
+// C global; cc.py emits storage as ``_g_ansi_fg`` and vga.c's
+// vga_teletype / vga_write_attribute reach it via an
+// ``asm_name("_g_ansi_fg")`` alias.
+uint8_t ansi_fg = 7;
 uint8_t ansi_state;
 uint8_t ansi_param_index;
 int     ansi_params[3];
@@ -201,9 +201,3 @@ void put_string(uint8_t *string __attribute__((in_register("si")))) {
     }
 }
 
-// Storage for ansi_fg.  Sits in a file-scope asm() block so the symbol
-// keeps its bare ``ansi_fg`` name (not cc.py's default ``_g_`` prefix),
-// matching the asm-side references in drivers/vga.asm.
-asm("
-ansi_fg db 7
-");

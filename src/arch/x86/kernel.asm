@@ -20,7 +20,7 @@
 %include "drivers/ne2k.kasm"            ; NE2000 ISA NIC (polled, compiled)
 %include "drivers/ps2.kasm"             ; PS/2 keyboard driver (compiled)
 %include "drivers/rtc.asm"              ; CMOS RTC + PIT tick counter
-%include "drivers/vga.asm"              ; VGA text + mode-13h helpers
+%include "drivers/vga.kasm"             ; VGA text + mode-13h helpers (compiled)
 
         ;; File descriptors, block I/O dispatch, filesystems, VFS switch
 %include "fs/fd.kasm"                   ; fd table + per-type backends
