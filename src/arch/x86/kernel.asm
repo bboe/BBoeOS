@@ -249,7 +249,10 @@ high_entry:
 
 .panic:
         ;; Allocator OOM during boot — print '!' on COM1 and halt.
-        mov dx, COM1_DATA
+        ;; serial.kasm emits COM1_DATA as a `%define` (cc.py's preprocessor
+        ;; output) that NASM only sees after the `%include` below — too
+        ;; late for this prologue.  Literal port works everywhere.
+        mov dx, 0x3F8
         mov al, '!'
         out dx, al
         cli
@@ -264,7 +267,7 @@ high_entry:
 %include "drivers/ne2k.asm"
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.asm"
-%include "drivers/serial.asm"
+%include "drivers/serial.kasm"
 %include "drivers/vga.asm"
 %include "entry.asm"
 %include "fs/block.asm"

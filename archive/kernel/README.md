@@ -34,6 +34,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
 | drivers/ps2 | 37102 | 37510 | +408 |
+| drivers/serial | 37478 | 37510 | +32 |
 
 ## Annotations
 
@@ -63,3 +64,13 @@ eax; ...; pop eax; ret` shape.  Candidate cc.py optimizations: keep
 single-use locals in registers across straight-line code (avoid the
 spill/reload roundtrip), and recognise the "param read once, used
 many cmps" pattern where the spill is unnecessary.
+
+**drivers/serial (+32):** `serial_character` is the only function — a
+ten-line poll-then-write pair against COM1.  Overhead is dominated by
+cc.py's frame setup: the `__attribute__((preserve_register("ax")))` /
+`("dx")` envelope adds a fixed `push ax; push dx; ...; pop dx; pop ax`
+around the body; the `kernel_inb` / `kernel_outb` calls each emit
+`mov dx, <port>; in al, dx` / `mov dx, <port>; mov al, <byte>; out
+dx, al` that the hand-written asm could reuse `dx` across.  Dead-code
+removal of `serial_getc` (no callers; `fs/fd/console.asm` polls COM1
+inline) trimmed both sides equally and kept the delta small.
