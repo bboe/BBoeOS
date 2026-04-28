@@ -39,7 +39,7 @@ so the comparison stays apples-to-apples.
 | netinit | 72             | 94          | 85        | -9    |
 | netrecv | 334            | 424         | 452       | +28   |
 | netsend | 187            | 215         | 255       | +40   |
-| ping    | 1034           | 1034        | 1306      | +272  |
+| ping    | 1034           | 1238        | 1558      | +320  |
 | shell   | 950            | 950         | 1337      | +387  |
 | uptime  | 50             | 67          | 100       | +33   |
 
@@ -131,7 +131,7 @@ length-bearing messages without null terminators.  The C version uses
 a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
 uses ``BUFFER``.
 
-**ping (+272):** Both versions build ICMP echo requests in userspace
+**ping (+320):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
 arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,
