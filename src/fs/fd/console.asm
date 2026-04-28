@@ -3,6 +3,13 @@ fd_read_console:
         ;; Arrow keys arrive as pre-encoded ESC sequences from ps2_handle_scancode;
         ;; each byte is returned separately on successive calls.
         ;; Returns AX = 1 on success, 0 if CX=0, CF clear throughout.
+        ;;
+        ;; Line discipline: CR (0x0D) is translated to LF (0x0A) on input
+        ;; so consumers see Unix-style line endings regardless of source.
+        ;; The PS/2 Enter scancode (0x0D in the keymap) and serial
+        ;; terminals (xterm, putty, etc., which send 0x0D for Enter)
+        ;; converge on 0x0A here.  put_character on the output path
+        ;; already translates LF → CRLF, so the symmetry is clean.
         push ebx
         push ecx
         push edx
@@ -26,6 +33,10 @@ fd_read_console:
         in al, dx
         pop edx
         .rcon_got_char:
+        cmp al, 0Dh             ; CR → LF normalization
+        jne .rcon_store
+        mov al, 0Ah
+        .rcon_store:
         stosb
         mov eax, 1
         pop edi

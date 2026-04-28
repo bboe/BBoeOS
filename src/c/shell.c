@@ -148,8 +148,10 @@ int main() {
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
                 break;
-            } else if (ch == '\r') {
-                /* Enter */
+            } else if (ch == '\n') {
+                /* Enter — fd_read_console normalises CR → LF on input
+                 * (PS/2 Enter scancode and serial-terminal CR both
+                 * land here as LF). */
                 putchar('\n');
                 break;
             } else if (ch == '\x19') {
