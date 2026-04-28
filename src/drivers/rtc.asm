@@ -8,11 +8,11 @@
 ;;;     INT 1Ah AH=00h (ticks)→ rtc_tick_read   (EAX = ticks since boot)
 ;;;     INT 15h AH=86h (sleep)→ rtc_sleep_ms    (CX = milliseconds)
 ;;;
-;;; A tiny IRQ 0 handler replaces the BIOS one so the counter keeps
-;;; advancing after the pmode switch lands.  rtc_tick_init reprograms the
-;;; PIT to 100 Hz (10 ms/tick) instead of the BIOS default ~18.2 Hz — gives
-;;; 10 ms sleep granularity while leaving ≥10 ms of headroom before a CLI
-;;; section starts losing ticks.
+;;; The PIT is reprogrammed to 100 Hz (10 ms/tick) and the IRQ 0 handler
+;;; (`pmode_irq0_handler` in entry.asm) is wired into the pmode IDT during
+;;; `protected_mode_entry`, replacing the BIOS default ~18.2 Hz tick. The
+;;; PIT_* constants below are consumed by entry.asm; PIC_EOI is consumed
+;;; by drivers/fdc.asm.
 ;;; ------------------------------------------------------------------------
 
         CMOS_CENTURY            equ 32h
@@ -27,11 +27,7 @@
         CMOS_UPDATE_IN_PROGRESS equ 80h
         CMOS_YEAR               equ 09h
 
-        IVT_IRQ0_OFFSET         equ 20h * 4     ; remapped by pic_remap (was 8h*4 under BIOS)
-        PIC1_CMD                equ 20h
-        PIC1_DATA               equ 21h
-        PIC_EOI                 equ 20h
-        PIC_IRQ0_UNMASK         equ 0FEh        ; clear bit 0 of master mask
+        PIC_EOI                 equ 20h         ; consumed by drivers/fdc.asm too
 
         PIT_CHANNEL0            equ 40h
         PIT_COMMAND             equ 43h
@@ -117,48 +113,6 @@ rtc_sleep_ms:
         pop eax
         popf
         ret
-
-rtc_tick_init:
-        ;; Reprogram the PIT to 100 Hz, install our own IRQ 0 handler
-        ;; at the pic_remap'd vector 0x20, unmask IRQ 0 at the master
-        ;; PIC (pic_remap leaves every line masked), and zero the tick
-        ;; counter.  Call once, early in stage 2 boot, after pic_remap.
-        cli
-        push ax
-        push es
-        mov al, PIT_MODE2_LOHI_CH0
-        out PIT_COMMAND, al
-        mov ax, PIT_DIVISOR
-        out PIT_CHANNEL0, al    ; lo byte
-        mov al, ah
-        out PIT_CHANNEL0, al    ; hi byte
-        xor ax, ax
-        mov es, ax
-        mov word [es:IVT_IRQ0_OFFSET], rtc_tick_irq0
-        mov word [es:IVT_IRQ0_OFFSET + 2], cs
-        mov dword [system_ticks], 0
-        in al, PIC1_DATA
-        and al, PIC_IRQ0_UNMASK
-        out PIC1_DATA, al
-        pop es
-        pop ax
-        sti
-        ret
-
-rtc_tick_irq0:
-        ;; IRQ 0 handler.  Increment the tick counter, EOI, iret.  Force
-        ;; DS=0 so the tick write lands in segment 0 even if the
-        ;; interrupted code held a non-zero DS (e.g. vga_scroll_up).
-        push eax
-        push ds
-        xor ax, ax
-        mov ds, ax
-        inc dword [system_ticks]
-        mov al, PIC_EOI
-        out PIC1_CMD, al
-        pop ds
-        pop eax
-        iret
 
 rtc_tick_read:
         ;; Output: EAX = monotonic tick counter.  Preserves everything
