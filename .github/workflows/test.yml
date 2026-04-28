@@ -27,4 +27,4 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_archive, test_asm, test_bboefs, test_cc, test_draw, test_ext2, test_programs]
+        suite: [test_archive, test_asm, test_bboefs, test_cc, test_draw, test_ext2, test_floppy_boot, test_programs]
