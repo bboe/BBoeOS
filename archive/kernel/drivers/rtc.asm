@@ -27,13 +27,10 @@
         CMOS_UPDATE_IN_PROGRESS equ 80h
         CMOS_YEAR               equ 09h
 
-        PIT_CHANNEL0            equ 40h
-        PIT_COMMAND             equ 43h
-        PIT_DIVISOR             equ 11932       ; 1193182 / 11932 ≈ 99.998 Hz
-        PIT_MODE2_LOHI_CH0      equ 00110100b   ; ch0, lo/hi access, mode 2, binary
-
-        MS_PER_TICK             equ 10
-        TICKS_PER_SECOND        equ 100
+        ;; PIC_EOI / PIT_* / MS_PER_TICK / TICKS_PER_SECOND moved
+        ;; to src/include/constants.asm during the C port; this
+        ;; archived snapshot relies on those definitions being live
+        ;; in the include chain.
 
 rtc_read:
         ;; Input: AL = CMOS register index.  Output: AL = register value.

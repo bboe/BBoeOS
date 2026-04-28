@@ -229,6 +229,8 @@ at the time.
 
 - Port the ATA PIO disk driver (`ata_init`, `ata_issue`, `ata_wait_drq`, `ata_read_sector`, `ata_write_sector`) from `drivers/ata.asm` to C in a new `src/drivers/ata.c`.  LBA28 single-sector PIO transfers via `kernel_inb` / `kernel_outb` for register programming and `kernel_insw` / `kernel_outsw` for the 256-word data move.  `__attribute__((carry_return))` keeps the asm CF=err contract (`return 1` = success / CF clear, `return 0` = error / CF set) intact for callers reached through `fs/block.asm`.
 
+- Port the CMOS RTC reads, PIT tick counter, and millisecond sleep (`rtc_read_epoch`, `rtc_tick_read`, `rtc_sleep_ms`, `uptime_seconds`, plus internal `rtc_read_date_internal` / `rtc_read_time_internal` / `rtc_bcd_to_bin` / `rtc_is_leap_year` / `rtc_wait_steady` helpers) from `drivers/rtc.asm` to C in a new `src/drivers/rtc.c`.  C-shaped logic (BCD conversion, leap-year math, the year-loop and month-days arithmetic in `rtc_read_epoch_impl`) ports to ~70 lines; the non-C-shaped pieces stay in file-scope `asm()` blocks — multi-byte CH:CL/DH:DL date/time returns picked up via two `out_register` parameters, the `cli`/`popf`-bracketed atomic 32-bit `system_ticks` read in `rtc_tick_read`, the `pushf`/`sti` envelope around `rtc_sleep_ms`, and the division-based `uptime_seconds`.  `system_ticks` keeps its bare asm symbol via `equ _g_system_ticks` so `entry.asm`'s IRQ 0 stub (`inc dword [system_ticks]`) and post-flip zero (`mov dword [system_ticks], 0`) link unchanged.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
