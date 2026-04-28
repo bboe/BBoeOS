@@ -7,6 +7,10 @@ at the time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
 ### Paging prep (2026-04-28)
+- Probe the BIOS memory map via INT 15h AX=E820 in the MBR and stash
+  24-byte entries at physical 0x500 (terminated by a zero entry).
+  Result is unconsumed at this point — the post-paging bitmap frame
+  allocator will use it to mark free vs reserved physical RAM.
 - Widen the BSS trailer from 16 to 32 bits.  Programs now declare BSS
   via the new 6-byte trailer (`dd bss_size; dw 0xB032`); the kernel
   loader still accepts the legacy 4-byte form (`dw bss_size; dw

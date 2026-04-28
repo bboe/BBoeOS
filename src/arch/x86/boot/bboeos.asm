@@ -86,6 +86,38 @@ start:
         ;; preamble of stage 2 (loaded just above by the disk read).
         call vga_font_load
 
+        ;; Walk the BIOS memory map via INT 15h AX=E820.  Stash 24-byte
+        ;; entries at physical 0x500, terminated by a 24-byte zero
+        ;; entry.  The bitmap frame allocator (post-paging) reads this
+        ;; to know which physical regions are usable RAM.  Runs here
+        ;; while we're still in real mode and BIOS is available.
+        mov di, 0x500
+        xor ebx, ebx                    ; continuation token, 0 = start
+        mov edx, 0x534D4150             ; 'SMAP' signature
+        .e820_loop:
+        mov eax, 0x0000E820
+        mov ecx, 24
+        mov dword [di + 20], 1          ; default ACPI attrs = "valid + ignore-on-read"
+        int 15h
+        jc .e820_done                   ; CF set = no support or end
+        cmp eax, 0x534D4150
+        jne .e820_done
+        test ecx, ecx
+        jz .e820_skip                   ; zero-length entry, skip but keep walking
+        cmp ecx, 20
+        jb .e820_skip
+        add di, 24
+        .e820_skip:
+        test ebx, ebx
+        jnz .e820_loop
+        .e820_done:
+        ;; Write 24-byte zero terminator at DI.
+        push di
+        xor eax, eax
+        mov cx, 24 / 2
+        rep stosw
+        pop di
+
         ;; Remap 8259A master/slave vectors to 0x20..0x27 / 0x28..0x2F.
         ;; Required before the protected mode flip: CPU exceptions 0-31 occupy
         ;; 0x08-0x1F, aliasing IRQ 0 onto double-fault and IRQ 5 onto #GP
