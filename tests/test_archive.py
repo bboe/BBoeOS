@@ -39,10 +39,13 @@ CC_PY = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
 README_PATH = ARCHIVE_DIR / "README.md"
 
-# ``| name | asm_bytes | c_bytes | delta |`` rows.  Delta may have a
-# leading sign and may be 0 (no sign).
+# ``| name | asm_16 | asm | c | delta |`` rows.  asm_16 is the frozen
+# 16-bit byte size (historical reference; the row's archive .asm may
+# now be 32-bit and gives a different ``asm`` value).  Delta may have
+# a leading sign and may be 0 (no sign).
 TABLE_ROW = re.compile(
     r"^\|\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"\|\s*(?P<asm_16>\d+)\s*"
     r"\|\s*(?P<asm>\d+)\s*"
     r"\|\s*(?P<c>\d+)\s*"
     r"\|\s*(?P<delta>[+\-]?\d+)\s*\|"
@@ -51,8 +54,15 @@ TABLE_ROW = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class Expected:
-    """Expected byte counts for a single program row."""
+    """Expected byte counts for a single program row.
 
+    ``asm_16`` is frozen — the 16-bit baseline preserved for historical
+    comparison.  ``asm`` and ``c`` reflect the current bits mode of
+    the row's archive .asm; once converted to 32-bit those numbers
+    update and stay updated.
+    """
+
+    asm_16: int
     asm: int
     c: int
     delta: int
@@ -68,11 +78,17 @@ def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
         if match.group("name") == "Program":
             continue
         rows[match.group("name")] = Expected(
+            asm_16=int(match.group("asm_16")),
             asm=int(match.group("asm")),
             c=int(match.group("c")),
             delta=int(match.group("delta")),
         )
     return rows
+
+
+def detect_bits(*, source: Path) -> int:
+    """Return 32 if *source* declares ``[bits 32]``, else 16."""
+    return 32 if "[bits 32]" in source.read_text(encoding="utf-8") else 16
 
 
 def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
@@ -95,18 +111,18 @@ def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr.strip()
 
 
-def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
+def compile_c(*, source: Path, output: Path, scratch: Path, bits: int) -> tuple[bool, str]:
     """Run cc.py + nasm on *source*, writing the binary to *output*.
 
-    Pinned to ``--bits 16``: the archive holds the original 16-bit
-    asm versions of each program, so the comparison only stays
-    apples-to-apples against 16-bit C output.  Production user
-    programs are built with ``--bits 32`` (see make_os.sh) — they're
-    the protected-mode runtime, not what this archive tracks.
+    *bits* picks 16-bit or 32-bit codegen so the C output matches the
+    archive .asm's bits mode — the archive is mid-conversion from
+    16-bit to 32-bit, so each program carries its current mode (auto-
+    detected from a ``[bits 32]`` directive).  Production user
+    programs ship at 32-bit (see make_os.sh).
     """
     asm_path = scratch / f"{source.stem}.asm"
     result = subprocess.run(
-        [sys.executable, str(CC_PY), "--bits", "16", str(source), str(asm_path)],
+        [sys.executable, str(CC_PY), "--bits", str(bits), str(source), str(asm_path)],
         capture_output=True,
         check=False,
         text=True,
@@ -129,7 +145,8 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
     ok, stderr = assemble(source=asm_source, output=asm_output)
     if not ok:
         return False, f"nasm failed on archive asm: {stderr}"
-    ok, stderr = compile_c(source=c_source, output=c_output, scratch=scratch)
+    bits = detect_bits(source=asm_source)
+    ok, stderr = compile_c(source=c_source, output=c_output, scratch=scratch, bits=bits)
     if not ok:
         return False, stderr
     actual_asm = asm_output.stat().st_size

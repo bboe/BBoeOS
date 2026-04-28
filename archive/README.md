@@ -5,24 +5,43 @@ source is kept here for reference.
 
 ## Binary Size Comparison
 
-| Program | ASM (bytes) | C (bytes) | Delta |
-|---------|-------------|-----------|-------|
-| arp     | 466         | 469       | +3    |
-| cat     | 145         | 145       |  0    |
-| chmod   | 149         | 174       | +25   |
-| cp      | 268         | 227       | -41   |
-| date    | 15          | 15        |  0    |
-| dns     | 724         | 1129      | +405  |
-| hello   | 22          | 23        | +1    |
-| ls      | 135         | 165       | +30   |
-| mkdir   | 123         | 127       | +4    |
-| mv      | 217         | 220       | +3    |
-| netinit | 72          | 69        | -3    |
-| netrecv | 334         | 403       | +69   |
-| netsend | 187         | 221       | +34   |
-| ping    | 1034        | 1306      | +272  |
-| shell   | 950         | 1337      | +387  |
-| uptime  | 50          | 78        | +28   |
+The protected-mode merge made 32-bit the only production target for
+user programs (`make_os.sh` passes `--bits 32`).  This archive is
+mid-migration from 16-bit hand-written asm to 32-bit hand-written asm
+so the comparison stays apples-to-apples.
+
+- **ASM 16 (bytes)** — frozen historical 16-bit baseline; never
+  changes once recorded.  Useful for spotting how much pmode (operand-
+  size prefixes, dword pointer slots, wider PC-relative displacements)
+  inflates each program.
+- **ASM (bytes)** — current archive .asm assembled size.  Reflects
+  whichever bits mode the file is in: rows whose `archive/<name>.asm`
+  still has no `[bits 32]` directive read 16-bit; rows that have been
+  re-written read 32-bit.  Once every row is converted this column
+  will be uniformly 32-bit.
+- **C (bytes)** — current `cc.py` output assembled size; matches the
+  bits mode of the row's archive .asm (auto-detected by
+  `tests/test_archive.py`).
+- **Delta** — C − ASM.  The "where can cc.py do better" signal.
+
+| Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
+|---------|----------------|-------------|-----------|-------|
+| arp     | 466            | 466         | 469       | +3    |
+| cat     | 145            | 145         | 145       |  0    |
+| chmod   | 149            | 149         | 174       | +25   |
+| cp      | 268            | 268         | 227       | -41   |
+| date    | 15             | 15          | 15        |  0    |
+| dns     | 724            | 724         | 1129      | +405  |
+| hello   | 22             | 28          | 29        | +1    |
+| ls      | 135            | 135         | 165       | +30   |
+| mkdir   | 123            | 123         | 127       | +4    |
+| mv      | 217            | 217         | 220       | +3    |
+| netinit | 72             | 72          | 69        | -3    |
+| netrecv | 334            | 334         | 403       | +69   |
+| netsend | 187            | 187         | 221       | +34   |
+| ping    | 1034           | 1034        | 1306      | +272  |
+| shell   | 950            | 950         | 1337      | +387  |
+| uptime  | 50             | 50          | 78        | +28   |
 
 **arp (+3):** The three scratch arrays (`mac_buffer[6]`,
 `receive_buffer[128]`, `target_ip[4]`) are file-scope BSS globals;
@@ -50,6 +69,13 @@ for compact byte-oriented loops.
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
 explicit length.
+
+**hello 16→32 (+6 ASM, +6 C):** Each `mov esi, imm` / `mov ecx, imm`
+in 32-bit takes 5 bytes (one byte op + 4 bytes immediate) where the
+16-bit form was 3 bytes (one byte op + 2 bytes immediate); the two
+loads in main account for the +4, the wider PC-relative jump
+displacement and the [bits 32] directive's effect on rel-jump
+encoding contribute the rest.
 
 **ls (+30):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
