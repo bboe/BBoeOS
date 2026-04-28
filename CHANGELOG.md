@@ -6,6 +6,13 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
+### Paging prep (2026-04-28)
+- Add design + implementation plan documents in
+  `docs/superpowers/specs/2026-04-28-paging-design.md`,
+  `docs/superpowers/specs/2026-04-28-vdso-design.md`, and
+  `docs/superpowers/plans/2026-04-28-paging.md` describing the
+  Linux-shaped high-half-kernel + per-AS layout.
+
 ### Kernel
 - Move userland programs to ring 3.  Add user code (0x18) and user data
   (0x20) GDT descriptors, a 32-bit TSS at selector 0x28 with SS0/ESP0
