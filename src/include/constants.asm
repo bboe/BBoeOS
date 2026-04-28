@@ -4,14 +4,14 @@
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 500h
-        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) — see BOOT_DISK_PHYS for why.
-        %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 48
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
+        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) — see BOOT_DISK_PHYS for why.
+        %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_SECTORS 3
         %assign EDIT_BUFFER_BASE 100000h        ; Edit gap-buffer base (extended memory, 1 MB mark; clears VGA/BIOS at 0xA0000-0xFFFFF)
         %assign EDIT_BUFFER_SIZE 100000h        ; Edit gap-buffer size (1 MB)
@@ -34,31 +34,36 @@
         %assign FD_OFFSET_SIZE 4        ; offset of size field within FD entry (32-bit)
         %assign FD_OFFSET_START 2       ; offset of start_sec field within FD entry
         %assign FD_OFFSET_TYPE 0        ; offset of type field within FD entry
-        %assign FD_TYPE_FREE 0      ; Must stay 0: fd_init zeroes the table; fd_alloc treats 0 as free
         %assign FD_TYPE_CONSOLE 1
         %assign FD_TYPE_DIRECTORY 2
         %assign FD_TYPE_FILE 3
+        %assign FD_TYPE_FREE 0      ; Must stay 0: fd_init zeroes the table; fd_alloc treats 0 as free
         %assign FD_TYPE_ICMP 4
         %assign FD_TYPE_NET 5
         %assign FD_TYPE_UDP 6
         %assign FD_TYPE_VGA 7
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
-        %assign FUNCTION_TABLE 00010000h ; vDSO code page; kernel copies vdso.bin here at boot.  5 bytes per entry (`jmp strict near`).
-        %assign FUNCTION_DIE            FUNCTION_TABLE      ; SI=msg, CX=len: write to stdout then exit
-        %assign FUNCTION_EXIT           FUNCTION_DIE + 5    ; Exit program (reload shell)
-        %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 5   ; Read one byte from stdin; returns AL
-        %assign FUNCTION_PARSE_ARGV   FUNCTION_GET_CHARACTER + 5 ; DI=argv buf: split EXEC_ARG, CX=argc
-        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PARSE_ARGV + 5 ; AL=byte: print 1-3 decimal digits
-        %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 5 ; AL=char: print to stdout
-        %assign FUNCTION_PRINT_DATETIME FUNCTION_PRINT_CHARACTER + 5 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
-        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_DATETIME + 5 ; AL=byte: print 2 zero-padded decimal digits
-        %assign FUNCTION_PRINT_HEX    FUNCTION_PRINT_DECIMAL + 5 ; AL=byte: print 2 hex digits
-        %assign FUNCTION_PRINT_IP      FUNCTION_PRINT_HEX + 5 ; SI=4-byte IP: print dotted decimal
-        %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 5 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
-        %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 5 ; DI=null-terminated string: write to stdout
-        %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 5 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 5 ; SI=buf, CX=len: write to stdout
+        ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
+        ;; match the function_table jmp order in src/vdso/vdso.asm.
+        ;; FUNCTION_TABLE comes first as the base anchor; the rest are
+        ;; sorted alphabetically with explicit slot offsets so adding /
+        ;; reordering an entry only touches its own line.
+        %assign FUNCTION_TABLE 00010000h ; vDSO code page; kernel copies vdso.bin here at boot
+        %assign FUNCTION_DIE                FUNCTION_TABLE +  0 ; SI=msg, CX=len: write to stdout then exit
+        %assign FUNCTION_EXIT               FUNCTION_TABLE +  5 ; Exit program (reload shell)
+        %assign FUNCTION_GET_CHARACTER      FUNCTION_TABLE + 10 ; Read one byte from stdin; returns AL
+        %assign FUNCTION_PARSE_ARGV         FUNCTION_TABLE + 15 ; DI=argv buf: split EXEC_ARG, CX=argc
+        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_TABLE + 20 ; AL=byte: print 1-3 decimal digits
+        %assign FUNCTION_PRINT_CHARACTER    FUNCTION_TABLE + 25 ; AL=char: print to stdout
+        %assign FUNCTION_PRINT_DATETIME     FUNCTION_TABLE + 30 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
+        %assign FUNCTION_PRINT_DECIMAL      FUNCTION_TABLE + 35 ; AL=byte: print 2 zero-padded decimal digits
+        %assign FUNCTION_PRINT_HEX          FUNCTION_TABLE + 40 ; AL=byte: print 2 hex digits
+        %assign FUNCTION_PRINT_IP           FUNCTION_TABLE + 45 ; SI=4-byte IP: print dotted decimal
+        %assign FUNCTION_PRINT_MAC           FUNCTION_TABLE + 50 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
+        %assign FUNCTION_PRINT_STRING       FUNCTION_TABLE + 55 ; DI=null-terminated string: write to stdout
+        %assign FUNCTION_PRINTF             FUNCTION_TABLE + 60 ; cdecl: push args R-to-L, push fmt, call
+        %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 65 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256
@@ -128,13 +133,10 @@
         %assign VGA_IOCTL_MODE          01h  ; DL=mode; also clears screen and serial
         %assign VGA_IOCTL_SET_PALETTE   02h  ; CL=index, CH=r, DL=g, DH=b (6-bit DAC)
 
-        ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL)
-        %assign VIDEO_MODE_TEXT_40x25      01h  ; 40x25 color text
+        ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL).
+        ;; Only the two modes that programs actually switch between are
+        ;; defined here; the BIOS supports more (CGA, EGA, VGA 16-color
+        ;; etc.) and `vga_set_mode` will pass through any AL value, but
+        ;; nothing in the tree currently asks for them.
         %assign VIDEO_MODE_TEXT_80x25      03h  ; 80x25 color text (default)
-        %assign VIDEO_MODE_CGA_320x200     04h  ; CGA 4-color 320x200
-        %assign VIDEO_MODE_CGA_640x200     06h  ; CGA 2-color 640x200
-        %assign VIDEO_MODE_EGA_320x200_16  0Dh  ; EGA 16-color 320x200
-        %assign VIDEO_MODE_EGA_640x200_16  0Eh  ; EGA 16-color 640x200
-        %assign VIDEO_MODE_EGA_640x350_16  10h  ; EGA 16-color 640x350
-        %assign VIDEO_MODE_VGA_640x480_16  12h  ; VGA 16-color 640x480
         %assign VIDEO_MODE_VGA_320x200_256 13h  ; VGA 256-color 320x200
