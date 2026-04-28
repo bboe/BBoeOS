@@ -32,6 +32,7 @@ so the comparison stays apples-to-apples.
 | cp      | 268            | 338         | 300       | -38   |
 | date    | 15             | 21          | 21        |  0    |
 | dns     | 724            | 935         | 1435      | +500  |
+| edit    | 2018           | 2668        | 3338      | +670  |
 | hello   | 22             | 28          | 29        | +1    |
 | ls      | 135            | 179         | 196       | +17   |
 | mkdir   | 123            | 151         | 171       | +20   |
@@ -86,6 +87,24 @@ because [dns_base] is now a 32-bit linear address).  Δ jumped from
 +405 to +500 mostly because cc.py's 32-bit codegen pays the
 ``movzx`` zero-extend cost on every byte read in the answer-walking
 loop, which the asm version still avoids.
+
+**edit (+670):** Restored from git history (retired during the pmode
+merge because the 16-bit C build couldn't represent a 256 KB buffer
+base).  The 32-bit asm rewrites the gap buffer to live at
+``EDIT_BUFFER_BASE = 0x100000`` (1 MB mark, past the VGA / BIOS
+regions) with a 1 MB ``EDIT_BUFFER_SIZE`` and ``EDIT_KILL_BUFFER``
+at the 2 MB mark — same layout the C version uses.  The 16-bit
+baseline of 2018 bytes used a buffer floating on ``program_end``
+inside segment 0 with a 25 KB cap.
+
+The +670 delta is mostly two structural costs cc.py 32-bit pays
+that the asm avoids: (1) every byte read from the gap buffer pays
+``movzx ecx, byte [..]`` zero-extend instead of asm's bare ``mov al,
+[..]``; (2) cc.py spills the ``cursor_column`` / ``cursor_line`` /
+``view_*`` BSS globals through EAX for every increment / compare
+where the asm hits memory directly.  The deep call graph (``move_*``,
+``buf_*``, ``check_*``, ``do_*`` helpers) also pays for register
+spilling cc.py's IR-based codegen does at every helper boundary.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
