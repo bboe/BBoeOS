@@ -59,18 +59,30 @@ fdc_dma_setup:
         ;; Input: AL = DMA mode byte (DMA_MODE_READ or DMA_MODE_WRITE).
         ;; Programs channel 2 for a 512 B transfer at SECTOR_BUFFER.
         ;; Preserves all registers.
+        ;;
+        ;; The 8237 channel-2 address registers take three byte writes
+        ;; (low, mid, page) to encode a 24-bit physical address.  Load
+        ;; SECTOR_BUFFER into EBX at runtime and split it ourselves
+        ;; rather than folding ``& 0FFh`` / ``>> 8`` against the
+        ;; SECTOR_BUFFER constant — once SECTOR_BUFFER becomes a
+        ;; section-relative label (rather than a numeric ``%assign``),
+        ;; NASM's ``bin``-format assembler rejects the bitwise
+        ;; arithmetic and the runtime split is the only way to keep
+        ;; this routine working.
         push eax
+        push ebx
 
         mov ah, al                      ; stash mode
+        mov ebx, SECTOR_BUFFER
 
         mov al, DMA_MASK_CH2
         out DMA_MASK, al
         xor al, al
         out DMA_CLEAR_FF, al
 
-        mov al, SECTOR_BUFFER & 0FFh
+        mov al, bl
         out DMA_CH2_ADDR, al
-        mov al, (SECTOR_BUFFER >> 8) & 0FFh
+        mov al, bh
         out DMA_CH2_ADDR, al
 
         xor al, al
@@ -84,12 +96,14 @@ fdc_dma_setup:
         mov al, ah
         out DMA_MODE, al
 
-        xor al, al                      ; SECTOR_BUFFER = 0x0000F000, page = 0
+        shr ebx, 16                     ; page register = phys[23:16]
+        mov al, bl
         out DMA_CH2_PAGE, al
 
         mov al, DMA_UNMASK_CH2
         out DMA_MASK, al
 
+        pop ebx
         pop eax
         ret
 
