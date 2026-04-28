@@ -27,7 +27,7 @@ Single flat-binary kernel (`nasm -f bin`) loaded at `org 7C00h`.  The first 512 
 - **Disk buffer** at `0xF000` for filesystem reads.
 - **Stack** at linear `0x9FFF0`, grows downward.
 - **Resident kernel** (the `bboeos.asm` flat binary) lives at `0x7C00` up through (roughly) `0xF000`, where the disk and NIC buffers begin (SECTOR_BUFFER 0xF000 / NET_TRANSMIT_BUFFER 0xF200 / NET_RECEIVE_BUFFER 0xF800; SECTOR_BUFFER stays below 0x10000 so FDC DMA channel 2's page register at port 0x81 = 0 reaches it).  Programs loaded at `PROGRAM_BASE` (`0x0600`) may allocate working buffers in segment 0, but everything between `0x7C00` and `0xFE00` is off-limits — overwriting it corrupts the live kernel and the next `int 30h` jumps into trashed code.  Programs that need more than ~36 KB of RAM put their buffers in extended memory above the 1 MB mark (e.g. `edit`'s 1 MB gap buffer at `0x100000`); flat 32-bit segments make any address up to ESP usable.  `make_os.sh` enforces a build-time check that `os.bin` doesn't exceed `SECTOR_BUFFER - 0x7C00` bytes, so the overflow that would corrupt buffers fails loud rather than silently.
-- Kernel sector count is derived from `DIRECTORY_SECTOR` via `%assign stage2_sectors (DIRECTORY_SECTOR - 1)` (the constant name carries over from the pre-merge stage1/stage2 split).
+- Kernel sector count is derived at runtime by stage 1: it reads `[stage2_bytes]` (a NASM-computed `kernel_end - 7E00h` placed at MBR offset 508) and shifts to get sectors.  The label name `stage2_bytes` is a fossil from the pre-merge stage1/stage2 split — there is no separate "stage 2" anymore; the 0x7E00 region is the post-MBR kernel binary.
 
 ### Filesystem
 
@@ -95,7 +95,7 @@ renumbering is source-compatible — just rebuild.
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
-- `src/arch/x86/boot/bboeos.asm` — Single flat-binary entry: 16-bit MBR setup, stage-2 disk read, PIC remap, A20, GDT load, far-jmp into protected mode, then `%include`s every kernel subsystem (drivers, fs, lib helpers, net stack, syscall dispatcher, system reboot/shutdown, IDT, post-flip entry).  No more `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split — they were collapsed into this file
+- `src/arch/x86/boot/bboeos.asm` — Single flat-binary entry: 16-bit MBR setup, INT 13h disk read of the post-MBR kernel into `0x7E00`, E820 probe, PIC remap, A20, GDT load, far-jmp into protected mode, then `%include`s every kernel subsystem (drivers, fs, helpers, net stack, syscall dispatcher, system reboot/shutdown, IDT, post-flip entry).  No more `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split — they were collapsed into this file
 - `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate; `idt_install` runs in the bootstrap right before the protected mode flip so any post-flip exception lands in `exc_common` and prints `EXCnn` on COM1
 - `src/arch/x86/entry.asm` — `protected_mode_entry` (segment reload, PIT + IRQ handler install, driver / VFS / NIC inits, banner) flowing into `shell_reload` (loads `bin/shell` and jumps), `program_enter` (fd reset, BSS zero, ESP snapshot, jump to `PROGRAM_BASE`), and the IRQ 0 / IRQ 6 handlers
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
@@ -127,7 +127,7 @@ renumbering is source-compatible — just rebuild.
 - The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none; use `set_exec_arg()`). Unknown commands are tried as external programs via `SYS_SYS_EXEC`; `SYS_SYS_EXIT` reloads the shell.
 - Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs call kernel-provided functions at fixed addresses (e.g., `FUNCTION_PRINT_BCD`, `FUNCTION_WRITE_STDOUT`) instead of `%include`ing shared helpers. Only program-specific logic files (e.g., `dns_query.asm`, `parse_ip.asm`) are still `%include`d.
 - Stage 1 functions must fit within the 512-byte MBR.
-- When adding the `DIRECTORY_SECTOR` constant, stage 2 sector count adjusts automatically.
+- When adding the `DIRECTORY_SECTOR` constant, the post-MBR sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
 - All output goes through `put_character` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `FUNCTION_PRINT_CHARACTER` for all output.
 

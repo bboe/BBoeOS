@@ -58,12 +58,14 @@ start:
         int 13h
         jc .error
 
-        ;; Read stage2 at CHS (cyl=0, head=0, sector=2) into linear 0x7E00.
-        ;; The byte count lives in `stage2_bytes` (NASM-computed from
-        ;; kernel_end - 7E00h and placed at MBR offset 508), so host tools
-        ;; can read the same value from the drive image.  Here we shift right
-        ;; by 9 to get the sector count, and publish `directory_sector` =
-        ;; stage2_sectors + 1 for bbfs / ext2 to consume.
+        ;; Read the rest of the kernel binary at CHS (cyl=0, head=0,
+        ;; sector=2) into linear 0x7E00.  The byte count lives in
+        ;; `stage2_bytes` (a fossil label name from the pre-collapse
+        ;; stage1/stage2/kernel split — NASM-computes it as kernel_end
+        ;; - 7E00h and places it at MBR offset 508 so host tools can
+        ;; read the same value from the drive image).  Here we shift
+        ;; right by 9 to get the post-MBR sector count, and publish
+        ;; `directory_sector` = sectors + 1 for bbfs / ext2 to consume.
         mov ax, [stage2_bytes]
         add ax, 511
         shr ax, 9
@@ -82,8 +84,9 @@ start:
         ;; away with the protected mode flip.  Without this, switching back to text
         ;; mode after running a graphics program (e.g. draw) leaves the
         ;; character generator pointed at empty VRAM and the screen
-        ;; renders as blank glyphs.  vga_font_load lives in the [bits 16]
-        ;; preamble of stage 2 (loaded just above by the disk read).
+        ;; renders as blank glyphs.  vga_font_load lives inside the
+        ;; MBR (its [bits 16] code precedes the AA55 marker, since the
+        ;; post-MBR kernel is all 32-bit).
         call vga_font_load
 
         ;; Walk the BIOS memory map via INT 15h AX=E820.  Stash 24-byte
@@ -185,11 +188,12 @@ start:
         ;; Real-mode-only helper called from the boot path above.  Lives
         ;; in the MBR so it stays adjacent to its sole caller and shares
         ;; the [bits 16] context — moving it past the AA55 boundary
-        ;; would force a [bits 16] island in the [bits 32] stage 2.
+        ;; would force a [bits 16] island in the [bits 32] post-MBR
+        ;; kernel.
 %include "vga_font.asm"
 
 boot_disk db 0
-directory_sector dw 0           ; stage2_sectors + 1; set at boot, read by bbfs
+directory_sector dw 0           ; post-MBR sector count + 1; set at boot, read by bbfs
 
         times 508-($-$$) db 0
 stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
