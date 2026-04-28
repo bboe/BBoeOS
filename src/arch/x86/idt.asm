@@ -19,10 +19,17 @@
         LSR_THRE                equ 20h
 
 %macro IDT_ENTRY 1
-        ;; We rely on the kernel living entirely in the low 64 KB of
-        ;; linear memory (MBR loads at 0x7C00 and the flat binary never
-        ;; grows past 0xFFFF), so offset 31:16 is always zero.  Revisit
-        ;; if anything ever lives above that line.
+        ;; Low 16 bits of the handler offset are emitted by NASM's
+        ;; native ``dw symbol`` truncation.  The high 16 bits are left
+        ;; zero here and patched at boot by ``idt_init`` — NASM's
+        ;; ``bin`` format treats labels as section-relative so the
+        ;; bitwise arithmetic that would otherwise produce them
+        ;; rejects with "may only be applied to scalar values" even
+        ;; for backward references.  When the kernel lives entirely
+        ;; in the low 64 KB (current pre-paging boot), the high half
+        ;; is already zero and ``idt_init`` is a no-op; once the
+        ;; kernel relocates above that line, the patch lights up the
+        ;; high half automatically.
         dw %1
         dw IDT_CODE_SELECTOR
         db 0
@@ -235,6 +242,8 @@ idt_start:
         ;; can issue `int 30h`.  Hardware IRQs and CPU exceptions ignore
         ;; gate DPL, so the lower 32 entries staying DPL=0 still works
         ;; while preventing ring 3 from synthesising fake fault frames.
+        ;; Like the EXC entries above, the high half of the offset is
+        ;; patched at boot by ``idt_init``.
         dw syscall_handler
         dw IDT_CODE_SELECTOR
         db 0
@@ -245,6 +254,63 @@ idt_end:
 idtr:
         dw idt_end - idt_start - 1
         dd idt_start
+
+%macro IDT_PATCH 2
+        ;; %1 = vector, %2 = handler symbol.  Writes high 16 bits of
+        ;; the handler address into the IDT entry at offset +6.
+        mov eax, %2
+        shr eax, 16
+        mov [idt_start + (%1) * 8 + 6], ax
+%endmacro
+
+idt_init:
+        ;; Patch the offset[31:16] field of every statically-defined
+        ;; IDT entry with the high half of its handler's address.
+        ;; The IDT_ENTRY macro emits only the low half via NASM's
+        ;; native ``dw symbol`` truncation (NASM's ``bin`` format
+        ;; rejects ``& 0FFFFh`` / ``>> 16`` arithmetic on section-
+        ;; relative labels, even backward references), so the runtime
+        ;; patch is the only place high-half handler addresses get
+        ;; written.  Idempotent — pre-paging the kernel lives in low
+        ;; 64 KB so every patch writes 0 over an already-zero field;
+        ;; once the kernel relocates above that line the high halves
+        ;; light up automatically.
+        push eax
+        IDT_PATCH 0,  exc_0
+        IDT_PATCH 1,  exc_1
+        IDT_PATCH 2,  exc_2
+        IDT_PATCH 3,  exc_3
+        IDT_PATCH 4,  exc_4
+        IDT_PATCH 5,  exc_5
+        IDT_PATCH 6,  exc_6
+        IDT_PATCH 7,  exc_7
+        IDT_PATCH 8,  exc_8
+        IDT_PATCH 9,  exc_9
+        IDT_PATCH 10, exc_10
+        IDT_PATCH 11, exc_11
+        IDT_PATCH 12, exc_12
+        IDT_PATCH 13, exc_13
+        IDT_PATCH 14, exc_14
+        IDT_PATCH 15, exc_15
+        IDT_PATCH 16, exc_16
+        IDT_PATCH 17, exc_17
+        IDT_PATCH 18, exc_18
+        IDT_PATCH 19, exc_19
+        IDT_PATCH 20, exc_20
+        IDT_PATCH 21, exc_21
+        IDT_PATCH 22, exc_22
+        IDT_PATCH 23, exc_23
+        IDT_PATCH 24, exc_24
+        IDT_PATCH 25, exc_25
+        IDT_PATCH 26, exc_26
+        IDT_PATCH 27, exc_27
+        IDT_PATCH 28, exc_28
+        IDT_PATCH 29, exc_29
+        IDT_PATCH 30, exc_30
+        IDT_PATCH 31, exc_31
+        IDT_PATCH 0x30, syscall_handler
+        pop eax
+        ret
 
 idt_set_gate32:
         ;; Install a 32-bit interrupt gate.  EAX = handler linear address,
