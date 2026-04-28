@@ -6,6 +6,15 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
+- Rename the MBR-offset-508 size field from `stage2_bytes` →
+  `kernel_bytes` (and `STAGE2_BYTES_OFFSET` → `KERNEL_BYTES_OFFSET` in
+  `add_file.py`).  The `stage2_*` name was a fossil from the pre-merge
+  stage1/stage2/kernel split that no longer exists; the post-MBR
+  region is just "the kernel".  Drop adjacent stale prose from
+  `CLAUDE.md`, `README.md`, `cc/target.py`, and `bboeos.asm` (vDSO
+  base address comment was still showing the pre-relocation
+  `0x08046000`).
+
 ### Paging prep (2026-04-28)
 - Move the FUNCTION_TABLE and `shared_*` helpers (`lib/print.asm`,
   `lib/proc.asm`) into a separately-assembled vDSO blob (`src/vdso/vdso.asm`)

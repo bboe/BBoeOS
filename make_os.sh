@@ -21,8 +21,9 @@ find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
     python3 cc.py --target kernel "$source" "$out" || exit 1
 done
 
-# Build the vDSO blob (FUNCTION_TABLE + shared_* helpers) — exactly 4 KB.
-# The kernel binary embeds it via incbin at the `vdso_image` label.
+# Build the vDSO blob (FUNCTION_TABLE + shared_* helpers).  The kernel
+# binary embeds it via incbin at the `vdso_image` label and copies it
+# to virtual FUNCTION_TABLE (0x00010000) at boot via `vdso_install`.
 nasm -f bin -i src/include/ -o vdso.bin src/vdso/vdso.asm
 if [ $? -ne 0 ]; then
     exit 1
