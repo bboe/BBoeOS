@@ -3,9 +3,9 @@
 
 For each src/c/*.c: run cc.py under both emission modes and pass the
 result through NASM.  Fails if either mode produces assembly that NASM
-rejects.  This is the only test that actually invokes cc.py under
-``--bits=32``; test_cc.py uses clang for C syntax and test_programs.py
-runs through the 16-bit default by booting the OS.
+rejects.  Production builds run cc.py at ``--bits=32`` (see
+make_os.sh, the default since the protected-mode merge); this test
+keeps ``--bits=16`` honest as a still-supported fallback.
 
 Usage:
     tests/test_cc_bits.py

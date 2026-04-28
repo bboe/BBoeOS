@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,12 +7,12 @@ main:
         cld
 
         ;; Require exactly one argument
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 1
+        cmp ecx, 1
         jne .usage
 
-        mov si, [ARGV]
+        mov esi, [ARGV]
         mov ah, SYS_FS_MKDIR
         int 30h
         jnc .done
@@ -20,16 +21,16 @@ main:
         je .exists
         cmp al, ERROR_DIRECTORY_FULL
         je .dir_full
-        mov si, MESSAGE_ERROR
-        mov cx, MESSAGE_ERROR_LENGTH
+        mov esi, MESSAGE_ERROR
+        mov ecx, MESSAGE_ERROR_LENGTH
         jmp .print
         .exists:
-        mov si, MESSAGE_EXISTS
-        mov cx, MESSAGE_EXISTS_LENGTH
+        mov esi, MESSAGE_EXISTS
+        mov ecx, MESSAGE_EXISTS_LENGTH
         jmp .print
         .dir_full:
-        mov si, MESSAGE_DIRECTORY_FULL
-        mov cx, MESSAGE_DIRECTORY_FULL_LENGTH
+        mov esi, MESSAGE_DIRECTORY_FULL
+        mov ecx, MESSAGE_DIRECTORY_FULL_LENGTH
         .print:
         jmp FUNCTION_DIE
 
@@ -37,8 +38,8 @@ main:
         jmp FUNCTION_EXIT
 
         .usage:
-        mov si, MESSAGE_USAGE
-        mov cx, MESSAGE_USAGE_LENGTH
+        mov esi, MESSAGE_USAGE
+        mov ecx, MESSAGE_USAGE_LENGTH
         jmp FUNCTION_DIE
 
 MESSAGE_DIRECTORY_FULL         db `Directory full\n`

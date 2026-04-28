@@ -1,10 +1,11 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
 
 main:
-        mov si, MESSAGE
-        mov cx, MESSAGE_LENGTH
+        mov esi, MESSAGE
+        mov ecx, MESSAGE_LENGTH
         jmp FUNCTION_DIE
 
 ;; --- string literals ---

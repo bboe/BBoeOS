@@ -2,11 +2,11 @@
 """Verify the archive/*.asm and src/c/*.c byte counts match the README table.
 
 The archive directory holds the last-known-good assembly form of each
-program that has since been rewritten in C.  The three-column byte-size
-comparison in archive/README.md is only meaningful if every cell stays
-honest — the ASM side must still assemble under the current kernel ABI,
-the C side must still compile (via cc.py) under the current constants
-and builtins, and the delta must equal ``c - asm``.
+program that has since been rewritten in C.  The byte-size comparison
+in archive/README.md is only meaningful if every cell stays honest —
+the ASM side must still assemble under the current kernel ABI, the C
+side must still compile (via cc.py) under the current constants and
+builtins, and the delta must equal ``c - asm``.
 
 This test:
   1. Assembles every archive/*.asm with nasm.
@@ -39,10 +39,12 @@ CC_PY = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
 README_PATH = ARCHIVE_DIR / "README.md"
 
-# ``| name | asm_bytes | c_bytes | delta |`` rows.  Delta may have a
-# leading sign and may be 0 (no sign).
+# ``| name | asm_16 | asm | c | delta |`` rows.  asm_16 is the frozen
+# 16-bit byte size (historical reference, never re-verified).  Delta
+# may have a leading sign and may be 0 (no sign).
 TABLE_ROW = re.compile(
     r"^\|\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"\|\s*(?P<asm_16>\d+)\s*"
     r"\|\s*(?P<asm>\d+)\s*"
     r"\|\s*(?P<c>\d+)\s*"
     r"\|\s*(?P<delta>[+\-]?\d+)\s*\|"
@@ -51,8 +53,14 @@ TABLE_ROW = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class Expected:
-    """Expected byte counts for a single program row."""
+    """Expected byte counts for a single program row.
 
+    ``asm_16`` is frozen — the 16-bit baseline preserved for historical
+    comparison and never re-verified.  ``asm`` and ``c`` are 32-bit byte
+    counts checked against the actual archive .asm and cc.py output.
+    """
+
+    asm_16: int
     asm: int
     c: int
     delta: int
@@ -68,6 +76,7 @@ def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
         if match.group("name") == "Program":
             continue
         rows[match.group("name")] = Expected(
+            asm_16=int(match.group("asm_16")),
             asm=int(match.group("asm")),
             c=int(match.group("c")),
             delta=int(match.group("delta")),

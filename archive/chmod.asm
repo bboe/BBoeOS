@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,13 +7,13 @@ main:
         cld
 
         ;; Require exactly two arguments: mode (+x/-x) and filename
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 2
+        cmp ecx, 2
         jne .usage
 
         ;; Parse mode argument (argv[0])
-        mov si, [ARGV]
+        mov esi, [ARGV]
         lodsb
         cmp al, '+'
         je .set_exec
@@ -30,11 +31,11 @@ main:
         lodsb
         cmp al, 'x'
         jne .usage
-        cmp byte [si], 0      ; Mode arg must be exactly 2 chars
+        cmp byte [esi], 0     ; Mode arg must be exactly 2 chars
         jne .usage
 
-        ;; SI = filename (argv[1])
-        mov si, [ARGV+2]
+        ;; ESI = filename (argv[1] — pointers are 4 bytes apart in 32-bit)
+        mov esi, [ARGV+4]
         mov al, dl             ; AL = new flags value
         mov ah, SYS_FS_CHMOD
         int 30h
@@ -43,12 +44,12 @@ main:
         cmp al, ERROR_PROTECTED
         je .protected
         ;; ERROR_NOT_FOUND (or unknown)
-        mov si, MESSAGE_NOT_FOUND
-        mov cx, MESSAGE_NOT_FOUND_LENGTH
+        mov esi, MESSAGE_NOT_FOUND
+        mov ecx, MESSAGE_NOT_FOUND_LENGTH
         jmp .error
         .protected:
-        mov si, MESSAGE_PROTECTED
-        mov cx, MESSAGE_PROTECTED_LENGTH
+        mov esi, MESSAGE_PROTECTED
+        mov ecx, MESSAGE_PROTECTED_LENGTH
         .error:
         jmp FUNCTION_DIE
 
@@ -56,8 +57,8 @@ main:
         jmp FUNCTION_EXIT
 
         .usage:
-        mov si, MESSAGE_USAGE
-        mov cx, MESSAGE_USAGE_LENGTH
+        mov esi, MESSAGE_USAGE
+        mov ecx, MESSAGE_USAGE_LENGTH
         jmp FUNCTION_DIE
 
         MESSAGE_NOT_FOUND db `File not found\n`

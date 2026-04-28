@@ -19,6 +19,10 @@ at the time.
   Privileged instructions (`cli`/`sti`/`in`/`out`/CR writes) now #GP
   from user code.
 
+### Toolchain
+- `cc.py` now defaults to `--bits 32`.  The protected-mode merge made 32-bit the only production target (kernel + user programs both pass `--bits 32` explicitly in `make_os.sh`); the 16-bit default was a holdover.  `--bits 16` is still a working option for back-compat — `tests/test_archive.py` (user-program archive baseline) and `tests/test_asm.py` (self-hosted assembler regression — its 32-bit codegen has gaps not yet covered) explicitly pin to 16-bit.  16-bit support stays on the table for now; revisit dropping it after the user-program archive moves to 32-bit (or retires).
+
+
 ## [0.8.0](https://github.com/bboe/BBoeOS/compare/0.7.0...0.8.0) (2026-04-27)
 
 ### Boot

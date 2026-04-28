@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,17 +7,17 @@ main:
         cld
 
         ;; Read cached MAC (NIC was probed at boot)
-        mov di, my_mac
+        mov edi, my_mac
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
         ;; Print MAC address
-        mov si, MESSAGE_MAC
-        mov cx, MESSAGE_MAC_LENGTH
+        mov esi, MESSAGE_MAC
+        mov ecx, MESSAGE_MAC_LENGTH
         call FUNCTION_WRITE_STDOUT
 
-        mov si, my_mac
+        mov esi, my_mac
         call FUNCTION_PRINT_MAC
 
         mov al, `\n`
@@ -24,8 +25,8 @@ main:
         jmp FUNCTION_EXIT
 
         .no_nic:
-        mov si, MESSAGE_NO_NIC
-        mov cx, MESSAGE_NO_NIC_LENGTH
+        mov esi, MESSAGE_NO_NIC
+        mov ecx, MESSAGE_NO_NIC_LENGTH
         jmp FUNCTION_DIE
 
         ;; Data

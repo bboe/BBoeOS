@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,35 +7,35 @@ main:
         cld
 
         ;; Require exactly two arguments
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 2
+        cmp ecx, 2
         jne .usage
 
-        ;; Validate newname length
-        mov si, [ARGV]         ; SI = oldname (for syscall later)
-        mov di, [ARGV+2]       ; DI = newname (for syscall later)
-        push si
-        push di
-        mov si, di
-        xor cx, cx
+        ;; Validate newname length (4-byte argv slots in 32-bit)
+        mov esi, [ARGV]         ; ESI = oldname (for syscall later)
+        mov edi, [ARGV+4]       ; EDI = newname (for syscall later)
+        push esi
+        push edi
+        mov esi, edi
+        xor ecx, ecx
         .count_new:
         lodsb
         test al, al
         jz .count_done
-        inc cx
-        cmp cx, DIRECTORY_NAME_LENGTH - 1
+        inc ecx
+        cmp ecx, DIRECTORY_NAME_LENGTH - 1
         ja .name_too_long
         jmp .count_new
         .name_too_long:
-        pop di
-        pop si
+        pop edi
+        pop esi
         jmp .toolong
         .count_done:
-        pop di
-        pop si
+        pop edi
+        pop esi
 
-        ;; SI = oldname, DI = newname
+        ;; ESI = oldname, EDI = newname
         mov ah, SYS_FS_RENAME
         int 30h
         jnc .done
@@ -44,16 +45,16 @@ main:
         cmp al, ERROR_PROTECTED
         je .protected
         ;; ERROR_NOT_FOUND (or unknown)
-        mov si, MESSAGE_NOT_FOUND
-        mov cx, MESSAGE_NOT_FOUND_LENGTH
+        mov esi, MESSAGE_NOT_FOUND
+        mov ecx, MESSAGE_NOT_FOUND_LENGTH
         jmp .error
         .exists:
-        mov si, MESSAGE_EXISTS
-        mov cx, MESSAGE_EXISTS_LENGTH
+        mov esi, MESSAGE_EXISTS
+        mov ecx, MESSAGE_EXISTS_LENGTH
         jmp .error
         .protected:
-        mov si, MESSAGE_PROTECTED
-        mov cx, MESSAGE_PROTECTED_LENGTH
+        mov esi, MESSAGE_PROTECTED
+        mov ecx, MESSAGE_PROTECTED_LENGTH
         .error:
         jmp FUNCTION_DIE
 
@@ -61,13 +62,13 @@ main:
         jmp FUNCTION_EXIT
 
         .toolong:
-        mov si, MESSAGE_TOO_LONG
-        mov cx, MESSAGE_TOO_LONG_LENGTH
+        mov esi, MESSAGE_TOO_LONG
+        mov ecx, MESSAGE_TOO_LONG_LENGTH
         jmp FUNCTION_DIE
 
         .usage:
-        mov si, MESSAGE_USAGE
-        mov cx, MESSAGE_USAGE_LENGTH
+        mov esi, MESSAGE_USAGE
+        mov ecx, MESSAGE_USAGE_LENGTH
         jmp FUNCTION_DIE
 
         MESSAGE_EXISTS    db `File already exists\n`

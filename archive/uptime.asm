@@ -1,30 +1,30 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
 
 main:
         mov ah, SYS_RTC_UPTIME
-        int 30h                 ; AX = elapsed seconds
+        int 30h                 ; EAX = elapsed seconds
 
-        xor dx, dx
-        mov cx, 3600
-        div cx                  ; AX = hours, DX = remaining seconds
-        push dx
+        xor edx, edx
+        mov ecx, 3600
+        div ecx                 ; EAX = hours, EDX = remaining seconds
+        push edx
         call FUNCTION_PRINT_DECIMAL
         mov al, ':'
         call FUNCTION_PRINT_CHARACTER
 
-        pop ax                  ; Remaining seconds
-        xor ah, ah
-        mov cl, 60
-        div cl                  ; AL = minutes, AH = seconds
-        push ax
+        pop eax                 ; Remaining seconds (0-3599)
+        xor edx, edx
+        mov ecx, 60
+        div ecx                 ; EAX = minutes, EDX = seconds
+        push edx
         call FUNCTION_PRINT_DECIMAL
         mov al, ':'
         call FUNCTION_PRINT_CHARACTER
 
-        pop ax
-        mov al, ah              ; Seconds
+        pop eax                 ; Seconds within minute
         call FUNCTION_PRINT_DECIMAL
         mov al, `\n`
         call FUNCTION_PRINT_CHARACTER

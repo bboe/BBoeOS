@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -9,35 +10,35 @@ main:
         cld
 
         ;; Verify NIC by reading MAC
-        mov di, my_mac
+        mov edi, my_mac
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
         ;; Require exactly one argument
-        mov di, ARGV
+        mov edi, ARGV
         call FUNCTION_PARSE_ARGV
-        cmp cx, 1
+        cmp ecx, 1
         jne .no_arg
 
         ;; Try dotted-decimal IP; fall back to DNS
-        mov si, [ARGV]
-        mov di, target_ip
+        mov esi, [ARGV]
+        mov edi, target_ip
         call parse_ip
         jnc .have_ip
-        mov si, [ARGV]
+        mov esi, [ARGV]
         call resolve_dns
         jc .resolve_err
 
         .have_ip:
         ;; Print "Pinging X.X.X.X...\n"
-        mov si, MESSAGE_PINGING
-        mov cx, MESSAGE_PINGING_LENGTH
+        mov esi, MESSAGE_PINGING
+        mov ecx, MESSAGE_PINGING_LENGTH
         call FUNCTION_WRITE_STDOUT
-        mov si, target_ip
+        mov esi, target_ip
         call FUNCTION_PRINT_IP
-        mov si, MESSAGE_ELLIPSIS
-        mov cx, MESSAGE_ELLIPSIS_LENGTH
+        mov esi, MESSAGE_ELLIPSIS
+        mov ecx, MESSAGE_ELLIPSIS_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         ;; Open ICMP socket (Linux-style SOCK_DGRAM + IPPROTO_ICMP)
@@ -46,12 +47,12 @@ main:
         mov ah, SYS_NET_OPEN
         int 30h
         jc .sock_err
-        mov [socket_fd], ax
+        mov [socket_fd], eax
 
         mov byte [count], PING_COUNT
         .loop:
         ;; Build ICMP echo request: 8-byte header + 8-byte payload
-        mov di, icmp_packet
+        mov edi, icmp_packet
         mov al, 8              ; Type: echo request
         stosb
         xor al, al             ; Code
@@ -64,15 +65,13 @@ main:
         xchg al, ah            ; Sequence in network byte order
         stosw
         inc word [ping_seq]
-        xor ax, ax             ; 8 bytes of zero payload
-        stosw
-        stosw
-        stosw
-        stosw
+        xor eax, eax           ; 8 bytes of zero payload (2× dword)
+        stosd
+        stosd
 
         ;; Inline 1's-complement checksum over the 16 ICMP bytes
-        mov si, icmp_packet
-        mov cx, PING_ICMP_LENGTH / 2
+        mov esi, icmp_packet
+        mov ecx, PING_ICMP_LENGTH / 2
         xor bx, bx
         .cksum:
         lodsw
@@ -82,107 +81,111 @@ main:
         not bx
         mov [icmp_packet + 2], bx
 
-        ;; Record start tick (low word of BIOS tick counter)
-        xor ah, ah
-        int 1Ah
-        mov [start_ticks], dx
+        ;; Record start time (full 32-bit ms via SYS_RTC_MILLIS).
+        ;; Pmode has no real-mode IVT, so the 16-bit version's int 1Ah
+        ;; is unavailable; SYS_RTC_MILLIS returns DX:AX which we
+        ;; recompose into EAX.
+        mov ah, SYS_RTC_MILLIS
+        int 30h
+        shl edx, 16
+        and eax, 0xFFFF
+        or eax, edx
+        mov [start_ms], eax
 
         ;; sendto(fd, icmp_packet, 16, target_ip) — ICMP ignores ports
-        mov bx, [socket_fd]
-        mov si, icmp_packet
-        mov cx, PING_ICMP_LENGTH
-        mov di, target_ip
+        mov ebx, [socket_fd]
+        mov esi, icmp_packet
+        mov ecx, PING_ICMP_LENGTH
+        mov edi, target_ip
         mov ah, SYS_NET_SENDTO
         int 30h
         jc .timeout
 
         ;; Poll recvfrom until we see an ICMP echo reply
-        mov bp, 0FFFFh
+        mov ebp, 0FFFFh
         .poll:
-        mov bx, [socket_fd]
-        mov di, recv_buffer
-        mov cx, 128
+        mov ebx, [socket_fd]
+        mov edi, recv_buffer
+        mov ecx, 128
         xor dx, dx
         mov ah, SYS_NET_RECVFROM
         int 30h
-        test ax, ax
+        test eax, eax
         jz .poll_next
         cmp byte [recv_buffer], 0       ; ICMP type 0 = echo reply
         jne .poll_next
-        ;; Got reply — RTT = now - start
-        xor ah, ah
-        int 1Ah
-        sub dx, [start_ticks]
-        mov ax, dx
+        ;; Got reply — RTT = now_ms - start_ms (full 32-bit)
+        mov ah, SYS_RTC_MILLIS
+        int 30h
+        shl edx, 16
+        and eax, 0xFFFF
+        or eax, edx
+        sub eax, [start_ms]
         jmp .print_reply
         .poll_next:
-        dec bp
+        dec ebp
         jnz .poll
         jmp .timeout
 
         .print_reply:
-        push ax
-        mov si, MESSAGE_REPLY
-        mov cx, MESSAGE_REPLY_LENGTH
+        push eax                ; Save ms delta
+        mov esi, MESSAGE_REPLY
+        mov ecx, MESSAGE_REPLY_LENGTH
         call FUNCTION_WRITE_STDOUT
-        mov si, target_ip
+        mov esi, target_ip
         call FUNCTION_PRINT_IP
-        mov si, MESSAGE_TIME
-        mov cx, MESSAGE_TIME_LENGTH
-        call FUNCTION_WRITE_STDOUT
-        pop ax
-        call FUNCTION_PRINT_DECIMAL
-        mov si, MESSAGE_TICKS
-        mov cx, MESSAGE_TICKS_LENGTH
-        call FUNCTION_WRITE_STDOUT
+        ;; printf(": time=%d ms\n", duration_ms) — cdecl, args R-to-L
+        push dword MESSAGE_TIME_FMT
+        call FUNCTION_PRINTF
+        add esp, 8              ; pop fmt + duration
         jmp .next
 
         .timeout:
-        mov si, MESSAGE_TIMEOUT
-        mov cx, MESSAGE_TIMEOUT_LENGTH
+        mov esi, MESSAGE_TIMEOUT
+        mov ecx, MESSAGE_TIMEOUT_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         .next:
         ;; Sleep ~1 second between pings
-        mov cx, 1000
+        mov ecx, 1000
         mov ah, SYS_RTC_SLEEP
         int 30h
         dec byte [count]
         jnz .loop
 
         ;; Close socket and exit
-        mov bx, [socket_fd]
+        mov ebx, [socket_fd]
         mov ah, SYS_IO_CLOSE
         int 30h
         jmp FUNCTION_EXIT
 
         .no_arg:
-        mov si, MESSAGE_USAGE
-        mov cx, MESSAGE_USAGE_LENGTH
+        mov esi, MESSAGE_USAGE
+        mov ecx, MESSAGE_USAGE_LENGTH
         jmp FUNCTION_DIE
 
         .no_nic:
-        mov si, MESSAGE_NO_NIC
-        mov cx, MESSAGE_NO_NIC_LENGTH
+        mov esi, MESSAGE_NO_NIC
+        mov ecx, MESSAGE_NO_NIC_LENGTH
         jmp FUNCTION_DIE
 
         .resolve_err:
-        mov si, MESSAGE_RESOLVE_ERROR
-        mov cx, MESSAGE_RESOLVE_ERROR_LENGTH
+        mov esi, MESSAGE_RESOLVE_ERROR
+        mov ecx, MESSAGE_RESOLVE_ERROR_LENGTH
         jmp FUNCTION_DIE
 
         .sock_err:
-        mov si, MESSAGE_SOCK_ERR
-        mov cx, MESSAGE_SOCK_ERR_LENGTH
+        mov esi, MESSAGE_SOCK_ERR
+        mov ecx, MESSAGE_SOCK_ERR_LENGTH
         jmp FUNCTION_DIE
 
 resolve_dns:
         ;; Resolve domain to IP via DNS A query
-        ;; Input: SI = null-terminated domain string
+        ;; Input: ESI = null-terminated domain string
         ;; Output: target_ip filled with first A record, CF set on error
-        push bx
-        push cx
-        push di
+        push ebx
+        push ecx
+        push edi
 
         call dns_query
         jc .err
@@ -191,58 +194,56 @@ resolve_dns:
         mov cl, al             ; CL = answer count
 
         .answer_loop:
-        cmp byte [di], 0C0h
+        cmp byte [edi], 0C0h
         jb .skip_labels
-        add di, 2
+        add edi, 2
         jmp .check_type
         .skip_labels:
-        cmp byte [di], 0
+        cmp byte [edi], 0
         je .labels_done
-        movzx bx, byte [di]
-        inc di
-        add di, bx
+        movzx ebx, byte [edi]
+        inc edi
+        add edi, ebx
         jmp .skip_labels
         .labels_done:
-        inc di
+        inc edi
 
         .check_type:
-        cmp word [di], 0100h   ; A record = 0x0001 big-endian
+        cmp word [edi], 0100h  ; A record = 0x0001 big-endian
         je .found_a
-        add di, 8
-        movzx bx, byte [di+1]
-        add di, 2
-        add di, bx
+        add edi, 8
+        movzx ebx, byte [edi+1]
+        add edi, 2
+        add edi, ebx
         dec cl
         jnz .answer_loop
         jmp .err
 
         .found_a:
-        add di, 10
-        mov ax, [di]
-        mov [target_ip], ax
-        mov ax, [di+2]
-        mov [target_ip+2], ax
+        add edi, 10
+        mov eax, [edi]         ; 4-byte IP — single dword copy
+        mov [target_ip], eax
         clc
         jmp .done
         .err:
         stc
         .done:
-        pop di
-        pop cx
-        pop bx
+        pop edi
+        pop ecx
+        pop ebx
         ret
 
         ;; Data
         count db 0
-        dns_base dw 0
+        dns_base dd 0
         dns_server_ip db 10, 0, 2, 3
-        dns_socket_fd dw 0
+        dns_socket_fd dd 0
         icmp_packet times PING_ICMP_LENGTH db 0
         my_mac times 6 db 0
         ping_seq dw 1
         recv_buffer times 128 db 0
-        socket_fd dw 0
-        start_ticks dw 0
+        socket_fd dd 0
+        start_ms dd 0
         target_ip times 4 db 0
 
         MESSAGE_ELLIPSIS db `...\n`
@@ -257,10 +258,7 @@ resolve_dns:
         MESSAGE_RESOLVE_ERROR_LENGTH equ $ - MESSAGE_RESOLVE_ERROR
         MESSAGE_SOCK_ERR db `Socket error\n`
         MESSAGE_SOCK_ERR_LENGTH equ $ - MESSAGE_SOCK_ERR
-        MESSAGE_TICKS db ` ticks\n`
-        MESSAGE_TICKS_LENGTH equ $ - MESSAGE_TICKS
-        MESSAGE_TIME db `: time=`
-        MESSAGE_TIME_LENGTH equ $ - MESSAGE_TIME
+        MESSAGE_TIME_FMT db `: time=%d ms\n\0`
         MESSAGE_TIMEOUT db `Request timed out\n`
         MESSAGE_TIMEOUT_LENGTH equ $ - MESSAGE_TIMEOUT
         MESSAGE_USAGE db `Usage: ping <ip|hostname>\n`

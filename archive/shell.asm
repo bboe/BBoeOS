@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -15,23 +16,23 @@ main:
         cld
         ;; Open /dev/vga for ioctl-based video-mode switching.  Stash the
         ;; fd so Ctrl-L can reuse it without reopening on every keypress.
-        mov si, DEV_VGA
+        mov esi, DEV_VGA
         mov al, O_WRONLY
         mov ah, SYS_IO_OPEN
         int 30h
-        mov [vga_fd], ax
+        mov [vga_fd], eax
 prompt:
-        mov si, PROMPT
-        mov cx, PROMPT_LENGTH
+        mov esi, PROMPT
+        mov ecx, PROMPT_LENGTH
         call FUNCTION_WRITE_STDOUT
 
         call read_line
-        test cx, cx
+        test ecx, ecx
         jz prompt
 
         ;; Split command at first space
-        mov si, BUFFER
-        mov word [EXEC_ARG], 0
+        mov esi, BUFFER
+        mov dword [EXEC_ARG], 0
 .find_space:
         lodsb
         cmp al, ' '
@@ -40,47 +41,46 @@ prompt:
         jnz .find_space
         jmp .split_done
 .found_space:
-        mov byte [si-1], 0     ; Null-terminate command name
-        mov [EXEC_ARG], si     ; Point to argument
+        mov byte [esi-1], 0    ; Null-terminate command name
+        mov [EXEC_ARG], esi    ; Point to argument
 .split_done:
-        ;; DX = command name length including null terminator
-        mov dx, si
-        sub dx, BUFFER
+        ;; EDX = command name length including null terminator
+        mov edx, esi
+        sub edx, BUFFER
 
 .dispatch:
-        mov bx, cmd_table
+        mov ebx, cmd_table
 .loop:
-        mov di, [bx]
-        test di, di
+        mov edi, [ebx]
+        test edi, edi
         jz .not_found
 
-        mov cx, dx
-        mov si, BUFFER
+        mov ecx, edx
+        mov esi, BUFFER
         repe cmpsb
         jne .next
 
-        call word [bx+2]
+        call dword [ebx+4]
         jmp .output
 
 .next:
-        add bx, 4
+        add ebx, 8             ; cmd_table entry stride: 4-byte name + 4-byte fn
         jmp .loop
 
 .not_found:
         ;; Try to execute as external program by literal name
-        mov si, BUFFER
+        mov esi, BUFFER
         mov ah, SYS_SYS_EXEC
         int 30h                 ; Does not return on success
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
-        ;; Not found in root: retry inside bin/
-        ;; Write the "bin/" prefix at runtime since exec_path is
-        ;; volatile ARGV scratch, not prefilled binary data.
-        mov word [exec_path], 0x6962        ; 'b','i'
-        mov word [exec_path+2], 0x2F6E      ; 'n','/'
-        mov si, BUFFER
-        mov di, exec_path + 4   ; just past "bin/"
-        mov cx, DIRECTORY_NAME_LENGTH    ; name + null
+        ;; Not found in root: retry inside bin/.  Write the "bin/"
+        ;; prefix as a single dword: little-endian "n/ib" with bytes
+        ;; 'b','i','n','/' lands as 0x2F6E6962.
+        mov dword [exec_path], 0x2F6E6962
+        mov esi, BUFFER
+        mov edi, exec_path + 4 ; just past "bin/"
+        mov ecx, DIRECTORY_NAME_LENGTH    ; name + null
         .copy_name:
         lodsb
         stosb
@@ -88,49 +88,49 @@ prompt:
         jz .copy_done
         loop .copy_name
         .copy_done:
-        mov byte [di], 0        ; ensure null-termination
-        mov si, exec_path
+        mov byte [edi], 0      ; ensure null-termination
+        mov esi, exec_path
         mov ah, SYS_SYS_EXEC
         int 30h                 ; Does not return on success
         cmp al, ERROR_NOT_EXECUTE
         je .not_exec
-        mov si, INVALID_COMMAND
+        mov esi, INVALID_COMMAND
         jmp .output
         .not_exec:
-        mov si, NOT_EXECUTABLE
+        mov esi, NOT_EXECUTABLE
 
 .output:
-        test si, si
+        test esi, esi
         jz prompt
-        mov di, si
+        mov edi, esi
         call FUNCTION_PRINT_STRING
         jmp prompt
 
 ;; Command handlers
-;; Return: SI = string to print, or SI = 0 for no output
+;; Return: ESI = string to print, or ESI = 0 for no output
 
 cmd_help:
-        push bx
-        mov si, HELP_PREFIX
-        mov cx, HELP_PREFIX_LENGTH
+        push ebx
+        mov esi, HELP_PREFIX
+        mov ecx, HELP_PREFIX_LENGTH
         call FUNCTION_WRITE_STDOUT
-        mov bx, cmd_table
+        mov ebx, cmd_table
 .help_loop:
-        mov di, [bx]
-        test di, di
+        mov edi, [ebx]
+        test edi, edi
         jz .help_end
-        push bx
+        push ebx
         call FUNCTION_PRINT_STRING
         mov al, ' '
         call FUNCTION_PRINT_CHARACTER
-        pop bx
-        add bx, 4
+        pop ebx
+        add ebx, 8
         jmp .help_loop
 .help_end:
-        pop bx
+        pop ebx
         mov al, `\n`
         call FUNCTION_PRINT_CHARACTER
-        xor si, si
+        xor esi, esi
         ret
 
 cmd_reboot:
@@ -140,17 +140,17 @@ cmd_reboot:
 cmd_shutdown:
         mov ah, SYS_SYS_SHUTDOWN
         int 30h
-        mov si, SHUTDOWN_FAIL
+        mov esi, SHUTDOWN_FAIL
         ret
 
 ;; Line editor
 
 read_line:
-        push ax
-        push bx
-        push dx
-        mov cx, BUFFER          ; Cursor position
-        mov dx, BUFFER          ; End of buffer
+        push eax
+        push ebx
+        push edx
+        mov ecx, BUFFER         ; Cursor position
+        mov edx, BUFFER         ; End of buffer
 
         .read_char:
         call FUNCTION_GET_CHARACTER
@@ -201,51 +201,50 @@ read_line:
         jmp .read_char          ; Ignore other extended keys
 
         .cursor_left:
-        cmp cx, BUFFER
+        cmp ecx, BUFFER
         je .read_char
-        dec cx
-        mov bx, 1
+        dec ecx
+        mov ebx, 1
         call emit_cursor_back
         jmp .read_char
 
         .cursor_right:
-        cmp cx, dx
+        cmp ecx, edx
         je .read_char
-        mov bx, cx
-        mov al, [bx]
+        mov al, [ecx]
         call putc
-        inc cx
+        inc ecx
         jmp .read_char
 
         .backspace:
-        cmp cx, BUFFER
+        cmp ecx, BUFFER
         je .read_char
-        dec cx
-        mov bx, 1
+        dec ecx
+        mov ebx, 1
         call emit_cursor_back
         call .delete_at_cursor
         jmp .read_char
 
         .delete:
-        cmp cx, dx
+        cmp ecx, edx
         je .read_char
         call .delete_at_cursor
         jmp .read_char
 
         .ctrl_a:
-        cmp cx, BUFFER
+        cmp ecx, BUFFER
         je .read_char
-        mov bx, cx
-        sub bx, BUFFER
+        mov ebx, ecx
+        sub ebx, BUFFER
         call emit_cursor_back
-        mov cx, BUFFER
+        mov ecx, BUFFER
         jmp .read_char
 
         .ctrl_c:
         mov al, `\n`
         call putc
-        mov cx, BUFFER
-        mov dx, BUFFER
+        mov ecx, BUFFER
+        mov edx, BUFFER
         jmp .return
 
         .ctrl_d:
@@ -254,222 +253,217 @@ read_line:
         jmp .read_char          ; If shutdown fails, continue
 
         .ctrl_e:
-        cmp cx, dx
+        cmp ecx, edx
         je .read_char
         .ce_loop:
-        mov bx, cx
-        mov al, [bx]
+        mov al, [ecx]
         call putc
-        inc cx
-        cmp cx, dx
+        inc ecx
+        cmp ecx, edx
         jne .ce_loop
         jmp .read_char
 
         .ctrl_k:
-        cmp cx, dx
+        cmp ecx, edx
         je .read_char
-        push si
-        push di
+        push esi
+        push edi
         ;; Copy killed text to kill buffer
-        mov si, cx
-        mov di, kill_buffer
-        mov bx, dx
-        sub bx, cx
-        cmp bx, MAX_INPUT
+        mov esi, ecx
+        mov edi, kill_buffer
+        mov ebx, edx
+        sub ebx, ecx
+        cmp ebx, MAX_INPUT
         jbe .ck_save
-        mov bx, MAX_INPUT
+        mov ebx, MAX_INPUT
         .ck_save:
-        mov [kill_length], bx
+        mov [kill_length], ebx
         .ck_copy:
-        mov al, [si]
-        mov [di], al
-        inc si
-        inc di
-        dec bx
+        mov al, [esi]
+        mov [edi], al
+        inc esi
+        inc edi
+        dec ebx
         jnz .ck_copy
         ;; Erase killed text: print spaces, then cursor back
-        mov bx, dx
-        sub bx, cx              ; Count of chars to erase
-        push bx                 ; Save count for cursor_back
-        mov si, bx
+        mov ebx, edx
+        sub ebx, ecx            ; Count of chars to erase
+        push ebx                ; Save count for cursor_back
+        mov esi, ebx
         .ck_erase:
         mov al, ' '
         call putc
-        dec si
+        dec esi
         jnz .ck_erase
-        pop bx
+        pop ebx
         call emit_cursor_back
-        mov dx, cx              ; Truncate buffer at cursor
-        pop di
-        pop si
+        mov edx, ecx            ; Truncate buffer at cursor
+        pop edi
+        pop esi
         jmp .read_char
 
         .ctrl_y:
-        push si
-        mov si, kill_buffer
-        mov bx, [kill_length]
-        test bx, bx
+        push esi
+        mov esi, kill_buffer
+        mov ebx, [kill_length]
+        test ebx, ebx
         jz .cy_done
         .cy_loop:
-        mov al, [si]
-        push bx
+        mov al, [esi]
+        push ebx
         call .insert_char
-        pop bx
+        pop ebx
         jc .cy_full             ; Stop yanking if buffer full
-        inc si
-        dec bx
+        inc esi
+        dec ebx
         jnz .cy_loop
         jmp .cy_done
         .cy_full:
         call visual_bell
         .cy_done:
-        pop si
+        pop esi
         jmp .read_char
 
         .ctrl_l:
-        mov bx, [vga_fd]
+        mov ebx, [vga_fd]
         mov dl, VIDEO_MODE_TEXT_80x25
         mov al, VGA_IOCTL_MODE
         mov ah, SYS_IO_IOCTL
         int 30h
-        mov cx, BUFFER
-        mov dx, BUFFER
+        mov ecx, BUFFER
+        mov edx, BUFFER
         jmp .return
 
         .end:
         mov al, `\n`
         call putc
         .return:
-        mov bx, dx              ; Add null terminating character to buffer
-        mov byte [bx], 00h
-        mov cx, dx
-        sub cx, BUFFER         ; Store how many characters were read in cx
-        pop dx
-        pop bx
-        pop ax
+        mov byte [edx], 0      ; Add null terminating character to buffer
+        mov ecx, edx
+        sub ecx, BUFFER        ; Store how many characters were read in ECX
+        pop edx
+        pop ebx
+        pop eax
         ret
 
         ;; Insert char in AL at cursor, shift buffer right, redraw
         .insert_char:
-        push bx
-        mov bx, dx
-        sub bx, BUFFER
-        cmp bx, MAX_INPUT
-        pop bx
+        push ebx
+        mov ebx, edx
+        sub ebx, BUFFER
+        cmp ebx, MAX_INPUT
+        pop ebx
         jb .ic_ok
         stc                     ; Set carry flag to signal buffer full
         ret
         .ic_ok:
-        push si
-        push ax
-        mov si, dx
+        push esi
+        push eax
+        mov esi, edx
         .ic_shift:
-        cmp si, cx
+        cmp esi, ecx
         jle .ic_insert
-        dec si
-        mov al, [si]
-        mov [si+1], al
+        dec esi
+        mov al, [esi]
+        mov [esi+1], al
         jmp .ic_shift
         .ic_insert:
-        pop ax
-        mov bx, cx
-        mov [bx], al
-        inc dx
+        pop eax
+        mov [ecx], al
+        inc edx
         ;; Print from cursor to end via putc
-        mov si, cx
+        mov esi, ecx
         .ic_print:
-        cmp si, dx
+        cmp esi, edx
         jge .ic_repos
-        mov bx, si
-        mov al, [bx]
+        mov al, [esi]
         call putc
-        inc si
+        inc esi
         jmp .ic_print
         .ic_repos:
-        inc cx
-        mov bx, dx
-        sub bx, cx
+        inc ecx
+        mov ebx, edx
+        sub ebx, ecx
         call emit_cursor_back
         clc                     ; Clear carry flag to signal success
-        pop si
+        pop esi
         ret
 
         ;; Delete char at cursor, shift buffer left, redraw
         .delete_at_cursor:
-        push si
-        mov si, cx
-        inc si
+        push esi
+        mov esi, ecx
+        inc esi
         .dac_shift:
-        cmp si, dx
+        cmp esi, edx
         jge .dac_redraw
-        mov al, [si]
-        dec si
-        mov [si], al
-        inc si
-        inc si
+        mov al, [esi]
+        dec esi
+        mov [esi], al
+        inc esi
+        inc esi
         jmp .dac_shift
         .dac_redraw:
-        dec dx
+        dec edx
         ;; Print from cursor to end, space to erase, then cursor back
-        mov si, cx
+        mov esi, ecx
         .dac_print:
-        cmp si, dx
+        cmp esi, edx
         jge .dac_erase
-        mov bx, si
-        mov al, [bx]
+        mov al, [esi]
         call putc
-        inc si
+        inc esi
         jmp .dac_print
         .dac_erase:
         mov al, ' '
         call putc               ; Erase trailing character
-        mov bx, dx
-        sub bx, cx
-        inc bx
+        mov ebx, edx
+        sub ebx, ecx
+        inc ebx
         call emit_cursor_back
-        pop si
+        pop esi
         ret
 
 ;; Utility functions
 
 emit_cursor_back:
         ;; Emit ESC[nD sequence via putc
-        ;; Input: BX = count (0 = no-op)
-        test bx, bx
+        ;; Input: EBX = count (0 = no-op)
+        test ebx, ebx
         jz .ecb_done
-        push ax
+        push eax
         mov al, 1Bh
         call putc
         mov al, '['
         call putc
-        mov ax, bx
+        mov eax, ebx
         call .emit_decimal
         mov al, 'D'
         call putc
-        pop ax
+        pop eax
 .ecb_done:
         ret
 
 .emit_decimal:
-        ;; Emit AX as decimal digits via putc
-        push cx
-        push dx
-        xor cx, cx              ; Digit count
+        ;; Emit EAX as decimal digits via putc
+        push ecx
+        push edx
+        xor ecx, ecx            ; Digit count
 .ed_div:
-        xor dx, dx
-        mov bx, 10
-        div bx                  ; AX = quotient, DX = remainder
-        push dx                 ; Push digit
-        inc cx
-        test ax, ax
+        xor edx, edx
+        mov ebx, 10
+        div ebx                 ; EAX = quotient, EDX = remainder
+        push edx                ; Push digit
+        inc ecx
+        test eax, eax
         jnz .ed_div
 .ed_print:
-        pop ax
+        pop eax
         add al, '0'
         call putc
         loop .ed_print
-        pop dx
-        pop cx
+        pop edx
+        pop ecx
         ret
 
 putc:
@@ -478,43 +472,43 @@ putc:
 
 syscall_null:
         int 30h
-        xor si, si
+        xor esi, esi
         ret
 
 visual_bell:
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
+        push eax
+        push ebx
+        push ecx
+        push edx
+        push esi
         ;; Flash background red via SGR: \e[48;5;4m
-        mov si, BELL_RED
-        mov cx, BELL_SGR_LEN
+        mov esi, BELL_RED
+        mov ecx, BELL_SGR_LEN
         call FUNCTION_WRITE_STDOUT
-        mov cx, 50              ; 50 ms
+        mov ecx, 50             ; 50 ms
         mov ah, SYS_RTC_SLEEP
         int 30h
         ;; Restore background black: \e[48;5;0m
-        mov si, BELL_BLACK
-        mov cx, BELL_SGR_LEN
+        mov esi, BELL_BLACK
+        mov ecx, BELL_SGR_LEN
         call FUNCTION_WRITE_STDOUT
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
+        pop esi
+        pop edx
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 BELL_BLACK   db `\e[48;5;0m`
 BELL_RED     db `\e[48;5;4m`
 BELL_SGR_LEN equ $ - BELL_RED
 
-;; Command table
+;; Command table — 4-byte name pointer + 4-byte fn pointer per entry.
 cmd_table:
-        dw .help,     cmd_help
-        dw .reboot,   cmd_reboot
-        dw .shutdown, cmd_shutdown
-        dw 0
+        dd .help,     cmd_help
+        dd .reboot,   cmd_reboot
+        dd .shutdown, cmd_shutdown
+        dd 0
         .help     db `help\0`
         .reboot   db `reboot\0`
         .shutdown db `shutdown\0`
@@ -533,6 +527,6 @@ SHUTDOWN_FAIL db `APM shutdown failed\n\0`
 ;; kill_buffer and exec_path live in the fixed scratch regions declared
 ;; as %assigns at the top of this file; no binary storage is reserved
 ;; for them here.
-kill_length   dw 0
-vga_fd        dw 0
+kill_length   dd 0
+vga_fd        dd 0
 
