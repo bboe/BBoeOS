@@ -96,10 +96,17 @@ def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
 
 
 def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
-    """Run cc.py + nasm on *source*, writing the binary to *output*."""
+    """Run cc.py + nasm on *source*, writing the binary to *output*.
+
+    Pinned to ``--bits 16``: the archive holds the original 16-bit
+    asm versions of each program, so the comparison only stays
+    apples-to-apples against 16-bit C output.  Production user
+    programs are built with ``--bits 32`` (see make_os.sh) — they're
+    the protected-mode runtime, not what this archive tracks.
+    """
     asm_path = scratch / f"{source.stem}.asm"
     result = subprocess.run(
-        [sys.executable, str(CC_PY), str(source), str(asm_path)],
+        [sys.executable, str(CC_PY), "--bits", "16", str(source), str(asm_path)],
         capture_output=True,
         check=False,
         text=True,

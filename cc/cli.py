@@ -27,8 +27,8 @@ def main() -> int:
     parser.add_argument(
         "--bits",
         choices=(16, 32),
-        default=16,
-        help="target CPU mode for emitted assembly (default 16)",
+        default=32,
+        help="target CPU mode for emitted assembly (default 32)",
         type=int,
     )
     parser.add_argument(
