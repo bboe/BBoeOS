@@ -282,7 +282,7 @@ high_entry:
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.kasm"
 %include "drivers/serial.kasm"
-%include "drivers/vga.asm"
+%include "drivers/vga.kasm"
 %include "entry.asm"
 %include "fs/block.asm"
 %include "fs/fd.kasm"
