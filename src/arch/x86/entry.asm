@@ -72,15 +72,33 @@ program_enter:
         ;; jmp target — never call.  Caller has vfs_load'd a program at
         ;; PROGRAM_BASE; this resets the fd table, zeros the program's
         ;; BSS region per the trailer-magic protocol, snapshots the
-        ;; kernel ESP into [shell_esp], and jumps into the program.
-        ;; sys_exit teleports back to the snapshot regardless of how
-        ;; the program mangled its stack.  Using `jmp` (not `call`)
-        ;; means SYS_EXIT respawns don't leave stranded return
-        ;; addresses on the kernel stack.
+        ;; kernel ESP into [shell_esp], and `iretd`s into the program at
+        ;; CPL=3.  sys_exit teleports back to the snapshot regardless of
+        ;; how the program mangled its stack.  Using `jmp` (not `call`)
+        ;; from shell_reload / sys_exec means SYS_EXIT respawns don't
+        ;; leave stranded return addresses on the kernel stack.
         call fd_init
         call bss_setup
         mov [shell_esp], esp
-        jmp PROGRAM_BASE
+
+        ;; Drop into ring 3.  iretd loads SS, ESP, EFLAGS, CS, EIP
+        ;; atomically from the constructed frame, so we never `mov ss,
+        ;; ax` directly — that would split the SS:ESP load across two
+        ;; instructions and an interrupt between them would push to the
+        ;; wrong stack.  iretd does NOT reload DS/ES/FS/GS, so do those
+        ;; by hand first; once they hold a DPL=3 selector the kernel can
+        ;; still read/write through them at CPL=0 (CPL ≤ DPL on access).
+        mov ax, USER_DATA_SELECTOR
+        mov ds, ax
+        mov es, ax
+        mov fs, ax
+        mov gs, ax
+        push dword USER_DATA_SELECTOR   ; SS
+        push dword USER_STACK_TOP       ; ESP
+        push dword 0x202                ; EFLAGS: IF=1, IOPL=0, reserved bit 1=1
+        push dword USER_CODE_SELECTOR   ; CS
+        push dword PROGRAM_BASE         ; EIP
+        iretd
 
 protected_mode_entry:
         mov ax, 0x10
@@ -89,7 +107,27 @@ protected_mode_entry:
         mov ss, ax
         mov fs, ax
         mov gs, ax
-        mov esp, 0x9FFF0
+        mov esp, KERNEL_STACK_TOP
+
+        ;; Patch the TSS descriptor's base bytes with tss_data's linear
+        ;; address (the bytes are scattered across descriptor offsets
+        ;; +2/+4/+7 so we can't fold them at assemble time without
+        ;; line-noise expressions), populate the TSS fields the CPU
+        ;; consults on a ring-3 → ring-0 transition (SS0, ESP0), parking
+        ;; the I/O permission bitmap past the TSS limit so all I/O ports
+        ;; trap from CPL=3.  Then `ltr` — must complete before any ring
+        ;; transition can fire, but exceptions and IRQs at CPL=0 don't
+        ;; need the TSS, so doing it before the rest of init is safe.
+        mov eax, tss_data
+        mov [gdt_tss + 2], ax
+        shr eax, 16
+        mov [gdt_tss + 4], al
+        mov [gdt_tss + 7], ah
+        mov dword [tss_data + 4], KERNEL_STACK_TOP      ; ESP0
+        mov word [tss_data + 8], 0x10                   ; SS0 = kernel data
+        mov word [tss_data + 102], 104                  ; IOPB offset = TSS limit + 1 → no I/O bitmap
+        mov ax, TSS_SELECTOR
+        ltr ax
 
         ;; Reprogram PIT to 100 Hz (MS_PER_TICK=10 ms/tick).
         ;; Constants defined in drivers/rtc.asm, assembled before entry.asm.
@@ -163,5 +201,13 @@ shell_reload:
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
 welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.0 (2026/04/27)", 13, 10, 0
+
+        ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
+        ;; protected_mode_entry); all other fields stay zero because we
+        ;; don't use hardware task switching.  Sized to the 104-byte
+        ;; standard layout so the IOPB-past-limit trick parks I/O.
+        align 4
+tss_data:
+        times 104 db 0
 
 ;;; -----------------------------------------------------------------------

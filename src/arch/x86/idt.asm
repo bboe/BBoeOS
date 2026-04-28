@@ -15,6 +15,7 @@
 
         IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (protected mode GDT[1])
         IDT_FLAGS_INT32         equ 8Eh          ; P=1 DPL=0 type=0xE
+        IDT_FLAGS_INT32_DPL3    equ 0EEh         ; P=1 DPL=3 type=0xE — ring-3 callable (INT 30h)
         LSR_THRE                equ 20h
 
 %macro IDT_ENTRY 1
@@ -174,7 +175,15 @@ idt_start:
         ;; not-present (all zeros) — a stray IRQ before they're filled in
         ;; will #GP, which lands in exc_common with exception 13.
         times (0x30 - 32) * 8 db 0
-        IDT_ENTRY syscall_handler       ; vector 0x30 (INT 30h syscall gate)
+        ;; Vector 0x30 — INT 30h syscall gate.  DPL=3 so ring-3 programs
+        ;; can issue `int 30h`.  Hardware IRQs and CPU exceptions ignore
+        ;; gate DPL, so the lower 32 entries staying DPL=0 still works
+        ;; while preventing ring 3 from synthesising fake fault frames.
+        dw syscall_handler
+        dw IDT_CODE_SELECTOR
+        db 0
+        db IDT_FLAGS_INT32_DPL3
+        dw 0
 idt_end:
 
 idtr:
