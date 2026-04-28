@@ -263,7 +263,7 @@ high_entry:
 %include "memory_management/frame.asm"
 %include "drivers/ata.kasm"
 %include "drivers/console.kasm"
-%include "drivers/fdc.asm"
+%include "drivers/fdc.kasm"
 %include "drivers/ne2k.asm"
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.kasm"
