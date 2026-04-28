@@ -31,17 +31,17 @@ This is the immediate post-ring-3 milestone. Ring 3 gave us privilege protection
 |---|---|---|
 | `0x00000000..0x000003FF` | Real-mode IVT | Free after PE flip |
 | `0x00000400..0x000004FF` | BIOS data area | Free after PE flip |
-| `0x00000500..0x000005FF` | E820 table stash | Stage-2 writes here, PE-side bitmap init reads here |
+| `0x00000500..0x000005FF` | E820 table stash | MBR-time real-mode code writes here, PE-side bitmap init reads here |
 | `0x00001000..0x00001FFF` | Boot PD (promoted to `kernel_pd_template`) | Bitmap-reserved forever |
 | `0x00002000..0x00002FFF` | First kernel PT (covers physical `0..4 MB`; serves identity at PDE[0] and direct-map at PDE[768]) | Bitmap-reserved forever |
 | `0x00007C00..0x00007DFF` | MBR | Free after PE flip |
-| `0x00007E00..0x0000FFFF` | Stage-2 / early-PE bootstrap | Free after dropping identity map |
-| `0x00010000..0x000FFFFF` | Kernel-loaded-here-by-stage-2 | Free after copy to `0x100000` |
+| `0x00007E00..0x0000FFFF` | boot.asm / early-PE bootstrap | Free after dropping identity map |
+| `0x00010000..0x000FFFFF` | Kernel image staging area | Free after early-PE copies it to `0x100000` |
 | `0x000A0000..0x000FFFFF` | VGA / BIOS reserved | Bitmap-reserved forever |
 | `0x00100000..(kernel_end)` | Relocated kernel image | Bitmap-reserved forever |
 | `(kernel_end)..(top of RAM)` | Bitmap-allocated frames | User pages, PDs, user PTs, BSS |
 
-Stage-2 reads the kernel image into `0x10000` via INT 13h. Early-PE code copies it to `0x100000` and zeroes the source area.
+The boot.asm code reads the kernel image into `0x10000` via INT 13h. Early-PE code copies it to `0x100000` and zeroes the source area.
 
 ### Virtual (every page directory)
 
@@ -50,8 +50,7 @@ Stage-2 reads the kernel image into `0x10000` via INT 13h. Early-PE code copies 
 | `0x00000000..0x00000FFF` | NULL guard (unmapped) | — | `*NULL` faults |
 | `0x00001000..0x0000FFFF` | Unmapped user low | — | Reserved for future heap / mmap |
 | `0x00010000..0x00010FFF` | vDSO code page | R-X user | Shared physical frame across all PDs |
-| `0x00011000..0x00011FFF` | vDSO data page | RW user | Per-AS private frame (printf state, scratch byte, etc.) |
-| `0x00012000..0x08047FFF` | Unmapped user low | — | Reserved for future heap / mmap |
+| `0x00011000..0x08047FFF` | Unmapped user low | — | Reserved for future heap / mmap |
 | `0x08048000..(prog_end)` | Program text + data | user | Private frames per AS |
 | `(prog_end)..(prog_end + bss_size)` | BSS, eager-zeroed | user | Private frames per AS |
 | `0x3FFDF000..0x3FFDFFFF` | Stack guard (unmapped) | — | Overflow → clean `#PF` |
@@ -67,21 +66,21 @@ Notes:
 - `__pa(virt) = virt - 0xC0000000` and `__va(phys) = phys + 0xC0000000` for any direct-map address.
 - 64 kernel page tables cover `0xC0000000..0xCFFFFFFF` (256 MB direct map) and are installed in `kernel_pd_template` before any user PD is created. PDEs `[768..831]` point at them and never change again. Future `kmalloc`-style code lives inside this 256 MB window so kernel PDEs in user PDs never need fan-out updates.
 - Kernel pages all carry the G (global) flag so a CR3 reload does not flush them from the TLB.
-- The vDSO at `0x00010000..0x00011FFF` is established by an earlier milestone (see `2026-04-28-vdso-design.md`); the program loader maps both the shared code page and the per-AS data page into every user PD as part of `prog_load`.
+- The vDSO at `0x00010000..0x00010FFF` is established by an earlier milestone (see `2026-04-28-vdso-design.md`); the program loader maps the shared code page into every user PD as part of `prog_load`.  All per-call scratch state lives on the user stack — there is no vDSO data page.
 
 ## Boot path
 
 The kernel splits into two flat-binary nasm outputs to handle the `org` change:
 
-- **`boot.bin`** (`org 0x7C00`): MBR + stage-2 + early-PE bootstrap. Loaded by BIOS at `0x7C00`; runs at low physical; never paged.
+- **`boot.bin`** (`org 0x7C00`): MBR + post-MBR real-mode bootstrap + early-PE bootstrap. Loaded by BIOS at `0x7C00`; runs at low physical; never paged.
 - **`kernel.bin`** (`org 0xC0100000`): everything else — IDT, drivers, VFS, syscall dispatcher, post-flip kernel entry. Linked at high virtual; resides at physical `0x100000` after relocation.
 
 `make_os.sh` concatenates them on the floppy image; one disk read sequence still loads everything.
 
 ### Sequence
 
-1. **BIOS → `0x7C00`.** MBR runs in real mode. Reads stage-2 sectors into `0x7E00` (current behavior).
-2. **Stage-2** (real mode):
+1. **BIOS → `0x7C00`.** MBR runs in real mode. Reads the post-MBR sectors of `boot.bin` into `0x7E00` (current behavior).
+2. **Post-MBR real-mode** (in `boot.bin`):
    - INT 13h reads `kernel.bin` sectors → `0x10000`.
    - INT 15h `AX=E820` walks the BIOS memory map, writes entries to `0x500` (terminated by zero entry).
    - PIC remap, A20 enable, GDT load (existing 6-entry GDT: null, kernel code, kernel data, user code, user data, TSS).
