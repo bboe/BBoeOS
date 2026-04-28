@@ -183,11 +183,11 @@ void fd_advance_position(
     struct fd *entry __attribute__((in_register("si"))),
     int delta __attribute__((in_register("cx"))));
 
-// ps2_has_key: CF-returning wrapper around drivers/ps2.asm's ZF-returning
-// ps2_check (defined in fd.c's asm block).  cc.py's carry_return convention
-// expects CF, not ZF — and ps2_check is the only ZF-returning function the
-// kernel exposes.
-__attribute__((carry_return)) int ps2_has_key();
+// ps2_check: CF clear if a decoded key is ready, CF set otherwise.
+// Defined in drivers/ps2.c (was the ZF-returning ps2_check in
+// drivers/ps2.asm with a CF-translating wrapper here; the C port
+// returns CF directly so the wrapper is gone).
+__attribute__((carry_return)) int ps2_check();
 
 // ps2_read: Block until a decoded key is ready; returns AL=ASCII / AH=scan-code
 // packed into AX (so the int return holds both halves; callers split via
@@ -262,7 +262,7 @@ __attribute__((carry_return)) int fd_read_console(
             *bytes_read = 1;
             return 1;
         }
-        if (!ps2_has_key()) { continue; }
+        if (!ps2_check()) { continue; }
         packed = ps2_read();
         ascii = packed & 0xFF;
         if (ascii != 0) {
@@ -493,17 +493,6 @@ fd_get_write_fn:
 fd_advance_position:
         add [si+FD_OFFSET_POSITION], cx
         adc word [si+FD_OFFSET_POSITION+2], 0
-        ret
-
-        ;; ps2_has_key: CF-returning wrapper around ps2_check (drivers/ps2.asm).
-        ;; ps2_check reports via ZF; cc.py's carry_return convention reads CF.
-ps2_has_key:
-        call ps2_check
-        jz .phk_none
-        clc
-        ret
-        .phk_none:
-        stc
         ret
 
         ;; Operations table: (read_fn, write_fn) indexed by FD_TYPE_*
