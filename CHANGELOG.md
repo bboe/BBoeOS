@@ -6,6 +6,33 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
+### Paging prep (2026-04-28)
+- Move the FUNCTION_TABLE and `shared_*` helpers (`lib/print.asm`,
+  `lib/proc.asm`) into a separately-assembled vDSO blob (`src/vdso/vdso.asm`)
+  loaded at virtual `0x00010000`.  The kernel embeds `vdso.bin` via
+  `incbin` and copies it to physical `FUNCTION_TABLE` once at boot via
+  `vdso_install`.  Helper bodies relocate their `SECTOR_BUFFER` and
+  internal-static references to per-AS data at `0x00011000`.  User
+  programs call `FUNCTION_DIE` / `FUNCTION_PRINT_STRING` / etc. exactly
+  as before — only the addresses change.  Decouples user-side helper
+  code from kernel-virt addressing ahead of paging.  Design at
+  `docs/superpowers/specs/2026-04-28-vdso-design.md`.
+- Probe the BIOS memory map via INT 15h AX=E820 in the MBR and stash
+  24-byte entries at physical 0x500 (terminated by a zero entry).
+  Result is unconsumed at this point — the post-paging bitmap frame
+  allocator will use it to mark free vs reserved physical RAM.
+- Widen the BSS trailer from 16 to 32 bits.  Programs now declare BSS
+  via the new 6-byte trailer (`dd bss_size; dw 0xB032`); the kernel
+  loader still accepts the legacy 4-byte form (`dw bss_size; dw
+  0xB055`) for back-compat.  Lifts the per-program BSS cap from 64 KB
+  to 4 GB ahead of paging, where `edit`'s 1 MB gap buffer becomes
+  ordinary BSS.
+- Add design + implementation plan documents in
+  `docs/superpowers/specs/2026-04-28-paging-design.md`,
+  `docs/superpowers/specs/2026-04-28-vdso-design.md`, and
+  `docs/superpowers/plans/2026-04-28-paging.md` describing the
+  Linux-shaped high-half-kernel + per-AS layout.
+
 ### Kernel
 - Move userland programs to ring 3.  Add user code (0x18) and user data
   (0x20) GDT descriptors, a 32-bit TSS at selector 0x28 with SS0/ESP0

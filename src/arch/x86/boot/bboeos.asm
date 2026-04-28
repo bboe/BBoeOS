@@ -58,12 +58,14 @@ start:
         int 13h
         jc .error
 
-        ;; Read stage2 at CHS (cyl=0, head=0, sector=2) into linear 0x7E00.
-        ;; The byte count lives in `stage2_bytes` (NASM-computed from
-        ;; kernel_end - 7E00h and placed at MBR offset 508), so host tools
-        ;; can read the same value from the drive image.  Here we shift right
-        ;; by 9 to get the sector count, and publish `directory_sector` =
-        ;; stage2_sectors + 1 for bbfs / ext2 to consume.
+        ;; Read the rest of the kernel binary at CHS (cyl=0, head=0,
+        ;; sector=2) into linear 0x7E00.  The byte count lives in
+        ;; `stage2_bytes` (a fossil label name from the pre-collapse
+        ;; stage1/stage2/kernel split — NASM-computes it as kernel_end
+        ;; - 7E00h and places it at MBR offset 508 so host tools can
+        ;; read the same value from the drive image).  Here we shift
+        ;; right by 9 to get the post-MBR sector count, and publish
+        ;; `directory_sector` = sectors + 1 for bbfs / ext2 to consume.
         mov ax, [stage2_bytes]
         add ax, 511
         shr ax, 9
@@ -82,9 +84,42 @@ start:
         ;; away with the protected mode flip.  Without this, switching back to text
         ;; mode after running a graphics program (e.g. draw) leaves the
         ;; character generator pointed at empty VRAM and the screen
-        ;; renders as blank glyphs.  vga_font_load lives in the [bits 16]
-        ;; preamble of stage 2 (loaded just above by the disk read).
+        ;; renders as blank glyphs.  vga_font_load lives inside the
+        ;; MBR (its [bits 16] code precedes the AA55 marker, since the
+        ;; post-MBR kernel is all 32-bit).
         call vga_font_load
+
+        ;; Walk the BIOS memory map via INT 15h AX=E820.  Stash 24-byte
+        ;; entries at physical 0x500, terminated by a 24-byte zero
+        ;; entry.  The bitmap frame allocator (post-paging) reads this
+        ;; to know which physical regions are usable RAM.  Runs here
+        ;; while we're still in real mode and BIOS is available.
+        mov di, 0x500
+        xor ebx, ebx                    ; continuation token, 0 = start
+        mov edx, 0x534D4150             ; 'SMAP' signature
+        .e820_loop:
+        mov eax, 0x0000E820
+        mov ecx, 24
+        mov dword [di + 20], 1          ; default ACPI attrs = "valid + ignore-on-read"
+        int 15h
+        jc .e820_done                   ; CF set = no support or end
+        cmp eax, 0x534D4150
+        jne .e820_done
+        test ecx, ecx
+        jz .e820_skip                   ; zero-length entry, skip but keep walking
+        cmp ecx, 20
+        jb .e820_skip
+        add di, 24
+        .e820_skip:
+        test ebx, ebx
+        jnz .e820_loop
+        .e820_done:
+        ;; Write 24-byte zero terminator at DI.
+        push di
+        xor eax, eax
+        mov cx, 24 / 2
+        rep stosw
+        pop di
 
         ;; Remap 8259A master/slave vectors to 0x20..0x27 / 0x28..0x2F.
         ;; Required before the protected mode flip: CPU exceptions 0-31 occupy
@@ -153,45 +188,32 @@ start:
         ;; Real-mode-only helper called from the boot path above.  Lives
         ;; in the MBR so it stays adjacent to its sole caller and shares
         ;; the [bits 16] context — moving it past the AA55 boundary
-        ;; would force a [bits 16] island in the [bits 32] stage 2.
+        ;; would force a [bits 16] island in the [bits 32] post-MBR
+        ;; kernel.
 %include "vga_font.asm"
 
 boot_disk db 0
-directory_sector dw 0           ; stage2_sectors + 1; set at boot, read by bbfs
+directory_sector dw 0           ; post-MBR sector count + 1; set at boot, read by bbfs
 
         times 508-($-$$) db 0
 stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
         dw 0AA55h
 
 [bits 32]
-        ;; Kernel jump table at FUNCTION_TABLE (= 0x7E00 — the byte
-        ;; immediately after the MBR signature).  Each slot is a 5-byte
-        ;; `jmp strict near` so the stride matches constants.asm's FUNCTION_*
-        ;; offsets.  Programs `jmp FUNCTION_DIE` etc. and land here; the
-        ;; stubs tail-call into the ported shared_* helpers in lib/proc.asm
-        ;; and lib/print.asm.
+        ;; vDSO image — separately-assembled blob copied to physical
+        ;; FUNCTION_TABLE (0x08046000) at boot by `vdso_install` in
+        ;; entry.asm.  Holds the 14-entry FUNCTION_TABLE jump block plus
+        ;; the shared_* helper bodies; user programs call into it via
+        ;; the FUNCTION_* constants in constants.asm.
         ;;
-        ;; Asserts the table starts exactly at FUNCTION_TABLE: zero bytes
-        ;; emitted in the normal case, but if the MBR ever overflows 512
-        ;; bytes the count goes negative and NASM fails the build instead
-        ;; of silently sliding the table.  Section-relative form so NASM
-        ;; can fold the expression to a constant.
-        times (FUNCTION_TABLE - 7C00h) - ($ - $$) db 0
-function_table:
-        jmp strict near shared_die              ; FUNCTION_DIE
-        jmp strict near shared_exit             ; FUNCTION_EXIT
-        jmp strict near shared_get_character    ; FUNCTION_GET_CHARACTER
-        jmp strict near shared_parse_argv       ; FUNCTION_PARSE_ARGV
-        jmp strict near shared_print_byte_decimal ; FUNCTION_PRINT_BYTE_DECIMAL
-        jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER
-        jmp strict near shared_print_datetime   ; FUNCTION_PRINT_DATETIME
-        jmp strict near shared_print_decimal    ; FUNCTION_PRINT_DECIMAL
-        jmp strict near shared_print_hex        ; FUNCTION_PRINT_HEX
-        jmp strict near shared_print_ip         ; FUNCTION_PRINT_IP
-        jmp strict near shared_print_mac        ; FUNCTION_PRINT_MAC
-        jmp strict near shared_print_string     ; FUNCTION_PRINT_STRING
-        jmp strict near shared_printf           ; FUNCTION_PRINTF
-        jmp strict near shared_write_stdout     ; FUNCTION_WRITE_STDOUT
+        ;; Embedded here (rather than loaded from disk separately) so
+        ;; the kernel image stays a single flat binary.  No alignment
+        ;; needed pre-paging — the kernel `vdso_install` uses rep movsd
+        ;; to copy the blob to physical FUNCTION_TABLE wherever it lands
+        ;; in the kernel binary.
+vdso_image:
+        incbin "vdso.bin"
+vdso_image_end:
 
         ;; GDT descriptors. Encoded by hand rather than via `dq` math so the
         ;; field meanings stay visible to a reader.
@@ -269,8 +291,6 @@ pmode_gdtr:
 %include "fs/fd.kasm"                   ; fd table + per-type backends
 %include "fs/vfs.asm"                   ; VFS dispatch + bbfs + ext2
 %include "idt.asm"                      ; 32-bit IDT + exception stubs
-%include "lib/print.asm"                ; shared_print_* / shared_printf / shared_write_stdout
-%include "lib/proc.asm"                 ; shared_die / shared_exit / shared_get_character / shared_parse_argv
 %include "net/net.asm"                  ; net/arp.asm + net/icmp.kasm + net/ip.kasm + net/udp.asm
 %include "syscall.asm"                  ; INT 30h dispatcher + syscall/ handlers
 %include "system.asm"                   ; reboot (8042), shutdown (QEMU/ACPI)

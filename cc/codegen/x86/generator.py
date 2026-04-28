@@ -402,11 +402,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"_bss_total_size equ {prev_end} - _program_end")
 
     def _emit_bss_trailer(self) -> None:
-        """Emit the 4-byte BSS trailer (``dw <size>; dw 0B055h``) just before ``_program_end``.
+        """Emit the 6-byte BSS trailer (``dd <size>; dw 0B032h``) just before ``_program_end``.
 
-        Sets ``self.bss_total`` so the caller can emit ``_bss_end`` and
-        the per-variable EQUs after ``_program_end:`` (avoiding forward
-        references that the self-hosted assembler cannot resolve).
+        Widened from 16-bit to 32-bit BSS size so programs can declare
+        more than 64 KB of BSS (used by ``edit``'s 1 MB gap buffer once
+        paging is on).  Sets ``self.bss_total`` so the caller can emit
+        ``_bss_end`` and the per-variable EQUs after ``_program_end:``
+        (avoiding forward references that the self-hosted assembler
+        cannot resolve).
         """
         if not self.bss_vars:
             return
@@ -423,11 +426,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         if all_literal:
             self.bss_total = total
-            self.emit(f"        dw {total}")
+            self.emit(f"        dd {total}")
         else:
             self.bss_total = "_bss_total_size"
-            self.emit("        dw _bss_total_size")
-        self.emit("        dw 0B055h")
+            self.emit("        dd _bss_total_size")
+        self.emit("        dw 0B032h")
 
     def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
