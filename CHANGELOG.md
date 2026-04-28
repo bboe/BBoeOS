@@ -6,6 +6,16 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
+- **Bugfix:** floppy boot (`qemu-system-i386 -drive
+  file=drive.img,format=raw,if=floppy`) works again after being
+  silently broken for some time.  `protected_mode_entry` was running
+  the driver init chain *before* unmasking IRQ 0 (PIT) and issuing
+  `sti`, so `vfs_init` → `fdc_motor_start` → `rtc_sleep_ms` would
+  busy-wait forever on `system_ticks`.  The fix moves the IRQ 0
+  unmask + `sti` ahead of the driver inits.  A regression test
+  (`tests/test_floppy_boot.py`) now exercises the floppy path on
+  every CI run so this can't slip again.
+
 - Rename the MBR-offset-508 size field from `stage2_bytes` →
   `kernel_bytes` (and `STAGE2_BYTES_OFFSET` → `KERNEL_BYTES_OFFSET` in
   `add_file.py`).  The `stage2_*` name was a fossil from the pre-merge
