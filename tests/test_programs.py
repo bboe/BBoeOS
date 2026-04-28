@@ -84,13 +84,14 @@ def _build_os(*, temporary_directory: Path) -> None:
         sys.exit(1)
 
 
-def _run_test(*, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
+def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
     """Run one ProgramTest; return (passed, short message for report)."""
     try:
         output = run_commands(
             test.commands,
             command_timeout=test.timeout,
             drive=temporary_directory / BASE_IMAGE,
+            floppy=floppy,
             snapshot=True,
             with_net=test.with_net,
         )
@@ -111,6 +112,11 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'netinit')")
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy)",
+    )
     arguments = parser.parse_args()
 
     tests = [t for t in TESTS if arguments.program is None or t.name == arguments.program]
@@ -130,7 +136,7 @@ def main() -> int:
                 print(f"  SKIP  {test.name:<12} ({test.skip})")
                 continue
             started = time.monotonic()
-            ok, message = _run_test(temporary_directory=temporary_directory, test=test)
+            ok, message = _run_test(floppy=arguments.floppy, temporary_directory=temporary_directory, test=test)
             elapsed = time.monotonic() - started
             if ok:
                 print(f"  PASS  {test.name:<12}              {elapsed:6.2f}s")

@@ -39,6 +39,11 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("test", nargs="?", help="run only the named test")
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy)",
+    )
     arguments = parser.parse_args()
 
     directory_sectors = read_assign("DIRECTORY_SECTORS")
@@ -75,6 +80,7 @@ def main() -> int:
                 test_function(
                     directory_sector=directory_sector,
                     directory_sectors=directory_sectors,
+                    floppy=arguments.floppy,
                     temporary_directory=temporary_directory,
                 )
                 ok, message = True, ""
@@ -106,13 +112,13 @@ def make_drive(*, name: str, temporary_directory: Path) -> Path:
     return drive
 
 
-def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
+def test_copy_large(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
     """Copy src/asm.c (>64 KB, sector >255) to a new root file.
 
     Verify the destination is byte-identical to the source.
     """
     drive = make_drive(name="copy_large", temporary_directory=temporary_directory)
-    run_commands(["cp src/asm.c big"], command_timeout=COMMAND_TIMEOUT, drive=drive)
+    run_commands(["cp src/asm.c big"], command_timeout=COMMAND_TIMEOUT, drive=drive, floppy=floppy)
     image = drive.read_bytes()
 
     big = find_entry(
@@ -149,13 +155,14 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, temporary_
     assert big_data == source_data, "copied data does not match source"
 
 
-def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
+def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
     """Copy a file into a subdirectory and verify the entry shows up there."""
     drive = make_drive(name="copy_subdirectory", temporary_directory=temporary_directory)
     run_commands(
         ["mkdir d", "cp bin/cat d/h"],
         command_timeout=COMMAND_TIMEOUT,
         drive=drive,
+        floppy=floppy,
     )
     image = drive.read_bytes()
 
@@ -194,7 +201,7 @@ def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, 
     assert h_data == cat_data, "subdirectory copy data mismatch"
 
 
-def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
+def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
     """Copy a file from bin/ into root, then mv it back into bin/.
 
     Verify the source entry is gone from root, the dest entry exists
@@ -205,6 +212,7 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
         ["cp bin/cat a.txt", "mv a.txt bin/a.txt"],
         command_timeout=COMMAND_TIMEOUT,
         drive=drive,
+        floppy=floppy,
     )
     image = drive.read_bytes()
 
@@ -248,13 +256,13 @@ def test_cross_directory_move(*, directory_sector: int, directory_sectors: int, 
     assert moved_data == cat_data, "moved data mismatch"
 
 
-def test_make_directory_high_sector(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
+def test_make_directory_high_sector(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
     """Verify mkdir allocates a 16-bit sector past sector 255.
 
     asm.c pushes the next free sector well beyond 256.
     """
     drive = make_drive(name="make_directory_high", temporary_directory=temporary_directory)
-    run_commands(["mkdir hi"], command_timeout=COMMAND_TIMEOUT, drive=drive)
+    run_commands(["mkdir hi"], command_timeout=COMMAND_TIMEOUT, drive=drive, floppy=floppy)
     image = drive.read_bytes()
     hi = find_entry(
         directory_sectors=directory_sectors,
@@ -271,7 +279,7 @@ def test_make_directory_high_sector(*, directory_sector: int, directory_sectors:
     assert subdirectory_data == b"\x00" * len(subdirectory_data), "subdirectory not zero-filled"
 
 
-def test_second_directory_sector(*, directory_sector: int, directory_sectors: int, temporary_directory: Path) -> None:
+def test_second_directory_sector(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
     """Exercise lookup, copy, and rename of an entry in the second directory sector.
 
     bin/ holds enough programs that shell lands in the second sector;
@@ -302,6 +310,7 @@ def test_second_directory_sector(*, directory_sector: int, directory_sectors: in
         ["cp bin/shell bin/s", "mv bin/s bin/s2"],
         command_timeout=COMMAND_TIMEOUT,
         drive=drive,
+        floppy=floppy,
     )
     image = drive.read_bytes()
     bin_entry = find_entry(

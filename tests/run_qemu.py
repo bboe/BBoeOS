@@ -180,6 +180,11 @@ def main() -> int:
         help=f"path to drive image (default: {DEFAULT_IMAGE})",
     )
     parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="attach drive as primary floppy (if=floppy) instead of IDE",
+    )
+    parser.add_argument(
         "--net",
         action="store_true",
         help="attach NE2000 NIC (user-mode networking)",
@@ -207,6 +212,7 @@ def main() -> int:
         boot_timeout=arguments.boot_timeout,
         command_timeout=arguments.timeout,
         drive=arguments.drive,
+        floppy=arguments.floppy,
         pcap=arguments.pcap,
         snapshot=arguments.snapshot,
         with_net=arguments.net,

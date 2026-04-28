@@ -122,6 +122,7 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
             ok, message = test_program(
                 directory_sector=directory_sector,
                 directory_sectors=directory_sectors,
+                floppy=arguments.floppy,
                 name=name,
                 output_binary=output_binary,
                 reference=reference,
@@ -237,6 +238,11 @@ def main() -> int:
         nargs="?",
         help="restrict the test to one program (e.g. 'edit')",
     )
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="boot QEMU with the drive attached as a floppy (if=floppy)",
+    )
     arguments = parser.parse_args()
     return _run_tests(arguments=arguments)
 
@@ -255,6 +261,7 @@ def test_program(
     *,
     directory_sector: int,
     directory_sectors: int,
+    floppy: bool,
     name: str,
     output_binary: Path,
     reference: Path,
@@ -270,6 +277,7 @@ def test_program(
         [f"asm src/{name}.asm {output_name}"],
         command_timeout=command_timeout,
         drive=drive,
+        floppy=floppy,
     )
     return compare_drive_output(
         directory_sector=directory_sector,
