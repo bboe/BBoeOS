@@ -1683,6 +1683,8 @@ void handle_movzx() {
     emit_word(0xB60F);
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
+    } else if (type2 == 2) {
+        emit_modrm_direct(register1_id, value2);
     } else {
         emit_indexed_mem(register1_id, register2_id, value2);
     }
