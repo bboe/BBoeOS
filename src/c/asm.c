@@ -2887,17 +2887,30 @@ int parse_operand() {
         }
         end = prev;
     }
-    /* Try to parse a 2-char register at ``end-2`` — this catches the
-       ``[disp + reg]`` NASM dialect.  The register must be preceded
-       by ``+`` (with optional whitespace).  On match, null-terminate
-       just before the ``+``, resolve the displacement, then restore. */
-    if (end - bracket_start >= 2) {
-        char *reg_pos = end - 2;
+    /* Try to parse a register at the trailing position to catch the
+       ``[disp + reg]`` NASM dialect.  The register name is the run
+       of identifier characters ending at ``end - 1`` (handles both
+       2-char 16-bit names like ``si`` and 3-char e-prefixed 32-bit
+       names like ``esi``); ``parse_register`` validates and rejects
+       non-register identifiers like trailing decimal/hex numbers.
+       The register must be preceded by ``+`` (with optional
+       whitespace).  On match, null-terminate just before the
+       ``+``, resolve the displacement, then restore. */
+    char *reg_pos = end;
+    while (reg_pos > bracket_start) {
+        char *prev = reg_pos - 1;
+        if (!is_ident_char(prev[0])) {
+            break;
+        }
+        reg_pos = prev;
+    }
+    if (reg_pos < end && reg_pos > bracket_start) {
         char *saved = source_cursor;
         source_cursor = reg_pos;
         int packed_register2 = parse_register();
+        int consumed_to_end = (source_cursor == end);
         source_cursor = saved;
-        if (packed_register2 >= 0) {
+        if (packed_register2 >= 0 && consumed_to_end) {
             char *back = reg_pos;
             while (back > bracket_start) {
                 char *pb = back - 1;
