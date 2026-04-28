@@ -136,6 +136,8 @@ at the time.
 
 - Port `reboot` (8042 reset) and `shutdown` (QEMU ACPI port `0x604` / Bochs port `0xB004`) from `arch/x86/system.asm` to C in a new `src/arch/x86/system.c`.  Two tiny functions; `shutdown` matches the asm version byte-for-byte, `reboot` pays a 12-byte cc.py prologue that's never reached (the function loops forever in `hlt`) and could be reclaimed with a future `__attribute__((naked))`.
 
+- Port the ANSI escape parser (`put_character` / `put_string`) from `drivers/console.asm` to C in a new `src/drivers/console.c`.  Full CSI sequence handling — `\n`/`\r` translation, `ESC[nA` cursor up, `ESC[nC` forward, `ESC[nD` back, `ESC[r;cH` position, `ESC[0m` reset, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background, `ESC[N@` write-at-cursor — all dispatched against five `vga_*` cross-asm callees declared with `in_register` / `out_register` pinning.  `ansi_fg` keeps its bare asm symbol via `equ _g_ansi_fg` so `drivers/vga.asm` (the only outside reader) links unchanged.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
