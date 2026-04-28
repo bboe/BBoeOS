@@ -34,7 +34,7 @@ so the comparison stays apples-to-apples.
 | dns     | 724            | 724         | 1129      | +405  |
 | hello   | 22             | 28          | 29        | +1    |
 | ls      | 135            | 135         | 165       | +30   |
-| mkdir   | 123            | 123         | 127       | +4    |
+| mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 217         | 220       | +3    |
 | netinit | 72             | 72          | 69        | -3    |
 | netrecv | 334            | 334         | 403       | +69   |
@@ -85,7 +85,13 @@ setup) and `write(STDOUT, ...)` (full syscall path via BX=fd).
 frame for `main` (+6 bytes for prologue, +6 bytes for `lea`-vs-`mov`
 addressing on `entry` accesses).
 
-**mkdir (+4):** Null-terminator overhead across 4 string literals.
+**mkdir (+20):** The asm version stores fd / pointer / count in
+registers; cc.py 32-bit spills several into BP-relative locals
+(visible in the prologue's wider ``sub esp, N``), and string-
+literal handling adds a null terminator per string × 4 strings.
+The 16-bit baseline's +4 was almost entirely null-terminator
+overhead; the +20 here picks up cc.py's frame setup and 32-bit
+prologue/epilogue cost too.
 
 **netrecv (+69):** The C version uses stack-local `receive_buffer[128]`
 and `mac_buffer[6]` in `main`'s BP frame where the assembly version
