@@ -91,8 +91,9 @@ def test_kernel_no_program_end() -> None:
 
 
 def test_kernel_no_bss_trailer() -> None:
-    """Kernel output must not contain the 0B055h stage-2 BSS sentinel."""
+    """Kernel output must not contain the BSS trailer sentinel (0B032h or legacy 0B055h)."""
     asm = _kernel("void hello() {}")
+    assert "0B032h" not in asm, f"'0B032h' BSS trailer found in kernel output\n{asm}"
     assert "0B055h" not in asm, f"'0B055h' BSS trailer found in kernel output\n{asm}"
 
 

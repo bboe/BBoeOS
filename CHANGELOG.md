@@ -7,6 +7,12 @@ at the time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
 ### Paging prep (2026-04-28)
+- Widen the BSS trailer from 16 to 32 bits.  Programs now declare BSS
+  via the new 6-byte trailer (`dd bss_size; dw 0xB032`); the kernel
+  loader still accepts the legacy 4-byte form (`dw bss_size; dw
+  0xB055`) for back-compat.  Lifts the per-program BSS cap from 64 KB
+  to 4 GB ahead of paging, where `edit`'s 1 MB gap buffer becomes
+  ordinary BSS.
 - Add design + implementation plan documents in
   `docs/superpowers/specs/2026-04-28-paging-design.md`,
   `docs/superpowers/specs/2026-04-28-vdso-design.md`, and

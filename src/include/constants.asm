@@ -1,5 +1,6 @@
         %assign ARGV 4DEh               ; 32 bytes (16 word-sized pointers)
-        %assign BSS_MAGIC 0B055h
+        %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
+        %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 500h
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 48

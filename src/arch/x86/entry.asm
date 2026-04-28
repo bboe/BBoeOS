@@ -21,21 +21,28 @@
 bss_setup:
         ;; Zero the BSS region of the freshly-loaded program at
         ;; PROGRAM_BASE.  Reads binary size from vfs_found_size, checks
-        ;; for the 4-byte trailer (dw bss_size; dw BSS_MAGIC) at the end
-        ;; of the binary, then zeroes bss_size bytes immediately after.
-        ;; Same protocol as the 16-bit kernel — programs end with an
-        ;; explicit trailer if they want their BSS zeroed.
+        ;; for either the new 6-byte trailer (dd bss_size; dw
+        ;; BSS_MAGIC32) or the legacy 4-byte trailer (dw bss_size; dw
+        ;; BSS_MAGIC) at the end of the binary, then zeroes bss_size
+        ;; bytes immediately after.  Programs end with an explicit
+        ;; trailer if they want their BSS zeroed.
         push eax
         push ecx
         push edi
         movzx ecx, word [vfs_found_size]        ; binary size (low 16)
         mov edi, PROGRAM_BASE
         add edi, ecx                            ; EDI = PROGRAM_BASE + binary_size
-        cmp ecx, 4
-        jb .bss_done
+        cmp ecx, 6
+        jb .try_old
+        cmp word [edi - 2], BSS_MAGIC32
+        jne .try_old
+        mov ecx, [edi - 6]                      ; 32-bit BSS byte count
+        jmp .zero
+        .try_old:
         cmp word [edi - 2], BSS_MAGIC
         jne .bss_done
-        movzx ecx, word [edi - 4]               ; BSS byte count
+        movzx ecx, word [edi - 4]               ; legacy 16-bit BSS byte count
+        .zero:
         test ecx, ecx
         jz .bss_done
         xor eax, eax
