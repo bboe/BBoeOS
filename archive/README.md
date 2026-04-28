@@ -28,7 +28,7 @@ so the comparison stays apples-to-apples.
 |---------|----------------|-------------|-----------|-------|
 | arp     | 466            | 466         | 469       | +3    |
 | cat     | 145            | 175         | 181       | +6    |
-| chmod   | 149            | 149         | 174       | +25   |
+| chmod   | 149            | 175         | 228       | +53   |
 | cp      | 268            | 268         | 227       | -41   |
 | date    | 15             | 21          | 21        |  0    |
 | dns     | 724            | 724         | 1129      | +405  |
@@ -48,9 +48,13 @@ so the comparison stays apples-to-apples.
 the assembly version uses inline `BUFFER`/`BUFFER+N` offsets.  The
 remaining +3 is null terminators on the two `die()` strings.
 
-**chmod (+25):** The assembly version walks the mode argument with
+**chmod (+53):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
-pointer and indexes for each character check.
+pointer and indexes for each character check.  The 32-bit asm widens
+to 4-byte argv pointer slots (``[ARGV+4]`` was ``[ARGV+2]``); cc.py's
+32-bit codegen for the per-character check sequence carries
+proportionally more byte-load + zero-extend overhead than 16-bit, so
+the delta inflates from +25 to +53.
 
 **dns (+405):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals;
