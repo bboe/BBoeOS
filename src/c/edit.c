@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
         while (lines_to_skip > 0 && offset < length) {
             int character = buffer_character_at(offset);
             offset += 1;
-            if (character == 10) {
+            if (character == '\n') {
                 lines_to_skip -= 1;
             }
         }
@@ -155,7 +155,7 @@ int main(int argc, char *argv[]) {
                 }
                 int character = buffer_character_at(offset);
                 offset += 1;
-                if (character == 10) {
+                if (character == '\n') {
                     if (visible != 0) {
                         putchar('\n');
                     }
