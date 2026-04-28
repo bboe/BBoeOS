@@ -30,7 +30,7 @@ fd_read_file:
         cmp dword [fd_rw_left], 0
         je .rf_done
         mov esi, [fd_rw_descriptor_pointer]
-        call vfs_read_sec       ; ESI = fd entry → SECTOR_BUFFER filled, BX = byte offset
+        call vfs_read_sec       ; ESI = fd entry → sector_buffer filled, BX = byte offset
         jc .rf_disk_err
         ;; Chunk size = min(512 - offset, bytes_left).  Per-iteration chunk
         ;; never exceeds 512, but ``fd_rw_left`` is dword so the compare /
@@ -42,9 +42,9 @@ fd_read_file:
         jbe .rf_chunk_ok
         mov ecx, [fd_rw_left]   ; left < 512: clamp chunk to remaining
         .rf_chunk_ok:
-        ;; Copy ECX bytes from SECTOR_BUFFER+EBX to [EDI]
+        ;; Copy ECX bytes from sector_buffer+EBX to [EDI]
         push esi
-        mov esi, SECTOR_BUFFER
+        mov esi, sector_buffer
         add esi, ebx
         cld
         push ecx
@@ -95,7 +95,7 @@ fd_write_file:
         cmp dword [fd_rw_left], 0
         je .wf_done
         mov esi, [fd_rw_descriptor_pointer]
-        call vfs_prepare_write_sec  ; ESI=fd_entry → SECTOR_BUFFER ready, BX=byte offset
+        call vfs_prepare_write_sec  ; ESI=fd_entry → sector_buffer ready, BX=byte offset
         jc .wf_disk_err
         ;; Chunk = min(512 - offset, bytes_left)
         movzx ebx, bx           ; zero-extend byte offset (0-511)
@@ -105,9 +105,9 @@ fd_write_file:
         jbe .wf_chunk_ok
         mov ecx, [fd_rw_left]
         .wf_chunk_ok:
-        ;; Copy ECX bytes from user buffer to SECTOR_BUFFER+EBX
+        ;; Copy ECX bytes from user buffer to sector_buffer+EBX
         push esi
-        mov edi, SECTOR_BUFFER
+        mov edi, sector_buffer
         add edi, ebx
         mov esi, [fd_write_buffer]
         add esi, [fd_rw_done]

@@ -1,7 +1,11 @@
         %assign ARGV 4DEh               ; 32 bytes (16 word-sized pointers)
+        %assign BOOT_DISK_PHYS    0x4D0   ; byte: BIOS boot drive number, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) so cc.py-emitted argv writes / shell.c's "bin/<name>\0" stage can't clobber it from CPL=3 through the Phase 3 user shim.
+        %assign BOOT_DISK_VIRT    0xC00004D0   ; kernel-virt alias of BOOT_DISK_PHYS via direct map
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 500h
+        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) — see BOOT_DISK_PHYS for why.
+        %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 48
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
@@ -57,11 +61,8 @@
         %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 5 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
-        %assign KERNEL_STACK_TOP 9FFF0h ; Ring-0 stack top; loaded by protected_mode_entry and stored as TSS.ESP0
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
-        %assign NET_RECEIVE_BUFFER 0F800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
-        %assign NET_TRANSMIT_BUFFER 0F200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
         %assign NULL 0
         %assign O_CREAT  10h
         %assign O_RDONLY 00h
@@ -75,7 +76,7 @@
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
         %assign PROGRAM_BASE 0600h
-        %assign SECTOR_BUFFER 0F000h    ; 512 bytes (one sector); kept below 0x10000 so FDC DMA channel 2 (page register at 0x81) reaches it
+        %assign SECTOR_BUFFER 0F000h    ; Legacy scratch RAM at physical 0xF000.  The kernel's actual disk buffer is the BSS-allocated `sector_buffer` label in fs/block.asm; this constant survives only as a user-side scratch slot used by the shell's kill-buffer (still reachable through the Phase 3 shim's identity user mapping, and slated to become real BSS once cc.py-driven user BSS lands).
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
         %assign STDERR 2

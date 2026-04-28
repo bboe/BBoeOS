@@ -222,7 +222,7 @@ ne2k_probe:
 
 ne2k_receive:
         ;; Receive a packet from the NE2000 RX ring buffer (polled).
-        ;; Output: EDI = NET_RECEIVE_BUFFER (packet data), ECX = packet length
+        ;; Output: EDI = net_receive_buffer (packet data), ECX = packet length
         ;;         CF clear if packet received, CF set if no packet available
         push eax
         push ebx
@@ -320,9 +320,9 @@ ne2k_receive:
         mov al, 0Ah             ; Start, remote read DMA
         out dx, al
 
-        ;; Read packet data into NET_RECEIVE_BUFFER
+        ;; Read packet data into net_receive_buffer
         shr ecx, 1              ; Word count
-        mov edi, NET_RECEIVE_BUFFER
+        mov edi, net_receive_buffer
         mov dx, NE2K_BASE + 10h ; Data port
         cld
         rep insw
@@ -347,7 +347,7 @@ ne2k_receive:
         out dx, al
 
         pop ecx                 ; Restore packet length
-        mov edi, NET_RECEIVE_BUFFER
+        mov edi, net_receive_buffer
         clc
         jmp .recv_done
 
@@ -486,3 +486,9 @@ network_initialize:
         ;; Variables
         mac_address times 6 db 0
         net_present db 0        ; set to 1 by stage 2 boot if NE2000 probe succeeded
+
+        ;; net_receive_buffer / net_transmit_buffer are not defined
+        ;; here — they're kernel-virt aliases at fixed phys 0x184000+
+        ;; (right after the kernel stack) declared in kernel.asm
+        ;; alongside the other out-of-binary scratch regions.  See
+        ;; NET_BUFFER_BYTES / NET_RECEIVE_BUFFER_PHYS there.

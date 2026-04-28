@@ -14,7 +14,7 @@ fd_read_net:
         jbe .rnet_len_ok
         mov cx, dx
         .rnet_len_ok:
-        mov esi, NET_RECEIVE_BUFFER
+        mov esi, net_receive_buffer
         mov edi, ebx
         movzx eax, cx           ; return value = bytes copied
         movzx ecx, cx           ; zero-extend for rep movsb

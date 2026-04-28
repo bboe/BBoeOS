@@ -4,8 +4,8 @@
 ;;; Replaces the INT 13h-based sector I/O that fs/block.asm used to do.  Talks
 ;;; to the primary IDE controller at 0x1F0..0x1F7 in LBA28 PIO mode.  The
 ;;; caller-facing surface is unchanged:
-;;;     read_sector   AX = 0-based LBA; fills SECTOR_BUFFER; CF on error.
-;;;     write_sector  AX = 0-based LBA; writes SECTOR_BUFFER; CF on error.
+;;;     read_sector   AX = 0-based LBA; fills sector_buffer; CF on error.
+;;;     write_sector  AX = 0-based LBA; writes sector_buffer; CF on error.
 ;;; One sector at a time — matches the existing filesystem layer.
 ;;;
 ;;; Stage 1 MBR still uses INT 13h to load stage 2.  That's intentional:
@@ -103,7 +103,7 @@ ata_issue:
 
 ata_read_sector:
         ;; Input:  AX = 0-based logical sector number.
-        ;; Output: SECTOR_BUFFER filled with 512 bytes.  CF=1 on error.
+        ;; Output: sector_buffer filled with 512 bytes.  CF=1 on error.
         push eax
         push ebx
         push ecx
@@ -116,7 +116,7 @@ ata_read_sector:
         jc .done
 
         mov dx, ATA_DATA
-        mov edi, SECTOR_BUFFER
+        mov edi, sector_buffer
         mov ecx, 256
         cld
         rep insw
@@ -152,7 +152,7 @@ ata_wait_drq:
         ret
 
 ata_write_sector:
-        ;; Input:  AX = 0-based logical sector number; SECTOR_BUFFER holds
+        ;; Input:  AX = 0-based logical sector number; sector_buffer holds
         ;;         the 512 bytes to write.
         ;; Output: CF=1 on error.
         push eax
@@ -167,7 +167,7 @@ ata_write_sector:
         jc .done
 
         mov dx, ATA_DATA
-        mov esi, SECTOR_BUFFER
+        mov esi, sector_buffer
         mov ecx, 256
         cld
         rep outsw

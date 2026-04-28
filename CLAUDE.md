@@ -46,7 +46,7 @@ Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir
 
 ### Networking
 
-NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers: `NET_TRANSMIT_BUFFER` at `0xE200` (1536 bytes), `NET_RECEIVE_BUFFER` at `0xE800` (1536 bytes).
+NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers (`net_receive_buffer` / `net_transmit_buffer`, 1536 bytes each) live at fixed phys `0x184000`+ (right after the kernel stack), reached through the kernel direct map at virt `0xC0184000`+; the `equ` aliases are declared in `kernel.asm` so the buffers don't burn 3 KB of zero padding inside `kernel.bin`.
 
 ### Serial Console
 

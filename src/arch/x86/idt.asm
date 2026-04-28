@@ -7,10 +7,11 @@
 ;;; exception number, and jumps to exc_common which prints "EXCnn\r\n" to
 ;;; COM1 and halts.  No recovery — a panic is a panic.
 ;;;
-;;; The IDTR is loaded via `lidt [idtr]` in bboeos.asm before the protected mode
-;;; switch; any fault from that point vectors through our stubs.  PIC remap
-;;; is orthogonal (belongs with the protected mode switch itself); this module does
-;;; not touch the PICs.
+;;; The IDTR is loaded via `lidt [idtr]` in `kernel.asm`'s `high_entry`,
+;;; right after the boot far-jump lands at the high-half kernel.
+;;; Any fault from that point vectors through our stubs.  PIC remap is
+;;; orthogonal (belongs with the CR0.PE flip in boot.asm); this module
+;;; does not touch the PICs.
 ;;; ------------------------------------------------------------------------
 
         IDT_CODE_SELECTOR       equ 08h          ; flat 32-bit code (protected mode GDT[1])

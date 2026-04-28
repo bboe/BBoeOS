@@ -43,7 +43,7 @@ ip_send:
         mov [.is_payload], esi
         mov [.is_destip], ebx
 
-        ;; 1. Resolve destination MAC via ARP (may use NET_TRANSMIT_BUFFER).
+        ;; 1. Resolve destination MAC via ARP (may use net_transmit_buffer).
         ;;    If dest is not on local subnet (10.0.2.0/24), use gateway.
         mov esi, ebx
         mov eax, [esi]
@@ -57,9 +57,9 @@ ip_send:
         call arp_resolve
         jc .ip_send_done
 
-        ;; 2. Build Ethernet header at NET_TRANSMIT_BUFFER
+        ;; 2. Build Ethernet header at net_transmit_buffer
         mov esi, edi                    ; ESI = resolved dest MAC
-        mov edi, NET_TRANSMIT_BUFFER
+        mov edi, net_transmit_buffer
         cld
         movsw                           ; Dest MAC
         movsw
@@ -71,7 +71,7 @@ ip_send:
         mov ax, 0008h                   ; EtherType: IPv4 (0x0800 big-endian)
         stosw
 
-        ;; 3. Build IP header at NET_TRANSMIT_BUFFER + 14 (EDI is already there)
+        ;; 3. Build IP header at net_transmit_buffer + 14 (EDI is already there)
         mov al, 45h                     ; Version 4, IHL 5 (20 bytes)
         stosb
         xor al, al                      ; DSCP/ECN = 0
@@ -101,19 +101,19 @@ ip_send:
         movsd
         pop esi
 
-        ;; 4. Copy payload to NET_TRANSMIT_BUFFER + 34 (EDI is already there)
+        ;; 4. Copy payload to net_transmit_buffer + 34 (EDI is already there)
         mov esi, [.is_payload]
         movzx ecx, word [.is_plen]
         rep movsb
 
         ;; 5. Compute and store IP header checksum
-        mov esi, NET_TRANSMIT_BUFFER + 14
+        mov esi, net_transmit_buffer + 14
         mov ecx, 20
         call ip_checksum
-        mov [NET_TRANSMIT_BUFFER + 24], ax    ; Offset 14 + 10
+        mov [net_transmit_buffer + 24], ax    ; Offset 14 + 10
 
         ;; 6. Send the frame
-        mov esi, NET_TRANSMIT_BUFFER
+        mov esi, net_transmit_buffer
         movzx ecx, word [.is_plen]
         add ecx, 34                     ; 14 (Eth) + 20 (IP) + payload
         call ne2k_send

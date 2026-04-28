@@ -13,8 +13,8 @@
 ;;; Surface (parallel to ata.asm):
 ;;;     fdc_init          install IRQ 6 handler, reset, SPECIFY, motor on,
 ;;;                       recalibrate drive 0.  Called once.
-;;;     fdc_read_sector   AX = 0-based LBA; fills SECTOR_BUFFER; CF err.
-;;;     fdc_write_sector  AX = 0-based LBA; writes SECTOR_BUFFER; CF err.
+;;;     fdc_read_sector   AX = 0-based LBA; fills sector_buffer; CF err.
+;;;     fdc_write_sector  AX = 0-based LBA; writes sector_buffer; CF err.
 ;;; ------------------------------------------------------------------------
 
         FDC_DOR                 equ 3F2h
@@ -57,23 +57,22 @@
 
 fdc_dma_setup:
         ;; Input: AL = DMA mode byte (DMA_MODE_READ or DMA_MODE_WRITE).
-        ;; Programs channel 2 for a 512 B transfer at SECTOR_BUFFER.
+        ;; Programs channel 2 for a 512 B transfer at sector_buffer.
         ;; Preserves all registers.
         ;;
         ;; The 8237 channel-2 address registers take three byte writes
         ;; (low, mid, page) to encode a 24-bit physical address.  Load
-        ;; SECTOR_BUFFER into EBX at runtime and split it ourselves
+        ;; sector_buffer into EBX at runtime and split it ourselves
         ;; rather than folding ``& 0FFh`` / ``>> 8`` against the
-        ;; SECTOR_BUFFER constant — once SECTOR_BUFFER becomes a
-        ;; section-relative label (rather than a numeric ``%assign``),
-        ;; NASM's ``bin``-format assembler rejects the bitwise
-        ;; arithmetic and the runtime split is the only way to keep
-        ;; this routine working.
+        ;; address — sector_buffer is now a section-relative label
+        ;; (not a numeric ``%assign``) and NASM's ``bin`` format
+        ;; rejects the bitwise arithmetic on labels even when they're
+        ;; backward references.
         push eax
         push ebx
 
         mov ah, al                      ; stash mode
-        mov ebx, SECTOR_BUFFER
+        mov ebx, sector_buffer
 
         mov al, DMA_MASK_CH2
         out DMA_MASK, al
@@ -255,7 +254,7 @@ fdc_motor_start:
 
 fdc_read_sector:
         ;; Input:  AX = 0-based LBA.
-        ;; Output: SECTOR_BUFFER filled via DMA.  CF=0 on success.
+        ;; Output: sector_buffer filled via DMA.  CF=0 on success.
         push eax
         push ebx
         push ecx

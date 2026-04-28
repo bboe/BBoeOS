@@ -5,17 +5,17 @@
 ;;; touching any caller.
 ;;;
 ;;; vfs_chmod:              SI=path, AL=mode → CF on error, AL=error code
-;;; vfs_commit_write_sec:   SI=fd_entry → CF on disk error (write SECTOR_BUFFER to cached sector)
+;;; vfs_commit_write_sec:   SI=fd_entry → CF on disk error (write sector_buffer to cached sector)
 ;;; vfs_create:             SI=path → vfs_found_*, CF on error
 ;;; vfs_delete:             SI=path → CF on error, AL=error code
 ;;; vfs_find:               SI=path → vfs_found_*, CF if not found
 ;;; vfs_init:               detect filesystem; swap pointers to ext2 if magic matches
 ;;; vfs_load:               DI=dest → CF (loads file using vfs_found_inode+vfs_found_size)
 ;;; vfs_mkdir:              SI=name → AX=inode, CF on error
-;;; vfs_prepare_write_sec:  SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
+;;; vfs_prepare_write_sec:  SI=fd_entry → sector_buffer filled, BX=byte offset; CF on err
 ;;; vfs_rmdir:              SI=name → CF on error, AL=error code
 ;;; vfs_read_dir:           SI=fd_entry, DI=buf → AX=bytes (DIRECTORY_ENTRY_SIZE or 0); CF on err
-;;; vfs_read_sec:           SI=fd_entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
+;;; vfs_read_sec:           SI=fd_entry → sector_buffer filled, BX=byte offset; CF on err
 ;;; vfs_rename:             SI=old, DI=new → CF on error, AL=error code
 ;;; vfs_update_size:        SI=fd_entry → CF on disk error
 
@@ -66,9 +66,9 @@ vfs_delete_fn             dd bbfs_delete
 vfs_find_fn               dd bbfs_find
 vfs_load_fn               dd bbfs_load
 vfs_mkdir_fn              dd bbfs_mkdir
-vfs_prepare_write_sec_fn  dd bbfs_prepare_write_sec ; SI=fd_entry → SECTOR_BUFFER, BX=byte offset; CF on err
+vfs_prepare_write_sec_fn  dd bbfs_prepare_write_sec ; SI=fd_entry → sector_buffer, BX=byte offset; CF on err
 vfs_read_dir_fn           dd bbfs_read_dir           ; SI=fd_entry, DI=buf → AX=bytes; CF on err
-vfs_read_sec_fn           dd bbfs_read_sec            ; SI=fd entry → SECTOR_BUFFER filled, BX=byte offset; CF on err
+vfs_read_sec_fn           dd bbfs_read_sec            ; SI=fd entry → sector_buffer filled, BX=byte offset; CF on err
 vfs_rename_fn             dd bbfs_rename
 vfs_rmdir_fn              dd bbfs_rmdir
 vfs_update_size_fn        dd bbfs_update_size

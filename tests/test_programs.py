@@ -55,6 +55,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
+    ProgramTest("echo_many_args", ["echo a b c d e", "ls"], r"^a b c d e$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
     ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
