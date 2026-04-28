@@ -97,6 +97,46 @@ exc_common:
         mov al, [esp]
         and al, 0Fh
         call exc_puthex
+        ;; Print " EIP=hhhhhhhh CR2=hhhhhhhh ERR=hhhhhhhh".  Useful for
+        ;; debugging page faults / GP faults from user programs and
+        ;; from the kernel itself before the per-vector handlers in
+        ;; arch/x86/exc.asm land.
+        mov al, ' '
+        call exc_putc
+        mov al, 'E'
+        call exc_putc
+        mov al, 'I'
+        call exc_putc
+        mov al, 'P'
+        call exc_putc
+        mov al, '='
+        call exc_putc
+        mov eax, [esp + 8]              ; saved EIP
+        call exc_puthex32
+        mov al, ' '
+        call exc_putc
+        mov al, 'C'
+        call exc_putc
+        mov al, 'R'
+        call exc_putc
+        mov al, '2'
+        call exc_putc
+        mov al, '='
+        call exc_putc
+        mov eax, cr2
+        call exc_puthex32
+        mov al, ' '
+        call exc_putc
+        mov al, 'E'
+        call exc_putc
+        mov al, 'R'
+        call exc_putc
+        mov al, 'R'
+        call exc_putc
+        mov al, '='
+        call exc_putc
+        mov eax, [esp + 4]              ; error code
+        call exc_puthex32
         mov al, 0Dh
         call exc_putc
         mov al, 0Ah
@@ -133,6 +173,22 @@ exc_puthex:
         .digit:
         add al, '0'
         jmp exc_putc
+
+exc_puthex32:
+        ;; EAX = 32-bit value, prints as 8 hex digits MSB-first.
+        push eax
+        push ecx
+        mov ecx, 8
+.next:
+        rol eax, 4
+        push eax
+        and al, 0Fh
+        call exc_puthex
+        pop eax
+        loop .next
+        pop ecx
+        pop eax
+        ret
 
         ;; ----- IDT data -----
         ;; Vectors 0..31: CPU exceptions. Vectors 32..47: reserved for
