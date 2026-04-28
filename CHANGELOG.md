@@ -233,6 +233,8 @@ at the time.
 
 - Port the floppy disk controller driver (DMA + IRQ-6 driven, `fdc_init` / `fdc_read_sector` / `fdc_write_sector`) from `drivers/fdc.asm` to C in a new `src/drivers/fdc.c`.  The public surface plus `fdc_drain_result`, `fdc_sense_interrupt`, and `fdc_dma_setup` port to straight-line C; the asm-shaped helpers — `fdc_send` / `fdc_recv` (tight poll-then-port-IO with EAX/EDX preservation), `fdc_wait_irq` (`pushf`/`sti` envelope plus tight flag spin), `fdc_lba_to_chs_internal` (multi-byte CH:CL/DH:DL return via two `out_register` parameters), `fdc_motor_start` / `fdc_seek` / `fdc_issue_read_write` (multi-step state machines with all-register preservation), the IRQ 6 stub (must `iretd`), and `fdc_install_irq` (needs address-of-label for `idt_set_gate32`) — sit in file-scope `asm()` blocks because cc.py can't express their shapes.
 
+- Port the NE2000 ISA NIC driver (`ne2k_init`, `ne2k_probe`, `ne2k_send`, `network_initialize`) from `drivers/ne2k.asm` to C in a new `src/drivers/ne2k.c`.  Polled-mode Ethernet at I/O base `0x300`; `kernel_outsw` covers the TX-buffer DMA upload (mirrors the asm `rep outsw`).  `mac_address[6]` and `net_present` stay as file-scope globals with `equ _g_*` bare-name aliases so callers in `net/arp.asm`, `net/ip.c`, `syscall/net.asm`, and `fs/fd/net.asm` continue to resolve.  `ne2k_receive` stays in a file-scope `asm()` block — its multi-register return shape (`EDI = NET_RECEIVE_BUFFER`, `ECX = packet length`, `CF = packet-available`) doesn't fit cc.py's single-EAX return convention, and the four asm callers all read EDI back immediately to walk the received frame.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive
