@@ -186,7 +186,7 @@ class X86CodegenTarget(CodegenTarget):
 
 
 class X86CodegenTarget16(X86CodegenTarget):
-    """16-bit real-mode x86 target (BBoeOS stage 2 and user programs)."""
+    """16-bit real-mode x86 target (legacy; production is 32-bit)."""
 
     acc = "ax"
     base_register = "bp"

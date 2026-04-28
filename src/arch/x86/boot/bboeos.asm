@@ -60,13 +60,12 @@ start:
 
         ;; Read the rest of the kernel binary at CHS (cyl=0, head=0,
         ;; sector=2) into linear 0x7E00.  The byte count lives in
-        ;; `stage2_bytes` (a fossil label name from the pre-collapse
-        ;; stage1/stage2/kernel split — NASM-computes it as kernel_end
-        ;; - 7E00h and places it at MBR offset 508 so host tools can
-        ;; read the same value from the drive image).  Here we shift
-        ;; right by 9 to get the post-MBR sector count, and publish
+        ;; `kernel_bytes` — NASM computes it as `kernel_end - 7E00h`
+        ;; and places it at MBR offset 508 so host tools can read
+        ;; the same value from the drive image.  Here we shift right
+        ;; by 9 to get the post-MBR sector count, and publish
         ;; `directory_sector` = sectors + 1 for bbfs / ext2 to consume.
-        mov ax, [stage2_bytes]
+        mov ax, [kernel_bytes]
         add ax, 511
         shr ax, 9
         mov [directory_sector], ax
@@ -196,12 +195,12 @@ boot_disk db 0
 directory_sector dw 0           ; post-MBR sector count + 1; set at boot, read by bbfs
 
         times 508-($-$$) db 0
-stage2_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
+kernel_bytes dw kernel_end - 7E00h      ; fixed offset 508; host tools depend on it
         dw 0AA55h
 
 [bits 32]
         ;; vDSO image — separately-assembled blob copied to physical
-        ;; FUNCTION_TABLE (0x08046000) at boot by `vdso_install` in
+        ;; FUNCTION_TABLE (0x00010000) at boot by `vdso_install` in
         ;; entry.asm.  Holds the 14-entry FUNCTION_TABLE jump block plus
         ;; the shared_* helper bodies; user programs call into it via
         ;; the FUNCTION_* constants in constants.asm.

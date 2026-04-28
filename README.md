@@ -35,7 +35,7 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 
 ```
 src/arch/x86/         Architecture-specific code
-  boot/bboeos.asm     Single flat-binary kernel: MBR + stage 2 in one file
+  boot/bboeos.asm     Single flat-binary kernel: MBR + post-MBR kernel in one file
   boot/vga_font.asm   Boot-time BIOS ROM font copy into char-gen slot 0x4000
   entry.asm           protected_mode_entry, IRQ 0 / IRQ 6 handlers, shell respawn
   idt.asm             32-bit IDT, exception stubs, INT 30h gate

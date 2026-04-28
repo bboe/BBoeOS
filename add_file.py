@@ -25,13 +25,13 @@ EXT2_SB_PARTITION_OFFSET = 1024  # superblock offset within ext2 partition
 FILENAME_MAX = 24
 FLAG_DIRECTORY = 0x02
 FLAG_EXECUTE = 0x01
+KERNEL_BYTES_OFFSET = 508  # offset of kernel_bytes word within the MBR
 MAX_RESOLVE_DEPTH = 16
 NAME_FIELD = 25
 OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
-STAGE2_BYTES_OFFSET = 508  # offset of stage2_bytes word within the MBR
 _DD = shutil.which("dd") or "dd"
 _DEBUGFS = shutil.which("debugfs") or "debugfs"
 
@@ -138,10 +138,11 @@ def add_file(
 def compute_directory_sector(*, image_path: str) -> int:
     """Return the sector where the filesystem directory starts on disk.
 
-    NASM embeds stage2's byte count in the MBR at ``STAGE2_BYTES_OFFSET``
-    (little-endian word).  Stage1 reads the same word at boot to size the
-    disk-read; here we mirror its arithmetic: sectors = ceil(bytes / 512),
-    directory starts at sectors + 1 (right after stage2 on disk).
+    NASM embeds the post-MBR kernel byte count in the MBR at
+    ``KERNEL_BYTES_OFFSET`` (little-endian word).  The MBR reads the same
+    word at boot to size the disk-read; here we mirror its arithmetic:
+    sectors = ceil(bytes / 512), directory starts at sectors + 1 (right
+    after the kernel on disk).
 
     Returns
     -------
@@ -151,9 +152,9 @@ def compute_directory_sector(*, image_path: str) -> int:
 
     """
     with pathlib.Path(image_path).open("rb") as file:
-        file.seek(STAGE2_BYTES_OFFSET)
-        stage2_bytes = struct.unpack("<H", file.read(2))[0]
-    return (stage2_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
+        file.seek(KERNEL_BYTES_OFFSET)
+        kernel_bytes = struct.unpack("<H", file.read(2))[0]
+    return (kernel_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
 
 
 def compute_next_data_sector(
