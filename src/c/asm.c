@@ -1,10 +1,9 @@
-/* Port of src/asm/asm.asm to C.  Phase 1: the assembler's logic still
-   lives in inline assembly — one string literal per NASM source line,
-   concatenated by cc.py (adjacent-literal fold) into the single
-   file-scope `asm(...)` block that emits the body verbatim.  Follow-up
-   PRs replace the driver, symbol table, emit functions, data tables,
-   and each instruction-handler family with pure C one at a time.  The
-   original NASM source is preserved under archive/asm.asm. */
+/* Self-hosted x86 assembler.  Each function is pure C with a small
+   inline-asm shim only where C can't express the operation: indirect
+   table dispatch, syscalls, and the ``rep movsw`` blocks for include
+   nesting.  Compiled with ``cc.py --bits 32`` for ring-0 protected
+   mode; the symbol and jump tables live at SYMBOL_BASE in extended
+   memory so they don't compete with segment-0 RAM. */
 
 #include "asm_layout.h"
 
@@ -26,7 +25,7 @@ uint8_t changed_flag;
 int current_address;
 /* Default operand size set by the ``[bits N]`` directive.  Starts at
    16 (real-mode default); a ``[bits 32]`` line flips it to 32 and
-   pmode encodings that match the default size emit without the 0x66
+   protected mode encodings that match the default size emit without the 0x66
    prefix, while 16-bit encodings acquire the prefix.  Reset to 16 at
    the start of every pass so the directive's effect on each pass
    matches the source order. */
@@ -213,7 +212,6 @@ __attribute__((regparm(1)))
 int reg_to_rm(int register_id);
 int resolve_label();
 int resolve_value();
-void restore_es();
 void run_pass1();
 void run_pass2();
 void scan_ident_dot();
@@ -244,7 +242,7 @@ void unary_f6f7(int modrm_base);
    ``ret`` that cc.py appends is dead code (1 byte), same cost as
    the retired file-scope asm version. */
 void abort_unknown() {
-    asm("mov [_g_error_word], si\n"
+    asm("mov [_g_error_word], esi\n"
         "jmp abort_unknown_impl");
 }
 
@@ -252,7 +250,6 @@ void abort_unknown() {
    source line from ``line_buffer`` together with the bad token,
    then exits. */
 void abort_unknown_impl() {
-    restore_es();
     printf("Error: unknown mnemonic or directive at line:\n  %s\n  at: %s\n",
            line_buffer, error_word);
     /* ``exit()`` would be cleaner but clang sees the stdlib prototype
@@ -283,13 +280,13 @@ void adc_sbb_handler(int modrm_base) {
     emit_byte(imm);
 }
 
-/* Close the current ``source_fd`` via the ES-safe ``syscall`` wrapper.
-   Factored so ``do_pass`` and ``include_pop`` share one inline-asm
-   block instead of each open-coding the 3-instruction SYS_IO_CLOSE
+/* Close the current ``source_fd`` via the syscall wrapper.  Factored
+   so ``do_pass`` and ``include_pop`` share one inline-asm block
+   instead of each open-coding the 3-instruction SYS_IO_CLOSE
    sequence.  Inlined at both call sites via always_inline. */
 __attribute__((always_inline))
 void close_source() {
-    asm("mov bx, [_g_source_fd]\n"
+    asm("mov ebx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
         "call syscall");
 }
@@ -417,25 +414,21 @@ void define_macro() {
     }
 }
 
-/* Error reporters called while ES is still pointed at the symbol-
-   table segment.  Each resets ES to DS before handing off to cc.py's
-   ``die()`` builtin (which jumps to FUNCTION_DIE with the string
-   preloaded).  ``die_error_pass1_io`` / ``die_error_pass1_iter`` are
-   called from ``run_pass1`` when do_pass signals an I/O error or the
-   jump-size convergence fails to settle; ``die_symbol_overflow`` is
-   the jmp-target of the symbol_set overflow branch. */
+/* Error reporters that hand off to cc.py's ``die()`` builtin (which
+   jumps to FUNCTION_DIE with the string preloaded).
+   ``die_error_pass1_io`` / ``die_error_pass1_iter`` are called from
+   ``run_pass1`` when do_pass signals an I/O error or the jump-size
+   convergence fails to settle; ``die_symbol_overflow`` is the
+   jmp-target of the symbol_set overflow branch. */
 void die_error_pass1_io() {
-    restore_es();
     die("Error: pass 1 io\n");
 }
 
 void die_error_pass1_iter() {
-    restore_es();
     die("Error: pass 1 iter\n");
 }
 
 void die_symbol_overflow() {
-    restore_es();
     die("Error: symbol table overflow (raise SYMBOL_MAX)\n");
 }
 
@@ -602,7 +595,21 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
        sign-extended ``83 /r ib`` shape is identical between 16 and
        32 bits — only the prefix distinguishes them. */
     emit_operand_size_prefix(size);
+    int short_form = 0;
     if (imm >= -128 && imm <= 127) {
+        short_form = 1;
+    } else if (size == 16) {
+        /* low 16 bits of imm sign-extend cleanly from a byte iff
+           the byte-mask-and-up is either all zero (small positive
+           values) or all 0xFF (small negative values).  Catches
+           ``sub ax, 65536`` (low 16 = 0) and ``and ax, 65535``
+           (low 16 = 0xFFFF) — both NASM-equivalent. */
+        int high = imm & 0xFF80;
+        if (high == 0 || high == 0xFF80) {
+            short_form = 1;
+        }
+    }
+    if (short_form) {
         emit_byte(0x83);
         emit_byte(modrm_base | reg);
         emit_byte(imm & 0xFF);
@@ -705,13 +712,13 @@ int emit_alu_mem_imm(int rfield) {
 __attribute__((regparm(1)))
 void emit_byte(int value) {
     if (pass == 2) {
-        asm("push si");
+        asm("push esi");
         output_buffer[output_position] = value;
         output_position += 1;
         if (output_position >= 512) {
             flush_output();
         }
-        asm("pop si");
+        asm("pop esi");
     }
     current_address += 1;
     output_total += 1;
@@ -789,14 +796,24 @@ void emit_modrm_direct(int reg, int disp) {
    for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
 __attribute__((regparm(1)))
 void emit_modrm_disp(int modrm, int disp) {
-    if (disp == 0) {
+    /* Truncate to the addressing width (16-bit) so a disp whose high
+       bits exceed 0xFFFF still narrows to its on-the-wire encoding —
+       NASM treats ``[0x100000+si]`` as ``[si]`` because the disp16
+       window of 0x100000 is zero, and our protected mode symbol table now
+       round-trips the full 32-bit value (so EDIT_BUFFER_BASE arrives
+       here as 0x100000 rather than the 16-bit-truncated 0). */
+    int low = disp & 0xFFFF;
+    if (low >= 0x8000) {
+        low -= 0x10000;
+    }
+    if (low == 0) {
         emit_byte(modrm);
-    } else if (disp >= -128 && disp <= 127) {
+    } else if (low >= -128 && low <= 127) {
         emit_byte(modrm | 0x40);
-        emit_byte(disp);
+        emit_byte(low);
     } else {
         emit_byte(modrm | 0x80);
-        emit_word(disp);
+        emit_word(low);
     }
 }
 
@@ -820,7 +837,7 @@ void emit_modrm_disp8(int rm, int disp) {
    that disagrees with the current ``default_bits``.  Under the
    default bits=16 mode a 32-bit operand acquires the prefix; under
    bits=32 a 16-bit operand does.  Used by ``emit_sized`` and every
-   hand-written pmode-encoding site that used to emit 0x66 directly. */
+   hand-written protected mode-encoding site that used to emit 0x66 directly. */
 __attribute__((regparm(1)))
 void emit_operand_size_prefix(int size) {
     if (size != 16 && size != 32) {
@@ -866,17 +883,14 @@ void emit_sized_mem(int base, int size) {
 }
 
 /* Emit a little-endian dword — the 32-bit companion to ``emit_word``.
-   Used by the pmode-specific paths that widen imm16 / disp16 to
+   Used by the protected mode-specific paths that widen imm16 / disp16 to
    imm32 / disp32 behind a 0x66 operand-size prefix. */
 __attribute__((regparm(1)))
 void emit_dword(int value) {
     emit_byte(value);
     emit_byte(value >> 8);
-    /* cc.py's 16-bit codegen can't reach bits above 15 from a
-       single ``int`` — write the upper half as zeros, which matches
-       every 32-bit address the self-host needs to emit (all labels
-       live below 64 KB). */
-    emit_word(0);
+    emit_byte(value >> 16);
+    emit_byte(value >> 24);
 }
 
 /* Emit a size-tagged immediate: byte for ``size == 8``, little-endian
@@ -1097,15 +1111,14 @@ int find_macro() {
 
 /* Write the accumulated OUTPUT_BUFFER (output_position bytes) to
    output_fd via SYS_IO_WRITE, then reset the position.  No-op when
-   nothing is queued.  Uses the ES-safe ``syscall`` wrapper so
-   ES=SYMBOL_SEGMENT survives the ``int 30h``. */
+   nothing is queued. */
 void flush_output() {
     if (output_position == 0) {
         return;
     }
-    asm("mov bx, [_g_output_fd]\n"
-        "mov si, OUTPUT_BUFFER\n"
-        "mov cx, [_g_output_position]\n"
+    asm("mov ebx, [_g_output_fd]\n"
+        "mov esi, OUTPUT_BUFFER\n"
+        "mov ecx, [_g_output_position]\n"
         "mov ah, SYS_IO_WRITE\n"
         "call syscall");
     output_position = 0;
@@ -1223,6 +1236,13 @@ void handle_cmp() {
         opcode = 0x80;
         is_imm8 = 1;
     } else if (imm >= -128 && imm <= 127) {
+        opcode = 0x83;
+        is_imm8 = 1;
+    } else if (size1 == 16 && ((imm & 0xFF80) == 0 || (imm & 0xFF80) == 0xFF80)) {
+        /* NASM-equivalent shrink: any imm whose low 16 bits sign-extend
+           cleanly from a byte compresses to the 0x83 imm8 form.
+           Covers ``cmp word [...], 65535`` (low 16 = 0xFFFF) and
+           ``cmp word [...], 65536`` (low 16 = 0, after wrap). */
         opcode = 0x83;
         is_imm8 = 1;
     } else {
@@ -1417,7 +1437,7 @@ void handle_lea() {
 }
 
 /* ``lgdt [mem]`` / ``lidt [mem]`` — load the GDT / IDT descriptor
-   register from a 6-byte memory operand.  Both are pmode bootstrap
+   register from a 6-byte memory operand.  Both are protected mode bootstrap
    essentials.  Encoded as ``0F 01 /r`` with reg field 2 for lgdt
    and 3 for lidt; the shared ``emit_modrm_direct`` helper packs
    the reg field into mod=00 rm=110 (direct disp16) for the only
@@ -1758,7 +1778,18 @@ void handle_push() {
     }
     int value = resolve_value();
     emit_operand_size_prefix(size);
+    int short_form = 0;
     if (value >= -128 && value <= 127) {
+        short_form = 1;
+    } else if (size == 16) {
+        /* ``push 65535`` etc — sign-extension window covers low 16
+           bits in [0..0x7F] OR [0xFF80..0xFFFF]. */
+        int high = value & 0xFF80;
+        if (high == 0 || high == 0xFF80) {
+            short_form = 1;
+        }
+    }
+    if (short_form) {
         emit_byte(0x6A);
         emit_byte(value & 0xFF);
     } else if (size == 32) {
@@ -2001,6 +2032,7 @@ void inc_dec_handler(int rfield) {
             emit_byte(0xFE);
             emit_byte(0xC0 | reg_shift | register_id);
         } else {
+            emit_operand_size_prefix(size);
             emit_byte(0x40 | reg_shift | register_id);
         }
     } else {
@@ -2017,51 +2049,40 @@ void inc_dec_handler(int rfield) {
    parent file's fd / buffer / position / valid fields, and copy the
    saved SOURCE_BUFFER contents back.  Called from do_pass (via
    ``call include_pop`` in the pass-loop inline asm) when read_line
-   hits EOF while include_depth > 0.  The original inline-asm label
-   also preserved AX/BX/CX/SI/DI, but the sole caller jumps to
-   ``.line_loop`` → ``call read_line`` which reloads its own
-   registers, so the C version only guards ES (callers rely on ES
-   staying at SYMBOL_SEGMENT across the rep movsw that needs ES=DS).
-   Keeping every asm() block SP-balanced is required because cc.py
-   wraps each inline block with ``push dx / pop dx`` to preserve the
-   local pinned to DX. */
+   hits EOF while include_depth > 0.  Flat protected mode addressing reaches
+   anywhere in 4 GB so the rep movsw below copies straight from the
+   stash address back into SOURCE_BUFFER without an ES-segment
+   override. */
 void include_pop() {
     close_source();
     source_fd = include_save_fd;
     source_buffer_position = include_save_position;
     source_buffer_valid = include_save_valid;
-    asm("push es\n"
-        "push ds\npop es\n"
-        "mov si, [_g_include_source_save]\n"
-        "mov di, SOURCE_BUFFER\n"
-        "mov cx, 256\n"
-        "cld\nrep movsw\n"
-        "pop es");
+    asm("mov esi, [_g_include_source_save]\n"
+        "mov edi, SOURCE_BUFFER\n"
+        "mov ecx, 256\n"
+        "cld\nrep movsw");
     include_depth -= 1;
 }
 
 /* Push the include stack: save the current file's fd / buffer
    state, stash a copy of the 512-byte SOURCE_BUFFER, build
-   ``include_path = source_prefix + <name>``, and open the result
-   via the ES-safe syscall wrapper.  On success source_fd points at
-   the included file and include_depth is bumped; on failure
-   error_flag is raised so the enclosing pass iteration reports it.
-   SI-on-entry holds the raw filename pointer taken straight from
-   the source line; the first instruction stashes it into
-   ``include_push_arg`` before cc.py's codegen gets a chance to
-   clobber SI. */
+   ``include_path = source_prefix + <name>``, and open the result.
+   On success source_fd points at the included file and include_depth
+   is bumped; on failure error_flag is raised so the enclosing pass
+   iteration reports it.  SI-on-entry holds the raw filename pointer
+   taken straight from the source line; the first instruction stashes
+   it into ``include_push_arg`` before cc.py's codegen gets a chance
+   to clobber SI. */
 void include_push() {
     include_push_arg = source_cursor;
     include_save_fd = source_fd;
     include_save_position = source_buffer_position;
     include_save_valid = source_buffer_valid;
-    asm("push es\n"
-        "push ds\npop es\n"
-        "mov si, SOURCE_BUFFER\n"
-        "mov di, [_g_include_source_save]\n"
-        "mov cx, 256\n"
-        "cld\nrep movsw\n"
-        "pop es");
+    asm("mov esi, SOURCE_BUFFER\n"
+        "mov edi, [_g_include_source_save]\n"
+        "mov ecx, 256\n"
+        "cld\nrep movsw");
     int i = 0;
     int j = 0;
     while (source_prefix[i] != '\0') {
@@ -2148,10 +2169,6 @@ int lookup_ident_here(int advance) {
 }
 
 int main(int argc, char *argv[]) {
-    /* ES starts at DS (kernel convention) so die() / open() run
-       safely.  We only switch to SYMBOL_SEGMENT once we're ready to
-       run the assembler passes — the handlers index the symbol table
-       via ``[es:...]``, which needs ES pointed at that segment. */
     /* Publish the scratch-buffer bases as C-visible pointers so
        C code can index ``line_buffer[i]`` / ``source_buffer[i]`` and
        so abort_unknown_impl can printf the bad source line.
@@ -2176,19 +2193,13 @@ int main(int argc, char *argv[]) {
         die("Error: cannot create output\n");
     }
     output_fd = fd;
-    /* Switch ES to the symbol-table segment for pass 1 / pass 2; the
-       handlers index ``[es:0..EFF8]`` for symbols and the jump table. */
-    asm("mov ax, SYMBOL_SEGMENT\n"
-        "mov es, ax\n"
-        "cld");
+    /* DF clear before the rep movsw blocks in include_push /
+       include_pop and the rep stosb that initialises the jump table
+       in run_pass1. */
+    asm("cld");
     run_pass1();
     run_pass2();
-    /* flush_output uses the ES-safe ``syscall`` wrapper internally, so
-       it preserves ES=SYMBOL_SEGMENT across the write. */
     flush_output();
-    /* Restore ES=DS before the cc.py close() builtin (kernel expects
-       ES=DS on int 30h). */
-    restore_es();
     if (close(output_fd) < 0) {
         die("Error: directory write failed\n");
     }
@@ -2214,12 +2225,18 @@ int make_modrm_reg_reg_impl(int register_id, int rm) {
    leaves the cursor alone and returns 0. */
 __attribute__((regparm(1)))
 int match_seg_ds_es(int ds_opcode, int es_opcode) {
-    if (source_cursor[0] == 'd' && source_cursor[1] == 's') {
+    /* Boundary check on source_cursor[2] — without it ``push esi`` /
+       ``push edi`` greedily match ``es`` / ``ds`` and emit the segment
+       opcode instead of a register push.  cc.py's auto-spill of an
+       asm_register("si") global emits ``push esi`` around inline-asm
+       blocks; before this guard the assembler turned that into
+       ``push es`` (0x06) and the corresponding pop into ``pop es``. */
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(ds_opcode);
         return 1;
     }
-    if (source_cursor[0] == 'e' && source_cursor[1] == 's') {
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(es_opcode);
         return 1;
@@ -2288,49 +2305,48 @@ void mem_op_reg_emit(int opcode) {
 }
 
 /* Invoke the handler pointer in ``mnemonic_table[index]`` (at
-   offset +2 of the 4-byte entry).  The indirect ``call [bx+2]``
+   offset +4 of the 8-byte entry).  The indirect ``call [ebx+4]``
    has no C analogue cc.py emits, so this tiny wrapper pairs with
    ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C.
    Inlined at its single call site — no body overhead. */
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void mnemonic_dispatch_at(int index) {
-    asm("shl ax, 2\n"
-        "mov bx, mnemonic_table\n"
-        "add bx, ax\n"
-        "call [bx+2]");
+    asm("shl eax, 3\n"
+        "mov ebx, mnemonic_table\n"
+        "add ebx, eax\n"
+        "call [ebx+4]");
 }
 
 /* Fetch the keyword pointer from ``mnemonic_table[index]`` (each
-   entry is 4 bytes: keyword-pointer + handler-pointer, terminated
-   by a 2-byte zero).  Returns ``NULL`` when the caller has walked
+   entry is 8 bytes: keyword-pointer + handler-pointer, terminated
+   by a 4-byte zero).  Returns ``NULL`` when the caller has walked
    past the terminator.  Compact naked-asm body because cc.py has
-   no syntax for reading a 16-bit pointer out of a packed data
-   table; factoring this out keeps ``parse_mnemonic`` pure C. */
+   no syntax for reading a pointer out of a packed data table;
+   factoring this out keeps ``parse_mnemonic`` pure C. */
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 char *mnemonic_keyword_at(int index) {
-    asm("shl ax, 2\n"
-        "mov bx, mnemonic_table\n"
-        "add bx, ax\n"
-        "mov ax, [bx]");
+    asm("shl eax, 3\n"
+        "mov ebx, mnemonic_table\n"
+        "add ebx, eax\n"
+        "mov eax, [ebx]");
 }
 
-/* Open ``path`` read-only via SYS_IO_OPEN (through the ES-safe
-   ``syscall`` wrapper).  Returns the fd on success, or -1 on error
-   (CF set by the syscall).  Takes the path pointer via regparm(1)
-   AX; the body threads it into SI for the syscall.  Inlined at both
-   call sites via always_inline; the internal ``.ofr_ok`` label gets
-   per-site uniquified. */
+/* Open ``path`` read-only via SYS_IO_OPEN.  Returns the fd on
+   success, or -1 on error (CF set by the syscall).  Takes the path
+   pointer via regparm(1) EAX; the body threads it into ESI for the
+   syscall.  Inlined at both call sites via always_inline; the
+   internal ``.ofr_ok`` label gets per-site uniquified. */
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 int open_file_ro(char *path) {
-    asm("mov si, ax\n"
+    asm("mov esi, eax\n"
         "mov al, O_RDONLY\n"
         "mov ah, SYS_IO_OPEN\n"
         "call syscall\n"
         "jnc .ofr_ok\n"
-        "mov ax, -1\n"
+        "mov eax, -1\n"
         ".ofr_ok:");
 }
 
@@ -2774,7 +2790,7 @@ int parse_operand() {
     skip_ws();
     /* ``byte`` / ``word`` / ``dword`` size prefix — match_word already
        rewinds ``source_cursor`` on miss, so no manual backtrack
-       needed.  The ``dword`` form appears in pmode sources with
+       needed.  The ``dword`` form appears in protected mode sources with
        ``cmp dword [reg], imm`` / ``inc dword [reg]`` shapes. */
     if (match_word(STR_BYTE)) {
         op1_size = 8;
@@ -3062,9 +3078,9 @@ int read_line() {
    for binding an inline ``call syscall``'s AX return to a C local. */
 __attribute__((always_inline))
 int read_source_sector() {
-    asm("mov bx, [_g_source_fd]\n"
-        "mov di, SOURCE_BUFFER\n"
-        "mov cx, 512\n"
+    asm("mov ebx, [_g_source_fd]\n"
+        "mov edi, SOURCE_BUFFER\n"
+        "mov ecx, 512\n"
         "mov ah, SYS_IO_READ\n"
         "call syscall");
 }
@@ -3223,16 +3239,6 @@ int resolve_value() {
     return value;
 }
 
-/* Restore ES=DS so cc.py's ``die`` / ``printf`` / ``close`` builtins
-   (which jmp/int-30h into the kernel expecting ES=0) work correctly
-   from code paths where ES has been pointed at SYMBOL_SEGMENT for
-   the symbol table.  ``always_inline`` splices the 2-byte body at
-   every call site, saving the 3-byte ``call`` + 1-byte shared ``ret``. */
-__attribute__((always_inline))
-void restore_es() {
-    asm("push ds\npop es");
-}
-
 /* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
    and lets the instruction handlers mark any jump they can shrink
    to rel8; loops until no jump changes size.  Convergence is
@@ -3245,9 +3251,9 @@ void run_pass1() {
     pass = 1;
     symbol_count = 0;
     org_value = 0;
-    /* Initialize ES:JUMP_TABLE to all-1 (near). */
-    asm("mov di, JUMP_TABLE\n"
-        "mov cx, JUMP_MAX\n"
+    /* Initialise the JUMP_TABLE region to all-1 (= near). */
+    asm("mov edi, JUMP_TABLE\n"
+        "mov ecx, JUMP_MAX\n"
         "mov al, 1\n"
         "cld\n"
         "rep stosb");
@@ -3388,9 +3394,9 @@ void symbol_add(int value, int scope) {
         n += 1;
     }
     source_cursor = saved;
-    far_write16(entry + SYMBOL_NAME_LENGTH, value);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 2, 0);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 3, scope & 0xFF);
+    far_write32(entry + SYMBOL_NAME_LENGTH, value);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 4, 0);
+    far_write8(entry + SYMBOL_NAME_LENGTH + 5, scope & 0xFF);
     symbol_count += 1;
 }
 
@@ -3402,45 +3408,43 @@ void symbol_add(int value, int scope) {
 __attribute__((regparm(1)))
 void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
-    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 2;
+    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 4;
     far_write8(offset, 1);
 }
 
-/* Compute the ES-relative offset of a symbol table entry: returns
-   ``index * SYMBOL_ENTRY`` (36) in AX.  Fastcall ``regparm(1)`` so
-   the index arrives in AX directly.  cc.py's multiplication codegen
-   uses ``mul bx`` which clobbers BX; callers that need BX across
-   the call save it on the stack.  The four inline-asm call sites
-   each do ``call symbol_entry_address ; mov di, ax`` now — the old
-   inline body wrote DI internally, the pure-C version returns via
-   AX and leaves the DI move to the caller (2 bytes per site × 4 =
-   8 bytes, offset by the smaller function body). */
+/* Compute the flat address of a symbol table entry: returns
+   ``SYMBOL_BASE + index * SYMBOL_ENTRY`` (36) in EAX.  Fastcall
+   ``regparm(1)`` so the index arrives in EAX directly.  Returning
+   the absolute address (rather than an ES-relative offset like the
+   16-bit version) lets every caller hand the result straight to
+   far_read* / far_write*, which under flat protected mode addressing is just
+   a normal indexed load. */
 __attribute__((regparm(1)))
 int symbol_entry_address(int index) {
-    return index * SYMBOL_ENTRY;
+    return SYMBOL_BASE + index * SYMBOL_ENTRY;
 }
 
-/* Linear scan of the symbol table at ES:0..EFF8.  Each entry is
-   SYMBOL_ENTRY (36) bytes: 32-char null-padded name, 2-byte value,
-   1-byte type, 1-byte scope.  Caller passes scope via regparm(1) AX
-   (low byte is compared against the entry's scope byte; 0xFFFF
-   selects globals since the low byte stored is 0xFF).  Name pointer
-   is ``source_cursor`` (SI-pinned).  On hit: returns AX = value,
-   sets ``last_symbol_index`` to the entry index.  On miss: returns
-   AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF return — all
-   remaining callers test ``last_symbol_index`` for hit/miss.
-   Accesses the symbol segment via ``far_read8`` / ``far_read16``
-   builtins so the body stays pure C (the [es:...] prefix is emitted
-   by cc.py when the builtin expands). */
+/* Linear scan of the symbol table starting at SYMBOL_BASE.  Each
+   entry is SYMBOL_ENTRY (38) bytes: 32-char null-padded name,
+   4-byte value, 1-byte type, 1-byte scope.  Caller passes scope via
+   regparm(1) AX (low byte is compared against the entry's scope
+   byte; 0xFFFF selects globals since the low byte stored is 0xFF).
+   Name pointer is ``source_cursor`` (SI-pinned).  On hit: returns
+   AX = value, sets ``last_symbol_index`` to the entry index.  On
+   miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF
+   return — all remaining callers test ``last_symbol_index`` for
+   hit/miss.  Accesses the symbol region via ``far_read8`` /
+   ``far_read32`` builtins; under protected mode flat DS this is a plain
+   ``mov`` indexed by the absolute address. */
 __attribute__((regparm(1)))
 int symbol_lookup(int scope) {
     int count = symbol_count;
-    int entry = 0;
+    int entry = SYMBOL_BASE;
     int index = 0;
     char *saved = source_cursor;
     last_symbol_index = 0xFFFF;
     while (index < count) {
-        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 3);
+        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 5);
         if (entry_scope == (scope & 0xFF)) {
             /* Walk source_cursor (= SI) and an entry cursor in
                parallel.  Reading ``source_cursor[0]`` lowers to a
@@ -3466,7 +3470,7 @@ int symbol_lookup(int scope) {
             source_cursor = saved;
             if (mismatch == 0) {
                 last_symbol_index = index;
-                return far_read16(entry + SYMBOL_NAME_LENGTH);
+                return far_read32(entry + SYMBOL_NAME_LENGTH);
             }
         }
         entry += SYMBOL_ENTRY;
@@ -3487,7 +3491,7 @@ void symbol_set(int value, int scope) {
         symbol_add(value, scope);
         last_symbol_index = symbol_count - 1;
     } else {
-        far_write16(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
+        far_write32(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
     }
 }
 
@@ -3500,17 +3504,17 @@ void symbol_set(int value, int scope) {
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_global(int value) {
-    asm("push word 0xFFFF\n"
+    asm("push dword 0xFFFF\n"
         "call symbol_set\n"
-        "add sp, 2");
+        "add esp, 4");
 }
 
 __attribute__((regparm(1)))
 __attribute__((always_inline))
 void symbol_set_local(int value) {
-    asm("push word [_g_global_scope]\n"
+    asm("push dword [_g_global_scope]\n"
         "call symbol_set\n"
-        "add sp, 2");
+        "add esp, 4");
 }
 
 /* Single-operand F6/F7-family handlers (``mul`` / ``neg`` / ``not``
@@ -3534,12 +3538,11 @@ asm(
     "\n"
     "\n"
     "        ;; Memory layout.  The assembler's scratch buffers live past\n"
-    "        ;; _program_end (cc.py tail sentinel); the symbol table and\n"
-    "        ;; jump table live in a dedicated ES segment (SYMBOL_SEGMENT,\n"
-    "        ;; linear 0x20000) so they don't compete with segment-0\n"
-    "        ;; memory.  Named constants are ``#define``d in\n"
-    "        ;; src/c/asm_layout.h and bridged into NASM ``%define``s by\n"
-    "        ;; cc.py at the top of the generated output.\n"
+    "        ;; _program_end (cc.py tail sentinel); the symbol and jump\n"
+    "        ;; tables live at SYMBOL_BASE (3 MB mark) so they don't\n"
+    "        ;; compete with segment-0 RAM.  Named constants are\n"
+    "        ;; ``#define``d in src/c/asm_layout.h and bridged into NASM\n"
+    "        ;; ``%define``s by cc.py at the top of the generated output.\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Every function in the assembler — main, the pass driver, the\n"
@@ -3556,73 +3559,75 @@ asm(
     ";;; -----------------------------------------------------------------------\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; Mnemonic table: pairs of (name_ptr, handler_ptr), terminated by 0\n"
+    ";;; Mnemonic table: pairs of (name_ptr, handler_ptr), terminated by 0.\n"
+    ";;; Pmode pointers are 32 bits, so each entry is 8 bytes — index *= 8\n"
+    ";;; in mnemonic_keyword_at / mnemonic_dispatch_at.\n"
     ";;; -----------------------------------------------------------------------\n"
     "mnemonic_table:\n"
-    "        dw STR_AAM, handle_aam\n"
-    "        dw STR_ADC, handle_adc\n"
-    "        dw STR_ADD, handle_add\n"
-    "        dw STR_AND, handle_and\n"
-    "        dw STR_CALL, handle_call\n"
-    "        dw STR_CLC, handle_clc\n"
-    "        dw STR_CLD, handle_cld\n"
-    "        dw STR_CMP, handle_cmp\n"
-    "        dw STR_DEC, handle_dec\n"
-    "        dw STR_DIV, handle_div\n"
-    "        dw STR_IMUL, handle_imul\n"
-    "        dw STR_IN,  handle_in\n"
-    "        dw STR_INC, handle_inc\n"
-    "        dw STR_INT, handle_int\n"
-    "        dw STR_JA,  handle_ja\n"
-    "        dw STR_JAE, handle_jnc\n"
-    "        dw STR_JB,  handle_jb\n"
-    "        dw STR_JBE, handle_jbe\n"
-    "        dw STR_JC,  handle_jb\n"
-    "        dw STR_JE,  handle_jz\n"
-    "        dw STR_JG,  handle_jg\n"
-    "        dw STR_JGE, handle_jge\n"
-    "        dw STR_JL,  handle_jl\n"
-    "        dw STR_JLE, handle_jle\n"
-    "        dw STR_JMP, handle_jmp\n"
-    "        dw STR_JNC, handle_jnc\n"
-    "        dw STR_JNE, handle_jne\n"
-    "        dw STR_JNS, handle_jns\n"
-    "        dw STR_JNZ, handle_jne\n"
-    "        dw STR_JZ,  handle_jz\n"
-    "        dw STR_LEA, handle_lea\n"
-    "        dw STR_LGDT, handle_lgdt\n"
-    "        dw STR_LIDT, handle_lidt\n"
-    "        dw STR_LODSB, handle_lodsb\n"
-    "        dw STR_LODSW, handle_lodsw\n"
-    "        dw STR_LOOP, handle_loop\n"
-    "        dw STR_MOV, handle_mov\n"
-    "        dw STR_MOVSB, handle_movsb\n"
-    "        dw STR_MOVSW, handle_movsw\n"
-    "        dw STR_MOVZX, handle_movzx\n"
-    "        dw STR_MUL, handle_mul\n"
-    "        dw STR_NEG, handle_neg\n"
-    "        dw STR_NOT, handle_not\n"
-    "        dw STR_OR,  handle_or\n"
-    "        dw STR_OUT, handle_out\n"
-    "        dw STR_POP, handle_pop\n"
-    "        dw STR_POPA, handle_popa\n"
-    "        dw STR_PUSH, handle_push\n"
-    "        dw STR_PUSHA, handle_pusha\n"
-    "        dw STR_REP, handle_rep\n"
-    "        dw STR_REPNE, handle_repne\n"
-    "        dw STR_RET, handle_ret\n"
-    "        dw STR_SBB, handle_sbb\n"
-    "        dw STR_SCASB, handle_scasb\n"
-    "        dw STR_SHL, handle_shl\n"
-    "        dw STR_SHR, handle_shr\n"
-    "        dw STR_STC, handle_stc\n"
-    "        dw STR_STOSB, handle_stosb\n"
-    "        dw STR_STOSW, handle_stosw\n"
-    "        dw STR_SUB, handle_sub\n"
-    "        dw STR_TEST, handle_test\n"
-    "        dw STR_XCHG, handle_xchg\n"
-    "        dw STR_XOR, handle_xor\n"
-    "        dw 0\n"
+    "        dd STR_AAM, handle_aam\n"
+    "        dd STR_ADC, handle_adc\n"
+    "        dd STR_ADD, handle_add\n"
+    "        dd STR_AND, handle_and\n"
+    "        dd STR_CALL, handle_call\n"
+    "        dd STR_CLC, handle_clc\n"
+    "        dd STR_CLD, handle_cld\n"
+    "        dd STR_CMP, handle_cmp\n"
+    "        dd STR_DEC, handle_dec\n"
+    "        dd STR_DIV, handle_div\n"
+    "        dd STR_IMUL, handle_imul\n"
+    "        dd STR_IN,  handle_in\n"
+    "        dd STR_INC, handle_inc\n"
+    "        dd STR_INT, handle_int\n"
+    "        dd STR_JA,  handle_ja\n"
+    "        dd STR_JAE, handle_jnc\n"
+    "        dd STR_JB,  handle_jb\n"
+    "        dd STR_JBE, handle_jbe\n"
+    "        dd STR_JC,  handle_jb\n"
+    "        dd STR_JE,  handle_jz\n"
+    "        dd STR_JG,  handle_jg\n"
+    "        dd STR_JGE, handle_jge\n"
+    "        dd STR_JL,  handle_jl\n"
+    "        dd STR_JLE, handle_jle\n"
+    "        dd STR_JMP, handle_jmp\n"
+    "        dd STR_JNC, handle_jnc\n"
+    "        dd STR_JNE, handle_jne\n"
+    "        dd STR_JNS, handle_jns\n"
+    "        dd STR_JNZ, handle_jne\n"
+    "        dd STR_JZ,  handle_jz\n"
+    "        dd STR_LEA, handle_lea\n"
+    "        dd STR_LGDT, handle_lgdt\n"
+    "        dd STR_LIDT, handle_lidt\n"
+    "        dd STR_LODSB, handle_lodsb\n"
+    "        dd STR_LODSW, handle_lodsw\n"
+    "        dd STR_LOOP, handle_loop\n"
+    "        dd STR_MOV, handle_mov\n"
+    "        dd STR_MOVSB, handle_movsb\n"
+    "        dd STR_MOVSW, handle_movsw\n"
+    "        dd STR_MOVZX, handle_movzx\n"
+    "        dd STR_MUL, handle_mul\n"
+    "        dd STR_NEG, handle_neg\n"
+    "        dd STR_NOT, handle_not\n"
+    "        dd STR_OR,  handle_or\n"
+    "        dd STR_OUT, handle_out\n"
+    "        dd STR_POP, handle_pop\n"
+    "        dd STR_POPA, handle_popa\n"
+    "        dd STR_PUSH, handle_push\n"
+    "        dd STR_PUSHA, handle_pusha\n"
+    "        dd STR_REP, handle_rep\n"
+    "        dd STR_REPNE, handle_repne\n"
+    "        dd STR_RET, handle_ret\n"
+    "        dd STR_SBB, handle_sbb\n"
+    "        dd STR_SCASB, handle_scasb\n"
+    "        dd STR_SHL, handle_shl\n"
+    "        dd STR_SHR, handle_shr\n"
+    "        dd STR_STC, handle_stc\n"
+    "        dd STR_STOSB, handle_stosb\n"
+    "        dd STR_STOSW, handle_stosw\n"
+    "        dd STR_SUB, handle_sub\n"
+    "        dd STR_TEST, handle_test\n"
+    "        dd STR_XCHG, handle_xchg\n"
+    "        dd STR_XOR, handle_xor\n"
+    "        dd 0\n"
     "\n"
     ";;; Mnemonic strings\n"
     "STR_AAM     db 'aam',0\n"
@@ -3727,19 +3732,15 @@ asm(
     "        db 0                   ; terminator\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
-    ";;; ES-safe syscall wrapper: save ES (symbol table segment), set ES=0\n"
-    ";;; for kernel calls, then restore ES before returning.  Kept as a\n"
-    ";;; file-scope asm label (not a C function) because ``syscall`` is\n"
-    ";;; a reserved libc symbol and clang's syntax check rejects a user\n"
-    ";;; definition; renaming would touch every ``call syscall`` site in\n"
-    ";;; the inline-asm bodies.\n"
+    ";;; Syscall wrapper.  Pmode runs flat: every segment register selects the\n"
+    ";;; same GDT data segment, so the old ES-save-and-restore dance retired\n"
+    ";;; with the 16-bit port.  Kept as a file-scope asm label (not a C\n"
+    ";;; function) because ``syscall`` is a reserved libc symbol and clang's\n"
+    ";;; syntax check rejects a user definition; renaming would touch every\n"
+    ";;; ``call syscall`` site in the inline-asm bodies.\n"
     ";;; -----------------------------------------------------------------------\n"
     "syscall:\n"
-    "        push es\n"
-    "        push ds\n"
-    "        pop es                  ; ES=0 (kernel expects ES=0)\n"
     "        int 30h\n"
-    "        pop es\n"
     "        ret\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"

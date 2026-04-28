@@ -54,7 +54,7 @@ class ProgramTest:
 
 TESTS: list[ProgramTest] = [
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
-    ProgramTest("cat_large", ["cat src/asm.c"], r"Port of src/asm/asm\.asm to C", timeout=30.0),
+    ProgramTest("cat_large", ["cat src/asm.c"], r"Self-hosted x86 assembler", timeout=30.0),
     ProgramTest(
         "chmod",
         ["cp src/parse_ip.asm out.asm", "chmod +x out.asm", "ls"],

@@ -1,9 +1,9 @@
 ;;; tests/idt_test.asm — standalone smoke test for idt.asm + stage1_5.asm.
 ;;;
 ;;; Stage 1 MBR: set up real-mode state, print "R", load stage 2 from
-;;; sectors 2..N via BIOS INT 13h, install IDTR, switch to pmode.
+;;; sectors 2..N via BIOS INT 13h, install IDTR, switch to protected mode.
 ;;;
-;;; Stage 2: in 32-bit pmode, print "P", trigger divide-by-zero to invoke
+;;; Stage 2: in 32-bit protected mode, print "P", trigger divide-by-zero to invoke
 ;;; exception 0.  The IDT's exc_common handler should print "EXC00\r\n"
 ;;; and halt.
 ;;;

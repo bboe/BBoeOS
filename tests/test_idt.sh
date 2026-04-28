@@ -2,7 +2,7 @@
 # tests/test_idt.sh — build and run the standalone IDT smoke test.
 #
 # Expected output:  R  then  P  then  EXC00  on the serial console,
-# confirming that the IDT caught a divide-by-zero after the pmode switch.
+# confirming that the IDT caught a divide-by-zero after the protected mode switch.
 
 set -e
 

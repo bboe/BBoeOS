@@ -491,9 +491,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Set up ``[CONST + disp + si]`` addressing for a constant-base index.
 
         Folds a trailing ``±Int`` off a ``Var ± Int`` index into the
-        displacement so ``buf[gap_start - 1]`` becomes
-        ``[EDIT_BUFFER_BASE-1+si]`` after a single
-        ``mov si, [_l_gap_start]``.  Byte-indexed references skip the
+        displacement so ``BUFFER[i - 1]`` becomes
+        ``[BUFFER-1+si]`` after a single ``mov si, [_l_i]``.  Byte-indexed references skip the
         load entirely when the index variable is pinned to DI or BX
         (``[CONST+di]`` / ``[CONST+bx]`` are valid 8086 addressing);
         BP-pinned vars don't qualify because BP would resolve through
@@ -526,26 +525,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         elif isinstance(index, Var) and index.name in self.pinned_register:
             self.emit(f"        mov {si}, {self.pinned_register[index.name]}")
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {si}, 2")
-                else:
-                    self.emit(f"        add {si}, {si}")
+                self._emit_scale_int_index(si)
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
             self.emit(f"        mov {si}, [{self._local_address(index.name)}]")
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {si}, 2")
-                else:
-                    self.emit(f"        add {si}, {si}")
+                self._emit_scale_int_index(si)
         else:
             if preserve_ax:
                 self.emit(f"        push {self.target.acc}")
             self.generate_expression(index)
             if not is_byte:
-                if self.target.int_size == 4:
-                    self.emit(f"        shl {self.target.acc}, 2")
-                else:
-                    self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                self._emit_scale_int_index(self.target.acc)
             self.emit(f"        mov {si}, {self.target.acc}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
@@ -1189,7 +1179,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``BUILTIN_CLOBBERS`` uses canonical 16-bit names (``cx``,
         ``bx``, etc.).  Caller-side clobber sets (the
         ``register_pool`` passed for user-function calls) name
-        E-registers in pmode and 16-bit aliases in real mode.
+        E-registers in protected mode and 16-bit aliases in real mode.
         Normalise both sides through ``target.low_word`` so the
         comparison still matches when the two halves disagree.
         """
@@ -1266,7 +1256,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         message = f"register-aliased global '{name}' cannot have a constant initializer (initialize from main() instead)"
                         raise CompileError(message, line=declaration.line)
                     # Widen the user's 16-bit alias ("si") to the target
-                    # width ("esi" in 32-bit pmode) so every downstream
+                    # width ("esi" in 32-bit protected mode) so every downstream
                     # read emits the right-width register without a
                     # per-use lookup.
                     self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
@@ -1620,7 +1610,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             name: local variable name.
             size: slot size in bytes.  Defaults to the target's native
                 integer width (2 on 16-bit real mode, 4 on 32-bit flat
-                pmode) so plain ``int`` / pointer locals pick up the
+                protected mode) so plain ``int`` / pointer locals pick up the
                 right width without caller-side branching.  Pass ``1``
                 explicitly for byte-typed scalars and ``4`` for
                 ``unsigned long`` pairs.
@@ -1770,7 +1760,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Zero-extend AL (byte result) to the target accumulator.
 
         16-bit real mode: ``xor ah, ah`` — clears AH, leaving AX = AL.
-        32-bit flat pmode: ``movzx eax, al`` — clears bits 8-31,
+        32-bit flat protected mode: ``movzx eax, al`` — clears bits 8-31,
         leaving EAX = AL.  Used after syscalls and byte-returning
         builtins (``exec`` / ``chmod`` / the carry-flag normalize path
         in ``emit_error_syscall_tail``) where the kernel ABI delivers
@@ -1879,7 +1869,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         On 16-bit real mode, emits ``mov al, <mem> / xor ah, ah`` — the
         cheap 3-byte + 2-byte sequence the 8086 / early peepholes
         (``peephole_dead_ah``, ``peephole_redundant_byte_mask``) expect
-        and can fuse through.  On 32-bit flat pmode, emits ``movzx eax,
+        and can fuse through.  On 32-bit flat protected mode, emits ``movzx eax,
         byte <mem>`` so bits 16-31 of EAX stay clean — the old
         ``mov al / xor ah, ah`` pair would leave EAX's upper word
         whatever the caller last wrote to it, and a downstream

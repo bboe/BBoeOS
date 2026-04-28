@@ -1,6 +1,6 @@
 # BBoeOS
 
-A minimal x86 operating system with a two-stage bootloader, shell, filesystem, networking stack, self-hosted assembler, and C compiler — all running in 16-bit real mode on a floppy disk.
+A minimal x86 operating system with a single-file bootloader-plus-kernel, shell, filesystem, networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit ring-0 protected mode, and runs the shell and user programs from there.
 
 ## Dependencies
 
@@ -34,38 +34,24 @@ A minimal x86 operating system with a two-stage bootloader, shell, filesystem, n
 ## File Structure
 
 ```
-src/include/          Shared includes
-  constants.asm       Shared constants (memory addresses, filesystem params)
-src/kernel/           Kernel assembly source
-  ansi.asm            ANSI escape sequence parser, serial output
-  bboeos.asm          Stage 1 boot code, shell loader, shared functions
-  fd.asm              File descriptor table management (open, read, write, close)
-  io.asm              Filesystem I/O (find_file, read_sector), visual_bell
-  net.asm             NE2000 NIC driver: ARP, IP, ICMP, UDP
-  syscall.asm         INT 30h syscall handler
-  system.asm          Graphics mode, reboot, shutdown
-src/asm/              User-space programs (assembly sources)
+src/arch/x86/         Architecture-specific code
+  boot/bboeos.asm     Single flat-binary kernel: MBR + stage 2 in one file
+  boot/vga_font.asm   Boot-time BIOS ROM font copy into char-gen slot 0x4000
+  entry.asm           protected_mode_entry, IRQ 0 / IRQ 6 handlers, shell respawn
+  idt.asm             32-bit IDT, exception stubs, INT 30h gate
+  syscall.asm         INT 30h dispatch table
+  system.asm          reboot (8042), shutdown (APM / QEMU / Bochs)
+src/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
+src/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
+src/include/          Shared constants and helper includes
+src/lib/              shared_print_*, shared_die / shared_exit / shared_parse_argv
+src/net/              ARP, IP, ICMP, UDP
+src/syscall/          per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
 src/c/                User-space programs (C sources, compiled by cc.py)
 add_file.py           Host-side script to add files to drive image
+cc.py                 Host-side C subset compiler
 make_os.sh            Build script
 ```
-
-## Known limitations / TODO
-
-* **`edit` cannot open `asm.asm`.** The gap buffer is 20 KB at
-  `EDIT_BUFFER_BASE` (`0x2000`) with the 2.5 KB kill buffer at
-  `EDIT_KILL_BUFFER` (`0x7200`), sandwiched between the edit binary
-  (loaded at `PROGRAM_BASE` = `0x0600`) and the resident kernel (stage 1 MBR
-  at `0x7C00`, stage 2 above it through `~0xE000`). The hard ceiling for a
-  contiguous gap buffer in segment 0 is ~27 KB (the gap from just past the
-  edit binary up to `0x7C00`); a separate ~4.5 KB of slack exists above the
-  NIC buffers at `0xEE00`–`0xFFFF` and could host the kill buffer, but
-  `static/asm.asm` is ~118 KB so neither rearrangement helps. The real fix is
-  to relocate the gap buffer into its own segment(s): one segment at e.g.
-  `1000h:0000` gets 64 KB; splitting across two segments gets 128 KB and
-  clears `asm.asm` with headroom. Requires widening `gap_start`/`gap_end` to
-  17-bit (or dword) and routing every `EDIT_BUFFER_BASE` access through a
-  segment-aware helper.
 
 ## Changelog
 

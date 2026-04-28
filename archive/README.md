@@ -7,13 +7,12 @@ source is kept here for reference.
 
 | Program | ASM (bytes) | C (bytes) | Delta |
 |---------|-------------|-----------|-------|
-| arp     | 451         | 454       | +3    |
+| arp     | 466         | 469       | +3    |
 | cat     | 145         | 145       |  0    |
 | chmod   | 149         | 174       | +25   |
 | cp      | 268         | 227       | -41   |
 | date    | 15          | 15        |  0    |
 | dns     | 724         | 1129      | +405  |
-| edit    | 2018        | 2480      | +462  |
 | hello   | 22          | 23        | +1    |
 | ls      | 135         | 165       | +30   |
 | mkdir   | 123         | 127       | +4    |
@@ -21,7 +20,7 @@ source is kept here for reference.
 | netinit | 72          | 69        | -3    |
 | netrecv | 334         | 403       | +69   |
 | netsend | 187         | 221       | +34   |
-| ping    | 1019        | 1291      | +272  |
+| ping    | 1034        | 1306      | +272  |
 | shell   | 950         | 1337      | +387  |
 | uptime  | 50          | 78        | +28   |
 
@@ -47,51 +46,6 @@ with no frame setup for every helper.  The C compiler also generates
 word-sized loads with `xor ah,ah` zero-extension for every byte read,
 whereas the assembly version uses `lodsb` / `stosb` / `rep movsb`
 for compact byte-oriented loops.
-
-**edit (+432):** Both versions implement the same gap-buffer /
-kill-buffer editor over the same key bindings.  The C version
-translates `ESC [ A/B/C/D` into the matching Ctrl-char before
-dispatching, so arrow keys and Ctrl+B/F/N/P share a single move
-body — same trick the asm achieves via fall-through to local
-labels.  `buffer_character_at` and `column_before` both qualify
-for the register calling convention now that `_is_simple_arg`
-admits leaf-only `Var ± Int` / `Var ± Var` BinOps; the topological
-arg scheduler treats those BinOps as reading whatever pinned
-registers their operands map to so an inter-arg dependency
-can't trash a live source.  The function still keeps its bp
-frame because two of its four params (`buffer`, `gap_end`)
-lose pin slots to its body locals, but each call site stops
-pushing those two args from registers and just hands `offset`
-straight into BX (built in-register via the
-`peephole_register_arithmetic` fold of `mov ax, X / add ax, Y /
-mov bx, ax`).  Main now also gets a fifth pin slot in BP — the
-cost model in `_select_auto_pin_candidates` weighs BP's
-zero-clobber-call savings against its 2-byte-per-subscript
-penalty (BP can't index DS-relative memory), so it lands on a
-high-traffic scalar like `_l_c` while gap_start/gap_end stay
-on DI/DX where they cost nothing per subscript.  Cursor
-repositioning uses `printf("\e[%d;%dH", ...)` (varargs push /
-format scan / `add sp, 6`) where the asm emits a literal ESC
-sequence through `FUNCTION_PRINT_CHARACTER`.  char locals spill
-to word slots so every byte read comes with a `xor ah, ah`
-zero-extension.  The main loop pins its most-used locals
-(`gap_start`, `gap_end`, `cursor_line`, `cursor_column`) to
-registers and statement-level builtin calls now collapse the
-4-register pin save/restore into single-byte `pusha`/`popa`
-pairs (vs the per-register push/pop fan the previous codegen
-produced); the dispatch chain over `character` hoists a single
-`mov ax, [_l_character]` so each `cmp ax, K` is 3 bytes rather
-than the 6-byte `cmp word [mem], K` form.  The remaining 10
-bytes over the previous 2247-byte build come from the
-``_peephole_will_strand_ax`` correctness fix: each of the five
-``cursor_line = cursor_line + 1; if (cursor_line >= view_line +
-24)`` sites (and their column equivalents) now reloads the
-pinned value after the fused ``inc <reg>``, where the old
-output elided the reload via an ``ax_local`` shortcut that the
-peephole invalidated.  The save-path scratch buffer is a local stack array
-(``char sector[512]``), which triggers a full BP frame for `main`
-so the 512-byte array lives on the stack segment rather than as a
-data label in the binary.
 
 **hello (+1):** The C compiler emits a null terminator on every string
 literal. The assembly version omits it since `FUNCTION_DIE` uses an
@@ -122,7 +76,7 @@ length-bearing messages without null terminators.  The C version uses
 a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
 uses ``BUFFER``.
 
-**ping (+346):** Both versions build ICMP echo requests in userspace
+**ping (+272):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
 arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,

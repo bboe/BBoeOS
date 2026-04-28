@@ -1,7 +1,19 @@
+        ;; ------------------------------------------------------------
+        ;; Process control syscalls.
+        ;;
+        ;; sys_exec loads the program and `jmp`s — never returns through
+        ;; the dispatch tail.  sys_exit teleports back to the kernel's
+        ;; saved ESP (set by shell_reload / sys_exec before each
+        ;; `jmp PROGRAM_BASE`) and re-enters shell_reload, which respawns
+        ;; the shell from a clean state — same shape as the 16-bit
+        ;; `mov sp, [shell_sp]; jmp shell_reload`.
+        ;; ------------------------------------------------------------
+
         .sys_exec:
-        ;; Execute program: SI = filename
-        ;; On error: CF set, AL = ERROR_NOT_FOUND or ERROR_NOT_EXECUTE
-        call vfs_find           ; populates vfs_found_*
+        ;; SI = filename.  On success control goes to PROGRAM_BASE and
+        ;; never returns; on error CF is set and AX holds an ERROR_*
+        ;; code per the original 16-bit contract.
+        call vfs_find
         jc .exec_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
         jnz .exec_load
@@ -13,36 +25,29 @@
         stc
         jmp .iret_cf
         .exec_load:
-        ;; Save SP from before INT 30h.  Our frame has 16 bytes of
-        ;; pusha save area plus the 6-byte iret frame, so the caller's
-        ;; pre-INT-30h SP is current SP + 22.
-        mov bp, sp
-        add bp, 22
-        mov [shell_sp], bp
-        mov di, PROGRAM_BASE
-        call vfs_load           ; DI=dest → CF
-        jnc .exec_run
-        mov al, ERROR_NOT_FOUND
-        stc
-        jmp .iret_cf
-        .exec_run:
-        call fd_init
-        call bss_setup
-        jmp PROGRAM_BASE
+        mov edi, PROGRAM_BASE
+        call vfs_load
+        jc .exec_not_found
+        jmp program_enter
 
         .sys_exit:
-        ;; Restore stack and reload shell (skips WELCOME and one-time
-        ;; boot inits — those run once from boot_shell).
-        xor ax, ax
-        mov ds, ax
-        mov es, ax
-        mov sp, [shell_sp]
+        ;; Restore the kernel's saved ESP and re-enter shell_reload to
+        ;; respawn the shell.  shell_reload (and sys_exec) snapshotted
+        ;; ESP just before each `jmp PROGRAM_BASE`, so this discards the
+        ;; syscall gate's iret frame, our pushad snapshot, and whatever
+        ;; the program piled on top — none of which we're returning to.
+        ;; Mirrors the 16-bit `mov sp, [shell_sp]; jmp shell_reload`.
+        mov esp, [shell_esp]
+        sti
         jmp shell_reload
 
         .sys_reboot:
+        ;; Does not return.
         call reboot
-        iret
 
         .sys_shutdown:
+        ;; Returns only if the host ignores the shutdown port — surface
+        ;; CF=1 so userspace can fall back.
         call shutdown
-        iret
+        stc
+        jmp .iret_cf

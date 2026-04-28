@@ -1,61 +1,68 @@
+;;; ---------------------------------------------------------------------
+;;; print.asm — protected mode user-side print helpers, jumped to via FUNCTION_TABLE
+;;; from cc.py-emitted code.  Helpers stay in alphabetical order.
+;;; ---------------------------------------------------------------------
+
 shared_print_byte_decimal:
-        ;; Print AL as 1-3 digit decimal (no leading zeros)
-        push ax
-        push bx
-        push cx
+        ;; AL = byte: print 1-3 decimal digits, no leading zeros.
+        ;; Preserves EAX, EBX, ECX (everything else through
+        ;; shared_print_character).
+        push eax
+        push ebx
+        push ecx
         xor ah, ah
-        xor bx, bx             ; Digit count
+        xor ebx, ebx                    ; digit count
         mov cl, 10
         .div_loop:
-        div cl                 ; AL = quotient, AH = remainder
-        push ax
-        inc bx
+        div cl                          ; AL = quotient, AH = remainder
+        push eax
+        inc ebx
         test al, al
         jz .print_digits
         xor ah, ah
         jmp .div_loop
         .print_digits:
-        pop ax
+        pop eax
         mov al, ah
         add al, '0'
         call shared_print_character
-        dec bx
+        dec ebx
         jnz .print_digits
-        pop cx
-        pop bx
-        pop ax
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 shared_print_character:
-        ;; Print character in AL to stdout via write syscall
-        ;; Preserves all registers
-        push ax
-        push bx
-        push cx
-        push si
+        ;; AL = byte to write to stdout.  Preserves all registers.
+        push eax
+        push ebx
+        push ecx
+        push esi
         mov [SECTOR_BUFFER], al
-        mov si, SECTOR_BUFFER
-        mov cx, 1
+        mov esi, SECTOR_BUFFER
+        mov ecx, 1
         mov bx, STDOUT
         mov ah, SYS_IO_WRITE
         int 30h
-        pop si
-        pop cx
-        pop bx
-        pop ax
+        pop esi
+        pop ecx
+        pop ebx
+        pop eax
         ret
 
 shared_print_datetime:
-        ;; Input: DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
-        ;; Prints: YYYY-MM-DD HH:MM:SS (no trailing newline).
-        ;; Full Gregorian leap rule. Valid through year 2106.
+        ;; DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
+        ;; Prints YYYY-MM-DD HH:MM:SS (no trailing newline).
+        ;; Full Gregorian leap rule.  Valid through year 2106 (32-bit
+        ;; epoch overflow).  Preserves EAX, EBX, ECX, EDX, ESI.
         push eax
         push ebx
         push ecx
         push edx
-        push si
+        push esi
 
-        ;; Combine DX:AX into EAX (zero-extend AX, shift DX into high 16).
+        ;; Combine DX:AX into a single 32-bit EAX.
         movzx ebx, ax
         movzx edx, dx
         shl edx, 16
@@ -64,26 +71,26 @@ shared_print_datetime:
 
         mov ecx, 86400
         xor edx, edx
-        div ecx                 ; EAX = day count, EDX = seconds within day
+        div ecx                         ; EAX = days, EDX = seconds within day
         mov [.pd_days], eax
         mov eax, edx
 
         mov ecx, 3600
         xor edx, edx
-        div ecx                 ; EAX = hours, EDX = seconds within hour
+        div ecx                         ; EAX = hours, EDX = seconds within hour
         mov [.pd_hours], al
         mov eax, edx
 
         mov ecx, 60
         xor edx, edx
-        div ecx                 ; EAX = minutes, EDX = seconds
+        div ecx                         ; EAX = minutes, EDX = seconds
         mov [.pd_minutes], al
         mov [.pd_seconds], dl
 
         ;; Walk years from 1970, peeling off 365 or 366 days each time.
-        mov bx, 1970
+        mov ebx, 1970
         .pd_year_loop:
-        mov ax, bx
+        mov eax, ebx
         call .pd_is_leap
         jz .pd_year_leap
         mov ecx, 365
@@ -94,32 +101,31 @@ shared_print_datetime:
         cmp [.pd_days], ecx
         jb .pd_year_done
         sub [.pd_days], ecx
-        inc bx
+        inc ebx
         jmp .pd_year_loop
         .pd_year_done:
         mov [.pd_year], bx
 
         ;; Walk months within the year.
-        mov cx, 1               ; CX = candidate month (1..12)
+        mov ecx, 1                      ; ECX = candidate month (1..12)
         .pd_month_loop:
-        mov bx, cx
-        dec bx
-        shl bx, 1
-        movzx eax, word [.pd_month_lengths + bx]
-        cmp cx, 2
+        mov ebx, ecx
+        dec ebx
+        shl ebx, 1
+        movzx eax, word [.pd_month_lengths + ebx]
+        cmp ecx, 2
         jne .pd_month_len_ready
-        push ax
-        mov ax, [.pd_year]
+        push eax
+        movzx eax, word [.pd_year]
         call .pd_is_leap
-        pop ax
+        pop eax
         jnz .pd_month_len_ready
-        movzx eax, ax
-        inc eax                 ; February in leap year = 29
+        inc eax                         ; February in leap year = 29
         .pd_month_len_ready:
         cmp [.pd_days], eax
         jb .pd_month_done
         sub [.pd_days], eax
-        inc cx
+        inc ecx
         jmp .pd_month_loop
         .pd_month_done:
         mov [.pd_month], cl
@@ -128,7 +134,7 @@ shared_print_datetime:
         mov [.pd_day], al
 
         ;; Emit YYYY-MM-DD HH:MM:SS
-        mov ax, [.pd_year]
+        movzx eax, word [.pd_year]
         call .pd_print_4digit
         mov al, '-'
         call shared_print_character
@@ -151,7 +157,7 @@ shared_print_datetime:
         mov al, [.pd_seconds]
         call shared_print_decimal
 
-        pop si
+        pop esi
         pop edx
         pop ecx
         pop ebx
@@ -159,65 +165,66 @@ shared_print_datetime:
         ret
 
         .pd_print_4digit:
-        ;; AX = value 0..9999. Print 4 zero-padded decimal digits.
-        push bx
-        push dx
-        xor dx, dx
-        mov bx, 1000
-        div bx
+        ;; EAX = value 0..9999.  Print 4 zero-padded decimal digits.
+        push ebx
+        push edx
+        xor edx, edx
+        mov ebx, 1000
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
-        xor dx, dx
-        mov bx, 100
-        div bx
+        mov eax, edx
+        xor edx, edx
+        mov ebx, 100
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
-        xor dx, dx
-        mov bx, 10
-        div bx
+        mov eax, edx
+        xor edx, edx
+        mov ebx, 10
+        div ebx
         add al, '0'
         call shared_print_character
-        mov ax, dx
+        mov eax, edx
         add al, '0'
         call shared_print_character
-        pop dx
-        pop bx
+        pop edx
+        pop ebx
         ret
 
         .pd_is_leap:
-        ;; AX = year. Returns ZF=1 if leap, ZF=0 otherwise. Clobbers AX, DX.
-        push cx
-        push ax
-        xor dx, dx
-        mov cx, 4
-        div cx
-        test dx, dx
+        ;; EAX = year.  Returns ZF=1 if leap, ZF=0 otherwise.
+        ;; Clobbers EAX, EDX.
+        push ecx
+        push eax
+        xor edx, edx
+        mov ecx, 4
+        div ecx
+        test edx, edx
         jnz .pd_leap_no
-        pop ax
-        push ax
-        xor dx, dx
-        mov cx, 100
-        div cx
-        test dx, dx
+        pop eax
+        push eax
+        xor edx, edx
+        mov ecx, 100
+        div ecx
+        test edx, edx
         jnz .pd_leap_yes
-        pop ax
-        push ax
-        xor dx, dx
-        mov cx, 400
-        div cx
-        test dx, dx
+        pop eax
+        push eax
+        xor edx, edx
+        mov ecx, 400
+        div ecx
+        test edx, edx
         jnz .pd_leap_no
         .pd_leap_yes:
-        pop ax
-        pop cx
-        xor ax, ax              ; ZF=1
+        pop eax
+        pop ecx
+        xor eax, eax                    ; ZF=1
         ret
         .pd_leap_no:
-        pop ax
-        pop cx
-        or ax, 1                ; ZF=0
+        pop eax
+        pop ecx
+        or eax, 1                       ; ZF=0
         ret
 
         .pd_month_lengths:
@@ -231,28 +238,29 @@ shared_print_datetime:
         .pd_seconds: db 0
 
 shared_print_decimal:
-        ;; Print AL as 2 zero-padded decimal digits
-        aam                     ; AH = AL/10, AL = AL%10
-        xchg al, ah             ; AL = tens, AH = ones
-        push ax
+        ;; AL = byte 0..99: print 2 zero-padded decimal digits.
+        ;; aam still works in protected mode (only invalid in long mode).
+        aam                             ; AH = AL/10, AL = AL%10
+        xchg al, ah                     ; AL = tens, AH = ones
+        push eax
         add al, '0'
         call shared_print_character
-        pop ax
+        pop eax
         mov al, ah
         add al, '0'
         call shared_print_character
         ret
 
 shared_print_hex:
-        ;; Print AL as two uppercase hex digits
-        push ax
+        ;; AL = byte: print 2 uppercase hex digits.
+        push eax
         shr al, 4
         call .nibble
-        pop ax
-        push ax
+        pop eax
+        push eax
         and al, 0Fh
         call .nibble
-        pop ax
+        pop eax
         ret
         .nibble:
         cmp al, 10
@@ -266,67 +274,71 @@ shared_print_hex:
         ret
 
 shared_print_ip:
-        ;; Print 4-byte IP address as dotted decimal
-        ;; Input: SI = pointer to 4-byte IP
-        push ax
-        push cx
-        mov cx, 4
+        ;; ESI = pointer to 4-byte IP.  Print as dotted decimal.
+        ;; ESI advances 4 bytes (lodsb under cleared DF — cc.py's
+        ;; entry stub `cld`s before any inline string op).  Preserves
+        ;; EAX, ECX.
+        push eax
+        push ecx
+        mov ecx, 4
         .ip_loop:
         lodsb
         call shared_print_byte_decimal
-        dec cx
+        dec ecx
         jz .ip_done
         mov al, '.'
         call shared_print_character
         jmp .ip_loop
         .ip_done:
-        pop cx
-        pop ax
+        pop ecx
+        pop eax
         ret
 
 shared_print_mac:
-        ;; Print a 6-byte MAC address as XX:XX:XX:XX:XX:XX
-        ;; Input: SI = pointer to 6-byte MAC address
-        push ax
-        push cx
-        mov cx, 6
+        ;; ESI = pointer to 6-byte MAC.  Print as XX:XX:XX:XX:XX:XX.
+        ;; ESI advances 6 bytes.  Preserves EAX, ECX.
+        push eax
+        push ecx
+        mov ecx, 6
         .mac_loop:
         lodsb
         call shared_print_hex
-        dec cx
+        dec ecx
         jz .mac_done
         mov al, ':'
         call shared_print_character
         jmp .mac_loop
         .mac_done:
-        pop cx
-        pop ax
+        pop ecx
+        pop eax
         ret
 
 shared_print_string:
-        ;; Write null-terminated string at DI to stdout
-        ;; Clobbers: AX, BX, CX, SI
-        mov si, di
+        ;; DI = null-terminated string.  Computes length via repne scasb,
+        ;; then writes via shared_write_stdout.  Clobbers EAX, EBX, ECX,
+        ;; ESI.
+        mov esi, edi
         xor al, al
-        mov cx, 0FFFFh
+        mov ecx, 0xFFFFFFFF
+        cld
         repne scasb
-        mov cx, di
-        sub cx, si
-        dec cx
+        mov ecx, edi
+        sub ecx, esi
+        dec ecx
         call shared_write_stdout
         ret
 
 shared_printf:
-        ;; Minimal printf: cdecl calling convention.
-        ;; Stack: [bp+4] = format string, [bp+6] = first arg, ...
+        ;; Minimal printf: cdecl, args are 4 bytes each under --bits 32.
+        ;; Stack: [ebp+8] = format string, [ebp+12] = first arg, …
         ;; Supports: %c %d %u %x %s %%, optional zero-pad flag and width.
         ;; Format: %[0][width]<type>
-        push bp
-        mov bp, sp
-        push si
-        push di
-        mov si, [bp+4]          ; SI = format string
-        mov di, 6               ; DI = stack offset from BP for next arg
+        push ebp
+        mov ebp, esp
+        push esi
+        push edi
+        mov esi, [ebp+8]                ; format string pointer
+        mov edi, 12                     ; stack offset for next arg
         cld
         .loop:
         lodsb
@@ -336,8 +348,9 @@ shared_printf:
         je .format
         call shared_print_character
         jmp .loop
+
         .format:
-        ;; [printf_width] = minimum width, [printf_pad] = pad character
+        ;; Reset width / pad for this conversion.
         mov byte [printf_width], 0
         mov byte [printf_pad], ' '
         lodsb
@@ -351,17 +364,17 @@ shared_printf:
         jb .spec
         cmp al, '9'
         ja .spec
-        ;; width = width * 10 + (al - '0')
         sub al, '0'
-        push ax
-        mov al, [printf_width]
-        mov ah, 10
-        mul ah                  ; AX = width * 10
+        push eax
+        movzx eax, byte [printf_width]
+        mov dl, 10
+        mul dl                          ; AX = width * 10
         mov [printf_width], al
-        pop ax
+        pop eax
         add [printf_width], al
         lodsb
         jmp .width_loop
+
         .spec:
         cmp al, 'c'
         je .fmt_c
@@ -375,66 +388,72 @@ shared_printf:
         je .fmt_s
         cmp al, '%'
         je .fmt_percent
-        ;; Unknown specifier: print literal
+        ;; Unknown specifier: print literal.
         call shared_print_character
         jmp .loop
+
         .fmt_c:
-        mov ax, [bp+di]
-        add di, 2
+        mov eax, [ebp+edi]
+        add edi, 4
         call shared_print_character
         jmp .loop
+
         .fmt_d:
         .fmt_u:
-        mov ax, [bp+di]
-        add di, 2
-        call .print_uint16
+        mov eax, [ebp+edi]
+        add edi, 4
+        call .print_uint32
         jmp .loop
+
         .fmt_x:
-        mov ax, [bp+di]
-        add di, 2
+        mov eax, [ebp+edi]
+        add edi, 4
         call .print_hex_padded
         jmp .loop
+
         .fmt_s:
-        push si
-        mov si, [bp+di]
-        add di, 2
-        ;; Find length of null-terminated string
-        push di
-        mov di, si
+        push esi
+        mov esi, [ebp+edi]
+        add edi, 4
+        ;; Strlen via repne scasb on a copy of ESI.
+        push edi
+        mov edi, esi
         xor al, al
-        mov cx, 0FFFFh
+        mov ecx, 0xFFFFFFFF
         repne scasb
-        mov cx, di
-        sub cx, si
-        dec cx
-        pop di
+        mov ecx, edi
+        sub ecx, esi
+        dec ecx
+        pop edi
         call shared_write_stdout
-        pop si
+        pop esi
         jmp .loop
+
         .fmt_percent:
         mov al, '%'
         call shared_print_character
         jmp .loop
+
         .done:
-        pop di
-        pop si
-        pop bp
+        pop edi
+        pop esi
+        pop ebp
         ret
 
-        .print_uint16:
-        ;; Print AX as unsigned decimal, padded to [printf_width] with [printf_pad].
-        ;; Clobbers: AX, BX, CX, DX
-        xor cx, cx              ; Digit count
-        mov bx, 10
+        .print_uint32:
+        ;; Print EAX as unsigned decimal, padded to [printf_width] with
+        ;; [printf_pad].  Clobbers EAX, EBX, ECX, EDX.
+        xor ecx, ecx                    ; digit count
+        mov ebx, 10
         .udiv:
-        xor dx, dx
-        div bx                  ; AX = quotient, DX = remainder
-        push dx                 ; Push digit
-        inc cx
-        test ax, ax
+        xor edx, edx
+        div ebx                         ; EAX = quotient, EDX = remainder
+        push edx
+        inc ecx
+        test eax, eax
         jnz .udiv
-        ;; Pad: print (width - digit_count) pad characters using CL as scratch.
-        push cx                 ; Save digit count
+        ;; Pad to width, using CL as scratch counter.
+        push ecx
         .upad:
         cmp cl, [printf_width]
         jae .pad_done
@@ -443,41 +462,59 @@ shared_printf:
         inc cl
         jmp .upad
         .pad_done:
-        pop cx                  ; Restore digit count
+        pop ecx
         .uprint:
-        pop ax
+        pop eax
         add al, '0'
         call shared_print_character
-        dec cx
+        dec ecx
         jnz .uprint
         ret
 
         .print_hex_padded:
         ;; Print AL as hex, padded to [printf_width] with [printf_pad].
-        ;; Default width for %x is 2. Clobbers: AX, CX
+        ;; Default width for %x is 2.  Clobbers EAX, ECX.
         cmp byte [printf_width], 2
         jae .hskip_default
         mov byte [printf_width], 2
         .hskip_default:
-        mov cl, 2               ; %x always prints 2 digits from AL
+        mov cl, 2
         .hpad:
         cmp cl, [printf_width]
         jae .hprint
-        push ax
+        push eax
         mov al, [printf_pad]
         call shared_print_character
-        pop ax
+        pop eax
         inc cl
         jmp .hpad
         .hprint:
-        jmp shared_print_hex
+        ;; Two hex digits from AL.
+        push eax
+        shr al, 4
+        call .nibble
+        pop eax
+        and al, 0Fh
+        call .nibble
+        ret
+        .nibble:
+        cmp al, 10
+        jb .digit
+        add al, 'A' - 10
+        jmp .nibble_print
+        .digit:
+        add al, '0'
+        .nibble_print:
+        call shared_print_character
+        ret
 
 shared_write_stdout:
-        ;; Write CX bytes from SI to stdout (fd 1)
+        ;; ESI = buffer, ECX = byte count.  Writes to stdout.  Preserves
+        ;; nothing the SYS_IO_WRITE handler doesn't already preserve.
         mov bx, STDOUT
         mov ah, SYS_IO_WRITE
         int 30h
         ret
 
-        printf_pad    db 0         ; printf pad character (' ' or '0')
-        printf_width  db 0         ; printf minimum field width
+        printf_pad    db 0
+        printf_width  db 0

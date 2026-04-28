@@ -69,6 +69,19 @@ class EmissionMixin:
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
 
+    def _emit_scale_int_index(self, register: str, /) -> None:
+        """Multiply *register* by ``self.target.int_size`` (2 or 4) in place.
+
+        Converts an integer subscript into a byte offset when stepping
+        through an array of word- or dword-sized elements.  16-bit
+        doubles via ``add reg, reg``; 32-bit uses ``shl reg, 2`` so the
+        4x stride lands in one instruction instead of two.
+        """
+        if self.target.int_size == 4:
+            self.emit(f"        shl {register}, 2")
+        else:
+            self.emit(f"        add {register}, {register}")
+
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
 
@@ -175,8 +188,9 @@ class EmissionMixin:
             live = [(label, elements) for label, elements in self.arrays if label in code]
             if live:
                 self.emit(";; --- array data ---")
+                int_directive = "dd" if self.target.int_size == 4 else "dw"
                 for label, elements in live:
-                    self.emit(f"{label}: dw {', '.join(elements)}")
+                    self.emit(f"{label}: {int_directive} {', '.join(elements)}")
         if self.target_mode == "user":
             self._emit_bss_trailer()
             # Sentinel label at the very end so inline asm can address the
@@ -705,13 +719,13 @@ class EmissionMixin:
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                            self._emit_scale_int_index(self.target.acc)
                         self.emit(f"        add {si}, {self.target.acc}")
                     else:
                         self.emit(f"        push {si}")
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                            self._emit_scale_int_index(self.target.acc)
                         self.emit(f"        pop {si}")
                         self.emit(f"        add {si}, {self.target.acc}")
                     if is_byte:
@@ -730,7 +744,7 @@ class EmissionMixin:
             vname = expression.name
             if vname in self.global_arrays:
                 declaration = self.global_arrays[vname]
-                stride = 1 if declaration.type_name in self.BYTE_TYPES else 2
+                stride = 1 if declaration.type_name in self.BYTE_TYPES else self.target.int_size
                 if declaration.init is not None:
                     size = len(declaration.init.elements) * stride
                     self.emit(f"        mov {self.target.acc}, {size}")
@@ -1565,13 +1579,13 @@ class EmissionMixin:
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
                     if not is_byte:
-                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                        self._emit_scale_int_index(self.target.acc)
                     self.emit(f"        add {si}, {self.target.acc}")
                 else:
                     self.emit(f"        push {si}")
                     self.generate_expression(statement.index)
                     if not is_byte:
-                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                        self._emit_scale_int_index(self.target.acc)
                     self.emit(f"        pop {si}")
                     self.emit(f"        add {si}, {self.target.acc}")
                 self.emit(f"        pop {self.target.acc}")
@@ -1635,7 +1649,9 @@ class EmissionMixin:
         rejected at codegen time.
         """
         if self.current_function_is_main:
-            # main: return [expr]; → exit() (discard return value)
+            # main: return [expr]; → exit() (discard return value).
+            # SYS_EXIT discards the program's stack entirely, so any
+            # bp frame can be left in place — no teardown needed.
             self.emit("        jmp FUNCTION_EXIT")
             return
         if self.current_carry_return:

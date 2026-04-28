@@ -1,25 +1,40 @@
+        ;; ------------------------------------------------------------
+        ;; Real-time-clock syscalls.  Returns that overflow AX (DX:AX
+        ;; pairs) get written explicitly into the saved EDX/ECX slots
+        ;; so the user sees the same values after iretd.
+        ;; ------------------------------------------------------------
+
         .rtc_datetime:
-        call rtc_read_epoch     ; AX = epoch_lo, DX = epoch_hi
-        mov [bp+14], ax
-        mov [bp+10], dx
-        jmp .iret_done
+        ;; Returns DX:AX = unsigned epoch seconds (UTC), valid through
+        ;; 2106-02-07.  CF clear (never errors).
+        call rtc_read_epoch
+        mov [esp + SYSCALL_SAVED_EDX], dx
+        clc
+        jmp .iret_cf
 
         .rtc_millis:
-        ;; DX:AX = milliseconds since boot (ticks × MS_PER_TICK).  Wraps at
-        ;; 2^32 ms ≈ 49.7 days — longer than any realistic BBoeOS uptime.
-        call rtc_tick_read      ; EAX = ticks
-        imul eax, MS_PER_TICK   ; EAX = ms
-        mov [bp+14], ax         ; AX slot = low 16 bits
-        shr eax, 16
-        mov [bp+10], ax         ; DX slot = high 16 bits
-        jmp .iret_done
+        ;; Returns DX:AX = milliseconds since boot.  Wraps at 2^32 ms
+        ;; (~49.7 days).  CF clear.
+        call rtc_tick_read
+        imul eax, MS_PER_TICK
+        mov edx, eax
+        shr edx, 16
+        mov [esp + SYSCALL_SAVED_EDX], dx
+        clc
+        jmp .iret_cf
 
         .rtc_sleep:
-        ;; Busy-wait for CX milliseconds via the native PIT tick counter.
+        ;; CX = milliseconds.  rtc_sleep_ms preserves all registers; CF
+        ;; clear.
         call rtc_sleep_ms
-        jmp .iret_done
+        clc
+        jmp .iret_cf
 
         .rtc_uptime:
-        call uptime_seconds
-        mov [bp+14], ax         ; return seconds in AX
-        jmp .iret_done
+        ;; Returns AX = seconds since boot.  CF clear.
+        call rtc_tick_read
+        xor edx, edx
+        mov ecx, TICKS_PER_SECOND
+        div ecx
+        clc
+        jmp .iret_cf

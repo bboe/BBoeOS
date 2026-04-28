@@ -8,17 +8,17 @@
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTORS 3
-        %assign EDIT_BUFFER_BASE 2000h       ; Edit gap-buffer start (6.5 KB after PROGRAM_BASE)
-        %assign EDIT_BUFFER_SIZE 5200h       ; Gap buffer size (EDIT_KILL_BUFFER - EDIT_BUFFER_BASE)
-        %assign EDIT_KILL_BUFFER 7200h       ; Kill buffer start (7C00h - EDIT_KILL_BUFFER_SIZE)
-        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Kill buffer size (2560 bytes)
+        %assign EDIT_BUFFER_BASE 100000h        ; Edit gap-buffer base (extended memory, 1 MB mark; clears VGA/BIOS at 0xA0000-0xFFFFF)
+        %assign EDIT_BUFFER_SIZE 100000h        ; Edit gap-buffer size (1 MB)
+        %assign EDIT_KILL_BUFFER (EDIT_BUFFER_BASE + EDIT_BUFFER_SIZE)
+        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Edit kill-buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found
         %assign ERROR_PROTECTED 05h     ; Rename/chmod error: file is protected
-        %assign EXEC_ARG 4FEh
+        %assign EXEC_ARG 4FCh           ; 4 bytes (dword pointer under --bits 32); before BUFFER
         %assign FD_ENTRY_SIZE 32
         %assign FD_MAX 8
         %assign FD_OFFSET_DIRECTORY_OFFSET 14    ; offset of dir_off field within FD entry
@@ -39,21 +39,21 @@
         %assign FD_TYPE_VGA 7
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
-        %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (3 bytes per entry)
+        %assign FUNCTION_TABLE 7E00h    ; Start of kernel jump table (5 bytes per entry in protected mode — `jmp strict near`)
         %assign FUNCTION_DIE            FUNCTION_TABLE      ; SI=msg, CX=len: write to stdout then exit
-        %assign FUNCTION_EXIT           FUNCTION_DIE + 3    ; Exit program (reload shell)
-        %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 3   ; Read one byte from stdin; returns AL
-        %assign FUNCTION_PARSE_ARGV   FUNCTION_GET_CHARACTER + 3 ; DI=argv buf: split EXEC_ARG, CX=argc
-        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PARSE_ARGV + 3 ; AL=byte: print 1-3 decimal digits
-        %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 3 ; AL=char: print to stdout
-        %assign FUNCTION_PRINT_DATETIME FUNCTION_PRINT_CHARACTER + 3 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
-        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_DATETIME + 3 ; AL=byte: print 2 zero-padded decimal digits
-        %assign FUNCTION_PRINT_HEX    FUNCTION_PRINT_DECIMAL + 3 ; AL=byte: print 2 hex digits
-        %assign FUNCTION_PRINT_IP      FUNCTION_PRINT_HEX + 3 ; SI=4-byte IP: print dotted decimal
-        %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 3 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
-        %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 3 ; DI=null-terminated string: write to stdout
-        %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 3 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 3 ; SI=buf, CX=len: write to stdout
+        %assign FUNCTION_EXIT           FUNCTION_DIE + 5    ; Exit program (reload shell)
+        %assign FUNCTION_GET_CHARACTER  FUNCTION_EXIT + 5   ; Read one byte from stdin; returns AL
+        %assign FUNCTION_PARSE_ARGV   FUNCTION_GET_CHARACTER + 5 ; DI=argv buf: split EXEC_ARG, CX=argc
+        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_PARSE_ARGV + 5 ; AL=byte: print 1-3 decimal digits
+        %assign FUNCTION_PRINT_CHARACTER FUNCTION_PRINT_BYTE_DECIMAL + 5 ; AL=char: print to stdout
+        %assign FUNCTION_PRINT_DATETIME FUNCTION_PRINT_CHARACTER + 5 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
+        %assign FUNCTION_PRINT_DECIMAL FUNCTION_PRINT_DATETIME + 5 ; AL=byte: print 2 zero-padded decimal digits
+        %assign FUNCTION_PRINT_HEX    FUNCTION_PRINT_DECIMAL + 5 ; AL=byte: print 2 hex digits
+        %assign FUNCTION_PRINT_IP      FUNCTION_PRINT_HEX + 5 ; SI=4-byte IP: print dotted decimal
+        %assign FUNCTION_PRINT_MAC     FUNCTION_PRINT_IP + 5 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
+        %assign FUNCTION_PRINT_STRING  FUNCTION_PRINT_MAC + 5 ; DI=null-terminated string: write to stdout
+        %assign FUNCTION_PRINTF       FUNCTION_PRINT_STRING + 5 ; cdecl: push args R-to-L, push fmt, call
+        %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 5 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign MAX_INPUT 256
@@ -96,10 +96,17 @@
         %assign SYS_RTC_SLEEP 32h       ; CX=milliseconds: busy-wait via the PIT tick counter
         %assign SYS_RTC_UPTIME 33h      ; returns AX = seconds since boot
 
-        %assign SYS_EXEC 0F0h
-        %assign SYS_EXIT 0F1h
-        %assign SYS_REBOOT 0F2h
-        %assign SYS_SHUTDOWN 0F3h
+        %assign SYS_SYS_EXEC 0F0h
+        %assign SYS_SYS_EXIT 0F1h
+        %assign SYS_SYS_REBOOT 0F2h
+        %assign SYS_SYS_SHUTDOWN 0F3h
+
+        ;; VGA hardware register ports (used by both the real-mode boot
+        ;; path's vga_font_load and the post-flip vga driver).
+        %assign VGA_GC_DATA     03CFh
+        %assign VGA_GC_INDEX    03CEh
+        %assign VGA_SEQ_DATA    03C5h
+        %assign VGA_SEQ_INDEX   03C4h
 
         ;; VGA ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_VGA)
         %assign VGA_IOCTL_FILL_BLOCK    00h  ; CL=col, CH=row, DL=color (mode 13h 8x8 tile)

@@ -1,6 +1,6 @@
 # BBoeOS
 
-A minimal x86 operating system with a two-stage bootloader, shell, filesystem, networking stack, self-hosted assembler, and C compiler — all running in 16-bit real mode on a floppy disk.
+A minimal x86 operating system with a single-file bootloader-plus-kernel, shell, filesystem, networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit ring-0 protected mode, and runs the shell and user programs from there.
 
 ## Build and Run
 
@@ -17,16 +17,16 @@ Requires `nasm` (`brew install nasm`).
 
 ## Architecture
 
-Two-stage bootloader in flat binary format (`nasm -f bin`), loaded at `org 7C00h`.
+Single flat-binary kernel (`nasm -f bin`) loaded at `org 7C00h`.  The first 512 bytes are the MBR — DS/ES/SS:SP setup, disk reset, INT 13h read of the rest of the kernel into `0x7E00`, jump into the post-MBR path.  On disk error the MBR prints `!` via INT 10h AH=0Eh and halts.  After the read the post-MBR code remaps the PIC (master IRQs → 0x20-0x27), enables A20, loads the 32-bit GDT, and far-jumps through `enter_protected_mode` into `protected_mode_entry`.  All of this lives in `src/arch/x86/boot/bboeos.asm`; the previous `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split has been collapsed into the one file.
 
-- **Stage 1 (MBR, 512 bytes)**: Minimal boot loader — sets up DS/ES/SS:SP, resets disk, reads stage 2 via BIOS INT 13h, jumps to `boot_shell`.  On error, prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init.
-- **Stage 2**: `boot_shell` runs kernel init (`pic_remap`, `rtc_tick_init`, `install_syscalls`, `network_initialize`), prints the welcome banner via `drivers/ansi.asm`, initialises PS/2 / FDC / file descriptors / VFS, then loads and jumps to the shell.
-- **Shell** (`src/c/shell.c`): Loaded from filesystem at `program_base` (`0x0600`). Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
+- **Post-flip entry** (`protected_mode_entry` in `src/arch/x86/entry.asm`): segment reload (CS=0x08, DS/ES/SS=0x10, ESP=0x9FFF0), PIT @ 100 Hz, 32-bit IRQ 0 / IRQ 6 handlers via `idt_set_gate32`, driver inits (`ata_init`, `fd_init`, `fdc_init`, `ps2_init`, `vfs_init`, `network_initialize`), unmask IRQ 0/6, `sti`, welcome banner, then falls into `shell_reload`.  Any post-flip CPU exception lands in `idt.asm`'s `exc_common` and prints `EXCnn` on COM1.
+- **Shell respawn** (`shell_reload` → `program_enter`): `vfs_find` + `vfs_load` for `bin/shell`, then `program_enter` resets the fd table, zeroes the program's BSS region per the trailer-magic protocol (`dw bss_size; dw 0xB055`), snapshots ESP into `[shell_esp]`, and `jmp PROGRAM_BASE`.  `sys_exit` from any program restores `[shell_esp]` and re-enters `shell_reload`.
+- **Shell** (`src/c/shell.c`): Loaded from filesystem at `PROGRAM_BASE` (`0x0600`).  Provides CLI loop, command dispatch, and built-in commands using INT 30h syscalls.
 - **Input buffer** at linear address `0x500`, max 256 characters.
 - **Disk buffer** at `0xE000` for filesystem reads.
-- **Stack** in its own segment at `9000h:0FFF0h` (linear `0x9FFF0`, grows downward).
-- **Resident kernel** (stage 1 MBR + stage 2) lives in segment 0 from `0x7C00` up through (roughly) `0xE000`, where the disk and NIC buffers begin. Programs loaded at `PROGRAM_BASE` (`0x0600`) may allocate working buffers in segment 0, but everything between `0x7C00` and `0xEE00` is off-limits — overwriting it corrupts the live kernel and the next `int 30h` jumps into trashed code.
-- Stage 2 sector count is derived from `DIRECTORY_SECTOR` via `%assign stage2_sectors (DIRECTORY_SECTOR - 1)`.
+- **Stack** at linear `0x9FFF0`, grows downward.
+- **Resident kernel** (the `bboeos.asm` flat binary) lives at `0x7C00` up through (roughly) `0xE000`, where the disk and NIC buffers begin.  Programs loaded at `PROGRAM_BASE` (`0x0600`) may allocate working buffers in segment 0, but everything between `0x7C00` and `0xEE00` is off-limits — overwriting it corrupts the live kernel and the next `int 30h` jumps into trashed code.  Programs that need more than ~28 KB of RAM put their buffers in extended memory above the 1 MB mark (e.g. `edit`'s 1 MB gap buffer at `0x100000`); flat 32-bit segments make any address up to ESP usable.
+- Kernel sector count is derived from `DIRECTORY_SECTOR` via `%assign stage2_sectors (DIRECTORY_SECTOR - 1)` (the constant name carries over from the pre-merge stage1/stage2 split).
 
 ### Filesystem
 
@@ -49,7 +49,7 @@ NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -
 
 ### Serial Console
 
-All output is mirrored to COM1. `put_character` in `drivers/ansi.asm` includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`. Raw bytes always go to serial, while ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to INT 10h calls for the screen. `put_string` and `serial_character` live in the same file.  Stage 1 does no string output; on boot it's BIOS text mode until stage 2 initialises the driver.  `serial_character` writes to COM1 only (used internally by `put_character` and `video_mode`). Input is polled from both keyboard (INT 16h) and COM1 simultaneously. Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
+All output is mirrored to COM1.  `put_character` in `drivers/console.asm` includes an ANSI escape sequence parser and automatic `\n` to `\r\n` conversion — strings only need `\n`.  Raw bytes go to serial via `serial_character` (in `drivers/serial.asm`); ANSI sequences (e.g., `ESC[nA` cursor up, `ESC[nC` cursor forward, `ESC[nD` cursor back, `ESC[r;cH` cursor position, `ESC[0m` reset colors, `ESC[38;5;Nm` foreground, `ESC[48;5;Nm` background) are translated to native VGA driver calls (`vga_set_cursor`, `vga_teletype`, `vga_set_palette_color`, etc. in `drivers/vga.asm`) for the screen — no INT 10h post-protected-mode-flip.  `put_string` lives in `drivers/console.asm`.  The MBR does no string output; on boot it's BIOS text mode until the post-MBR path initialises the console driver.  Input from both PS/2 (`drivers/ps2.asm`, IRQ 1) and COM1 (`drivers/serial.asm`, polled in `fd_read_console`) feeds the same fd-0 console.  Serial terminals send `0x7F` (DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 
@@ -94,14 +94,9 @@ renumbering is source-compatible — just rebuild.
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via `cc.py`, creates floppy image)
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`, `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared DNS/IP helpers; see source headers for calling conventions.
-- `src/arch/x86/boot/bboeos.asm` — Top-level flat-binary entry; `%include`s `stage1.asm`, `stage2.asm`, then `arch/x86/kernel.asm` to aggregate every kernel subsystem after the boot handoff
-- `src/arch/x86/boot/stage1.asm` — MBR (512 bytes): set DS/ES/SS:SP, reset disk, load stage 2 via BIOS INT 13h, jump to `boot_shell`.  On error prints `!` via INT 10h AH=0Eh and halts.  No string output, no kernel init
-- `src/arch/x86/boot/stage2.asm` — Post-MBR boot handoff: jump table, `boot_shell` (kernel init → welcome banner → driver inits → VFS load of the shell), `bss_setup`.  Does NOT `%include` kernel subsystems — that's `kernel.asm`'s job
-- `src/arch/x86/kernel.asm` — Kernel subsystem aggregator: `%include`s every `drivers/`, `fs/`, `lib/`, `net/` file plus the arch-specific `pic.asm`, `syscall.asm`, `system.asm`, `init.asm`.  Pulled in once by `bboeos.asm`, immediately after `stage2.asm`, so kernel code sits contiguously after the boot handoff
-- `src/arch/x86/init.asm` — `kernel_init`: PIC remap, PIT + IRQ 0 init, INT 30h gate install, NIC probe.  Called once from `boot_shell` before the shell is loaded; the pmode port will refactor this (some steps move to post-flip once the 32-bit IDT is live)
-- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate (not yet wired in; pmode infrastructure)
-- `src/arch/x86/pic.asm` — `pic_remap`: ICW1-ICW4 sequence that moves master IRQs to 0x20-0x27 and slave IRQs to 0x28-0x2F (prerequisite for the pmode flip)
-- `src/arch/x86/boot/stage1_5.asm` — 16→32-bit protected-mode entry, GDT (the "stage 1.5" of the boot flow; not yet wired in)
+- `src/arch/x86/boot/bboeos.asm` — Single flat-binary entry: 16-bit MBR setup, stage-2 disk read, PIC remap, A20, GDT load, far-jmp into protected mode, then `%include`s every kernel subsystem (drivers, fs, lib helpers, net stack, syscall dispatcher, system reboot/shutdown, IDT, post-flip entry).  No more `stage1.asm` / `stage2.asm` / `stage1_5.asm` / `kernel.asm` split — they were collapsed into this file
+- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and INT 30h gate; `idt_install` runs in the bootstrap right before the protected mode flip so any post-flip exception lands in `exc_common` and prints `EXCnn` on COM1
+- `src/arch/x86/entry.asm` — `protected_mode_entry` (segment reload, PIT + IRQ handler install, driver / VFS / NIC inits, banner) flowing into `shell_reload` (loads `bin/shell` and jumps), `program_enter` (fd reset, BSS zero, ESP snapshot, jump to `PROGRAM_BASE`), and the IRQ 0 / IRQ 6 handlers
 - `src/arch/x86/syscall.asm` — INT 30h dispatch table and helpers; includes `syscall/fs.asm`, `syscall/io.asm`, `syscall/net.asm`, `syscall/rtc.asm`, `syscall/sys.asm`, `syscall/video.asm`
 - `src/arch/x86/system.asm` — `reboot`, `shutdown` (PC-specific: 8042 reset, QEMU/Bochs shutdown ports)
 - `src/drivers/ansi.asm` — ANSI escape sequence parser (`put_character`, `put_string`), `serial_character`; delegates to `drivers/vga.asm` for screen writes
@@ -115,13 +110,12 @@ renumbering is source-compatible — just rebuild.
 - `src/fs/bbfs.asm` — BBoeOS filesystem implementation (VFS backend): `bbfs_chmod`, `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`, `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`, `scan_directory_entries`, etc.)
 - `src/fs/ext2.asm` — ext2 filesystem implementation (second VFS backend, auto-detected by `vfs_init`)
 - `src/fs/vfs.asm` — VFS layer: runtime function-pointer table (`vfs_find_fn`, etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`, `vfs_create`, `vfs_rmdir`, …); `%include`s `fs/bbfs.asm` and `fs/ext2.asm`
-- `src/lib/lib.asm` — 2-line orchestrator; includes `lib/print.asm` and `lib/proc.asm`
 - `src/lib/print.asm` — output utilities: `shared_print_*`, `shared_printf`, `shared_write_stdout`
 - `src/lib/proc.asm` — program utilities: `shared_die`, `shared_exit`, `shared_get_character`, `shared_parse_argv`
 - `src/net/net.asm` — 4-line orchestrator; includes `net/arp.asm`, `net/icmp.asm`, `net/ip.asm`, `net/udp.asm`.  The NE2000 hardware driver itself lives in `drivers/ne2k.asm`
 - `src/syscall/` — syscall handler implementations: `fs.asm`, `io.asm`, `net.asm`, `rtc.asm`, `sys.asm`.  Dispatched from `arch/x86/syscall.asm` (the INT 30h entry)
 - `src/c/` programs written in the C subset: `arp`, `asm`, `asmesc`, `bits`, `booltest`, `cat`, `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `edit`, `gdemo`, `gtable`, `hello`, `inctest`, `loop`, `loop_array`, `ls`, `mkdir`, `mv`, `netinit`, `netrecv`, `netsend`, `ping`, `rm`, `rmdir`, `shell`, `uptime`. `asmesc` smoke-tests the `asm(...)` inline-asm escape (both file-scope and statement forms); `bits` is a smoke test for cc.py's bitwise operators (`|`, `^`, `~`, `<<`, `>>`, `&`) and their compound-assignment forms; `booltest` is a smoke test for cc.py's booleanized comparison BinOps used as expression values (`int x = (a == b);` etc.); `gdemo` and `gtable` are smoke tests for cc.py's file-scope globals; `inctest` is a smoke test for cc.py's `#include` directive (pairs with `src/c/inctest.h`).
-- `src/c/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. Gap buffer at `EDIT_BUFFER_BASE` (`0x2000`) up to the 2.5 KB kill buffer at `EDIT_KILL_BUFFER` (`0x7200`); sizes are defined in `constants.asm`. Still cannot open `asm.asm` (118 KB) — lifting that requires moving the gap buffer out of segment 0; see "Known limitations" in README.md.
+- `src/c/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q quit. The 1 MB gap buffer (`EDIT_BUFFER_SIZE`) and 2.5 KB kill buffer (`EDIT_KILL_BUFFER_SIZE`) sit in extended memory (`EDIT_BUFFER_BASE` = 0x100000, `EDIT_KILL_BUFFER` = 0x200000) — above the 1 MB mark to clear the VGA/BIOS regions at 0xA0000-0xFFFFF, so the gap buffer can hold any source file in the tree.  Cursor / view / dirty / kill / status state is BSS (file-scope globals) so cc.py won't pin to registers that `buffer_character_at` clobbers.  Disk reads chunk at 32767 bytes per `read()` because `SYS_IO_READ` returns `AX` (sign-extended), so a single read returning ≥ 32768 looks like a negative error.
 - `src/c/asm.c` — Self-hosted x86 assembler (two-pass; byte-identical to NASM for everything in `static/`). Phase 1 port: the driver and handlers still live inside a single file-scope `asm("...")` block that wraps `archive/asm.asm`'s original NASM source; follow-up PRs extract pieces into pure C one family at a time. Supported directives and mnemonics are documented in the inline-asm body.
 
 ## Key Conventions
@@ -129,23 +123,23 @@ renumbering is source-compatible — just rebuild.
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
 - Shell command dispatch is a chain of `else if (streq(buf, "name"))` checks in `src/c/shell.c`. Adding a built-in requires a new branch (and a matching entry in the `help` string).
-- The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none; use `set_exec_arg()`). Unknown commands are tried as external programs via `SYS_EXEC`; `SYS_EXIT` reloads the shell.
+- The shell splits input at the first space: the command name is null-terminated in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none; use `set_exec_arg()`). Unknown commands are tried as external programs via `SYS_SYS_EXEC`; `SYS_SYS_EXIT` reloads the shell.
 - Programs are loaded at `PROGRAM_BASE` (`0x0600`). The shell is the first program loaded at boot. Programs call kernel-provided functions at fixed addresses (e.g., `FUNCTION_PRINT_BCD`, `FUNCTION_WRITE_STDOUT`) instead of `%include`ing shared helpers. Only program-specific logic files (e.g., `dns_query.asm`, `parse_ip.asm`) are still `%include`d.
 - Stage 1 functions must fit within the 512-byte MBR.
 - When adding the `DIRECTORY_SECTOR` constant, stage 2 sector count adjusts automatically.
 - **Naming conventions**: Constants and string labels use `UPPER_CASE`. Functions and variables use `lower_case`. Local labels use `.dot_prefix`.
 - All output goes through `put_character` (in MBR) which handles ANSI escape sequences for both screen and serial. The shell's line editor uses ANSI sequences (e.g., `ESC[nD` for cursor back, `ESC[nA` for cursor up) via `FUNCTION_PRINT_CHARACTER` for all output.
 
-## 16-bit Real Mode Constraints
+## Bootloader (real mode) constraints
+
+The MBR + `boot/vga_font.asm` (~700 bytes total) are the only real-mode
+code in the tree.  Everything past the `jmp dword 0x08:protected_mode_entry`
+is flat 32-bit protected mode.  Real-mode constraints that still apply
+inside the bootloader:
 
 - Only BX, BP, SI, DI are valid base/index registers in memory operands (not AX, CX, DX, SP).
-- BIOS interrupts: INT 10h (video), INT 13h (disk), INT 16h (keyboard), INT 1Ah (RTC/timer).
-- INT 10h AH=03h clobbers CX (returns cursor scanline shape) — save any value in CX before calling.
-- `mul` clobbers DX (result in DX:AX) — save DX if needed.
-- 32-bit registers (EAX, ECX, EDX) are usable with operand-size prefix (386+).
-- Use unsigned conditional jumps (`jb`/`jbe`/`ja`/`jae`) for byte counts, file sizes, and buffer lengths — not signed (`jl`/`jle`/`jg`/`jge`). Signed jumps misinterpret values > 32767.
-- Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.) — the direction flag may be in an unknown state at program entry.
-- Teletype backspace (`\b` via INT 10h AH=0Eh) does not wrap across screen lines. The ANSI parser's `ESC[nD` handler uses INT 10h AH=02h/03h with linear position math for proper wrapping.
+- BIOS interrupts: INT 10h (video), INT 13h (disk).  Available only before the CR0.PE flip.
+- Programs must `cld` before using string instructions (`lodsb`, `rep movsw`, etc.).
 
 ## Python conventions
 
@@ -155,7 +149,7 @@ renumbering is source-compatible — just rebuild.
 
 ## Releases
 
-Update `CHANGELOG.md` with new entries as features land. Group entries by date under the Unreleased section. After a batch of significant improvements, bump the version in `src/arch/x86/boot/stage1.asm` (the `WELCOME` string) and move the Unreleased entries under a new version header with updated comparison links.
+Update `CHANGELOG.md` with new entries as features land.  Group entries by date under the Unreleased section.  After a batch of significant improvements, bump the version in `src/arch/x86/entry.asm` (the `welcome_msg` string emitted by `protected_mode_entry`) and move the Unreleased entries under a new version header with updated comparison links.
 
 ## Testing
 

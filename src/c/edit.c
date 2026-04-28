@@ -1,27 +1,46 @@
-/* gap_start / gap_end are file-scope so the cursor-move helpers can
-   mutate them directly.  Text logically occupies [0, gap_start) and
-   [gap_end, EDIT_BUFFER_SIZE); the gap sits between. */
-int gap_start;
+/* All editor state is file-scope so helpers can read/mutate it
+   directly and so cc.py keeps it in BSS rather than auto-pinning to
+   registers — buffer_character_at uses EDX/ECX as scratch, which
+   would otherwise clobber any caller pin landing on those.  Text
+   logically occupies [0, gap_start) and [gap_end, EDIT_BUFFER_SIZE);
+   the gap sits between.  The buffer itself lives in extended memory
+   above the 1 MB mark (`EDIT_BUFFER_BASE` = 0x100000) so it can be
+   1 MB without colliding with the resident kernel at 0x7C00..0xE000
+   or the VGA/BIOS regions at 0xA0000-0xFFFFF; BSS would also
+   collide, since it grows up from PROGRAM_BASE = 0x600. */
+int confirm_quit;
+int cursor_column;
+int cursor_line;
+int dirty;
 int gap_end;
+int gap_start;
+int kill_length;
+char *status_message;
+int view_column;
+int view_line;
 
-int buffer_character_at(char *buffer, int offset) {
-    /* Gap-buffer lookup: map a logical offset to the raw byte.  Returns
-       -1 when the offset is past the end of the text. */
-    int gap_size = gap_end - gap_start;
-    int length = EDIT_BUFFER_SIZE - gap_size;
-    if (offset >= length) {
-        return -1;
-    }
+int buffer_character_at(int offset) {
+    /* Gap-buffer lookup: map a logical offset to the raw byte.  Caller
+       must check ``offset < buffer_length()`` first — the helper has no
+       EOF sentinel because cc.py types the call result as a byte (the
+       only return path is ``buffer[offset]``), and a negative or >255
+       sentinel would not survive the AL-only store the caller emits. */
+    char *buffer = EDIT_BUFFER_BASE;
     if (offset >= gap_start) {
-        offset += gap_size;
+        offset += gap_end - gap_start;
     }
     return buffer[offset];
 }
 
-int column_before(char *buffer) {
+int buffer_length() {
+    return EDIT_BUFFER_SIZE - (gap_end - gap_start);
+}
+
+int column_before() {
     /* Count characters between gap_start and the previous newline (or
        start of buffer).  Used to recompute cursor_column after the
        cursor crosses a newline. */
+    char *buffer = EDIT_BUFFER_BASE;
     int column = 0;
     int i = gap_start;
     while (i > 0) {
@@ -62,16 +81,7 @@ int main(int argc, char *argv[]) {
     char *buffer = EDIT_BUFFER_BASE;
     char *kill_buf = EDIT_KILL_BUFFER;
     char *filename = argv[0];
-    gap_start = 0;
     gap_end = EDIT_BUFFER_SIZE;
-    int cursor_line = 0;
-    int cursor_column = 0;
-    int view_line = 0;
-    int view_column = 0;
-    int kill_length = 0;
-    int dirty = 0;
-    int confirm_quit = 0;
-    char *status_message = NULL;
     char sector[512];
 
     int vga_fd = open("/dev/vga", O_WRONLY);
@@ -107,16 +117,18 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         /* ---- Render ---- */
+        /* Reset to text mode and clear the framebuffer each iteration so
+           the next render redraws over a blank screen — without this,
+           every previously-printed cell stays put and successive renders
+           layer text over the old contents (e.g. typing "hello" displays
+           as "hhhhhello"). */
         video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
-
+        int length = buffer_length();
         /* Walk to the start of view_line by counting newlines. */
         int offset = 0;
         int lines_to_skip = view_line;
-        while (lines_to_skip > 0) {
-            int character = buffer_character_at(buffer, offset);
-            if (character < 0) {
-                break;
-            }
+        while (lines_to_skip > 0 && offset < length) {
+            int character = buffer_character_at(offset);
             offset += 1;
             if (character == 10) {
                 lines_to_skip -= 1;
@@ -137,11 +149,11 @@ int main(int argc, char *argv[]) {
             int skip = view_column;
             int visible = 80;
             while (1) {
-                int character = buffer_character_at(buffer, offset);
-                if (character < 0) {
+                if (offset >= length) {
                     at_eof = 1;
                     break;
                 }
+                int character = buffer_character_at(offset);
                 offset += 1;
                 if (character == 10) {
                     if (visible != 0) {
@@ -237,7 +249,7 @@ int main(int argc, char *argv[]) {
                 if (c == '\n') {
                     if (cursor_line > 0) {
                         cursor_line -= 1;
-                        cursor_column = column_before(buffer);
+                        cursor_column = column_before();
                         if (cursor_line < view_line) {
                             view_line = cursor_line;
                         }
@@ -275,7 +287,7 @@ int main(int argc, char *argv[]) {
                 if (c == '\n') {
                     if (cursor_line > 0) {
                         cursor_line -= 1;
-                        cursor_column = column_before(buffer);
+                        cursor_column = column_before();
                         if (cursor_line < view_line) {
                             view_line = cursor_line;
                         }
@@ -389,7 +401,7 @@ int main(int argc, char *argv[]) {
                     }
                     int i = 0;
                     while (i < chunk_size) {
-                        sector[i] = buffer_character_at(buffer, logical_offset + i);
+                        sector[i] = buffer_character_at(logical_offset + i);
                         i += 1;
                     }
                     if (write(save_fd, sector, chunk_size) < 0) {
