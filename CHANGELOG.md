@@ -19,8 +19,11 @@ at the time.
   Privileged instructions (`cli`/`sti`/`in`/`out`/CR writes) now #GP
   from user code.
 
+### Programs
+- Close the self-hosted `asm` assembler's 32-bit codegen gaps so its output is byte-identical to NASM under `[bits 32]`, and move `tests/test_asm.py` from its `--bits 16` pin to `--bits 32` (matching `make_os.sh`'s production path).  Six fixes in `src/c/asm.c`: 32-bit displacement (rel32) for `call`, `jmp`, and conditional-jump near forms (plus the convergence loop's short-vs-long sizing math); 3-character e-prefixed register names like `esi`/`edi` parse at the trailing `[disp+reg]` position; `handle_movzx` handles the direct-memory operand (`type2 == 2`); operand-size-prefix emission for `unary_f6f7` (mul/div/neg/not), `adc_sbb_handler`, and the 16-bit string ops (`lodsw`/`movsw`/`stosw`); and `emit_alu_mem_imm` (`add/and/or/sub/xor [mem], imm`) gains `dword` support and bits-aware encoding via `emit_modrm_direct`.  All 35 self-host programs assemble byte-identical to NASM at `--bits 32`.
+
 ### Toolchain
-- `cc.py` now defaults to `--bits 32`.  The protected-mode merge made 32-bit the only production target (kernel + user programs both pass `--bits 32` explicitly in `make_os.sh`); the 16-bit default was a holdover.  `--bits 16` is still a working option for back-compat — `tests/test_archive.py` (user-program archive baseline) and `tests/test_asm.py` (self-hosted assembler regression — its 32-bit codegen has gaps not yet covered) explicitly pin to 16-bit.  16-bit support stays on the table for now; revisit dropping it after the user-program archive moves to 32-bit (or retires).
+- `cc.py` now defaults to `--bits 32`.  The protected-mode merge made 32-bit the only production target (kernel + user programs both pass `--bits 32` explicitly in `make_os.sh`); the 16-bit default was a holdover.  `--bits 16` stays a working option (`tests/test_cc_bits.py` exercises both modes for cc.py front-end coverage), but production user programs and the self-host assembler regression both run at `--bits 32`.
 
 
 ## [0.8.0](https://github.com/bboe/BBoeOS/compare/0.7.0...0.8.0) (2026-04-27)

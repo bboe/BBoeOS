@@ -184,14 +184,12 @@ def compile_c_sources(*, temporary_directory: Path) -> list[Path]:
     (i.e. a hand-written version is the source of truth).  Returns the
     list of generated paths so they can be included in the test run.
 
-    Pinned to ``--bits 16``: this test boots the self-hosted assembler
-    inside the OS and has it reassemble each input, comparing the
-    output byte-for-byte against NASM.  The self-hosted assembler's
-    32-bit codegen has gaps (e.g. operand-size prefix sequences for
-    some forms) that don't match NASM's output, so the test stays on
-    16-bit input until those gaps are closed.  Production user
-    programs are built with ``--bits 32`` (see make_os.sh) — that's a
-    separate code path this test doesn't currently cover.
+    Compiled at ``--bits 32`` to match production (see make_os.sh):
+    every emitted .asm file then runs through both NASM and the
+    self-hosted assembler in QEMU, and the byte streams must match.
+    The 32-bit self-host path used to drift from NASM (operand-size
+    prefix omissions and a 16-bit-only ``[mem], imm`` encoder); those
+    gaps are closed.
     """
     if not C_DIR.is_dir():
         return []
@@ -202,7 +200,7 @@ def compile_c_sources(*, temporary_directory: Path) -> list[Path]:
             continue
         target = temporary_directory / f"{name}.asm"
         subprocess.run(
-            ["./cc.py", "--bits", "16", str(c_source), str(target)],
+            ["./cc.py", "--bits", "32", str(c_source), str(target)],
             check=True,
         )
         generated.append(target)
