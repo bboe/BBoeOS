@@ -16,6 +16,10 @@
 ;;;   0x00 null
 ;;;   0x08 code: base=0, limit=4GB, 32-bit, DPL=0, exec/read
 ;;;   0x10 data: base=0, limit=4GB, 32-bit, DPL=0, read/write
+;;;   0x18 code: base=0, limit=4GB, 32-bit, DPL=3, exec/read     (ring-3 code)
+;;;   0x20 data: base=0, limit=4GB, 32-bit, DPL=3, read/write    (ring-3 data)
+;;;   0x28 TSS:  base=&tss_data, limit=103, 32-bit available TSS (DPL=0).
+;;;        Base patched at runtime in protected_mode_entry before `ltr`.
 ;;; ------------------------------------------------------------------------
 
         org 7C00h               ; offset where bios loads our first stage
@@ -212,6 +216,40 @@ pmode_gdt_start:
         db 10010010b
         db 11001111b
         db 0x00
+
+        ;; 0x18 user code segment: same geometry as kernel code, DPL=3.
+        ;; Access byte 11111010b  = P=1 DPL=11 S=1 type=1010 (exec/read non-conforming)
+        dw 0xFFFF
+        dw 0x0000
+        db 0x00
+        db 11111010b
+        db 11001111b
+        db 0x00
+
+        ;; 0x20 user data segment: same geometry as kernel data, DPL=3.
+        ;; Access byte 11110010b  = P=1 DPL=11 S=1 type=0010 (R/W)
+        dw 0xFFFF
+        dw 0x0000
+        db 0x00
+        db 11110010b
+        db 11001111b
+        db 0x00
+
+        ;; 0x28 TSS descriptor.  Limit = sizeof(tss32) - 1 = 103.  Base
+        ;; bytes are patched at runtime by protected_mode_entry before
+        ;; `ltr` — `tss_data` is a forward label inside entry.asm and the
+        ;; descriptor encoding scatters base across non-contiguous bytes,
+        ;; so a static encoding here would force NASM to fold a forward
+        ;; reference through `& 0xFFFF` / `>> 16` arithmetic.  Runtime
+        ;; patch keeps the descriptor readable.
+        ;; Access byte 10001001b  = P=1 DPL=00 S=0 type=1001 (32-bit available TSS)
+gdt_tss:
+        dw 103
+        dw 0x0000               ; base[15:0]  — patched at runtime
+        db 0x00                 ; base[23:16] — patched at runtime
+        db 10001001b
+        db 00000000b            ; G=0, limit[19:16]=0
+        db 0x00                 ; base[31:24] — patched at runtime
 pmode_gdt_end:
 
 pmode_gdtr:

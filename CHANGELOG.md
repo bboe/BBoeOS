@@ -6,6 +6,19 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.0...main)
 
+### Kernel
+- Move userland programs to ring 3.  Add user code (0x18) and user data
+  (0x20) GDT descriptors, a 32-bit TSS at selector 0x28 with SS0/ESP0
+  pointing at the kernel stack, and raise the INT 30h gate to DPL=3.
+  `program_enter` now reloads DS/ES/FS/GS to the user data selector and
+  `iretd`s into a fresh ring-3 stack at `USER_STACK_TOP` (0x8FFF0)
+  instead of `jmp PROGRAM_BASE`.  IRQ handlers, exception stubs, the
+  syscall dispatcher, `sys_exit`, and `sys_exec` are all already
+  cross-priv correct (the CPU auto-switches to TSS.ESP0 on ring-3 → 0
+  and `iretd` pops the right number of dwords on the way back).
+  Privileged instructions (`cli`/`sti`/`in`/`out`/CR writes) now #GP
+  from user code.
+
 ## [0.8.0](https://github.com/bboe/BBoeOS/compare/0.7.0...0.8.0) (2026-04-27)
 
 ### Boot

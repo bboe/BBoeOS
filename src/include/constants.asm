@@ -56,6 +56,7 @@
         %assign FUNCTION_WRITE_STDOUT  FUNCTION_PRINTF + 5 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
+        %assign KERNEL_STACK_TOP 9FFF0h ; Ring-0 stack top; loaded by protected_mode_entry and stored as TSS.ESP0
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
         %assign NET_RECEIVE_BUFFER 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
@@ -100,6 +101,11 @@
         %assign SYS_SYS_EXIT 0F1h
         %assign SYS_SYS_REBOOT 0F2h
         %assign SYS_SYS_SHUTDOWN 0F3h
+
+        %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
+        %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
+        %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
+        %assign USER_STACK_TOP 8FFF0h   ; Ring-3 stack top; 64 KB region 0x80000-0x8FFF0
 
         ;; VGA hardware register ports (used by both the real-mode boot
         ;; path's vga_font_load and the post-flip vga driver).
