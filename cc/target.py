@@ -15,13 +15,38 @@ from typing import ClassVar
 
 EREG_LOW_WORD: dict[str, str] = {
     "eax": "ax",
-    "ecx": "cx",
-    "edx": "dx",
-    "ebx": "bx",
-    "esi": "si",
-    "edi": "di",
     "ebp": "bp",
+    "ebx": "bx",
+    "ecx": "cx",
+    "edi": "di",
+    "edx": "dx",
+    "esi": "si",
     "esp": "sp",
+}
+
+#: Low-byte alias of every E-register / 16-bit / byte-alias name that
+#: has one in 32-bit-without-REX encoding.  ``si`` / ``di`` /
+#: ``bp`` / ``sp`` (and their E-prefixed forms) deliberately omitted
+#: — they have no byte alias accessible from cc.py's emission, and
+#: byte-typed ``in_register`` parameters pinned to those registers
+#: are an error (see :meth:`X86CodegenTarget.low_byte`).
+LOW_BYTE: dict[str, str] = {
+    "ah": "al",
+    "al": "al",
+    "ax": "al",
+    "bh": "bl",
+    "bl": "bl",
+    "bx": "bl",
+    "ch": "cl",
+    "cl": "cl",
+    "cx": "cl",
+    "dh": "dl",
+    "dl": "dl",
+    "dx": "dl",
+    "eax": "al",
+    "ebx": "bl",
+    "ecx": "cl",
+    "edx": "dl",
 }
 
 #: Inverse of :data:`EREG_LOW_WORD`: widen a 16-bit GP name to its
@@ -72,6 +97,22 @@ class CodegenTarget(ABC):
     @abstractmethod
     def far_ref(base_reg: str) -> str:
         """Memory-operand string for ``far_read*/far_write*`` builtins."""
+
+    @staticmethod
+    def low_byte(reg: str) -> str | None:
+        """Return the low-byte alias of *reg*, or ``None`` if it has none.
+
+        Default is identity — correct for ISAs without partitioned
+        byte sub-registers.  x86 overrides this to map
+        ``eax``/``ax`` → ``al``, etc., and to return ``None`` for
+        registers (``si``, ``di``, ``bp``, ``sp`` and their E-prefixed
+        forms) that have no byte alias accessible without REX prefixes.
+        Used by the prologue spill of byte-typed ``in_register``
+        parameters so the named register's *low byte* is widened to
+        the int-width slot — preventing AH-garbage from asm callers
+        (e.g. ``lodsb; call f``) leaking into the spilled value.
+        """
+        return reg
 
     @staticmethod
     def low_word(reg: str) -> str:
@@ -164,6 +205,17 @@ class X86CodegenTarget(CodegenTarget):
         "SHUTDOWN": ("mov ah, SYS_SYS_SHUTDOWN", "int 30h"),
     }
     syscall_sequences = SYSCALL_SEQUENCES
+
+    @staticmethod
+    def low_byte(reg: str) -> str | None:
+        """Return the 8-bit low-byte alias of *reg*, or ``None`` if it has none.
+
+        ``si`` / ``di`` / ``bp`` / ``sp`` (and their E-prefixed forms)
+        return ``None`` — they have no byte alias accessible from
+        cc.py's emission (the SIL/DIL/BPL/SPL bytes need a REX prefix
+        in 64-bit mode and aren't reachable in 16/32-bit encoding).
+        """
+        return LOW_BYTE.get(reg)
 
     @staticmethod
     def low_word(reg: str) -> str:

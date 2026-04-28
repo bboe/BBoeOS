@@ -1338,6 +1338,26 @@ class EmissionMixin:
                     # the whole slot via the accumulator) don't pick up
                     # uninitialised stack bytes.  For full-width E-register
                     # pins the named register already covers the slot.
+                    #
+                    # Byte-typed parameters (``char`` / ``uint8_t``) treat
+                    # the named register as the *byte* alias — only AL is
+                    # the value, AH is undefined per the asm-side calling
+                    # convention (e.g. ``lodsb; call f``).  Widening from
+                    # the byte alias scrubs AH-garbage out of the spilled
+                    # slot.  Pinning a byte-typed parameter to a register
+                    # without a byte alias (esi / edi / ebp / esp) is
+                    # rejected at codegen time.
+                    if param.type in self.BYTE_TYPES:
+                        source = self.target.low_byte(param.in_register)
+                        if source is None:
+                            message = (
+                                f"byte-typed parameter '{param.name}' cannot be pinned to register "
+                                f"'{param.in_register}' — no low-byte alias in the target encoding"
+                            )
+                            raise CompileError(message, line=function.line)
+                        self.emit(f"        movzx {self.target.acc}, {source}")
+                        self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
+                        continue
                     widened = self.target.widen_gp(param.in_register)
                     if widened != param.in_register:
                         self.emit(f"        movzx {widened}, {param.in_register}")

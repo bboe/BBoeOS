@@ -839,12 +839,15 @@ def test_in_register_32bit_full_width_skips_widen() -> None:
     assert "mov [ebp-4], ecx" in asm, f"expected direct spill of ecx\n{asm}"
 
 
-def test_in_register_32bit_char_param() -> None:
-    """32-bit target: ``char`` parameter pinned to ``ax`` widens via ``movzx``.
+def test_in_register_32bit_char_param_widens_from_low_byte() -> None:
+    """32-bit target: ``char`` pin uses the *byte* alias (AL) for widening.
 
-    The 8-bit byte arrives in AL but the AX pin is 16 bits — the
-    fix widens AX into EAX so the slot reload reads a clean
-    zero-extended value.
+    The asm-side calling convention sets only AL — AH is whatever the
+    caller had in there from earlier code (e.g. ``lodsb; call f``).
+    Widening from AX would preserve AH-garbage in bits 8..15 of the
+    spilled slot, so subsequent ``cmp dword [ebp-N], <const>`` reads
+    fail even when AL holds the expected byte.  Widening from AL
+    scrubs AH out of the picture.
     """
     asm = _kernel(
         """
@@ -856,7 +859,58 @@ def test_in_register_32bit_char_param() -> None:
         """,
         bits=32,
     )
-    assert "movzx eax, ax" in asm, f"expected widening of char-pinned ax\n{asm}"
+    assert "movzx eax, al" in asm, f"expected widening from low byte\n{asm}"
+    assert "movzx eax, ax" not in asm, f"unexpected widening from full ax\n{asm}"
+
+
+def test_in_register_32bit_char_param_other_registers() -> None:
+    """32-bit target: byte-typed pin to bx / cx / dx widens from bl / cl / dl."""
+    for reg, low in (("bx", "bl"), ("cx", "cl"), ("dx", "dl")):
+        asm = _kernel(
+            f"""
+            void putc(char byte __attribute__((in_register("{reg}")))) {{
+                int copy;
+                copy = byte;
+                kernel_outb(0x3F8, copy);
+            }}
+            """,
+            bits=32,
+        )
+        assert f"movzx eax, {low}" in asm, f"expected widening from {low}\n{asm}"
+
+
+def test_in_register_byte_typed_pin_to_si_rejected() -> None:
+    """Byte-typed parameter pinned to a register without a byte alias errors out."""
+    error = _kernel_error(
+        """
+        void f(char byte __attribute__((in_register("esi")))) {
+            kernel_outb(0x3F8, byte);
+        }
+        """,
+        bits=32,
+    )
+    assert "byte" in error.lower() and "esi" in error, f"expected error mentioning byte+esi\n{error}"
+
+
+def test_in_register_int_param_keeps_full_word_widen() -> None:
+    """Non-byte typed pins still widen from the full 16-bit alias.
+
+    ``int`` parameters carry the full 16 bits of AX as the value; the
+    caller-side ABI sets AX (not just AL) for them.  Widening must
+    use ``movzx eax, ax`` to keep the upper 8 bits of AX intact.
+    """
+    asm = _kernel(
+        """
+        void f(int x __attribute__((in_register("ax")))) {
+            int y;
+            y = x;
+            kernel_outb(0x60, y);
+        }
+        """,
+        bits=32,
+    )
+    assert "movzx eax, ax" in asm, f"expected full word widening for int param\n{asm}"
+    assert "movzx eax, al" not in asm, f"int param should not narrow to al\n{asm}"
 
 
 def test_out_register_32bit_narrow_target_uses_low_word() -> None:
