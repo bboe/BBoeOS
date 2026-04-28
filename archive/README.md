@@ -26,7 +26,7 @@ so the comparison stays apples-to-apples.
 
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
 |---------|----------------|-------------|-----------|-------|
-| arp     | 466            | 466         | 469       | +3    |
+| arp     | 466            | 567         | 611       | +44   |
 | cat     | 145            | 175         | 181       | +6    |
 | chmod   | 149            | 175         | 228       | +53   |
 | cp      | 268            | 338         | 300       | -38   |
@@ -43,10 +43,16 @@ so the comparison stays apples-to-apples.
 | shell   | 950            | 950         | 1337      | +387  |
 | uptime  | 50             | 67          | 100       | +33   |
 
-**arp (+3):** The three scratch arrays (`mac_buffer[6]`,
+**arp (+44):** The three scratch arrays (`mac_buffer[6]`,
 `receive_buffer[128]`, `target_ip[4]`) are file-scope BSS globals;
-the assembly version uses inline `BUFFER`/`BUFFER+N` offsets.  The
-remaining +3 is null terminators on the two `die()` strings.
+the assembly version uses inline `BUFFER`/`BUFFER+N` offsets.  Two
+structural wins from 32-bit: the 6-byte MAC copy (was 3× ``movsw``)
+collapses to ``movsd + movsw``, and the sender-IP match (was two
+2-byte ``mov ax, [..]; cmp ax, [..]``) collapses to a single 4-byte
+compare.  Most of the +41 jump from the 16-bit +3 baseline is cc.py
+gaining BP-frame setup overhead and ``movzx`` zero-extends on the
+per-byte EtherType / opcode checks (each grows from a 5-byte
+``cmp byte [],imm8`` to a wider zero-extend-then-compare pair).
 
 **chmod (+53):** The assembly version walks the mode argument with
 `lodsb` (1 byte per character read); the C version reloads the base
