@@ -65,11 +65,195 @@ syscall_handler:
         je .sys_shutdown
         jmp .iret_done
 
-%include "syscall/fs.asm"
-%include "syscall/io.asm"
-%include "syscall/net.asm"
-%include "syscall/rtc.asm"
-%include "syscall/sys.asm"
+        ;; --- Filesystem syscalls ---
+        ;; The chmod / rename / unlink branches refuse to touch the shell
+        ;; binary (the live ``bin/shell`` we'll re-exec on every program
+        ;; exit) — .check_shell flips ZF if SI matches.
+
+        .fs_chmod:
+        ;; Change a file's flags: SI = filename, AL = new flags value
+        call .check_shell
+        jne .fs_chmod_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_chmod_do:
+        call vfs_chmod          ; SI=path, AL=mode → CF, AL=error code
+        jmp .iret_cf
+
+        .fs_mkdir:
+        ;; Create subdirectory: SI = name; AX = allocated sector, CF on error
+        call vfs_mkdir
+        jmp .iret_cf
+
+        .fs_rename:
+        ;; Rename / move file: SI = old name, DI = new name
+        call .check_shell
+        jne .fs_rename_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_rename_do:
+        call vfs_rename         ; SI=old, DI=new → CF, AL=error code
+        jmp .iret_cf
+
+        .fs_rmdir:
+        ;; Remove an empty directory: SI = name
+        call vfs_rmdir
+        jmp .iret_cf
+
+        .fs_unlink:
+        ;; Delete a file: SI = filename
+        call .check_shell
+        jne .fs_unlink_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_unlink_do:
+        call vfs_delete         ; SI=path → CF, AL=error code
+        jmp .iret_cf
+
+        ;; --- File-descriptor syscalls ---
+        ;; All trivial pass-throughs to the existing fd_* C functions.
+        ;; fstat additionally splats CX:DX into the saved CX/DX slots
+        ;; so the user gets the 32-bit size back as a register pair.
+
+        .io_close:
+        call fd_close
+        jmp .iret_cf
+
+        .io_fstat:
+        call fd_fstat
+        mov [bp+12], cx         ; high 16 of size → saved CX
+        mov [bp+10], dx         ; low 16 of size → saved DX
+        jmp .iret_cf
+
+        .io_ioctl:
+        call fd_ioctl
+        jmp .iret_cf
+
+        .io_open:
+        call fd_open
+        jmp .iret_cf
+
+        .io_read:
+        call fd_read
+        jmp .iret_cf
+
+        .io_write:
+        call fd_write
+        jmp .iret_cf
+
+        ;; --- Network syscalls ---
+        ;; The four handlers (mac / open / recvfrom / sendto) live in
+        ;; src/syscall/syscalls.c — they need fd-table walking, branching
+        ;; on FD_TYPE_*, and payload memcpy that's clearer in C than asm.
+        ;; sendto pre-loads AX with the user's BP slot ([bp+4]) because
+        ;; the C function takes dst_port as an in_register("ax") param.
+
+        .net_mac:
+        call sys_net_mac
+        jmp .iret_cf
+
+        .net_open:
+        call sys_net_open
+        jmp .iret_cf
+
+        .net_recvfrom:
+        call sys_net_recvfrom
+        jmp .iret_cf
+
+        .net_sendto:
+        mov ax, [bp+4]          ; user's BP slot = dst_port
+        call sys_net_sendto
+        jmp .iret_cf
+
+        ;; --- RTC syscalls ---
+        ;; All four leave AX (and DX for datetime / millis) explicitly
+        ;; populated and exit through .iret_done so .iret_cf doesn't
+        ;; clobber the saved AX with the carry-return shim's value.
+        ;; rtc_millis does its 32-bit math here because cc.py 16-bit
+        ;; can't multiply ``unsigned long`` by an immediate.
+
+        .rtc_datetime:
+        call rtc_read_epoch     ; AX = epoch_lo, DX = epoch_hi
+        mov [bp+14], ax
+        mov [bp+10], dx
+        jmp .iret_done
+
+        .rtc_millis:
+        ;; DX:AX = milliseconds since boot (ticks × MS_PER_TICK).  Wraps
+        ;; at 2^32 ms ≈ 49.7 days — longer than any realistic uptime.
+        call rtc_tick_read      ; EAX = ticks
+        imul eax, MS_PER_TICK   ; EAX = ms
+        mov [bp+14], ax         ; AX slot = low 16
+        shr eax, 16
+        mov [bp+10], ax         ; DX slot = high 16
+        jmp .iret_done
+
+        .rtc_sleep:
+        ;; Busy-wait for CX milliseconds via the native PIT tick counter.
+        call rtc_sleep_ms
+        jmp .iret_done
+
+        .rtc_uptime:
+        call uptime_seconds
+        mov [bp+14], ax         ; return seconds in AX
+        jmp .iret_done
+
+        ;; --- System syscalls ---
+        ;; exec / exit don't return through iret — they jmp to user code
+        ;; (PROGRAM_BASE) or to shell_reload; reboot / shutdown halt the
+        ;; CPU and don't really come back at all.
+
+        .sys_exec:
+        ;; Execute program: SI = filename
+        ;; On error: CF set, AL = ERROR_NOT_FOUND or ERROR_NOT_EXECUTE
+        call vfs_find           ; populates vfs_found_*
+        jc .exec_not_found
+        test byte [vfs_found_mode], FLAG_EXECUTE
+        jnz .exec_load
+        mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+        .exec_not_found:
+        mov al, ERROR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .exec_load:
+        ;; Save SP from before INT 30h.  Our frame has 16 bytes of pusha
+        ;; save area plus the 6-byte iret frame, so the caller's
+        ;; pre-INT-30h SP is current SP + 22.
+        mov bp, sp
+        add bp, 22
+        mov [shell_sp], bp
+        mov di, PROGRAM_BASE
+        call vfs_load           ; DI=dest → CF
+        jnc .exec_run
+        mov al, ERROR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .exec_run:
+        call fd_init
+        call bss_setup
+        jmp PROGRAM_BASE
+
+        .sys_exit:
+        ;; Restore stack and reload shell (skips WELCOME and the one-time
+        ;; boot inits — those run once from boot_shell).
+        xor ax, ax
+        mov ds, ax
+        mov es, ax
+        mov sp, [shell_sp]
+        jmp shell_reload
+
+        .sys_reboot:
+        call reboot
+        iret
+
+        .sys_shutdown:
+        call shutdown
+        iret
 
         .iret_cf:
         ;; Propagate the handler's CF to the caller's saved FLAGS,
