@@ -35,7 +35,7 @@ so the comparison stays apples-to-apples.
 | hello   | 22             | 28          | 29        | +1    |
 | ls      | 135            | 179         | 196       | +17   |
 | mkdir   | 123            | 151         | 171       | +20   |
-| mv      | 217            | 217         | 220       | +3    |
+| mv      | 217            | 253         | 278       | +25   |
 | netinit | 72             | 72          | 69        | -3    |
 | netrecv | 334            | 334         | 403       | +69   |
 | netsend | 187            | 187         | 221       | +34   |
