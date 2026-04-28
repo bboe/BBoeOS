@@ -59,15 +59,15 @@
         %assign KERNEL_STACK_TOP 9FFF0h ; Ring-0 stack top; loaded by protected_mode_entry and stored as TSS.ESP0
         %assign MAX_INPUT 256
         %assign NE2K_BASE 300h
-        %assign NET_RECEIVE_BUFFER 0E800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
-        %assign NET_TRANSMIT_BUFFER 0E200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign NET_RECEIVE_BUFFER 0F800h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
+        %assign NET_TRANSMIT_BUFFER 0F200h    ; 1536 bytes (max Ethernet frame: 1500 MTU + 14 header + padding)
         %assign NULL 0
         %assign O_CREAT  10h
         %assign O_RDONLY 00h
         %assign O_TRUNC  20h
         %assign O_WRONLY 01h
         %assign PROGRAM_BASE 0600h
-        %assign SECTOR_BUFFER 0E000h    ; 512 bytes (one sector)
+        %assign SECTOR_BUFFER 0F000h    ; 512 bytes (one sector); kept below 0x10000 so FDC DMA channel 2 (page register at 0x81) reaches it
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
         %assign STDERR 2
