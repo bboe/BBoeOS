@@ -1153,10 +1153,12 @@ void handle_and() {
     emit_alu_binop(4);
 }
 
-/* ``call <label>`` (E8 rel16) and ``call [reg+disp8]`` (FF /2) —
-   the only two call forms the self-host needs.  The indirect form
-   requires a non-zero disp that fits in a signed byte; anything
-   else jumps to abort_unknown. */
+/* ``call <label>`` (E8 rel16/rel32) and ``call [reg+disp8]`` (FF /2) —
+   the only two call forms the self-host needs.  The displacement is
+   16-bit under bits=16 and 32-bit under bits=32 (no operand-size
+   prefix in either default).  The indirect form requires a non-zero
+   disp that fits in a signed byte; anything else jumps to
+   abort_unknown. */
 void handle_call() {
     skip_ws();
     if (source_cursor[0] == '[') {
@@ -1173,8 +1175,13 @@ void handle_call() {
     } else {
         emit_byte(0xE8);
         int target = resolve_label();
-        int delta = target - current_address - 2;
-        emit_word(delta);
+        if (default_bits == 32) {
+            int delta = target - current_address - 4;
+            emit_dword(delta);
+        } else {
+            int delta = target - current_address - 2;
+            emit_word(delta);
+        }
     }
 }
 
