@@ -6,22 +6,16 @@ source is kept here for reference.
 ## Binary Size Comparison
 
 The protected-mode merge made 32-bit the only production target for
-user programs (`make_os.sh` passes `--bits 32`).  This archive is
-mid-migration from 16-bit hand-written asm to 32-bit hand-written asm
-so the comparison stays apples-to-apples.
+user programs (`make_os.sh` passes `--bits 32`); every row in this
+table is now 32-bit on both sides.
 
 - **ASM 16 (bytes)** — frozen historical 16-bit baseline; never
   changes once recorded.  Useful for spotting how much pmode (operand-
   size prefixes, dword pointer slots, wider PC-relative displacements)
   inflates each program.
-- **ASM (bytes)** — current archive .asm assembled size.  Reflects
-  whichever bits mode the file is in: rows whose `archive/<name>.asm`
-  still has no `[bits 32]` directive read 16-bit; rows that have been
-  re-written read 32-bit.  Once every row is converted this column
-  will be uniformly 32-bit.
-- **C (bytes)** — current `cc.py` output assembled size; matches the
-  bits mode of the row's archive .asm (auto-detected by
-  `tests/test_archive.py`).
+- **ASM (bytes)** — current 32-bit hand-written `archive/<name>.asm`
+  assembled size.
+- **C (bytes)** — current 32-bit `cc.py` output assembled size.
 - **Delta** — C − ASM.  The "where can cc.py do better" signal.
 
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
