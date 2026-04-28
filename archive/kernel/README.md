@@ -33,6 +33,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
+| arch/x86/system | 37486 | 37510 | +24 |
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/serial | 37478 | 37510 | +32 |
 
@@ -74,3 +75,12 @@ around the body; the `kernel_inb` / `kernel_outb` calls each emit
 dx, al` that the hand-written asm could reuse `dx` across.  Dead-code
 removal of `serial_getc` (no callers; `fs/fd/console.asm` polls COM1
 inline) trimmed both sides equally and kept the delta small.
+
+**arch/x86/system (+24):** Two tiny functions, one with a never-returns
+infinite loop.  `shutdown` is byte-for-byte equivalent to the asm
+version (`mov dx, port; mov ax, 0x2000; out dx, ax` × 2 + `ret`).
+`reboot` pays the cc.py 12-byte prologue (`push ebp; mov ebp, esp;
+sub esp, 8`) it will never return through, plus a 3-byte epilogue
+that's also unreachable — together they're the entire +27.  Could
+be reclaimed with `__attribute__((naked))` if cc.py grows support
+for it on functions whose body is "linear C with `asm()` escapes".

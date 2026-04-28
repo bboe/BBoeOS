@@ -59,6 +59,7 @@ echo "%include \"${PATH_NAME}.asm\"" > "$KASM_PATH"
 nasm -f bin \
     -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
     -i build/kernel-c/ -i build/kernel-c/net/ -i build/kernel-c/fs/ \
+    -i build/kernel-c/arch/x86/ \
     -i archive/kernel/ \
     -o os.bin src/arch/x86/boot/bboeos.asm
 
