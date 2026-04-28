@@ -271,6 +271,7 @@ void adc_sbb_handler(int modrm_base) {
     int packed_register = parse_register();
     skip_comma();
     int imm = resolve_value();
+    emit_operand_size_prefix(packed_register >> 8);
     if ((packed_register >> 8) == 8) {
         emit_byte(0x80);
     } else {
@@ -650,6 +651,8 @@ int emit_alu_mem_imm(int rfield) {
         size = 8;
     } else if (match_word(STR_WORD)) {
         size = 16;
+    } else if (match_word(STR_DWORD)) {
+        size = 32;
     } else {
         return 0;
     }
@@ -665,30 +668,31 @@ int emit_alu_mem_imm(int rfield) {
     source_cursor += 1;
     skip_comma();
     int imm = resolve_value();
-    /* Keep the opcode / modrm pair as two ``emit_byte`` calls rather
-       than folding into ``emit_word(opcode | (modrm << 8))``.  modrm
-       is runtime-computed from ``rfield``, so cc.py lowers the
-       ``<< 8`` through ``mov cx, 8 / shl ax, cl`` — which costs more
-       than the extra ``emit_byte`` call saves (tried: asm.c binary
-       grew 30 bytes).  The ``emit_word(constant)`` idiom only pays
-       off when both bytes are compile-time constants, as in
-       ``handle_aam``'s ``emit_word(0x0AD4)``. */
-    int modrm = 0x06 | (rfield << 3);
+    /* Operand-size prefix sits before the opcode for non-byte sizes
+       that disagree with ``default_bits``.  ``emit_modrm_direct``
+       picks the right ModR/M (rm=110 for [disp16] under bits=16,
+       rm=101 for [disp32] under bits=32) and emits the matching
+       displacement width, so the same opcode body assembles both
+       modes. */
+    if (size != 8) {
+        emit_operand_size_prefix(size);
+    }
     if (size == 8) {
         emit_byte(0x80);
-        emit_byte(modrm);
-        emit_word(disp);
+        emit_modrm_direct(rfield, disp);
         emit_byte(imm & 0xFF);
     } else if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
-        emit_byte(modrm);
-        emit_word(disp);
+        emit_modrm_direct(rfield, disp);
         emit_byte(imm & 0xFF);
     } else {
         emit_byte(0x81);
-        emit_byte(modrm);
-        emit_word(disp);
-        emit_word(imm);
+        emit_modrm_direct(rfield, disp);
+        if (size == 32) {
+            emit_dword(imm);
+        } else {
+            emit_word(imm);
+        }
     }
     return 1;
 }
@@ -959,17 +963,23 @@ void encode_rel8_jump(int opcode) {
         }
     } else {
         /* Currently long; attempt to shrink in pass 1 if the
-           target has moved into rel8 range.  Forward jumps need
-           an extra +4/-1 correction because the 4-byte near form
-           straddles the comparison point (and the ``jmp rel8``
-           0xEB opcode shrinks to 2 bytes rather than 3). */
+           target has moved into rel8 range.  Forward jumps straddle
+           the comparison point: under bits=16 jcc-near is 4 bytes
+           (jmp-near 3), under bits=32 jcc-near is 6 (jmp-near 5),
+           so the shrink check picks the matching long-form size.
+           Backward targets are fixed addresses so the comparison is
+           always against the post-short-instruction tail (+2). */
         use_short = 0;
         if (pass == 1) {
             if (peek_label_target()) {
                 int target = peek_label_value;
                 int base = current_address;
                 if (target >= base) {
-                    base += 4;
+                    if (default_bits == 32) {
+                        base += 6;
+                    } else {
+                        base += 4;
+                    }
                     if (opcode == 0xEB) {
                         base -= 1;
                     }
@@ -996,8 +1006,13 @@ void encode_rel8_jump(int opcode) {
             emit_byte(0x0F);
             emit_byte(opcode + 0x10);
         }
-        int disp = resolve_label() - (current_address + 2);
-        emit_word(disp);
+        if (default_bits == 32) {
+            int disp = resolve_label() - (current_address + 4);
+            emit_dword(disp);
+        } else {
+            int disp = resolve_label() - (current_address + 2);
+            emit_word(disp);
+        }
     }
 }
 
@@ -1153,10 +1168,12 @@ void handle_and() {
     emit_alu_binop(4);
 }
 
-/* ``call <label>`` (E8 rel16) and ``call [reg+disp8]`` (FF /2) —
-   the only two call forms the self-host needs.  The indirect form
-   requires a non-zero disp that fits in a signed byte; anything
-   else jumps to abort_unknown. */
+/* ``call <label>`` (E8 rel16/rel32) and ``call [reg+disp8]`` (FF /2) —
+   the only two call forms the self-host needs.  The displacement is
+   16-bit under bits=16 and 32-bit under bits=32 (no operand-size
+   prefix in either default).  The indirect form requires a non-zero
+   disp that fits in a signed byte; anything else jumps to
+   abort_unknown. */
 void handle_call() {
     skip_ws();
     if (source_cursor[0] == '[') {
@@ -1173,8 +1190,13 @@ void handle_call() {
     } else {
         emit_byte(0xE8);
         int target = resolve_label();
-        int delta = target - current_address - 2;
-        emit_word(delta);
+        if (default_bits == 32) {
+            int delta = target - current_address - 4;
+            emit_dword(delta);
+        } else {
+            int delta = target - current_address - 2;
+            emit_word(delta);
+        }
     }
 }
 
@@ -1464,6 +1486,11 @@ void handle_lodsb() {
 }
 
 void handle_lodsw() {
+    /* 0xAD is LODSW under bits=16 / LODSD under bits=32; flipping
+       the default operand size to the other width via a 0x66 prefix
+       makes the opcode encode the explicit ``-w`` (16-bit) form
+       regardless of the current mode.  Same shape for movsw / stosw. */
+    emit_operand_size_prefix(16);
     emit_byte(0xAD);
 }
 
@@ -1641,6 +1668,7 @@ void handle_movsb() {
 }
 
 void handle_movsw() {
+    emit_operand_size_prefix(16);
     emit_byte(0xA5);
 }
 
@@ -1665,6 +1693,8 @@ void handle_movzx() {
     emit_word(0xB60F);
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
+    } else if (type2 == 2) {
+        emit_modrm_direct(register1_id, value2);
     } else {
         emit_indexed_mem(register1_id, register2_id, value2);
     }
@@ -1854,6 +1884,7 @@ void handle_stosb() {
 }
 
 void handle_stosw() {
+    emit_operand_size_prefix(16);
     emit_byte(0xAB);
 }
 
@@ -2869,17 +2900,30 @@ int parse_operand() {
         }
         end = prev;
     }
-    /* Try to parse a 2-char register at ``end-2`` — this catches the
-       ``[disp + reg]`` NASM dialect.  The register must be preceded
-       by ``+`` (with optional whitespace).  On match, null-terminate
-       just before the ``+``, resolve the displacement, then restore. */
-    if (end - bracket_start >= 2) {
-        char *reg_pos = end - 2;
+    /* Try to parse a register at the trailing position to catch the
+       ``[disp + reg]`` NASM dialect.  The register name is the run
+       of identifier characters ending at ``end - 1`` (handles both
+       2-char 16-bit names like ``si`` and 3-char e-prefixed 32-bit
+       names like ``esi``); ``parse_register`` validates and rejects
+       non-register identifiers like trailing decimal/hex numbers.
+       The register must be preceded by ``+`` (with optional
+       whitespace).  On match, null-terminate just before the
+       ``+``, resolve the displacement, then restore. */
+    char *reg_pos = end;
+    while (reg_pos > bracket_start) {
+        char *prev = reg_pos - 1;
+        if (!is_ident_char(prev[0])) {
+            break;
+        }
+        reg_pos = prev;
+    }
+    if (reg_pos < end && reg_pos > bracket_start) {
         char *saved = source_cursor;
         source_cursor = reg_pos;
         int packed_register2 = parse_register();
+        int consumed_to_end = (source_cursor == end);
         source_cursor = saved;
-        if (packed_register2 >= 0) {
+        if (packed_register2 >= 0 && consumed_to_end) {
             char *back = reg_pos;
             while (back > bracket_start) {
                 char *pb = back - 1;
@@ -3530,6 +3574,7 @@ void unary_f6f7(int modrm_base) {
     if ((packed_register >> 8) == 8) {
         opcode = 0xF6;
     }
+    emit_operand_size_prefix(packed_register >> 8);
     emit_byte(opcode);
     emit_byte(modrm_base | (packed_register & 0xFF));
 }
