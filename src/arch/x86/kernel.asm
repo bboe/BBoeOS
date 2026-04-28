@@ -91,6 +91,11 @@ sector_buffer    equ 0xC000F000
         PROGRAM_SCRATCH_BYTES   equ 128 * 1024                          ; 128 KB
         PROGRAM_SCRATCH_PHYS    equ 0x185000                            ; aligned, just past NIC buffers
         program_scratch         equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
+        ;; Bare uppercase aliases — cc.py emits the original
+        ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER names from C source
+        ;; via NAMED_CONSTANTS.
+        NET_RECEIVE_BUFFER      equ net_receive_buffer
+        NET_TRANSMIT_BUFFER     equ net_transmit_buffer
         E820_TABLE_VIRT         equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE        equ 768
         LAST_KERNEL_PDE         equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
@@ -264,7 +269,7 @@ high_entry:
 %include "drivers/ata.kasm"
 %include "drivers/console.kasm"
 %include "drivers/fdc.kasm"
-%include "drivers/ne2k.asm"
+%include "drivers/ne2k.kasm"
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.kasm"
 %include "drivers/serial.kasm"

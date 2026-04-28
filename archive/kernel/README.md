@@ -37,6 +37,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | drivers/ata | 37238 | 37510 | +272 |
 | drivers/console | 37030 | 37510 | +480 |
 | drivers/fdc | 37286 | 37510 | +224 |
+| drivers/ne2k | 37118 | 37510 | +392 |
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
@@ -167,3 +168,27 @@ calls, `fdc_dma_setup`'s ten `kernel_outb`s, `fdc_init`'s reset +
 sense × 4 + SPECIFY × 3, the read/write `cx`/`dx` spill+reload
 pattern around the `out_register` capture from
 `fdc_lba_to_chs_internal`).
+
+**drivers/ne2k (+392):** Five public functions covering NE2000 polled-mode
+Ethernet.  `ne2k_probe`, `ne2k_init`, `ne2k_send`, and
+`network_initialize` port to straight-line C — `kernel_outb` for
+register programming, `kernel_inw` for the word-mode PROM read inside
+`ne2k_probe`, and `kernel_outsw` for the TX-buffer DMA upload in
+`ne2k_send` (matches the asm `rep outsw`).  `ne2k_send`'s
+``__attribute__((carry_return))`` keeps the asm CF=err contract under
+the inverted `return 1` = success mapping; `in_register("esi")` /
+`in_register("ecx")` pin the frame pointer and length the asm callers
+in `net/ip.c`, `net/arp.asm`, and `fs/fd/net.asm` pass via those
+registers.  `ne2k_receive` stays in a file-scope `asm()` block — its
+multi-register return contract (EDI = NET_RECEIVE_BUFFER, ECX = packet
+length, CF = packet-available flag) doesn't fit cc.py's single-EAX
+return shape, and the four asm callers (`net/arp.asm`,
+`net/icmp.c`'s asm body, `net/udp.asm`, `fs/fd/net.asm`) all read
+back EDI immediately to walk the received frame.  `mac_address[6]`
+and `net_present` are file-scope globals with `equ _g_*` aliases so
+asm consumers under the bare names continue to resolve.  Most of the
++400 is the same per-function frame overhead pattern other drivers
+hit (`push ebp; mov ebp, esp; sub esp, N` × 4 functions plus the
+`preserve_register` push/pops on `ne2k_send`); `ne2k_probe`'s two
+`while` loops over `mac_address[i]` add ~20 bytes vs the asm
+`mov esi, mac_address; lodsb; out dx, al; loop` shape.
