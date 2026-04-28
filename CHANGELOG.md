@@ -223,6 +223,8 @@ at the time.
 ### Drivers
 - Port `serial_character` from `drivers/serial.asm` to C in a new `src/drivers/serial.c`, retiring the asm file.  Tiny one-function port — the polled COM1 output path that mirrors every `put_character` byte to serial.  `__attribute__((preserve_register("ax")))` / `("dx")` envelope keeps the asm-side ABI (`drivers/console.c` calls `vga_teletype` immediately after, expecting AL to round-trip).  Drop the unused `serial_getc` entry point at the same time — `fs/fd/console.asm` polls COM1 inline (port `0x3FD` for data-ready, `0x3F8` for the byte) so the DEL→BS handler had no live callers.
 
+- Port `reboot` (8042 reset) and `shutdown` (QEMU ACPI port `0x604` / Bochs port `0xB004`) from `arch/x86/system.asm` to C in a new `src/arch/x86/system.c`.  Two tiny functions; `shutdown` matches the asm version byte-for-byte, `reboot` pays a 12-byte cc.py prologue that's never reached (the function loops forever in `hlt`) and could be reclaimed with a future `__attribute__((naked))`.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive

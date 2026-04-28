@@ -285,7 +285,7 @@ high_entry:
 %include "net/net.asm"
 %include "syscall.asm"
 %include "idt.asm"
-%include "system.asm"
+%include "system.kasm"
 
 ;;; ----- Kernel GDT (kernel-virt copy of the boot GDT) -----
         align 8
