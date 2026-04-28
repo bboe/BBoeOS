@@ -1,3 +1,4 @@
+        [bits 32]
         org 0600h
 
 %include "constants.asm"
@@ -6,31 +7,32 @@ main:
         cld
 
         ;; Read our MAC into the shell's idle input buffer (no embedded cell).
-        mov di, BUFFER
+        mov edi, BUFFER
         mov ah, SYS_NET_MAC
         int 30h
         jc .no_nic
 
-        ;; Copy our MAC into ARP frame (src MAC at offset 6, sender MAC at offset 22)
-        mov si, BUFFER
-        mov di, arp_frame + 6
-        mov cx, 3
-        rep movsw
-        mov si, BUFFER
-        mov di, arp_frame + 22
-        mov cx, 3
-        rep movsw
+        ;; Copy our MAC into ARP frame: src MAC at offset 6, sender MAC
+        ;; at offset 22.  6 bytes per copy = movsd + movsw.
+        mov esi, BUFFER
+        mov edi, arp_frame + 6
+        movsd
+        movsw
+        mov esi, BUFFER
+        mov edi, arp_frame + 22
+        movsd
+        movsw
 
         ;; Open raw Ethernet socket
         mov al, SOCK_RAW
         mov ah, SYS_NET_OPEN
         int 30h
         jc .no_nic
-        mov bx, ax              ; BX = fd
+        mov ebx, eax            ; EBX = fd
 
         ;; Write ARP frame to the socket
-        mov si, arp_frame
-        mov cx, 60
+        mov esi, arp_frame
+        mov ecx, 60
         mov ah, SYS_IO_WRITE
         int 30h
         jc .error
@@ -39,18 +41,18 @@ main:
         mov ah, SYS_IO_CLOSE
         int 30h
 
-        mov si, MESSAGE_SENT
-        mov cx, MESSAGE_SENT_LENGTH
+        mov esi, MESSAGE_SENT
+        mov ecx, MESSAGE_SENT_LENGTH
         jmp FUNCTION_DIE
 
         .no_nic:
-        mov si, MESSAGE_NO_NIC
-        mov cx, MESSAGE_NO_NIC_LENGTH
+        mov esi, MESSAGE_NO_NIC
+        mov ecx, MESSAGE_NO_NIC_LENGTH
         jmp FUNCTION_DIE
 
         .error:
-        mov si, MESSAGE_ERROR
-        mov cx, MESSAGE_ERROR_LENGTH
+        mov esi, MESSAGE_ERROR
+        mov ecx, MESSAGE_ERROR_LENGTH
         jmp FUNCTION_DIE
 
         ;; Data

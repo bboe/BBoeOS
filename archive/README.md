@@ -38,7 +38,7 @@ so the comparison stays apples-to-apples.
 | mv      | 217            | 253         | 278       | +25   |
 | netinit | 72             | 94          | 85        | -9    |
 | netrecv | 334            | 334         | 403       | +69   |
-| netsend | 187            | 187         | 221       | +34   |
+| netsend | 187            | 215         | 255       | +40   |
 | ping    | 1034           | 1034        | 1306      | +272  |
 | shell   | 950            | 950         | 1337      | +387  |
 | uptime  | 50             | 67          | 100       | +33   |
