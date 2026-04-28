@@ -34,6 +34,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
 | arch/x86/system | 37486 | 37510 | +24 |
+| drivers/console | 37030 | 37510 | +480 |
 | drivers/ps2 | 37102 | 37510 | +408 |
 | drivers/serial | 37478 | 37510 | +32 |
 
@@ -84,3 +85,23 @@ sub esp, 8`) it will never return through, plus a 3-byte epilogue
 that's also unreachable — together they're the entire +27.  Could
 be reclaimed with `__attribute__((naked))` if cc.py grows support
 for it on functions whose body is "linear C with `asm()` escapes".
+
+**drivers/console (+480):** The ANSI escape parser becomes ~110 lines
+of pure C against five `vga_*` helpers (`vga_teletype`,
+`vga_get_cursor`, `vga_set_cursor`, `vga_set_bg`,
+`vga_write_attribute`) and `serial_character`.  Cross-asm calls use
+`__attribute__((in_register))` for the AL/BX/DX inputs and one
+`out_register` parameter to capture `vga_get_cursor`'s packed DX
+return.  `put_character`'s `preserve_register("ax/bx/cx/dx")`
+matches the asm contract (`push eax/ebx/ecx/edx` ... `pop ...`).
+Most of the +480 is cc.py's pattern of spilling every intermediate
+to a stack slot — `p1`, `dx_packed`, `row`, `col`, `linear` each
+get their own `[ebp-N]`, then reload through EAX.  The asm version
+keeps these in BX/CX/DX across the dispatch chain.  `ansi_params`
+shifts from ``dw 0,0,0`` (6 bytes) to four-byte int slots (12
+bytes) — small but cumulative — and the four `vga_get_cursor`
+call sites each pay the full out-register-capture sequence
+(`mov [ebp-N], dx`).  Candidate cc.py optimizations: register
+pinning across straight-line code in fastcall-ish paths, and a
+narrower default storage for `int`-typed globals when their value
+range fits a smaller width.
