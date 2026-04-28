@@ -271,6 +271,7 @@ void adc_sbb_handler(int modrm_base) {
     int packed_register = parse_register();
     skip_comma();
     int imm = resolve_value();
+    emit_operand_size_prefix(packed_register >> 8);
     if ((packed_register >> 8) == 8) {
         emit_byte(0x80);
     } else {
@@ -650,6 +651,8 @@ int emit_alu_mem_imm(int rfield) {
         size = 8;
     } else if (match_word(STR_WORD)) {
         size = 16;
+    } else if (match_word(STR_DWORD)) {
+        size = 32;
     } else {
         return 0;
     }
@@ -665,30 +668,31 @@ int emit_alu_mem_imm(int rfield) {
     source_cursor += 1;
     skip_comma();
     int imm = resolve_value();
-    /* Keep the opcode / modrm pair as two ``emit_byte`` calls rather
-       than folding into ``emit_word(opcode | (modrm << 8))``.  modrm
-       is runtime-computed from ``rfield``, so cc.py lowers the
-       ``<< 8`` through ``mov cx, 8 / shl ax, cl`` — which costs more
-       than the extra ``emit_byte`` call saves (tried: asm.c binary
-       grew 30 bytes).  The ``emit_word(constant)`` idiom only pays
-       off when both bytes are compile-time constants, as in
-       ``handle_aam``'s ``emit_word(0x0AD4)``. */
-    int modrm = 0x06 | (rfield << 3);
+    /* Operand-size prefix sits before the opcode for non-byte sizes
+       that disagree with ``default_bits``.  ``emit_modrm_direct``
+       picks the right ModR/M (rm=110 for [disp16] under bits=16,
+       rm=101 for [disp32] under bits=32) and emits the matching
+       displacement width, so the same opcode body assembles both
+       modes. */
+    if (size != 8) {
+        emit_operand_size_prefix(size);
+    }
     if (size == 8) {
         emit_byte(0x80);
-        emit_byte(modrm);
-        emit_word(disp);
+        emit_modrm_direct(rfield, disp);
         emit_byte(imm & 0xFF);
     } else if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
-        emit_byte(modrm);
-        emit_word(disp);
+        emit_modrm_direct(rfield, disp);
         emit_byte(imm & 0xFF);
     } else {
         emit_byte(0x81);
-        emit_byte(modrm);
-        emit_word(disp);
-        emit_word(imm);
+        emit_modrm_direct(rfield, disp);
+        if (size == 32) {
+            emit_dword(imm);
+        } else {
+            emit_word(imm);
+        }
     }
     return 1;
 }
@@ -1482,6 +1486,11 @@ void handle_lodsb() {
 }
 
 void handle_lodsw() {
+    /* 0xAD is LODSW under bits=16 / LODSD under bits=32; flipping
+       the default operand size to the other width via a 0x66 prefix
+       makes the opcode encode the explicit ``-w`` (16-bit) form
+       regardless of the current mode.  Same shape for movsw / stosw. */
+    emit_operand_size_prefix(16);
     emit_byte(0xAD);
 }
 
@@ -1659,6 +1668,7 @@ void handle_movsb() {
 }
 
 void handle_movsw() {
+    emit_operand_size_prefix(16);
     emit_byte(0xA5);
 }
 
@@ -1874,6 +1884,7 @@ void handle_stosb() {
 }
 
 void handle_stosw() {
+    emit_operand_size_prefix(16);
     emit_byte(0xAB);
 }
 
@@ -3563,6 +3574,7 @@ void unary_f6f7(int modrm_base) {
     if ((packed_register >> 8) == 8) {
         opcode = 0xF6;
     }
+    emit_operand_size_prefix(packed_register >> 8);
     emit_byte(opcode);
     emit_byte(modrm_base | (packed_register & 0xFF));
 }
