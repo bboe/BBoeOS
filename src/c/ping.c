@@ -88,7 +88,7 @@ int resolve_dns(char *domain, char *target, char *query, char *ip) {
         offset = skip_name(query, offset);
         char *record = query + offset;
         int rdlength = record[9];
-        if (record[0] == 0 && record[1] == 1) {
+        if (record[0] == '\0' && record[1] == '\x01') {
             memcpy(target, record + 10, 4);
             return 0;
         }
