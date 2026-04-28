@@ -266,7 +266,7 @@ high_entry:
 %include "drivers/fdc.asm"
 %include "drivers/ne2k.asm"
 %include "drivers/ps2.kasm"
-%include "drivers/rtc.asm"
+%include "drivers/rtc.kasm"
 %include "drivers/serial.kasm"
 %include "drivers/vga.asm"
 %include "entry.asm"

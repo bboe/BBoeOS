@@ -37,6 +37,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | drivers/ata | 37238 | 37510 | +272 |
 | drivers/console | 37030 | 37510 | +480 |
 | drivers/ps2 | 37102 | 37510 | +408 |
+| drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
 
 ## Annotations
@@ -122,3 +123,26 @@ bbfs holds full 32-bit ECX file sizes that 16-bit `push cx`
 would silently truncate).  The wider `mov edx, [ebp-N]; and edx,
 65535` reload-and-mask on `lba` is also paid once per call
 where the asm version stayed in CX through the port writes.
+
+**drivers/rtc (+368):** Eleven functions; the C-shaped logic
+(`rtc_bcd_to_bin`, `rtc_is_leap_year`, the year-loop and
+month-days arithmetic in `rtc_read_epoch_impl`) ports to ~70
+lines of straightforward C.  The non-C-shaped pieces stay in
+file-scope `asm()` blocks: `rtc_read_date_internal` /
+`rtc_read_time_internal` (multi-byte CH:CL/DH:DL returns that
+don't fit cc.py's single-EAX return shape — the C side picks
+them up via `out_register("cx")` / `out_register("dx")`
+parameters), `rtc_tick_read` (cli/popf-bracketed atomic 32-bit
+read of `system_ticks`), `uptime_seconds` (the EAX = ticks /
+TICKS_PER_SECOND division), `rtc_sleep_ms` (16-bit CX
+input, pushf/sti envelope, full register preservation), and
+`rtc_read_epoch` (a thin shim that calls
+`rtc_read_epoch_impl` and splits the 32-bit EAX into DX:AX
+for asm-side callers).  +368 is mostly the cc.py prologue /
+epilogue overhead on the substantial helper chain
+(`rtc_read_epoch_impl` calls `rtc_read_date_internal`,
+`rtc_read_time_internal`, `rtc_bcd_to_bin` × 7,
+`rtc_is_leap_year` × N) plus stack spills for every
+intermediate (`year`, `days`, `month_index`, `seconds`,
+`cx`, `dx`).  The asm version kept these in BX/CX/SI through
+the year-loop.
