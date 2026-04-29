@@ -9,6 +9,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      BBOE_ASM_SELF_HOST_TIMEOUT: 32
+      BBOE_BOOT_TIMEOUT: 30
+      BBOE_DOUBLY_INDIRECT_TIMEOUT: 60
+      BBOE_FS_COMMAND_TIMEOUT: 30
+      BBOE_LARGE_FILE_TIMEOUT: 30
+      BBOE_PROGRAM_TIMEOUT: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -23,8 +30,11 @@ jobs:
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Run ${{ matrix.suite }}
-        run: python3 tests/${{ matrix.suite }}.py
+        run: python3 tests/${{ matrix.suite }}.py ${{ matrix.extra_args }}
     strategy:
       fail-fast: false
       matrix:
         suite: [test_archive, test_asm, test_bboefs, test_cc, test_draw, test_ext2, test_floppy_boot, test_programs]
+        include:
+          - suite: test_ext2
+            extra_args: --slow

@@ -28,7 +28,7 @@ from run_qemu import run_commands  # noqa: E402
 from add_file import FLAG_DIRECTORY, SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
-COMMAND_TIMEOUT = 30
+COMMAND_TIMEOUT = float(os.environ.get("BBOE_FS_COMMAND_TIMEOUT", "1"))
 
 
 def main() -> int:
@@ -39,6 +39,11 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("test", nargs="?", help="run only the named test")
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop after the first failing test",
+    )
     parser.add_argument(
         "--floppy",
         action="store_true",
@@ -97,6 +102,8 @@ def main() -> int:
                 print(f"  FAIL  {label:<22}  {message}  {elapsed:6.2f}s")
                 fail_count += 1
                 failed.append(label)
+                if arguments.fail_fast:
+                    break
 
     print()
     print(f"{pass_count} passed, {fail_count} failed")

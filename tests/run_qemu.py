@@ -27,7 +27,7 @@ import tempfile
 import time
 from pathlib import Path
 
-BOOT_TIMEOUT = 30
+BOOT_TIMEOUT = float(os.environ.get("BBOE_BOOT_TIMEOUT", "2"))
 COMMAND_TIMEOUT = 4
 DEFAULT_IMAGE = Path(__file__).resolve().parent.parent / "drive.img"
 PROMPT = b"$ "
