@@ -505,19 +505,33 @@ class EmissionMixin:
                 self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             # Capture out_register outputs before any register restores so the
             # callee-written registers haven't been overwritten by the pops yet.
+            #
+            # Width handling mirrors the in_register prologue: when the
+            # callee returned via a 16-bit name (e.g. ``out_register("bx")``)
+            # but the destination spans a wider slot (32-bit local or pinned
+            # E-register), zero-extend so the upper bytes are clean.
             si_captured: str | None = None
             for reg, arg in out_reg_captures:
                 if not isinstance(arg, AddressOf):
                     message = "out_register argument must be an address-of expression (&var)"
                     raise CompileError(message, line=statement.line)
                 dest_name = arg.name
+                widened = self.target.widen_gp(reg)
                 if dest_name in self.pinned_register:
                     dest_reg = self.pinned_register[dest_name]
-                    if dest_reg != reg:
+                    if dest_reg == reg:
+                        pass
+                    elif dest_reg == widened:
+                        self.emit(f"        movzx {dest_reg}, {reg}")
+                    else:
                         self.emit(f"        mov {dest_reg}, {reg}")
                 else:
                     dest = self._local_address(dest_name)
-                    self.emit(f"        mov [{dest}], {reg}")
+                    if widened != reg:
+                        self.emit(f"        movzx {widened}, {reg}")
+                        self.emit(f"        mov [{dest}], {widened}")
+                    else:
+                        self.emit(f"        mov [{dest}], {reg}")
                     if reg == self.target.si_register:
                         si_captured = dest_name
             if use_pusha:

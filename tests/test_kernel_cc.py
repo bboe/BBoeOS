@@ -597,6 +597,61 @@ def test_out_register_capture_not_destroyed_by_pinned_push_pop() -> None:
     )
 
 
+def test_out_register_capture_widens_into_local_32bit() -> None:
+    """A 16-bit out_register captured into a 32-bit local slot zero-extends.
+
+    Without widening, ``mov [local], bx`` would write only the low 16
+    bits of the 4-byte slot, leaving the upper 16 bits stale.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int reader(int *byte_offset __attribute__((out_register("bx"))));
+
+        int caller() {
+            int offset;
+            int total;
+            reader(&offset);
+            total = offset + 1;
+            return total;
+        }
+    """,
+        bits=32,
+    )
+    # The capture must zero-extend BX into EBX before the 4-byte spill.
+    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' for 16-bit out_register into 32-bit slot:\n{asm}"
+
+
+def test_out_register_capture_widens_into_pinned_eregister_32bit() -> None:
+    """A 16-bit out_register captured into a pinned E-register zero-extends.
+
+    Scenario: ``offset`` auto-pins to EBX (multiple uses, one call → references > clobber).
+    ``reader`` returns its result via ``out_register("bx")``.  cc.py must emit
+    ``movzx ebx, bx`` to put the captured value into the pinned register with
+    clean upper bytes; a bare ``mov ebx, bx`` is invalid (mixed widths).
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int reader(int *byte_offset __attribute__((out_register("bx"))));
+
+        int chunk_size(int left) {
+            int offset;
+            int chunk;
+            reader(&offset);
+            chunk = 512 - offset;
+            if (chunk > left) {
+                chunk = left;
+            }
+            return chunk;
+        }
+    """,
+        bits=32,
+    )
+    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' capture into pinned EBX:\n{asm}"
+    assert "mov ebx, bx" not in asm, f"raw 'mov ebx, bx' is mixed-width and invalid:\n{asm}"
+
+
 def test_out_register_prototype_registers_convention() -> None:
     """A function prototype with out_register is retained in the AST and registers the convention."""
     # If the prototype is silently dropped, generate_call won't know about out_register
