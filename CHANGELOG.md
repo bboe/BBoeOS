@@ -6,6 +6,58 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Phase 3 paging (2026-04-28)
+- Enable 32-bit paging and split the kernel binary into `boot.bin`
+  (`org 0x7C00`, MBR + real-mode bootstrap + early-PE relocator) and
+  `kernel.bin` (`org 0xC0100000`, post-paging high-half).  `boot.asm`
+  reads `kernel.bin` from disk into physical `0x10000`; the early-PE
+  bootstrap copies it to physical `0x100000`, builds an initial PD
+  with the first kernel PT identity-mapped + direct-mapped at virt
+  `0xC0000000`, enables paging, and far-jumps into `high_entry` at
+  virt `0xC0100000`.
+- High-half kernel installs its own GDT / IDT (with runtime patching
+  of high-half handler offsets via `idt_init`), drops the boot
+  identity mapping, initializes the bitmap frame allocator from
+  E820, allocates the remaining 63 kernel PTs to complete the
+  256 MB direct map at `0xC0000000..0xCFFFFFFF`, and installs them
+  in `kernel_pd_template` (PDEs 768..831).
+- Phase 3 ships an interim user "shim" PT at PDE[0] of
+  `kernel_pd_template` with two user-accessible R/W windows: PTEs
+  `0..0xFF` map virt `0..0xFFFFF` (low 1 MB; covers the legacy
+  `PROGRAM_BASE = 0x600` / `USER_STACK_TOP = 0x8FFF0` / vDSO /
+  BUFFER layout) and PTEs `0x300..0x3FF` map virt
+  `0x300000..0x3FFFFF` (1 MB at the 3 MB mark; covers `asm.c`'s
+  SYMBOL_BASE / JUMP_TABLE region).  PTEs `0x100..0x2FF` stay
+  not-present so user code can't see the kernel image, the boot PD
+  (now at phys `0x200000`), the first kernel PT (now at phys
+  `0x201000`), the bitmap-allocated kernel PTs, or the shim PT
+  itself through the alias.  Phase 4's per-program PDs will replace
+  this whole arrangement with private user frames and proper
+  memory protection.  `tests/test_asm.py`, `tests/test_bboefs.py`,
+  `tests/test_programs.py`, `tests/test_cc.py`,
+  `tests/test_archive.py`, `tests/test_struct.py`, and
+  `tests/test_kernel_cc.py` all pass.
+- Bitmap frame allocator (`src/memory_management/frame.asm`) provides
+  `frame_alloc` / `frame_free` / `frame_init` (E820 walker) /
+  `frame_reserve_range` over a 256 MB ceiling (8 KB bitmap).
+- Migrate kernel-private buffers (`kernel_stack` /
+  `kernel_stack_top`, NIC TX/RX buffers) into kernel BSS so they
+  travel with the kernel image at virt `0xC01xxxxx` instead of
+  squatting on fixed low-memory addresses.  `sector_buffer` and
+  `fd_table` stay at fixed low-physical addresses
+  (`0xF000` / `0xE000`, accessed via the direct map at
+  `0xC000F000` / `0xC000E000`) so `bbfs.asm` / `ext2.asm` keep
+  their 16-bit-register accesses (`[bx+offset]` / `[si+FD_OFFSET_*]`)
+  without 32-bit-register conversion churn.  `boot_disk` and
+  `directory_sector` move to fixed low-phys `0x4F0` / `0x4F2`,
+  written by boot.asm and read by the kernel through the direct
+  map.
+- The pre-existing `EXCnn` halt handler now also prints
+  `EIP=hhhhhhhh CR2=hhhhhhhh ERR=hhhhhhhh` on COM1 — useful for
+  diagnosing #PF / #GP from user programs and from the kernel's own
+  paging path before per-vector handlers in `arch/x86/exc.asm`
+  land.
+
 ## [0.8.1](https://github.com/bboe/BBoeOS/compare/0.8.0...0.8.1) (2026-04-28)
 
 - **Bugfix:** floppy boot (`qemu-system-i386 -drive

@@ -2,13 +2,17 @@
         ;; Network syscalls.
         ;;
         ;; net_recvfrom and net_sendto stage user buffers through
-        ;; SECTOR_BUFFER before calling the (still-16-bit-pointer)
-        ;; udp / icmp / ip stack.  The stack assumes its inputs live
-        ;; in low memory (NET_TRANSMIT_BUFFER, kernel statics, etc.)
-        ;; and stores them in 16-bit slots — passing a 32-bit user
-        ;; stack pointer directly truncates the high half.  Staging
-        ;; sidesteps that until the net protocol files get their own
-        ;; protected mode port.
+        ;; sector_buffer before calling udp_send / ip_send.  The
+        ;; protocol stack stores inputs in its own statics
+        ;; (.ud_destip, udp_buffer, …) so we could in principle hand it
+        ;; the user pointer directly, but staging keeps the protocol
+        ;; stack from ever dereferencing a user-virt address — under
+        ;; the Phase 3 user shim the kernel can read user pages, but
+        ;; once Phase 4 lands per-AS maps, an arbitrary user pointer
+        ;; would need access_ok / copy_from_user.  Staging sidesteps
+        ;; that entirely.  All pointers passed to udp_send / ip_send
+        ;; are full 32-bit kernel-virt (EBX / ESI), not 16-bit BX / SI
+        ;; — the protocol stack saves them as dwords (e.g. .ud_destip).
         ;; ------------------------------------------------------------
 
         .net_mac:
@@ -75,17 +79,21 @@
         .rf_udp:
         call udp_receive                        ; DI=payload (low 16), CX=len, CF if none
         jc .rf_none
-        ;; Check dest port: UDP dest port is at NET_RECEIVE_BUFFER+36 (big-endian).
+        ;; Check dest port: UDP dest port is at net_receive_buffer+36 (big-endian).
         mov ax, [.rf_port]
         xchg al, ah                             ; user port → big-endian
-        cmp ax, [NET_RECEIVE_BUFFER+36]
+        cmp ax, [net_receive_buffer+36]
         jne .rf_none
         jmp .rf_copy
         .rf_icmp:
         call icmp_receive                       ; DI=ICMP payload, CX=len, CF if none
         jc .rf_none
         .rf_copy:
-        ;; CX = payload length, DI = payload offset (in NET_RECEIVE_BUFFER, fits 16 bits).
+        ;; CX = payload length, EDI = payload pointer into net_receive_buffer.
+        ;; The buffer used to live at fixed phys 0xF800 (low 16 bits sufficed
+        ;; for any pointer into it); post-paging it's a kernel BSS label at
+        ;; virt 0xC0xxxxxx, so the source address must be the full EDI, not
+        ;; ``movzx esi, di`` which would zero out the kernel-virt high half.
         ;; Copy min(CX, rf_max) bytes to user's buffer at [.rf_buf].
         movzx ecx, cx
         cmp ecx, [.rf_max]
@@ -93,8 +101,8 @@
         mov ecx, [.rf_max]
         .rf_have_count:
         mov eax, ecx                            ; return value = bytes copied
-        movzx esi, di                           ; flat 32-bit source
-        mov edi, [.rf_buf]                      ; flat 32-bit destination
+        mov esi, edi                            ; flat 32-bit kernel-virt source
+        mov edi, [.rf_buf]                      ; flat 32-bit user-virt destination
         cld
         rep movsb
         clc
@@ -114,9 +122,9 @@
         ;;                         user EBP (saved at [esp+8]) = dst_port
         ;;   ICMP (FD_TYPE_ICMP): same shape; DX/dst_port ignored
         ;;
-        ;; Stage user IP and payload into SECTOR_BUFFER (4-byte IP +
+        ;; Stage user IP and payload into sector_buffer (4-byte IP +
         ;; payload starting at +4) so the net stack sees kernel-
-        ;; resident addresses.  Caps payload at SECTOR_BUFFER - 4 = 508
+        ;; resident addresses.  Caps payload at sector_buffer - 4 = 508
         ;; bytes; larger UDP datagrams land when the staging buffer
         ;; widens.
         mov [.st_fd], bx
@@ -125,15 +133,15 @@
         mov eax, [esp+8]                        ; saved user EBP = dst port
         mov [.st_dport], ax
 
-        ;; Stage 4-byte dest IP at SECTOR_BUFFER+0.
+        ;; Stage 4-byte dest IP at sector_buffer+0.
         push esi                                ; save user payload ptr
         mov esi, edi                            ; user EDI = IP source
-        mov edi, SECTOR_BUFFER
+        mov edi, sector_buffer
         cld
         movsd
         pop esi                                 ; restore payload ptr
 
-        ;; Stage payload at SECTOR_BUFFER+4.
+        ;; Stage payload at sector_buffer+4.
         movzx ecx, word [.st_len]
         rep movsb
 
@@ -147,10 +155,10 @@
         jmp .st_err
 
         .st_udp:
-        mov bx, SECTOR_BUFFER                   ; staged dest IP
+        mov ebx, sector_buffer                  ; staged dest IP (full kernel-virt)
         mov di, [.st_sport]
         mov dx, [.st_dport]
-        mov si, SECTOR_BUFFER + 4               ; staged payload
+        mov esi, sector_buffer + 4              ; staged payload (full kernel-virt)
         mov cx, [.st_len]
         call udp_send
         jc .st_err
@@ -159,9 +167,9 @@
         jmp .iret_cf
 
         .st_icmp:
-        mov bx, SECTOR_BUFFER
+        mov ebx, sector_buffer                  ; staged dest IP (full kernel-virt)
         mov al, IPPROTO_ICMP
-        mov si, SECTOR_BUFFER + 4
+        mov esi, sector_buffer + 4              ; staged payload (full kernel-virt)
         mov cx, [.st_len]
         call ip_send
         jc .st_err

@@ -62,16 +62,16 @@ pmode_irq0_handler:
         ;; single CPU we don't need the LOCK prefix.
         push eax
         inc dword [system_ticks]
-        mov al, PMODE_PIC_EOI
-        out PMODE_PIC1_CMD, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
         pop eax
         iretd
 
 pmode_irq6_handler:
         ;; FDC command complete.  EOI.
         push eax
-        mov al, PMODE_PIC_EOI
-        out PMODE_PIC1_CMD, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
         pop eax
         iretd
 
@@ -108,14 +108,14 @@ program_enter:
         iretd
 
 protected_mode_entry:
-        mov ax, 0x10
-        mov ds, ax
-        mov es, ax
-        mov ss, ax
-        mov fs, ax
-        mov gs, ax
-        mov esp, KERNEL_STACK_TOP
-
+        ;; Segment registers, ESP, GDTR, and IDTR are already in place
+        ;; — `high_entry` (kernel.asm) ran first and handed off here
+        ;; with the kernel GDT / IDT live and ESP pointing at
+        ;; `kernel_stack_top` (16 KB at virt 0xC0180000, backed by
+        ;; reserved phys frames; see KERNEL_STACK_PHYS in kernel.asm).
+        ;; We just patch the TSS, ltr, bring up devices, and drop into
+        ;; the shell.
+        ;;
         ;; Patch the TSS descriptor's base bytes with tss_data's linear
         ;; address (the bytes are scattered across descriptor offsets
         ;; +2/+4/+7 so we can't fold them at assemble time without
@@ -130,7 +130,7 @@ protected_mode_entry:
         shr eax, 16
         mov [gdt_tss + 4], al
         mov [gdt_tss + 7], ah
-        mov dword [tss_data + 4], KERNEL_STACK_TOP      ; ESP0
+        mov dword [tss_data + 4], kernel_stack_top      ; ESP0
         mov word [tss_data + 8], 0x10                   ; SS0 = kernel data
         mov word [tss_data + 102], 104                  ; IOPB offset = TSS limit + 1 → no I/O bitmap
         mov ax, TSS_SELECTOR
@@ -162,9 +162,9 @@ protected_mode_entry:
         ;; Other IRQs are unmasked by their own driver inits (IRQ 1
         ;; by ps2_init, IRQ 6 by fdc_init).
         mov dword [system_ticks], 0
-        in al, PMODE_PIC1_DATA
+        in al, PIC1_DATA_PORT
         and al, 0FEh                    ; clear bit 0 (unmask IRQ 0)
-        out PMODE_PIC1_DATA, al
+        out PIC1_DATA_PORT, al
         sti
 
         ;; Install the vDSO blob at FUNCTION_TABLE so user programs can
@@ -198,7 +198,25 @@ protected_mode_entry:
 shell_reload:
         ;; Reload bin/shell off disk and run it.  Same lifecycle as
         ;; sys_exec's .exec_load: find → load → program_enter.
+        ;;
+        ;; Stage the kernel-side `shell_path` string into BUFFER first.
+        ;; bbfs_find / ext2_find still use 16-bit SI/DI for path-string
+        ;; iteration (a holdover from when the kernel lived in low 64
+        ;; KB).  Kernel-virt strings at 0xC01xxxxx don't fit in SI, so
+        ;; we copy the path into low-physical BUFFER (= 0x500, reached
+        ;; through the Phase 3 user shim) where 16-bit addressing works.
+        ;; sys_exec doesn't need this dance — its callers pass paths
+        ;; that already live at user-virt low addresses.
         mov esi, shell_path
+        mov edi, BUFFER
+.shell_path_copy:
+        mov al, [esi]
+        mov [edi], al
+        inc esi
+        inc edi
+        test al, al
+        jnz .shell_path_copy
+        mov esi, BUFFER
         call vfs_find
         jc .shell_fail
         mov edi, PROGRAM_BASE
@@ -216,12 +234,12 @@ shell_reload:
 
 vdso_install:
         ;; Copy the embedded vDSO blob (vdso_image..vdso_image_end, 4 KB)
-        ;; to physical FUNCTION_TABLE (0x08046000).  User programs `call`
-        ;; FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. and land in this
-        ;; blob.  Pre-paging the virt = phys identity holds, so the
-        ;; programs running at PROGRAM_BASE see the vDSO as ordinary RAM.
-        ;; Once paging lands, the kernel will map this same physical
-        ;; frame as a user-readable code page in every PD instead.
+        ;; into the page at FUNCTION_TABLE (= 0x10000).  User programs
+        ;; `call` FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. and land
+        ;; in this blob.  Pre-paging the virt = phys identity holds, so
+        ;; the programs running at PROGRAM_BASE see the vDSO as ordinary
+        ;; RAM.  Phase 4 will instead map the same physical frame as a
+        ;; user-readable code page in every per-program PD.
         push esi
         push edi
         push ecx
@@ -235,9 +253,15 @@ vdso_install:
         pop esi
         ret
 
+        ;; Physical address of `kernel_pd_template`, the page directory
+        ;; whose top-256 PDEs are copied into every per-program PD as
+        ;; the kernel half of the address space.  Phase 3 promotes the
+        ;; boot PD into this slot (= 0x1000) and stops here; Phase 4's
+        ;; per-AS work consumes it from `as_create`.
+kernel_pd_template_phys dd 0
+
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.1 (2026/04/28)", 13, 10, 0
 
         ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
         ;; protected_mode_entry); all other fields stay zero because we
@@ -246,5 +270,7 @@ welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.1 (2026/04/28)", 1
         align 4
 tss_data:
         times 104 db 0
+
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.8.1 (2026/04/28)", 13, 10, 0
 
 ;;; -----------------------------------------------------------------------

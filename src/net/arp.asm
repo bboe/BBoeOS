@@ -5,7 +5,7 @@
 
 arp_handle_packet:
         ;; Process a received Ethernet frame for ARP.
-        ;; Input: ESI = pointer to received frame (within NET_RECEIVE_BUFFER)
+        ;; Input: ESI = pointer to received frame (within net_receive_buffer)
         ;; Updates ARP table on reply, sends reply to requests for our IP.
         push eax
         push ecx
@@ -50,8 +50,8 @@ arp_handle_packet:
         call arp_table_add
         pop esi
 
-        ;; Build ARP reply at NET_TRANSMIT_BUFFER
-        mov edi, NET_TRANSMIT_BUFFER
+        ;; Build ARP reply at net_transmit_buffer
+        mov edi, net_transmit_buffer
         cld
 
         ;; Ethernet dest = requester's MAC (from offset +6 in received frame)
@@ -113,7 +113,7 @@ arp_handle_packet:
 
         ;; Send reply
         push esi
-        mov esi, NET_TRANSMIT_BUFFER
+        mov esi, net_transmit_buffer
         mov ecx, 60
         call ne2k_send
         pop esi
@@ -180,8 +180,8 @@ arp_send_request:
         push esi
         push edi
 
-        ;; Build Ethernet + ARP frame at NET_TRANSMIT_BUFFER
-        mov edi, NET_TRANSMIT_BUFFER
+        ;; Build Ethernet + ARP frame at net_transmit_buffer
+        mov edi, net_transmit_buffer
         cld
 
         ;; Ethernet dest: broadcast
@@ -246,7 +246,7 @@ arp_send_request:
         rep stosw
 
         ;; Send the frame
-        mov esi, NET_TRANSMIT_BUFFER
+        mov esi, net_transmit_buffer
         mov ecx, 60
         call ne2k_send
 

@@ -11,8 +11,8 @@
 ;;; The PIT is reprogrammed to 100 Hz (10 ms/tick) and the IRQ 0 handler
 ;;; (`pmode_irq0_handler` in entry.asm) is wired into the protected mode IDT during
 ;;; `protected_mode_entry`, replacing the BIOS default ~18.2 Hz tick. The
-;;; PIT_* constants below are consumed by entry.asm; PIC_EOI is consumed
-;;; by drivers/fdc.asm.
+;;; PIT_* constants below are consumed by entry.asm.  PIC_EOI lives in
+;;; src/include/constants.asm alongside the other 8259A port numbers.
 ;;; ------------------------------------------------------------------------
 
         CMOS_CENTURY            equ 32h
@@ -26,8 +26,6 @@
         CMOS_STATUS_A           equ 0Ah
         CMOS_UPDATE_IN_PROGRESS equ 80h
         CMOS_YEAR               equ 09h
-
-        PIC_EOI                 equ 20h         ; consumed by drivers/fdc.asm too
 
         PIT_CHANNEL0            equ 40h
         PIT_COMMAND             equ 43h
