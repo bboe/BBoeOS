@@ -117,14 +117,279 @@ syscall_handler:
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
         SYS_ENTRY SYS_SYS_SHUTDOWN,  .sys_shutdown
 
-        ;; Handler subfiles — kept at the bottom so the dispatch logic and
-        ;; the manifest read top-to-bottom before the per-case bodies.
-        ;; Each subfile uses only local labels (`.fs_chmod`, `.io_write`,
-        ;; …) so they attach to syscall_handler's scope; if a subfile ever
-        ;; needs a named helper or private data, switch the table to refer
-        ;; to global labels (sys_fs_chmod, etc.) instead.
-%include "syscall/fs.asm"
-%include "syscall/io.asm"
-%include "syscall/net.asm"
-%include "syscall/rtc.asm"
-%include "syscall/sys.asm"
+        ;; Per-case handler bodies follow.  All but the four net_*
+        ;; handlers are inlined here — each one is just a `call
+        ;; <existing_function>; jmp .iret_cf` pair (or a few extra
+        ;; `mov [esp+N], reg` for syscalls returning DX:AX), so a
+        ;; separate %include subfile gained nothing.  The net_*
+        ;; handlers — fd-table inspection, per-protocol dispatch,
+        ;; payload memcpy through SECTOR_BUFFER — port to C in
+        ;; `src/syscall/syscalls.c` and the table entries below are
+        ;; thin shims that call them.
+
+        ;; ------------------------------------------------------------
+        ;; Filesystem handlers.  cc.py loads args directly into the
+        ;; regs each kernel vfs_* helper expects (SI=path, DI=second-
+        ;; path, AL=flags).
+        ;;
+        ;; fs_chmod / fs_rename / fs_unlink each guard the shell binary
+        ;; against being modified, renamed out from under us, or
+        ;; deleted.  The check keys on the literal path "bin/shell" —
+        ;; aliases like "./bin/shell" still slip through, same as the
+        ;; original.
+        ;; ------------------------------------------------------------
+
+        .check_shell:
+        ;; Returns ZF set if ESI points to the shell path (null-terminated).
+        ;; Preserves ESI/EDI/ECX.  Local to the fs group.
+        push esi
+        push edi
+        push ecx
+        cld
+        mov edi, .shell_name
+        mov ecx, .shell_name_len
+        repe cmpsb
+        pop ecx
+        pop edi
+        pop esi
+        ret
+
+        .fs_chmod:
+        ;; SI = path, AL = flags.
+        call .check_shell
+        jne .fs_chmod_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_chmod_do:
+        call vfs_chmod
+        jmp .iret_cf
+
+        .fs_mkdir:
+        ;; SI = name.  vfs_mkdir returns AX = new sector on success.
+        call vfs_mkdir
+        jmp .iret_cf
+
+        .fs_rename:
+        ;; SI = old path, DI = new path.
+        call .check_shell
+        jne .fs_rename_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_rename_do:
+        call vfs_rename
+        jmp .iret_cf
+
+        .fs_rmdir:
+        ;; SI = path.
+        call vfs_rmdir
+        jmp .iret_cf
+
+        .fs_unlink:
+        ;; SI = path.
+        call .check_shell
+        jne .fs_unlink_do
+        mov al, ERROR_PROTECTED
+        stc
+        jmp .iret_cf
+        .fs_unlink_do:
+        call vfs_delete
+        jmp .iret_cf
+
+        .shell_name            db "bin/shell", 0
+        .shell_name_len        equ $ - .shell_name
+
+        ;; ------------------------------------------------------------
+        ;; I/O handlers.  cc.py loads args directly into the regs each
+        ;; fd_* helper expects (BX=fd, AL=flags/cmd, SI=buf for write,
+        ;; DI=buf for read, CX=count).
+        ;; ------------------------------------------------------------
+
+        .io_close:
+        ;; BX = fd.
+        call fd_close
+        jmp .iret_cf
+
+        .io_fstat:
+        ;; BX = fd.  fd_fstat returns AL = mode, CX:DX = size (32-bit).
+        ;; Mirror the asm version: write CX/DX into the saved-regs
+        ;; slots so the user sees mode in AL and size in CX:DX after
+        ;; iret.  Saved CX is at SAVED_EAX-4 (24), saved DX at
+        ;; SAVED_EAX-8 (20).
+        call fd_fstat
+        jc .iret_cf
+        mov [esp + SYSCALL_SAVED_EDX], dx
+        mov [esp + SYSCALL_SAVED_EDX + 4], cx
+        jmp .iret_cf
+
+        .io_ioctl:
+        ;; BX = fd, AL = cmd, other regs per (fd_type, cmd).
+        call fd_ioctl
+        jmp .iret_cf
+
+        .io_open:
+        ;; SI = filename, AL = flags, DL = mode (when O_CREAT).
+        call fd_open
+        jmp .iret_cf
+
+        .io_read:
+        ;; BX = fd, EDI = buffer, ECX = count.  fd_read returns the
+        ;; full 32-bit byte count in EAX (or -1 on error), so route
+        ;; through the .iret_cf_eax path that skips the sign-extend.
+        call fd_read
+        jmp .iret_cf_eax
+
+        .io_write:
+        ;; BX = fd, ESI = buffer, ECX = count.  Same return shape as io_read.
+        call fd_write
+        jmp .iret_cf_eax
+
+        ;; ------------------------------------------------------------
+        ;; Network handlers — bodies in src/syscall/syscalls.c.  Each
+        ;; entry is a thin shim that calls the C function and jumps to
+        ;; .iret_cf.  sys_net_sendto needs the user's dst_port, which
+        ;; lives in the saved EBP slot at [esp+8] (the user passed it
+        ;; via EBP because every other register was already taken).
+        ;; The shim loads it into EAX before the call so cc.py's
+        ;; in_register("ax") sees it as a regular parameter.
+        ;; ------------------------------------------------------------
+
+        .net_mac:
+        call sys_net_mac
+        jmp .iret_cf
+
+        .net_open:
+        call sys_net_open
+        jmp .iret_cf
+
+        .net_recvfrom:
+        call sys_net_recvfrom
+        jmp .iret_cf
+
+        .net_sendto:
+        mov eax, [esp + 8]              ; saved EBP — low 16 = dst_port
+        call sys_net_sendto
+        jmp .iret_cf
+
+        ;; ------------------------------------------------------------
+        ;; Real-time-clock handlers.  Returns that overflow AX (DX:AX
+        ;; pairs) get written explicitly into the saved EDX slot so
+        ;; the user sees the same value after iretd.
+        ;; ------------------------------------------------------------
+
+        .rtc_datetime:
+        ;; Returns DX:AX = unsigned epoch seconds (UTC), valid through
+        ;; 2106-02-07.  CF clear (never errors).
+        call rtc_read_epoch
+        mov [esp + SYSCALL_SAVED_EDX], dx
+        clc
+        jmp .iret_cf
+
+        .rtc_millis:
+        ;; Returns DX:AX = milliseconds since boot.  Wraps at 2^32 ms
+        ;; (~49.7 days).  CF clear.
+        call rtc_tick_read
+        imul eax, MS_PER_TICK
+        mov edx, eax
+        shr edx, 16
+        mov [esp + SYSCALL_SAVED_EDX], dx
+        clc
+        jmp .iret_cf
+
+        .rtc_sleep:
+        ;; CX = milliseconds.  rtc_sleep_ms preserves all registers; CF clear.
+        call rtc_sleep_ms
+        clc
+        jmp .iret_cf
+
+        .rtc_uptime:
+        ;; Returns AX = seconds since boot.  CF clear.
+        call rtc_tick_read
+        xor edx, edx
+        mov ecx, TICKS_PER_SECOND
+        div ecx
+        clc
+        jmp .iret_cf
+
+        ;; ------------------------------------------------------------
+        ;; Process control handlers.  sys_exec loads the program and
+        ;; jmps — never returns through .iret_cf.  sys_exit teleports
+        ;; back to the kernel's saved ESP (set by shell_reload /
+        ;; sys_exec before each `jmp PROGRAM_BASE`) and re-enters
+        ;; shell_reload, which respawns the shell from a clean state.
+        ;; ------------------------------------------------------------
+
+        .sys_exec:
+        ;; ESI = filename in the calling shell's user-virt.  Active PD
+        ;; is the shell's; we can read user pages directly until the
+        ;; switch-to-template + destroy below.
+        call vfs_find
+        jc .exec_not_found
+        test byte [vfs_found_mode], FLAG_EXECUTE
+        jnz .exec_load
+        mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+        .exec_not_found:
+        mov al, ERROR_NOT_FOUND
+        stc
+        jmp .iret_cf
+        .exec_load:
+        mov edi, program_scratch
+        call vfs_load
+        jc .exec_not_found
+        ;; Snapshot BUFFER (256 B at user-virt 0x500) and EXEC_ARG (4 B
+        ;; at user-virt 0x4FC) from the shell's PD before destroy.
+        push esi
+        push edi
+        mov esi, BUFFER
+        mov edi, buffer_snapshot
+        mov ecx, MAX_INPUT / 4
+        cld
+        rep movsd
+        mov eax, [EXEC_ARG]
+        mov [exec_arg_snapshot], eax
+        pop edi
+        pop esi
+        mov esp, [shell_esp]
+        ;; Switch CR3 to kernel_pd_template, then destroy the dying shell's PD.
+        mov eax, cr3
+        push eax
+        mov eax, [kernel_pd_template_phys]
+        mov cr3, eax
+        pop eax
+        call address_space_destroy
+        sti
+        jmp program_enter
+
+        .sys_exit:
+        ;; Tear down the dying program's PD, restore kernel ESP, and
+        ;; re-enter shell_reload to respawn.
+        mov eax, cr3
+        push eax
+        mov eax, [kernel_pd_template_phys]
+        mov cr3, eax
+        pop eax
+        call address_space_destroy
+        mov esp, [shell_esp]
+        sti
+        jmp shell_reload
+
+        .sys_reboot:
+        ;; Does not return.
+        call reboot
+
+        .sys_shutdown:
+        ;; Returns only if the host ignores the shutdown port — surface
+        ;; CF=1 so userspace can fall back.
+        call shutdown
+        stc
+        jmp .iret_cf
+
+;;; The four net_* C handlers and their `extern` declarations of
+;;; fd_alloc / fd_lookup / udp_send / udp_receive / icmp_receive /
+;;; ip_send + the ne2k.c file-scope globals (`net_present`,
+;;; `mac_address`).  Lives at file scope so the dispatcher's `call
+;;; sys_net_*` resolves to global labels.
+%include "syscalls.kasm"
