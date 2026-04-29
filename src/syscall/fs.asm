@@ -1,7 +1,8 @@
         ;; ------------------------------------------------------------
         ;; Filesystem syscalls.  cc.py loads args directly into the regs
-        ;; the kernel vfs_* helpers expect (SI=path, DI=second-path,
-        ;; AL=flags), so each case is just a call + jmp .iret_cf.
+        ;; the kernel vfs_* helpers expect (ESI=path, EDI=second-path,
+        ;; AL=flags), so each case validates its user pointer(s) via
+        ;; access_ok_string and then calls + jmp .iret_cf.
         ;;
         ;; fs_chmod / fs_rename / fs_unlink each guard the shell binary
         ;; against being modified, renamed out from under us, or deleted.
@@ -26,8 +27,21 @@
         pop esi
         ret
 
+        .check_path:
+        ;; Validates ESI as a null-terminated user path within MAX_PATH
+        ;; bytes.  On failure: sets AL = ERROR_FAULT, sets CF, and jumps
+        ;; out via .fs_bad_pointer (handlers fall through .iret_cf).
+        ;; On success: returns with CF clear, registers preserved.
+        push ecx
+        mov ecx, MAX_PATH
+        call access_ok_string
+        pop ecx
+        ret
+
         .fs_chmod:
-        ;; SI = path, AL = flags.
+        ;; ESI = path, AL = flags.
+        call .check_path
+        jc .fs_bad_pointer
         call .check_shell
         jne .fs_chmod_do
         mov al, ERROR_PROTECTED
@@ -38,14 +52,22 @@
         jmp .iret_cf
 
         .fs_mkdir:
-        ;; SI = name.  vfs_mkdir returns AX = new sector on success.
+        ;; ESI = name.  vfs_mkdir returns AX = new sector on success.
+        call .check_path
+        jc .fs_bad_pointer
         call vfs_mkdir
         jmp .iret_cf
 
         .fs_rename:
-        ;; SI = old path, DI = new path.  Guard the shell as the rename
+        ;; ESI = old path, EDI = new path.  Guard the shell as the rename
         ;; source only — vfs_rename's own "destination exists" check
         ;; refuses an attempt to rename over bin/shell.
+        call .check_path
+        jc .fs_bad_pointer
+        xchg esi, edi
+        call .check_path
+        xchg esi, edi
+        jc .fs_bad_pointer
         call .check_shell
         jne .fs_rename_do
         mov al, ERROR_PROTECTED
@@ -56,12 +78,16 @@
         jmp .iret_cf
 
         .fs_rmdir:
-        ;; SI = path.
+        ;; ESI = path.
+        call .check_path
+        jc .fs_bad_pointer
         call vfs_rmdir
         jmp .iret_cf
 
         .fs_unlink:
-        ;; SI = path.
+        ;; ESI = path.
+        call .check_path
+        jc .fs_bad_pointer
         call .check_shell
         jne .fs_unlink_do
         mov al, ERROR_PROTECTED
@@ -69,6 +95,11 @@
         jmp .iret_cf
         .fs_unlink_do:
         call vfs_delete
+        jmp .iret_cf
+
+        .fs_bad_pointer:
+        mov al, ERROR_FAULT
+        stc
         jmp .iret_cf
 
         .shell_name            db "bin/shell", 0
