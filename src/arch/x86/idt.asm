@@ -4,8 +4,17 @@
 ;;; Exports a statically-built IDT covering vectors 0..31 (CPU exceptions)
 ;;; and 0x30 (INT 30h syscall gate).  Each exception stub normalizes the
 ;;; stack (pushes a fake error code when the CPU didn't), pushes the
-;;; exception number, and jumps to exc_common which prints "EXCnn\r\n" to
-;;; COM1 and halts.  No recovery — a panic is a panic.
+;;; exception number, and jumps to exc_common which prints
+;;; "EXCnn EIP=... CR2=... ERR=..." on COM1, then triages:
+;;;   * CPL=3 (any vector) → tear down the dying program's PD and
+;;;     re-enter shell_reload, mirroring sys_exit's teardown sequence.
+;;;   * CPL=0 + #PF + CR2 < 0xC0000000 → also kill.  The kernel was
+;;;     dereferencing a user pointer mid-syscall (e.g. read() into an
+;;;     unmapped user buffer); the program is the bug, not the kernel.
+;;;     Phase 5 PR B's access_ok will reject these at the syscall
+;;;     boundary, but until then this route keeps the kernel alive.
+;;;   * Anything else → halt.  Kernel-half CR2 on #PF, or any non-#PF
+;;;     exception at CPL=0, is a kernel bug we want loud.
 ;;;
 ;;; The IDTR is loaded via `lidt [idtr]` in `kernel.asm`'s `high_entry`,
 ;;; right after the boot far-jump lands at the high-half kernel.
@@ -149,6 +158,53 @@ exc_common:
         call exc_putc
         mov al, 0Ah
         call exc_putc
+
+        ;; Triage.  exc_putc / exc_puthex / exc_puthex32 all preserve the
+        ;; stack, so the iret frame is still where it was on entry:
+        ;;   [esp+0]  exception number   [esp+12] CS
+        ;;   [esp+4]  error code         [esp+16] EFLAGS
+        ;;   [esp+8]  EIP
+        ;; Dispatch:
+        ;;   CPL=3 (user-mode fault, any vector) → kill program.
+        ;;   CPL=0 + #PF + CR2 < 0xC0000000      → kill program.  The kernel
+        ;;       was dereferencing a user pointer mid-syscall (e.g. read()
+        ;;       into an unmapped user buffer).  Phase 5 PR B's access_ok
+        ;;       will reject these at the syscall boundary, but until then
+        ;;       routing the fault through the kill path keeps the kernel
+        ;;       alive instead of bricking on every syscall with a bad
+        ;;       user pointer.
+        ;;   Anything else                        → halt.  Kernel-half CR2
+        ;;       on #PF, or any non-#PF exception at CPL=0, is a kernel
+        ;;       bug we want loud.
+        test byte [esp + 12], 3
+        jnz .kill_program
+        cmp dword [esp], 14
+        jne .halt_kernel
+        mov eax, cr2
+        cmp eax, 0xC0000000
+        jae .halt_kernel
+
+        .kill_program:
+        ;; Tear down the dying program's PD and re-enter shell_reload.
+        ;; CR3 still points at the dying program's PD (the CPU doesn't
+        ;; change CR3 on a fault).  Mirrors sys_exit (src/syscall/sys.asm).
+        ;; We never return through the iret frame — the program's death
+        ;; is final, including for the kernel-deref-of-user-pointer case
+        ;; (whatever kernel-side state the syscall built up is abandoned;
+        ;; fd_init in shell_reload re-zeroes the FD table for the next
+        ;; program, and the dying program's user pages go away with the
+        ;; PD).
+        mov eax, cr3
+        push eax
+        mov eax, [kernel_pd_template_phys]
+        mov cr3, eax
+        pop eax
+        call address_space_destroy
+        mov esp, [shell_esp]
+        sti
+        jmp shell_reload
+
+        .halt_kernel:
         cli
         .halt:
         hlt
