@@ -40,7 +40,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT = b"$ "
 
-BOOT_TIMEOUT = 30.0
+BOOT_TIMEOUT = float(os.environ.get("BBOE_BOOT_TIMEOUT", "2"))
 LS_TIMEOUT = 5.0
 
 # A populated 80x25 text screen with welcome banner + uptime + ls bin

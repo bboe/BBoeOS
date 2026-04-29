@@ -35,10 +35,9 @@ STATIC_DIR = Path("static")
 # The self-host run on asm.asm itself is the slow-path test; every
 # other program in static/ finishes well under a second.  Give asm
 # its own generous budget and let everything else trip the default
-# 4s cap.  Bumped to 32s once the pure-C handler ports (mul / neg
-# / not / div / adc / shl / shr) grew the hot-path per-call
-# overhead past the 16s ceiling on the CI runner.
-ASM_SELF_HOST_TIMEOUT = 32
+# 4s cap.  CI runners are significantly slower; use BBOE_ASM_SELF_HOST_TIMEOUT
+# to raise the ceiling (the workflow sets it to 32).
+ASM_SELF_HOST_TIMEOUT = int(os.environ.get("BBOE_ASM_SELF_HOST_TIMEOUT", "12"))
 
 
 def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
@@ -135,6 +134,8 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
                 print(f"  FAIL  {label:<20} {message}  {timing}")
                 fail_count += 1
                 failed.append(label)
+                if arguments.fail_fast:
+                    break
 
         persisted: Path | None = None
         if keep_artifacts:
@@ -237,6 +238,11 @@ def main() -> int:
         "program",
         nargs="?",
         help="restrict the test to one program (e.g. 'edit')",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop after the first failing test",
     )
     parser.add_argument(
         "--floppy",

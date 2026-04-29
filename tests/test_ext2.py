@@ -40,6 +40,10 @@ from run_qemu import run_commands  # noqa: E402
 
 from add_file import compute_directory_sector, ext2_add_file  # noqa: E402
 
+_DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
+_LARGE_FILE_TIMEOUT = float(os.environ.get("BBOE_LARGE_FILE_TIMEOUT", "6.0"))
+_DOUBLY_INDIRECT_TIMEOUT = float(os.environ.get("BBOE_DOUBLY_INDIRECT_TIMEOUT", "12.0"))
+
 
 @dataclass
 class ProgramTest:
@@ -48,12 +52,13 @@ class ProgramTest:
     name: str
     commands: list[str]
     expect: str
-    timeout: float = 10.0
+    slow: bool = False
+    timeout: float = _DEFAULT_PROGRAM_TIMEOUT
 
 
 TESTS: list[ProgramTest] = [
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
-    ProgramTest("cat_large", ["cat src/asm.c"], r"Self-hosted x86 assembler", timeout=30.0),
+    ProgramTest("cat_large", ["cat src/asm.c"], r"Self-hosted x86 assembler", slow=True, timeout=_LARGE_FILE_TIMEOUT),
     ProgramTest(
         "chmod",
         ["cp src/parse_ip.asm out.asm", "chmod +x out.asm", "ls"],
@@ -69,25 +74,27 @@ TESTS: list[ProgramTest] = [
         "cp_overwrite_shrink",
         ["cp src/asm.c out.c", "cp src/parse_ip.asm out.c", "cat out.c"],
         r"^parse_ip:",
-        timeout=30.0,
+        timeout=_LARGE_FILE_TIMEOUT,
     ),
     ProgramTest(
         "doubly_indirect_cat",
         ["cat src/large.bin"],
         r"EXT2_DOUBLY_INDIRECT_OK",  # sentinel placed at byte 274432 (block 268)
-        timeout=60.0,
+        slow=True,
+        timeout=_DOUBLY_INDIRECT_TIMEOUT,
     ),
     ProgramTest(
         "doubly_indirect_cp",
         ["cp src/large.bin out.bin", "cat out.bin"],
         r"EXT2_DOUBLY_INDIRECT_OK",  # verifies doubly-indirect write path
-        timeout=60.0,
+        slow=True,
+        timeout=_DOUBLY_INDIRECT_TIMEOUT,
     ),
     ProgramTest(
         "doubly_indirect_cp_shrink",
         ["cp src/large.bin out.bin", "cp src/parse_ip.asm out.bin", "cat out.bin"],
         r"^parse_ip:",
-        timeout=60.0,
+        timeout=_DOUBLY_INDIRECT_TIMEOUT,
     ),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
@@ -178,7 +185,7 @@ def _add_large_test_file(*, image: Path) -> None:
         )
 
 
-def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
+def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 1024) -> None:
     """Run make_os.sh --ext2; abort if the build fails."""
     image = temporary_directory / BASE_IMAGE
     result = subprocess.run(
@@ -190,7 +197,7 @@ def _build_os(*, temporary_directory: Path, block_size: int = 1024) -> None:
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(1)
-    if block_size == 1024:
+    if large_file and block_size == 1024:
         _add_large_test_file(image=image)
 
 
@@ -249,6 +256,7 @@ def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> 
 
 def _run_suite(
     *,
+    fail_fast: bool,
     floppy: bool,
     tests: list[ProgramTest],
     temporary_directory: Path,
@@ -273,6 +281,8 @@ def _run_suite(
             print(f"  FAIL  {name:<20}  {message}   {timing}")
             fail_count += 1
             failed.append(name)
+            if fail_fast:
+                break
     return pass_count, fail_count, failed
 
 
@@ -311,11 +321,21 @@ def main() -> int:
     )
     parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'hello')")
     parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop after the first failing test",
+    )
+    parser.add_argument(
         "--floppy",
         action="store_true",
         help="boot QEMU with the drive attached as a floppy (if=floppy); "
         "skips the 2 KB-block-size matrix because the resulting image "
         "exceeds the 1.44 MB floppy capacity",
+    )
+    parser.add_argument(
+        "--slow",
+        action="store_true",
+        help="include slow tests (large-file and doubly-indirect I/O)",
     )
     arguments = parser.parse_args()
 
@@ -324,14 +344,22 @@ def main() -> int:
         print(f"No test named {arguments.program!r}")
         return 1
 
+    if arguments.program is None and not arguments.slow:
+        for test in tests:
+            if test.slow:
+                print(f"  SKIP  {test.name:<20} (slow; pass --slow to include)")
+        tests = [t for t in tests if not t.slow]
+
     total_pass = 0
     total_fail = 0
     all_failed: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="test_ext2_") as temporary_path:
         temporary_directory = Path(temporary_path)
-        _build_os(temporary_directory=temporary_directory, block_size=1024)
-        p, f, failed = _run_suite(floppy=arguments.floppy, tests=tests, temporary_directory=temporary_directory)
+        _build_os(large_file=arguments.slow, temporary_directory=temporary_directory, block_size=1024)
+        p, f, failed = _run_suite(
+            fail_fast=arguments.fail_fast, floppy=arguments.floppy, tests=tests, temporary_directory=temporary_directory
+        )
         total_pass += p
         total_fail += f
         all_failed += failed
@@ -339,12 +367,13 @@ def main() -> int:
     # 2 KB block-size tests (only when running the full suite, and not under --floppy:
     # mke2fs grows a 2 KB-block image past 1.44 MB so it can't be addressed via
     # QEMU's floppy backend).
-    if arguments.program is None and not arguments.floppy:
-        blk2_tests = BLOCK_SIZE_TESTS
+    if arguments.program is None and not arguments.floppy and not (arguments.fail_fast and total_fail):
+        blk2_tests = BLOCK_SIZE_TESTS if arguments.slow else [t for t in BLOCK_SIZE_TESTS if not t.slow]
         with tempfile.TemporaryDirectory(prefix="test_ext2_2k_") as temporary_path:
             temporary_directory = Path(temporary_path)
-            _build_os(temporary_directory=temporary_directory, block_size=2048)
+            _build_os(large_file=False, temporary_directory=temporary_directory, block_size=2048)
             p, f, failed = _run_suite(
+                fail_fast=arguments.fail_fast,
                 floppy=arguments.floppy,
                 tests=blk2_tests,
                 temporary_directory=temporary_directory,

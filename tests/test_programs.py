@@ -29,6 +29,7 @@ from run_qemu import run_commands
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive.img"
+_DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
 
 
 @dataclass
@@ -39,7 +40,7 @@ class ProgramTest:
     commands: list[str]
     expect: str
     with_net: bool = False
-    timeout: float = 10.0
+    timeout: float = _DEFAULT_PROGRAM_TIMEOUT
     skip: str | None = None
 
 
@@ -114,6 +115,11 @@ def main() -> int:
     )
     parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'netinit')")
     parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop after the first failing test",
+    )
+    parser.add_argument(
         "--floppy",
         action="store_true",
         help="boot QEMU with the drive attached as a floppy (if=floppy)",
@@ -149,6 +155,8 @@ def main() -> int:
                 print(f"  FAIL  {test.name:<12}  {message}   {timing}")
                 fail_count += 1
                 failed.append(test.name)
+                if arguments.fail_fast:
+                    break
     print()
     print(f"{pass_count} passed, {fail_count} failed")
     if fail_count:
