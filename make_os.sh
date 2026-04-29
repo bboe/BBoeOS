@@ -18,7 +18,7 @@ rm -rf "$KBUILD" && mkdir -p "$KBUILD"
 find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
     rel="${source#src/}"; out="$KBUILD/${rel%.c}.kasm"
     mkdir -p "$(dirname "$out")"
-    python3 cc.py --target kernel "$source" "$out" || exit 1
+    python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
 done
 
 # Build the vDSO blob (FUNCTION_TABLE + shared_* helpers).  The kernel
@@ -37,7 +37,7 @@ fi
 # the pad, NASM's `times` directive goes negative and the build fails.
 nasm -f bin \
     -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
-    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" \
+    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" -i "$KBUILD/syscall/" \
     -o kernel.bin src/arch/x86/kernel.asm
 if [ $? -ne 0 ]; then
     exit 1

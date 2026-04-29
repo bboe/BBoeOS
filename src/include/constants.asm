@@ -121,6 +121,16 @@
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 40000000h        ; Ring-3 stack top; 64 KB region 0x3FFF0000-0x40000000
 
+        ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
+        ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with
+        ;; the rest of the 8259A constants.
+        %assign PIT_CHANNEL0       0x40
+        %assign PIT_COMMAND        0x43
+        %assign PIT_DIVISOR        11932         ; 1193182 / 11932 ≈ 99.998 Hz
+        %assign PIT_MODE2_LOHI_CH0 00110100b     ; ch0, lo/hi access, mode 2, binary
+        %assign MS_PER_TICK        10
+        %assign TICKS_PER_SECOND   100
+
         ;; VGA hardware register ports (used by both the real-mode boot
         ;; path's vga_font_load and the post-flip vga driver).
         %assign VGA_GC_DATA     03CFh

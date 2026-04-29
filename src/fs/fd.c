@@ -289,9 +289,9 @@ fd_ioctl:
         stc
         ret
 
-%include \"fs/fd/console.asm\"
+%include \"fs/fd/console.kasm\"
 %include \"fs/fd/fs.asm\"
-%include \"fs/fd/net.asm\"
+%include \"fs/fd/net.kasm\"
 
         ;; Operations table: (read_fn, write_fn) dword pairs indexed by FD_TYPE_*
         ;; A zero entry means unsupported for that type.
@@ -321,12 +321,25 @@ fd_ioctl_ops:
         fd_open_flags   db 0
         fd_open_mode    db 0
         fd_open_name    dd 0
-        fd_write_buffer dd 0
         ;; FD table.  Lives in kernel BSS at whatever kernel-virt
         ;; address the linker assigns; bbfs.asm / ext2.asm reach FD
         ;; entries via `[esi+FD_OFFSET_*]` (32-bit), so the table is
         ;; no longer pinned to fixed low-physical 0xE000.
+        ;;
+        ;; fd_write_buffer was here as `dd 0` storage; now lives as a
+        ;; C-level global below the asm() block so the C-ported
+        ;; fs/fd/*.c handlers can reference it directly.
         align 4
 fd_table:
         times FD_MAX * FD_ENTRY_SIZE db 0
 ");
+
+// fd_write_buffer holds the user-supplied source pointer for the
+// in-flight io_write call.  The dispatcher (fd_write above) stashes ESI
+// here before the per-type write handler is jumped to so the handlers
+// can access it without an extra parameter.  Hoisted out of the asm()
+// block so C ports of fs/fd/{console,fs,net}.asm can read/write it
+// directly; the bare-name `fd_write_buffer` symbol stays valid for the
+// surviving asm references via the `equ` shim below.
+uint8_t *fd_write_buffer;
+asm("fd_write_buffer equ _g_fd_write_buffer");
