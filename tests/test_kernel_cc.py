@@ -1437,6 +1437,67 @@ def test_pinned_function_pointer_emits_jmp_via_pinned_register() -> None:
     assert "mov ebx, eax" in asm, f"must move return value into the pinned register\n{asm}"
 
 
+# ---------------------------------------------------------------------------
+# Dot member access on file-scope struct globals (extern struct support)
+# ---------------------------------------------------------------------------
+
+
+def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
+    """``obj.field`` on a file-scope struct global emits ``[_g_obj+offset]``.
+
+    Motivation: fd_open's port wants to read ``vfs_found.size`` etc.
+    after vfs_find populates the struct.  No base-register load needed
+    because the struct's address is a compile-time symbol.
+    """
+    asm = _kernel(
+        """
+        struct vfs_found_t { uint8_t type; uint8_t mode; uint16_t inode; uint32_t size; };
+        extern struct vfs_found_t vfs_found;
+        int read_size(int *r __attribute__((out_register("ax")))) {
+            *r = vfs_found.size;
+            return 1;
+        }
+    """,
+        bits=32,
+    )
+    assert "[_g_vfs_found+4]" in asm, f"expected direct memory access\n{asm}"
+
+
+def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
+    """``obj.field = expr;`` on a file-scope struct global emits direct stores."""
+    asm = _kernel(
+        """
+        struct slot { uint8_t kind; uint16_t value; };
+        struct slot entry;
+        void set() {
+            entry.kind = 5;
+            entry.value = 42;
+        }
+    """,
+        bits=32,
+    )
+    # cc.py packs struct fields tightly (no alignment padding), so the
+    # uint16_t value sits immediately after the uint8_t kind at offset 1.
+    assert "mov byte [_g_entry], al" in asm, f"expected byte write to _g_entry\n{asm}"
+    assert "mov word [_g_entry+1], ax" in asm, f"expected word write to _g_entry+1\n{asm}"
+
+
+def test_dot_access_on_local_struct_still_rejected() -> None:
+    """Dot-access on a local struct value (not a pointer) still raises an error."""
+    error = _kernel_error(
+        """
+        struct s { uint8_t x; };
+        void bad() {
+            struct s local;
+            int y;
+            y = local.x;
+        }
+    """,
+        bits=32,
+    )
+    assert "dot member access" in error, f"Expected dot-access rejection, got: {error}"
+
+
 def test_pinned_register_on_non_function_pointer_rejected() -> None:
     """``pinned_register`` on a plain int local is rejected at parse time."""
     error = _kernel_error("""
