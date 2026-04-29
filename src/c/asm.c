@@ -804,8 +804,9 @@ void emit_modrm_disp(int modrm, int disp) {
        bits exceed 0xFFFF still narrows to its on-the-wire encoding —
        NASM treats ``[0x100000+si]`` as ``[si]`` because the disp16
        window of 0x100000 is zero, and our protected mode symbol table now
-       round-trips the full 32-bit value (so EDIT_BUFFER_BASE arrives
-       here as 0x100000 rather than the 16-bit-truncated 0). */
+       round-trips the full 32-bit value (so a label whose address
+       happens to land at 0x100000 arrives here as 0x100000 rather
+       than the 16-bit-truncated 0). */
     int low = disp & 0xFFFF;
     if (low >= 0x8000) {
         low -= 0x10000;
