@@ -942,12 +942,23 @@ class Parser:
                 asm_symbol = value
             else:
                 asm_register = value
+        # Optional ``extern`` keyword on file-scope variable / array
+        # declarations.  Names a symbol whose storage lives in another
+        # translation unit; the generator emits no ``_g_<name>:`` bytes
+        # for it, but references compile normally to ``[_g_<name>]``.
+        is_extern = False
+        if self.peek()[0] == "EXTERN":
+            self.eat("EXTERN")
+            is_extern = True
         type_string = self.parse_type()
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
             if asm_register is not None:
                 message = "asm_register attribute is not valid on function definitions"
+                raise CompileError(message, line=line)
+            if is_extern:
+                message = "extern is not supported on functions; function declarations are extern by default"
                 raise CompileError(message, line=line)
             self.eat("LPAREN")
             parameters = self.parse_parameters()
@@ -1059,6 +1070,9 @@ class Parser:
             self.eat("ASSIGN")
             init = self.parse_array_init() if is_array else self.parse_expression()
         self.eat("SEMI")
+        if is_extern and init is not None:
+            message = "extern declarations may not have an initializer"
+            raise CompileError(message, line=line)
         if is_array:
             if asm_register is not None:
                 message = "asm_register attribute is not valid on arrays"
@@ -1066,11 +1080,13 @@ class Parser:
             if asm_symbol is not None:
                 message = "asm_name attribute is not valid on arrays"
                 raise CompileError(message, line=line)
-            if size_expression is None and init is None:
+            if size_expression is None and init is None and not is_extern:
                 message = f"global array '{name}' needs either a size or an initializer"
                 raise CompileError(message, line=line)
-            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(asm_register=asm_register, asm_symbol=asm_symbol, init=init, line=line, name=name, type_name=type_string)
+            return ArrayDecl(init=init, is_extern=is_extern, line=line, name=name, size=size_expression, type_name=type_string)
+        return VarDecl(
+            asm_register=asm_register, asm_symbol=asm_symbol, init=init, is_extern=is_extern, line=line, name=name, type_name=type_string
+        )
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).

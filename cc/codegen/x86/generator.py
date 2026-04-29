@@ -171,6 +171,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         super().__init__(constant_values=constant_values, defines=defines, target=target)
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
+        self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
@@ -580,6 +581,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # Storage lives in an existing asm symbol, not here,
                 # so no ``_g_<name>`` label is emitted.
                 continue
+            if name in self.extern_globals:
+                # Storage lives in another translation unit; references
+                # still resolve to ``_g_<name>`` (matching the symbol the
+                # owning .c file emits).
+                continue
             if declaration.init is None:
                 stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 if self.target_mode == "kernel":
@@ -592,6 +598,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
+            if name in self.extern_globals:
+                # Storage lives in another translation unit; references
+                # to the bare ``_g_<name>`` label still resolve.
+                continue
             is_byte = declaration.type_name in self.BYTE_TYPES
             is_struct = declaration.type_name.startswith("struct ")
             if is_struct:
@@ -1268,6 +1278,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.register_aliased_globals[name] = self.target.widen_gp(declaration.asm_register)
                 if declaration.asm_symbol is not None:
                     self.asm_symbol_globals[name] = declaration.asm_symbol
+                if declaration.is_extern:
+                    self.extern_globals.add(name)
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
@@ -1283,6 +1295,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         self.emit_constant_reference(constant)
                 if declaration.init is not None:
                     self._validate_array_init(declaration.init.elements)
+                if declaration.is_extern:
+                    self.extern_globals.add(name)
                 self.global_arrays[name] = declaration
             else:
                 message = f"unexpected top-level declaration: {type(declaration).__name__}"

@@ -1151,6 +1151,63 @@ def test_asm_name_with_offset_compiles() -> None:
     assert "[vfs_found_size+2]" in output
 
 
+# ---------------------------------------------------------------------------
+# extern keyword
+# ---------------------------------------------------------------------------
+
+
+def test_extern_scalar_global_no_storage() -> None:
+    """``extern T name;`` declares the symbol but emits no _g_name storage.
+
+    The motivating shape is a cross-.c-file global like ``fd_write_buffer``
+    whose definition lives in fs/fd.c and whose handlers in
+    fs/fd/console.c want to reference it without redefining storage.
+    """
+    source = textwrap.dedent("""
+        extern uint8_t *fd_write_buffer;
+        int read_buf(int *result __attribute__((out_register("ax")))) {
+            *result = fd_write_buffer[0];
+            return 1;
+        }
+    """)
+    output = _kernel(source)
+    assert "[_g_fd_write_buffer]" in output, f"reference must resolve to _g_fd_write_buffer\n{output}"
+    assert "_g_fd_write_buffer:" not in output, f"extern must not emit storage\n{output}"
+
+
+def test_extern_array_global_no_storage() -> None:
+    """``extern T name[N];`` declares the array symbol but emits no _g_name storage."""
+    source = textwrap.dedent("""
+        extern int sizes[8];
+        int read_size(int idx __attribute__((in_register("bx"))),
+                      int *result __attribute__((out_register("ax")))) {
+            *result = sizes[idx];
+            return 1;
+        }
+    """)
+    output = _kernel(source)
+    assert "_g_sizes" in output, f"reference must mention _g_sizes\n{output}"
+    assert "_g_sizes:" not in output, f"extern must not emit storage\n{output}"
+
+
+def test_extern_with_init_rejected() -> None:
+    """``extern T name = value;`` is rejected — extern declares, doesn't define."""
+    error = _kernel_error("""
+        extern int x = 5;
+    """)
+    assert "extern" in error.lower(), f"Expected error about extern + initializer, got: {error}"
+
+
+def test_extern_local_rejected() -> None:
+    """``extern`` inside a function body is rejected (only valid at file scope)."""
+    error = _kernel_error("""
+        void f() {
+            extern int x;
+        }
+    """)
+    assert "extern" in error.lower(), f"Expected error about extern in function body, got: {error}"
+
+
 def test_net_transmit_buffer_named_constant() -> None:
     """NET_TRANSMIT_BUFFER resolves as a named constant (immediate), not a memory operand."""
     source = """
