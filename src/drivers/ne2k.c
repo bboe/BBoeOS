@@ -144,11 +144,15 @@ int ne2k_probe() __attribute__((carry_return)) {
     return 1;
 }
 
-// ne2k_receive: poll the RX ring for one frame.  Multi-register return
-// (EDI = NET_RECEIVE_BUFFER, ECX = packet length, CF) doesn't fit cc.py's
-// natural codegen shape, so the body stays as one inline-asm block —
-// byte-for-byte equivalent to the original drivers/ne2k.asm version.
-void ne2k_receive();
+// ne2k_receive: poll the RX ring for one frame.  The body stays as one
+// inline-asm block — byte-for-byte equivalent to the original
+// drivers/ne2k.asm version — but the C declaration captures the multi-
+// register return (EDI = NET_RECEIVE_BUFFER pointer, ECX = packet
+// length, CF = packet-available) via out_register parameters and
+// carry_return so C callers see it as a normal function.
+__attribute__((carry_return))
+int ne2k_receive(uint8_t *frame_pointer __attribute__((out_register("edi"))),
+                 int *length __attribute__((out_register("ecx"))));
 
 asm("ne2k_receive:\n"
     "        push eax\n"

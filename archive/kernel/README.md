@@ -42,6 +42,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
 | drivers/vga | 37190 | 37510 | +320 |
+| fs/fd/net | 37494 | 37510 | +16 |
 
 ## Annotations
 
@@ -222,3 +223,16 @@ helpers, plus the C-shaped `vga_get_cursor`'s divmod-by-80 (~+96
 vs the asm version's `div bx`), plus the new `movzx eax, ax`
 prologue prefix on every narrow-pinned in_register parameter (PR
 #241 fix).
+
+**fs/fd/net (+16):** Two tiny functions — `fd_read_net` (poll NIC,
+memcpy frame) and `fd_write_net` (send raw frame from
+`fd_write_buffer`) — port to ~30 lines of straight-line C.  Tightening
+`ne2k_receive`'s C declaration with `out_register("edi")` /
+`out_register("ecx")` + `carry_return` lets the C side capture the
+multi-register output cleanly (no asm shim needed; the asm body of
+`ne2k_receive` is unchanged).  `fd_write_buffer` lifts out of
+`fs/fd.c`'s asm() block to a C-level `uint8_t *` global with an
+`asm("fd_write_buffer equ _g_fd_write_buffer")` shim so the surviving
+`fs/fd/{console,fs}.asm` references resolve unchanged.  The +16 is
+mostly cc.py's per-function frame setup on the two ports plus the
+prologue zero-extend around the `in_register("ecx")` count parameter.
