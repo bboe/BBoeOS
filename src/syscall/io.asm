@@ -1,8 +1,17 @@
         ;; ------------------------------------------------------------
         ;; I/O syscalls.  cc.py loads args directly into the regs each
-        ;; kernel fd_* helper expects (BX=fd, AL=flags/cmd, SI=buf for
-        ;; write, DI=buf for read, CX=count), so cases are mostly bare
+        ;; kernel fd_* helper expects (BX=fd, AL=flags/cmd, ESI=buf for
+        ;; write, EDI=buf for read, ECX=count), so most cases are bare
         ;; `call fd_*; jmp .iret_cf`.
+        ;;
+        ;; Handlers that take a user pointer + length call access_ok
+        ;; (or access_ok_string for null-terminated paths) before
+        ;; dispatching to fd_*.  A bad pointer surfaces as CF=1 with
+        ;; AL = ERROR_FAULT so the user sees an errno-style failure
+        ;; rather than the kernel ever dereferencing the pointer.  The
+        ;; CPL=0 #PF kill path in idt.asm catches the residual case
+        ;; where access_ok passes but the user page is unmapped (e.g.
+        ;; edit's gap buffer at virt 0x100000 before fault-in).
         ;; ------------------------------------------------------------
 
         .io_close:
@@ -28,18 +37,47 @@
         jmp .iret_cf
 
         .io_open:
-        ;; SI = filename, AL = flags, DL = mode (when O_CREAT).
+        ;; ESI = filename, AL = flags, DL = mode (when O_CREAT).
+        push ecx
+        mov ecx, MAX_PATH
+        call access_ok_string
+        pop ecx
+        jc .io_open_bad_pointer
         call fd_open
+        jmp .iret_cf
+        .io_open_bad_pointer:
+        mov al, ERROR_FAULT
+        stc
         jmp .iret_cf
 
         .io_read:
         ;; BX = fd, EDI = buffer, ECX = count.  fd_read returns the full
         ;; 32-bit byte count in EAX (or -1 on error), so route through the
-        ;; .iret_cf_eax path that skips the sign-extend.
+        ;; .iret_cf_eax path that skips the sign-extend.  Bad-buffer is
+        ;; surfaced the same way fd_read surfaces a closed-fd error:
+        ;; EAX=-1 + CF=1, no errno encoding.
+        push ebx
+        mov ebx, edi
+        call access_ok
+        pop ebx
+        jc .io_read_bad_pointer
         call fd_read
+        jmp .iret_cf_eax
+        .io_read_bad_pointer:
+        or eax, -1
+        stc
         jmp .iret_cf_eax
 
         .io_write:
         ;; BX = fd, ESI = buffer, ECX = count.  Same return shape as io_read.
+        push ebx
+        mov ebx, esi
+        call access_ok
+        pop ebx
+        jc .io_write_bad_pointer
         call fd_write
+        jmp .iret_cf_eax
+        .io_write_bad_pointer:
+        or eax, -1
+        stc
         jmp .iret_cf_eax

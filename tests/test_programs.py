@@ -71,6 +71,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("netinit", ["netinit"], r"NIC found: [0-9A-F:]+", with_net=True),
     ProgramTest("netrecv", ["netrecv"], r"Received:.*08 06", with_net=True, timeout=20.0),
     ProgramTest("netsend", ["netsend"], r"ARP request sent", with_net=True),
+    ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("pintest", ["pintest"], r"^first non-space: h$"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),

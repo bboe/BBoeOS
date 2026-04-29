@@ -17,11 +17,20 @@
         ;; ESI = filename in the calling shell's user-virt.  Active PD
         ;; is the shell's; we can read user pages directly until the
         ;; switch-to-template + destroy below.
+        push ecx
+        mov ecx, MAX_PATH
+        call access_ok_string
+        pop ecx
+        jc .exec_bad_pointer
         call vfs_find
         jc .exec_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
         jnz .exec_load
         mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+        .exec_bad_pointer:
+        mov al, ERROR_FAULT
         stc
         jmp .iret_cf
         .exec_not_found:

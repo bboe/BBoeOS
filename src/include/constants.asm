@@ -19,6 +19,7 @@
         %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Edit kill-buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
+        %assign ERROR_FAULT     07h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
         %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found
@@ -66,7 +67,9 @@
         %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 65 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
+        %assign KERNEL_VIRT_BASE 0C0000000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.
         %assign MAX_INPUT 256
+        %assign MAX_PATH 64             ; Hard cap on user-supplied filename byte count (incl. NUL); enough for "<24-char dir>/<24-char file>" plus headroom
         %assign NE2K_BASE 300h
         %assign NULL 0
         %assign O_CREAT  10h
