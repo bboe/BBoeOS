@@ -289,7 +289,7 @@ fd_ioctl:
         stc
         ret
 
-%include \"fs/fd/console.asm\"
+%include \"fs/fd/console.kasm\"
 %include \"fs/fd/fs.asm\"
 %include \"fs/fd/net.kasm\"
 

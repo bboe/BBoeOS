@@ -42,6 +42,7 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 | drivers/rtc | 37142 | 37510 | +368 |
 | drivers/serial | 37478 | 37510 | +32 |
 | drivers/vga | 37190 | 37510 | +320 |
+| fs/fd/console | 37454 | 37510 | +56 |
 | fs/fd/net | 37494 | 37510 | +16 |
 
 ## Annotations
@@ -236,3 +237,15 @@ multi-register output cleanly (no asm shim needed; the asm body of
 `fs/fd/{console,fs}.asm` references resolve unchanged.  The +16 is
 mostly cc.py's per-function frame setup on the two ports plus the
 prologue zero-extend around the `in_register("ecx")` count parameter.
+
+**fs/fd/console (+56):** Two functions — `fd_read_console` (poll
+keyboard ring + COM1, CR→LF translate, write one byte to user
+buffer) and `fd_write_console` (loop `put_character` over the user
+buffer at `[fd_write_buffer]`).  +56 is mostly cc.py's frame setup
+on the read path: the polling loop's two `kernel_inb` call sites
+(LSR data-ready check, then DR read) each emit `mov dx, <port>; in
+al, dx; xor ah, ah` whereas the asm version reused DX across the
+adjacent reads.  The `asm("sti")` escape costs one byte.
+`destination[0] = byte` (rather than `*destination = byte` — cc.py
+rejects the latter on non-`out_register` parameter pointers) emits
+the same `mov [edi], al` either way.
