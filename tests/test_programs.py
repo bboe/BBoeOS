@@ -19,17 +19,26 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from run_qemu import run_commands
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive.img"
 _DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
+
+sys.path.insert(0, str(REPO_ROOT))
+
+from run_qemu import run_commands  # noqa: E402
+
+from add_file import add_file  # noqa: E402
 
 
 @dataclass
@@ -39,9 +48,76 @@ class ProgramTest:
     name: str
     commands: list[str]
     expect: str
+    setup: Callable[[Path, ProgramTest], None] | None = None
     with_net: bool = False
     timeout: float = _DEFAULT_PROGRAM_TIMEOUT
     skip: str | None = None
+
+
+def _add_empty_filler(*, image: Path, name: str) -> None:
+    """Add a 0-byte file named `name` to bin/."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        empty = Path(tmpdir) / name
+        empty.touch()
+        add_file(
+            allow_empty=True,
+            executable=False,
+            file_path=str(empty),
+            image_path=str(image),
+            subdirectory="bin",
+        )
+
+
+def _add_exec_probe(*, image: Path, name: str) -> None:
+    """Compile a tiny C program that prints `EXEC <name>` and add it to bin/."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / f"{name}.c"
+        source.write_text(f'int main() {{ printf("EXEC {name}\\n"); return 0; }}\n')
+        assembled = Path(tmpdir) / f"{name}.asm"
+        subprocess.run(
+            ["./cc.py", "--bits", "32", str(source), str(assembled)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        binary = Path(tmpdir) / name
+        subprocess.run(
+            ["nasm", "-f", "bin", "-i", "src/include/", "-o", str(binary), str(assembled)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        add_file(
+            executable=True,
+            file_path=str(binary),
+            image_path=str(image),
+            subdirectory="bin",
+        )
+
+
+def _pad_bin_to_full_directory(image: Path, test: ProgramTest) -> None:
+    """Pad bin/ to BBfs's 48-entry cap with an executable probe written last.
+
+    The final probe lives at slot 47 (sector 2, slot 15), so the test
+    can `bin/_zexec_last` and confirm the lookup walks all three of
+    bbfs's directory sectors.
+
+    bin/ holds 34 program entries in slots 0..33 (bbfs subdirectories
+    have no . / ..).  Slots 34..46 take 13 empty fillers; slot 47
+    takes _zexec_last so the test can `bin/_zexec_last` and confirm
+    the lookup walks all three of bbfs's directory sectors.
+    loop_array (slot 21, sector 1 of the directory) and arp (slot 0,
+    the first entry) cover the other two positions without needing
+    additional executable probes — they're already in the listing.
+    """
+    for filler_index in range(48 - 34 - 1):
+        _add_empty_filler(image=image, name=f"_pad{filler_index:02d}")
+    _add_exec_probe(image=image, name="_zexec_last")
+
+    test.commands = ["arp", "loop_array", "_zexec_last"]
+    test.expect = (
+        r"usage: arp <ip>"
+        r"[\s\S]+abc"
+        r"[\s\S]+^EXEC _zexec_last$"
+    )
 
 
 TESTS: list[ProgramTest] = [
@@ -57,6 +133,18 @@ TESTS: list[ProgramTest] = [
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
     ProgramTest("echo_many_args", ["echo a b c d e", "ls"], r"^a b c d e$"),
+    ProgramTest(
+        # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
+        # ending with a single executable probe so the final directory
+        # entry is something we can exec.  Asserts arp (first file
+        # entry), loop_array (a program in the middle of bin/), and
+        # _zexec_last (the literal last entry) all resolve.  The setup
+        # writes the test's commands+expect post-padding.
+        "exec_first_middle_last",
+        commands=[],
+        expect="",
+        setup=_pad_bin_to_full_directory,
+    ),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
@@ -88,13 +176,21 @@ def _build_os(*, temporary_directory: Path) -> None:
 
 def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
     """Run one ProgramTest; return (passed, message, boot_time, command_time)."""
+    if test.setup is None:
+        drive = temporary_directory / BASE_IMAGE
+        snapshot = True
+    else:
+        drive = temporary_directory / f"test_{test.name}.img"
+        shutil.copy2(temporary_directory / BASE_IMAGE, drive)
+        test.setup(drive, test)
+        snapshot = False
     try:
         result = run_commands(
             test.commands,
             command_timeout=test.timeout,
-            drive=temporary_directory / BASE_IMAGE,
+            drive=drive,
             floppy=floppy,
-            snapshot=True,
+            snapshot=snapshot,
             with_net=test.with_net,
         )
     except TimeoutError as error:

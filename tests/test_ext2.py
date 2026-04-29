@@ -30,6 +30,10 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "drive_ext2.img"
@@ -38,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import compute_directory_sector, ext2_add_file  # noqa: E402
+from add_file import add_file, compute_directory_sector, ext2_add_file  # noqa: E402
 
 _DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
 _LARGE_FILE_TIMEOUT = float(os.environ.get("BBOE_LARGE_FILE_TIMEOUT", "6.0"))
@@ -47,11 +51,19 @@ _DOUBLY_INDIRECT_TIMEOUT = float(os.environ.get("BBOE_DOUBLY_INDIRECT_TIMEOUT", 
 
 @dataclass
 class ProgramTest:
-    """One runtime test: shell commands to run and a regex the output must match."""
+    """One runtime test: shell commands to run and a regex the output must match.
+
+    A ``setup`` hook receives ``(image, test)`` after the per-test image
+    is copied but before QEMU boots.  It may mutate ``test.commands`` and
+    ``test.expect`` — used by ``exec_first_middle_last`` to pick filler
+    names based on the post-setup directory layout instead of hard-coding
+    them.
+    """
 
     name: str
     commands: list[str]
     expect: str
+    setup: Callable[[Path, ProgramTest], None] | None = None
     slow: bool = False
     timeout: float = _DEFAULT_PROGRAM_TIMEOUT
 
@@ -97,6 +109,22 @@ TESTS: list[ProgramTest] = [
         timeout=_DOUBLY_INDIRECT_TIMEOUT,
     ),
     ProgramTest("echo", ["echo ext2"], r"^ext2$"),
+    ProgramTest(
+        # Pad bin/ with empty fillers until its inode uses all 12 direct
+        # blocks (ext2_search_dir's walk ceiling), interleaving three
+        # executable probes — _zexec_a (block 1 first entry), _zexec_b
+        # (~middle of the directory), _zexec_last (literal final entry).
+        # Looking up any one of them forces ext2_search_blk to advance
+        # past the 512-byte sector boundary in at least one preceding
+        # block, which is the path the previous commit fixes.  The
+        # setup writes the actual probe names into commands+expect so
+        # the assertions stay correct regardless of how many entries
+        # the rest of bin/ accumulates.
+        "exec_first_middle_last",
+        commands=[],
+        expect="",
+        setup=lambda image, test: _pad_bin_to_full_directory(image=image, test=test),
+    ),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
     ProgramTest(
@@ -105,14 +133,27 @@ TESTS: list[ProgramTest] = [
         r"^\.\./",  # '..' entry always present
     ),
     ProgramTest(
+        "mkdir_ls_root",
+        ["mkdir mydir", "ls"],
+        r"mydir/",
+    ),
+    ProgramTest(
         "mkdir_nested",
         ["mkdir parent", "mkdir parent/child", "ls parent/child"],
         r"^\.\./",
     ),
     ProgramTest(
-        "mkdir_ls_root",
-        ["mkdir mydir", "ls"],
-        r"mydir/",
+        # `_add_multi_sector_dir_filler` (run as a per-test setup) keeps
+        # appending _zzpadNN stubs to bin/ until one lands in the *last*
+        # 512-byte sector of bin/'s first directory block — byte ≥ 512
+        # on 1 KB blocks, byte ≥ 1536 on 2 KB blocks — then writes the
+        # name of that probe into commands+expect.  Confirms ext2_search_blk
+        # advances across every intra-block sector boundary (0→1 on 1 KB;
+        # 0→1→2→3 on 2 KB).
+        "multi_sector_dir",
+        commands=[],
+        expect="",
+        setup=lambda image, test: _add_multi_sector_dir_filler(image=image, test=test),
     ),
     ProgramTest(
         "rename",
@@ -135,6 +176,11 @@ TESTS: list[ProgramTest] = [
         r"^\.\./",
     ),
     ProgramTest(
+        "rm",
+        ["cp src/parse_ip.asm out.asm", "rm out.asm", "cat out.asm"],
+        r"File not found",
+    ),
+    ProgramTest(
         "rmdir",
         ["mkdir mydir", "rmdir mydir", "ls mydir"],
         r"Not found",  # ls fails because mydir was successfully removed
@@ -144,17 +190,56 @@ TESTS: list[ProgramTest] = [
         ["mkdir mydir", "cp src/parse_ip.asm mydir/file.asm", "rmdir mydir"],
         r"Not empty",
     ),
-    ProgramTest(
-        "rm",
-        ["cp src/parse_ip.asm out.asm", "rm out.asm", "cat out.asm"],
-        r"File not found",
-    ),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 
 
-DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
 DOUBLY_INDIRECT_SENTINEL = b"EXT2_DOUBLY_INDIRECT_OK"
+DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
+EXT2_DIRECT_BLOCKS = 12  # ext2 directory blocks ext2_search_dir walks (i_block[0..11])
+
+
+def _add_empty_filler(*, image: Path, name: str) -> None:
+    """Add a 0-byte file named `name` to bin/.
+
+    Cheap padding — no data blocks consumed, only one inode and ~16
+    bytes of directory entry.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        empty = Path(tmpdir) / name
+        empty.touch()
+        add_file(
+            allow_empty=True,
+            executable=False,
+            file_path=str(empty),
+            image_path=str(image),
+            subdirectory="bin",
+        )
+
+
+def _add_exec_probe(*, image: Path, name: str) -> None:
+    """Compile a tiny C program that prints `EXEC <name>` and add it to bin/."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / f"{name}.c"
+        source.write_text(f'int main() {{ printf("EXEC {name}\\n"); return 0; }}\n')
+        assembled = Path(tmpdir) / f"{name}.asm"
+        subprocess.run(
+            ["./cc.py", "--bits", "32", str(source), str(assembled)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        binary = Path(tmpdir) / name
+        subprocess.run(
+            ["nasm", "-f", "bin", "-i", "src/include/", "-o", str(binary), str(assembled)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        add_file(
+            executable=True,
+            file_path=str(binary),
+            image_path=str(image),
+            subdirectory="bin",
+        )
 
 
 def _add_large_test_file(*, image: Path) -> None:
@@ -185,11 +270,166 @@ def _add_large_test_file(*, image: Path) -> None:
         )
 
 
+def _add_multi_sector_dir_filler(*, image: Path, test: ProgramTest) -> None:
+    """Pad bin/ until an entry lands in block 0's final 512-byte sector.
+
+    ext2_search_blk reads one 512-byte sector at a time and walks the
+    entries inside it; on a miss it bumps the within-block sector index
+    and reads the next sector.  A regression that loses the sector
+    counter or the block number across iterations only surfaces when a
+    target entry actually lives past byte 512 of its block.  1 KB
+    blocks span two sectors (boundary at 512); 2 KB blocks span four
+    (boundaries at 512, 1024, 1536), so a fixed handful of stubs
+    enough to cross the first boundary on 1 KB blocks does not exercise
+    the 1→2 or 2→3 advances on 2 KB blocks.
+
+    Keeps adding _zzpadNN stubs to bin/ until the next entry would land
+    at or past `block_size - 512` (i.e. inside the final intra-block
+    sector), then captures that stub's name as the assertion target.
+    Looking it up forces ext2_search_blk to walk every intra-block
+    sector boundary of block 0.
+    """
+    block_size = _ext2_block_size(image=image)
+    last_sector_start = block_size - 512
+    initial_offset = _bin_block0_used_bytes(image=image)
+    # Each "_zzpadNN" entry is 8 (ext2 dirent header) + ((8+1+3)&~3) = 20 bytes,
+    # so the Nth (0-indexed) stub starts at initial_offset + N*stub_size.  Solve
+    # for the smallest N whose start offset is at or past last_sector_start —
+    # the entry whose lookup forces a walk across every intra-block sector
+    # boundary.  When initial_offset is already past the boundary (1 KB blocks
+    # land here because the baseline bin/ pads exactly to byte 512), the very
+    # first stub serves and target_index is 0.
+    stub_size = 20
+    target_index = max(0, (last_sector_start - initial_offset + stub_size - 1) // stub_size)
+    needed = target_index + 1
+    ext2_start = compute_directory_sector(image_path=str(image))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stubs = []
+        for index in range(needed):
+            stub = Path(tmpdir) / f"_zzpad{index:02d}"
+            stub.write_text("MULTISEC\n")
+            stubs.append(stub)
+        # Batch every `write` into a single debugfs session with a single
+        # partition extract+splice, instead of paying ext2_add_file's
+        # per-call dd round-trip ~65 times on 2 KB blocks.
+        partition = Path(tmpdir) / "partition.ext2"
+        subprocess.run(
+            ["dd", f"if={image}", f"of={partition}", "bs=512", f"skip={ext2_start}", "status=none"],
+            check=True,
+        )
+        script = "".join(f"write {stub} /bin/{stub.name}\n" for stub in stubs)
+        result = subprocess.run(
+            ["debugfs", "-w", str(partition)],
+            input=script.encode(),
+            capture_output=True,
+            check=False,
+        )
+        stderr_text = result.stderr.decode()
+        stderr_failed = any(
+            line.strip() for line in stderr_text.splitlines() if not line.startswith("debugfs ") and "Allocated inode:" not in line
+        )
+        if result.returncode != 0 or stderr_failed:
+            msg = f"debugfs batch write failed:\n{stderr_text}"
+            raise RuntimeError(msg)
+        subprocess.run(
+            ["dd", f"if={partition}", f"of={image}", "bs=512", f"seek={ext2_start}", "conv=notrunc", "status=none"],
+            check=True,
+        )
+    test.commands = [f"cat bin/_zzpad{target_index:02d}"]
+    test.expect = r"^MULTISEC$"
+
+
+def _bin_block0_first_block_num(*, debugfs_output: str) -> int:
+    """Parse the first direct-block number from `debugfs stat <12>` output."""
+    for line in debugfs_output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("(0):"):
+            return int(stripped[4:].split(",")[0].split(")")[0])
+        if "(0)" in stripped and ":" in stripped:
+            parts = stripped.replace("(0):", "").split(",")[0].strip()
+            return int(parts.split()[0])
+    msg = "could not find bin/ block 0 in debugfs stat output"
+    raise RuntimeError(msg)
+
+
+def _bin_block0_used_bytes(*, image: Path) -> int:
+    """Byte-offset where the next entry would land within bin/'s block 0.
+
+    Sums every entry's actual (header + padded-name) size — ignoring the
+    last entry's rec_len padding to end-of-block — so the test's setup
+    can insert an executable probe at a specific intra-block byte offset
+    (e.g. anywhere past offset 512) and have it land in the sector the
+    regression actually targets, not at offset 0 of a freshly-allocated
+    next block where the bug wouldn't bite.
+    """
+    import struct  # noqa: PLC0415 — narrow-scope binary parsing helper
+
+    block_size = _ext2_block_size(image=image)
+    tmp_path = _ext2_extract(image=image)
+    try:
+        result = subprocess.run(
+            ["debugfs", "-R", "stat <12>", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        block_num = _bin_block0_first_block_num(debugfs_output=result.stdout)
+        with tmp_path.open("rb") as f:
+            f.seek(block_num * block_size)
+            block_data = f.read(block_size)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    used = 0
+    offset = 0
+    while offset + 8 <= block_size:
+        _, rec_len, name_len, _ = struct.unpack_from("<IHBB", block_data, offset)
+        if rec_len == 0:
+            break
+        actual = 8 + ((name_len + 1 + 3) & ~3)
+        is_last_with_padding = rec_len > actual and offset + rec_len >= block_size
+        used = offset + (actual if is_last_with_padding else rec_len)
+        offset += rec_len
+    return used
+
+
+def _bin_dir_blocks(*, image: Path) -> int:
+    """Return the number of 1 KB filesystem blocks bin/'s directory uses.
+
+    debugfs reports the inode's Blockcount in 512-byte sectors, so divide.
+    """
+    tmp_path = _ext2_extract(image=image)
+    try:
+        result = subprocess.run(
+            ["debugfs", "-R", "stat <12>", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    for line in result.stdout.splitlines():
+        if "Blockcount:" in line:
+            sectors = int(line.split("Blockcount:")[1].split()[0])
+            return sectors // 2
+    msg = "could not parse Blockcount from debugfs stat <12>"
+    raise RuntimeError(msg)
+
+
 def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 1024) -> None:
-    """Run make_os.sh --ext2; abort if the build fails."""
+    """Run make_os.sh --ext2; abort if the build fails.
+
+    Bumps the inode count to 1024 so the exec_first_middle_last test can
+    pad bin/ to use all 12 of an ext2 directory inode's direct blocks
+    (the lookup ceiling — ext2_search_dir doesn't follow indirect-block
+    pointers).  At the default mke2fs inode ratio our 1.44 MB image only
+    gets ~176 inodes; padding to 12 blocks needs ~770.  1024 inodes adds
+    ~250 KB of inode-table metadata to the image; data-block space stays
+    comfortably above what every other test (incl. doubly_indirect) needs.
+    """
     image = temporary_directory / BASE_IMAGE
     result = subprocess.run(
-        ["./make_os.sh", "--ext2", f"--ext2-block-size={block_size}", str(image)],
+        ["./make_os.sh", "--ext2", f"--ext2-block-size={block_size}", "--ext2-inode-count=1024", str(image)],
         capture_output=True,
         text=True,
         check=False,
@@ -199,6 +439,37 @@ def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 
         sys.exit(1)
     if large_file and block_size == 1024:
         _add_large_test_file(image=image)
+
+
+def _ext2_block_size(*, image: Path) -> int:
+    """Return the ext2 filesystem's block size in bytes."""
+    tmp_path = _ext2_extract(image=image)
+    try:
+        result = subprocess.run(
+            ["dumpe2fs", "-h", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    for line in result.stdout.splitlines():
+        if line.startswith("Block size:"):
+            return int(line.split(":")[1].strip())
+    msg = "could not parse Block size from dumpe2fs output"
+    raise RuntimeError(msg)
+
+
+def _ext2_extract(*, image: Path) -> Path:
+    """Copy the ext2 partition out of `image` into a standalone temp file."""
+    ext2_offset = compute_directory_sector(image_path=str(image)) * 512
+    with image.open("rb") as f:
+        f.seek(ext2_offset)
+        ext2_data = f.read()
+    fd, tmp_name = tempfile.mkstemp(suffix=".ext2")
+    with os.fdopen(fd, "wb") as out:
+        out.write(ext2_data)
+    return Path(tmp_name)
 
 
 def _fsck(*, image: Path) -> str | None:
@@ -228,30 +499,66 @@ def _fsck(*, image: Path) -> str | None:
         ext2_path.unlink(missing_ok=True)
 
 
-def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
-    """Run one ProgramTest; return (passed, message, boot_time, command_time)."""
-    test_image = temporary_directory / f"test_{test.name}.img"
-    shutil.copy2(temporary_directory / BASE_IMAGE, test_image)
-    try:
-        result = run_commands(
-            test.commands,
-            command_timeout=test.timeout,
-            drive=test_image,
-            floppy=floppy,
-            snapshot=False,
-        )
-    except TimeoutError as error:
-        return False, f"timeout: {error}", 0.0, 0.0
-    except RuntimeError as error:
-        return False, f"qemu error: {error}", 0.0, 0.0
-    command_time = sum(result.command_times)
-    failures = []
-    if not re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
-        failures.append(f"expected regex {test.expect!r} not found in output")
-    fsck_error = _fsck(image=test_image)
-    if fsck_error:
-        failures.append(f"fsck: {fsck_error}")
-    return (not failures), "; ".join(failures), result.boot_time, command_time
+def _pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
+    """Pad bin/ with empty fillers + exec probes until 12 direct blocks are full.
+
+    12 direct blocks is the upper bound for a directory ext2_search_dir
+    can walk — indirect-block traversal isn't implemented.  Three
+    executable probes land in distinct blocks so a lookup of any of
+    them necessarily walks both sectors of at least one block:
+
+      _zexec_a:    inserted once block 0 has filled past byte 512 →
+                   the probe lives in sector 1 of block 0 and its
+                   lookup forces ext2_search_blk to walk past the
+                   sector boundary inside that block.
+      _zexec_b:    inserted after bin/ has grown to ~half the cap →
+                   somewhere in block 6 or 7.
+      _zexec_last: inserted after bin/ reaches the 12-block ceiling →
+                   the literal final directory entry.
+
+    The test's commands and expected regex are written here, post-setup,
+    so the probe names the test asserts stay pinned to the names this
+    helper actually wrote — robust to PROGRAMS growing in make_os.sh.
+    """
+    filler_index = 0
+
+    def add_filler() -> None:
+        nonlocal filler_index
+        _add_empty_filler(image=image, name=f"_pad{filler_index:04d}")
+        filler_index += 1
+        if filler_index > 1500:
+            msg = "filler limit hit"
+            raise RuntimeError(msg)
+
+    def grow_until_blocks(target_blocks: int) -> None:
+        while _bin_dir_blocks(image=image) < target_blocks:
+            add_filler()
+
+    # Add empty fillers until bin's block 0 has filled past byte 512 —
+    # i.e. it has spilled into sector 1.  The next inserted entry lands
+    # past byte 512 too, so _zexec_a's lookup necessarily forces
+    # ext2_search_blk to walk sector 1 of block 0 and read it as the
+    # entry actually living there — the exact path the fix targets.
+    while _bin_block0_used_bytes(image=image) < 768:
+        add_filler()
+    _add_exec_probe(image=image, name="_zexec_a")
+
+    # Pad the directory until it spans roughly half its 12-block ceiling,
+    # then insert _zexec_b — a probe in a "middle" block.  Then pad to
+    # the full 12-block cap before adding _zexec_last so the final probe
+    # is the literal last entry of the literal last walkable block.
+    grow_until_blocks(target_blocks=EXT2_DIRECT_BLOCKS // 2)
+    _add_exec_probe(image=image, name="_zexec_b")
+    grow_until_blocks(target_blocks=EXT2_DIRECT_BLOCKS)
+    _add_exec_probe(image=image, name="_zexec_last")
+
+    test.commands = ["arp", "_zexec_a", "_zexec_b", "_zexec_last"]
+    test.expect = (
+        r"usage: arp <ip>"
+        r"[\s\S]+^EXEC _zexec_a$"
+        r"[\s\S]+^EXEC _zexec_b$"
+        r"[\s\S]+^EXEC _zexec_last$"
+    )
 
 
 def _run_suite(
@@ -286,6 +593,34 @@ def _run_suite(
     return pass_count, fail_count, failed
 
 
+def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
+    """Run one ProgramTest; return (passed, message, boot_time, command_time)."""
+    test_image = temporary_directory / f"test_{test.name}.img"
+    shutil.copy2(temporary_directory / BASE_IMAGE, test_image)
+    if test.setup is not None:
+        test.setup(test_image, test)
+    try:
+        result = run_commands(
+            test.commands,
+            command_timeout=test.timeout,
+            drive=test_image,
+            floppy=floppy,
+            snapshot=False,
+        )
+    except TimeoutError as error:
+        return False, f"timeout: {error}", 0.0, 0.0
+    except RuntimeError as error:
+        return False, f"qemu error: {error}", 0.0, 0.0
+    command_time = sum(result.command_times)
+    failures = []
+    if not re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
+        failures.append(f"expected regex {test.expect!r} not found in output")
+    fsck_error = _fsck(image=test_image)
+    if fsck_error:
+        failures.append(f"fsck: {fsck_error}")
+    return (not failures), "; ".join(failures), result.boot_time, command_time
+
+
 # Subset of tests to re-run with 2 KB blocks (exercises the variable-block-size paths).
 # Excludes tests that don't touch ext2 (echo, hello, uptime).
 BLOCK_SIZE_TESTS: list[ProgramTest] = [
@@ -299,10 +634,12 @@ BLOCK_SIZE_TESTS: list[ProgramTest] = [
         "cp",
         "cp_into_subdir",
         "cp_overwrite_shrink",
+        "exec_first_middle_last",
         "ls",
         "mkdir",
         "mkdir_ls_root",
         "mkdir_nested",
+        "multi_sector_dir",
         "rename",
         "rename_dir",
         "rm",
