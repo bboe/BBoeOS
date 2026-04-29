@@ -40,8 +40,8 @@
         ;;                             stack top = 0x40000000
         JUMP_TABLE_FRAME_COUNT  equ 256
         JUMP_TABLE_VIRT_BASE    equ 0x300000
-        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
