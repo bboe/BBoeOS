@@ -43,9 +43,14 @@ class ArrayDecl(Node):
     At global scope the array may also carry an explicit ``[SIZE]`` with
     no initializer — stored as ``size`` (a parser node, evaluated at
     NASM assemble time so it can reference kernel constants).
+
+    ``is_extern`` is set for ``extern T name[N];`` file-scope declarations
+    that name a symbol whose storage lives in another translation unit;
+    the generator skips emitting ``_g_<name>:`` storage for these.
     """
 
     init: Node | None
+    is_extern: bool = field(default=False, kw_only=True)
     name: str
     size: Node | None = field(default=None, kw_only=True)
     type_name: str
@@ -415,12 +420,17 @@ class VarDecl(Node):
     syntax ``type (*name)(params)``.  The list carries each parameter's
     ``in_register`` annotation so call sites know which CPU registers to
     load before ``call ax``.  ``None`` for ordinary (non-function_pointer) scalars.
+
+    ``is_extern`` is set for ``extern T name;`` file-scope declarations
+    that name a symbol whose storage lives in another translation unit;
+    the generator skips emitting ``_g_<name>:`` storage for these.
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
     asm_symbol: str | None = field(default=None, kw_only=True)
     function_pointer_params: list[Param] | None = field(default=None, kw_only=True)
     init: Node | None
+    is_extern: bool = field(default=False, kw_only=True)
     name: str
     type_name: str
 
