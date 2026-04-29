@@ -726,7 +726,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        mov {self.target.acc}, {base_reg}")
             self.ax_clear()
             return
-        if field_size not in (1, 2):
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
@@ -738,6 +739,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
+            # 32-bit target: clear upper bytes of EAX so downstream
+            # ``test eax, eax`` / signed compares don't read stale bits
+            # left behind by a wider previous load.
+            self.emit(f"        movzx {self.target.acc}, word {addr}")
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
         self.ax_clear()
@@ -764,7 +770,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{statement.member_name}'"
             raise CompileError(message, line=statement.line)
         offset, field_size, _element_size = layout[statement.member_name]
-        if field_size not in (1, 2):
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
             message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=statement.line)
         self.ax_clear()
@@ -779,6 +786,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
         else:
             self.emit(f"        mov {addr}, {self.target.acc}")
 

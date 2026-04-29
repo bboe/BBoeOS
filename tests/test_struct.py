@@ -269,6 +269,91 @@ def test_member_access_in_condition() -> None:
     )
 
 
+def test_member_access_uint32_read_32bit() -> None:
+    """p->size where size is uint32_t emits a full 4-byte load in 32-bit mode."""
+    asm = _compile(
+        """
+        struct fd {
+            uint8_t type;
+            uint8_t flags;
+            uint16_t start;
+            uint32_t size;
+        };
+        int read_size(struct fd *p) {
+            return p->size;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov eax, [ebx+4]" in asm, f"Expected 'mov eax, [ebx+4]' for uint32_t field read\n{asm}"
+
+
+def test_member_access_uint32_write_32bit() -> None:
+    """p->size = x where size is uint32_t emits a full 4-byte store in 32-bit mode."""
+    asm = _compile(
+        """
+        struct fd {
+            uint8_t type;
+            uint8_t flags;
+            uint16_t start;
+            uint32_t size;
+        };
+        void write_size(struct fd *p, int value) {
+            p->size = value;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov [ebx+4], eax" in asm, f"Expected 'mov [ebx+4], eax' for uint32_t field write\n{asm}"
+
+
+def test_member_access_uint16_read_32bit() -> None:
+    """p->start where start is uint16_t emits ``movzx eax, word [...]`` in 32-bit mode.
+
+    Without the zero-extend, the load would either spill into adjacent
+    bytes (32-bit ``mov eax, [...]``) or leave EAX's upper word stale
+    from a prior write — ``test eax, eax`` checks downstream would
+    misfire.
+    """
+    asm = _compile(
+        """
+        struct fd {
+            uint8_t type;
+            uint8_t flags;
+            uint16_t start;
+        };
+        int read_start(struct fd *p) {
+            return p->start;
+        }
+    """,
+        bits=32,
+    )
+    assert "movzx eax, word [ebx+2]" in asm, f"Expected 'movzx eax, word [ebx+2]' for uint16_t field read\n{asm}"
+
+
+def test_member_access_uint16_write_32bit() -> None:
+    """p->start = x emits ``mov word [...], ax`` in 32-bit mode.
+
+    The destination needs an explicit ``word`` size override; the
+    default ``mov [...], eax`` would clobber the next 2 bytes of the
+    struct.
+    """
+    asm = _compile(
+        """
+        struct fd {
+            uint8_t type;
+            uint8_t flags;
+            uint16_t start;
+        };
+        void write_start(struct fd *p, int value) {
+            p->start = value;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov word [ebx+2], ax" in asm, f"Expected 'mov word [ebx+2], ax' for uint16_t field write\n{asm}"
+
+
 # --- global struct array tests ---
 
 
