@@ -34,7 +34,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [test_archive, test_asm, test_bboefs, test_cc, test_draw, test_ext2, test_floppy_boot, test_programs]
+        # test_ext2 first so the longest job starts dispatching ahead of the others.
+        suite: [test_ext2, test_archive, test_asm, test_bboefs, test_cc, test_draw, test_floppy_boot, test_programs]
         include:
           - suite: test_ext2
             extra_args: --slow
