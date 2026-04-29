@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -118,8 +117,7 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
             name = source.stem
             reference = references[name]
             output_binary = temporary_directory / f"out_{name}.bin"
-            started = time.monotonic()
-            ok, message = test_program(
+            ok, message, boot_time, command_time = test_program(
                 directory_sector=directory_sector,
                 directory_sectors=directory_sectors,
                 floppy=arguments.floppy,
@@ -128,13 +126,13 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
                 reference=reference,
                 temporary_directory=temporary_directory,
             )
-            elapsed = time.monotonic() - started
             label = f"{name}.asm"
+            timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
             if ok:
-                print(f"  PASS  {label:<20} {reference.stat().st_size:>6} bytes  {elapsed:6.2f}s")
+                print(f"  PASS  {label:<20} {reference.stat().st_size:>6} bytes  {timing}")
                 pass_count += 1
             else:
-                print(f"  FAIL  {label:<20} {message}  {elapsed:6.2f}s")
+                print(f"  FAIL  {label:<20} {message}  {timing}")
                 fail_count += 1
                 failed.append(label)
 
@@ -294,20 +292,23 @@ def test_program(
     output_binary: Path,
     reference: Path,
     temporary_directory: Path,
-) -> tuple[bool, str]:
-    """Assemble a single program in QEMU and compare the output to the NASM reference."""
+) -> tuple[bool, str, float, float]:
+    """Assemble a single program in QEMU and compare the output to the NASM reference.
+
+    Returns (passed, message, boot_time, command_time).
+    """
     output_name = f"{name}_t"
     drive = temporary_directory / f"drive_{name}.img"
     shutil.copy(temporary_directory / BASE_IMAGE, drive)
 
     command_timeout = ASM_SELF_HOST_TIMEOUT if name == "asm" else COMMAND_TIMEOUT
-    run_commands(
+    result = run_commands(
         [f"asm src/{name}.asm {output_name}"],
         command_timeout=command_timeout,
         drive=drive,
         floppy=floppy,
     )
-    return compare_drive_output(
+    ok, message = compare_drive_output(
         directory_sector=directory_sector,
         directory_sectors=directory_sectors,
         drive=drive,
@@ -315,6 +316,8 @@ def test_program(
         output_name=output_name,
         reference_bytes=reference.read_bytes(),
     )
+    command_time = result.command_times[0] if result.command_times else 0.0
+    return ok, message, result.boot_time, command_time
 
 
 if __name__ == "__main__":

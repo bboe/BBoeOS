@@ -50,7 +50,8 @@ def main() -> int:
         stderr=subprocess.DEVNULL,
     )
 
-    output = run_commands(["date", "ls"], floppy=True, snapshot=True)
+    result = run_commands(["date", "ls"], floppy=True, snapshot=True)
+    output = result.output
 
     failures: list[str] = []
     if DATE_RE.search(output) is None:

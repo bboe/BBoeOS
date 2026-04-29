@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import os
 import select
 import subprocess
@@ -33,6 +34,15 @@ PROMPT = b"$ "
 SERIAL_BASENAME = "ser"
 
 
+@dataclasses.dataclass
+class QemuResult:
+    """Timing and output from a QEMU session."""
+
+    boot_time: float
+    command_times: list[float]
+    output: str
+
+
 def run_commands(
     commands: list[str],
     *,
@@ -41,10 +51,11 @@ def run_commands(
     drive: Path = DEFAULT_IMAGE,
     floppy: bool = False,
     pcap: Path | None = None,
+    retry: bool = True,
     snapshot: bool = False,
     with_net: bool = False,
-) -> str:
-    """Boot QEMU, run each command, return the captured serial output as text.
+) -> QemuResult:
+    """Boot QEMU, run each command, return a :class:`QemuResult`.
 
     QEMU is always killed when this returns (normal or error path). The shell
     prompt ('$ ') is used as the synchronisation marker: the function returns
@@ -54,7 +65,49 @@ def run_commands(
     instead of the default IDE/HDD attachment — boots route through
     INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
     which is the harder path to keep working as the kernel evolves.
+
+    When *retry* is True (the default) and a TimeoutError occurs, the entire
+    QEMU session is retried once with 50% more time for both boot and command
+    timeouts.  A second timeout raises immediately.
     """
+    try:
+        return _run_commands_once(
+            commands,
+            boot_timeout=boot_timeout,
+            command_timeout=command_timeout,
+            drive=drive,
+            floppy=floppy,
+            pcap=pcap,
+            snapshot=snapshot,
+            with_net=with_net,
+        )
+    except TimeoutError:
+        if not retry:
+            raise
+        return _run_commands_once(
+            commands,
+            boot_timeout=boot_timeout * 1.5,
+            command_timeout=command_timeout * 1.5,
+            drive=drive,
+            floppy=floppy,
+            pcap=pcap,
+            snapshot=snapshot,
+            with_net=with_net,
+        )
+
+
+def _run_commands_once(
+    commands: list[str],
+    *,
+    boot_timeout: float,
+    command_timeout: float,
+    drive: Path,
+    floppy: bool,
+    pcap: Path | None,
+    snapshot: bool,
+    with_net: bool,
+) -> QemuResult:
+    """Single-attempt implementation of run_commands."""
     with tempfile.TemporaryDirectory(prefix="run_qemu_") as temp_dir:
         temporary_directory = Path(temp_dir)
         serial_base = temporary_directory / SERIAL_BASENAME
@@ -92,19 +145,23 @@ def run_commands(
         qemu: subprocess.Popen | None = None
         output_fd: int | None = None
         buffer = bytearray()
+        command_times: list[float] = []
         try:
             qemu = subprocess.Popen(qemu_args)
             output_fd = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
 
+            boot_start = time.monotonic()
             _wait_for_prompt(
                 buffer=buffer,
                 file_descriptor=output_fd,
                 process=qemu,
                 timeout=boot_timeout,
             )
+            boot_time = time.monotonic() - boot_start
 
             input_path = Path(f"{serial_base}.in")
             for command in commands:
+                command_start = time.monotonic()
                 input_path.write_text(command + "\r", encoding="utf-8")
                 _wait_for_prompt(
                     buffer=buffer,
@@ -112,12 +169,17 @@ def run_commands(
                     process=qemu,
                     timeout=command_timeout,
                 )
+                command_times.append(time.monotonic() - command_start)
         finally:
             if output_fd is not None:
                 os.close(output_fd)
             if qemu is not None:
                 _terminate(process=qemu)
-        return buffer.decode(errors="replace")
+        return QemuResult(
+            boot_time=boot_time,
+            command_times=command_times,
+            output=buffer.decode(errors="replace"),
+        )
 
 
 def _terminate(*, process: subprocess.Popen) -> None:
@@ -207,7 +269,7 @@ def main() -> int:
         help=f"per-command timeout in seconds (default: {COMMAND_TIMEOUT})",
     )
     arguments = parser.parse_args()
-    output = run_commands(
+    result = run_commands(
         arguments.commands,
         boot_timeout=arguments.boot_timeout,
         command_timeout=arguments.timeout,
@@ -217,7 +279,7 @@ def main() -> int:
         snapshot=arguments.snapshot,
         with_net=arguments.net,
     )
-    sys.stdout.write(output)
+    sys.stdout.write(result.output)
     return 0
 
 

@@ -22,7 +22,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,10 +83,10 @@ def _build_os(*, temporary_directory: Path) -> None:
         sys.exit(1)
 
 
-def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
-    """Run one ProgramTest; return (passed, short message for report)."""
+def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
+    """Run one ProgramTest; return (passed, message, boot_time, command_time)."""
     try:
-        output = run_commands(
+        result = run_commands(
             test.commands,
             command_timeout=test.timeout,
             drive=temporary_directory / BASE_IMAGE,
@@ -96,12 +95,13 @@ def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> 
             with_net=test.with_net,
         )
     except TimeoutError as error:
-        return False, f"timeout: {error}"
+        return False, f"timeout: {error}", 0.0, 0.0
     except RuntimeError as error:
-        return False, f"qemu error: {error}"
-    if re.search(test.expect, output.replace("\r", ""), re.MULTILINE):
-        return True, ""
-    return False, f"expected regex {test.expect!r} not found in output"
+        return False, f"qemu error: {error}", 0.0, 0.0
+    command_time = sum(result.command_times)
+    if re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
+        return True, "", result.boot_time, command_time
+    return False, f"expected regex {test.expect!r} not found in output", result.boot_time, command_time
 
 
 def main() -> int:
@@ -135,14 +135,17 @@ def main() -> int:
             if test.skip is not None:
                 print(f"  SKIP  {test.name:<12} ({test.skip})")
                 continue
-            started = time.monotonic()
-            ok, message = _run_test(floppy=arguments.floppy, temporary_directory=temporary_directory, test=test)
-            elapsed = time.monotonic() - started
+            ok, message, boot_time, command_time = _run_test(
+                floppy=arguments.floppy,
+                temporary_directory=temporary_directory,
+                test=test,
+            )
+            timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
             if ok:
-                print(f"  PASS  {test.name:<12}              {elapsed:6.2f}s")
+                print(f"  PASS  {test.name:<12}              {timing}")
                 pass_count += 1
             else:
-                print(f"  FAIL  {test.name:<12}  {message}   {elapsed:6.2f}s")
+                print(f"  FAIL  {test.name:<12}  {message}   {timing}")
                 fail_count += 1
                 failed.append(test.name)
     print()
