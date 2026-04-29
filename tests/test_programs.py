@@ -7,7 +7,6 @@ gets its own QEMU boot with `snapshot=on`, so writes don't pollute
 drive.img.
 
 Skips `shell` (implicit) and `asm` (covered by test_asm.py).
-Skips `draw` and `edit` (interactive; no deterministic output).
 
 Usage:
     ./test_programs.py            # run the full suite
@@ -194,8 +193,26 @@ TESTS: list[ProgramTest] = [
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
+    # 'draw\nq' runs `draw`, then draw reads the trailing 'q' from the
+    # serial buffer and exits its main loop (back to text mode).  draw
+    # has no serial output of its own — all writes go to VGA — so the
+    # follow-up `hello` is what the regex matches: if draw crashed or
+    # left the shell wedged in graphics mode, hello would never run.
+    # See the `edit` entry below for the same pattern with Ctrl+Q.
+    ProgramTest("draw", ["draw\nq", "hello"], r"^\$ draw[\s\S]+Hello world!"),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
     ProgramTest("echo_many_args", ["echo a b c d e", "ls"], r"^a b c d e$"),
+    # 'edit hello\n\x11' runs `edit hello`, then edit consumes the trailing
+    # Ctrl+Q (\x11) from the serial buffer.  hello doesn't exist in cwd, so
+    # edit opens with an empty buffer; with dirty=0 a single Ctrl+Q exits.
+    # The follow-up `hello` command confirms the shell is fully functional
+    # again — catches PD teardown / VGA mode reset bugs that would
+    # otherwise leave the shell wedged.  Doubles as a regression for the
+    # ~1 MB BSS allocation in the per-program PD.  Relies on
+    # _wait_for_prompt's settle window to drain the spurious empty-line
+    # prompt (from the trailing '\r' shell consumes after edit exits)
+    # before this command's wait begins.
+    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!"),
     ProgramTest(
         # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
         # ending with a single executable probe so the final directory

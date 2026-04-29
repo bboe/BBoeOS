@@ -13,10 +13,6 @@
         %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) — see BOOT_DISK_PHYS for why.
         %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_SECTORS 3
-        %assign EDIT_BUFFER_BASE 100000h        ; Edit gap-buffer base (extended memory, 1 MB mark; clears VGA/BIOS at 0xA0000-0xFFFFF)
-        %assign EDIT_BUFFER_SIZE 100000h        ; Edit gap-buffer size (1 MB)
-        %assign EDIT_KILL_BUFFER (EDIT_BUFFER_BASE + EDIT_BUFFER_SIZE)
-        %assign EDIT_KILL_BUFFER_SIZE 0A00h     ; Edit kill-buffer size (2560 bytes)
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT     07h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH

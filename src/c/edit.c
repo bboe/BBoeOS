@@ -1,17 +1,18 @@
+#define EDIT_BUFFER_SIZE 0x100000
+#define EDIT_KILL_BUFFER_SIZE 0xA00
+
 /* All editor state is file-scope so helpers can read/mutate it
    directly and so cc.py keeps it in BSS rather than auto-pinning to
    registers — buffer_character_at uses EDX/ECX as scratch, which
    would otherwise clobber any caller pin landing on those.  Text
    logically occupies [0, gap_start) and [gap_end, EDIT_BUFFER_SIZE);
-   the gap sits between.  The buffer itself lives in extended memory
-   above the 1 MB mark (`EDIT_BUFFER_BASE` = 0x100000) so it can be
-   1 MB without colliding with the resident kernel at 0x7C00..0xF000
-   or the VGA/BIOS regions at 0xA0000-0xFFFFF; BSS would also
-   collide, since it grows up from PROGRAM_BASE = 0x600. */
+   the gap sits between. */
 int confirm_quit;
 int cursor_column;
 int cursor_line;
 int dirty;
+char edit_buffer[EDIT_BUFFER_SIZE];
+char edit_kill_buffer[EDIT_KILL_BUFFER_SIZE];
 int gap_end;
 int gap_start;
 int kill_length;
@@ -23,13 +24,12 @@ int buffer_character_at(int offset) {
     /* Gap-buffer lookup: map a logical offset to the raw byte.  Caller
        must check ``offset < buffer_length()`` first — the helper has no
        EOF sentinel because cc.py types the call result as a byte (the
-       only return path is ``buffer[offset]``), and a negative or >255
+       only return path is ``edit_buffer[offset]``), and a negative or >255
        sentinel would not survive the AL-only store the caller emits. */
-    char *buffer = EDIT_BUFFER_BASE;
     if (offset >= gap_start) {
         offset += gap_end - gap_start;
     }
-    return buffer[offset];
+    return edit_buffer[offset];
 }
 
 int buffer_length() {
@@ -40,12 +40,11 @@ int column_before() {
     /* Count characters between gap_start and the previous newline (or
        start of buffer).  Used to recompute cursor_column after the
        cursor crosses a newline. */
-    char *buffer = EDIT_BUFFER_BASE;
     int column = 0;
     int i = gap_start;
     while (i > 0) {
         i -= 1;
-        if (buffer[i] == '\n') {
+        if (edit_buffer[i] == '\n') {
             return column;
         }
         column += 1;
@@ -57,29 +56,25 @@ int column_before() {
    side (cursor steps backward).  Returns the moved character for the
    caller's break / state updates.  Assumes gap_start > 0. */
 int gap_move_left() {
-    char *buffer = EDIT_BUFFER_BASE;
-    buffer[gap_end - 1] = buffer[gap_start - 1];
+    edit_buffer[gap_end - 1] = edit_buffer[gap_start - 1];
     gap_start -= 1;
     gap_end -= 1;
-    return buffer[gap_end];
+    return edit_buffer[gap_end];
 }
 
 /* Dual of gap_move_left — move one character from the right side into
    the left (cursor steps forward).  Assumes gap_end < EDIT_BUFFER_SIZE. */
 int gap_move_right() {
-    char *buffer = EDIT_BUFFER_BASE;
-    buffer[gap_start] = buffer[gap_end];
+    edit_buffer[gap_start] = edit_buffer[gap_end];
     gap_start += 1;
     gap_end += 1;
-    return buffer[gap_start - 1];
+    return edit_buffer[gap_start - 1];
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 1) {
         die("Usage: edit <filename>\n");
     }
-    char *buffer = EDIT_BUFFER_BASE;
-    char *kill_buf = EDIT_KILL_BUFFER;
     char *filename = argv[0];
     gap_end = EDIT_BUFFER_SIZE;
     char sector[512];
@@ -91,13 +86,13 @@ int main(int argc, char *argv[]) {
             close(fd);
             die("Is a directory\n");
         }
-        int bytes = read(fd, buffer, EDIT_BUFFER_SIZE);
+        int bytes = read(fd, edit_buffer, EDIT_BUFFER_SIZE);
         if (bytes < 0) {
             close(fd);
             die("Load error\n");
         }
         /* Detect overflow by attempting one more byte past the buffer. */
-        int extra = read(fd, kill_buf, 1);
+        int extra = read(fd, edit_kill_buffer, 1);
         close(fd);
         if (extra > 0) {
             die("File too large for edit buffer\n");
@@ -108,7 +103,7 @@ int main(int argc, char *argv[]) {
         int src = bytes - 1;
         int dest = EDIT_BUFFER_SIZE - 1;
         while (src >= 0) {
-            buffer[dest] = buffer[src];
+            edit_buffer[dest] = edit_buffer[src];
             dest -= 1;
             src -= 1;
         }
@@ -238,7 +233,7 @@ int main(int argc, char *argv[]) {
         if (character == '\x01') {
             /* Ctrl+A: move to beginning of line.  Shift chars from the
                pre-gap side over the gap until we hit a newline. */
-            while (gap_start > 0 && buffer[gap_start - 1] != '\n') {
+            while (gap_start > 0 && edit_buffer[gap_start - 1] != '\n') {
                 gap_move_left();
             }
             cursor_column = 0;
@@ -260,7 +255,7 @@ int main(int argc, char *argv[]) {
             }
         } else if (character == '\x05') {
             /* Ctrl+E: move to end of line. */
-            while (gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
+            while (gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
                 gap_move_right();
                 cursor_column += 1;
             }
@@ -281,7 +276,7 @@ int main(int argc, char *argv[]) {
         } else if (character == '\b' || character == '\x7F') {
             /* Backspace / DEL: delete the char before the cursor. */
             if (gap_start > 0) {
-                char c = buffer[gap_start - 1];
+                char c = edit_buffer[gap_start - 1];
                 gap_start -= 1;
                 dirty = 1;
                 if (c == '\n') {
@@ -301,11 +296,11 @@ int main(int argc, char *argv[]) {
                past the kill buffer silently drops the tail. */
             int kill_index = 0;
             while (gap_end < EDIT_BUFFER_SIZE) {
-                char c = buffer[gap_end];
+                char c = edit_buffer[gap_end];
                 gap_end += 1;
                 dirty = 1;
                 if (kill_index < EDIT_KILL_BUFFER_SIZE) {
-                    kill_buf[kill_index] = c;
+                    edit_kill_buffer[kill_index] = c;
                     kill_index += 1;
                 }
                 if (c == '\n') {
@@ -316,7 +311,7 @@ int main(int argc, char *argv[]) {
         } else if (character == '\r' || character == '\n') {
             /* Enter: insert newline at cursor. */
             if (gap_start < gap_end) {
-                buffer[gap_start] = '\n';
+                edit_buffer[gap_start] = '\n';
                 gap_start += 1;
                 dirty = 1;
                 cursor_line += 1;
@@ -342,7 +337,7 @@ int main(int argc, char *argv[]) {
                 if (cursor_line >= view_line + 24) {
                     view_line = cursor_line - 23;
                 }
-                while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
+                while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
                     gap_move_right();
                     cursor_column += 1;
                     target_col -= 1;
@@ -362,7 +357,7 @@ int main(int argc, char *argv[]) {
                 }
                 if (found_nl) {
                     /* Walk back to the start of the previous line. */
-                    while (gap_start > 0 && buffer[gap_start - 1] != '\n') {
+                    while (gap_start > 0 && edit_buffer[gap_start - 1] != '\n') {
                         gap_move_left();
                     }
                     cursor_line -= 1;
@@ -370,7 +365,7 @@ int main(int argc, char *argv[]) {
                     if (cursor_line < view_line) {
                         view_line = cursor_line;
                     }
-                    while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && buffer[gap_end] != '\n') {
+                    while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
                         gap_move_right();
                         cursor_column += 1;
                         target_col -= 1;
@@ -423,8 +418,8 @@ int main(int argc, char *argv[]) {
             int i = 0;
             while (i < kill_length) {
                 if (gap_start < gap_end) {
-                    char c = kill_buf[i];
-                    buffer[gap_start] = c;
+                    char c = edit_kill_buffer[i];
+                    edit_buffer[gap_start] = c;
                     gap_start += 1;
                     dirty = 1;
                     if (c == '\n') {
@@ -442,7 +437,7 @@ int main(int argc, char *argv[]) {
         } else if (character >= ' ' && character <= '~') {
             /* Printable ASCII: insert at cursor. */
             if (gap_start < gap_end) {
-                buffer[gap_start] = character;
+                edit_buffer[gap_start] = character;
                 gap_start += 1;
                 dirty = 1;
                 cursor_column += 1;

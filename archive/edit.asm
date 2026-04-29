@@ -3,12 +3,22 @@
 
 %include "constants.asm"
 
+        ;; Local copies of the EDIT_* constants.  These used to live in
+        ;; src/include/constants.asm; once edit.c moved to BSS arrays the
+        ;; live header dropped them.  This archive snapshot keeps private
+        ;; %assigns so the historical real-mode layout still assembles
+        ;; under the current kernel ABI.
+        %assign EDIT_BUFFER_BASE 100000h
+        %assign EDIT_BUFFER_SIZE 100000h
+        %assign EDIT_KILL_BUFFER (EDIT_BUFFER_BASE + EDIT_BUFFER_SIZE)
+        %assign EDIT_KILL_BUFFER_SIZE 0A00h
+
         ;; Gap buffer in extended memory [EDIT_BUFFER_BASE ..
         ;; EDIT_BUFFER_BASE+EDIT_BUFFER_SIZE):
         ;;   [0 .. gap_start)        text before cursor
         ;;   [gap_start .. gap_end)  gap (free space)
         ;;   [gap_end .. EDIT_BUFFER_SIZE)  text after cursor
-        ;; Constants from include/constants.asm (set by the pmode merge):
+        ;; Constants (private to this archive snapshot):
         ;;   EDIT_BUFFER_BASE      = 0x100000  (1 MB mark, past VGA / BIOS)
         ;;   EDIT_BUFFER_SIZE      = 0x100000  (1 MB gap buffer)
         ;;   EDIT_KILL_BUFFER      = 0x200000  (kill buffer at the 2 MB mark)

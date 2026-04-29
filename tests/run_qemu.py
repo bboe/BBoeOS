@@ -96,6 +96,26 @@ def run_commands(
         )
 
 
+_PROMPT_SETTLE_SECONDS = 0.05
+
+
+def _drain_until_idle(*, buffer: bytearray, file_descriptor: int, settle_seconds: float) -> None:
+    """Append any pending bytes to `buffer` until `settle_seconds` of silence."""
+    deadline = time.monotonic() + settle_seconds
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([file_descriptor], [], [], settle_seconds)
+        if not ready:
+            return
+        try:
+            chunk = os.read(file_descriptor, 4096)
+        except BlockingIOError:
+            return
+        if not chunk:
+            return
+        buffer.extend(chunk)
+        deadline = time.monotonic() + settle_seconds
+
+
 def _run_commands_once(
     commands: list[str],
     *,
@@ -198,7 +218,16 @@ def _wait_for_prompt(
     process: subprocess.Popen,
     timeout: float,
 ) -> None:
-    """Drain the output fifo into `buffer` until `PROMPT` appears."""
+    """Drain the output fifo into `buffer` until `PROMPT` appears, then settle.
+
+    After the first PROMPT match, keep draining for a short window so
+    back-to-back prompts (e.g. shell consuming a stray carriage return as
+    an empty command after a program that itself swallowed an inline
+    byte) all land in the buffer before this returns.  Without the
+    settle, the next command's prompt_start sits between the two prompts
+    and the spurious one falsely satisfies the next wait — masking
+    whether the actual command produced any output.
+    """
     prompt_start = len(buffer)
     deadline = time.monotonic() + timeout
     while PROMPT not in buffer[prompt_start:]:
@@ -220,6 +249,7 @@ def _wait_for_prompt(
             time.sleep(0.01)
             continue
         buffer.extend(chunk)
+    _drain_until_idle(buffer=buffer, file_descriptor=file_descriptor, settle_seconds=_PROMPT_SETTLE_SECONDS)
 
 
 def main() -> int:
