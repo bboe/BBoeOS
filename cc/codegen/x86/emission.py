@@ -443,15 +443,6 @@ class EmissionMixin:
             if len(arguments) != expected:
                 message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
                 raise CompileError(message, line=statement.line)
-            clobbers: frozenset[str] = frozenset(self.target.register_pool)
-            saved = self._pinned_registers_to_save(clobbers)
-            use_pusha = discard_return and len(saved) >= 3
-            if not tail_call:
-                if use_pusha:
-                    self.emit("        pusha")
-                else:
-                    for register in saved:
-                        self.emit(f"        push {register}")
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
             out_regs = self.out_register_params.get(name, {})
@@ -471,6 +462,24 @@ class EmissionMixin:
                     register_args.append((callee_pins[index], arg))
                 else:
                     stack_args.append(arg)
+            # Pinned registers whose locals get overwritten by an
+            # out_register capture have no live pre-call value worth
+            # preserving — push/pop around the call would clobber the
+            # captured value.  Exclude them from saved before the push
+            # loop; the pop loop then has nothing to restore for them.
+            captured_pinned_registers: set[str] = set()
+            for _, capture_arg in out_reg_captures:
+                if isinstance(capture_arg, AddressOf) and capture_arg.name in self.pinned_register:
+                    captured_pinned_registers.add(self.pinned_register[capture_arg.name])
+            clobbers: frozenset[str] = frozenset(self.target.register_pool)
+            saved = [r for r in self._pinned_registers_to_save(clobbers) if r not in captured_pinned_registers]
+            use_pusha = discard_return and len(saved) >= 3
+            if not tail_call:
+                if use_pusha:
+                    self.emit("        pusha")
+                else:
+                    for register in saved:
+                        self.emit(f"        push {register}")
             # Push stack-bound arguments right-to-left (C convention).
             for arg in reversed(stack_args):
                 self._emit_push_arg(arg)

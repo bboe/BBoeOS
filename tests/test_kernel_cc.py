@@ -550,6 +550,53 @@ def test_out_register_caller_captures_register_into_local() -> None:
     assert "mov [bp-2], si" in asm
 
 
+def test_out_register_capture_not_destroyed_by_pinned_push_pop() -> None:
+    """out_register capture into a pinned register must not be push/popped around the call.
+
+    Scenario: ``inner_value`` is auto-pinned to DX (two uses, one call → clobber
+    cost 1, references 2 > 1).  ``net_get`` returns its result via
+    ``out_register("cx")``, which cc.py captures with ``mov dx, cx`` (cross-
+    register move into the pin).  The pre-push guard in ``generate_call``
+    must recognise that DX is the capture destination and exclude it from the
+    push/pop save set.  Without the guard, cc.py emits ``push dx`` before the
+    call then ``pop dx`` after ``mov dx, cx``, destroying the captured value.
+
+    The assertions are unconditional: the capture ``mov dx, cx`` is always
+    emitted when ``inner_value`` pins to DX and the out_register is CX.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int net_get(int *value __attribute__((out_register("cx"))));
+
+        int process() {
+            int inner_value;
+            if (net_get(&inner_value)) {
+                return inner_value;
+            }
+            return inner_value;
+        }
+    """,
+        bits=16,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    call_idx = next(i for i, line in enumerate(lines) if line == "call net_get")
+    before_call = lines[:call_idx]
+    after_call = lines[call_idx + 1 :]
+    # inner_value must be pinned to DX: the cross-register capture must appear.
+    assert any("mov dx, cx" in line for line in after_call), (
+        f"expected 'mov dx, cx' capture after call — inner_value may not have pinned to dx:\n{asm}"
+    )
+    # DX must NOT be pushed before the call (the pre-push guard must exclude it).
+    assert not any("push dx" in line for line in before_call), (
+        f"'push dx' found before 'call net_get' — pre-push guard failed to exclude the capture target:\n{asm}"
+    )
+    # DX must NOT be popped after the call (nothing was pushed, so nothing to pop).
+    assert not any("pop dx" in line for line in after_call), (
+        f"'pop dx' found after 'call net_get' — captured value in DX would be destroyed:\n{asm}"
+    )
+
+
 def test_out_register_prototype_registers_convention() -> None:
     """A function prototype with out_register is retained in the AST and registers the convention."""
     # If the prototype is silently dropped, generate_call won't know about out_register
