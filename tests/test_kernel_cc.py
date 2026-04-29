@@ -1874,3 +1874,45 @@ def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
         }
     """)
     assert "f:" in asm
+
+
+def test_memset_emits_rep_stosb() -> None:
+    """memset(dst, value, count) compiles to rep stosb."""
+    asm = _kernel(
+        """
+        void zero_buf(uint8_t *buf, int n) {
+            memset(buf, 0, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"Expected 'rep stosb' in:\n{asm}"
+    assert "rep movsb" not in asm, f"Must not emit movsb for memset:\n{asm}"
+
+
+def test_memset_nonzero_value() -> None:
+    """Memset with a non-zero literal value loads AL correctly."""
+    asm = _kernel(
+        """
+        void fill_buf(uint8_t *buf, int n) {
+            memset(buf, 0xFF, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"Expected 'rep stosb' in:\n{asm}"
+    assert "0xFF" in asm or "255" in asm or "0ffh" in asm.lower() or "0xff" in asm.lower(), f"Expected 0xFF value in:\n{asm}"
+
+
+def test_memset_zero_literal_loads_correctly() -> None:
+    """Memset with a zero value literal loads the value into AX."""
+    asm = _kernel(
+        """
+        void zero_buf(uint8_t *buf, int n) {
+            memset(buf, 0, n);
+        }
+    """,
+        bits=32,
+    )
+    # The zero value must be loaded into AX (via xor or mov).
+    assert "eax, 0" in asm or "xor eax, eax" in asm or "xor ax, ax" in asm, f"Expected zero value loaded into AX:\n{asm}"
