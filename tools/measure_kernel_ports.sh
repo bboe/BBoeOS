@@ -12,27 +12,38 @@
 # build fails partway through.
 set -e
 
-# Each entry is "<rel-from-src>:<include-pattern>".  The include
-# pattern is what appears between %include "..." in bboeos.asm — usually
-# the relative path under src/<root> minus the .asm/.kasm extension,
-# but `arch/x86/system` just appears as `system` because that include
-# resolves via nasm's -i src/arch/x86 path.
+# Each entry is "<rel-from-src>:<include-pattern>:<asm-host-file>".  The
+# include pattern is what appears between %include "..." in the host
+# asm file — usually the relative path under src/<root> minus the
+# .asm/.kasm extension, but `arch/x86/system` just appears as `system`
+# because that include resolves via nasm's -i src/arch/x86 path.  The
+# host file is the .asm whose %include line gets sed'd between .asm
+# and .kasm; defaults to src/arch/x86/kernel.asm but
+# fs/fd/<name> ports route through src/fs/fd.c (which is itself an
+# asm() block).
 ROW_LIST="
-arch/x86/system:system
-drivers/ata:drivers/ata
-drivers/console:drivers/console
-drivers/fdc:drivers/fdc
-drivers/ne2k:drivers/ne2k
-drivers/ps2:drivers/ps2
-drivers/rtc:drivers/rtc
-drivers/serial:drivers/serial
-drivers/vga:drivers/vga
+arch/x86/system:system:src/arch/x86/kernel.asm
+drivers/ata:drivers/ata:src/arch/x86/kernel.asm
+drivers/console:drivers/console:src/arch/x86/kernel.asm
+drivers/fdc:drivers/fdc:src/arch/x86/kernel.asm
+drivers/ne2k:drivers/ne2k:src/arch/x86/kernel.asm
+drivers/ps2:drivers/ps2:src/arch/x86/kernel.asm
+drivers/rtc:drivers/rtc:src/arch/x86/kernel.asm
+drivers/serial:drivers/serial:src/arch/x86/kernel.asm
+drivers/vga:drivers/vga:src/arch/x86/kernel.asm
+fs/fd/net:fs/fd/net:src/fs/fd.c
 "
 
 cleanup() {
-    git checkout -- src/arch/x86/boot/bboeos.asm 2>/dev/null
     for entry in $ROW_LIST; do
-        row=${entry%:*}
+        host=${entry##*:}
+        host_bak="/tmp/measure_host_$(echo "$host" | tr / _).bak"
+        if [ -f "$host_bak" ]; then
+            mv "$host_bak" "$host"
+        fi
+    done
+    for entry in $ROW_LIST; do
+        row=${entry%%:*}
         rm -f "src/${row}.asm"
         bak="/tmp/measure_$(echo "$row" | tr / _).c"
         if [ -f "$bak" ]; then
@@ -52,13 +63,17 @@ printf "| File | ASM (bytes) | C (bytes) | Delta |\n"
 printf "|------|-------------|-----------|-------|\n"
 
 for entry in $ROW_LIST; do
-    row=${entry%:*}
-    inc=${entry#*:}
+    row=${entry%%:*}
+    rest=${entry#*:}
+    inc=${rest%:*}
+    host=${rest#*:}
     bak="/tmp/measure_$(echo "$row" | tr / _).c"
 
+    host_bak="/tmp/measure_host_$(echo "$host" | tr / _).bak"
+    cp "$host" "$host_bak"
     cp "archive/kernel/${row}.asm" "src/${row}.asm"
     mv "src/${row}.c" "$bak"
-    sed -i "s|${inc}.kasm|${inc}.asm|" src/arch/x86/boot/bboeos.asm
+    sed -i "s|${inc}.kasm|${inc}.asm|" "$host"
 
     if ! ./make_os.sh > /tmp/build.log 2>&1; then
         echo "BUILD FAILED for $row" >&2
@@ -73,5 +88,5 @@ for entry in $ROW_LIST; do
     # Restore for next iteration.
     rm "src/${row}.asm"
     mv "$bak" "src/${row}.c"
-    sed -i "s|${inc}.asm|${inc}.kasm|" src/arch/x86/boot/bboeos.asm
+    mv "$host_bak" "$host"
 done
