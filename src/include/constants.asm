@@ -80,7 +80,7 @@
         %assign PIC2_CMD_PORT   0xA0
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
-        %assign PROGRAM_BASE 0600h
+        %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
         %assign SECTOR_BUFFER 0F000h    ; Legacy scratch RAM at physical 0xF000.  The kernel's actual disk buffer is the BSS-allocated `sector_buffer` label in fs/block.asm; this constant survives only as a user-side scratch slot used by the shell's kill-buffer (still reachable through the Phase 3 shim's identity user mapping, and slated to become real BSS once cc.py-driven user BSS lands).
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
@@ -119,7 +119,7 @@
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
-        %assign USER_STACK_TOP 8FFF0h   ; Ring-3 stack top; 64 KB region 0x80000-0x8FFF0
+        %assign USER_STACK_TOP 40000000h        ; Ring-3 stack top; 64 KB region 0x3FFF0000-0x40000000
 
         ;; VGA hardware register ports (used by both the real-mode boot
         ;; path's vga_font_load and the post-flip vga driver).

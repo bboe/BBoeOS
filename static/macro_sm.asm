@@ -7,7 +7,7 @@
         ;; test_asm.py diffs asm.c's output against NASM's; byte
         ;; identity is the only contract.
 
-        org 0600h
+        org 08048000h
 
 %macro IDT_ENTRY 1
         dw %1

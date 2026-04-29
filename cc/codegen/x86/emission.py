@@ -92,7 +92,7 @@ class EmissionMixin:
         for line in self.target.preamble_lines():
             self.emit(line)
         if self.target_mode == "user":
-            self.emit("        org 0600h")
+            self.emit("        org 08048000h")
             self.emit()
             self.emit('%include "constants.asm"')
         if self.defines:

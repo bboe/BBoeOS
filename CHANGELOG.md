@@ -6,6 +6,34 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Phase 4 paging — Linux-shape relocation (2026-04-29)
+- Move `PROGRAM_BASE` from `0x600` to `0x08048000` (the Linux ELF
+  load address) and `USER_STACK_TOP` from `0x8FFF0` to `0x40000000`
+  (1 GB).  cc.py emits `org 08048000h`; `program_enter` maps
+  program text + BSS at `PROGRAM_BASE` and the 16-page user stack
+  at `0x3FFF0000..0x40000000`.  `BUFFER` (0x500), `EXEC_ARG`
+  (0x4FC), and the vDSO at `FUNCTION_TABLE` (0x10000) stay at low
+  user-virt and reach the program through the per-program PD's
+  first PT.  The "program prefix" copy at virt `0x600..0xFFF` goes
+  away — programs now load entirely above 0x08048000, and the low
+  frame is just the shell-to-program handoff region (BUFFER +
+  EXEC_ARG + ARGV).
+- The syscall ABI was already mostly 32-bit (cc.py emits 32-bit
+  register loads via `mov esi, ...` / `lea edi, [...]`, the
+  dispatcher's `pushad` preserves full E-regs, and most handlers
+  read ESI/EDI internally).  Two artifacts of the relocation
+  surfaced and were fixed:
+  - `src/c/asmesc.c`'s hand-written `mov bx, asmesc_table` →
+    `mov ebx, asmesc_table`; the table label is now at high virt
+    and no longer fits in BX.
+  - `src/c/asm.c::parse_d_values` emitted `dd <symbol>` as
+    `emit_word(value); emit_word(0)` — i.e. low 16 bits of the
+    symbol address followed by a zero word.  Switched to
+    `emit_dword(value)` so the full 32-bit address is preserved
+    (label addresses now live above 0x08048000).
+- All test suites pass: test_asm (35), test_bboefs (5), test_ext2
+  --slow (38), test_floppy_boot, test_programs (28).
+
 ### Phase 4 paging (2026-04-29)
 - Wire `address_space_create` / `address_space_destroy` /
   `address_space_map_page` (PR B's dormant helpers) into

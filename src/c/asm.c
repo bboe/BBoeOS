@@ -2382,17 +2382,20 @@ int open_file_ro(char *path) {
 }
 
 /* Shared body for ``dw`` / ``dd`` directives — ``dw`` is
-   ``parse_d_values(0)`` and ``dd`` is ``parse_d_values(1)`` (the
-   extra zero word past the 16-bit value).  Comma-separated
-   operand list; each operand evaluates via resolve_value. */
+   ``parse_d_values(0)`` (16-bit values) and ``dd`` is
+   ``parse_d_values(1)`` (full 32-bit values, needed since
+   PROGRAM_BASE = 0x08048000 and label addresses no longer fit in
+   16 bits).  Comma-separated operand list; each operand evaluates
+   via resolve_value. */
 __attribute__((regparm(1)))
-void parse_d_values(int extra_word) {
+void parse_d_values(int wide) {
     skip_ws();
     while (1) {
         int value = resolve_value();
-        emit_word(value);
-        if (extra_word != 0) {
-            emit_word(0);
+        if (wide != 0) {
+            emit_dword(value);
+        } else {
+            emit_word(value);
         }
         skip_ws();
         if (source_cursor[0] != ',') {
