@@ -2002,3 +2002,172 @@ def test_memset_zero_literal_loads_correctly() -> None:
     )
     # The zero value must be loaded into AX (via xor or mov).
     assert "eax, 0" in asm or "xor eax, eax" in asm or "xor ax, ax" in asm, f"Expected zero value loaded into AX:\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# ! (logical not) operator
+# ---------------------------------------------------------------------------
+
+
+def test_not_carry_return_call_emits_jnc() -> None:
+    """`if (!foo())` against a carry_return callee emits jnc (not jc).
+
+    carry_return convention: return 1 = CF clear (success),
+    return 0 = CF set (failure).  `if (!foo())` executes the body on
+    failure (CF set), so the false-jump past the body must be jnc
+    (skip body when CF clear = success).
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int try_open();
+
+        void caller() {
+            if (!try_open()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call try_open" in asm, f"Expected call in:\n{asm}"
+    assert "jnc" in asm, f"Expected 'jnc' (not_carry) for !carry_return in:\n{asm}"
+    assert "jc " not in asm, f"Must not emit bare jc for !carry_return:\n{asm}"
+
+
+def test_not_carry_return_call_positive_form_emits_jc() -> None:
+    """`if (foo())` (no !) against a carry_return callee emits jc (not jnc).
+
+    Confirms the positive form is correct so the ! test above is meaningful.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int try_open();
+
+        void caller() {
+            if (try_open()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call try_open" in asm, f"Expected call in:\n{asm}"
+    assert "jc " in asm, f"Expected 'jc' for positive carry_return in:\n{asm}"
+    assert "jnc" not in asm, f"Must not emit jnc for positive carry_return:\n{asm}"
+
+
+def test_not_carry_return_in_logical_and() -> None:
+    """`if (!a() && !b())` both legs emit correct not_carry jumps."""
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int a();
+        __attribute__((carry_return)) int b();
+
+        void caller() {
+            if (!a() && !b()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call a" in asm, f"Expected call a in:\n{asm}"
+    assert "call b" in asm, f"Expected call b in:\n{asm}"
+    # Both legs short-circuit via jnc (skip body / skip second check on success).
+    assert asm.count("jnc") >= 2, f"Expected jnc for both !a() and !b() in &&:\n{asm}"
+
+
+def test_not_carry_return_while_emits_jnc() -> None:
+    """`while (!poll())` loops while carry_return returns 0 (CF set = failure)."""
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int poll();
+
+        void wait_until_ready() {
+            while (!poll()) {}
+        }
+    """,
+        bits=32,
+    )
+    assert "call poll" in asm, f"Expected call in:\n{asm}"
+    assert "jnc" in asm, f"Expected 'jnc' in while(!carry_return) in:\n{asm}"
+
+
+def test_not_integer_literal_evaluates_correctly() -> None:
+    """`!0` evaluates to 1 and `!1` evaluates to 0.
+
+    cc.py does NOT fold constant comparisons at parse time: `!0` desugars
+    to `0 == 0` and the codegen emits a `cmp`/`jne`/`inc` sequence that
+    produces the correct result (1) at runtime.  The test verifies the
+    correct control-flow shape rather than asserting a folded literal.
+    """
+    asm_not0 = _kernel(
+        """
+        int always_one() {
+            return !0;
+        }
+    """,
+        bits=32,
+    )
+    # !0 = (0 == 0) = true.  The false-jump (jne) skips the inc-to-one path
+    # when 0 != 0 (never fires), so the function returns 1.  The cmp sequence
+    # must be present and the inc-eax path must appear.
+    assert "cmp" in asm_not0 or "test" in asm_not0, f"Expected cmp/test for !0 in:\n{asm_not0}"
+    assert "jne" in asm_not0, f"Expected jne branch in !0 sequence in:\n{asm_not0}"
+    assert "inc eax" in asm_not0 or "inc ax" in asm_not0, f"Expected 'inc eax' for the true-result path of !0 in:\n{asm_not0}"
+
+    asm_not1 = _kernel(
+        """
+        int always_zero() {
+            return !1;
+        }
+    """,
+        bits=32,
+    )
+    # !1 = (1 == 0) = false.  The false-jump fires (1 != 0 is true), so
+    # the inc path is skipped and the function returns 0.  cmp/jne must appear.
+    assert "cmp" in asm_not1 or "test" in asm_not1, f"Expected cmp/test for !1 in:\n{asm_not1}"
+    assert "jne" in asm_not1, f"Expected jne branch in !1 sequence in:\n{asm_not1}"
+
+
+def test_not_regular_call_emits_jne() -> None:
+    """`if (!foo())` against a non-carry_return callee: compares EAX to 0, emits jne.
+
+    `!foo()` desugars to `foo() == 0`.  The body executes when foo() is
+    zero; the false-jump (skip body) fires when foo() is non-zero — that is
+    a `jne` / `test + jne` sequence, NOT a `je`.
+    """
+    asm = _kernel(
+        """
+        int get_count();
+
+        void caller() {
+            if (!get_count()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call get_count" in asm, f"Expected call in:\n{asm}"
+    assert "jne" in asm, f"Expected 'jne' (false-jump = skip body when non-zero) for !regular_call in:\n{asm}"
+
+
+def test_not_variable_emits_jne() -> None:
+    """`if (!x)` on an integer variable compiles to test/cmp + jne.
+
+    The body executes when x == 0; the false-jump skips the body when x != 0
+    — so the emitted branch is `jne` (or the equivalent `test reg,reg` /
+    `jne`), not `je`.
+    """
+    asm = _kernel(
+        """
+        void check(int x) {
+            if (!x) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "jne" in asm or "jnz" in asm, f"Expected jne/jnz (false-jump) for !var in:\n{asm}"
