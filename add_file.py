@@ -64,6 +64,7 @@ def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str
 
 def add_file(
     *,
+    allow_empty: bool = False,
     executable: bool,
     file_path: str,
     image_path: str,
@@ -71,11 +72,16 @@ def add_file(
 ) -> None:
     """Add a file to the BBoeOS drive image.
 
+    By default refuses 0-byte files because the CLI is normally invoked
+    on built artifacts (a truly empty binary is almost always a build
+    error worth catching).  Tests that pad a directory with sentinel
+    entries opt in via ``allow_empty=True``.
+
     Raises
     ------
     SystemExit
-        If the filename is too long, the file is empty, the subdirectory is
-        not found, or the directory is full.
+        If the filename is too long, the file is empty (and not allowed),
+        the subdirectory is not found, or the directory is full.
 
     """
     filename = pathlib.Path(file_path).name
@@ -84,7 +90,7 @@ def add_file(
         raise SystemExit(message)
 
     file_data = pathlib.Path(file_path).read_bytes()
-    if not file_data:
+    if not file_data and not allow_empty:
         message = "Error: file is empty"
         raise SystemExit(message)
     file_size = len(file_data)
@@ -248,8 +254,17 @@ def ext2_add_file(
             capture_output=True,
             check=False,
         )
-        if result.returncode != 0:
-            message = f"Error: debugfs write failed:\n{result.stderr.decode()}"
+        # debugfs's `write` returns exit 0 even when it cannot allocate
+        # an inode (e.g. when the filesystem's inode table is full),
+        # printing "Could not allocate inode" on stderr instead.
+        # Treat any stderr line that isn't the version banner or the
+        # "Allocated inode: N" success line as a real failure.
+        stderr_text = result.stderr.decode()
+        stderr_failed = any(
+            line.strip() for line in stderr_text.splitlines() if not line.startswith("debugfs ") and "Allocated inode:" not in line
+        )
+        if result.returncode != 0 or stderr_failed:
+            message = f"Error: debugfs write failed:\n{stderr_text}"
             raise SystemExit(message)
         if executable:
             subprocess.run(
