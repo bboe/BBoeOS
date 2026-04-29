@@ -6,6 +6,51 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Phase 4 paging (2026-04-29)
+- Wire `address_space_create` / `address_space_destroy` /
+  `address_space_map_page` (PR B's dormant helpers) into
+  `program_enter`, `sys_exec`, and `sys_exit`: every program now
+  runs on its own private page directory.  The PD's user half (PDEs
+  0..767) carries only the program's image, BSS, ring-3 stack, and
+  shared vDSO + JUMP_TABLE PTEs; the kernel half (PDEs 768..1023) is
+  copy-imaged from `kernel_pd_template` so the kernel direct map is
+  reachable from every address space.
+- Drop the Phase 3 user shim PT at PDE[0] of `kernel_pd_template` —
+  user-virt 0..0xFFFFF and 0x300000..0x3FFFFF are no longer mapped
+  by default.  Kernel-mode code running on `kernel_pd_template`
+  (between teardown and the next `address_space_create`) cannot
+  accidentally touch user memory.
+- vDSO and `asm.c` JUMP_TABLE pages are allocated once at boot and
+  installed into every per-program PD with the AVL[0] `PTE_SHARED`
+  bit set; `address_space_destroy` skips `frame_free` on PTEs
+  carrying that bit so the shared frames outlive any single program.
+- `sys_exec` snapshots `BUFFER` (256 B at user-virt 0x500) and
+  `EXEC_ARG` (4 B at 0x4FC) from the dying shell's PD before
+  destroying it, so the new program inherits its argv as before.
+- `program_scratch` (128 KB at phys 0x185000, reached via the
+  kernel direct map at virt 0xC0185000) gives `vfs_load` a fixed
+  staging buffer outside any per-program PD, avoiding 128 KB of
+  zero padding inside `kernel.bin`.
+- VGA driver kernel writes migrate to the direct-map kernel-virt
+  aliases (`0xC00B8000` text, `0xC00A0000` mode-13h) since the user
+  shim no longer maps the low VGA frames.
+- `rtc_read_epoch` switches `[rtc_month_days + bx]` to
+  `[... + ebx]` to drop the 67h address-size override that truncated
+  the displacement to 16 bits (latent bug since the table moved to
+  high-half; previously masked by the Phase 3 shim's identity
+  mapping for low memory).
+- ext2.asm: convert function prologue / epilogue `push bx/cx/dx/si/di`
+  pairs to 32-bit `push ebx/ecx/edx/esi/edi` so callers' high
+  register bits survive the call.  Also fix several
+  `movzx esi, bx` / `movzx ebx, bx` sites that derived from
+  `ext2_read_inode`'s return pointer — they were truncating the full
+  kernel-virt sector_buffer pointer (0xC000F000+ofs) to its low 16
+  bits, which only worked while the Phase 3 shim aliased low memory
+  to the same physical frames.  All ext2 tests
+  (`tests/test_ext2.py --slow`) pass under per-program PDs.
+- All test suites (`test_asm`, `test_bboefs`, `test_ext2`,
+  `test_floppy_boot`, `test_programs`) pass under per-program PDs.
+
 ### Phase 3 paging (2026-04-28)
 - Enable 32-bit paging and split the kernel binary into `boot.bin`
   (`org 0x7C00`, MBR + real-mode bootstrap + early-PE relocator) and

@@ -257,10 +257,10 @@ rtc_read_epoch:
         jmp .re_year_loop
         .re_year_done:
 
-        movzx bx, byte [epoch_month]
-        dec bx
-        shl bx, 1
-        movzx eax, word [rtc_month_days + bx]
+        movzx ebx, byte [epoch_month]
+        dec ebx
+        shl ebx, 1
+        movzx eax, word [rtc_month_days + ebx]
         add esi, eax
 
         cmp byte [epoch_month], 2
