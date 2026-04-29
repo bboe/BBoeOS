@@ -39,7 +39,7 @@ fi
 # the pad, NASM's `times` directive goes negative and the build fails.
 nasm -f bin \
     -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
-    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" \
+    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" -i "$KBUILD/syscall/" \
     -o kernel.bin src/arch/x86/kernel.asm
 if [ $? -ne 0 ]; then
     exit 1
