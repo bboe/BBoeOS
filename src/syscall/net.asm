@@ -16,9 +16,17 @@
         ;; ------------------------------------------------------------
 
         .net_mac:
-        ;; DI = caller's 6-byte buffer.  CF set if no NIC.
+        ;; EDI = caller's 6-byte buffer.  CF set if no NIC or bad pointer.
         cmp byte [net_present], 0
         je .net_mac_absent
+        push ebx
+        push ecx
+        mov ebx, edi
+        mov ecx, 6
+        call access_ok
+        pop ecx
+        pop ebx
+        jc .net_mac_bad_pointer
         push esi
         push ecx
         cld
@@ -30,6 +38,10 @@
         clc
         jmp .iret_cf
         .net_mac_absent:
+        stc
+        jmp .iret_cf
+        .net_mac_bad_pointer:
+        mov al, ERROR_FAULT
         stc
         jmp .iret_cf
 
@@ -66,6 +78,11 @@
         ;; Receive datagram via fd.
         ;;   UDP (FD_TYPE_UDP):  BX=fd, EDI=recv buf, ECX=max len, DX=local_port
         ;;   ICMP (FD_TYPE_ICMP): same shape; DX ignored
+        push ebx
+        mov ebx, edi
+        call access_ok
+        pop ebx
+        jc .rf_bad_pointer
         mov [.rf_buf], edi
         mov [.rf_max], ecx
         mov [.rf_port], dx
@@ -111,6 +128,10 @@
         xor eax, eax                            ; AX = 0 = no bytes
         clc
         jmp .iret_cf
+        .rf_bad_pointer:
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
         .rf_buf dd 0
         .rf_max dd 0
         .rf_port dw 0
@@ -127,6 +148,19 @@
         ;; resident addresses.  Caps payload at sector_buffer - 4 = 508
         ;; bytes; larger UDP datagrams land when the staging buffer
         ;; widens.
+        push ebx
+        mov ebx, esi
+        call access_ok                         ; payload ESI + ECX
+        pop ebx
+        jc .st_bad_pointer
+        push ebx
+        push ecx
+        mov ebx, edi
+        mov ecx, 4
+        call access_ok                         ; IP EDI + 4 bytes
+        pop ecx
+        pop ebx
+        jc .st_bad_pointer
         mov [.st_fd], bx
         mov [.st_len], cx
         mov [.st_sport], dx
@@ -178,6 +212,10 @@
         jmp .iret_cf
 
         .st_err:
+        stc
+        jmp .iret_cf
+        .st_bad_pointer:
+        mov al, ERROR_FAULT
         stc
         jmp .iret_cf
 
