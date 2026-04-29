@@ -54,7 +54,7 @@ else:
 print(value - 0x7C00)
 PY
 )
-KERNEL_SIZE=$(stat -c %s os.bin)
+KERNEL_SIZE=$(wc -c < os.bin | tr -d ' ')
 if [ "$KERNEL_SIZE" -gt "$KERNEL_BUDGET" ]; then
     echo "os.bin is $KERNEL_SIZE bytes; budget is $KERNEL_BUDGET (SECTOR_BUFFER - 0x7C00)." >&2
     echo "The kernel has overflowed into the disk buffer at SECTOR_BUFFER; ata_read_sector / fdc DMA will corrupt it on the first read.  Move SECTOR_BUFFER (and the NET_*_BUFFER pair if needed) up in src/include/constants.asm, or shrink the kernel." >&2

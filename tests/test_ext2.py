@@ -28,7 +28,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -222,12 +221,12 @@ def _fsck(*, image: Path) -> str | None:
         ext2_path.unlink(missing_ok=True)
 
 
-def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str]:
-    """Run one ProgramTest; return (passed, short message for report)."""
+def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
+    """Run one ProgramTest; return (passed, message, boot_time, command_time)."""
     test_image = temporary_directory / f"test_{test.name}.img"
     shutil.copy2(temporary_directory / BASE_IMAGE, test_image)
     try:
-        output = run_commands(
+        result = run_commands(
             test.commands,
             command_timeout=test.timeout,
             drive=test_image,
@@ -235,16 +234,17 @@ def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> 
             snapshot=False,
         )
     except TimeoutError as error:
-        return False, f"timeout: {error}"
+        return False, f"timeout: {error}", 0.0, 0.0
     except RuntimeError as error:
-        return False, f"qemu error: {error}"
+        return False, f"qemu error: {error}", 0.0, 0.0
+    command_time = sum(result.command_times)
     failures = []
-    if not re.search(test.expect, output.replace("\r", ""), re.MULTILINE):
+    if not re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
         failures.append(f"expected regex {test.expect!r} not found in output")
     fsck_error = _fsck(image=test_image)
     if fsck_error:
         failures.append(f"fsck: {fsck_error}")
-    return (not failures), "; ".join(failures)
+    return (not failures), "; ".join(failures), result.boot_time, command_time
 
 
 def _run_suite(
@@ -260,14 +260,17 @@ def _run_suite(
     failed: list[str] = []
     for test in tests:
         name = f"{label}{test.name}" if label else test.name
-        started = time.monotonic()
-        ok, message = _run_test(floppy=floppy, temporary_directory=temporary_directory, test=test)
-        elapsed = time.monotonic() - started
+        ok, message, boot_time, command_time = _run_test(
+            floppy=floppy,
+            temporary_directory=temporary_directory,
+            test=test,
+        )
+        timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
         if ok:
-            print(f"  PASS  {name:<20}              {elapsed:6.2f}s")
+            print(f"  PASS  {name:<20}              {timing}")
             pass_count += 1
         else:
-            print(f"  FAIL  {name:<20}  {message}   {elapsed:6.2f}s")
+            print(f"  FAIL  {name:<20}  {message}   {timing}")
             fail_count += 1
             failed.append(name)
     return pass_count, fail_count, failed
