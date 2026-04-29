@@ -328,11 +328,12 @@ class CodeGeneratorBase:
         """Return a NASM constant expression if *init* is compile-time resolvable.
 
         Recognizes integer literals, ``NAMED_CONSTANT`` references,
-        constant aliases, and arbitrarily-nested ``+``/``-``/``*``
+        constant aliases, user function names (their bare label is a
+        link-time constant), and arbitrarily-nested ``+``/``-``/``*``
         combinations of those.  Returns a NASM expression string (e.g.
-        ``"BUFFER"``, ``"(BUFFER+128)"``, or
-        ``"((O_WRONLY+O_CREAT)+O_TRUNC)"``) that the assembler folds at
-        link time, or ``None`` if any leaf is not constant.
+        ``"BUFFER"``, ``"(BUFFER+128)"``, ``"fd_read_console"``) that
+        the assembler folds at link time, or ``None`` if any leaf is
+        not constant.
         """
         if isinstance(init, Int):
             return str(init.value)
@@ -341,6 +342,8 @@ class CodeGeneratorBase:
                 return init.name
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
+            if init.name in self.user_functions:
+                return init.name
             return None
         if isinstance(init, BinaryOperation) and init.operation in ("+", "-", "*", "&", "|", "^"):
             left = self._constant_expression(init.left)
