@@ -1876,6 +1876,92 @@ def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
     assert "f:" in asm
 
 
+def test_memcmp_emits_repe_cmpsb() -> None:
+    """memcmp(a, b, n) compiles to repe cmpsb."""
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+    # Standard memcmp returns lexical difference, not a 0/1 boolean — the old
+    # setne-then-zero-extend tail must be gone.
+    assert "setne" not in asm, f"Old boolean-result codegen leaked through:\n{asm}"
+
+
+def test_memcmp_n_zero_short_circuits() -> None:
+    """memcmp(a, b, 0) must return 0 without inspecting the buffers.
+
+    rep with CX=0 leaves ZF undefined, so the implementation must guard
+    with an explicit ``test count, count`` / ``jz`` pair before cmpsb.
+    """
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "test ecx, ecx" in asm, f"Expected 'test ecx, ecx' n==0 guard in:\n{asm}"
+    assert "memcmp_done_" in asm, f"Expected memcmp_done label for n==0 jump in:\n{asm}"
+
+
+def test_memcmp_not_equal_branch() -> None:
+    """Memcmp result != 0 branch works correctly."""
+    asm = _kernel(
+        """
+        int differs(uint8_t *a, uint8_t *b, int n) {
+            if (memcmp(a, b, n) != 0) {
+                return 1;
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+
+
+def test_memcmp_result_used_as_condition() -> None:
+    """Memcmp result used in an if condition compiles without extra cmp."""
+    asm = _kernel(
+        """
+        int is_equal(uint8_t *a, uint8_t *b, int n) {
+            if (memcmp(a, b, n) == 0) {
+                return 1;
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+
+
+def test_memcmp_returns_signed_difference() -> None:
+    """Memcmp returns the lexical signed byte difference, not a 0/1 boolean.
+
+    On a mismatch SI/DI sit one past the differing byte, so the
+    implementation reloads ``[di-1]`` / ``[si-1]`` zero-extended and
+    subtracts.  Result range is [-255, +255], matching standard C memcmp.
+    """
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "movzx eax, byte [edi-1]" in asm, f"Expected zero-extended byte load from a in:\n{asm}"
+    assert "movzx edx, byte [esi-1]" in asm, f"Expected zero-extended byte load from b in:\n{asm}"
+    assert "sub eax, edx" in asm, f"Expected 'sub eax, edx' for signed lexical diff in:\n{asm}"
+
+
 def test_memset_emits_rep_stosb() -> None:
     """memset(dst, value, count) compiles to rep stosb."""
     asm = _kernel(

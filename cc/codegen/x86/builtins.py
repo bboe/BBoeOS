@@ -491,6 +491,39 @@ class BuiltinsMixin:
         self._emit_syscall("NET_MAC")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
+    def builtin_memcmp(self, arguments: list[Node], /) -> None:
+        """Generate code for the memcmp(a, b, n) builtin.
+
+        Returns the standard C ``memcmp`` result: 0 if the *n* bytes are
+        equal, a negative value if the first differing byte in *a* is less
+        than the corresponding byte in *b*, a positive value otherwise.
+        ``memcmp(a, b, 0)`` returns 0 without inspecting the buffers.
+
+        Bytes are compared as ``unsigned char``; the difference fits in
+        ``[-255, +255]``.  AX, CX, DX, SI, DI are clobbered.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="memcmp")
+        a_argument, b_argument, count_argument = arguments
+        self.emit_register_from_argument(argument=a_argument, register=self.target.di_register)
+        self.emit_register_from_argument(argument=b_argument, register=self.target.si_register)
+        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        label_index = self.new_label()
+        # Default result = 0; covers both n==0 and all-bytes-equal paths.
+        self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+        # n==0 short-circuit: rep with CX=0 leaves ZF undefined, so the
+        # cmpsb/je path can't be trusted to return 0.
+        self.emit(f"        test {self.target.count_register}, {self.target.count_register}")
+        self.emit(f"        jz .memcmp_done_{label_index}")
+        self.emit("        cld")
+        self.emit("        repe cmpsb")
+        self.emit(f"        je .memcmp_done_{label_index}")
+        # cmpsb post-incremented SI/DI past the differing byte; reload it.
+        self.emit(f"        movzx {self.target.acc}, byte [{self.target.di_register}-1]")
+        self.emit(f"        movzx {self.target.dx_register}, byte [{self.target.si_register}-1]")
+        self.emit(f"        sub {self.target.acc}, {self.target.dx_register}")
+        self.emit(f".memcmp_done_{label_index}:")
+        self.ax_clear()
+
     def builtin_memcpy(self, arguments: list[Node], /) -> None:
         """Generate code for the memcpy(destination, source, n) builtin.
 

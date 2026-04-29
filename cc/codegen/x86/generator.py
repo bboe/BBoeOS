@@ -97,6 +97,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "kernel_outsw": frozenset({"ax", "cx", "dx", "si"}),
         "kernel_outw": frozenset({"ax", "dx"}),
         "mac": frozenset({"ax", "di"}),
+        "memcmp": frozenset({"ax", "cx", "di", "dx", "si"}),
         "memcpy": frozenset({"ax", "cx", "di", "si"}),
         "memset": frozenset({"ax", "cx", "di"}),
         "mkdir": frozenset({"ax", "si"}),
