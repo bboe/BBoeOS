@@ -1,41 +1,41 @@
 ;;; ------------------------------------------------------------------------
-;;; memory_management/as.asm — per-program address-space helpers.
+;;; memory_management/address_space.asm — per-program address-space helpers.
 ;;;
 ;;; Builds and tears down user page directories for Phase 4's per-program
 ;;; PDs.  Kernel-half PDEs (768..1023, the 256 MB direct map at virtual
 ;;; 0xC0000000..0xCFFFFFFF) are copied verbatim from `kernel_pd_template`
-;;; at as_create time and never modified afterward — that invariant is
-;;; what lets us avoid fan-out updates when the kernel installs a new
-;;; kernel-half mapping.
+;;; at address_space_create time and never modified afterward — that
+;;; invariant is what lets us avoid fan-out updates when the kernel
+;;; installs a new kernel-half mapping.
 ;;;
 ;;; Public (CPL=0 only):
-;;;   as_create()                     -> EAX = pd_phys, CF on OOM
-;;;   as_destroy(eax = pd_phys)        free user PTs and pages, then PD
-;;;   as_map_page(eax = pd_phys,
-;;;               ebx = user_virt,
-;;;               ecx = phys,
-;;;               edx = flags)         install / replace PTE; CF on OOM
-;;;   as_unmap_page(eax = pd_phys,
-;;;                 ebx = user_virt)   clear PTE; invlpg if pd is current
+;;;   address_space_create()                  -> EAX = pd_phys, CF on OOM
+;;;   address_space_destroy(eax = pd_phys)     free user PTs and pages, then PD
+;;;   address_space_map_page(eax = pd_phys,
+;;;                          ebx = user_virt,
+;;;                          ecx = phys,
+;;;                          edx = flags)      install / replace PTE; CF on OOM
+;;;   address_space_unmap_page(eax = pd_phys,
+;;;                            ebx = user_virt) clear PTE; invlpg if pd is current
 ;;;
 ;;; All four routines preserve every register the caller passed in
 ;;; (success and failure paths both restore via the prologue/epilogue
 ;;; pop chain).  The success-path return value lives in EAX for
-;;; as_create only; the others communicate solely via CF.
+;;; address_space_create only; the others communicate solely via CF.
 ;;;
 ;;; No callers yet — these helpers are dormant until Phase 4's PR C
 ;;; rewrites `program_enter` to build a fresh PD per program.
 ;;; ------------------------------------------------------------------------
 
-%define AS_DIRECT_MAP_BASE      0xC0000000
-%define AS_KERNEL_PDE_COUNT     256             ; PDEs 768..1023 are kernel-half
-%define AS_PDE_PRESENT          0x001
-%define AS_PDE_RW               0x002
-%define AS_PDE_USER             0x004
-%define AS_PDE_USER_RW          (AS_PDE_PRESENT | AS_PDE_RW | AS_PDE_USER)
-%define AS_USER_PDE_COUNT       768             ; PDEs 0..767 are user-half
+%define ADDRESS_SPACE_DIRECT_MAP_BASE   0xC0000000
+%define ADDRESS_SPACE_KERNEL_PDE_COUNT  256             ; PDEs 768..1023 are kernel-half
+%define ADDRESS_SPACE_PDE_PRESENT       0x001
+%define ADDRESS_SPACE_PDE_RW            0x002
+%define ADDRESS_SPACE_PDE_USER          0x004
+%define ADDRESS_SPACE_PDE_USER_RW       (ADDRESS_SPACE_PDE_PRESENT | ADDRESS_SPACE_PDE_RW | ADDRESS_SPACE_PDE_USER)
+%define ADDRESS_SPACE_USER_PDE_COUNT    768             ; PDEs 0..767 are user-half
 
-as_create:
+address_space_create:
         ;; Allocate one frame, zero it, then copy the top-256 PDEs from
         ;; `kernel_pd_template` into the new PD's kernel-half slot.
         ;; Output: EAX = pd_phys, CF clear on success; CF set on OOM.
@@ -48,7 +48,7 @@ as_create:
         ;; Zero all 1024 PDEs via the direct map.
         push eax                                ; save pd_phys for return
         mov edi, eax
-        add edi, AS_DIRECT_MAP_BASE
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
         push edi                                ; remember PD direct-map base
         mov ecx, 1024
         xor eax, eax
@@ -56,13 +56,14 @@ as_create:
         rep stosd
         ;; Copy top-256 PDEs from kernel_pd_template into PDE[768..1023].
         ;; ESI = source kernel-virt, EDI = destination kernel-virt, both
-        ;; offset by AS_USER_PDE_COUNT * 4 bytes to skip the user half.
+        ;; offset by ADDRESS_SPACE_USER_PDE_COUNT * 4 bytes to skip the
+        ;; user half.
         mov esi, [kernel_pd_template_phys]
-        add esi, AS_DIRECT_MAP_BASE
-        add esi, AS_USER_PDE_COUNT * 4
+        add esi, ADDRESS_SPACE_DIRECT_MAP_BASE
+        add esi, ADDRESS_SPACE_USER_PDE_COUNT * 4
         pop edi                                 ; PD direct-map base
-        add edi, AS_USER_PDE_COUNT * 4
-        mov ecx, AS_KERNEL_PDE_COUNT
+        add edi, ADDRESS_SPACE_USER_PDE_COUNT * 4
+        mov ecx, ADDRESS_SPACE_KERNEL_PDE_COUNT
         rep movsd
         pop eax                                 ; restore pd_phys
         clc
@@ -79,7 +80,7 @@ as_create:
         pop ebx
         ret
 
-as_destroy:
+address_space_destroy:
         ;; EAX = pd_phys.  Walks PDEs 0..767 (user half).  For each
         ;; present PDE, walks the PT, frees every present user-page
         ;; frame, then frees the PT frame itself.  Finally frees the PD
@@ -95,21 +96,21 @@ as_destroy:
         push esi
         mov esi, eax                            ; ESI = pd_phys (saved)
         mov edi, eax
-        add edi, AS_DIRECT_MAP_BASE             ; EDI = PD direct-map address
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDI = PD direct-map address
         xor ebx, ebx                            ; EBX = PDE index
 .pde_loop:
         mov eax, [edi + ebx*4]
-        test eax, AS_PDE_PRESENT
+        test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pde
         ;; PDE present: walk the PT.
         mov edx, eax
         and edx, 0xFFFFF000                     ; EDX = PT phys
         push edx                                ; save for the PT-frame free
-        add edx, AS_DIRECT_MAP_BASE             ; EDX = PT direct-map address
+        add edx, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDX = PT direct-map address
         xor ecx, ecx                            ; ECX = PTE index
 .pte_loop:
         mov eax, [edx + ecx*4]
-        test eax, AS_PDE_PRESENT
+        test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pte
         and eax, 0xFFFFF000                     ; user-page phys
         call frame_free
@@ -122,7 +123,7 @@ as_destroy:
         call frame_free
 .next_pde:
         inc ebx
-        cmp ebx, AS_USER_PDE_COUNT
+        cmp ebx, ADDRESS_SPACE_USER_PDE_COUNT
         jb .pde_loop
         ;; Free the PD frame.
         mov eax, esi
@@ -135,7 +136,7 @@ as_destroy:
         pop eax
         ret
 
-as_map_page:
+address_space_map_page:
         ;; EAX = pd_phys, EBX = user_virt, ECX = phys, EDX = flags.
         ;; Inserts a PTE.  Allocates a PT frame on demand if the PDE is
         ;; not-present.  Does not invalidate TLB — caller invalidates if
@@ -154,33 +155,33 @@ as_map_page:
         shr esi, 22
         ;; EDI = PD direct-map address.
         mov edi, eax
-        add edi, AS_DIRECT_MAP_BASE
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
         mov eax, [edi + esi*4]
-        test eax, AS_PDE_PRESENT
+        test eax, ADDRESS_SPACE_PDE_PRESENT
         jnz .pde_present
         ;; PDE not present: allocate a fresh PT, zero it, install the PDE.
         call frame_alloc
         jc .oom
         push eax                                ; save PT phys
         mov edi, eax
-        add edi, AS_DIRECT_MAP_BASE             ; EDI = PT direct-map address
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDI = PT direct-map address
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
         pop eax                                 ; restore PT phys
         ;; Install PDE = pt_phys | P | RW | U.  Reload EDI from the
-        ;; PD-direct-map base saved on the prologue stack ([esp+4] is
-        ;; the saved EDI).
+        ;; PD-direct-map base saved on the prologue stack ([esp+20] is
+        ;; the saved EAX = pd_phys).
         mov edi, [esp + 20]                     ; saved EAX = pd_phys
-        add edi, AS_DIRECT_MAP_BASE
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
         mov edx, eax
-        or edx, AS_PDE_USER_RW
+        or edx, ADDRESS_SPACE_PDE_USER_RW
         mov [edi + esi*4], edx
 .pde_present:
         ;; EAX = PDE value; mask off flag bits to get PT phys.
         and eax, 0xFFFFF000
-        add eax, AS_DIRECT_MAP_BASE             ; EAX = PT direct-map address
+        add eax, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EAX = PT direct-map address
         ;; PTE index = (user_virt >> 12) & 0x3FF.
         mov ebx, [esp + 16]                     ; saved EBX = user_virt
         shr ebx, 12
@@ -210,7 +211,7 @@ as_map_page:
         pop eax
         ret
 
-as_unmap_page:
+address_space_unmap_page:
         ;; EAX = pd_phys, EBX = user_virt.  Clears the PTE if present;
         ;; no-op if the PDE or PTE was already not-present.  Does not
         ;; free the underlying frame — caller's responsibility.  Issues
@@ -225,13 +226,13 @@ as_unmap_page:
         mov esi, ebx
         shr esi, 22
         mov edi, eax
-        add edi, AS_DIRECT_MAP_BASE
+        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
         mov ecx, [edi + esi*4]
-        test ecx, AS_PDE_PRESENT
+        test ecx, ADDRESS_SPACE_PDE_PRESENT
         jz .done
         ;; ECX = PT direct-map address; EDI = PTE index.
         and ecx, 0xFFFFF000
-        add ecx, AS_DIRECT_MAP_BASE
+        add ecx, ADDRESS_SPACE_DIRECT_MAP_BASE
         mov edi, ebx
         shr edi, 12
         and edi, 0x3FF

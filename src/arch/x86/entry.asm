@@ -257,7 +257,7 @@ vdso_install:
         ;; whose top-256 PDEs are copied into every per-program PD as
         ;; the kernel half of the address space.  Phase 3 promotes the
         ;; boot PD into this slot (= 0x1000) and stops here; Phase 4's
-        ;; per-AS work consumes it from `as_create`.
+        ;; per-address-space work consumes it from `address_space_create`.
 kernel_pd_template_phys dd 0
 
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit

@@ -19,8 +19,8 @@
 ;;; The 0x00010000 base sits below the user PROGRAM_BASE (0x600) and the
 ;;; pre-paging stack region (0x80000-0x8FFF0) yet within the default
 ;;; QEMU 128 MB RAM, so writes at boot work without a custom -m flag.
-;;; Post-paging (Phase 3+) the same virt address is mapped per AS into
-;;; the user PD at user-virt 0x00010000.
+;;; Post-paging (Phase 3+) the same virt address is mapped per address
+;;; space into the user PD at user-virt 0x00010000.
 ;;; ------------------------------------------------------------------------
 
         org 0x00010000

@@ -12,7 +12,7 @@ This is the immediate post-ring-3 milestone. Ring 3 gave us privilege protection
 - Per-program virtual address space: each loaded program has a private page directory built at load and torn down at exit. CR3 changes only at program load, program exit, and the kill path.
 - Linux-shaped layout: kernel mapped high (`0xC0000000+`); user programs occupy the low 3 GB; physical kernel relocated to `0x100000`.
 - Real virtual memory for large buffers: `edit`'s 1 MB gap buffer becomes ordinary BSS instead of a hardcoded `0x100000` slab. The trailer-magic protocol widens from 16-bit to 32-bit `bss_size`.
-- Multi-process foundation: per-AS plumbing exists; only the scheduler is missing. A future scheduler can switch CR3 between PDs without rearchitecting.
+- Multi-process foundation: per-address-space plumbing exists; only the scheduler is missing. A future scheduler can switch CR3 between PDs without rearchitecting.
 
 ## Non-goals (deferred)
 
@@ -51,10 +51,10 @@ The boot.asm code reads the kernel image into `0x10000` via INT 13h. Early-PE co
 | `0x00001000..0x0000FFFF` | Unmapped user low | — | Reserved for future heap / mmap |
 | `0x00010000..0x00010FFF` | vDSO code page | R-X user | Shared physical frame across all PDs |
 | `0x00011000..0x08047FFF` | Unmapped user low | — | Reserved for future heap / mmap |
-| `0x08048000..(prog_end)` | Program text + data | user | Private frames per AS |
-| `(prog_end)..(prog_end + bss_size)` | BSS, eager-zeroed | user | Private frames per AS |
+| `0x08048000..(prog_end)` | Program text + data | user | Private frames per address space |
+| `(prog_end)..(prog_end + bss_size)` | BSS, eager-zeroed | user | Private frames per address space |
 | `0x3FFDF000..0x3FFDFFFF` | Stack guard (unmapped) | — | Overflow → clean `#PF` |
-| `0x3FFE0000..0x3FFFFFFF` | User stack (128 KB) | user | Private frames per AS |
+| `0x3FFE0000..0x3FFFFFFF` | User stack (128 KB) | user | Private frames per address space |
 | `0x40000000` | Stack top (initial ESP) | — | — |
 | `0x40000001..0xBFFFFFFF` | Unmapped user high | — | Reserved for future mmap |
 | `0xC0000000..0xCFFFFFFF` | Kernel direct map (256 MB) | kernel | Constant offset to physical 0..256 MB |
@@ -121,14 +121,14 @@ Public interface (CPL=0 only):
 
 The 256 MB ceiling is enforced statically by the bitmap size. RAM beyond 256 MB is ignored. Easy to widen later by changing one constant.
 
-### Address-space helpers (`memory_management/as.asm`)
+### Address-space helpers (`memory_management/address_space.asm`)
 
 Public interface (CPL=0 only):
 
-- `as_create()` → `EAX = pd_phys`, CF on OOM. Allocates one frame, zeroes it, copies top-256 PDEs from `kernel_pd_template`. Does not switch CR3.
-- `as_destroy(eax = pd_phys)` → walks user-half PDEs (0..767). For each present PDE: walks the PT, frees each present user-page frame, frees the PT frame. Finally frees the PD frame. Caller must not have `pd_phys` loaded in CR3.
-- `as_map_page(eax = pd_phys, ebx = user_virt, ecx = phys, edx = flags)` → installs / replaces a PTE. Allocates a PT frame on demand if the relevant PDE is not-present. CF on OOM. Does not invalidate TLB; caller invalidates if `pd_phys == current CR3`.
-- `as_unmap_page(eax = pd_phys, ebx = user_virt)` → clears the PTE. Does not free the underlying frame. Issues `invlpg` if `pd_phys == current CR3`.
+- `address_space_create()` → `EAX = pd_phys`, CF on OOM. Allocates one frame, zeroes it, copies top-256 PDEs from `kernel_pd_template`. Does not switch CR3.
+- `address_space_destroy(eax = pd_phys)` → walks user-half PDEs (0..767). For each present PDE: walks the PT, frees each present user-page frame, frees the PT frame. Finally frees the PD frame. Caller must not have `pd_phys` loaded in CR3.
+- `address_space_map_page(eax = pd_phys, ebx = user_virt, ecx = phys, edx = flags)` → installs / replaces a PTE. Allocates a PT frame on demand if the relevant PDE is not-present. CF on OOM. Does not invalidate TLB; caller invalidates if `pd_phys == current CR3`.
+- `address_space_unmap_page(eax = pd_phys, ebx = user_virt)` → clears the PTE. Does not free the underlying frame. Issues `invlpg` if `pd_phys == current CR3`.
 
 ### Program loader (`prog/load.asm`)
 
@@ -136,14 +136,14 @@ Public interface (CPL=0 only):
 
 1. `vfs_find` → fail (CF) if not found.
 2. `vfs_load` into a kernel-BSS scratch buffer (`program_scratch`, sized for the largest expected program image — start at 256 KB, grow if needed). The buffer lives in the kernel binary, so its kernel-virt address is fixed at link time and its physical pages are reserved as part of the kernel image. Read the trailer to extract `bss_size` (now 32-bit, see "Trailer change" below).
-3. `as_create` → new PD.
+3. `address_space_create` → new PD.
 4. For each user-virt page in `[0x08048000..(0x08048000 + binary_size + bss_size)]`:
    - `frame_alloc` → user frame.
    - For pages within the binary: kernel-side memcpy from scratch to the new frame's direct-map address.
    - For pages within BSS: zero the frame.
-   - `as_map_page(new_pd, virt, frame_phys, P|RW|U)`.
+   - `address_space_map_page(new_pd, virt, frame_phys, P|RW|U)`.
 5. For each user-virt page in `[0x3FFE0000..0x40000000]`:
-   - `frame_alloc`, zero, `as_map_page` with `P|RW|U`.
+   - `frame_alloc`, zero, `address_space_map_page` with `P|RW|U`.
 6. Stack guard at `0x3FFDF000`: leave PDE/PTE not-present.
 7. `mov cr3, new_pd_phys`.
 8. `iretd` to ring 3 with `EIP=0x08048000`, `ESP=0x40000000`, `EFLAGS=0x202`, selectors `USER_CODE_SELECTOR` / `USER_DATA_SELECTOR`.
@@ -152,10 +152,10 @@ Public interface (CPL=0 only):
 
 1. `old_pd = current CR3`.
 2. `mov cr3, kernel_pd_template_phys` (now running with no user mappings).
-3. `as_destroy(old_pd)`.
+3. `address_space_destroy(old_pd)`.
 4. Restore `[shell_esp]`; fall into `shell_reload`.
 
-`shell_reload` calls `prog_load` to build a fresh shell AS and entry into ring 3.
+`shell_reload` calls `prog_load` to build a fresh shell address space and entry into ring 3.
 
 ### Trailer change (BSS-via-trailer widening)
 
@@ -224,7 +224,7 @@ Kill-program path:
 
 1. `dead_pd = current CR3`.
 2. `mov cr3, kernel_pd_template_phys`.
-3. `as_destroy(dead_pd)`.
+3. `address_space_destroy(dead_pd)`.
 4. Restore `[shell_esp]`; `jmp shell_reload`.
 
 The kill path shares its body with `sys_exit`'s tear-down.
@@ -282,5 +282,5 @@ Tracked here so the design stays focused on this milestone:
 - **`SYS_MMAP` and runtime user allocation.** Required before user-side `malloc` / `free`.
 - **`kmalloc` / kernel heap.** Lives in the reserved kernel-virt range above `0xCFFFFFFF`. Will need fan-out machinery the first time we add a kernel PDE that the boot template doesn't already cover.
 - **Demand-grown user stack.** `VM_GROWSDOWN`-style: PTE not-present below current SP, `#PF` allocates and grows.
-- **Multi-process / scheduler.** Per-AS plumbing already in place; needs a runqueue, context switch, and CR3 swap on tick.
+- **Multi-process / scheduler.** Per-address-space plumbing already in place; needs a runqueue, context switch, and CR3 swap on tick.
 - **Highmem / >256 MB RAM.** Requires either a wider direct map (eats kernel-virt) or `kmap`-style temporary slots. Out of scope while QEMU defaults to 128 MB.

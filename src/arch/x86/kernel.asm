@@ -306,7 +306,7 @@ high_entry:
 %include "fs/block.asm"
 %include "fs/fd.kasm"
 %include "fs/vfs.asm"
-%include "memory_management/as.asm"
+%include "memory_management/address_space.asm"
 %include "memory_management/frame.asm"
 %include "net/net.asm"
 %include "syscall.asm"
