@@ -57,41 +57,41 @@ bbfs_create:
         push edx
         push edi
         push esi
-        mov [bbfs_create_name], si
+        mov [bbfs_create_name], esi
         call scan_directory_entries   ; BX = free root entry index, DX = next data sector
         mov [bbfs_create_sector], dx
         ;; scan_directory_entries clobbers SI; restore path pointer from saved variable
-        mov di, [bbfs_create_name]
+        mov edi, [bbfs_create_name]
         .bc_slash:
-        mov al, [di]
+        mov al, [edi]
         test al, al
         jz .bc_root
         cmp al, '/'
         je .bc_subdir
-        inc di
+        inc edi
         jmp .bc_slash
         .bc_root:
         cmp bx, 0FFFFh
         je .bc_full
         call directory_load_entry     ; EBX = entry ptr in sector_buffer
-        mov si, [bbfs_create_name]
+        mov esi, [bbfs_create_name]
         jmp .bc_write
         .bc_subdir:
         ;; Null-terminate dir component, find subdir, then find a free slot in it
-        mov byte [di], 0
+        mov byte [edi], 0
         push edi
-        mov si, [bbfs_create_name]
+        mov esi, [bbfs_create_name]
         call find_file                ; EBX = subdir entry in sector_buffer
         pop edi
-        mov byte [di], '/'
+        mov byte [edi], '/'
         jc .bc_err
         test byte [ebx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .bc_err
         mov ax, [ebx+DIRECTORY_OFFSET_SECTOR]
         call subdir_find_free         ; EBX = free entry ptr, directory_loaded_sector set
         jc .bc_full
-        inc di                        ; SI = basename (past '/')
-        mov si, di
+        inc edi                       ; ESI = basename (past '/')
+        mov esi, edi
         .bc_write:
         push ebx
         call write_directory_name
@@ -175,9 +175,9 @@ bbfs_find:
         ;; Output: CF clear, vfs_found_* set; CF set if not found
         push ebx
         ;; Handle "." — synthesise root directory entry
-        cmp byte [si], '.'
+        cmp byte [esi], '.'
         jne .normal_find
-        cmp byte [si+1], 0
+        cmp byte [esi+1], 0
         jne .normal_find
         mov ax, [directory_sector]
         mov [vfs_found_inode], ax
@@ -284,7 +284,7 @@ bbfs_mkdir:
         stc
         ret
         .bbmkdir_scan:
-        mov di, si                      ; DI = dirname (for write_directory_name later)
+        mov edi, esi                    ; EDI = dirname (for write_directory_name later)
         call scan_directory_entries     ; BX = free root entry index, DX = next data sector
         cmp bx, 0FFFFh
         jne .bbmkdir_write
@@ -302,7 +302,7 @@ bbfs_mkdir:
         pop edx
         push edx
         push ebx
-        mov si, di
+        mov esi, edi
         call write_directory_name
         pop ebx
         pop edx
@@ -360,13 +360,13 @@ bbfs_prepare_write_sec:
         ;; Output: sector_buffer ready for modification (read if partial sector),
         ;;         BX = byte offset within sector; CF on disk error
         push ecx                        ; inline fd_pos_to_sector
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov bx, [si+FD_OFFSET_POSITION]
+        mov ax, [esi+FD_OFFSET_POSITION+2]
+        mov bx, [esi+FD_OFFSET_POSITION]
         shl ax, 7
         mov cx, bx
         shr cx, 9
         or ax, cx
-        add ax, [si+FD_OFFSET_START]    ; AX = absolute sector
+        add ax, [esi+FD_OFFSET_START]    ; AX = absolute sector
         and bx, 01FFh                   ; BX = byte offset within sector
         pop ecx
         mov [bbfs_pws_sector], ax
@@ -387,22 +387,22 @@ bbfs_read_dir:
         push edx
         push edi
         .brd_next:
-        mov ax, [si+FD_OFFSET_POSITION]
+        mov ax, [esi+FD_OFFSET_POSITION]
         cmp ax, DIRECTORY_SECTORS * 512
         jae .brd_eof
-        mov ax, [si+FD_OFFSET_POSITION+2]  ; inline fd_pos_to_sector
-        movzx ebx, word [si+FD_OFFSET_POSITION]
+        mov ax, [esi+FD_OFFSET_POSITION+2]  ; inline fd_pos_to_sector
+        movzx ebx, word [esi+FD_OFFSET_POSITION]
         shl ax, 7
         mov cx, bx
         shr cx, 9
         or ax, cx
-        add ax, [si+FD_OFFSET_START]    ; AX = absolute sector
+        add ax, [esi+FD_OFFSET_START]    ; AX = absolute sector
         and ebx, 01FFh                  ; EBX = byte offset within sector
         call read_sector
         jc .brd_disk_err
         cmp byte [sector_buffer+ebx], 0
         jne .brd_found
-        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
+        add word [esi+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
         jmp .brd_next
         .brd_found:
         push esi
@@ -412,7 +412,7 @@ bbfs_read_dir:
         cld
         rep movsb
         pop esi
-        add word [si+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
+        add word [esi+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
         mov ax, DIRECTORY_ENTRY_SIZE
         pop edi
         pop edx
@@ -443,13 +443,13 @@ bbfs_read_sec:
         ;; Output: sector_buffer filled, BX = byte offset within sector; CF on error
         push eax
         push ecx
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov bx, [si+FD_OFFSET_POSITION]
+        mov ax, [esi+FD_OFFSET_POSITION+2]
+        mov bx, [esi+FD_OFFSET_POSITION]
         shl ax, 7
         mov cx, bx
         shr cx, 9
         or ax, cx
-        add ax, [si+FD_OFFSET_START]    ; AX = absolute sector
+        add ax, [esi+FD_OFFSET_START]    ; AX = absolute sector
         and bx, 01FFh                   ; BX = byte offset within sector
         push ebx
         call read_sector
@@ -470,9 +470,9 @@ bbfs_rename:
         mov cx, 0FFFFh
         push esi
         .rename_pfx_scan_si:
-        cmp byte [si], 0
+        cmp byte [esi], 0
         je .rename_pfx_si_done
-        cmp byte [si], '/'
+        cmp byte [esi], '/'
         jne .rename_pfx_si_next
         mov cx, si
         pop eax
@@ -480,7 +480,7 @@ bbfs_rename:
         push eax
         jmp .rename_pfx_si_done
         .rename_pfx_si_next:
-        inc si
+        inc esi
         jmp .rename_pfx_scan_si
         .rename_pfx_si_done:
         pop esi
@@ -489,9 +489,9 @@ bbfs_rename:
         mov cx, 0FFFFh
         push edi
         .rename_pfx_scan_di:
-        cmp byte [di], 0
+        cmp byte [edi], 0
         je .rename_pfx_di_done
-        cmp byte [di], '/'
+        cmp byte [edi], '/'
         jne .rename_pfx_di_next
         mov cx, di
         pop eax
@@ -499,7 +499,7 @@ bbfs_rename:
         push eax
         jmp .rename_pfx_di_done
         .rename_pfx_di_next:
-        inc di
+        inc edi
         jmp .rename_pfx_scan_di
         .rename_pfx_di_done:
         pop edi
@@ -513,11 +513,11 @@ bbfs_rename:
         push edi
         movzx ecx, ax
         .rename_pfx_cmp:
-        mov al, [si]
-        cmp al, [di]
+        mov al, [esi]
+        cmp al, [edi]
         jne .rename_pfx_cmp_bad
-        inc si
-        inc di
+        inc esi
+        inc edi
         loop .rename_pfx_cmp
         pop edi
         pop esi
@@ -533,7 +533,7 @@ bbfs_rename:
         pop esi
         ;; Check new name doesn't already exist
         push esi
-        mov si, di
+        mov esi, edi
         call find_file
         pop esi
         jc .rename_find_old             ; new name not found → good, proceed
@@ -551,19 +551,19 @@ bbfs_rename:
         .rename_do:
         ;; Advance DI past '/' to the basename of the new name
         push esi
-        mov si, di
+        mov esi, edi
         .rename_basename:
         lodsb
         test al, al
         jz .rename_basename_done
         cmp al, '/'
         jne .rename_basename
-        mov di, si                      ; one past '/'
+        mov edi, esi                      ; one past '/'
         .rename_basename_done:
         pop esi
         push ecx
         push esi
-        mov si, di
+        mov esi, edi
         call write_directory_name
         pop esi
         pop ecx
@@ -577,7 +577,7 @@ bbfs_rename:
         pop esi
         ;; Check new name doesn't already exist
         push esi
-        mov si, di
+        mov esi, edi
         call find_file
         pop esi
         jc .frc_find_old
@@ -794,16 +794,16 @@ bbfs_update_size:
         push ebx
         push ecx
         push edx
-        mov ax, [si+FD_OFFSET_DIRECTORY_SECTOR]
+        mov ax, [esi+FD_OFFSET_DIRECTORY_SECTOR]
         mov [directory_loaded_sector], ax
         call read_sector
         jc .us_err
         mov ebx, sector_buffer
-        movzx eax, word [si+FD_OFFSET_DIRECTORY_OFFSET]
+        movzx eax, word [esi+FD_OFFSET_DIRECTORY_OFFSET]
         add ebx, eax
-        mov ax, [si+FD_OFFSET_POSITION]
+        mov ax, [esi+FD_OFFSET_POSITION]
         mov [ebx+DIRECTORY_OFFSET_SIZE], ax
-        mov ax, [si+FD_OFFSET_POSITION+2]
+        mov ax, [esi+FD_OFFSET_POSITION+2]
         mov [ebx+DIRECTORY_OFFSET_SIZE+2], ax
         call directory_write_back
         pop edx
@@ -868,37 +868,37 @@ find_file:
         push esi
         push edi
         ;; Scan for '/' to detect a subdirectory path
-        mov di, si
+        mov edi, esi
         .ff_scan_slash:
-        mov al, [di]
+        mov al, [edi]
         test al, al
         jz .ff_no_slash
         cmp al, '/'
         je .ff_has_slash
-        inc di
+        inc edi
         jmp .ff_scan_slash
         .ff_no_slash:
-        mov dx, si
+        mov edx, esi
         mov ax, [directory_sector]
         mov [directory_search_start], ax
         jmp .ff_search_root
         .ff_has_slash:
         ;; Split path at '/': DI points to '/'
-        mov byte [di], 0
+        mov byte [edi], 0
         push edi
-        mov dx, si
+        mov edx, esi
         push edx
         call .ff_do_root_search
         pop edx
         pop edi
-        mov byte [di], '/'
+        mov byte [edi], '/'
         jc .ff_done
         test byte [ebx+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
         jz .ff_not_found
         mov ax, [ebx+DIRECTORY_OFFSET_SECTOR]
         mov [directory_search_start], ax
-        inc di
-        mov dx, di
+        inc edi
+        mov edx, edi
         xor bx, bx
         jmp .ff_load_sector
         .ff_search_root:
@@ -913,15 +913,15 @@ find_file:
         .ff_search:
         cmp byte [edi], 0
         je .ff_skip_entry
-        mov si, dx
+        mov esi, edx
         push edi
         .ff_cmp:
-        mov al, [si]
+        mov al, [esi]
         cmp al, [edi]
         jne .ff_no_match
         test al, al
         jz .ff_found
-        inc si
+        inc esi
         inc edi
         jmp .ff_cmp
         .ff_no_match:
@@ -965,15 +965,15 @@ find_file:
         .fdr_search:
         cmp byte [edi], 0
         je .fdr_skip
-        mov si, dx
+        mov esi, edx
         push edi
         .fdr_cmp:
-        mov al, [si]
+        mov al, [esi]
         cmp al, [edi]
         jne .fdr_no_match
         test al, al
         jz .fdr_found
-        inc si
+        inc esi
         inc edi
         jmp .fdr_cmp
         .fdr_no_match:
@@ -1008,7 +1008,7 @@ scan_directory_entries:
         mov bx, 0FFFFh
         mov dx, [directory_sector]
         add dx, DIRECTORY_SECTORS
-        xor di, di
+        xor edi, edi
         mov al, byte [directory_sector]
         .sd_next_sector:
         xor ah, ah
@@ -1091,7 +1091,7 @@ scan_directory_entries:
         add esi, DIRECTORY_ENTRY_SIZE
         loop .sd_sub_entry
         inc ax
-        dec di
+        dec edi
         jnz .sd_subloop
         jmp .sd_subdir_done
         .sd_subdir_err:
@@ -1122,7 +1122,7 @@ scan_directory_entries:
         pop eax
         .sd_skip:
         add esi, DIRECTORY_ENTRY_SIZE
-        inc di
+        inc edi
         dec cx
         jnz .sd_entry
         push edx
@@ -1182,10 +1182,10 @@ write_directory_name:
         ;; Clobbers: AX, EBX (advanced), CX, SI (advanced)
         mov cx, DIRECTORY_NAME_LENGTH - 1
         .copy:
-        mov al, [si]
+        mov al, [esi]
         test al, al
         jz .pad
-        inc si
+        inc esi
         mov [ebx], al
         inc ebx
         dec cx
@@ -1198,7 +1198,7 @@ write_directory_name:
         jnz .pad
         ret
 
-        bbfs_create_name   dw 0
+        bbfs_create_name   dd 0   ; 32-bit kernel-virt or user-virt path pointer
         bbfs_create_sector dw 0
         bbfs_pws_sector    dw 0
         bbfs_rd_entry_off  dw 0   ; bbfs_rmdir: byte offset of entry within parent sector

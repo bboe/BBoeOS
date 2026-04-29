@@ -321,11 +321,12 @@ fd_ioctl_ops:
         fd_open_flags   db 0
         fd_open_mode    db 0
         fd_open_name    dd 0
-        ;; fd_table lives at fixed low-physical 0xE000 (kernel-virt
-        ;; 0xC000E000 via the direct map; see EQU in kernel.asm).
-        ;; Pinned low so bbfs.asm / ext2.asm can keep their `[si+...]`
-        ;; / `[di+...]` 16-bit-register accesses to FD entries
-        ;; without 32-bit-register conversion churn.  fd_init zeroes
-        ;; it through the kernel-virt alias.
         fd_write_buffer dd 0
+        ;; FD table.  Lives in kernel BSS at whatever kernel-virt
+        ;; address the linker assigns; bbfs.asm / ext2.asm reach FD
+        ;; entries via `[esi+FD_OFFSET_*]` (32-bit), so the table is
+        ;; no longer pinned to fixed low-physical 0xE000.
+        align 4
+fd_table:
+        times FD_MAX * FD_ENTRY_SIZE db 0
 ");

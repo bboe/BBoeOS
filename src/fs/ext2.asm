@@ -91,16 +91,16 @@ ext2_find:
         push si
         push di
         ;; Handle "." — synthesise root directory entry using actual inode size
-        cmp byte [si], '.'
+        cmp byte [esi], '.'
         jne .ef_normal
-        cmp byte [si+1], 0
+        cmp byte [esi+1], 0
         jne .ef_normal
         mov word [vfs_found_inode], EXT2_ROOT_INODE
         mov ax, EXT2_ROOT_INODE
         call ext2_read_inode            ; BX = pointer to inode in sector_buffer
-        mov cx, [bx+EXT2_INODE_SIZE_LO]
+        mov cx, [ebx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], cx
-        mov cx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov cx, [ebx+EXT2_INODE_SIZE_LO+2]
         mov [vfs_found_size+2], cx
         mov byte [vfs_found_mode], FLAG_DIRECTORY
         mov byte [vfs_found_type], FD_TYPE_DIRECTORY
@@ -115,14 +115,14 @@ ext2_find:
         ret
         .ef_normal:
         ;; Scan for '/'
-        mov di, si
+        mov edi, esi
         .ef_slash:
-        mov al, [di]
+        mov al, [edi]
         test al, al
         jz .ef_no_slash
         cmp al, '/'
         je .ef_has_slash
-        inc di
+        inc edi
         jmp .ef_slash
         .ef_no_slash:
         ;; Simple name: search root directory
@@ -132,25 +132,25 @@ ext2_find:
         jmp .ef_got_inode
         .ef_has_slash:
         ;; Split at '/': find dir component in root, then file in that dir
-        mov byte [di], 0
+        mov byte [edi], 0
         push di
         mov ax, EXT2_ROOT_INODE
         call ext2_search_dir    ; AX = dir inode
         pop di
-        mov byte [di], '/'
+        mov byte [edi], '/'
         jc .ef_not_found
-        inc di                  ; DI = basename (past '/')
-        mov si, di
+        inc edi                  ; DI = basename (past '/')
+        mov esi, edi
         call ext2_search_dir    ; AX = file inode
         jc .ef_not_found
         .ef_got_inode:
         ;; AX = inode number; read inode to get size and mode
         mov [vfs_found_inode], ax
         call ext2_read_inode    ; BX = pointer to inode in sector_buffer
-        mov cx, [bx+EXT2_INODE_MODE]
-        mov dx, [bx+EXT2_INODE_SIZE_LO]
+        mov cx, [ebx+EXT2_INODE_MODE]
+        mov dx, [ebx+EXT2_INODE_SIZE_LO]
         mov [vfs_found_size], dx
-        mov dx, [bx+EXT2_INODE_SIZE_LO+2]
+        mov dx, [ebx+EXT2_INODE_SIZE_LO+2]
         mov [vfs_found_size+2], dx
         mov word [vfs_found_dir_sec], 0
         mov word [vfs_found_dir_off], 0
@@ -434,7 +434,7 @@ ext2_mkdir:
         push dx
         push si
         push di
-        mov [ext2_mk_name], si
+        mov [ext2_mk_name], esi
         ;; Reject if name already exists
         call ext2_find
         jc .emkdir_ok
@@ -448,11 +448,11 @@ ext2_mkdir:
         ret
         .emkdir_ok:
         ;; Resolve parent directory and basename from path
-        mov si, [ext2_mk_name]
+        mov esi, [ext2_mk_name]
         call ext2_resolve_path          ; AX = parent inode, SI = basename; CF if not found
         jc .emkdir_err
         mov [ext2_mk_parent_inode], ax
-        mov [ext2_mk_name], si          ; narrow to basename only
+        mov [ext2_mk_name], esi          ; narrow to basename only
         ;; Allocate inode for the new directory
         call ext2_alloc_inode           ; AX = inode number, CF on err
         jc .emkdir_err
@@ -463,41 +463,41 @@ ext2_mkdir:
         mov [ext2_mk_new_blk], ax
         ;; Read the new inode, zero it, then set fields
         mov ax, [ext2_mk_new_inode]
-        call ext2_read_inode            ; BX = inode ptr in sector_buffer
-        push si
+        call ext2_read_inode            ; EBX = inode ptr in sector_buffer
+        push esi
         push cx
-        mov si, bx
+        mov esi, ebx
         mov cx, [ext2_inode_size]
         xor ax, ax
         cld
         .emkdir_zero_inode:
-        mov [si], ax
-        add si, 2
+        mov [esi], ax
+        add esi, 2
         sub cx, 2
         jnz .emkdir_zero_inode
         pop cx
-        pop si
-        mov word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR | 01EDh  ; S_IFDIR | 0755
-        mov word [bx + EXT2_INODE_LINKS_COUNT], 2
+        pop esi
+        mov word [ebx + EXT2_INODE_MODE], EXT2_S_IFDIR | 01EDh  ; S_IFDIR | 0755
+        mov word [ebx + EXT2_INODE_LINKS_COUNT], 2
         ;; inode size = block_size = 1024 << log_block_size
         xor ah, ah
         mov al, [ext2_log_block_size]
         mov cl, al
         mov ax, 1024
         shl ax, cl
-        mov [bx + EXT2_INODE_SIZE_LO], ax
-        mov word [bx + EXT2_INODE_SIZE_LO + 2], 0
+        mov [ebx + EXT2_INODE_SIZE_LO], ax
+        mov word [ebx + EXT2_INODE_SIZE_LO + 2], 0
         mov ax, [ext2_mk_new_blk]
-        mov [bx + EXT2_INODE_BLOCK], ax
-        mov word [bx + EXT2_INODE_BLOCK + 2], 0
+        mov [ebx + EXT2_INODE_BLOCK], ax
+        mov word [ebx + EXT2_INODE_BLOCK + 2], 0
         ;; i_blocks = sectors_per_block (one data block allocated)
         xor cx, cx
         mov cl, [ext2_log_block_size]
         inc cl
         mov ax, 1
         shl ax, cl                      ; AX = sectors_per_block
-        mov [bx + EXT2_INODE_BLOCKS], ax
-        mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        mov [ebx + EXT2_INODE_BLOCKS], ax
+        mov word [ebx + EXT2_INODE_BLOCKS + 2], 0
         call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -571,14 +571,14 @@ ext2_mkdir:
         ;; Add entry for new directory in parent
         mov byte [ext2_ade_filetype], 2    ; FT_DIR
         mov ax, [ext2_mk_parent_inode]
-        mov di, [ext2_mk_name]
+        mov edi, [ext2_mk_name]
         mov bx, [ext2_mk_new_inode]
         call ext2_add_dir_entry
         jc .emkdir_err
         ;; Increment parent's i_links_count (child's '..' back-link)
         mov ax, [ext2_mk_parent_inode]
         call ext2_read_inode            ; BX = parent inode ptr
-        inc word [bx + EXT2_INODE_LINKS_COUNT]
+        inc word [ebx + EXT2_INODE_LINKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .emkdir_err
@@ -726,10 +726,10 @@ ext2_add_dir_entry:
         ;; Compute min_rec_len = (8 + namelen + 3) & ~3
         xor cx, cx
         .ead_namelen:
-        cmp byte [di], 0
+        cmp byte [edi], 0
         je .ead_nl_done
         inc cx
-        inc di
+        inc edi
         jmp .ead_namelen
         .ead_nl_done:
         mov [ext2_ade_namelen], cx
@@ -841,17 +841,17 @@ ext2_add_dir_entry:
         push ax
         mov cx, [ext2_ade_cur_blk]
         mov ax, [ext2_last_read_inode]
-        call ext2_read_inode            ; BX = inode ptr; ext2_last_blk_sec = inode sector
-        ;; SI = &i_block[cur_blk]
+        call ext2_read_inode            ; EBX = inode ptr; ext2_last_blk_sec = inode sector
+        ;; ESI = &i_block[cur_blk]
         push ax                         ; save block_idx result (unused) as temp
-        mov ax, cx
-        shl ax, 2
-        lea si, [bx + EXT2_INODE_BLOCK]
-        add si, ax
+        movzx eax, cx
+        shl eax, 2
+        lea esi, [ebx + EXT2_INODE_BLOCK]
+        add esi, eax
         pop ax                          ; discard
         pop ax                          ; AX = new block number
-        mov [si], ax
-        mov word [si+2], 0
+        mov [esi], ax
+        mov word [esi+2], 0
         ;; Flush updated inode
         push ax
         mov ax, [ext2_last_blk_sec]
@@ -887,7 +887,7 @@ ext2_add_dir_entry:
         mov al, [ext2_ade_filetype]
         mov [sector_buffer + ebx + EXT2_DIRENT_NAME_LEN + 1], al
         push esi
-        movzx esi, word [ext2_ade_name]
+        mov esi, [ext2_ade_name]
         mov edi, ebx
         add edi, sector_buffer + EXT2_DIRENT_NAME
         cld
@@ -1137,14 +1137,14 @@ ext2_chmod:
         pop ax                          ; AL = mode flags
         test al, FLAG_EXECUTE
         jz .echm_clear
-        or word [bx + EXT2_INODE_MODE], EXT2_S_IXALL
+        or word [ebx + EXT2_INODE_MODE], EXT2_S_IXALL
         jmp .echm_flush
         .echm_clear:
-        and word [bx + EXT2_INODE_MODE], ~EXT2_S_IXALL
+        and word [ebx + EXT2_INODE_MODE], ~EXT2_S_IXALL
         .echm_flush:
         call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [bx + EXT2_INODE_CTIME], ax
-        mov [bx + EXT2_INODE_CTIME + 2], dx
+        mov [ebx + EXT2_INODE_CTIME], ax
+        mov [ebx + EXT2_INODE_CTIME + 2], dx
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .echm_err
@@ -1188,34 +1188,34 @@ ext2_create:
         ;; Clobbers: AX, BX, CX, DX, SI, DI
         push bp
         mov bp, sp
-        mov [ext2_cr_name], si
+        mov [ext2_cr_name], esi
         mov [ext2_cr_mode], dl
         ;; Resolve parent directory and basename from path
         call ext2_resolve_path          ; AX = parent inode, SI = basename; CF if not found
         jc .ecr_err
         mov [ext2_cr_parent_inode], ax
-        mov [ext2_cr_name], si          ; narrow to basename only
+        mov [ext2_cr_name], esi          ; narrow to basename only
         ;; Allocate a new inode
         call ext2_alloc_inode   ; AX = inode number, CF on err
         jc .ecr_err
         mov [ext2_cr_new_inode], ax
         ;; Initialise the inode sector (ext2_alloc_inode left bitmap sector in sector_buffer)
         ;; Read the inode sector fresh
-        call ext2_read_inode    ; AX = new inode → BX = pointer in sector_buffer
+        call ext2_read_inode    ; AX = new inode → EBX = pointer in sector_buffer
         ;; Zero the inode (128 or 256 bytes)
-        push si
+        push esi
         push cx
-        mov si, bx
+        mov esi, ebx
         mov cx, [ext2_inode_size]
         xor ax, ax
         cld
         .ecr_zero_inode:
-        mov [si], ax
-        add si, 2
+        mov [esi], ax
+        add esi, 2
         sub cx, 2
         jnz .ecr_zero_inode
         pop cx
-        pop si
+        pop esi
         ;; Set i_mode: EXT2_S_IFREG | 0644
         mov ax, EXT2_S_IFREG | 0644o
         ;; Apply execute flag
@@ -1224,9 +1224,9 @@ ext2_create:
         jz .ecr_no_exec
         or ax, EXT2_S_IXALL
         .ecr_no_exec:
-        mov [bx + EXT2_INODE_MODE], ax
+        mov [ebx + EXT2_INODE_MODE], ax
         ;; links_count = 1
-        mov word [bx + EXT2_INODE_LINKS_COUNT], 1
+        mov word [ebx + EXT2_INODE_LINKS_COUNT], 1
         call ext2_set_timestamps_now    ; atime = mtime = ctime = now; clobbers AX, DX
         ;; Flush inode sector
         mov ax, [ext2_last_blk_sec]
@@ -1235,7 +1235,7 @@ ext2_create:
         ;; Add directory entry in parent directory
         mov byte [ext2_ade_filetype], 1    ; FT_REG_FILE
         mov ax, [ext2_cr_parent_inode]
-        mov di, [ext2_cr_name]
+        mov edi, [ext2_cr_name]
         mov bx, [ext2_cr_new_inode]
         call ext2_add_dir_entry
         jc .ecr_err
@@ -1269,12 +1269,12 @@ ext2_delete:
         call ext2_resolve_path          ; AX=parent_inode, SI=basename; CF if not found
         jc .edl_not_found
         mov [ext2_dl_parent_inode], ax
-        mov [ext2_dl_name], si
+        mov [ext2_dl_name], esi
         call ext2_search_dir            ; AX=file_inode; CF if not found
         jc .edl_not_found
         mov [ext2_dl_inode], ax
         call ext2_read_inode            ; BX = inode ptr in sector_buffer
-        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        test word [ebx + EXT2_INODE_MODE], EXT2_S_IFDIR
         jnz .edl_not_found
         ;; Save block pointers (direct 0-11, indirect 12, doubly-indirect 13)
         push esi
@@ -1292,9 +1292,9 @@ ext2_delete:
         pop esi
         ;; Set i_dtime, zero i_links_count, flush inode before freeing blocks
         call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [bx + EXT2_INODE_DTIME], ax
-        mov [bx + EXT2_INODE_DTIME + 2], dx
-        mov word [bx + EXT2_INODE_LINKS_COUNT], 0
+        mov [ebx + EXT2_INODE_DTIME], ax
+        mov [ebx + EXT2_INODE_DTIME + 2], dx
+        mov word [ebx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .edl_err
@@ -1361,7 +1361,7 @@ ext2_delete:
         call ext2_free_inode
         jc .edl_err
         mov ax, [ext2_dl_parent_inode]
-        mov si, [ext2_dl_name]
+        mov esi, [ext2_dl_name]
         call ext2_remove_dir_entry
         jc .edl_err
         pop di
@@ -1471,8 +1471,8 @@ ext2_prepare_write_sec:
         push cx
         push dx
         ;; Decompose 32-bit position (matching ext2_read_sec)
-        mov ax, [si+FD_OFFSET_POSITION]
-        mov dx, [si+FD_OFFSET_POSITION+2]
+        mov ax, [esi+FD_OFFSET_POSITION]
+        mov dx, [esi+FD_OFFSET_POSITION+2]
         mov bx, ax
         and bx, 01FFh                   ; BX = byte offset within sector
         mov [ext2_pws_byte_offset], bx
@@ -1492,7 +1492,7 @@ ext2_prepare_write_sec:
         and dx, ax                      ; DX = sector_in_block
         mov [ext2_pws_sec_in_blk], dx
         ;; Read inode; try to resolve existing block
-        mov ax, [si+FD_OFFSET_START]
+        mov ax, [esi+FD_OFFSET_START]
         call ext2_read_inode            ; BX = inode ptr
         mov ax, [ext2_pws_block_idx]
         call ext2_get_data_block        ; AX=block_idx, BX=inode_ptr → AX=block_num
@@ -1517,7 +1517,7 @@ ext2_prepare_write_sec:
         ;; Re-read inode; check if i_block[12] (indirect block) already exists
         mov ax, [ext2_last_read_inode]
         call ext2_read_inode            ; BX = inode ptr
-        mov ax, [bx + EXT2_INODE_BLOCK + 48]   ; low word of i_block[12]
+        mov ax, [ebx + EXT2_INODE_BLOCK + 48]   ; low word of i_block[12]
         test ax, ax
         jnz .epws_have_ind_blk
         ;; Allocate and zero-fill a new indirect block
@@ -1555,15 +1555,15 @@ ext2_prepare_write_sec:
         mov ax, [ext2_last_read_inode]
         call ext2_read_inode            ; BX = inode ptr
         mov ax, [ext2_pws_ind_blk]
-        mov [bx + EXT2_INODE_BLOCK + 48], ax
-        mov word [bx + EXT2_INODE_BLOCK + 50], 0
+        mov [ebx + EXT2_INODE_BLOCK + 48], ax
+        mov word [ebx + EXT2_INODE_BLOCK + 50], 0
         movzx cx, byte [ext2_log_block_size]
         inc cx
         push ax                         ; save ind_blk
         mov ax, 1
         shl ax, cl
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         pop ax                          ; AX = ind_blk (restore)
@@ -1604,8 +1604,8 @@ ext2_prepare_write_sec:
         mov ax, 1
         shl ax, cl
         pop bx
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         pop ax                          ; AX = data_blk (restore)
@@ -1623,7 +1623,7 @@ ext2_prepare_write_sec:
         ;; --- Ensure i_block[13] (top doubly-indirect block) exists ---
         mov ax, [ext2_last_read_inode]
         call ext2_read_inode            ; BX = inode ptr
-        mov ax, [bx + EXT2_INODE_BLOCK + 52]   ; low word of i_block[13]
+        mov ax, [ebx + EXT2_INODE_BLOCK + 52]   ; low word of i_block[13]
         test ax, ax
         jnz .epws_have_dbl_blk
         ;; Allocate and zero-fill a new top doubly-indirect block
@@ -1660,15 +1660,15 @@ ext2_prepare_write_sec:
         mov ax, [ext2_last_read_inode]
         call ext2_read_inode
         mov ax, [ext2_pws_dbl_blk]
-        mov [bx + EXT2_INODE_BLOCK + 52], ax
-        mov word [bx + EXT2_INODE_BLOCK + 54], 0
+        mov [ebx + EXT2_INODE_BLOCK + 52], ax
+        mov word [ebx + EXT2_INODE_BLOCK + 54], 0
         movzx cx, byte [ext2_log_block_size]
         inc cx
         push ax                         ; save dbl_blk
         mov ax, 1
         shl ax, cl
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         pop ax                          ; AX = dbl_blk (restore)
@@ -1740,8 +1740,8 @@ ext2_prepare_write_sec:
         mov ax, 1
         shl ax, cl
         pop bx
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .epws_err
@@ -1778,8 +1778,8 @@ ext2_prepare_write_sec:
         mov ax, 1
         shl ax, cl
         pop bx
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         pop ax                          ; AX = data_blk (restore)
@@ -1797,16 +1797,16 @@ ext2_prepare_write_sec:
         inc cx
         mov ax, 1
         shl ax, cl
-        add [bx + EXT2_INODE_BLOCKS], ax
-        adc word [bx + EXT2_INODE_BLOCKS + 2], 0
+        add [ebx + EXT2_INODE_BLOCKS], ax
+        adc word [ebx + EXT2_INODE_BLOCKS + 2], 0
         ;; Store block pointer in i_block[block_idx]
-        mov ax, [ext2_pws_block_idx]
-        shl ax, 2
-        add bx, EXT2_INODE_BLOCK
-        add bx, ax                      ; BX → i_block[block_idx]
+        movzx eax, word [ext2_pws_block_idx]
+        shl eax, 2
+        add ebx, EXT2_INODE_BLOCK
+        add ebx, eax                    ; EBX → i_block[block_idx]
         pop ax                          ; AX = new block number
-        mov [bx], ax
-        mov word [bx+2], 0
+        mov [ebx], ax
+        mov word [ebx+2], 0
         push ax                         ; re-save block number for have_block
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -1855,7 +1855,7 @@ ext2_remove_dir_entry:
         push cx
         push dx
         push di
-        mov [ext2_rde_name], si
+        mov [ext2_rde_name], esi
         ;; Read dir inode; save direct block pointers
         call ext2_read_inode            ; BX = inode ptr in sector_buffer
         movzx esi, bx
@@ -1918,7 +1918,7 @@ ext2_remove_dir_entry:
         push cx
         push dx
         lea edi, [sector_buffer + ebx + EXT2_DIRENT_NAME]
-        mov si, [ext2_rde_name]
+        mov esi, [ext2_rde_name]
         mov cl, [sector_buffer + ebx + EXT2_DIRENT_NAME_LEN]
         call ext2_names_match           ; CF = no match
         pop dx
@@ -1965,10 +1965,10 @@ ext2_rename:
         push dx
         push si
         push di
-        mov [ext2_rn_old_path], si
-        mov [ext2_rn_new_path], di
+        mov [ext2_rn_old_path], esi
+        mov [ext2_rn_new_path], edi
         ;; Reject if new name already exists
-        mov si, di
+        mov esi, edi
         call ext2_find
         jc .ern_dest_ok
         pop di
@@ -1981,26 +1981,26 @@ ext2_rename:
         ret
         .ern_dest_ok:
         ;; Resolve old path → (old_dir_inode, old_basename)
-        mov si, [ext2_rn_old_path]
+        mov esi, [ext2_rn_old_path]
         call ext2_resolve_path          ; AX = dir inode, SI = basename; CF if not found
         jc .ern_not_found
         mov [ext2_rn_old_dir], ax
-        mov [ext2_rn_old_name], si
+        mov [ext2_rn_old_name], esi
         ;; Look up old entry's inode
         call ext2_search_dir            ; AX = dir inode, SI = basename → AX = inode; CF if not found
         jc .ern_not_found
         mov [ext2_rn_old_inode], ax
         ;; Resolve new path → (new_dir_inode, new_basename)
-        mov si, [ext2_rn_new_path]
+        mov esi, [ext2_rn_new_path]
         call ext2_resolve_path          ; AX = dir inode, SI = basename; CF if parent not found
         jc .ern_not_found
         mov [ext2_rn_new_dir], ax
-        mov [ext2_rn_new_name], si
+        mov [ext2_rn_new_name], esi
         ;; Determine filetype from old inode's mode
         mov ax, [ext2_rn_old_inode]
         call ext2_read_inode            ; BX = old inode ptr; clobbers AX, CX, DX
         mov byte [ext2_ade_filetype], 1
-        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        test word [ebx + EXT2_INODE_MODE], EXT2_S_IFDIR
         jz .ern_filetype_set
         mov byte [ext2_ade_filetype], 2
         .ern_filetype_set:
@@ -2013,7 +2013,7 @@ ext2_rename:
         ;; Update '..' inode in the moved directory's data block
         mov ax, [ext2_rn_old_inode]
         call ext2_read_inode            ; BX = inode ptr; clobbers AX, CX, DX
-        mov ax, [bx + EXT2_INODE_BLOCK] ; AX = i_block[0]
+        mov ax, [ebx + EXT2_INODE_BLOCK] ; AX = i_block[0]
         xor bx, bx                      ; BX = sector 0 within block
         call ext2_read_blk_sec          ; sector_buffer = directory data; clobbers AX
         jc .ern_err
@@ -2026,27 +2026,27 @@ ext2_rename:
         ;; Decrement old parent's i_links_count
         mov ax, [ext2_rn_old_dir]
         call ext2_read_inode
-        dec word [bx + EXT2_INODE_LINKS_COUNT]
+        dec word [ebx + EXT2_INODE_LINKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .ern_err
         ;; Increment new parent's i_links_count
         mov ax, [ext2_rn_new_dir]
         call ext2_read_inode
-        inc word [bx + EXT2_INODE_LINKS_COUNT]
+        inc word [ebx + EXT2_INODE_LINKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .ern_err
         .ern_add_entry:
         ;; Add new directory entry
         mov ax, [ext2_rn_new_dir]
-        mov di, [ext2_rn_new_name]
+        mov edi, [ext2_rn_new_name]
         mov bx, [ext2_rn_old_inode]
         call ext2_add_dir_entry
         jc .ern_err
         ;; Remove old directory entry
         mov ax, [ext2_rn_old_dir]
-        mov si, [ext2_rn_old_name]
+        mov esi, [ext2_rn_old_name]
         call ext2_remove_dir_entry
         jc .ern_err
         pop di
@@ -2168,12 +2168,12 @@ ext2_rmdir:
         call ext2_resolve_path          ; AX=parent_inode, SI=basename; CF if not found
         jc .erdr_not_found
         mov [ext2_rdr_parent_inode], ax
-        mov [ext2_rdr_name], si
+        mov [ext2_rdr_name], esi
         call ext2_search_dir            ; AX=dir_inode; CF if not found
         jc .erdr_not_found
         mov [ext2_rdr_inode], ax
         call ext2_read_inode            ; BX = inode ptr in sector_buffer
-        test word [bx + EXT2_INODE_MODE], EXT2_S_IFDIR
+        test word [ebx + EXT2_INODE_MODE], EXT2_S_IFDIR
         jz .erdr_not_found
         ;; Save block pointers (direct 0-11, indirect 12, doubly-indirect 13)
         push esi
@@ -2209,9 +2209,9 @@ ext2_rmdir:
         call ext2_read_inode            ; BX = inode ptr
         ;; Set i_dtime, zero i_links_count, flush before freeing blocks
         call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [bx + EXT2_INODE_DTIME], ax
-        mov [bx + EXT2_INODE_DTIME + 2], dx
-        mov word [bx + EXT2_INODE_LINKS_COUNT], 0
+        mov [ebx + EXT2_INODE_DTIME], ax
+        mov [ebx + EXT2_INODE_DTIME + 2], dx
+        mov word [ebx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .erdr_err
@@ -2276,13 +2276,13 @@ ext2_rmdir:
         call ext2_free_inode
         jc .erdr_err
         mov ax, [ext2_rdr_parent_inode]
-        mov si, [ext2_rdr_name]
+        mov esi, [ext2_rdr_name]
         call ext2_remove_dir_entry
         jc .erdr_err
         ;; Decrement parent directory's i_links_count
         mov ax, [ext2_rdr_parent_inode]
         call ext2_read_inode            ; BX = inode ptr
-        dec word [bx + EXT2_INODE_LINKS_COUNT]
+        dec word [ebx + EXT2_INODE_LINKS_COUNT]
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .erdr_err
@@ -2326,10 +2326,10 @@ ext2_set_mtime_ctime_now:
         ;; Input:  BX = pointer to inode in sector_buffer
         ;; Clobbers: AX, DX
         call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [bx + EXT2_INODE_MTIME], ax
-        mov [bx + EXT2_INODE_MTIME + 2], dx
-        mov [bx + EXT2_INODE_CTIME], ax
-        mov [bx + EXT2_INODE_CTIME + 2], dx
+        mov [ebx + EXT2_INODE_MTIME], ax
+        mov [ebx + EXT2_INODE_MTIME + 2], dx
+        mov [ebx + EXT2_INODE_CTIME], ax
+        mov [ebx + EXT2_INODE_CTIME + 2], dx
         ret
 
 ext2_set_timestamps_now:
@@ -2337,12 +2337,12 @@ ext2_set_timestamps_now:
         ;; Input:  BX = pointer to inode in sector_buffer
         ;; Clobbers: AX, DX
         call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [bx + EXT2_INODE_ATIME], ax
-        mov [bx + EXT2_INODE_ATIME + 2], dx
-        mov [bx + EXT2_INODE_MTIME], ax
-        mov [bx + EXT2_INODE_MTIME + 2], dx
-        mov [bx + EXT2_INODE_CTIME], ax
-        mov [bx + EXT2_INODE_CTIME + 2], dx
+        mov [ebx + EXT2_INODE_ATIME], ax
+        mov [ebx + EXT2_INODE_ATIME + 2], dx
+        mov [ebx + EXT2_INODE_MTIME], ax
+        mov [ebx + EXT2_INODE_MTIME + 2], dx
+        mov [ebx + EXT2_INODE_CTIME], ax
+        mov [ebx + EXT2_INODE_CTIME + 2], dx
         ret
 
 ext2_update_size:
@@ -2356,16 +2356,16 @@ ext2_update_size:
         push dx
         push si
         push di
-        mov [ext2_us_fd], si
-        mov ax, [si+FD_OFFSET_START]
+        mov [ext2_us_fd], esi
+        mov ax, [esi+FD_OFFSET_START]
         call ext2_read_inode                ; BX = inode ptr in sector_buffer
         ;; 32-bit compare: new_pos vs old i_size
-        movzx eax, word [si+FD_OFFSET_POSITION]
-        movzx edx, word [si+FD_OFFSET_POSITION+2]
+        movzx eax, word [esi+FD_OFFSET_POSITION]
+        movzx edx, word [esi+FD_OFFSET_POSITION+2]
         shl edx, 16
         or eax, edx                         ; EAX = new_pos
-        movzx ecx, word [bx + EXT2_INODE_SIZE_LO]
-        movzx edx, word [bx + EXT2_INODE_SIZE_LO + 2]
+        movzx ecx, word [ebx + EXT2_INODE_SIZE_LO]
+        movzx edx, word [ebx + EXT2_INODE_SIZE_LO + 2]
         shl edx, 16
         or ecx, edx                         ; ECX = old_size
         cmp eax, ecx
@@ -2395,10 +2395,10 @@ ext2_update_size:
         jnz .eus_save_blks
         pop esi
         ;; Update i_size and zero freed i_block[] entries in sector_buffer
-        mov ax, [si+FD_OFFSET_POSITION]
-        mov [bx + EXT2_INODE_SIZE_LO], ax
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov [bx + EXT2_INODE_SIZE_LO + 2], ax
+        mov ax, [esi+FD_OFFSET_POSITION]
+        mov [ebx + EXT2_INODE_SIZE_LO], ax
+        mov ax, [esi+FD_OFFSET_POSITION+2]
+        mov [ebx + EXT2_INODE_SIZE_LO + 2], ax
         mov cx, [ext2_us_keep_blocks]
         cmp cx, 14
         jae .eus_flush
@@ -2442,8 +2442,8 @@ ext2_update_size:
         .eus_ib_shift:
         inc cl                              ; CL = log_block_size + 1
         shl ax, cl
-        mov [bx + EXT2_INODE_BLOCKS], ax
-        mov word [bx + EXT2_INODE_BLOCKS + 2], 0
+        mov [ebx + EXT2_INODE_BLOCKS], ax
+        mov word [ebx + EXT2_INODE_BLOCKS + 2], 0
         call ext2_set_mtime_ctime_now       ; mtime = ctime = now; clobbers AX, DX
         ;; Flush inode to disk before freeing blocks
         mov ax, [ext2_last_blk_sec]
@@ -2597,10 +2597,10 @@ ext2_update_size:
         jc .eus_err
         jmp .eus_done
         .eus_grow:
-        mov ax, [si+FD_OFFSET_POSITION]
-        mov [bx + EXT2_INODE_SIZE_LO], ax
-        mov ax, [si+FD_OFFSET_POSITION+2]
-        mov [bx + EXT2_INODE_SIZE_LO + 2], ax
+        mov ax, [esi+FD_OFFSET_POSITION]
+        mov [ebx + EXT2_INODE_SIZE_LO], ax
+        mov ax, [esi+FD_OFFSET_POSITION+2]
+        mov [ebx + EXT2_INODE_SIZE_LO + 2], ax
         call ext2_set_mtime_ctime_now   ; mtime = ctime = now; clobbers AX, DX
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2783,20 +2783,20 @@ ext2_get_data_block:
         ret
 
 ext2_names_match:
-        ;; Compare null-terminated SI against entry name at DI with length CL
+        ;; Compare null-terminated ESI against entry name at EDI with length CL
         ;; Output: CF clear = match, CF set = no match
         ;; Preserves all registers
         push ax
-        push bx
+        push ebx
         push cx
-        push si
-        push di
-        ;; Compute strlen(SI) into BX using [si+bx] to avoid modifying SI
-        xor bx, bx
+        push esi
+        push edi
+        ;; Compute strlen(ESI) into EBX using [esi+ebx] to avoid modifying ESI
+        xor ebx, ebx
         .enm_len:
-        cmp byte [si+bx], 0
+        cmp byte [esi+ebx], 0
         je .enm_len_done
-        inc bx
+        inc ebx
         jmp .enm_len
         .enm_len_done:
         xor ch, ch                      ; CX = entry name length (CL already set)
@@ -2805,23 +2805,21 @@ ext2_names_match:
         test cx, cx
         jz .enm_match                   ; both empty
         movzx ecx, cx
-        movzx esi, si
-        movzx edi, di
         repe cmpsb
         jne .enm_no_match
         .enm_match:
-        pop di
-        pop si
+        pop edi
+        pop esi
         pop cx
-        pop bx
+        pop ebx
         pop ax
         clc
         ret
         .enm_no_match:
-        pop di
-        pop si
+        pop edi
+        pop esi
         pop cx
-        pop bx
+        pop ebx
         pop ax
         stc
         ret
@@ -2846,7 +2844,7 @@ ext2_read_blk_sec:
 ext2_read_inode:
         ;; Read inode AX into sector_buffer; return EBX = pointer to inode
         ;; (BX = low 16 of pointer, still valid through the Phase 3 user shim
-        ;; for 16-bit `[bx+EXT2_INODE_*]` accesses; EBX is the full 32-bit
+        ;; for 16-bit `[ebx+EXT2_INODE_*]` accesses; EBX is the full 32-bit
         ;; kernel-virt address, used by callers that already promote via
         ;; `movzx esi, bx` etc.)
         ;; Also sets ext2_last_read_inode and ext2_last_blk_sec for write-back
@@ -2883,7 +2881,7 @@ ext2_search_dir:
         push dx
         push si
         push di
-        mov [ext2_sd_name], si
+        mov [ext2_sd_name], esi
         ;; Read directory inode; save direct block pointers
         call ext2_read_inode            ; BX = pointer to inode
         movzx esi, bx
@@ -2957,7 +2955,7 @@ ext2_search_blk:
         pop ax
         jc .esb_not_found
         ;; Scan directory entries in sector_buffer
-        mov si, [ext2_sd_name]
+        mov esi, [ext2_sd_name]
         mov edi, sector_buffer
         .esb_entry:
         ;; Bounds check
@@ -3019,8 +3017,8 @@ ext2_read_sec:
         push cx
         push dx
         ;; Decompose 32-bit position into byte_in_sector, sector_in_block, block_index
-        mov ax, [si+FD_OFFSET_POSITION]
-        mov dx, [si+FD_OFFSET_POSITION+2]
+        mov ax, [esi+FD_OFFSET_POSITION]
+        mov dx, [esi+FD_OFFSET_POSITION+2]
         mov bx, ax
         and bx, 01FFh           ; BX = byte offset within sector (to return)
         ;; sector_index = pos >> 9 (fits in 16 bits for files < 32 MB)
@@ -3045,7 +3043,7 @@ ext2_read_sec:
         push bx                 ; save byte offset
         push cx                 ; save sector_in_block
         push ax                 ; save block_index
-        mov ax, [si+FD_OFFSET_START]    ; inode number
+        mov ax, [esi+FD_OFFSET_START]    ; inode number
         call ext2_read_inode            ; BX = &inode in sector_buffer; clobbers AX,CX,DX
         pop ax                          ; AX = block_index
         call ext2_get_data_block        ; AX=block_index, BX=inode_ptr → AX=block_num; CF on err
@@ -3076,13 +3074,13 @@ ext2_resolve_path:
         ;; Output: AX = parent dir inode, SI = basename; CF if parent dir not found
         push cx
         push di
-        mov di, si
+        mov edi, esi
         .erp_scan:
-        cmp byte [di], 0
+        cmp byte [edi], 0
         je .erp_root
-        cmp byte [di], '/'
+        cmp byte [edi], '/'
         je .erp_subdir
-        inc di
+        inc edi
         jmp .erp_scan
         .erp_root:
         mov ax, EXT2_ROOT_INODE
@@ -3091,15 +3089,15 @@ ext2_resolve_path:
         clc
         ret
         .erp_subdir:
-        mov byte [di], 0                ; null-terminate dirname
+        mov byte [edi], 0                ; null-terminate dirname
         push di                         ; save slash position
         mov ax, EXT2_ROOT_INODE
         call ext2_search_dir            ; AX=root, SI=dirname → AX=dir_inode; CF if not found
         pop di                          ; DI = slash position
-        mov byte [di], '/'              ; restore slash
+        mov byte [edi], '/'              ; restore slash
         jc .erp_not_found
-        inc di                          ; DI = basename
-        mov si, di
+        inc edi                          ; DI = basename
+        mov esi, edi
         pop di                          ; restore caller's DI
         pop cx
         clc
@@ -3117,7 +3115,7 @@ ext2_resolve_path:
         ext2_ade_filetype      db 1     ; ext2_add_dir_entry: file type (1=reg, 2=dir)
         ext2_ade_inode         dw 0     ; ext2_add_dir_entry: new file's inode
         ext2_ade_min_rec       dw 0     ; ext2_add_dir_entry: minimum rec_len needed
-        ext2_ade_name          dw 0     ; ext2_add_dir_entry: pointer to name string
+        ext2_ade_name          dd 0     ; ext2_add_dir_entry: pointer to name string
         ext2_ade_namelen       dw 0     ; ext2_add_dir_entry: name length in bytes
         ext2_ade_new_blk       dw 0     ; ext2_add_dir_entry: newly allocated block number
         ext2_alloc_bitmap_blk  dw 0     ; ext2_alloc_bit: bitmap block being scanned
@@ -3125,7 +3123,7 @@ ext2_resolve_path:
         ext2_block_bitmap_blk  dw 0
         ext2_first_data_block  dw 0
         ext2_cr_mode           db 0     ; ext2_create: FLAG_EXECUTE / FLAG_DIRECTORY
-        ext2_cr_name           dw 0     ; ext2_create: pointer to filename
+        ext2_cr_name           dd 0     ; ext2_create: pointer to filename
         ext2_cr_new_inode      dw 0     ; ext2_create: allocated inode number
         ext2_cr_parent_inode   dw 0     ; ext2_create: parent directory inode
         ext2_dir_blks          times 12 dw 0
@@ -3136,7 +3134,7 @@ ext2_resolve_path:
         ext2_dl_dtime_hi       dw 0     ; ext2_delete: i_dtime epoch (high 16)
         ext2_dl_dtime_lo       dw 0     ; ext2_delete: i_dtime epoch (low 16)
         ext2_dl_inode          dw 0     ; ext2_delete: inode number to free
-        ext2_dl_name           dw 0     ; ext2_delete: pointer to basename
+        ext2_dl_name           dd 0     ; ext2_delete: pointer to basename
         ext2_dl_parent_inode   dw 0     ; ext2_delete: parent directory inode
         ext2_fb_bitmap_blk     dw 0     ; ext2_free_bit: bitmap block being cleared
         ext2_fib_blk           dw 0     ; ext2_free_ind_block: indirect block number
@@ -3157,7 +3155,7 @@ ext2_resolve_path:
         ext2_load_ptrs         dw 0     ; ext2_load: ptrs_per_blk
         ext2_load_rem          dw 0
         ext2_log_block_size    db 0
-        ext2_mk_name           dw 0     ; ext2_mkdir: pointer to basename
+        ext2_mk_name           dd 0     ; ext2_mkdir: pointer to basename
         ext2_mk_new_blk        dw 0     ; ext2_mkdir: newly allocated data block
         ext2_mk_new_inode      dw 0     ; ext2_mkdir: newly allocated inode
         ext2_mk_parent_inode   dw 0     ; ext2_mkdir: parent directory inode
@@ -3177,7 +3175,7 @@ ext2_resolve_path:
         ext2_rd_rec_len        dw 0
         ext2_rde_blk_num       dw 0     ; ext2_remove_dir_entry: block number for multi-sector scan
         ext2_rde_cur_sec       dw 0     ; ext2_remove_dir_entry: sector within current block
-        ext2_rde_name          dw 0     ; ext2_remove_dir_entry: pointer to name string
+        ext2_rde_name          dd 0     ; ext2_remove_dir_entry: pointer to name string
         ext2_rdr_blks          times 14 dw 0  ; ext2_rmdir: saved i_block[0..13]
         ext2_rdr_cde_blk       dw 0     ; ext2_check_dir_empty: block number
         ext2_rdr_dbl_blk       dw 0     ; ext2_rmdir: doubly-indirect block number
@@ -3186,20 +3184,20 @@ ext2_resolve_path:
         ext2_rdr_dtime_hi      dw 0     ; ext2_rmdir: i_dtime epoch (high 16)
         ext2_rdr_dtime_lo      dw 0     ; ext2_rmdir: i_dtime epoch (low 16)
         ext2_rdr_inode         dw 0     ; ext2_rmdir: inode number to free
-        ext2_rdr_name          dw 0     ; ext2_rmdir: pointer to basename
+        ext2_rdr_name          dd 0     ; ext2_rmdir: pointer to basename
         ext2_rdr_parent_inode  dw 0     ; ext2_rmdir: parent directory inode
         ext2_rn_new_dir        dw 0     ; ext2_rename: new parent dir inode
-        ext2_rn_new_name       dw 0     ; ext2_rename: pointer to new basename
-        ext2_rn_new_path       dw 0     ; ext2_rename: pointer to new full path
+        ext2_rn_new_name       dd 0     ; ext2_rename: pointer to new basename
+        ext2_rn_new_path       dd 0     ; ext2_rename: pointer to new full path
         ext2_rn_old_dir        dw 0     ; ext2_rename: old parent dir inode
         ext2_rn_old_inode      dw 0     ; ext2_rename: inode to relocate
-        ext2_rn_old_name       dw 0     ; ext2_rename: pointer to old basename
-        ext2_rn_old_path       dw 0     ; ext2_rename: pointer to old full path
-        ext2_sd_name           dw 0
+        ext2_rn_old_name       dd 0     ; ext2_rename: pointer to old basename
+        ext2_rn_old_path       dd 0     ; ext2_rename: pointer to old full path
+        ext2_sd_name           dd 0
         ext2_us_blks           times 14 dw 0  ; ext2_update_size: saved i_block[0..13]
         ext2_us_cur_ptr        dw 0     ; ext2_update_size: pointer index within current sector
         ext2_us_cur_sec        dw 0     ; ext2_update_size: current sector in indirect block
-        ext2_us_fd             dw 0     ; ext2_update_size: fd_entry pointer
+        ext2_us_fd             dd 0     ; ext2_update_size: fd_entry pointer
         ext2_us_ind_blk        dw 0     ; ext2_update_size: indirect block number
         ext2_us_ind_fptr       dw 0     ; ext2_update_size: first pointer index in first sector
         ext2_us_ind_fsec       dw 0     ; ext2_update_size: first sector index to process

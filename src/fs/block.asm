@@ -15,11 +15,8 @@ write_sector:
 
         ;; The kernel disk buffer (`sector_buffer`) lives at fixed
         ;; low-physical 0xF000, accessed via the direct map at virt
-        ;; 0xC000F000 (`sector_buffer` EQU in kernel.asm).  It stays
-        ;; below the 16-bit pointer line so bbfs.asm / ext2.asm can
-        ;; keep using `[bx+offset]` and `sub ax, sector_buffer` style
-        ;; accesses without 32-bit-register conversion churn — the
-        ;; high half (0xC000) is shared by the entire low-1 MB direct
-        ;; map and gets folded out by NASM's truncation rules in 16-
-        ;; bit operand contexts.  Reserved at boot by the bitmap
-        ;; allocator's BOOT_REGION_BYTES carve-out (0x7C00..0xFFFF).
+        ;; 0xC000F000 (`sector_buffer` EQU in kernel.asm).  bbfs.asm /
+        ;; ext2.asm reach it via 32-bit `[ebx+offset]` etc. (PR A
+        ;; migration), so the buffer no longer needs to fit in 16-bit
+        ;; register addressing.  Reserved at boot by the bitmap
+        ;; allocator's LOW_RESERVE_BYTES carve-out.
