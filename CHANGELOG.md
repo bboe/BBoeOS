@@ -95,8 +95,18 @@ at the time.
   regression for the ~1 MB BSS allocation in the per-program PD
   (edit case).
 ### Kernel C ports (2026-04-29)
+- Promote `fd_alloc`, `fd_close`, `fd_fstat`, `fd_init`, and
+  `fd_lookup` from `src/fs/fd.c`'s file-scope `asm()` block into
+  real C bodies.  The four table-driven dispatchers (`fd_open`,
+  `fd_read`, `fd_write`, `fd_ioctl`) plus the `fd_ops` /
+  `fd_ioctl_ops` data tables stay as inline asm — cc.py doesn't yet
+  express tail-call function-pointer dispatch cleanly.  `fd_table`
+  is now a C-level `struct fd[FD_MAX]` global with an `equ` shim so
+  the asm dispatchers continue to reference the bare name.  +208
+  bytes os.bin; integration tests pass (`test_bboefs` 5/5,
+  `test_archive` 17/17, `test_floppy_boot`).
 - Port `src/fs/fd/fs.asm` (147 lines: `fd_read_dir`, `fd_read_file`,
-  `fd_write_file`) to `src/fs/fd/fs.c`.  Adds +184 bytes vs the
+  `fd_write_file`) to `src/fs/fd/fs.c`.  Adds +192 bytes vs the
   hand-written form; the integration tests (`test_bboefs`, including
   `copy_large` for >64 KB files) verify the sector-staging loops
   through `vfs_read_sec` / `vfs_prepare_write_sec` /

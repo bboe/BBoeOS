@@ -33,18 +33,18 @@ archived as `archive/kernel/drivers/ps2.asm`, ported to
 
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|
-| arch/x86/system | 39310 | 39334 | +24 |
-| drivers/ata | 39062 | 39334 | +272 |
-| drivers/console | 38846 | 39334 | +488 |
-| drivers/fdc | 39086 | 39334 | +248 |
-| drivers/ne2k | 38942 | 39334 | +392 |
-| drivers/ps2 | 38934 | 39334 | +400 |
-| drivers/rtc | 38958 | 39334 | +376 |
-| drivers/serial | 39310 | 39334 | +24 |
-| drivers/vga | 39014 | 39334 | +320 |
-| fs/fd/console | 39286 | 39334 | +48 |
-| fs/fd/fs | 39150 | 39334 | +184 |
-| fs/fd/net | 39326 | 39334 | +8 |
+| arch/x86/system | 39518 | 39542 | +24 |
+| drivers/ata | 39262 | 39542 | +280 |
+| drivers/console | 39054 | 39542 | +488 |
+| drivers/fdc | 39294 | 39542 | +248 |
+| drivers/ne2k | 39150 | 39542 | +392 |
+| drivers/ps2 | 39134 | 39542 | +408 |
+| drivers/rtc | 39166 | 39542 | +376 |
+| drivers/serial | 39510 | 39542 | +32 |
+| drivers/vga | 39214 | 39542 | +328 |
+| fs/fd/console | 39486 | 39542 | +56 |
+| fs/fd/fs | 39350 | 39542 | +192 |
+| fs/fd/net | 39526 | 39542 | +16 |
 
 ## Annotations
 
