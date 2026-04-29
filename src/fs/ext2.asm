@@ -2922,29 +2922,42 @@ ext2_search_dir:
 ext2_search_blk:
         ;; Search all sectors of ext2 directory block AX for entry named [ext2_sd_name]
         ;; Output: AX = inode if found, CF if not found
+        ;;
+        ;; Two pieces of outer-loop state are spilled to memory because
+        ;; the per-entry inner loop unavoidably clobbers AX and CX:
+        ;;   ext2_sd_blk_num — the block number passed in.  AX is reused
+        ;;       inside the loop to hold the candidate entry's inode (the
+        ;;       eventual return value), so it can't simultaneously carry
+        ;;       the block number across iterations.  Without this spill,
+        ;;       a 1024-byte directory block whose first sector's last
+        ;;       entry has a non-zero inode would compute the wrong disk
+        ;;       sector when fetching sector 1, since AX would still hold
+        ;;       that last entry's inode instead of the block number.
+        ;;   ext2_sd_cur_sec — the within-block sector index.  CL gets
+        ;;       loaded with name_len before each ext2_names_match call.
+        ;;       Mirrors the ext2_ade_cur_sec pattern in ext2_add_dir_entry.
         push ebx
         push ecx
         push edx
         push esi
         push edi
+        mov [ext2_sd_blk_num], ax
         ;; DX = sectors_per_block = 1 << (log_block_size + 1)
         xor ch, ch
         mov cl, [ext2_log_block_size]
         inc cl
         mov dx, 1
         shl dx, cl
-        xor cx, cx                      ; CX = sector within block
+        mov word [ext2_sd_cur_sec], 0
         .esb_sector:
+        mov cx, [ext2_sd_cur_sec]
         cmp cx, dx
         jae .esb_not_found
-        push ax
-        push cx
+        mov ax, [ext2_sd_blk_num]
         push dx
         mov bx, cx
         call ext2_read_blk_sec
         pop dx
-        pop cx
-        pop ax
         jc .esb_not_found
         ;; Scan directory entries in sector_buffer
         mov esi, [ext2_sd_name]
@@ -2989,7 +3002,7 @@ ext2_search_blk:
         add edi, ebx                    ; advance by rec_len
         jmp .esb_entry
         .esb_next_sector:
-        inc cx
+        inc word [ext2_sd_cur_sec]
         jmp .esb_sector
         .esb_not_found:
         pop edi
@@ -3185,6 +3198,8 @@ ext2_resolve_path:
         ext2_rn_old_inode      dw 0     ; ext2_rename: inode to relocate
         ext2_rn_old_name       dd 0     ; ext2_rename: pointer to old basename
         ext2_rn_old_path       dd 0     ; ext2_rename: pointer to old full path
+        ext2_sd_blk_num        dw 0     ; ext2_search_blk: caller's block number (AX-spill, see search_blk header)
+        ext2_sd_cur_sec        dw 0     ; ext2_search_blk: current sector index within block (CX-spill, see search_blk header)
         ext2_sd_name           dd 0
         ext2_us_blks           times 14 dw 0  ; ext2_update_size: saved i_block[0..13]
         ext2_us_cur_ptr        dw 0     ; ext2_update_size: pointer index within current sector

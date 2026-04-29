@@ -100,6 +100,15 @@ TESTS: list[ProgramTest] = [
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("ls", ["ls bin"], r"hello\*"),
     ProgramTest(
+        "multi_sector_dir",
+        ["cat bin/_zzpad05"],
+        # bin/ is post-padded with _zzpad00.._zzpad05 in `_add_multi_sector_dir_filler`
+        # so _zzpad05 (the alphabetically-last new entry) starts inside sector 1
+        # of bin's first directory block.  Confirms ext2_search_blk advances
+        # past the 512-byte sector boundary and finds the entry there.
+        r"^MULTISEC$",
+    ),
+    ProgramTest(
         "mkdir",
         ["mkdir mydir", "ls mydir"],
         r"^\.\./",  # '..' entry always present
@@ -185,6 +194,34 @@ def _add_large_test_file(*, image: Path) -> None:
         )
 
 
+def _add_multi_sector_dir_filler(*, image: Path) -> None:
+    """Pad bin/ with stubs so its directory spans both 512-byte sectors.
+
+    With 1 KB blocks ext2 directory blocks span two 512-byte disk sectors.
+    Without this padding, every test image's bin/ comfortably fits in
+    sector 0, and a regression in ext2_search_blk's multi-sector walk
+    (e.g. losing the block number in AX, or the sector counter in CX)
+    goes undetected.  Six stub files with a fixed-length name push the
+    last few entries into sector 1; the multi_sector_dir test then does
+    `cat bin/_zzpad05` to assert the alphabetically-last new entry — the
+    one furthest into sector 1 — is still findable.
+    """
+    ext2_start = compute_directory_sector(image_path=str(image))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stub = Path(tmpdir) / "_zzpad00"
+        stub.write_text("MULTISEC\n")
+        for index in range(6):
+            named_stub = Path(tmpdir) / f"_zzpad{index:02d}"
+            named_stub.write_text("MULTISEC\n")
+            ext2_add_file(
+                executable=False,
+                ext2_start_sector=ext2_start,
+                file_path=str(named_stub),
+                image_path=str(image),
+                subdirectory="bin",
+            )
+
+
 def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 1024) -> None:
     """Run make_os.sh --ext2; abort if the build fails."""
     image = temporary_directory / BASE_IMAGE
@@ -199,6 +236,8 @@ def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 
         sys.exit(1)
     if large_file and block_size == 1024:
         _add_large_test_file(image=image)
+    if block_size == 1024:
+        _add_multi_sector_dir_filler(image=image)
 
 
 def _fsck(*, image: Path) -> str | None:
