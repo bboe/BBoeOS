@@ -290,7 +290,7 @@ fd_ioctl:
         ret
 
 %include \"fs/fd/console.kasm\"
-%include \"fs/fd/fs.asm\"
+%include \"fs/fd/fs.kasm\"
 %include \"fs/fd/net.kasm\"
 
         ;; Operations table: (read_fn, write_fn) dword pairs indexed by FD_TYPE_*

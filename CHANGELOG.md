@@ -94,6 +94,25 @@ at the time.
   shell is fully functional after the program exits.  Doubles as a
   regression for the ~1 MB BSS allocation in the per-program PD
   (edit case).
+### Kernel C ports (2026-04-29)
+- Port `src/fs/fd/fs.asm` (147 lines: `fd_read_dir`, `fd_read_file`,
+  `fd_write_file`) to `src/fs/fd/fs.c`.  Adds +184 bytes vs the
+  hand-written form; the integration tests (`test_bboefs`, including
+  `copy_large` for >64 KB files) verify the sector-staging loops
+  through `vfs_read_sec` / `vfs_prepare_write_sec` /
+  `vfs_commit_write_sec` are byte-for-byte equivalent.
+- cc.py: add 32-bit struct field reads/writes for 4-byte fields
+  (`mov eax, [ebx+N]` / `mov [ebx+N], eax`) and fix the 32-bit
+  emission path for 2-byte fields (now `movzx eax, word [...]` and
+  `mov word [...], ax` instead of accidentally compiling as 4-byte
+  loads/stores).  Required by the `struct fd { … int size; int
+  position; … }` layout in `fs/fd/fs.c`.
+- cc.py: width-correct `out_register` capture.  A 16-bit
+  `out_register("bx")` captured into a 32-bit local slot or pinned
+  E-register now emits `movzx ebx, bx` instead of the invalid
+  `mov ebx, bx` (mixed widths) or a 16-bit-only `mov [local], bx`
+  that left the upper bytes of a 4-byte slot stale.  Symmetric with
+  the `in_register` prologue's existing widening path.
 
 ### Phase 4 paging — Linux-shape relocation (2026-04-29)
 - Move `PROGRAM_BASE` from `0x600` to `0x08048000` (the Linux ELF

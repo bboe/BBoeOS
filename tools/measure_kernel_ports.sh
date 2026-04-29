@@ -32,6 +32,7 @@ drivers/rtc:drivers/rtc:src/arch/x86/kernel.asm
 drivers/serial:drivers/serial:src/arch/x86/kernel.asm
 drivers/vga:drivers/vga:src/arch/x86/kernel.asm
 fs/fd/console:fs/fd/console:src/fs/fd.c
+fs/fd/fs:fs/fd/fs:src/fs/fd.c
 fs/fd/net:fs/fd/net:src/fs/fd.c
 "
 
