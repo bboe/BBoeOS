@@ -1208,6 +1208,10 @@ void handle_cld() {
     emit_byte(0xFC);
 }
 
+void handle_cli() {
+    emit_byte(0xFA);
+}
+
 /* ``cmp`` covers r-r, r-imm, r-[mem], [mem]-imm, and [disp16]-imm.
    ``/r`` field is 7 (``0xF8`` register-mode modrm constant, ``0x38``
    for memory-mode reg field, ``0x3E`` for the mod=00 disp16 form).
@@ -3619,6 +3623,7 @@ asm(
     "        dd STR_CALL, handle_call\n"
     "        dd STR_CLC, handle_clc\n"
     "        dd STR_CLD, handle_cld\n"
+    "        dd STR_CLI, handle_cli\n"
     "        dd STR_CMP, handle_cmp\n"
     "        dd STR_DEC, handle_dec\n"
     "        dd STR_DIV, handle_div\n"
@@ -3689,6 +3694,7 @@ asm(
     "STR_CALL    db 'call',0\n"
     "STR_CLC     db 'clc',0\n"
     "STR_CLD     db 'cld',0\n"
+    "STR_CLI     db 'cli',0\n"
     "STR_CMP     db 'cmp',0\n"
     "STR_DEC     db 'dec',0\n"
     "STR_DIV     db 'div',0\n"

@@ -59,6 +59,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("echo_many_args", ["echo a b c d e", "ls"], r"^a b c d e$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
+    ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
     ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("inctest", ["inctest"], r"^square = 144$"),
