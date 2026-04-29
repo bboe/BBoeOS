@@ -4,8 +4,13 @@
 ;;; Exports a statically-built IDT covering vectors 0..31 (CPU exceptions)
 ;;; and 0x30 (INT 30h syscall gate).  Each exception stub normalizes the
 ;;; stack (pushes a fake error code when the CPU didn't), pushes the
-;;; exception number, and jumps to exc_common which prints "EXCnn\r\n" to
-;;; COM1 and halts.  No recovery — a panic is a panic.
+;;; exception number, and jumps to exc_common which prints
+;;; "EXCnn EIP=... CR2=... ERR=..." on COM1, then triages the saved CS:
+;;; CPL=0 (kernel-mode fault) halts — those are kernel bugs.  CPL=3
+;;; (user-mode fault) tears down the dying program's PD and re-enters
+;;; shell_reload, mirroring sys_exit's teardown sequence.  No fault-cause
+;;; introspection yet (Phase 5 PR B will add `access_ok` for the
+;;; kernel-deref-of-bad-user-pointer case).
 ;;;
 ;;; The IDTR is loaded via `lidt [idtr]` in `kernel.asm`'s `high_entry`,
 ;;; right after the boot far-jump lands at the high-half kernel.
@@ -149,6 +154,30 @@ exc_common:
         call exc_putc
         mov al, 0Ah
         call exc_putc
+
+        ;; Triage on saved CS's RPL.  exc_putc / exc_puthex / exc_puthex32
+        ;; all preserve the stack, so the iret frame is still where it was
+        ;; on entry: [esp+12] = CS.  CPL=0 (kernel-mode fault) → halt;
+        ;; CPL=3 (user-mode fault) → kill program and respawn shell.
+        test byte [esp + 12], 3
+        jz .halt_kernel
+
+        ;; --- User-mode fault: tear down the dying program's PD and
+        ;; --- re-enter shell_reload.  CR3 still points at the dying
+        ;; --- program's PD (the CPU doesn't change CR3 on a fault).
+        ;; --- Mirrors sys_exit (src/syscall/sys.asm).  We never return
+        ;; --- through the iret frame — the program's death is final.
+        mov eax, cr3
+        push eax
+        mov eax, [kernel_pd_template_phys]
+        mov cr3, eax
+        pop eax
+        call address_space_destroy
+        mov esp, [shell_esp]
+        sti
+        jmp shell_reload
+
+        .halt_kernel:
         cli
         .halt:
         hlt

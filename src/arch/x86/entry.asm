@@ -18,8 +18,10 @@
 ;;; kernel ESP for sys_exit, switches CR3, and `iretd`s at CPL=3.
 ;;;
 ;;; Any CPU exception fired past this point vectors through `idt.asm`'s
-;;; `exc_common` and prints `EXCnn` on COM1.  Phase 5 will give
-;;; user-mode #PF / #GP a kill-program path; today they still halt.
+;;; `exc_common` and prints `EXCnn` on COM1.  Kernel-mode (CPL=0) faults
+;;; halt — those are kernel bugs.  User-mode (CPL=3) faults tear down
+;;; the dying program's PD and jump back to shell_reload, mirroring
+;;; sys_exit's teardown.
 ;;; ------------------------------------------------------------------------
 
         PMODE_IRQ0_VECTOR       equ 0x20        ; matches the pic_remap master base
