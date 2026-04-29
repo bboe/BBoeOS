@@ -38,11 +38,11 @@
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0x3FFF0..0x3FFFF   : private — user stack (16 × 4 KB = 64 KB),
         ;;                             stack top = 0x40000000
-        VDSO_VIRT               equ FUNCTION_TABLE          ; 0x00010000
-        STACK_VIRT_END          equ USER_STACK_TOP          ; 0x40000000 (one past last page)
-        STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000        ; 16 × 4 KB
-        JUMP_TABLE_VIRT_BASE    equ 0x300000
         JUMP_TABLE_FRAME_COUNT  equ 256
+        JUMP_TABLE_VIRT_BASE    equ 0x300000
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
+        STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
+        VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment `system_ticks` (dword in rtc.asm's
