@@ -38,7 +38,19 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import add_file  # noqa: E402
+from add_file import (  # noqa: E402
+    ENTRIES_PER_SECTOR,
+    NAME_FIELD,
+    OFFSET_SECTOR,
+    SECTOR_SIZE,
+    add_file,
+    compute_directory_sector,
+    find_subdirectory_entry,
+    iter_entries,
+)
+
+_BBFS_DIRECTORY_SECTORS = 3
+_BBFS_DIRECTORY_MAX_ENTRIES = _BBFS_DIRECTORY_SECTORS * ENTRIES_PER_SECTOR  # 48
 
 
 @dataclass
@@ -93,31 +105,82 @@ def _add_exec_probe(*, image: Path, name: str) -> None:
         )
 
 
+def _bin_entry_names(*, image: Path) -> list[str | None]:
+    """Return bin/'s slot table as a list of length 48; empty slots are None."""
+    image_data = bytearray(image.read_bytes())
+    directory_sector = compute_directory_sector(image_path=str(image))
+    bin_offset = find_subdirectory_entry(
+        directory_sector=directory_sector,
+        directory_sectors=_BBFS_DIRECTORY_SECTORS,
+        image=image_data,
+        name="bin",
+    )
+    if bin_offset is None:
+        msg = "bin/ subdirectory not found in image"
+        raise RuntimeError(msg)
+    bin_start = int.from_bytes(image_data[bin_offset + OFFSET_SECTOR : bin_offset + OFFSET_SECTOR + 2], "little")
+    return [
+        bytes(image_data[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode() if image_data[entry_offset] != 0 else None
+        for entry_offset in iter_entries(base_offset=bin_start * SECTOR_SIZE, sector_count=_BBFS_DIRECTORY_SECTORS)
+    ]
+
+
 def _pad_bin_to_full_directory(image: Path, test: ProgramTest) -> None:
     """Pad bin/ to BBfs's 48-entry cap with an executable probe written last.
 
-    The final probe lives at slot 47 (sector 2, slot 15), so the test
-    can `bin/_zexec_last` and confirm the lookup walks all three of
-    bbfs's directory sectors.
-
-    bin/ holds 34 program entries in slots 0..33 (bbfs subdirectories
-    have no . / ..).  Slots 34..46 take 13 empty fillers; slot 47
-    takes _zexec_last so the test can `bin/_zexec_last` and confirm
-    the lookup walks all three of bbfs's directory sectors.
-    loop_array (slot 21, sector 1 of the directory) and arp (slot 0,
-    the first entry) cover the other two positions without needing
-    additional executable probes — they're already in the listing.
+    bbfs subdirectories don't carry . / ..; bin/ starts populated with
+    the PROGRAMS list (count varies as PROGRAMS grows).  The setup
+    counts the existing entries, adds (47 - existing) empty fillers,
+    then writes _zexec_last as the literal final entry (slot 47, in
+    sector 2 of bbfs's 3-sector directory).  Asserts arp (slot 0,
+    sector 0), a runtime-picked sector-1 entry (slots 16..31, name
+    chosen from the post-padding bin/ layout so the test stays robust
+    to PROGRAMS reordering), and _zexec_last (slot 47, sector 2) all
+    resolve so the lookup walks all three of bbfs's directory sectors.
     """
-    for filler_index in range(48 - 34 - 1):
+    names = _bin_entry_names(image=image)
+    used = sum(1 for name in names if name is not None)
+    fillers_needed = _BBFS_DIRECTORY_MAX_ENTRIES - used - 1
+    if fillers_needed < 0:
+        msg = f"bin/ already at or past cap ({used}/{_BBFS_DIRECTORY_MAX_ENTRIES}); cannot place _zexec_last"
+        raise RuntimeError(msg)
+    for filler_index in range(fillers_needed):
         _add_empty_filler(image=image, name=f"_pad{filler_index:02d}")
     _add_exec_probe(image=image, name="_zexec_last")
 
-    test.commands = ["arp", "loop_array", "_zexec_last"]
+    middle_name, middle_expect = _pick_sector1_probe(names=_bin_entry_names(image=image))
+    test.commands = ["arp", middle_name, "_zexec_last"]
     test.expect = (
         r"usage: arp <ip>"
-        r"[\s\S]+abc"
+        rf"[\s\S]+{middle_expect}"
         r"[\s\S]+^EXEC _zexec_last$"
     )
+
+
+def _pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
+    """Return (program_name, expected_regex) for some entry in sector 1.
+
+    Sector 1 spans slots 16..31.  Walks those slots in order and picks
+    the first whose program has a single-command, non-network entry in
+    TESTS so its expected output regex is reusable here.  Robust to
+    PROGRAMS growth: as long as some sector-1 slot still maps to a
+    self-contained TEST, the lookup keeps exercising all three bbfs
+    directory sectors during the `_zexec_last` walk and the picked
+    program separately confirms a sector-1 entry resolves.
+    """
+    runnable = {
+        test.name: test.expect
+        for test in TESTS
+        if test.commands == [test.name] and not test.with_net and test.setup is None and test.skip is None
+    }
+    sector_1_start = ENTRIES_PER_SECTOR
+    sector_1_end = 2 * ENTRIES_PER_SECTOR
+    for slot in range(sector_1_start, sector_1_end):
+        name = names[slot]
+        if name is not None and name in runnable:
+            return name, runnable[name]
+    msg = f"no testable program in bin/'s sector 1 (slots {sector_1_start}..{sector_1_end - 1}); update TESTS or _pick_sector1_probe"
+    raise RuntimeError(msg)
 
 
 TESTS: list[ProgramTest] = [
@@ -159,6 +222,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("netinit", ["netinit"], r"NIC found: [0-9A-F:]+", with_net=True),
     ProgramTest("netrecv", ["netrecv"], r"Received:.*08 06", with_net=True, timeout=20.0),
     ProgramTest("netsend", ["netsend"], r"ARP request sent", with_net=True),
+    ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("pintest", ["pintest"], r"^first non-space: h$"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),

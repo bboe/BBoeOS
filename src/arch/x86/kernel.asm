@@ -256,6 +256,7 @@ high_entry:
         hlt
         jmp $-1
 
+%include "memory_management/access.asm"
 %include "memory_management/address_space.asm"
 %include "memory_management/frame.asm"
 %include "drivers/ata.asm"
