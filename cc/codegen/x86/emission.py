@@ -1848,9 +1848,17 @@ class EmissionMixin:
         """Generate a ``__tail_call`` tail-dispatch statement.
 
         Tears down the current frame, loads each argument into its
-        declared ``in_register``, loads the function pointer into AX,
-        and emits ``jmp ax`` so the callee returns directly to the
-        current function's caller — AX and CF flow through unchanged.
+        declared ``in_register``, loads the function pointer into the
+        target register, and emits ``jmp <reg>`` so the callee returns
+        directly to the current function's caller — AX and CF flow
+        through unchanged.
+
+        The default target is EAX/AX.  A function_pointer local
+        declared with ``__attribute__((pinned_register("REG")))``
+        already lives in REG; the load is elided and the jump uses REG
+        directly.  This lets dispatchers preserve EAX/AL through to
+        the handler when AL carries an actual argument (fd_ioctl's
+        cmd byte).
         """
         fn = statement.fn
         if fn not in self.variable_types or self.variable_types[fn] != "function_pointer":
@@ -1863,14 +1871,18 @@ class EmissionMixin:
         if function_pointer_in_regs:
             register_args = [(function_pointer_in_regs[i], arg) for i, arg in enumerate(statement.args)]
             self._emit_register_arg_moves(register_args)
-        self._emit_load_var(fn, register=self.target.acc)
+        if fn in self.pinned_register:
+            target_register = self.pinned_register[fn]
+        else:
+            target_register = self.target.acc
+            self._emit_load_var(fn, register=target_register)
         if not self.elide_frame:
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
             self.emit(f"        pop {self.target.base_register}")
             for reg in reversed(self.current_preserve_registers):
                 self.emit(f"        pop {reg}")
-        self.emit(f"        jmp {self.target.acc}")
+        self.emit(f"        jmp {target_register}")
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.

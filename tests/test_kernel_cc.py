@@ -1405,6 +1405,50 @@ def test_tail_call_arg_count_mismatch_raises_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# pinned_register on function_pointer locals (controls __tail_call register)
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_function_pointer_emits_jmp_via_pinned_register() -> None:
+    """``pinned_register("ebx")`` on a function_pointer makes __tail_call jmp ebx.
+
+    Motivation: fd_ioctl receives ``cmd`` in AL and tail-calls the
+    per-FD-type ioctl handler.  Routing the function pointer through
+    EAX would clobber AL before the handler reads it; pinning the
+    pointer to EBX keeps AL intact through the dispatch.
+    """
+    asm = _kernel(
+        """
+        int get_fn();
+        __attribute__((carry_return))
+        int dispatch(int cmd __attribute__((in_register("ax")))) {
+            int (*handler)(int c __attribute__((in_register("ax"))))
+                __attribute__((pinned_register("ebx")));
+            handler = get_fn();
+            __tail_call(handler, cmd);
+        }
+    """,
+        bits=32,
+    )
+    assert "jmp ebx" in asm, f"__tail_call with pinned_register must emit 'jmp ebx'\n{asm}"
+    assert "jmp eax" not in asm, f"must not jmp via eax when pinned to ebx\n{asm}"
+    # The pinned register receives the function-pointer value via the
+    # standard return-value plumbing (mov ebx, eax after the helper call).
+    assert "mov ebx, eax" in asm, f"must move return value into the pinned register\n{asm}"
+
+
+def test_pinned_register_on_non_function_pointer_rejected() -> None:
+    """``pinned_register`` on a plain int local is rejected at parse time."""
+    error = _kernel_error("""
+        void bad() {
+            int x __attribute__((pinned_register("ebx")));
+            x = 0;
+        }
+    """)
+    assert "pinned_register" in error, f"Expected pinned_register error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
 # naked attribute + tail-call dispatch through if/else
 # ---------------------------------------------------------------------------
 

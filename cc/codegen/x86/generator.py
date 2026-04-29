@@ -2409,6 +2409,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                             in_regs[param_index] = param.in_register
                     if in_regs:
                         self.function_pointer_in_registers[statement.name] = in_regs
+                if statement.pinned_register is not None:
+                    # Explicit pin via __attribute__((pinned_register(...))).
+                    # Storage lives in the register; no stack slot allocated,
+                    # so the loop continues past the slot-allocation tail.
+                    self.pinned_register[statement.name] = statement.pinned_register
+                    continue
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
                     alias = self._constant_expression(statement.init)
                     self.constant_aliases[statement.name] = alias
