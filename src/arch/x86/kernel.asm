@@ -34,18 +34,10 @@
 boot_disk        equ BOOT_DISK_VIRT
 directory_sector equ DIRECTORY_SECTOR_VIRT
 
-        ;; FD table at fixed low-phys 0xE000 (kernel-virt 0xC000E000
-        ;; via the direct map).  Pinned low so bbfs.asm / ext2.asm can
-        ;; reach FD entries via `[si+FD_OFFSET_*]` etc. without
-        ;; breaking under 32-bit kernel-virt addresses.  See
-        ;; fs/block.asm's comment for the reasoning.
-fd_table         equ 0xC000E000
-
         ;; Disk sector buffer at fixed low-phys 0xF000 (kernel-virt
-        ;; 0xC000F000 via the direct map).  Same reasoning as
-        ;; fd_table: bbfs.asm / ext2.asm keep 16-bit register accesses
-        ;; (bx, ax) into the buffer, so it must fit in 16-bit linear
-        ;; addressing.
+        ;; 0xC000F000 via the direct map).  Stays at fixed phys for now;
+        ;; PR A migrated bbfs.asm / ext2.asm to 32-bit register accesses
+        ;; so it'll keep working post-shim via the kernel direct map.
 sector_buffer    equ 0xC000F000
 
         BOOT_PD_PHYS            equ 0x200000
