@@ -20,11 +20,11 @@
 ;;; every address space.  The user half (PDEs 0..767) starts empty and
 ;;; is populated only with the program's own pages, plus shared
 ;;; vDSO/JUMP_TABLE PTEs marked with the AVL[0] PTE_SHARED bit so
-;;; `address_space_destroy` skips frame_free on them.  The legacy
-;;; PROGRAM_BASE / USER_STACK_TOP layout is retained; Phase 4 PR D
-;;; relocates programs to Linux-shape (PROGRAM_BASE=0x08048000,
-;;; USER_STACK_TOP=0x40000000) and flips the syscall ABI to 32-bit
-;;; register pointers.
+;;; `address_space_destroy` skips frame_free on them.  Programs run
+;;; with PROGRAM_BASE=0x08048000 and USER_STACK_TOP=0x40000000 (Linux
+;;; ELF convention); BUFFER (0x500), EXEC_ARG (0x4FC), and the vDSO
+;;; (0x10000) stay at low user-virt and reach the program through the
+;;; per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
         org 0C0100000h

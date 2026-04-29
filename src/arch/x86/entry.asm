@@ -31,17 +31,18 @@
         PTE_USER_RX_SHARED      equ (PTE_USER_RX | ADDRESS_SPACE_PTE_SHARED)
         PTE_USER_RW_SHARED      equ (PTE_USER_RW | ADDRESS_SPACE_PTE_SHARED)
 
-        ;; User address-space layout (legacy PROGRAM_BASE = 0x600):
-        ;;   PTE 0x000          : private — EXEC_ARG, BUFFER, prog prefix
-        ;;   PTEs 0x001..       : private — program text + BSS
-        ;;   PTE 0x010          : shared  — vDSO code page (R-X)
-        ;;   PTEs 0x080..0x08F  : private — user stack (16 × 4 KB = 64 KB)
-        ;;   PTEs 0x300..0x3FF  : shared  — asm.c JUMP_TABLE (256 × 4 KB)
-        VDSO_VIRT               equ FUNCTION_TABLE          ; 0x00010000
-        STACK_VIRT_BASE         equ 0x80000
-        STACK_VIRT_END          equ 0x90000                 ; one past last page
-        JUMP_TABLE_VIRT_BASE    equ 0x300000
+        ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
+        ;;   PTE 0x00000             : private — ARGV, EXEC_ARG, BUFFER (low 4 KB)
+        ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
+        ;;   PTEs 0x00300..0x003FF   : shared  — asm.c JUMP_TABLE (256 × 4 KB)
+        ;;   PTEs 0x08048..          : private — program text + BSS
+        ;;   PTEs 0x3FFF0..0x3FFFF   : private — user stack (16 × 4 KB = 64 KB),
+        ;;                             stack top = 0x40000000
         JUMP_TABLE_FRAME_COUNT  equ 256
+        JUMP_TABLE_VIRT_BASE    equ 0x300000
+        STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
+        VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment `system_ticks` (dword in rtc.asm's
@@ -90,8 +91,8 @@ program_enter:
         ;; --- Determine total user image size ---
         ;; binsize = vfs_found_size; bsssize from trailer at end of
         ;; program_scratch (matches the PR-#234 6-byte trailer or the
-        ;; legacy 4-byte trailer).  total = PROGRAM_BASE + binsize +
-        ;; bsssize, page-aligned up.
+        ;; legacy 4-byte trailer).  total = binsize + bsssize, page-
+        ;; aligned up.  user_image_end = PROGRAM_BASE + total.
         movzx ecx, word [vfs_found_size]
         mov edi, program_scratch
         add edi, ecx                        ; EDI = end of binary in scratch
@@ -116,8 +117,9 @@ program_enter:
         mov [user_image_end], eax
 
         ;; --- Map low frame (virt 0x000-0x0FFF) ---
-        ;; Contains EXEC_ARG (4 B at 0x4FC), BUFFER (256 B at 0x500),
-        ;; and the program prefix (up to 0xA00 B at 0x600..0xFFF).
+        ;; Contains EXEC_ARG (4 B at 0x4FC) and BUFFER (256 B at 0x500).
+        ;; Program code now lives at PROGRAM_BASE = 0x08048000, so the
+        ;; low frame is just the shell-to-program handoff region.
         call frame_alloc
         jc .panic
         push eax                            ; [esp+0] = low frame phys
@@ -140,17 +142,6 @@ program_enter:
         mov ecx, MAX_INPUT / 4
         rep movsd
         pop edi
-        ;; Program prefix (min(binsize, 0x1000-PROGRAM_BASE) bytes).
-        mov esi, program_scratch
-        movzx ecx, word [vfs_found_size]
-        cmp ecx, 0x1000 - PROGRAM_BASE      ; 0xA00
-        jbe .copy_low_partial
-        mov ecx, 0x1000 - PROGRAM_BASE
-.copy_low_partial:
-        push edi
-        lea edi, [edi + PROGRAM_BASE]
-        rep movsb
-        pop edi
         ;; Map low frame at user-virt 0.
         pop ecx                             ; low frame phys
         mov eax, [current_pd_phys]
@@ -159,8 +150,8 @@ program_enter:
         call address_space_map_page
         jc .panic
 
-        ;; --- Map remaining program text + BSS frames ---
-        mov dword [virt_cursor], 0x1000
+        ;; --- Map program text + BSS frames at PROGRAM_BASE ---
+        mov dword [virt_cursor], PROGRAM_BASE
 .prog_page_loop:
         mov eax, [virt_cursor]
         cmp eax, [user_image_end]

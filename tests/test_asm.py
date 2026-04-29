@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test that the self-hosted assembler produces byte-identical output to NASM.
 
-With no argument, tests every program in static/ that has `org 0600h`.
+With no argument, tests every program in static/ that has `org 08048000h`.
 With a name (e.g. ./test_asm.py edit), tests only that one program. On
 single-program runs the artifacts (nasm reference binary, extracted output,
 drive image) are copied to a persistent temp directory so they can be
@@ -29,7 +29,7 @@ from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_ass
 
 BASE_IMAGE = "drive.img"
 C_DIR = Path("src/c")
-ORG_DIRECTIVE = "org 0600h"
+ORG_DIRECTIVE = "org 08048000h"
 STATIC_DIR = Path("static")
 
 # The self-host run on asm.asm itself is the slow-path test; every

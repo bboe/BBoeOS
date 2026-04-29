@@ -9,7 +9,7 @@
         ;; bits so cc.py's current bits=16 integer width can round-trip
         ;; them; widening comes in phase 4b.
 
-        org 0600h
+        org 08048000h
 
         mov eax, cr0
         or  eax, 1
