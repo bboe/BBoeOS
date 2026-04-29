@@ -28,9 +28,9 @@ table is now 32-bit on both sides.
 | dns     | 724            | 935         | 1437      | +502  |
 | edit    | 2018           | 2668        | 3340      | +672  |
 | hello   | 22             | 28          | 29        | +1    |
-| ls      | 135            | 179         | 196       | +17   |
+| ls      | 135            | 179         | 198       | +19   |
 | mkdir   | 123            | 151         | 171       | +20   |
-| mv      | 217            | 253         | 278       | +25   |
+| mv      | 217            | 253         | 280       | +27   |
 | netinit | 72             | 94          | 85        | -9    |
 | netrecv | 334            | 424         | 452       | +28   |
 | netsend | 187            | 215         | 255       | +40   |
@@ -111,15 +111,19 @@ loads in main account for the +4, the wider PC-relative jump
 displacement and the [bits 32] directive's effect on rel-jump
 encoding contribute the rest.
 
-**ls (+17):** The assembly version uses inline `repne scasb` with a
+**ls (+19):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` and
 `write(STDOUT, ...)`.  `entry[DIRECTORY_ENTRY_SIZE]` is a local stack
-array, triggering a BP frame for `main`.  Δ shrunk from +30 to +17
+array, triggering a BP frame for `main`.  Δ shrunk from +30 to +19
 in 32-bit because the asm grew faster (+44 vs C's +31) — both the
 ``repne scasb`` walk-and-subtract and the ``test byte
 [entry_buf+OFFSET]`` flag checks gain operand-size overhead in the
 hand-written form, which narrows the compiler-vs-handwritten gap.
+The +2 shift over the original +17 comes from cc.py preserving
+``cld`` ahead of the C ``strlen``'s ``repne scasb``; the prefix used
+to be stripped by ``peephole_unused_cld``, leaving DF undefined in
+practice (typically clear via boot defaults).
 
 **mkdir (+20):** The asm version stores fd / pointer / count in
 registers; cc.py 32-bit spills several into BP-relative locals

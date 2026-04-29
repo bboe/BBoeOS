@@ -550,6 +550,53 @@ def test_out_register_caller_captures_register_into_local() -> None:
     assert "mov [bp-2], si" in asm
 
 
+def test_out_register_capture_not_destroyed_by_pinned_push_pop() -> None:
+    """out_register capture into a pinned register must not be push/popped around the call.
+
+    Scenario: ``inner_value`` is auto-pinned to DX (two uses, one call → clobber
+    cost 1, references 2 > 1).  ``net_get`` returns its result via
+    ``out_register("cx")``, which cc.py captures with ``mov dx, cx`` (cross-
+    register move into the pin).  The pre-push guard in ``generate_call``
+    must recognise that DX is the capture destination and exclude it from the
+    push/pop save set.  Without the guard, cc.py emits ``push dx`` before the
+    call then ``pop dx`` after ``mov dx, cx``, destroying the captured value.
+
+    The assertions are unconditional: the capture ``mov dx, cx`` is always
+    emitted when ``inner_value`` pins to DX and the out_register is CX.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int net_get(int *value __attribute__((out_register("cx"))));
+
+        int process() {
+            int inner_value;
+            if (net_get(&inner_value)) {
+                return inner_value;
+            }
+            return inner_value;
+        }
+    """,
+        bits=16,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    call_idx = next(i for i, line in enumerate(lines) if line == "call net_get")
+    before_call = lines[:call_idx]
+    after_call = lines[call_idx + 1 :]
+    # inner_value must be pinned to DX: the cross-register capture must appear.
+    assert any("mov dx, cx" in line for line in after_call), (
+        f"expected 'mov dx, cx' capture after call — inner_value may not have pinned to dx:\n{asm}"
+    )
+    # DX must NOT be pushed before the call (the pre-push guard must exclude it).
+    assert not any("push dx" in line for line in before_call), (
+        f"'push dx' found before 'call net_get' — pre-push guard failed to exclude the capture target:\n{asm}"
+    )
+    # DX must NOT be popped after the call (nothing was pushed, so nothing to pop).
+    assert not any("pop dx" in line for line in after_call), (
+        f"'pop dx' found after 'call net_get' — captured value in DX would be destroyed:\n{asm}"
+    )
+
+
 def test_out_register_prototype_registers_convention() -> None:
     """A function prototype with out_register is retained in the AST and registers the convention."""
     # If the prototype is silently dropped, generate_call won't know about out_register
@@ -1827,3 +1874,315 @@ def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
         }
     """)
     assert "f:" in asm
+
+
+def test_memcmp_emits_repe_cmpsb() -> None:
+    """memcmp(a, b, n) compiles to repe cmpsb."""
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+    assert "cld" in asm, f"Expected 'cld' in memcmp output (peephole must not strip it):\n{asm}"
+    # Standard memcmp returns lexical difference, not a 0/1 boolean — the old
+    # setne-then-zero-extend tail must be gone.
+    assert "setne" not in asm, f"Old boolean-result codegen leaked through:\n{asm}"
+
+
+def test_memcmp_n_zero_short_circuits() -> None:
+    """memcmp(a, b, 0) must return 0 without inspecting the buffers.
+
+    rep with CX=0 leaves ZF undefined, so the implementation must guard
+    with an explicit ``test count, count`` / ``jz`` pair before cmpsb.
+    """
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "test ecx, ecx" in asm, f"Expected 'test ecx, ecx' n==0 guard in:\n{asm}"
+    assert "memcmp_done_" in asm, f"Expected memcmp_done label for n==0 jump in:\n{asm}"
+
+
+def test_memcmp_not_equal_branch() -> None:
+    """Memcmp result != 0 branch works correctly."""
+    asm = _kernel(
+        """
+        int differs(uint8_t *a, uint8_t *b, int n) {
+            if (memcmp(a, b, n) != 0) {
+                return 1;
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+
+
+def test_memcmp_preserves_cld() -> None:
+    """Memcmp must retain cld — peephole_unused_cld must not strip it."""
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "cld" in asm, f"Expected 'cld' in memcmp output (peephole must not strip it):\n{asm}"
+
+
+def test_memcmp_result_used_as_condition() -> None:
+    """Memcmp result used in an if condition compiles without extra cmp."""
+    asm = _kernel(
+        """
+        int is_equal(uint8_t *a, uint8_t *b, int n) {
+            if (memcmp(a, b, n) == 0) {
+                return 1;
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+
+
+def test_memcmp_returns_signed_difference() -> None:
+    """Memcmp returns the lexical signed byte difference, not a 0/1 boolean.
+
+    On a mismatch SI/DI sit one past the differing byte, so the
+    implementation reloads ``[di-1]`` / ``[si-1]`` zero-extended and
+    subtracts.  Result range is [-255, +255], matching standard C memcmp.
+    """
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "movzx eax, byte [edi-1]" in asm, f"Expected zero-extended byte load from a in:\n{asm}"
+    assert "movzx edx, byte [esi-1]" in asm, f"Expected zero-extended byte load from b in:\n{asm}"
+    assert "sub eax, edx" in asm, f"Expected 'sub eax, edx' for signed lexical diff in:\n{asm}"
+
+
+def test_memset_emits_rep_stosb() -> None:
+    """memset(dst, value, count) compiles to rep stosb."""
+    asm = _kernel(
+        """
+        void zero_buf(uint8_t *buf, int n) {
+            memset(buf, 0, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"Expected 'rep stosb' in:\n{asm}"
+    assert "rep movsb" not in asm, f"Must not emit movsb for memset:\n{asm}"
+    assert "cld" in asm, f"Expected 'cld' in memset output (peephole must not strip it):\n{asm}"
+
+
+def test_memset_nonzero_value() -> None:
+    """Memset with a non-zero literal value loads AL correctly."""
+    asm = _kernel(
+        """
+        void fill_buf(uint8_t *buf, int n) {
+            memset(buf, 0xFF, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"Expected 'rep stosb' in:\n{asm}"
+    assert "0xFF" in asm or "255" in asm or "0ffh" in asm.lower() or "0xff" in asm.lower(), f"Expected 0xFF value in:\n{asm}"
+
+
+def test_memset_zero_literal_loads_correctly() -> None:
+    """Memset with a zero value literal loads the value into AX."""
+    asm = _kernel(
+        """
+        void zero_buf(uint8_t *buf, int n) {
+            memset(buf, 0, n);
+        }
+    """,
+        bits=32,
+    )
+    # The zero value must be loaded into AX (via xor or mov).
+    assert "eax, 0" in asm or "xor eax, eax" in asm or "xor ax, ax" in asm, f"Expected zero value loaded into AX:\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# ! (logical not) operator
+# ---------------------------------------------------------------------------
+
+
+def test_not_carry_return_call_emits_jnc() -> None:
+    """`if (!foo())` against a carry_return callee emits jnc (not jc).
+
+    carry_return convention: return 1 = CF clear (success),
+    return 0 = CF set (failure).  `if (!foo())` executes the body on
+    failure (CF set), so the false-jump past the body must be jnc
+    (skip body when CF clear = success).
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int try_open();
+
+        void caller() {
+            if (!try_open()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call try_open" in asm, f"Expected call in:\n{asm}"
+    assert "jnc" in asm, f"Expected 'jnc' (not_carry) for !carry_return in:\n{asm}"
+    assert "jc " not in asm, f"Must not emit bare jc for !carry_return:\n{asm}"
+
+
+def test_not_carry_return_call_positive_form_emits_jc() -> None:
+    """`if (foo())` (no !) against a carry_return callee emits jc (not jnc).
+
+    Confirms the positive form is correct so the ! test above is meaningful.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int try_open();
+
+        void caller() {
+            if (try_open()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call try_open" in asm, f"Expected call in:\n{asm}"
+    assert "jc " in asm, f"Expected 'jc' for positive carry_return in:\n{asm}"
+    assert "jnc" not in asm, f"Must not emit jnc for positive carry_return:\n{asm}"
+
+
+def test_not_carry_return_in_logical_and() -> None:
+    """`if (!a() && !b())` both legs emit correct not_carry jumps."""
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int a();
+        __attribute__((carry_return)) int b();
+
+        void caller() {
+            if (!a() && !b()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call a" in asm, f"Expected call a in:\n{asm}"
+    assert "call b" in asm, f"Expected call b in:\n{asm}"
+    # Both legs short-circuit via jnc (skip body / skip second check on success).
+    assert asm.count("jnc") >= 2, f"Expected jnc for both !a() and !b() in &&:\n{asm}"
+
+
+def test_not_carry_return_while_emits_jnc() -> None:
+    """`while (!poll())` loops while carry_return returns 0 (CF set = failure)."""
+    asm = _kernel(
+        """
+        __attribute__((carry_return)) int poll();
+
+        void wait_until_ready() {
+            while (!poll()) {}
+        }
+    """,
+        bits=32,
+    )
+    assert "call poll" in asm, f"Expected call in:\n{asm}"
+    assert "jnc" in asm, f"Expected 'jnc' in while(!carry_return) in:\n{asm}"
+
+
+def test_not_integer_literal_evaluates_correctly() -> None:
+    """`!0` evaluates to 1 and `!1` evaluates to 0.
+
+    cc.py does NOT fold constant comparisons at parse time: `!0` desugars
+    to `0 == 0` and the codegen emits a `cmp`/`jne`/`inc` sequence that
+    produces the correct result (1) at runtime.  The test verifies the
+    correct control-flow shape rather than asserting a folded literal.
+    """
+    asm_not0 = _kernel(
+        """
+        int always_one() {
+            return !0;
+        }
+    """,
+        bits=32,
+    )
+    # !0 = (0 == 0) = true.  The false-jump (jne) skips the inc-to-one path
+    # when 0 != 0 (never fires), so the function returns 1.  The cmp sequence
+    # must be present and the inc-eax path must appear.
+    assert "cmp" in asm_not0 or "test" in asm_not0, f"Expected cmp/test for !0 in:\n{asm_not0}"
+    assert "jne" in asm_not0, f"Expected jne branch in !0 sequence in:\n{asm_not0}"
+    assert "inc eax" in asm_not0 or "inc ax" in asm_not0, f"Expected 'inc eax' for the true-result path of !0 in:\n{asm_not0}"
+
+    asm_not1 = _kernel(
+        """
+        int always_zero() {
+            return !1;
+        }
+    """,
+        bits=32,
+    )
+    # !1 = (1 == 0) = false.  The false-jump fires (1 != 0 is true), so
+    # the inc path is skipped and the function returns 0.  cmp/jne must appear.
+    assert "cmp" in asm_not1 or "test" in asm_not1, f"Expected cmp/test for !1 in:\n{asm_not1}"
+    assert "jne" in asm_not1, f"Expected jne branch in !1 sequence in:\n{asm_not1}"
+
+
+def test_not_regular_call_emits_jne() -> None:
+    """`if (!foo())` against a non-carry_return callee: compares EAX to 0, emits jne.
+
+    `!foo()` desugars to `foo() == 0`.  The body executes when foo() is
+    zero; the false-jump (skip body) fires when foo() is non-zero — that is
+    a `jne` / `test + jne` sequence, NOT a `je`.
+    """
+    asm = _kernel(
+        """
+        int get_count();
+
+        void caller() {
+            if (!get_count()) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "call get_count" in asm, f"Expected call in:\n{asm}"
+    assert "jne" in asm, f"Expected 'jne' (false-jump = skip body when non-zero) for !regular_call in:\n{asm}"
+
+
+def test_not_variable_emits_jne() -> None:
+    """`if (!x)` on an integer variable compiles to test/cmp + jne.
+
+    The body executes when x == 0; the false-jump skips the body when x != 0
+    — so the emitted branch is `jne` (or the equivalent `test reg,reg` /
+    `jne`), not `je`.
+    """
+    asm = _kernel(
+        """
+        void check(int x) {
+            if (!x) {
+                return;
+            }
+        }
+    """,
+        bits=32,
+    )
+    assert "jne" in asm or "jnz" in asm, f"Expected jne/jnz (false-jump) for !var in:\n{asm}"

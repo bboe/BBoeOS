@@ -1236,7 +1236,21 @@ class Peepholer:
         removed when the direction flag is already clear (no intervening
         label, call, or interrupt that could change DF).
         """
-        string_operations = ("lodsb", "lodsw", "stosb", "stosw", "movsb", "movsw", "scasb", "scasw", "cmpsb", "cmpsw", "rep ")
+        string_operations = (
+            "lodsb",
+            "lodsw",
+            "stosb",
+            "stosw",
+            "movsb",
+            "movsw",
+            "scasb",
+            "scasw",
+            "cmpsb",
+            "cmpsw",
+            "rep ",
+            "repe ",
+            "repne ",
+        )
         has_string_operations = any(any(line.strip().startswith(operation) for operation in string_operations) for line in self.lines)
         if not has_string_operations:
             self.lines = [line for line in self.lines if line.strip() != "cld"]
