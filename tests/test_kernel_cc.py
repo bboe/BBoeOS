@@ -1887,6 +1887,7 @@ def test_memcmp_emits_repe_cmpsb() -> None:
         bits=32,
     )
     assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+    assert "cld" in asm, f"Expected 'cld' in memcmp output (peephole must not strip it):\n{asm}"
     # Standard memcmp returns lexical difference, not a 0/1 boolean — the old
     # setne-then-zero-extend tail must be gone.
     assert "setne" not in asm, f"Old boolean-result codegen leaked through:\n{asm}"
@@ -1924,6 +1925,19 @@ def test_memcmp_not_equal_branch() -> None:
         bits=32,
     )
     assert "repe cmpsb" in asm, f"Expected 'repe cmpsb' in:\n{asm}"
+
+
+def test_memcmp_preserves_cld() -> None:
+    """Memcmp must retain cld — peephole_unused_cld must not strip it."""
+    asm = _kernel(
+        """
+        int compare(uint8_t *a, uint8_t *b, int n) {
+            return memcmp(a, b, n);
+        }
+    """,
+        bits=32,
+    )
+    assert "cld" in asm, f"Expected 'cld' in memcmp output (peephole must not strip it):\n{asm}"
 
 
 def test_memcmp_result_used_as_condition() -> None:
@@ -1974,6 +1988,7 @@ def test_memset_emits_rep_stosb() -> None:
     )
     assert "rep stosb" in asm, f"Expected 'rep stosb' in:\n{asm}"
     assert "rep movsb" not in asm, f"Must not emit movsb for memset:\n{asm}"
+    assert "cld" in asm, f"Expected 'cld' in memset output (peephole must not strip it):\n{asm}"
 
 
 def test_memset_nonzero_value() -> None:
