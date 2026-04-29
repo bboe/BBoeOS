@@ -16,7 +16,7 @@ The vDSO also gains us:
 
 - Preserve the existing user-program ABI: programs continue to emit `call FUNCTION_PRINT_STRING`, `jmp FUNCTION_DIE`, etc. cc.py output is unchanged.
 - Make the vDSO blob self-contained: no references to kernel-private addresses (`SECTOR_BUFFER`, `EXEC_ARG`).
-- Ship vDSO migration as a **pre-paging** PR. After this PR lands, Phase 3 of the paging milestone can map the vDSO into per-AS user PDs without further code changes.
+- Ship vDSO migration as a **pre-paging** PR. After this PR lands, Phase 3 of the paging milestone can map the vDSO into per-address-space user PDs without further code changes.
 - Multi-process compatible: code page is shared across processes; per-call state lives on the calling process's own stack, so concurrent calls in different processes (or different threads of the same process, when threads land) cannot collide.
 
 ## Non-goals
@@ -33,7 +33,7 @@ The vDSO also gains us:
 | Range | Use | Permissions | Lifecycle |
 |---|---|---|---|
 | `0x00010000..0x00010FFF` | vDSO code page | R-X user | Shared physical frame, mapped into every user PD |
-| `0x08048000..` | User program code | RW(X) user | Per-AS private |
+| `0x08048000..` | User program code | RW(X) user | Per-address-space private |
 
 **No vDSO data page.** All per-call scratch state — the byte transit for char I/O, `printf`'s pad/width flags, `print_datetime`'s intermediate fields — lives on the user's stack, scoped to the calling helper. The vDSO is code-only.
 
@@ -72,7 +72,7 @@ Each helper that needs scratch space allocates it inside its own stack frame:
 
 The only read-only data the vDSO holds is `print_datetime_month_lengths` (24 bytes, 12 words), embedded in the code page below the helper bodies. Reads from R-X user pages are fine on x86 without NX.
 
-**`EXEC_ARG` is NOT migrated in this milestone.** `shared_parse_argv` continues to read from `[EXEC_ARG]` where `EXEC_ARG = 0x4FC` (kernel-side, unchanged). Pre-paging this works because all memory is reachable from CPL=3. Post-paging, `EXEC_ARG`'s cross-AS handoff is a Phase 4 concern — the vDSO migration is intentionally narrow and lands before paging.
+**`EXEC_ARG` is NOT migrated in this milestone.** `shared_parse_argv` continues to read from `[EXEC_ARG]` where `EXEC_ARG = 0x4FC` (kernel-side, unchanged). Pre-paging this works because all memory is reachable from CPL=3. Post-paging, `EXEC_ARG`'s cross-address-space handoff is a Phase 4 concern — the vDSO migration is intentionally narrow and lands before paging.
 
 ## Build pipeline
 
@@ -116,9 +116,9 @@ That's it. There's no data page to zero — all per-call state is on the user st
 
 ### Per-program-load setup (post-paging — Phase 3+)
 
-In `prog_load`, after `as_create` and before mapping the user program:
+In `prog_load`, after `address_space_create` and before mapping the user program:
 
-1. `as_map_page(pd, 0x00010000, vdso_code_phys, P|U)` — code page, R/W=0 (read-only executable).
+1. `address_space_map_page(pd, 0x00010000, vdso_code_phys, P|U)` — code page, R/W=0 (read-only executable).
 
 `vdso_code_phys` is the shared frame allocated at boot. Stored in a kernel global.
 
@@ -126,9 +126,9 @@ In `prog_load`, after `as_create` and before mapping the user program:
 
 ### sys_exit / kill path
 
-The vDSO code page's frame is shared across all PDs, so it must NOT be freed when an AS is destroyed. The simplest invariant: the boot-time frame allocator marks the vDSO code frame as "permanent" before the bitmap initializes (or is allocated outside the bitmap range entirely). Then `frame_free(vdso_code_phys)` is a no-op. `as_destroy` walks user-half PTEs and calls `frame_free` on each; the code-page entry happens to free a permanent frame, which the bitmap silently ignores.
+The vDSO code page's frame is shared across all PDs, so it must NOT be freed when an address space is destroyed. The simplest invariant: the boot-time frame allocator marks the vDSO code frame as "permanent" before the bitmap initializes (or is allocated outside the bitmap range entirely). Then `frame_free(vdso_code_phys)` is a no-op. `address_space_destroy` walks user-half PTEs and calls `frame_free` on each; the code-page entry happens to free a permanent frame, which the bitmap silently ignores.
 
-Alternative: have `as_destroy` skip the code-page virt address. Cleaner but introduces a special case. We pick the "permanent frame, free is a no-op" path.
+Alternative: have `address_space_destroy` skip the code-page virt address. Cleaner but introduces a special case. We pick the "permanent frame, free is a no-op" path.
 
 ## `constants.asm` changes
 
@@ -188,11 +188,11 @@ A one-liner: `xxd -s 0x00010000 -l 16 /proc/<qemu-pid>/mem` (or equivalent QEMU 
 
 ### Out of scope (covered by paging milestone)
 
-- Per-AS data isolation between concurrent programs (only one program runs at a time today).
-- vDSO mapping into multiple PDs (no per-AS PDs yet).
+- Per-address-space data isolation between concurrent programs (only one program runs at a time today).
+- vDSO mapping into multiple PDs (no per-address-space PDs yet).
 
 ## Follow-up work
 
-- **Phase 3 paging integration**: `prog_load` maps the shared vDSO code page (R-X user) into every new PD. The boot-time static-physical-address path is retired in favor of the per-AS mapping path; the underlying physical frame is unchanged.
+- **Phase 3 paging integration**: `prog_load` maps the shared vDSO code page (R-X user) into every new PD. The boot-time static-physical-address path is retired in favor of the per-address-space mapping path; the underlying physical frame is unchanged.
 - **vDSO ELF metadata** (long-term): if we ever add a real dynamic linker, expose vDSO symbols via auxv `AT_SYSINFO_EHDR` instead of hardcoded `constants.asm` values.
-- **EXEC_ARG handoff** (Phase 4): when the per-AS layout lands, replace the kernel-side `[EXEC_ARG]` slot with a mechanism the user can read across the AS transition (pass via syscall register, or introduce a vDSO data page just for this slot, or copy through a kernel buffer).
+- **EXEC_ARG handoff** (Phase 4): when the per-address-space layout lands, replace the kernel-side `[EXEC_ARG]` slot with a mechanism the user can read across the address-space transition (pass via syscall register, or introduce a vDSO data page just for this slot, or copy through a kernel buffer).

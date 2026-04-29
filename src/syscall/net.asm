@@ -8,7 +8,7 @@
         ;; the user pointer directly, but staging keeps the protocol
         ;; stack from ever dereferencing a user-virt address — under
         ;; the Phase 3 user shim the kernel can read user pages, but
-        ;; once Phase 4 lands per-AS maps, an arbitrary user pointer
+        ;; once Phase 4 lands per-address-space maps, an arbitrary user pointer
         ;; would need access_ok / copy_from_user.  Staging sidesteps
         ;; that entirely.  All pointers passed to udp_send / ip_send
         ;; are full 32-bit kernel-virt (EBX / ESI), not 16-bit BX / SI
