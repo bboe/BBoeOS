@@ -768,6 +768,31 @@ def test_struct_array_initializer_unspecified_fields_zero() -> None:
     assert "dw 0" in asm
 
 
+def test_struct_array_initializer_function_symbol_fields() -> None:
+    """User function names are accepted as constant initializers for function_pointer fields.
+
+    The fd_ops table in src/fs/fd.c is the motivating shape: an array of
+    struct { fn_ptr read; fn_ptr write; } entries laid out at file scope
+    with `{ fd_read_console, fd_write_console }` style entries.
+    """
+    asm = _kernel(
+        """
+        struct ops { int (*read)(); int (*write)(); };
+        int reader();
+        int writer();
+        struct ops table[2] = {
+            { 0, 0 },
+            { reader, writer },
+        };
+        void f() {}
+    """,
+        bits=32,
+    )
+    assert "_g_table: dd 0" in asm
+    assert "dd reader" in asm
+    assert "dd writer" in asm
+
+
 # ---------------------------------------------------------------------------
 # uint16_t: fixed 2-byte type across both --bits modes
 # ---------------------------------------------------------------------------
