@@ -38,7 +38,7 @@ vga_clear_screen:
         push dx
         push edi
 
-        mov edi, 0xB8000
+        mov edi, 0xC00B8000
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
         mov ecx, VGA_COLS * VGA_ROWS
         cld
@@ -57,7 +57,7 @@ vga_fill_block:
         ;; Fill an 8×8 tile at (BL=col, BH=row) with color AL in mode 13h.
         ;; Tile coordinates: 0-39 columns, 0-24 rows.  Preserves all registers.
         ;; Uses flat 32-bit addressing — DS already covers the linear VGA
-        ;; framebuffer at 0xA0000, no ES reload (a real-mode segment value
+        ;; framebuffer at 0xC00A0000, no ES reload (a real-mode segment value
         ;; would #GP in protected mode).
         push eax
         push ebx
@@ -67,13 +67,13 @@ vga_fill_block:
 
         mov cl, al                      ; stash color
 
-        ;; EDI = 0xA0000 + row * 2560 + col * 8  (linear pixel offset)
+        ;; EDI = 0xC00A0000 + row * 2560 + col * 8  (linear pixel offset)
         movzx edi, bh                   ; EDI = row
         imul edi, 2560                  ; EDI = row × 2560
         movzx eax, bl                   ; EAX = col
         shl eax, 3                      ; EAX = col × 8
         add edi, eax
-        add edi, 0xA0000                ; flat VGA framebuffer base
+        add edi, 0xC00A0000                ; flat VGA framebuffer base
 
         mov al, cl                      ; restore color
 
@@ -137,13 +137,13 @@ vga_scroll_up:
         push esi
         push edi
 
-        mov esi, 0xB8000 + VGA_COLS * 2         ; source: row 1
-        mov edi, 0xB8000                         ; dest:   row 0
+        mov esi, 0xC00B8000 + VGA_COLS * 2         ; source: row 1
+        mov edi, 0xC00B8000                         ; dest:   row 0
         mov cx, (VGA_ROWS - 1) * VGA_COLS        ; word count
         cld
         rep movsw
 
-        mov edi, 0xB8000 + (VGA_ROWS - 1) * VGA_COLS * 2
+        mov edi, 0xC00B8000 + (VGA_ROWS - 1) * VGA_COLS * 2
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
         mov cx, VGA_COLS
         rep stosw
@@ -351,20 +351,20 @@ vga_set_mode:
 
         ;; 11. Clear framebuffer using flat 32-bit addressing — DS / ES
         ;; already point to the protected mode flat data segment, so we just write
-        ;; to the linear framebuffer address (0xB8000 for text, 0xA0000
+        ;; to the linear framebuffer address (0xC00B8000 for text, 0xC00A0000
         ;; for mode 13h).  No ES reload (a real-mode segment value would
         ;; #GP in protected mode).
         cmp ah, 13h
         je .clear_graphics
-        ;; Text mode: fill 0xB8000 with space + default attribute
-        mov edi, 0xB8000
+        ;; Text mode: fill 0xC00B8000 with space + default attribute
+        mov edi, 0xC00B8000
         mov ax, (VGA_DEFAULT_ATTRIBUTE << 8) | ' '
         mov ecx, VGA_COLS * VGA_ROWS
         rep stosw
         jmp .clear_done
 .clear_graphics:
-        ;; Mode 13h: zero 320×200 = 64000 bytes at 0xA0000
-        mov edi, 0xA0000
+        ;; Mode 13h: zero 320×200 = 64000 bytes at 0xC00A0000
+        mov edi, 0xC00A0000
         xor eax, eax
         mov ecx, 320 * 200 / 2
         cld
@@ -410,7 +410,7 @@ vga_teletype:
         movzx ebx, dl                   ; EBX = col (DX still valid)
         add eax, ebx
         shl eax, 1                      ; byte offset
-        add eax, 0xB8000                ; linear VGA address
+        add eax, 0xC00B8000                ; linear VGA address
         mov edi, eax
 
         mov al, cl                      ; char
@@ -480,7 +480,7 @@ vga_write_attribute:
         movzx ebx, dl                   ; EBX = col (DX still valid)
         add eax, ebx
         shl eax, 1
-        add eax, 0xB8000                ; linear VGA address
+        add eax, 0xC00B8000                ; linear VGA address
         mov edi, eax
 
         mov al, cl

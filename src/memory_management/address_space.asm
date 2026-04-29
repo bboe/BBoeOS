@@ -33,6 +33,7 @@
 %define ADDRESS_SPACE_PDE_RW            0x002
 %define ADDRESS_SPACE_PDE_USER          0x004
 %define ADDRESS_SPACE_PDE_USER_RW       (ADDRESS_SPACE_PDE_PRESENT | ADDRESS_SPACE_PDE_RW | ADDRESS_SPACE_PDE_USER)
+%define ADDRESS_SPACE_PTE_SHARED        0x200           ; AVL[0]: frame is shared, address_space_destroy skips frame_free
 %define ADDRESS_SPACE_USER_PDE_COUNT    768             ; PDEs 0..767 are user-half
 
 address_space_create:
@@ -83,11 +84,15 @@ address_space_create:
 address_space_destroy:
         ;; EAX = pd_phys.  Walks PDEs 0..767 (user half).  For each
         ;; present PDE, walks the PT, frees every present user-page
-        ;; frame, then frees the PT frame itself.  Finally frees the PD
-        ;; frame.  Caller must not have pd_phys loaded in CR3 — the
-        ;; `sys_exit` / kill path switches CR3 to kernel_pd_template
-        ;; first.  Kernel-half PDEs are left alone; the kernel-half PTs
-        ;; they reference are shared and outlive every per-program PD.
+        ;; frame, then frees the PT frame itself.  PTEs with the
+        ;; `ADDRESS_SPACE_PTE_SHARED` AVL bit set (vDSO code page,
+        ;; asm.c JUMP_TABLE) are skipped — those frames live in shared
+        ;; tables managed by the kernel and outlive any one address
+        ;; space.  Finally frees the PD frame.  Caller must not have
+        ;; pd_phys loaded in CR3 — the `sys_exit` / kill path switches
+        ;; CR3 to kernel_pd_template first.  Kernel-half PDEs are left
+        ;; alone; the kernel-half PTs they reference are shared and
+        ;; outlive every per-program PD.
         push eax
         push ebx
         push ecx
@@ -112,6 +117,8 @@ address_space_destroy:
         mov eax, [edx + ecx*4]
         test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pte
+        test eax, ADDRESS_SPACE_PTE_SHARED      ; shared frame (vDSO, JUMP_TABLE)?
+        jnz .next_pte                           ; yes — leave it for other PDs
         and eax, 0xFFFFF000                     ; user-page phys
         call frame_free
 .next_pte:

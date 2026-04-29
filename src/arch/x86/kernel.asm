@@ -9,17 +9,22 @@
 ;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0100000).
 ;;; high_entry installs the kernel GDT/IDT/stack, drops the boot
 ;;; identity mapping, initializes the bitmap frame allocator, allocates
-;;; the remaining 63 kernel direct-map PTs, installs the Phase 3 user
-;;; shim (one user-accessible PT at PDE[0] of `kernel_pd_template`), and
-;;; jumps into `protected_mode_entry` for driver / VFS / NIC / shell
-;;; bring-up.
+;;; the remaining 63 kernel direct-map PTs that fan out the kernel
+;;; direct map (PDEs 769..831, virt 0xC0400000..0xCFFFFFFF), and jumps
+;;; into `protected_mode_entry` for driver / VFS / NIC / shell bring-up.
 ;;;
-;;; Phase boundaries:
-;;;   * Pre-paging boot binary lives in boot.asm.
-;;;   * Phase 3 shim: `kernel_pd_template` carries one user PT at
-;;;     PDE[0] mapping virt 0..0xFFFFF as user-accessible.  Programs
-;;;     keep running at the legacy PROGRAM_BASE / USER_STACK_TOP layout
-;;;     until Phase 4 introduces per-program PDs.
+;;; Phase 4: each program runs in its own per-program PD built by
+;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
+;;; kernel half (PDEs 768..1023) is copy-imaged from
+;;; `kernel_pd_template` so the kernel direct map is reachable from
+;;; every address space.  The user half (PDEs 0..767) starts empty and
+;;; is populated only with the program's own pages, plus shared
+;;; vDSO/JUMP_TABLE PTEs marked with the AVL[0] PTE_SHARED bit so
+;;; `address_space_destroy` skips frame_free on them.  The legacy
+;;; PROGRAM_BASE / USER_STACK_TOP layout is retained; Phase 4 PR D
+;;; relocates programs to Linux-shape (PROGRAM_BASE=0x08048000,
+;;; USER_STACK_TOP=0x40000000) and flips the syscall ABI to 32-bit
+;;; register pointers.
 ;;; ------------------------------------------------------------------------
 
         org 0C0100000h
@@ -75,6 +80,17 @@ sector_buffer    equ 0xC000F000
         NET_TRANSMIT_BUFFER_PHYS equ NET_RECEIVE_BUFFER_PHYS + NET_BUFFER_BYTES
         net_receive_buffer      equ DIRECT_MAP_BASE + NET_RECEIVE_BUFFER_PHYS
         net_transmit_buffer     equ DIRECT_MAP_BASE + NET_TRANSMIT_BUFFER_PHYS
+        ;; Program-load scratch buffer.  vfs_load writes the freshly-
+        ;; loaded binary here; program_enter copies from here into the
+        ;; per-program PD's user pages.  128 KB headroom comfortably
+        ;; covers every program in src/c/ (largest is ~22 KB today).
+        ;; Lives at fixed phys above the NE2000 buffers, reached via
+        ;; the kernel direct map; same trick as kernel_stack — keeps
+        ;; the bytes out of kernel.bin's on-disk image.
+        ;; LOW_RESERVE_BYTES (0x202000) covers the whole range.
+        PROGRAM_SCRATCH_BYTES   equ 128 * 1024                          ; 128 KB
+        PROGRAM_SCRATCH_PHYS    equ 0x185000                            ; aligned, just past NIC buffers
+        program_scratch         equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
         E820_TABLE_VIRT         equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE        equ 768
         LAST_KERNEL_PDE         equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
@@ -155,12 +171,14 @@ high_entry:
         ;; Reserve everything from phys 0 up to and including the
         ;; boot PD and first kernel PT in one sweep.  Covers BIOS /
         ;; VGA / staging region / kernel image / kernel stack (at
-        ;; phys 0x180000) / NE2000 RX/TX scratch (0x184000+) / boot
-        ;; PD / first kernel PT.  The bitmap allocator only ever
-        ;; returns frames at phys LOW_RESERVE_BYTES (0x202000) and
-        ;; above, so the kernel PTs allocated next and the Phase 3
-        ;; user shim PT all land outside the user shim's
-        ;; 0..0xFFFFF user-accessible range.
+        ;; phys 0x180000) / NE2000 RX/TX scratch (0x184000+) /
+        ;; program_scratch (0x185000+) / boot PD / first kernel PT.
+        ;; The bitmap allocator only ever returns frames at phys
+        ;; LOW_RESERVE_BYTES (0x202000) and above, so the kernel PTs
+        ;; allocated next, every PD/PT/page built by
+        ;; `address_space_create` / `address_space_map_page`, and the
+        ;; vDSO + JUMP_TABLE shared frames all land in the
+        ;; high-physical region above LOW_RESERVE_BYTES.
         xor eax, eax
         mov ecx, LOW_RESERVE_BYTES
         call frame_reserve_range
@@ -216,65 +234,17 @@ high_entry:
         mov eax, cr3
         mov cr3, eax
 
-        ;; --- Phase 3 user shim ---
-        ;;
-        ;; Allocate one PT covering virt 0..0x3FFFFF (4 MB), install
-        ;; at PDE[0] in kernel_pd_template, and populate two
-        ;; user-accessible R/W windows:
-        ;;   * PTEs 0..0xFF map virt 0..0xFFFFF (1 MB) → phys 0..0xFFFFF
-        ;;     — covers the legacy program / stack / vDSO / BUFFER
-        ;;     layout.
-        ;;   * PTEs 0x300..0x3FF map virt 0x300000..0x3FFFFF (1 MB at
-        ;;     the 3 MB mark) → phys 0x300000..0x3FFFFF — covers
-        ;;     ``asm.c``'s SYMBOL_BASE / JUMP_TABLE region (3 MB+).
-        ;; The 0x100..0x2FF window stays not-present so user code
-        ;; can't see or write the kernel image (phys 0x100000..),
-        ;; the boot PD (phys 0x200000), the first kernel PT (phys
-        ;; 0x201000), or the frames the bitmap allocator handed out
-        ;; for the 64 kernel PTs + this shim PT (phys 0x202000+,
-        ;; well within 0x300000).
-        ;;
-        ;; Phase 4's per-program PDs replace this whole arrangement
-        ;; with private user frames and proper memory protection.
-        call frame_alloc
-        jc .panic
-        mov esi, eax                            ; preserve phys of shim PT
-        mov edi, eax
-        add edi, DIRECT_MAP_BASE                ; kernel-virt to populate
-        xor ecx, ecx
-.shim_pt_loop:
-        cmp ecx, 0x100
-        jb .shim_pt_user                        ; PTEs 0..0xFF: low 1 MB
-        cmp ecx, 0x300
-        jb .shim_pt_unmap                       ; PTEs 0x100..0x2FF: kernel-only
-        ;; PTEs 0x300..0x3FF: extended 1 MB at 3 MB mark.
-.shim_pt_user:
-        mov eax, ecx
-        shl eax, 12
-        or eax, 0x107                           ; P | RW | U
-        jmp .shim_pt_store
-.shim_pt_unmap:
-        xor eax, eax
-.shim_pt_store:
-        mov [edi + ecx*4], eax
-        inc ecx
-        cmp ecx, 1024
-        jb .shim_pt_loop
-
-        ;; Install at PDE[0] in kernel_pd_template.
-        mov eax, esi
-        or eax, 0x007                           ; P | RW | U
-        mov edi, DIRECT_MAP_BASE + BOOT_PD_PHYS
-        mov [edi + 0*4], eax
-
-        ;; Flush TLB.
-        mov eax, cr3
-        mov cr3, eax
-
         ;; Continue with the existing post-flip init: TSS / IDT IRQ
         ;; gates / drivers / VFS / NIC / banner / shell.  Lives in
         ;; entry.asm's `protected_mode_entry`, trimmed to skip the
         ;; segment / ESP / lidt work `high_entry` already performed.
+        ;;
+        ;; Phase 4 PR C drops the temporary user shim that lived at
+        ;; PDE[0] of kernel_pd_template — programs now run in private
+        ;; per-program PDs built by `address_space_create` from
+        ;; `program_enter`.  kernel_pd_template's user half is
+        ;; entirely zero-filled, so kernel-mode code running on it
+        ;; cannot accidentally touch user memory.
         jmp protected_mode_entry
 
 .panic:
@@ -286,6 +256,8 @@ high_entry:
         hlt
         jmp $-1
 
+%include "memory_management/address_space.asm"
+%include "memory_management/frame.asm"
 %include "drivers/ata.asm"
 %include "drivers/console.asm"
 %include "drivers/fdc.asm"
@@ -298,8 +270,6 @@ high_entry:
 %include "fs/block.asm"
 %include "fs/fd.kasm"
 %include "fs/vfs.asm"
-%include "memory_management/address_space.asm"
-%include "memory_management/frame.asm"
 %include "net/net.asm"
 %include "syscall.asm"
 %include "idt.asm"
