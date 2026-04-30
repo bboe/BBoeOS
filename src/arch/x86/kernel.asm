@@ -1,17 +1,21 @@
 ;;; ------------------------------------------------------------------------
-;;; kernel.asm — high-half kernel binary (org 0xC0100000).
+;;; kernel.asm — high-half kernel binary (org 0xC0020000).
 ;;;
-;;; Loaded onto disk after boot.bin and read into physical 0x10000 by
-;;; boot.asm's real-mode INT 13h, then relocated to physical 0x100000
-;;; (= virtual 0xC0100000) by `early_pe_entry` once paging is on.
+;;; Loaded onto disk after boot.bin and read into physical 0x20000 by
+;;; boot.asm's real-mode INT 13h.  The phys load address sits in
+;;; conventional RAM (above the vDSO target at 0x10000, below the VGA
+;;; aperture at 0xA0000) so the entire kernel-side reserved region
+;;; fits under 1 MB and the OS can boot under QEMU `-m 1`.  The
+;;; kernel `org` is 0xC0000000 + KERNEL_LOAD_PHYS, which means the
+;;; kernel runs at its direct-map alias — no separate higher-half PT.
 ;;;
 ;;; The very first byte of kernel.bin is `high_entry`, which boot.asm's
-;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0100000).
+;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0020000).
 ;;; high_entry installs the kernel GDT/IDT/stack, drops the boot
 ;;; identity mapping, initializes the bitmap frame allocator, allocates
-;;; only the kernel direct-map PTs needed for installed RAM (0..63,
-;;; covering virt 0xC0400000..0xCFFFFFFF), and jumps
-;;; into `protected_mode_entry` for driver / VFS / NIC / shell bring-up.
+;;; only the kernel direct-map PTs needed for installed RAM beyond the
+;;; first 4 MB, and jumps into `protected_mode_entry` for driver / VFS
+;;; / NIC / shell bring-up.
 ;;;
 ;;; Each program runs in its own per-program PD built by
 ;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
@@ -27,7 +31,7 @@
 ;;; per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
-        org 0C0100000h
+        org 0C0020000h
         bits 32
         %include "constants.asm"
 
@@ -43,14 +47,15 @@ directory_sector equ DIRECTORY_SECTOR_VIRT
         ;; Sits at low-phys 0xF200 (sector_buffer + 0x200, the next 1 KB
         ;; of the same 4 KB frame) so the 1 KB doesn't burn disk space
         ;; inside kernel.bin — same trick as kernel_stack / program_scratch.
-        ;; LOW_RESERVE_BYTES (0x202000) covers the entire 0..2 MB region,
-        ;; so this slot is pre-reserved by the bitmap allocator at boot
-        ;; and won't be handed out for general allocations.
+        ;; LOW_RESERVE_BYTES covers everything from phys 0 up through
+        ;; the kernel image and KERNEL_RESERVED_BASE region, so this
+        ;; slot is pre-reserved by the bitmap allocator at boot and
+        ;; won't be handed out for general allocations.
 ext2_sd_buffer   equ 0xC000F200
         ;; Disk sector buffer at fixed low-phys 0xF000 (kernel-virt
-        ;; 0xC000F000 via the direct map).  Stays at fixed phys for now;
-        ;; PR A migrated bbfs.asm / ext2.asm to 32-bit register accesses
-        ;; so it'll keep working post-shim via the kernel direct map.
+        ;; 0xC000F000 via the direct map).  Reached only by the kernel
+        ;; from CPL=0; per-program PDs never map this phys range
+        ;; user-side.
 sector_buffer    equ 0xC000F000
 
         BOOT_PD_PHYS            equ PROGRAM_SCRATCH_PHYS + PROGRAM_SCRATCH_BYTES
@@ -58,14 +63,14 @@ sector_buffer    equ 0xC000F000
         ;; kernel-virt address to recover its physical alias.
         DIRECT_MAP_BASE         equ 0C0000000h
         FIRST_KERNEL_PT_PHYS    equ BOOT_PD_PHYS + 0x1000
-        KERNEL_FINAL_PHYS       equ 0x100000
+        KERNEL_LOAD_PHYS        equ 0x20000
         LOW_RESERVE_BYTES       equ FIRST_KERNEL_PT_PHYS + 0x1000  ; bitmap-allocator sweep ceiling
         ;; KERNEL_RESERVED_BASE is the first page above kernel.bin, computed
         ;; by make_os.sh and passed as -DKERNEL_RESERVED_BASE=N.  The fallback
         ;; keeps direct nasm invocations working with a valid (if not maximally
         ;; packed) layout.
         %ifndef KERNEL_RESERVED_BASE
-        %define KERNEL_RESERVED_BASE 0x180000
+        %define KERNEL_RESERVED_BASE 0x40000
         %endif
         ;; Ring-0 stack: 16 KB immediately above kernel.bin, accessed through
         ;; the direct map.  Lives outside kernel.bin to avoid burning 16 KB of
@@ -139,12 +144,13 @@ high_entry:
         jmp KERNEL_CODE_SELECTOR:.cs_reloaded
 .cs_reloaded:
 
-        ;; Switch ESP to the kernel stack (16 KB at virt 0xC0180000,
-        ;; backed by phys 0x180000+; see KERNEL_STACK_PHYS for why it
-        ;; lives here instead of inside kernel.bin).  Reachable
-        ;; immediately because PDE[768]'s direct map covers
-        ;; phys 0..0x3FFFFF.  TSS.ESP0 is patched to the same later
-        ;; in protected_mode_entry.
+        ;; Switch ESP to the kernel stack (16 KB at KERNEL_RESERVED_BASE,
+        ;; reached through the direct map at kernel-virt
+        ;; DIRECT_MAP_BASE + KERNEL_RESERVED_BASE; see KERNEL_STACK_PHYS
+        ;; for why it lives here instead of inside kernel.bin).  Reachable
+        ;; immediately because PDE[768]'s direct map covers phys
+        ;; 0..0x3FFFFF.  TSS.ESP0 is patched to the same later in
+        ;; protected_mode_entry.
         mov esp, kernel_stack_top
 
         ;; Patch the high-half offsets of the static IDT entries (the
@@ -182,13 +188,13 @@ high_entry:
         call frame_init
 
         ;; Reserve everything from phys 0 up to and including the
-        ;; boot PD and first kernel PT in one sweep.  Covers BIOS /
-        ;; VGA / staging region / kernel image / kernel stack (at
-        ;; phys 0x180000) / NE2000 RX/TX scratch (0x184000+) /
-        ;; program_scratch (0x185000+) / boot PD / first kernel PT.
-        ;; The bitmap allocator only ever returns frames at phys
-        ;; LOW_RESERVE_BYTES (0x202000) and above, so the kernel PTs
-        ;; allocated next, every PD/PT/page built by
+        ;; boot PD and first kernel PT in one sweep.  Covers
+        ;; boot stash / ARGV / BUFFER / FD table / sector_buffer /
+        ;; vDSO target frame / kernel image (at KERNEL_LOAD_PHYS) /
+        ;; kernel stack / NE2000 RX/TX scratch / program_scratch /
+        ;; boot PD / first kernel PT.  The bitmap allocator only ever
+        ;; returns frames at phys LOW_RESERVE_BYTES and above, so the
+        ;; kernel PTs allocated next, every PD/PT/page built by
         ;; `address_space_create` / `address_space_map_page`, and the
         ;; shared vDSO frame all land in the high-physical region
         ;; above LOW_RESERVE_BYTES.

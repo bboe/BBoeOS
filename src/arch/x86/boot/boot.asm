@@ -6,7 +6,8 @@
 ;;;                      boot bytes; jumps into the post-MBR region
 ;;;                      once those sectors are resident.
 ;;;   [0x7E00..]        Post-MBR real-mode bootstrap: second INT 13h
-;;;                      read pulls kernel.bin into physical 0x10000,
+;;;                      read pulls kernel.bin into physical 0x20000
+;;;                      (its final home — no later relocation copy),
 ;;;                      then VGA font copy / E820 probe / PIC remap /
 ;;;                      A20 / GDT / CR0.PE flip / far-jump into the
 ;;;                      32-bit `early_pe_entry`.  Padded to a fixed
@@ -14,10 +15,12 @@
 ;;;                      measure kernel.bin's sector count.
 ;;;
 ;;; After the PE flip, `early_pe_entry` runs in flat 32-bit at low
-;;; physical, copies kernel.bin from 0x10000 to 0x100000, builds the
-;;; boot PD + first kernel PT, enables paging, and far-jumps to
-;;; `high_entry` at the kernel-virt entry point (0xC0100000 — the very
-;;; first byte of kernel.bin per its `org` directive).
+;;; physical, builds the boot PD + first kernel PT, enables paging,
+;;; and far-jumps to `high_entry` at the kernel-virt entry point
+;;; (0xC0020000 — the very first byte of kernel.bin per its `org`
+;;; directive, which equals 0xC0000000 + KERNEL_LOAD_PHYS so the
+;;; kernel runs in the direct map without needing a separate
+;;; higher-half mapping).
 ;;;
 ;;; boot.asm intentionally has no IDT.  An exception during early-PE
 ;;; bootstrap triple-faults; the bootstrap is short and tested.  The
@@ -76,9 +79,15 @@
         PROGRAM_SCRATCH_PHYS_BOOT equ (NET_TX_END_BOOT + 0xFFF) & ~0xFFF
         BOOT_PD_PHYS              equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
         FIRST_KERNEL_PT_PHYS      equ BOOT_PD_PHYS + 0x1000
-        KERNEL_LOAD_PHYS        equ 0x10000     ; INT 13h read destination
-        KERNEL_FINAL_PHYS       equ 0x100000    ; final post-relocation phys
-        HIGH_ENTRY_VIRT         equ 0xC0100000  ; kernel.bin org / first byte
+        ;; kernel.bin loads directly to its final physical home — there's
+        ;; no real-mode-to-PE relocation copy.  The address sits above the
+        ;; vDSO target frame at phys 0x10000 and below the VGA aperture at
+        ;; phys 0xA0000, so the kernel image plus its KERNEL_RESERVED_BASE-
+        ;; rooted scratch region (stack, NIC bufs, program_scratch, boot
+        ;; PD, first kernel PT) all fit in conventional memory; the OS can
+        ;; boot under QEMU `-m 1` (1 MB total).
+        KERNEL_LOAD_PHYS        equ 0x20000     ; INT 13h read destination = final home
+        HIGH_ENTRY_VIRT         equ 0xC0020000  ; kernel.bin org / first byte
 
 start:
         xor ax, ax
@@ -88,7 +97,7 @@ start:
 
         ;; Dedicated stack at SS=0x9000, SP=0xFFF0 (linear 0x90000-0x9FFF0)
         ;; owns its entire segment so it can never collide with the
-        ;; kernel image at 0x7C00 / 0x10000 / 0x100000.
+        ;; kernel image at 0x7C00 / 0x20000 or the post-MBR boot bytes.
         cli
         mov ax, 9000h
         mov ss, ax
@@ -151,11 +160,11 @@ post_mbr_continue:
         mov [DIRECTORY_SECTOR_PHYS], ax
 
         ;; Load kernel.bin from disk into physical KERNEL_LOAD_PHYS
-        ;; (= 0x1000:0x0000 in real mode = 0x10000 linear).  The
+        ;; (= 0x2000:0x0000 in real mode = 0x20000 linear).  The
         ;; sector count is passed by the build script; the start CHS
         ;; sector is the first sector after boot.bin (1 MBR + BOOT_SECTORS
         ;; post-MBR ⇒ sector BOOT_SECTORS + 2 in 1-based CHS).
-        mov ax, 1000h
+        mov ax, 2000h
         mov es, ax
         xor bx, bx
         mov ah, 02h
@@ -279,15 +288,7 @@ early_pe_entry:
         mov gs, ax
         mov esp, 0x9FFF0                ; pre-paging stack (still low memory)
 
-        ;; Step 1: Copy kernel.bin from KERNEL_LOAD_PHYS to
-        ;; KERNEL_FINAL_PHYS.  KERNEL_SECTORS * 512 bytes / 4 dwords.
-        mov esi, KERNEL_LOAD_PHYS
-        mov edi, KERNEL_FINAL_PHYS
-        mov ecx, KERNEL_SECTORS * 512 / 4
-        cld
-        rep movsd
-
-        ;; Step 2: Build the first kernel PT at FIRST_KERNEL_PT_PHYS.
+        ;; Step 1: Build the first kernel PT at FIRST_KERNEL_PT_PHYS.
         ;; PTE[j] = (j * 0x1000) | P | RW | G  (U/S=0, kernel-only).
         ;; This single PT covers physical 0..4 MB and is hooked into
         ;; the boot PD twice — at PDE[0] (identity) and PDE[768]
@@ -303,7 +304,7 @@ early_pe_entry:
         cmp ecx, 1024
         jb .fill_pt
 
-        ;; Step 3: Zero the boot PD at BOOT_PD_PHYS, then install the
+        ;; Step 2: Zero the boot PD at BOOT_PD_PHYS, then install the
         ;; first kernel PT at PDE[0] (identity for first 4 MB) and
         ;; PDE[768] (kernel direct map at virt 0xC0000000..0xC03FFFFF).
         mov edi, BOOT_PD_PHYS
@@ -314,7 +315,7 @@ early_pe_entry:
         mov dword [BOOT_PD_PHYS + 0*4], FIRST_KERNEL_PT_PHYS | 0x003
         mov dword [BOOT_PD_PHYS + 768*4], FIRST_KERNEL_PT_PHYS | 0x003
 
-        ;; Step 4: Set CR3 = boot PD, enable PG | WP in CR0.
+        ;; Step 3: Set CR3 = boot PD, enable PG | WP in CR0.
         ;; CR0.WP makes ring-0 writes honor R/W bits in PTEs (so a
         ;; kernel write through a read-only user page #PFs instead of
         ;; silently succeeding).
@@ -324,9 +325,9 @@ early_pe_entry:
         or eax, 0x80010000              ; CR0.PG | CR0.WP
         mov cr0, eax
 
-        ;; Step 5: Far-jump to the high-half kernel entry.  EIP becomes
+        ;; Step 4: Far-jump to the high-half kernel entry.  EIP becomes
         ;; the kernel-virt address of high_entry (= the first byte of
-        ;; kernel.bin per its `org 0xC0100000`).  The identity map at
+        ;; kernel.bin per its `org 0xC0020000`).  The identity map at
         ;; PDE[0] keeps low-physical addresses (boot.asm's GDT etc.)
         ;; reachable until the kernel re-lgdts and tears identity down.
         jmp dword BOOT_CODE_SELECTOR:HIGH_ENTRY_VIRT
