@@ -304,8 +304,7 @@ at the time.
   internal-static references to per-AS data at `0x00011000`.  User
   programs call `FUNCTION_DIE` / `FUNCTION_PRINT_STRING` / etc. exactly
   as before — only the addresses change.  Decouples user-side helper
-  code from kernel-virt addressing ahead of paging.  Design at
-  `docs/superpowers/specs/2026-04-28-vdso-design.md`.
+  code from kernel-virt addressing ahead of paging.
 - Probe the BIOS memory map via INT 15h AX=E820 in the MBR and stash
   24-byte entries at physical 0x500 (terminated by a zero entry).
   Result is unconsumed at this point — the post-paging bitmap frame
@@ -316,11 +315,6 @@ at the time.
   0xB055`) for back-compat.  Lifts the per-program BSS cap from 64 KB
   to 4 GB ahead of paging, where `edit`'s 1 MB gap buffer becomes
   ordinary BSS.
-- Add design + implementation plan documents in
-  `docs/superpowers/specs/2026-04-28-paging-design.md`,
-  `docs/superpowers/specs/2026-04-28-vdso-design.md`, and
-  `docs/superpowers/plans/2026-04-28-paging.md` describing the
-  Linux-shaped high-half-kernel + per-AS layout.
 
 ### Kernel
 - Move userland programs to ring 3.  Add user code (0x18) and user data
