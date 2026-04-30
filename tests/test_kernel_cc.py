@@ -1404,6 +1404,66 @@ def test_tail_call_arg_count_mismatch_raises_error() -> None:
     assert "__tail_call" in error, f"Expected __tail_call arity error, got: {error}"
 
 
+def test_tail_call_thunk_suppresses_in_register_spill() -> None:
+    """Pure-thunk body: in_register param spill is elided (slot is dead).
+
+    A function whose entire body is a single ``__tail_call`` that forwards
+    its in_register param as a Var arg never reads the local stack slot —
+    the named register holds the value throughout.  The prologue should
+    emit no ``mov [bp-N], <reg>`` spill for that param.
+    """
+    asm = _kernel("""
+        __attribute__((carry_return))
+        int vfs_find(int path __attribute__((in_register("si")))) {
+            int (*vfs_find_fn)(int p __attribute__((in_register("si"))));
+            __tail_call(vfs_find_fn, path);
+        }
+    """)
+    # No spill of SI to a local slot in the prologue.
+    assert "mov [bp-2], si" not in asm, f"expected no si spill for pure thunk\n{asm}"
+    assert "mov [bp-4], si" not in asm, f"expected no si spill for pure thunk\n{asm}"
+    # The jmp still happens.
+    assert "jmp ax" in asm, f"expected jmp ax in thunk\n{asm}"
+
+
+def test_tail_call_thunk_arg_sources_named_register() -> None:
+    """TailCall arg for an in_register param sources from the register directly.
+
+    When the thunk body is ``__tail_call(fn, param)`` and param is an
+    in_register param, the arg move should emit ``mov <target>, <named_reg>``
+    rather than loading from the stack slot (``mov <target>, [bp-N]``).
+    """
+    asm = _kernel("""
+        __attribute__((carry_return))
+        int vfs_find(int path __attribute__((in_register("si")))) {
+            int (*vfs_find_fn)(int p __attribute__((in_register("di"))));
+            __tail_call(vfs_find_fn, path);
+        }
+    """)
+    # The arg move must source from the named register (si), not the slot.
+    jmp_pos = asm.index("jmp ax")
+    before_jmp = asm[:jmp_pos]
+    assert "mov di, si" in before_jmp, f"expected 'mov di, si' before jmp ax\n{asm}"
+    assert "mov di, [bp-" not in before_jmp, f"expected no slot load for di arg\n{asm}"
+
+
+def test_in_register_spill_kept_when_param_read_in_body() -> None:
+    """Spill is NOT elided when the body reads the param outside a TailCall arg.
+
+    A body that uses the in_register param in an expression (assignment,
+    arithmetic, etc.) still needs the prologue spill so the body can read it
+    from the local slot via the normal accumulator path.
+    """
+    asm = _kernel("""
+        void f(int x __attribute__((in_register("bx")))) {
+            int y;
+            y = x + 1;
+        }
+    """)
+    assert "mov [bp-" in asm, f"expected spill kept when param is read in body\n{asm}"
+    assert "mov [bp-2], bx" in asm, f"expected 'mov [bp-2], bx' spill\n{asm}"
+
+
 # ---------------------------------------------------------------------------
 # pinned_register on function_pointer locals (controls __tail_call register)
 # ---------------------------------------------------------------------------

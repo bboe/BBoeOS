@@ -21,6 +21,8 @@ emitted.
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 from cc import ir
 from cc.ast_nodes import (
     AddressOf,
@@ -1117,6 +1119,49 @@ class EmissionMixin:
             case ir.Block(node=node):
                 self.generate_statement(node)
 
+    def _node_contains_var(self, node: Node, name: str, /) -> bool:
+        """Return True if node or any descendant is Var(name).
+
+        Conservative: any str field equal to name is treated as a possible
+        variable read so that nodes like IndexAssign and DerefAssign (which
+        store the array/pointer name as a plain str rather than a Var) are
+        not silently missed.
+        """
+        if isinstance(node, Var):
+            return node.name == name
+        for field in fields(node):
+            value = getattr(node, field.name)
+            if isinstance(value, str) and value == name:
+                return True
+            if isinstance(value, Node) and self._node_contains_var(value, name):
+                return True
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and self._node_contains_var(item, name):
+                        return True
+        return False
+
+    def _param_slot_is_read(self, body: list[Node], param_name: str, /) -> bool:
+        """Return True if the local slot for param_name is read anywhere in body.
+
+        Var refs that appear as direct TailCall arguments are excluded because
+        change 3a sources those from the named in_register directly rather than
+        loading from the stack slot.  Non-Var TailCall args are still walked.
+        Conservative: any Var(param_name) in a non-TailCall-arg position is
+        treated as a slot read and the spill is kept.
+        """
+        # Pure thunk: the body is exactly one TailCall.  Simple Var args
+        # will be sourced from the named register (param_in_register), so
+        # they do NOT require the slot.  Non-Var args are checked
+        # conservatively — if any contain the param, keep the spill.
+        if len(body) == 1 and isinstance(body[0], TailCall):
+            return any(not isinstance(arg, Var) and self._node_contains_var(arg, param_name) for arg in body[0].args)
+        # Non-pure-thunk: every reference to param_name — including
+        # TailCall args — keeps the slot alive so the reload before
+        # the tail jmp is valid and the named register's stale value
+        # is never used.
+        return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
     def generate_function(self, function: Function | ir.Function, /) -> None:
         """Generate assembly for a single function definition."""
         # Unpack ir.Function: keep the IR body for code generation but use
@@ -1184,6 +1229,7 @@ class EmissionMixin:
         self.local_stack_arrays = {}
         self.locals = {}
         self.out_register_locals: dict[str, str] = {}
+        self.param_in_register: dict[str, str] = {}
         self.pinned_register = {}
         self.si_local: str | None = None
         self.variable_arrays = set()
@@ -1303,12 +1349,21 @@ class EmissionMixin:
         # Reserve local slots for in_register params (spilled at prologue entry).
         # Naked functions skip the spill: in_register params are pinned to
         # their register and the body reads them directly without a stack slot.
+        #
+        # Register-direct TailCall sourcing (param_in_register) is only safe
+        # for pure thunks — functions whose entire body is a single TailCall.
+        # For any other body shape, intermediate code may clobber the named
+        # register between function entry and the tail jump, so the slot
+        # reload is still required.
+        is_pure_thunk = len(body) == 1 and isinstance(body[0], TailCall)
         for param in parameters:
             if param.in_register is not None:
                 if function.naked:
                     self.pinned_register[param.name] = param.in_register
                 else:
                     self.allocate_local(param.name)
+                    if is_pure_thunk:
+                        self.param_in_register[param.name] = param.in_register
 
         self.scan_locals(body)
         # Type-check every comparison in the body now that ``variable_types``
@@ -1381,6 +1436,8 @@ class EmissionMixin:
                 self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
             for param in parameters:
                 if param.in_register is not None:
+                    if not self._param_slot_is_read(body, param.name):
+                        continue  # named register holds the value; skip the dead spill
                     slot = self.locals[param.name]
                     # Zero-extend narrower in_register values into the
                     # full int-width slot so subsequent reads (which load

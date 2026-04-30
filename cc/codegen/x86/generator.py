@@ -181,6 +181,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # Populated during the first pass over function definitions in generate().
         self.in_register_params: dict[str, dict[int, str]] = {}
         self.out_register_params: dict[str, dict[int, str]] = {}
+        self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
@@ -317,6 +318,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(arg, Var):
             if arg.name in self.pinned_register:
                 return {self.pinned_register[arg.name]}
+            if arg.name in self.param_in_register:
+                return {self.param_in_register[arg.name]}
             return set()
         if isinstance(arg, BinaryOperation):
             return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
@@ -1112,6 +1115,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             primary_source: str | None = None
             if isinstance(arg, Var) and arg.name in self.pinned_register:
                 primary_source = self.pinned_register[arg.name]
+            elif isinstance(arg, Var) and arg.name in self.param_in_register:
+                primary_source = self.param_in_register[arg.name]
             items.append({"target": target, "arg": arg, "source": primary_source, "sources": sources})
         while items:
             progress_index = None
