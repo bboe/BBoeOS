@@ -45,10 +45,41 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-KERNEL_SECTORS=$(( ( $(wc -c < kernel.bin) + 511 ) / 512 ))
+KERNEL_SIZE=$(wc -c < kernel.bin)
+KERNEL_SECTORS=$(( ( KERNEL_SIZE + 511 ) / 512 ))
+
+# Compute the first page above kernel.bin.  The kernel stack, NIC buffers,
+# program-scratch buffer, boot PD, and first kernel PT are stacked here.
+KERNEL_RESERVED_BASE=$(( (0x100000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
+
+# Safety: stack top must stay within the initial 4 MB direct-map window
+# that early_pe_entry builds; high_entry's first instruction (mov esp,
+# kernel_stack_top) relies on it being reachable before any extra PTs exist.
+if [ $(( KERNEL_RESERVED_BASE + 0x4000 )) -ge $(( 4 * 1024 * 1024 )) ]; then
+    echo "make_os.sh: kernel.bin too large — stack top would exceed 4 MB" >&2
+    exit 1
+fi
+
+# Second pass: re-assemble kernel.bin with the correct layout anchor.
+# All immediates are 32-bit regardless of value, so the size is invariant.
+nasm -f bin \
+    -DKERNEL_RESERVED_BASE=$KERNEL_RESERVED_BASE \
+    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" -i "$KBUILD/syscall/" \
+    -o kernel.bin src/arch/x86/kernel.asm
+if [ $? -ne 0 ]; then
+    exit 1
+fi
+
+KERNEL_SIZE_2=$(wc -c < kernel.bin)
+if [ "$KERNEL_SIZE_2" -ne "$KERNEL_SIZE" ]; then
+    echo "make_os.sh: kernel.bin size changed between passes ($KERNEL_SIZE → $KERNEL_SIZE_2)" >&2
+    exit 1
+fi
 
 nasm -f bin \
     -DKERNEL_SECTORS=$KERNEL_SECTORS \
+    -DKERNEL_RESERVED_BASE=$KERNEL_RESERVED_BASE \
     -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
     -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" \
     -o boot.bin src/arch/x86/boot/boot.asm

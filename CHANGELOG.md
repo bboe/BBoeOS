@@ -22,6 +22,25 @@ at the time.
 - `archive/kernel/NOTES.md`: recorded that all four follow-up items from PR
   #239 review have been resolved in this cleanup pass.
 
+### Reduce minimum RAM to 3 MB (2026-04-29)
+- `frame_mark_range_free` now tracks `frame_max_phys` (highest usable
+  physical frame seen during E820 scan).
+- `high_entry` uses `frame_max_phys` to allocate only the kernel
+  direct-map page tables that actually cover installed RAM (0..N extra
+  PTs instead of always 63), dropping ~252 KB of page table allocations
+  on machines with less than 256 MB.
+- The kernel reserved region (stack, NIC buffers, program scratch, boot
+  PD, first kernel PT) is now packed immediately after `kernel.bin`
+  rather than at fixed high addresses.  `make_os.sh` computes
+  `KERNEL_RESERVED_BASE = page_align(0x100000 + sizeof(kernel.bin))` and
+  threads it through a second NASM pass for both `kernel.asm` and
+  `boot.asm`, shrinking `LOW_RESERVE_BYTES` from ~2 MB to ~1.2 MB.
+- Combined result: minimum RAM drops from ~4 MB to 3 MB (the 1 MB
+  assembler JUMP_TABLE is the remaining bottleneck).
+- `make_os.sh` now has a safety check that aborts the build if
+  `kernel.bin` grows large enough to push the stack top above the 4 MB
+  early direct-map window.
+
 ### Phase 6 paging — NULL guard (2026-04-29)
 - The shell↔program handoff frame moves from user-virt 0..0xFFF
   (PTE[0]) to `USER_DATA_BASE = 0x1000` (PTE[1]).  ARGV becomes

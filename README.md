@@ -9,9 +9,11 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 
 ## Minimum runtime requirements
 
-* **4 MB RAM** to boot the shell and run lightweight programs (`hello`, `ls`,
-  `cat`, `uptime`, etc.).  The kernel reserves ~2 MB statically for code,
-  stacks, NIC/program-load buffers, and the frame bitmap.
+* **3 MB RAM** to boot the shell and run lightweight programs (`hello`, `ls`,
+  `cat`, `uptime`, etc.).  The kernel reserves ~1.2 MB for code, stacks, NIC
+  buffers, and the frame bitmap (shrunk from the old ~2 MB by packing the
+  reserved region right after `kernel.bin`); the assembler's 1 MB JUMP_TABLE
+  accounts for most of the remaining headroom.
 * **5 MB RAM** to run every program in `bin/` — `edit` allocates a 1 MB
   edit buffer in BSS, and `bigbss` reserves 256 KB.
 * `qemu-system-i386` defaults to 128 MB, which is comfortably above either

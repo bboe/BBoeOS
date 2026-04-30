@@ -9,8 +9,8 @@
 ;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0100000).
 ;;; high_entry installs the kernel GDT/IDT/stack, drops the boot
 ;;; identity mapping, initializes the bitmap frame allocator, allocates
-;;; the remaining 63 kernel direct-map PTs that fan out the kernel
-;;; direct map (PDEs 769..831, virt 0xC0400000..0xCFFFFFFF), and jumps
+;;; only the kernel direct-map PTs needed for installed RAM (0..63,
+;;; covering virt 0xC0400000..0xCFFFFFFF), and jumps
 ;;; into `protected_mode_entry` for driver / VFS / NIC / shell bring-up.
 ;;;
 ;;; Phase 4: each program runs in its own per-program PD built by
@@ -53,26 +53,28 @@ ext2_sd_buffer   equ 0xC000F200
         ;; so it'll keep working post-shim via the kernel direct map.
 sector_buffer    equ 0xC000F000
 
-        BOOT_PD_PHYS            equ 0x200000
+        BOOT_PD_PHYS            equ PROGRAM_SCRATCH_PHYS + PROGRAM_SCRATCH_BYTES
         ;; Kernel-virt base of the direct map.  Subtract from any
         ;; kernel-virt address to recover its physical alias.
         DIRECT_MAP_BASE         equ 0C0000000h
-        FIRST_KERNEL_PT_PHYS    equ 0x201000
+        FIRST_KERNEL_PT_PHYS    equ BOOT_PD_PHYS + 0x1000
         KERNEL_FINAL_PHYS       equ 0x100000
-        LOW_RESERVE_BYTES       equ FIRST_KERNEL_PT_PHYS + 0x1000  ; 0x202000 — bitmap-allocator sweep ceiling
-        ;; Ring-0 stack: 16 KB at phys 0x180000, accessed through the
-        ;; direct map at virt 0xC0180000.  Lives outside kernel.bin to
-        ;; avoid burning 16 KB of zero padding on disk; the bitmap
-        ;; allocator reserves the underlying frames at boot via the
-        ;; LOW_RESERVE_BYTES sweep above (the sweep covers 0..0x202000,
-        ;; which naturally includes the stack).  Reachable from the
-        ;; very first instructions in `high_entry` because early-PE's
-        ;; PDE[768] direct map already covers phys 0..0x3FFFFF.  Sits
-        ;; above the kernel image (0x100000+) and below the 4 MB
-        ;; early-PE direct-map ceiling, outside the user shim's
-        ;; user-accessible windows.
+        LOW_RESERVE_BYTES       equ FIRST_KERNEL_PT_PHYS + 0x1000  ; bitmap-allocator sweep ceiling
+        ;; KERNEL_RESERVED_BASE is the first page above kernel.bin, computed
+        ;; by make_os.sh and passed as -DKERNEL_RESERVED_BASE=N.  The fallback
+        ;; keeps direct nasm invocations working with a valid (if not maximally
+        ;; packed) layout.
+        %ifndef KERNEL_RESERVED_BASE
+        %define KERNEL_RESERVED_BASE 0x180000
+        %endif
+        ;; Ring-0 stack: 16 KB immediately above kernel.bin, accessed through
+        ;; the direct map.  Lives outside kernel.bin to avoid burning 16 KB of
+        ;; zero padding on disk; the bitmap allocator reserves the underlying
+        ;; frames at boot via the LOW_RESERVE_BYTES sweep.  Reachable from the
+        ;; very first instructions in `high_entry` because early-PE's PDE[768]
+        ;; direct map already covers phys 0..0x3FFFFF.
         KERNEL_STACK_BYTES      equ 0x4000                       ; 16 KB
-        KERNEL_STACK_PHYS       equ 0x180000
+        KERNEL_STACK_PHYS       equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS   equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         kernel_stack            equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top        equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
@@ -95,9 +97,8 @@ sector_buffer    equ 0xC000F000
         ;; Lives at fixed phys above the NE2000 buffers, reached via
         ;; the kernel direct map; same trick as kernel_stack — keeps
         ;; the bytes out of kernel.bin's on-disk image.
-        ;; LOW_RESERVE_BYTES (0x202000) covers the whole range.
         PROGRAM_SCRATCH_BYTES   equ 128 * 1024                          ; 128 KB
-        PROGRAM_SCRATCH_PHYS    equ 0x185000                            ; aligned, just past NIC buffers
+        PROGRAM_SCRATCH_PHYS    equ (NET_TRANSMIT_BUFFER_PHYS + NET_BUFFER_BYTES + 0xFFF) & ~0xFFF
         program_scratch         equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
         ;; Bare uppercase aliases — cc.py emits the original
         ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER names from C source
@@ -156,14 +157,12 @@ high_entry:
 
         ;; --- Drop the identity mapping at PDE[0] ---
         ;;
-        ;; Boot's PD lives at physical BOOT_PD_PHYS (0x1000), which is
-        ;; reachable via the kernel direct map at virt
-        ;; DIRECT_MAP_BASE + 0x1000 = 0xC0001000.  Zero the PDE that
-        ;; identity-maps virt 0..0x3FFFFF, then full TLB flush via CR3
+        ;; Boot's PD lives at physical BOOT_PD_PHYS (derived from
+        ;; KERNEL_RESERVED_BASE by make_os.sh), reachable via the kernel
+        ;; direct map at virt DIRECT_MAP_BASE + BOOT_PD_PHYS.  Zero the PDE
+        ;; that identity-maps virt 0..0x3FFFFF, then full TLB flush via CR3
         ;; reload.  Boot.asm's GDT and code at low physical are now
-        ;; permanently unreachable; we already re-lgdt'd onto the
-        ;; kernel GDT so segment loads find the kernel GDT through the
-        ;; direct map.
+        ;; permanently unreachable; we already re-lgdt'd onto the kernel GDT.
         mov dword [DIRECT_MAP_BASE + BOOT_PD_PHYS + 0*4], 0
         mov eax, cr3
         mov cr3, eax
@@ -196,18 +195,26 @@ high_entry:
         mov ecx, LOW_RESERVE_BYTES
         call frame_reserve_range
 
-        ;; --- Allocate the remaining 63 kernel PTs to fill out the
-        ;; 256 MB direct map at 0xC0000000..0xCFFFFFFF ---
+        ;; --- Allocate kernel PTs for installed RAM only ---
         ;;
         ;; Each new PT covers 4 MB; install at PDE[FIRST_KERNEL_PDE+1]
-        ;; through PDE[LAST_KERNEL_PDE-1].  The bitmap's first-fit
-        ;; allocations land in the still-mapped first 4 MB (frames
-        ;; below 0x400000 that aren't already reserved), so each new
-        ;; PT is reachable via the existing PDE[768] direct map for
-        ;; population — no kmap slot needed.
+        ;; through PDE[dynamic_limit-1].  The initial PDE[768] PT already
+        ;; covers phys 0..4 MB, so we only need extra PTs for RAM above
+        ;; that.  frame_max_phys (set by frame_init) is the highest free
+        ;; frame's base; shr by 22 gives its 4 MB chunk index.
+        ;; ESI = (frame_max_phys >> 22) + FIRST_KERNEL_PDE + 1, capped at
+        ;; LAST_KERNEL_PDE.  On a 4 MB system this equals FIRST_KERNEL_PDE+1
+        ;; and the loop body never executes.
+        mov esi, [frame_max_phys]
+        shr esi, 22
+        add esi, FIRST_KERNEL_PDE + 1
+        cmp esi, LAST_KERNEL_PDE
+        jbe .cap_ok
+        mov esi, LAST_KERNEL_PDE
+.cap_ok:
         mov ebx, FIRST_KERNEL_PDE + 1           ; first new PDE index
 .alloc_kernel_pt:
-        cmp ebx, LAST_KERNEL_PDE
+        cmp ebx, esi
         jae .alloc_done
         call frame_alloc
         jc .panic                               ; OOM at boot — fatal

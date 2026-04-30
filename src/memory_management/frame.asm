@@ -204,6 +204,9 @@ frame_mark_range_free:
         inc dword [frame_free_count]
 .already_free:
         pop ecx
+        cmp eax, [frame_max_phys]
+        jbe .skip
+        mov [frame_max_phys], eax
 .skip:
         add eax, 0x1000
         cmp eax, ecx
@@ -277,4 +280,6 @@ frame_free_count:
 frame_search_hint:
         dd 0
 frame_total:
+        dd 0
+frame_max_phys:
         dd 0
