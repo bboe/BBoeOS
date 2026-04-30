@@ -439,11 +439,11 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_load:
-        mov edi, program_scratch
-        call vfs_load
-        jc .exec_not_found
         ;; Snapshot BUFFER (256 B at user-virt 0x500) and EXEC_ARG (4 B
         ;; at user-virt 0x4FC) from the shell's PD before destroy.
+        ;; vfs_find above populated vfs_found_*; program_enter streams
+        ;; the binary directly from disk into the new PD's user pages,
+        ;; so there's no staging step between this point and the jump.
         push esi
         push edi
         mov esi, BUFFER

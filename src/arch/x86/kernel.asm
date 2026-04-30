@@ -62,7 +62,6 @@ directory_sector dw 0                   ; offset 3
         ;;     sector_buffer                      (SECTOR_BUFFER_BYTES = 512 B)
         ;;     ext2_sd_buffer                     (EXT2_SD_BUFFER_BYTES = 1 KB)
         ;;     ... page-align up ...
-        ;;   PROGRAM_SCRATCH_PHYS                 (PROGRAM_SCRATCH_BYTES = 32 KB)
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
         ;;   LOW_RESERVE_BYTES                    (sweep ceiling)
@@ -72,16 +71,19 @@ directory_sector dw 0                   ; offset 3
         ;; The fallback below keeps direct nasm invocations working with
         ;; a valid (if not maximally packed) layout.
         ;;
-        ;; The post-kernel cluster (stack / NIC / disk buffers /
-        ;; program_scratch / boot PD / first PT) lives outside
-        ;; kernel.bin so the on-disk image doesn't carry their
-        ;; zero-initialized bytes; the bitmap allocator reserves the
-        ;; underlying frames via the `LOW_RESERVE_BYTES` sweep at boot.
-        ;; Pre-relocation, sector_buffer / ext2_sd_buffer sat at fixed
-        ;; low phys (0xF000 / 0xF200) for 16-bit `[bx+offset]` reach;
-        ;; bbfs.asm / ext2.asm are now fully 32-bit (`mov ebx,
-        ;; sector_buffer`) so they live in the post-kernel cluster like
-        ;; everything else.
+        ;; The post-kernel cluster (stack / NIC / disk buffers / boot PD
+        ;; / first PT) lives outside kernel.bin so the on-disk image
+        ;; doesn't carry their zero-initialized bytes; the bitmap
+        ;; allocator reserves the underlying frames via the
+        ;; `LOW_RESERVE_BYTES` sweep at boot.  Pre-relocation,
+        ;; sector_buffer / ext2_sd_buffer sat at fixed low phys
+        ;; (0xF000 / 0xF200) for 16-bit `[bx+offset]` reach; bbfs.asm /
+        ;; ext2.asm are now fully 32-bit (`mov ebx, sector_buffer`) so
+        ;; they live in the post-kernel cluster like everything else.
+        ;;
+        ;; The legacy program_scratch staging buffer (32 KB) is gone:
+        ;; program_enter streams the binary directly from disk into
+        ;; per-program user frames via vfs_read_sec, sector by sector.
         ;;
         ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER are bare uppercase
         ;; aliases for the lowercase kernel-virt symbols — cc.py emits
@@ -89,7 +91,7 @@ directory_sector dw 0                   ; offset 3
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x40000
         %endif
-        BOOT_PD_PHYS             equ PROGRAM_SCRATCH_PHYS + PROGRAM_SCRATCH_BYTES
+        BOOT_PD_PHYS             equ (EXT2_SD_BUFFER_PHYS + EXT2_SD_BUFFER_BYTES + 0xFFF) & ~0xFFF
         DIRECT_MAP_BASE          equ 0C0000000h
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
         EXT2_SD_BUFFER_BYTES     equ 1024
@@ -109,8 +111,6 @@ directory_sector dw 0                   ; offset 3
         NET_RECEIVE_BUFFER_PHYS  equ KERNEL_STACK_TOP_PHYS
         NET_TRANSMIT_BUFFER      equ net_transmit_buffer
         NET_TRANSMIT_BUFFER_PHYS equ NET_RECEIVE_BUFFER_PHYS + NET_BUFFER_BYTES
-        PROGRAM_SCRATCH_BYTES    equ 32 * 1024                           ; 32 KB
-        PROGRAM_SCRATCH_PHYS     equ (EXT2_SD_BUFFER_PHYS + EXT2_SD_BUFFER_BYTES + 0xFFF) & ~0xFFF
         SECTOR_BUFFER_BYTES      equ 512
         SECTOR_BUFFER_PHYS       equ NET_TRANSMIT_BUFFER_PHYS + NET_BUFFER_BYTES
         ext2_sd_buffer           equ DIRECT_MAP_BASE + EXT2_SD_BUFFER_PHYS
@@ -118,7 +118,6 @@ directory_sector dw 0                   ; offset 3
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
         net_receive_buffer       equ DIRECT_MAP_BASE + NET_RECEIVE_BUFFER_PHYS
         net_transmit_buffer      equ DIRECT_MAP_BASE + NET_TRANSMIT_BUFFER_PHYS
-        program_scratch          equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
         sector_buffer            equ DIRECT_MAP_BASE + SECTOR_BUFFER_PHYS
 
 high_entry:
@@ -206,8 +205,7 @@ high_entry:
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
         ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
         ;;      kernel image, kernel stack, NIC RX/TX, sector_buffer,
-        ;;      ext2_sd_buffer, program_scratch, boot PD, first
-        ;;      kernel PT.
+        ;;      ext2_sd_buffer, boot PD, first kernel PT.
         mov eax, 0x10000
         mov ecx, 0x1000                 ; vDSO target page
         call frame_reserve_range

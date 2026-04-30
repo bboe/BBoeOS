@@ -25,7 +25,6 @@ __attribute__((carry_return)) int bbfs_create();
 __attribute__((carry_return)) int bbfs_delete();
 __attribute__((carry_return)) int bbfs_find();
 __attribute__((carry_return)) int bbfs_init();
-__attribute__((carry_return)) int bbfs_load();
 __attribute__((carry_return)) int bbfs_mkdir();
 __attribute__((carry_return)) int bbfs_prepare_write_sec();
 __attribute__((carry_return)) int bbfs_read_dir();
@@ -40,7 +39,6 @@ __attribute__((carry_return)) int ext2_create();
 __attribute__((carry_return)) int ext2_delete();
 __attribute__((carry_return)) int ext2_find();
 __attribute__((carry_return)) int ext2_init();
-__attribute__((carry_return)) int ext2_load();
 __attribute__((carry_return)) int ext2_mkdir();
 __attribute__((carry_return)) int ext2_prepare_write_sec();
 __attribute__((carry_return)) int ext2_read_dir();
@@ -68,7 +66,6 @@ int (*vfs_commit_write_sec_fn)(struct fd *e __attribute__((in_register("esi"))))
 int (*vfs_create_fn)(uint8_t *path __attribute__((in_register("esi")))) = bbfs_create;
 int (*vfs_delete_fn)(uint8_t *path __attribute__((in_register("esi")))) = bbfs_delete;
 int (*vfs_find_fn)(uint8_t *path __attribute__((in_register("esi")))) = bbfs_find;
-int (*vfs_load_fn)(uint8_t *dest __attribute__((in_register("edi")))) = bbfs_load;
 int (*vfs_mkdir_fn)(uint8_t *name __attribute__((in_register("esi")))) = bbfs_mkdir;
 int (*vfs_prepare_write_sec_fn)(struct fd *e __attribute__((in_register("esi")))) = bbfs_prepare_write_sec;
 int (*vfs_read_dir_fn)(struct fd *e __attribute__((in_register("esi"))),
@@ -92,7 +89,6 @@ void vfs_init() {
         vfs_create_fn = ext2_create;
         vfs_delete_fn = ext2_delete;
         vfs_find_fn = ext2_find;
-        vfs_load_fn = ext2_load;
         vfs_mkdir_fn = ext2_mkdir;
         vfs_prepare_write_sec_fn = ext2_prepare_write_sec;
         vfs_read_dir_fn = ext2_read_dir;
@@ -139,11 +135,6 @@ int vfs_delete(uint8_t *path __attribute__((in_register("esi")))) {
 __attribute__((carry_return))
 int vfs_find(uint8_t *path __attribute__((in_register("esi")))) {
     __tail_call(vfs_find_fn, path);
-}
-
-__attribute__((carry_return))
-int vfs_load(uint8_t *dest __attribute__((in_register("edi")))) {
-    __tail_call(vfs_load_fn, dest);
 }
 
 __attribute__((carry_return))

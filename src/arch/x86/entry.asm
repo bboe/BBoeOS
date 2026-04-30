@@ -72,14 +72,21 @@ pmode_irq6_handler:
 ;;; Builds the per-program PD and `iretd`s into ring 3.  Caller
 ;;; invariants:
 ;;;   * Active PD = `kernel_pd_template` (no user mappings).
-;;;   * Program binary staged at `program_scratch`; `vfs_found_size`
-;;;     holds the binary length.
+;;;   * `vfs_find` (or equivalent) has populated `vfs_found_*` for
+;;;     the binary file.
 ;;;   * `buffer_snapshot` (256 B) and `exec_arg_snapshot` (4 B) hold
 ;;;     the BUFFER / EXEC_ARG content the new program inherits.
 ;;;
-;;; Never returns.  On panic (allocator OOM during PD build) the kernel
-;;; halts — there's no graceful recovery for "ran out of frames mid-
-;;; program-load" yet.
+;;; Streams the binary directly from disk into per-program user
+;;; frames — sector-by-sector via `vfs_read_sec` and a private
+;;; `program_fd` struct — instead of staging through a scratch
+;;; buffer.  The trailer (BSS size) is read from the last loaded
+;;; user frame after Phase 1, then BSS-only frames are mapped in
+;;; Phase 2.
+;;;
+;;; Never returns.  On panic (allocator OOM or disk error during
+;;; PD build) the kernel halts — there's no graceful recovery for
+;;; "ran out of frames / lost a sector mid-program-load" yet.
 ;;; -----------------------------------------------------------------------
 program_enter:
         call fd_init
@@ -89,33 +96,25 @@ program_enter:
         jc .panic
         mov [current_pd_phys], eax
 
-        ;; --- Determine total user image size ---
-        ;; binsize = vfs_found_size; bsssize from trailer at end of
-        ;; program_scratch (matches the PR-#234 6-byte trailer or the
-        ;; legacy 4-byte trailer).  total = binsize + bsssize, page-
-        ;; aligned up.  user_image_end = PROGRAM_BASE + total.
-        movzx ecx, word [vfs_found_size]
-        mov edi, program_scratch
-        add edi, ecx                        ; EDI = end of binary in scratch
-        xor eax, eax                        ; default bss_size = 0
-        cmp ecx, 6
-        jb .check_old_trailer
-        cmp word [edi - 2], BSS_MAGIC32
-        jne .check_old_trailer
-        mov eax, [edi - 6]
-        jmp .have_bss_size
-.check_old_trailer:
-        cmp ecx, 4
-        jb .have_bss_size
-        cmp word [edi - 2], BSS_MAGIC
-        jne .have_bss_size
-        movzx eax, word [edi - 4]
-.have_bss_size:
-        add eax, ecx
-        add eax, PROGRAM_BASE
-        add eax, 0xFFF
-        and eax, 0xFFFFF000
-        mov [user_image_end], eax
+        ;; --- Set up kernel-side fd struct from vfs_found_* ---
+        ;; Used by Phase 1's vfs_read_sec calls to walk the binary
+        ;; sector-by-sector without going through fd_alloc / the user
+        ;; fd table.  Lives in BSS; only one program loads at a time.
+        mov edi, program_fd
+        xor eax, eax
+        mov ecx, FD_ENTRY_SIZE / 4
+        cld
+        rep stosd
+        mov al, [vfs_found_type]
+        mov [program_fd + FD_OFFSET_TYPE], al
+        mov ax, [vfs_found_inode]
+        mov [program_fd + FD_OFFSET_START], ax
+        mov eax, [vfs_found_size]
+        mov [program_fd + FD_OFFSET_SIZE], eax
+        mov ax, [vfs_found_dir_sec]
+        mov [program_fd + FD_OFFSET_DIRECTORY_SECTOR], ax
+        mov ax, [vfs_found_dir_off]
+        mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
 
         ;; --- Map shell↔program handoff frame at user-virt USER_DATA_BASE ---
         ;; Holds ARGV (32 B at +0x4DE), EXEC_ARG (4 B at +0x4FC), and
@@ -155,41 +154,92 @@ program_enter:
         call address_space_map_page
         jc .panic
 
-        ;; --- Map program text + BSS frames at PROGRAM_BASE ---
+        ;; --- Phase 1: stream binary pages directly from disk ---
+        ;; Each loaded user frame is zero-filled then populated sector-
+        ;; by-sector via vfs_read_sec into sector_buffer + a memcpy into
+        ;; the frame's direct-map alias.  Last binary frame's phys is
+        ;; stashed so the trailer can be peeked after the loop.
+        mov dword [last_binary_frame_phys], 0
         mov dword [virt_cursor], PROGRAM_BASE
-.prog_page_loop:
+.phase1_page_loop:
         mov eax, [virt_cursor]
-        cmp eax, [user_image_end]
-        jae .prog_pages_done
-        ;; Allocate frame.
+        sub eax, PROGRAM_BASE               ; EAX = file byte offset for this page
+        cmp eax, [vfs_found_size]
+        jae .phase1_done                    ; past binary end
+
         call frame_alloc
         jc .panic
-        push eax                            ; frame phys
+        mov [last_binary_frame_phys], eax   ; remember for trailer peek
+        push eax                            ; frame phys for map call
         mov edi, eax
-        add edi, 0xC0000000                 ; EDI = kernel-virt
-        ;; Zero frame.
+        add edi, 0xC0000000                 ; EDI = kernel-virt of frame
+
+        ;; Zero entire frame so the partial last sector lands on a
+        ;; zero background.
         push edi
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop edi                             ; restore EDI = frame start
-        ;; Copy program bytes if this page is within the binary.
+        pop edi
+
+        ;; Inner loop: 8 sectors per page (or fewer at end of file).
+        xor edx, edx                        ; sector_in_page index
+.phase1_sector_loop:
+        cmp edx, 8
+        jae .phase1_page_done
+
+        ;; file_offset = (virt_cursor - PROGRAM_BASE) + sector_in_page * 512
         mov eax, [virt_cursor]
-        sub eax, PROGRAM_BASE               ; scratch offset for this page
-        movzx ecx, word [vfs_found_size]
-        cmp eax, ecx
-        jae .prog_page_no_copy              ; past binary end → BSS-only, leave zeroed
-        sub ecx, eax                        ; bytes remaining in binary
-        cmp ecx, 0x1000
-        jbe .prog_page_copy
-        mov ecx, 0x1000
-.prog_page_copy:
-        mov esi, program_scratch
-        add esi, eax                        ; ESI = scratch source
+        sub eax, PROGRAM_BASE
+        mov ebx, edx
+        shl ebx, 9
+        add eax, ebx                        ; EAX = file offset for this sector
+        cmp eax, [vfs_found_size]
+        jae .phase1_page_done               ; past end of binary
+
+        ;; bytes_remaining = binsize - file_offset (bytes still to copy)
+        mov ebx, [vfs_found_size]
+        sub ebx, eax                        ; EBX = remaining
+        cmp ebx, 512
+        jbe .phase1_chunk_set
+        mov ebx, 512
+.phase1_chunk_set:
+
+        mov [program_fd + FD_OFFSET_POSITION], eax
+
+        ;; Read one sector into sector_buffer.
+        push ebx
+        push edx
+        push edi
+        mov esi, program_fd
+        call vfs_read_sec
+        pop edi
+        pop edx
+        pop ebx
+        jc .panic                           ; disk error mid-program-load
+
+        ;; Copy EBX bytes from sector_buffer to (frame + sector_in_page * 512).
+        push esi
+        push edi
+        push edx
+        push ecx
+        mov esi, sector_buffer
+        mov ecx, edx
+        shl ecx, 9                          ; ECX = sector_in_page * 512
+        add edi, ecx                        ; EDI = frame + offset
+        mov ecx, ebx
+        cld
         rep movsb
-.prog_page_no_copy:
-        ;; Map frame at virt_cursor.
+        pop ecx
+        pop edx
+        pop edi
+        pop esi
+
+        inc edx
+        jmp .phase1_sector_loop
+.phase1_page_done:
+        ;; Map the frame into the per-program PD at virt_cursor.
         pop ecx                             ; frame phys
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
@@ -197,7 +247,70 @@ program_enter:
         call address_space_map_page
         jc .panic
         add dword [virt_cursor], 0x1000
-        jmp .prog_page_loop
+        jmp .phase1_page_loop
+.phase1_done:
+
+        ;; --- Read BSS trailer from the last binary frame ---
+        ;; binsize is vfs_found_size; the trailer (6-byte BSS_MAGIC32 or
+        ;; legacy 4-byte BSS_MAGIC) sits at offset (binsize - N) within
+        ;; the file, which lands inside the last loaded frame at offset
+        ;; ((binsize - 1) & 0xFFF) + 1 - N.
+        xor ebx, ebx                        ; default bss_size = 0
+        mov eax, [last_binary_frame_phys]
+        test eax, eax
+        jz .have_bss_size                   ; empty file (no binary loaded)
+        add eax, 0xC0000000                 ; EAX = kernel-virt of last frame
+        mov ecx, [vfs_found_size]
+        sub ecx, 1
+        and ecx, 0xFFF
+        inc ecx                             ; ECX = valid bytes in last frame
+        ;; Try 6-byte trailer first (BSS_MAGIC32).
+        cmp ecx, 6
+        jb .check_old_trailer
+        cmp word [eax + ecx - 2], BSS_MAGIC32
+        jne .check_old_trailer
+        mov ebx, [eax + ecx - 6]
+        jmp .have_bss_size
+.check_old_trailer:
+        cmp ecx, 4
+        jb .have_bss_size
+        cmp word [eax + ecx - 2], BSS_MAGIC
+        jne .have_bss_size
+        movzx ebx, word [eax + ecx - 4]
+.have_bss_size:
+
+        ;; --- Compute user_image_end ---
+        mov eax, [vfs_found_size]
+        add eax, ebx                        ; binsize + bsssize
+        add eax, PROGRAM_BASE
+        add eax, 0xFFF
+        and eax, 0xFFFFF000
+        mov [user_image_end], eax
+
+        ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
+        ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
+        ;; by Phase 1; loop until user_image_end.
+.phase2_page_loop:
+        mov eax, [virt_cursor]
+        cmp eax, [user_image_end]
+        jae .prog_pages_done
+        call frame_alloc
+        jc .panic
+        push eax
+        mov edi, eax
+        add edi, 0xC0000000
+        mov ecx, 1024
+        xor eax, eax
+        cld
+        rep stosd
+        pop ecx
+        mov eax, [current_pd_phys]
+        mov ebx, [virt_cursor]
+        mov edx, PTE_USER_RW
+        call address_space_map_page
+        jc .panic
+        add dword [virt_cursor], 0x1000
+        jmp .phase2_page_loop
 .prog_pages_done:
 
         ;; --- Map vDSO code page (shared, R-X user) ---
@@ -354,14 +467,11 @@ protected_mode_entry:
 shell_reload:
         ;; Active PD: kernel_pd_template (sys_exit just destroyed the
         ;; dying program's PD and switched off it, or this is the first
-        ;; boot and CR3 was set up by high_entry).  Load bin/shell
-        ;; into program_scratch, reset the BUFFER / EXEC_ARG snapshots,
-        ;; and `jmp` program_enter to build the shell's PD.
+        ;; boot and CR3 was set up by high_entry).  Look up bin/shell
+        ;; (program_enter streams its bytes from disk on demand), reset
+        ;; the BUFFER / EXEC_ARG snapshots, and jmp program_enter.
         mov esi, shell_path
         call vfs_find
-        jc .shell_fail
-        mov edi, program_scratch
-        call vfs_load
         jc .shell_fail
         ;; Fresh shell inherits no args.  Zero both snapshots.
         mov edi, buffer_snapshot
@@ -420,9 +530,19 @@ kernel_pd_template_phys dd 0
 
         ;; Per-program-load state used by program_enter.
 current_pd_phys         dd 0    ; new PD being built
+last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+
+        ;; Kernel-side fd struct used by program_enter to stream the
+        ;; program binary directly from disk into per-program user
+        ;; frames (sector-by-sector via vfs_read_sec).  Sized to
+        ;; FD_ENTRY_SIZE so the FD_OFFSET_* layout matches the user fd
+        ;; table, even though this slot lives outside it.  Only one
+        ;; program loads at a time, so a single static slot suffices.
+        align 4
+program_fd              times FD_ENTRY_SIZE db 0
 
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0

@@ -6,6 +6,29 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Drop program_scratch — stream binaries from disk into user frames (2026-04-30)
+- `program_enter` no longer relies on a kernel-side staging buffer.
+  Each per-program user frame is allocated, zero-filled, and then
+  populated sector-by-sector via `vfs_read_sec` + `sector_buffer` and
+  a memcpy through the kernel direct map.  The legacy 32 KB
+  `program_scratch` region is gone — saving ~32 KB in the kernel-side
+  reserved region under every QEMU memory configuration.
+- A static `program_fd` (`FD_ENTRY_SIZE` bytes in entry.asm BSS)
+  carries the file descriptor state vfs_read_sec needs (`type`,
+  `start`, `size`, `position`, `directory_sector`,
+  `directory_offset`).  Only one program loads at a time, so a single
+  slot suffices and there's no need to plumb it through the user fd
+  table.
+- BSS-trailer detection now happens AFTER Phase 1 (binary pages
+  loaded) by peeking the last loaded user frame at offset
+  `((binsize - 1) & 0xFFF) + 1 - {6,4}` — same magic checks
+  (BSS_MAGIC32 first, legacy BSS_MAGIC second) as the previous
+  scratch-walk logic.
+- `vfs_load`, `vfs_load_fn`, `bbfs_load`, and `ext2_load` references
+  drop from `vfs.c`'s function-pointer dispatch (the function bodies
+  in `bbfs.asm` / `ext2.asm` remain as dead code for now; a later
+  sweep can delete them).
+
 ### Reclaim conventional low memory + tighten kernel-side reservations (2026-04-30)
 - `boot_disk` and `directory_sector` move out of fixed phys `0x4D0` /
   `0x4D2` and into a 3-byte stash at the top of `kernel.bin`.  The
