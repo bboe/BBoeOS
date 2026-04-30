@@ -24,23 +24,18 @@ vDSO page.
 
 ## Minimum runtime requirements
 
-* **1 MB RAM** to boot the shell and run small programs (e.g. `hello`,
-  `date`, `uptime`, `ls`, `cat`).  The kernel-side fixed-physical
-  region — `kernel.bin` (~29 KB) + 4 KB kernel stack + first kernel
-  PT — sits in conventional RAM below the VGA aperture at `0xA0000`.
-  Filesystem and NIC scratch frames are allocated dynamically from
-  the bitmap allocator only when their subsystems initialize, so a
-  no-NIC boot never spends those frames.  Default for the `tests/`
-  harness is `qemu-system-i386 -m 1`.
-* **2 MB RAM** to additionally run the 1 MB-BSS editor (`edit`).
-  Each user program runs in its own per-program PD and
-  `program_enter` eagerly zero-fills the program's BSS, so `edit`'s
-  1 MB BSS is what sets this floor — every other program in `bin/`
-  (including the self-hosted assembler `asm`) runs comfortably under
-  `-m 1`.
-* `qemu-system-i386` defaults to 128 MB, comfortably above either
-  floor.  Pass `-m 1` for the minimum-RAM smoke test or `-m 2`
-  (or higher) for the full-program contract.
+* **1 MB RAM** boots the shell and runs every program in `bin/`,
+  including the self-hosted assembler (`asm`), the BSS-stress test
+  (`bigbss`, 256 KB BSS), and the 448 KB-BSS editor (`edit`).  The
+  kernel-side fixed-physical region — `kernel.bin` (~29 KB) + 4 KB
+  kernel stack + first kernel PT + 8 KB frame bitmap — sits in
+  conventional RAM below the VGA aperture at `0xA0000`.  Filesystem
+  and NIC scratch frames are allocated dynamically from the bitmap
+  allocator only when their subsystems initialize, so a no-NIC boot
+  never spends those frames.  Default for the `tests/` harness is
+  `qemu-system-i386 -m 1`.
+* `qemu-system-i386` defaults to 128 MB, well above the 1 MB floor.
+  Pass `-m 1` to exercise the minimum-RAM contract.
 
 ## Building and running BBoeOS
 
