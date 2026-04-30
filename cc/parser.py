@@ -958,6 +958,34 @@ class Parser:
             self.eat("EXTERN")
             is_extern = True
         type_string = self.parse_type()
+        # Function-pointer global: ``type (*name)(params);``.  The parens
+        # around ``*name`` distinguish this from a function definition
+        # (``type name(params)``).  Globals only — locals are handled in
+        # ``parse_variable_declaration``.
+        if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] == "STAR":
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            function_pointer_params_list = self.parse_parameters()
+            self.eat("RPAREN")
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                init = self.parse_expression()
+            self.eat("SEMI")
+            if is_extern and init is not None:
+                message = "extern declarations may not have an initializer"
+                raise CompileError(message, line=line)
+            return VarDecl(
+                function_pointer_params=function_pointer_params_list,
+                init=init,
+                is_extern=is_extern,
+                line=line,
+                name=name,
+                type_name="function_pointer",
+            )
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":

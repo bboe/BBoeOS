@@ -623,6 +623,14 @@ class EmissionMixin:
                 self.emit(f"        mov {self.target.acc}, {self.constant_aliases[vname]}")
                 self.ax_clear()
                 return
+            if vname in self.user_functions:
+                # A bare function name as an rvalue decays to the
+                # function's address (a link-time constant), so the
+                # value can be assigned to a function_pointer global,
+                # passed as an argument, etc.
+                self.emit(f"        mov {self.target.acc}, {vname}")
+                self.ax_clear()
+                return
             if vname in self.global_arrays:
                 # A global array name decays to its base address — the
                 # ``_g_<name>`` label.  Load it as an immediate, not as a
@@ -1216,6 +1224,18 @@ class EmissionMixin:
         for global_name, declaration in self.global_scalars.items():
             self.variable_types[global_name] = declaration.type_name
             self.visible_vars.add(global_name)
+            # File-scope function_pointer globals carry a per-param
+            # in_register map.  Re-publish it into the per-function
+            # ``function_pointer_in_registers`` dict so indirect call
+            # sites and ``__tail_call`` can marshal arguments — the
+            # dict is reset to ``{}`` above for each function body.
+            if declaration.type_name == "function_pointer" and declaration.function_pointer_params:
+                in_regs: dict[int, str] = {}
+                for param_index, param in enumerate(declaration.function_pointer_params):
+                    if param.in_register is not None:
+                        in_regs[param_index] = param.in_register
+                if in_regs:
+                    self.function_pointer_in_registers[global_name] = in_regs
         for global_name, declaration in self.global_arrays.items():
             self.variable_types[global_name] = declaration.type_name
             self.variable_arrays.add(global_name)

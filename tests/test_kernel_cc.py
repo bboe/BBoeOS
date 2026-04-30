@@ -1482,6 +1482,71 @@ def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
     assert "mov word [_g_entry+1], ax" in asm, f"expected word write to _g_entry+1\n{asm}"
 
 
+# ---------------------------------------------------------------------------
+# File-scope function_pointer globals
+# ---------------------------------------------------------------------------
+
+
+def test_file_scope_function_pointer_emits_storage_and_indirect_call() -> None:
+    """File-scope function_pointer compiles to storage + indirect call.
+
+    ``int (*name)(...);`` emits ``_g_<name>`` storage and ``name(args)``
+    becomes ``mov eax, [_g_<name>]; call eax``.
+    """
+    asm = _kernel(
+        """
+        int (*vfs_find_fn)();
+        int dispatch() {
+            vfs_find_fn();
+            return 1;
+        }
+    """,
+        bits=32,
+    )
+    assert "_g_vfs_find_fn:" in asm, f"expected storage label\n{asm}"
+    assert "mov eax, [_g_vfs_find_fn]" in asm, f"expected indirect load\n{asm}"
+    assert "call eax" in asm, f"expected indirect call\n{asm}"
+
+
+def test_file_scope_function_pointer_assignment_uses_function_symbol() -> None:
+    """Bare function name decays to its address in an assignment.
+
+    ``vfs_find_fn = my_handler;`` emits ``mov eax, my_handler`` (the
+    function's link-time address) followed by ``mov [_g_name], eax``.
+    """
+    asm = _kernel(
+        """
+        int my_handler();
+        int (*vfs_find_fn)();
+        void register_handler() {
+            vfs_find_fn = my_handler;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov eax, my_handler" in asm, f"expected function-symbol load\n{asm}"
+    assert "mov [_g_vfs_find_fn], eax" in asm, f"expected store to global\n{asm}"
+
+
+def test_file_scope_function_pointer_tail_call() -> None:
+    """``__tail_call`` works on a file-scope function_pointer global.
+
+    Emits ``mov eax, [_g_<name>]; jmp eax`` after frame teardown.
+    """
+    asm = _kernel(
+        """
+        int (*vfs_find_fn)(int x __attribute__((in_register("ebx"))));
+        __attribute__((carry_return))
+        int dispatch(int v __attribute__((in_register("ebx")))) {
+            __tail_call(vfs_find_fn, v);
+        }
+    """,
+        bits=32,
+    )
+    assert "mov eax, [_g_vfs_find_fn]" in asm, f"expected indirect load before jmp\n{asm}"
+    assert "jmp eax" in asm, f"expected jmp eax\n{asm}"
+
+
 def test_dot_access_on_local_struct_still_rejected() -> None:
     """Dot-access on a local struct value (not a pointer) still raises an error."""
     error = _kernel_error(

@@ -1375,6 +1375,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # variable_types is otherwise scoped to function locals).
                 if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
                     self.variable_types[name] = declaration.type_name
+                # File-scope function_pointer globals (e.g. vfs.asm's
+                # vfs_find_fn) need the variable type recorded here so
+                # downstream codegen knows the symbol is callable; the
+                # per-param in_register map is re-published into
+                # ``function_pointer_in_registers`` from
+                # ``generate_function`` since that dict is per-function
+                # state.
+                if declaration.type_name == "function_pointer":
+                    self.variable_types[name] = "function_pointer"
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
@@ -1817,6 +1826,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     collect_function_pointer_vars(stmt.body)
 
         collect_function_pointer_vars(body)
+        # File-scope function_pointer globals are visible from every
+        # function body — add them so an indirect call through one
+        # isn't misclassified as ``unknown function`` below.
+        for global_name, declaration in self.global_scalars.items():
+            if declaration.type_name == "function_pointer":
+                function_pointer_vars.add(global_name)
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):
