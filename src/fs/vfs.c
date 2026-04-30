@@ -5,9 +5,9 @@
 // from bbfs to ext2 if an ext2 superblock is detected.
 //
 // vfs_init also allocates the FS scratch frame.  Layout (4 KB total,
-// ≤1.5 KB used):
+// ~1.5 KB used):
 //
-//   0..511   sector_buffer       (512 B; populated by every disk read)
+//   0..511     sector_buffer     (512 B; populated by every disk read)
 //   512..1535  ext2_sd_buffer    (1 KB; ext2_search_blk's sliding
 //                                 2-sector directory window — only
 //                                 written on ext2 systems)

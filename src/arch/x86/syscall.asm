@@ -439,20 +439,43 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_load:
-        ;; Snapshot BUFFER (256 B at user-virt 0x500) and EXEC_ARG (4 B
-        ;; at user-virt 0x4FC) from the shell's PD before destroy.
-        ;; vfs_find above populated vfs_found_*; program_enter streams
-        ;; the binary directly from disk into the new PD's user pages,
-        ;; so there's no staging step between this point and the jump.
+        ;; Pre-allocate the new program's USER_DATA handoff frame from
+        ;; the bitmap allocator and populate it *directly* from the
+        ;; dying shell's user pages.  The bitmap pool sits inside the
+        ;; kernel direct map, so the new frame is reachable at
+        ;; kernel-virt (phys + 0xC0000000) regardless of which PD is
+        ;; active — we don't need any cross-AS staging buffer.  The
+        ;; phys is handed off to program_enter via
+        ;; [next_handoff_frame_phys].
+        ;;
+        ;; Reads from BUFFER (user-virt 0x1500) and EXEC_ARG (user-virt
+        ;; 0x14FC) below resolve through the shell's PD because we
+        ;; haven't switched CR3 yet.  Once the new frame is populated,
+        ;; we tear down the shell PD; the new frame survives because
+        ;; address_space_destroy only iterates user-half PTEs of the
+        ;; PD it's destroying, and this frame isn't mapped there.
+        call frame_alloc
+        jc .exec_oom
+        mov [next_handoff_frame_phys], eax
         push esi
         push edi
-        mov esi, BUFFER
-        mov edi, buffer_snapshot
-        mov ecx, MAX_INPUT / 4
+        mov edi, eax
+        add edi, 0xC0000000             ; kernel-virt of new frame
+        ;; Zero entire frame so unused slots (ARGV etc.) start clean.
+        push edi
+        mov ecx, 1024
+        xor eax, eax
         cld
-        rep movsd
+        rep stosd
+        pop edi
+        ;; Copy EXEC_ARG (4 B) and BUFFER (256 B) from the shell PD's
+        ;; user pages into the new frame at the matching offsets.
         mov eax, [EXEC_ARG]
-        mov [exec_arg_snapshot], eax
+        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
+        mov esi, BUFFER
+        add edi, (BUFFER - USER_DATA_BASE)
+        mov ecx, MAX_INPUT / 4
+        rep movsd
         pop edi
         pop esi
         mov esp, [shell_esp]
@@ -465,6 +488,14 @@ syscall_handler:
         call address_space_destroy
         sti
         jmp program_enter
+        .exec_oom:
+        ;; frame_alloc returned CF=1 — bitmap exhausted.  Shell stays
+        ;; alive (we haven't touched its PD yet); surface the failure
+        ;; via ERROR_FAULT so the caller can report and retry / give
+        ;; up.  In practice frames are abundant, so this is rare.
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
 
         .sys_exit:
         ;; Tear down the dying program's PD, restore kernel ESP, and
