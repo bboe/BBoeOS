@@ -206,7 +206,6 @@ asm("vga_clear_screen:\n"
     "        pop eax\n"
     "        ret");
 
-// Pure C: fill an 8x8 tile at (BL=col, BH=row) with colour AL in mode 13h.
 // EDI = 0xC00A0000 + row*2560 + col*8 — flat 32-bit linear address.
 // Writes 8 rows of 8 pixels each, advancing 320 bytes per row.
 void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
@@ -294,7 +293,6 @@ asm("vga_scroll_up:\n"
     "        pop eax\n"
     "        ret");
 
-// Pure C: program the attribute-controller overscan register from AL.
 // Reads VGA_INPUT_STATUS_1 first to reset the AC index/data flip-flop
 // to "index" state, then writes the (0x11 | 0x20) index byte (bit 5 =
 // keep palette latched / video unblanked) and the colour byte to 0x3C0.
@@ -307,7 +305,6 @@ void vga_set_bg(uint8_t color __attribute__((in_register("ax"))))
     kernel_outb(0x3C0, color);         // colour value
 }
 
-// Pure C: program the CRTC cursor position from DH:DL packed in DX.
 // drivers/console.c declares this with ``__attribute__((in_register("dx")))``.
 // Clobbers AX; preserves everything else.
 void vga_set_cursor(int row_col __attribute__((in_register("dx"))))
@@ -498,7 +495,6 @@ asm("vga_set_mode:\n"
     "        pop eax\n"
     "        ret");
 
-// Pure C: program one DAC palette entry.  CL = index, CH = R, DL = G,
 // DH = B (each 6-bit).  Used by mode-13h programs and the SET_PALETTE
 // ioctl path.  Preserves everything.
 void vga_set_palette_color(int index_r __attribute__((in_register("cx"))),
