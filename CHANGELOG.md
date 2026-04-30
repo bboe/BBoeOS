@@ -6,6 +6,95 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Phase 6 paging — NULL guard (2026-04-29)
+- The shell↔program handoff frame moves from user-virt 0..0xFFF
+  (PTE[0]) to `USER_DATA_BASE = 0x1000` (PTE[1]).  ARGV becomes
+  `0x14DE`, EXEC_ARG becomes `0x14FC`, BUFFER becomes `0x1500` —
+  same in-page offsets, just shifted up by one page.  PTE[0] now
+  stays not-present in every per-program PD, so a NULL dereference
+  from CPL=3 raises #PF and routes through the user-fault kill
+  path instead of silently reading/writing the handoff frame.
+- `src/arch/x86/entry.asm::program_enter` maps the handoff frame
+  at `USER_DATA_BASE` and uses `<symbol> - USER_DATA_BASE` for the
+  in-frame offsets when staging EXEC_ARG / BUFFER snapshots.
+- `src/c/nullderef.c` writes to virt 0 again (the previous
+  `0x00400000` workaround targeted PDE[1] precisely because
+  PTE[0]'s low frame was still mapped); test_programs now matches
+  `CR2=00000000` instead of `00400000`.  The `BOOT_DISK_PHYS` /
+  `DIRECTORY_SECTOR_PHYS` "kept below ARGV" comment in
+  `src/include/constants.asm` is stale — those bytes live at phys
+  0x4D0/0x4D2, kernel-only via the direct map, and user PDs no
+  longer alias the boot frame.
+- CLAUDE.md's user-virt table reflects the new `0x1000`-page
+  handoff slot and the explicit NULL guard at `0..0xFFF`.
+
+### Phase 6 paging — ext2 walker straddle fix (2026-04-29)
+- `ext2_search_blk` (`src/fs/ext2.asm`) now uses a sliding 2-sector
+  window (`ext2_sd_buffer`, 1024 B at fixed low-phys 0xF200) and
+  tracks block-relative byte offset (`ext2_sd_blk_off`).  Previously
+  the walker bounds-checked only the entry's start (`offset >= 512`),
+  so an entry at offset 504 with an 8-byte name straddling 512..519
+  was processed by reading the header from the loaded sector and the
+  name from stale bytes past byte 511 of `sector_buffer`; on the
+  inevitable mismatch the walker advanced by `rec_len` past 512,
+  reloaded sector 1 fresh, and resumed parsing at buffer offset 0
+  rather than the next valid entry boundary inside that sector,
+  desynchronising the parser for the rest of the block.  The 2 KB
+  block-size matrix in `tests/test_ext2.py` exposed it (more
+  sectors per block = more chances of straddle).
+- `tests/test_ext2.py` grows a `straddle_dir` test (2 KB matrix
+  only) that chains 12/16/20-byte filler entries via name lengths
+  4/8/12 to land `STRADDLE` at exactly `boundary - 8` so its 8-byte
+  name spans the boundary.  Stronger guarantee than
+  `multi_sector_dir`, which only happens to straddle for particular
+  bin/ layouts.
+
+### Phase 6 paging — fault-path smoke programs (2026-04-29)
+- New `nullderef`, `bigbss`, and `stackbomb` user programs in
+  `src/c/`, plus matching `tests/test_programs.py` entries.
+  `nullderef` writes to virt 0x00400000 (start of PDE[1], no PT
+  installed) to confirm the user-fault kill path tears down the PD
+  and respawns the shell.  `bigbss` allocates a 64 K-element int
+  array (256 KB) in BSS, writes the index into each slot, then
+  reads it back — catches any `program_enter` walk that skips a
+  page or any frame-allocator double-hand.  `stackbomb` recurses
+  with 1 KB local frames until ESP underflows the 16-page user
+  stack into the unmapped page below 0x3FFF0000, exercising the
+  same kill path as `nullderef` from a stack-overflow trigger.
+- `tests/run_qemu.py::_wait_for_prompt` grows a 50 ms settle window
+  (factored into `_drain_until_idle`) so back-to-back prompts —
+  e.g. shell consuming a stray `\r` as an empty command after
+  `edit` exits — all land in the buffer before the next command's
+  wait begins.  Without the settle, the spurious empty-line prompt
+  satisfied the next wait early and masked whether the actual
+  command ran.
+- `cc.py`'s BSS emission folds `(N)*stride` to a literal at compile
+  time when the dimension is a plain integer (`bigbss`'s 64 K-int
+  array is the first user of this).  Sidesteps a latent miscompile
+  in the self-hosted assembler's flat-precedence `resolve_value`
+  that grouped `A + N*4 - B` as `A + N*(4 - B)` whenever the chain
+  used `-` — which is exactly what the BSS-EQU chain does.
+
+### Phase 6 paging — edit BSS migration (2026-04-29)
+- `src/c/edit.c` drops the hardcoded `EDIT_BUFFER_BASE = 0x100000`
+  and `EDIT_KILL_BUFFER = 0x200000` in favor of file-scope arrays.
+  cc.py emits them in BSS via the 32-bit trailer; the kernel
+  allocates and zeroes ~1 MB of private user pages at program load.
+  The fixed-address layout was a real-mode hack that predated
+  paging; with virtual memory, edit's gap buffer is just memory.
+  `EDIT_BUFFER_SIZE` / `EDIT_KILL_BUFFER_SIZE` move from
+  `src/include/constants.asm` to local `#define`s in `edit.c`;
+  `cc/codegen/base.py` drops the four `EDIT_*` names from
+  `NAMED_CONSTANTS`; `archive/edit.asm` carries its own
+  `%assigns` so the historical real-mode snapshot still assembles
+  under the current kernel ABI.
+- `tests/test_programs.py` covers the previously-skipped
+  interactive `edit` and `draw` programs by sending `edit hello\n\x11`
+  / `draw\nq` followed by a probe command (`hello`) — confirms the
+  shell is fully functional after the program exits.  Doubles as a
+  regression for the ~1 MB BSS allocation in the per-program PD
+  (edit case).
+
 ### Phase 4 paging — Linux-shape relocation (2026-04-29)
 - Move `PROGRAM_BASE` from `0x600` to `0x08048000` (the Linux ELF
   load address) and `USER_STACK_TOP` from `0x8FFF0` to `0x40000000`

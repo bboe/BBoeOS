@@ -1,16 +1,16 @@
-        %assign ARGV 4DEh               ; 32 bytes (16 word-sized pointers)
-        %assign BOOT_DISK_PHYS    0x4D0   ; byte: BIOS boot drive number, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) so cc.py-emitted argv writes / shell.c's "bin/<name>\0" stage can't clobber it from CPL=3 through the Phase 3 user shim.
+        %assign ARGV 14DEh              ; 32 bytes (16 word-sized pointers); = USER_DATA_BASE + 0x4DE
+        %assign BOOT_DISK_PHYS    0x4D0   ; byte: BIOS boot drive number, set by boot.asm.  Kernel-only via the direct map; user PDs no longer alias phys 0..0xFFF after the NULL-guard relocation.
         %assign BOOT_DISK_VIRT    0xC00004D0   ; kernel-virt alias of BOOT_DISK_PHYS via direct map
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
-        %assign BUFFER 500h
+        %assign BUFFER 1500h            ; 256 bytes; = USER_DATA_BASE + 0x500
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 48
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kept below ARGV (0x4DE..0x4FD) — see BOOT_DISK_PHYS for why.
+        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kernel-only via the direct map — see BOOT_DISK_PHYS.
         %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_SECTORS 3
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
@@ -20,7 +20,7 @@
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found
         %assign ERROR_PROTECTED 05h     ; Rename/chmod error: file is protected
-        %assign EXEC_ARG 4FCh           ; 4 bytes (dword pointer under --bits 32); before BUFFER
+        %assign EXEC_ARG 14FCh          ; 4 bytes (dword pointer under --bits 32); before BUFFER; = USER_DATA_BASE + 0x4FC
         %assign FD_ENTRY_SIZE 32
         %assign FD_MAX 8
         %assign FD_OFFSET_DIRECTORY_OFFSET 14    ; offset of dir_off field within FD entry
@@ -117,6 +117,7 @@
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
+        %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 40000000h        ; Ring-3 stack top; 64 KB region 0x3FFF0000-0x40000000
 

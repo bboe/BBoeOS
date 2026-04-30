@@ -23,8 +23,8 @@
 
 /* --- Constants (from src/include/constants.asm) --- */
 
-#define ARGV ((char *)0x4DE)
-#define BUFFER ((char *)0x500)
+#define ARGV ((char *)0x14DE)
+#define BUFFER ((char *)0x1500)
 #define DIRECTORY_ENTRY_SIZE 32
 #define DIRECTORY_NAME_LENGTH 25
 #define DIRECTORY_OFFSET_FLAGS 25
@@ -34,7 +34,7 @@
 #define ERROR_NOT_EXECUTE 0x03
 #define ERROR_NOT_FOUND 0x04
 #define ERROR_PROTECTED 0x05
-#define EXEC_ARG ((char *)0x4FC)
+#define EXEC_ARG ((char *)0x14FC)
 #define FLAG_DIRECTORY 0x02
 #define FLAG_EXECUTE 0x01
 #define IPPROTO_ICMP 1
