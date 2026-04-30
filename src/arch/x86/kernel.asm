@@ -57,7 +57,7 @@ directory_sector dw 0                   ; offset 3
         ;;   vDSO target at phys 0x10000          (1 page, mapped per-PD)
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
-        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 8 KB)
+        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 4 KB)
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
         ;;   FRAME_BITMAP_PHYS                    (FRAME_BITMAP_BYTES = 8 KB)
@@ -110,7 +110,7 @@ directory_sector dw 0                   ; offset 3
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
         KERNEL_LOAD_PHYS         equ 0x20000
-        KERNEL_STACK_BYTES       equ 0x2000                              ; 8 KB
+        KERNEL_STACK_BYTES       equ 0x1000                              ; 4 KB (peak measured ~412 B; ~10× margin)
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
@@ -147,7 +147,7 @@ high_entry:
         jmp KERNEL_CODE_SELECTOR:.cs_reloaded
 .cs_reloaded:
 
-        ;; Switch ESP to the kernel stack (16 KB at KERNEL_RESERVED_BASE,
+        ;; Switch ESP to the kernel stack (4 KB at KERNEL_RESERVED_BASE,
         ;; reached through the direct map at kernel-virt
         ;; DIRECT_MAP_BASE + KERNEL_RESERVED_BASE; see KERNEL_STACK_PHYS
         ;; for why it lives here instead of inside kernel.bin).  Reachable
@@ -155,6 +155,24 @@ high_entry:
         ;; 0..0x3FFFFF.  TSS.ESP0 is patched to the same later in
         ;; protected_mode_entry.
         mov esp, kernel_stack_top
+
+        ;; Poison-fill the kernel stack with 0xDEADBEEF dwords.  Used
+        ;; as a canary for future stack-depth instrumentation: a debug
+        ;; routine can scan kernel_stack upward for the first
+        ;; non-poisoned dword to find the high-water mark (since stack
+        ;; values, once written, are never re-poisoned).  The 4 KB
+        ;; stack is sized at ~10× the measured peak (~412 B); the
+        ;; canary is also a tripwire if a future regression eats deep
+        ;; into the stack.  high_entry has nothing to preserve in
+        ;; EAX/ECX/EDI yet (boot's pre-paging code didn't pass
+        ;; anything through), so a one-shot rep stosd is fine.  Runs
+        ;; before lidt so any exception here triple-faults (which is
+        ;; what would happen without the fill).
+        mov edi, kernel_stack
+        mov ecx, KERNEL_STACK_BYTES / 4
+        mov eax, 0xDEADBEEF
+        cld
+        rep stosd
 
         ;; Patch the high-half offsets of the static IDT entries (the
         ;; macros only emit the low 16 bits — see idt.asm for why),
