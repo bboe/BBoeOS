@@ -3,7 +3,8 @@
 ;;;
 ;;; protected_mode_entry runs once per boot — TSS / IRQ install, vDSO
 ;;; shared-frame allocation, driver / VFS / NIC init, banner — then
-;;; falls through into shell_reload.
+;;; falls through into shell_reload.  Active PD on entry: `kernel_idle_pd`
+;;; (built by `high_entry`, replaces the boot PD which has been freed).
 ;;;
 ;;; shell_reload is the re-entry point for SYS_EXIT (after the dying
 ;;; program's PD has been torn down by sys_exit).  It loads bin/shell
@@ -71,7 +72,7 @@ pmode_irq6_handler:
 ;;;
 ;;; Builds the per-program PD and `iretd`s into ring 3.  Caller
 ;;; invariants:
-;;;   * Active PD = `kernel_pd_template` (no user mappings).
+;;;   * Active PD = `kernel_idle_pd` (no user mappings).
 ;;;   * `vfs_find` (or equivalent) has populated `vfs_found_*` for
 ;;;     the binary file.
 ;;;   * `[next_handoff_frame_phys]` either holds the phys of a
@@ -469,9 +470,9 @@ protected_mode_entry:
         ;; Fall through into shell_reload.
 
 shell_reload:
-        ;; Active PD: kernel_pd_template (sys_exit just destroyed the
-        ;; dying program's PD and switched off it, or this is the first
-        ;; boot and CR3 was set up by high_entry).  Look up bin/shell
+        ;; Active PD: kernel_idle_pd (sys_exit just destroyed the
+        ;; dying program's PD and switched CR3 off it, or this is the
+        ;; first boot and CR3 was set up by high_entry).  Look up bin/shell
         ;; (program_enter streams its bytes from disk on demand) and
         ;; jmp program_enter.  Leaving [next_handoff_frame_phys] at
         ;; zero tells program_enter to allocate + zero a fresh handoff
@@ -521,12 +522,20 @@ vdso_install:
         hlt
         jmp $-1
 
-        ;; Physical address of `kernel_pd_template`, the page directory
-        ;; whose top-256 PDEs are copied into every per-program PD as
-        ;; the kernel half of the address space.  `high_entry` records
-        ;; the boot PD's phys here; `address_space_create` reads it
-        ;; when seeding each new per-program PD's kernel half.
-kernel_pd_template_phys dd 0
+        ;; Physical address of the kernel idle PD — a long-lived 4 KB
+        ;; kernel-only page directory built in `high_entry` by
+        ;; copy-imaging the boot PD's kernel half (PDEs 768..1023)
+        ;; into a fresh frame_alloc'd frame and leaving the user half
+        ;; (PDEs 0..767) zero.  Used as the canonical kernel-half PDE
+        ;; source for `address_space_create`, as CR3 between programs
+        ;; (post sys_exit / kill, before program_enter swaps in the
+        ;; next program's PD), and as the CR3-swap target during
+        ;; `address_space_destroy` (which cannot run on the dying PD
+        ;; it is about to frame_free).  Replaces the boot PD's
+        ;; permanent-frame role; the boot PD's frame is freed once
+        ;; the idle PD takes over, returning a 4 KB conventional
+        ;; frame to the bitmap pool for user pages.
+kernel_idle_pd_phys dd 0
 
         ;; Per-program-load state used by program_enter.
 current_pd_phys         dd 0    ; new PD being built
