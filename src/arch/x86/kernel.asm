@@ -62,6 +62,7 @@ directory_sector dw 0                   ; offset 3
         ;;     ... page-align up ...
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
+        ;;   FRAME_BITMAP_PHYS                    (FRAME_BITMAP_BYTES = 8 KB)
         ;;   LOW_RESERVE_BYTES                    (sweep ceiling)
         ;;
         ;; KERNEL_RESERVED_BASE is the first page above kernel.bin,
@@ -83,6 +84,12 @@ directory_sector dw 0                   ; offset 3
         ;; program_enter streams the binary directly from disk into
         ;; per-program user frames via vfs_read_sec, sector by sector.
         ;;
+        ;; frame_bitmap (8 KB, 256 MB ceiling) lives in the post-kernel
+        ;; cluster rather than inside kernel.bin so the 8 KB of zero-init
+        ;; storage isn't carried on disk.  frame_init zeroes it before
+        ;; any allocator call, so the on-disk garbage at that physical
+        ;; range doesn't matter.
+        ;;
         ;; ext2_search_blk's 1 KB sliding directory window
         ;; (`ext2_sd_buffer`) is allocated dynamically by `ext2_init`
         ;; from the bitmap allocator on a successful ext2 detect; bbfs
@@ -103,6 +110,8 @@ directory_sector dw 0                   ; offset 3
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE         equ 768
         FIRST_KERNEL_PT_PHYS     equ BOOT_PD_PHYS + 0x1000
+        FRAME_BITMAP_BYTES       equ 0x2000                              ; 8 KB (256 MB ceiling, mirrored in frame.asm)
+        FRAME_BITMAP_PHYS        equ FIRST_KERNEL_PT_PHYS + 0x1000
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
         KERNEL_LOAD_PHYS         equ 0x20000
@@ -110,9 +119,10 @@ directory_sector dw 0                   ; offset 3
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
-        LOW_RESERVE_BYTES        equ FIRST_KERNEL_PT_PHYS + 0x1000       ; bitmap-allocator sweep ceiling
+        LOW_RESERVE_BYTES        equ FRAME_BITMAP_PHYS + FRAME_BITMAP_BYTES       ; bitmap-allocator sweep ceiling
         SECTOR_BUFFER_BYTES      equ 512
         SECTOR_BUFFER_PHYS       equ KERNEL_STACK_TOP_PHYS
+        frame_bitmap             equ DIRECT_MAP_BASE + FRAME_BITMAP_PHYS
         kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
         sector_buffer            equ DIRECT_MAP_BASE + SECTOR_BUFFER_PHYS
@@ -202,7 +212,7 @@ high_entry:
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
         ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
         ;;      kernel image, kernel stack, sector_buffer, boot PD,
-        ;;      first kernel PT.
+        ;;      first kernel PT, frame_bitmap.
         mov eax, 0x10000
         mov ecx, 0x1000                 ; vDSO target page
         call frame_reserve_range

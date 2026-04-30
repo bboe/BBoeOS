@@ -50,7 +50,8 @@ Kernel-side fixed-physical regions, all reached through the kernel direct map at
 | ~`0x2C000..0x2C1FF` | `0xC002C000..` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
 | ~`0x2D000..0x2DFFF` | `0xC002D000..` | 4 KB | boot PD (`BOOT_PD_PHYS`; promoted to `kernel_pd_template`) | no |
 | ~`0x2E000..0x2EFFF` | `0xC002E000..` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
-| ~`0x2F000+` | `0xC002F000+` | -- | `LOW_RESERVE_BYTES` ceiling — the kernel reserves only this region (plus the vDSO target page at `0x10000`); everything else in conventional RAM is owned by the bitmap allocator (subject to E820's reserved regions, including the VGA aperture at `0xA0000..0xFFFFF`) | -- |
+| ~`0x2F000..0x30FFF` | `0xC002F000..` | 8 KB | `frame_bitmap` (256 MB ceiling; `frame_init` zero-fills before any allocator call, so the bytes don't ride on disk inside `kernel.bin`) | no |
+| ~`0x31000+` | `0xC0031000+` | -- | `LOW_RESERVE_BYTES` ceiling — the kernel reserves only this region (plus the vDSO target page at `0x10000`); everything else in conventional RAM is owned by the bitmap allocator (subject to E820's reserved regions, including the VGA aperture at `0xA0000..0xFFFFF`) | -- |
 | dynamic | dynamic | 4 KB | `ext2_sd_buffer` — frame allocated by `ext2_init` only when ext2 is detected (1 KB used for the 2-sector sliding directory window; bbfs systems never spend a frame on it) | no |
 | dynamic | dynamic | 4 KB | `net_receive_buffer` — frame allocated by `network_initialize` only when an NE2000 NIC is detected (1.5 KB used for one max-size Ethernet frame; sessions without `-device ne2k_isa` never spend a frame on it) | no |
 | dynamic | dynamic | 4 KB | `net_transmit_buffer` — same allocation policy as `net_receive_buffer`; second of two NIC scratch frames | no |
