@@ -1,30 +1,45 @@
 # BBoeOS
 
-A minimal x86 operating system with a single-file bootloader-plus-kernel, shell, filesystem, networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit ring-0 protected mode, and runs the shell and user programs from there.
+A minimal x86 operating system: a real-mode bootloader hands off to a
+paged 32-bit protected-mode kernel that runs userland programs at
+ring 3.  Includes a shell, VFS with bbfs and ext2 backends, NE2000
+networking (ARP / IP / ICMP / UDP), a self-hosted assembler, and a
+custom C subset compiler that translates `src/c/*.c` to NASM-compatible
+assembly on the host.
+
+The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`)
+concatenated on disk.  `boot.bin` is the MBR + post-MBR real-mode
+bootstrap + 32-bit paging bring-up; `kernel.bin` is the high-half
+kernel (`org 0xC0020000`) that owns drivers, filesystems, the network
+stack, and the INT 30h syscall surface.  Each user program runs in its
+own page directory built by `address_space_create`; the kernel half
+(PDEs 768..1023) is copy-imaged from a single `kernel_idle_pd`, and
+the user half holds the program's text, BSS, stack, and a shared
+vDSO page.
 
 ## Dependencies
 
 * nasm: `brew install nasm`
-* python3 (for `add_file.py`)
+* python3 (for `add_file.py`, `cc.py`, and the `tests/` harness)
 
 ## Minimum runtime requirements
 
 * **1 MB RAM** to boot the shell and run small programs (e.g. `hello`,
-  `date`, `uptime`, `ls`, `cat`).  The kernel image sits at phys
-  `0x20000` so its entire reserved region — image + 16 KB stack +
-  3 KB NIC buffers + 128 KB program_scratch + boot PD + first kernel
-  PT — fits below the VGA aperture at `0xA0000` in conventional
-  memory.  Confirmed by `tests/test_low_ram.py` running QEMU with
+  `date`, `uptime`, `ls`, `cat`).  The kernel-side fixed-physical
+  region — `kernel.bin` (~29 KB) + 4 KB kernel stack + first kernel
+  PT — sits in conventional RAM below the VGA aperture at `0xA0000`.
+  Filesystem and NIC scratch frames are allocated dynamically from
+  the bitmap allocator only when their subsystems initialize, so a
+  no-NIC boot never spends those frames.  Default for the `tests/`
+  harness is `qemu-system-i386 -m 1`.
+* **2 MB RAM** to additionally run the 1 MB-BSS editor (`edit`).
+  Each user program runs in its own per-program PD and
+  `program_enter` eagerly zero-fills the program's BSS, so `edit`'s
+  1 MB BSS is what sets this floor — every other program in `bin/`
+  (including the self-hosted assembler `asm`) runs comfortably under
   `-m 1`.
-* **2 MB RAM** to additionally run the heavier programs in `bin/`:
-  the self-hosted assembler (`asm`), the 1 MB-BSS editor (`edit`),
-  and the 256 KB-BSS BSS-stress test (`bigbss`).  Each user program
-  runs in its own per-program PD and `program_enter` eagerly
-  zero-fills the program's BSS, so the largest single user image
-  (edit at ~1 MB) sets this floor — not the sum of every program's
-  BSS.
-* `qemu-system-i386` defaults to 128 MB, which is comfortably above
-  either floor.  Pass `-m 1` for the minimum-RAM smoke test or `-m 2M`
+* `qemu-system-i386` defaults to 128 MB, comfortably above either
+  floor.  Pass `-m 1` for the minimum-RAM smoke test or `-m 2`
   (or higher) for the full-program contract.
 
 ## Building and running BBoeOS
@@ -55,8 +70,9 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 
 ```
 src/arch/x86/         Architecture-specific code
-  boot/bboeos.asm     Single flat-binary kernel: MBR + post-MBR kernel in one file
+  boot/boot.asm       Pre-paging boot binary: MBR + post-MBR + early-PE bootstrap
   boot/vga_font.asm   Boot-time BIOS ROM font copy into char-gen slot 0x4000
+  kernel.asm          Post-paging high-half kernel (org 0xC0020000)
   entry.asm           protected_mode_entry, IRQ 0 / IRQ 6 handlers, shell respawn
   idt.asm             32-bit IDT, exception stubs, INT 30h gate
   syscall.asm         INT 30h dispatch table
@@ -65,8 +81,9 @@ src/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
 src/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
 src/include/          Shared constants and helper includes
 src/lib/              shared_print_*, shared_die / shared_exit / shared_parse_argv
+src/memory_management/  Bitmap frame allocator (frame.asm)
 src/net/              ARP, IP, ICMP, UDP
-src/syscall/          per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
+src/syscall/          Per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
 src/c/                User-space programs (C sources, compiled by cc.py)
 add_file.py           Host-side script to add files to drive image
 cc.py                 Host-side C subset compiler

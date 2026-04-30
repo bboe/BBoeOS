@@ -1,6 +1,6 @@
 # BBoeOS
 
-A minimal x86 operating system with a single-file bootloader-plus-kernel, shell, filesystem, networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit protected mode, runs the kernel at ring 0 and userland programs at ring 3 (privileged instructions trap to `exc_common` with `EXC0D`).
+A minimal x86 operating system with a real-mode bootloader (`boot.bin`) and a paged high-half kernel (`kernel.bin`) concatenated on disk, plus a shell, VFS (bbfs + ext2), networking stack, self-hosted assembler, and C compiler.  Boots in 16-bit real mode, flips into flat 32-bit protected mode with paging, runs the kernel at ring 0 and userland programs at ring 3 in per-program page directories (privileged instructions trap to `exc_common` with `EXC0D`).
 
 ## Build and Run
 
