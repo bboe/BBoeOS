@@ -1,17 +1,21 @@
 ;;; ------------------------------------------------------------------------
-;;; kernel.asm — high-half kernel binary (org 0xC0100000).
+;;; kernel.asm — high-half kernel binary (org 0xC0020000).
 ;;;
-;;; Loaded onto disk after boot.bin and read into physical 0x10000 by
-;;; boot.asm's real-mode INT 13h, then relocated to physical 0x100000
-;;; (= virtual 0xC0100000) by `early_pe_entry` once paging is on.
+;;; Loaded onto disk after boot.bin and read into physical 0x20000 by
+;;; boot.asm's real-mode INT 13h.  The phys load address sits in
+;;; conventional RAM (above the vDSO target at 0x10000, below the VGA
+;;; aperture at 0xA0000) so the entire kernel-side reserved region
+;;; fits under 1 MB and the OS can boot under QEMU `-m 1`.  The
+;;; kernel `org` is 0xC0000000 + KERNEL_LOAD_PHYS, which means the
+;;; kernel runs at its direct-map alias — no separate higher-half PT.
 ;;;
 ;;; The very first byte of kernel.bin is `high_entry`, which boot.asm's
-;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0100000).
+;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0020000).
 ;;; high_entry installs the kernel GDT/IDT/stack, drops the boot
 ;;; identity mapping, initializes the bitmap frame allocator, allocates
-;;; only the kernel direct-map PTs needed for installed RAM (0..63,
-;;; covering virt 0xC0400000..0xCFFFFFFF), and jumps
-;;; into `protected_mode_entry` for driver / VFS / NIC / shell bring-up.
+;;; only the kernel direct-map PTs needed for installed RAM beyond the
+;;; first 4 MB, and jumps into `protected_mode_entry` for driver / VFS
+;;; / NIC / shell bring-up.
 ;;;
 ;;; Each program runs in its own per-program PD built by
 ;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
@@ -27,89 +31,95 @@
 ;;; per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
-        org 0C0100000h
+        org 0C0020000h
         bits 32
         %include "constants.asm"
 
-        ;; The kernel reads boot-time state (boot_disk, directory_sector)
-        ;; via the direct map at fixed low-physical addresses set by
-        ;; boot.asm before paging.  EQU aliases let kernel includes
-        ;; (drivers/fs.asm, fs/bbfs.asm, …) keep using the natural
-        ;; `[boot_disk]` / `[directory_sector]` syntax.
-boot_disk        equ BOOT_DISK_VIRT
-directory_sector equ DIRECTORY_SECTOR_VIRT
+        ;; Trampoline + boot stash at the very top of kernel.bin.
+        ;; boot.asm's far-jump targets virt 0xC0020000 = the first byte
+        ;; of kernel.bin; the trampoline skips past the stash to
+        ;; high_entry.  boot.asm writes boot_disk and directory_sector
+        ;; here AFTER loading kernel.bin (so the writes don't get
+        ;; overwritten by the load), then the kernel reads them via
+        ;; PDE[768]'s direct map.  Embedding them inside kernel.bin lets
+        ;; us drop the legacy phys 0x4D0 / 0x4D2 reservation: the IVT /
+        ;; BDA / 0x600-0x7BFF gap / MBR landing zone all stay in the
+        ;; bitmap allocator's free pool.
+        jmp short high_entry            ; 2 bytes (offset 0)
+boot_disk        db 0                   ; offset 2  (BOOT_STASH_OFFSET)
+directory_sector dw 0                   ; offset 3
+        ;; Pad to align high_entry on a 4-byte boundary.
+        times 8 - ($ - $$) db 0
 
-        ;; Sliding 2-sector window for ext2_search_blk's directory walk.
-        ;; Sits at low-phys 0xF200 (sector_buffer + 0x200, the next 1 KB
-        ;; of the same 4 KB frame) so the 1 KB doesn't burn disk space
-        ;; inside kernel.bin — same trick as kernel_stack / program_scratch.
-        ;; LOW_RESERVE_BYTES (0x202000) covers the entire 0..2 MB region,
-        ;; so this slot is pre-reserved by the bitmap allocator at boot
-        ;; and won't be handed out for general allocations.
-ext2_sd_buffer   equ 0xC000F200
-        ;; Disk sector buffer at fixed low-phys 0xF000 (kernel-virt
-        ;; 0xC000F000 via the direct map).  Stays at fixed phys for now;
-        ;; PR A migrated bbfs.asm / ext2.asm to 32-bit register accesses
-        ;; so it'll keep working post-shim via the kernel direct map.
-sector_buffer    equ 0xC000F000
-
-        BOOT_PD_PHYS            equ PROGRAM_SCRATCH_PHYS + PROGRAM_SCRATCH_BYTES
-        ;; Kernel-virt base of the direct map.  Subtract from any
-        ;; kernel-virt address to recover its physical alias.
-        DIRECT_MAP_BASE         equ 0C0000000h
-        FIRST_KERNEL_PT_PHYS    equ BOOT_PD_PHYS + 0x1000
-        KERNEL_FINAL_PHYS       equ 0x100000
-        LOW_RESERVE_BYTES       equ FIRST_KERNEL_PT_PHYS + 0x1000  ; bitmap-allocator sweep ceiling
-        ;; KERNEL_RESERVED_BASE is the first page above kernel.bin, computed
-        ;; by make_os.sh and passed as -DKERNEL_RESERVED_BASE=N.  The fallback
-        ;; keeps direct nasm invocations working with a valid (if not maximally
-        ;; packed) layout.
+        ;; Kernel-side memory layout.  In-memory order (low to high):
+        ;;
+        ;;   E820 table at phys 0x500             (read-only, from boot.asm)
+        ;;   vDSO target at phys 0x10000          (1 page, mapped per-PD)
+        ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
+        ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
+        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 8 KB)
+        ;;     net_receive_buffer / TX            (NET_BUFFER_BYTES × 2 = 3 KB)
+        ;;     sector_buffer                      (SECTOR_BUFFER_BYTES = 512 B)
+        ;;     ext2_sd_buffer                     (EXT2_SD_BUFFER_BYTES = 1 KB)
+        ;;     ... page-align up ...
+        ;;   PROGRAM_SCRATCH_PHYS                 (PROGRAM_SCRATCH_BYTES = 32 KB)
+        ;;   BOOT_PD_PHYS                         (4 KB)
+        ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
+        ;;   LOW_RESERVE_BYTES                    (sweep ceiling)
+        ;;
+        ;; KERNEL_RESERVED_BASE is the first page above kernel.bin,
+        ;; computed by make_os.sh and passed as -DKERNEL_RESERVED_BASE=N.
+        ;; The fallback below keeps direct nasm invocations working with
+        ;; a valid (if not maximally packed) layout.
+        ;;
+        ;; The post-kernel cluster (stack / NIC / disk buffers /
+        ;; program_scratch / boot PD / first PT) lives outside
+        ;; kernel.bin so the on-disk image doesn't carry their
+        ;; zero-initialized bytes; the bitmap allocator reserves the
+        ;; underlying frames via the `LOW_RESERVE_BYTES` sweep at boot.
+        ;; Pre-relocation, sector_buffer / ext2_sd_buffer sat at fixed
+        ;; low phys (0xF000 / 0xF200) for 16-bit `[bx+offset]` reach;
+        ;; bbfs.asm / ext2.asm are now fully 32-bit (`mov ebx,
+        ;; sector_buffer`) so they live in the post-kernel cluster like
+        ;; everything else.
+        ;;
+        ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER are bare uppercase
+        ;; aliases for the lowercase kernel-virt symbols — cc.py emits
+        ;; those names verbatim from C source via NAMED_CONSTANTS.
         %ifndef KERNEL_RESERVED_BASE
-        %define KERNEL_RESERVED_BASE 0x180000
+        %define KERNEL_RESERVED_BASE 0x40000
         %endif
-        ;; Ring-0 stack: 16 KB immediately above kernel.bin, accessed through
-        ;; the direct map.  Lives outside kernel.bin to avoid burning 16 KB of
-        ;; zero padding on disk; the bitmap allocator reserves the underlying
-        ;; frames at boot via the LOW_RESERVE_BYTES sweep.  Reachable from the
-        ;; very first instructions in `high_entry` because early-PE's PDE[768]
-        ;; direct map already covers phys 0..0x3FFFFF.
-        KERNEL_STACK_BYTES      equ 0x4000                       ; 16 KB
-        KERNEL_STACK_PHYS       equ KERNEL_RESERVED_BASE
-        KERNEL_STACK_TOP_PHYS   equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
-        kernel_stack            equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
-        kernel_stack_top        equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
-        ;; NE2000 polled-mode TX/RX scratch — same trick as the
-        ;; kernel stack: backing frames at fixed phys (right after
-        ;; the stack) reached through the direct map, so the buffers
-        ;; don't burn 3 KB of zero padding inside kernel.bin.  1536
-        ;; bytes apiece — one max-size Ethernet frame each (1500 MTU
-        ;; + 14-byte header + slop).  LOW_RESERVE_BYTES above covers
-        ;; the entire region.
-        NET_BUFFER_BYTES        equ 1536
-        NET_RECEIVE_BUFFER_PHYS equ KERNEL_STACK_TOP_PHYS               ; 0x184000
+        BOOT_PD_PHYS             equ PROGRAM_SCRATCH_PHYS + PROGRAM_SCRATCH_BYTES
+        DIRECT_MAP_BASE          equ 0C0000000h
+        E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
+        EXT2_SD_BUFFER_BYTES     equ 1024
+        EXT2_SD_BUFFER_PHYS      equ SECTOR_BUFFER_PHYS + SECTOR_BUFFER_BYTES
+        FIRST_KERNEL_PDE         equ 768
+        FIRST_KERNEL_PT_PHYS     equ BOOT_PD_PHYS + 0x1000
+        KERNEL_CODE_SELECTOR     equ 08h
+        KERNEL_DATA_SELECTOR     equ 10h
+        KERNEL_LOAD_PHYS         equ 0x20000
+        KERNEL_STACK_BYTES       equ 0x2000                              ; 8 KB
+        KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
+        KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
+        LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
+        LOW_RESERVE_BYTES        equ FIRST_KERNEL_PT_PHYS + 0x1000       ; bitmap-allocator sweep ceiling
+        NET_BUFFER_BYTES         equ 1536
+        NET_RECEIVE_BUFFER       equ net_receive_buffer
+        NET_RECEIVE_BUFFER_PHYS  equ KERNEL_STACK_TOP_PHYS
+        NET_TRANSMIT_BUFFER      equ net_transmit_buffer
         NET_TRANSMIT_BUFFER_PHYS equ NET_RECEIVE_BUFFER_PHYS + NET_BUFFER_BYTES
-        net_receive_buffer      equ DIRECT_MAP_BASE + NET_RECEIVE_BUFFER_PHYS
-        net_transmit_buffer     equ DIRECT_MAP_BASE + NET_TRANSMIT_BUFFER_PHYS
-        ;; Program-load scratch buffer.  vfs_load writes the freshly-
-        ;; loaded binary here; program_enter copies from here into the
-        ;; per-program PD's user pages.  128 KB headroom comfortably
-        ;; covers every program in src/c/ (largest is ~22 KB today).
-        ;; Lives at fixed phys above the NE2000 buffers, reached via
-        ;; the kernel direct map; same trick as kernel_stack — keeps
-        ;; the bytes out of kernel.bin's on-disk image.
-        PROGRAM_SCRATCH_BYTES   equ 128 * 1024                          ; 128 KB
-        PROGRAM_SCRATCH_PHYS    equ (NET_TRANSMIT_BUFFER_PHYS + NET_BUFFER_BYTES + 0xFFF) & ~0xFFF
-        program_scratch         equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
-        ;; Bare uppercase aliases — cc.py emits the original
-        ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER names from C source
-        ;; via NAMED_CONSTANTS.
-        NET_RECEIVE_BUFFER      equ net_receive_buffer
-        NET_TRANSMIT_BUFFER     equ net_transmit_buffer
-        E820_TABLE_VIRT         equ DIRECT_MAP_BASE + 0x500
-        FIRST_KERNEL_PDE        equ 768
-        LAST_KERNEL_PDE         equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
-        KERNEL_CODE_SELECTOR    equ 08h
-        KERNEL_DATA_SELECTOR    equ 10h
+        PROGRAM_SCRATCH_BYTES    equ 32 * 1024                           ; 32 KB
+        PROGRAM_SCRATCH_PHYS     equ (EXT2_SD_BUFFER_PHYS + EXT2_SD_BUFFER_BYTES + 0xFFF) & ~0xFFF
+        SECTOR_BUFFER_BYTES      equ 512
+        SECTOR_BUFFER_PHYS       equ NET_TRANSMIT_BUFFER_PHYS + NET_BUFFER_BYTES
+        ext2_sd_buffer           equ DIRECT_MAP_BASE + EXT2_SD_BUFFER_PHYS
+        kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
+        kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
+        net_receive_buffer       equ DIRECT_MAP_BASE + NET_RECEIVE_BUFFER_PHYS
+        net_transmit_buffer      equ DIRECT_MAP_BASE + NET_TRANSMIT_BUFFER_PHYS
+        program_scratch          equ DIRECT_MAP_BASE + PROGRAM_SCRATCH_PHYS
+        sector_buffer            equ DIRECT_MAP_BASE + SECTOR_BUFFER_PHYS
 
 high_entry:
         ;; --- Switch onto kernel-virt addresses for stack/GDT/IDT ---
@@ -139,12 +149,13 @@ high_entry:
         jmp KERNEL_CODE_SELECTOR:.cs_reloaded
 .cs_reloaded:
 
-        ;; Switch ESP to the kernel stack (16 KB at virt 0xC0180000,
-        ;; backed by phys 0x180000+; see KERNEL_STACK_PHYS for why it
-        ;; lives here instead of inside kernel.bin).  Reachable
-        ;; immediately because PDE[768]'s direct map covers
-        ;; phys 0..0x3FFFFF.  TSS.ESP0 is patched to the same later
-        ;; in protected_mode_entry.
+        ;; Switch ESP to the kernel stack (16 KB at KERNEL_RESERVED_BASE,
+        ;; reached through the direct map at kernel-virt
+        ;; DIRECT_MAP_BASE + KERNEL_RESERVED_BASE; see KERNEL_STACK_PHYS
+        ;; for why it lives here instead of inside kernel.bin).  Reachable
+        ;; immediately because PDE[768]'s direct map covers phys
+        ;; 0..0x3FFFFF.  TSS.ESP0 is patched to the same later in
+        ;; protected_mode_entry.
         mov esp, kernel_stack_top
 
         ;; Patch the high-half offsets of the static IDT entries (the
@@ -181,19 +192,27 @@ high_entry:
         mov esi, E820_TABLE_VIRT
         call frame_init
 
-        ;; Reserve everything from phys 0 up to and including the
-        ;; boot PD and first kernel PT in one sweep.  Covers BIOS /
-        ;; VGA / staging region / kernel image / kernel stack (at
-        ;; phys 0x180000) / NE2000 RX/TX scratch (0x184000+) /
-        ;; program_scratch (0x185000+) / boot PD / first kernel PT.
-        ;; The bitmap allocator only ever returns frames at phys
-        ;; LOW_RESERVE_BYTES (0x202000) and above, so the kernel PTs
-        ;; allocated next, every PD/PT/page built by
-        ;; `address_space_create` / `address_space_map_page`, and the
-        ;; shared vDSO frame all land in the high-physical region
-        ;; above LOW_RESERVE_BYTES.
-        xor eax, eax
-        mov ecx, LOW_RESERVE_BYTES
+        ;; Reserve only the regions the kernel still owns post-boot.
+        ;; The IVT / BDA / E820-staging page / 0x600..0x7BFF gap /
+        ;; MBR + post-MBR boot code / FD-table page / sector_buffer
+        ;; page / boot stack are all dead by now and stay free in the
+        ;; bitmap so the user pool can grow into them.  Two narrow
+        ;; reserves:
+        ;;
+        ;;   1. vDSO target frame at phys 0x10000.  One 4 KB page.
+        ;;      The vDSO is mapped into every per-program PD as a
+        ;;      shared user code page, so its phys location must
+        ;;      stay pinned.
+        ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
+        ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
+        ;;      kernel image, kernel stack, NIC RX/TX, sector_buffer,
+        ;;      ext2_sd_buffer, program_scratch, boot PD, first
+        ;;      kernel PT.
+        mov eax, 0x10000
+        mov ecx, 0x1000                 ; vDSO target page
+        call frame_reserve_range
+        mov eax, KERNEL_LOAD_PHYS
+        mov ecx, LOW_RESERVE_BYTES - KERNEL_LOAD_PHYS
         call frame_reserve_range
 
         ;; --- Allocate kernel PTs for installed RAM only ---

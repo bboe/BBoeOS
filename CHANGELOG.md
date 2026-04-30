@@ -6,6 +6,65 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Reclaim conventional low memory + tighten kernel-side reservations (2026-04-30)
+- `boot_disk` and `directory_sector` move out of fixed phys `0x4D0` /
+  `0x4D2` and into a 3-byte stash at the top of `kernel.bin`.  The
+  kernel image's first instruction is `jmp short high_entry` (a 2-byte
+  trampoline at offset 0); `boot.asm` writes the stash through
+  `ES:BOOT_STASH_OFFSET` *after* the kernel.bin INT 13h read so the
+  load can't clobber it.  Eliminates the legacy IVT/BDA reservation —
+  page 0 is now in the bitmap allocator's free pool.
+- The MBR's pre-stack `mov [BOOT_DISK_PHYS], dl` becomes `mov bp, dx`;
+  BP carries the BIOS drive number through to `post_mbr_continue`,
+  which uses it for the second INT 13h and then writes it into the
+  kernel's stash slot.
+- `sector_buffer` (512 B) and `ext2_sd_buffer` (1 KB) move out of
+  fixed phys `0xF000` / `0xF200` into the post-kernel reserved
+  region (right after the NIC TX buffer).  `bbfs.asm` and `ext2.asm`
+  are already 32-bit clean (`mov ebx, sector_buffer` / `[ebx+OFFSET]`),
+  so the legacy "16-bit `[bx+offset]`" justification for low-phys
+  pinning no longer applies.  The FD table is already in kernel BSS
+  (`struct fd fd_table[FD_MAX]` in `src/fs/fd.c`), so the historical
+  `0xE000` reservation was a phantom.
+- Kernel stack shrinks from 16 KB to 8 KB.  Linux i386 uses 8 KB and
+  BBoeOS's call depth is much shallower — every helper that recurses
+  was checked.
+- `program_scratch` shrinks from 128 KB to 32 KB.  Largest binary in
+  the tree is `asm` at ~17 KB; 32 KB leaves ~14 KB headroom.  Build
+  asserts the whole reserved region stays under `0xA0000`.
+- `high_entry` replaces the single `frame_reserve_range(0,
+  LOW_RESERVE_BYTES)` sweep with two narrow calls: one for the vDSO
+  target frame at `0x10000` and one for `KERNEL_LOAD_PHYS..
+  LOW_RESERVE_BYTES` (kernel image + KERNEL_RESERVED_BASE region).
+  Everything else in conventional low memory — IVT/BDA at `0..0x4FF`,
+  `0x600-0x7BFF` gap, MBR landing zone, dead post-MBR boot code, the
+  unused page at `0xE000`, and the boot stack at `0x9F000` — stays
+  free.  Combined with the program_scratch / kernel_stack /
+  disk-buffer cuts, the user pool grows by ~225 KB under `-m 1` (from
+  ~316 KB to ~540 KB).
+
+### Drop the kernel to phys 0x20000 / 1 MB minimum RAM (2026-04-30)
+- The kernel now loads at phys `0x20000` (in conventional RAM) instead
+  of `0x100000`.  `boot.asm`'s INT 13h reads `kernel.bin` directly to
+  its final home — `early_pe_entry` no longer needs the pre-paging
+  rep-movsd relocation copy.  `kernel.asm`'s `org` becomes
+  `0xC0020000`, which equals `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`,
+  so the kernel runs at its direct-map alias and PDE[768]'s 4 MB
+  direct map is the only mapping it needs (no separate higher-half
+  PT).
+- The entire kernel-side reserved region (image + 16 KB stack +
+  3 KB NIC bufs + 128 KB `program_scratch` + boot PD + first kernel
+  PT) now fits below the VGA aperture at `0xA0000`.  `make_os.sh`
+  asserts this at build time.  Combined with E820 marking the
+  reserved region above `0x9FC00`, the OS boots under
+  `qemu-system-i386 -m 1` (1 MB total).
+- New `tests/test_low_ram.py` smoke test boots the OS under `-m 1`
+  and runs `date` + `ls`.  Wired into the CI matrix to keep the new
+  contract honest.
+- `README.md`'s minimum-RAM section now describes both the 1 MB
+  small-program floor and the 2 MB full-program floor (driven by
+  `edit`'s 1 MB BSS and `asm`'s ~70 KB BSS).
+
 ### Move shell kill buffer into BSS (2026-04-30)
 - `shell.c` previously stored its Ctrl-K kill buffer at `SECTOR_BUFFER + 4`
   (phys `0xF000`), reachable through the pre-Phase-4 user shim's identity

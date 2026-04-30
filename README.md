@@ -9,16 +9,23 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 
 ## Minimum runtime requirements
 
-* **2 MB RAM** to boot the shell and run every program in `bin/`,
-  including the self-hosted assembler (`asm`), the 1 MB-BSS editor (`edit`),
-  and the 256 KB-BSS BSS-stress test (`bigbss`).  The kernel reserves
-  ~1.2 MB for code, stacks, NIC buffers, and the frame bitmap (the reserved
-  region is packed right after `kernel.bin`); each program runs in its own
-  per-program PD, so the largest single user image (edit at ~1 MB) sets the
-  minimum, not the sum of every program's BSS.
-* `qemu-system-i386` defaults to 128 MB, which is comfortably above the
-  2 MB floor.  Pass `-m 2M` (or higher) if you want to test under tighter
-  constraints.
+* **1 MB RAM** to boot the shell and run small programs (e.g. `hello`,
+  `date`, `uptime`, `ls`, `cat`).  The kernel image sits at phys
+  `0x20000` so its entire reserved region — image + 16 KB stack +
+  3 KB NIC buffers + 128 KB program_scratch + boot PD + first kernel
+  PT — fits below the VGA aperture at `0xA0000` in conventional
+  memory.  Confirmed by `tests/test_low_ram.py` running QEMU with
+  `-m 1`.
+* **2 MB RAM** to additionally run the heavier programs in `bin/`:
+  the self-hosted assembler (`asm`), the 1 MB-BSS editor (`edit`),
+  and the 256 KB-BSS BSS-stress test (`bigbss`).  Each user program
+  runs in its own per-program PD and `program_enter` eagerly
+  zero-fills the program's BSS, so the largest single user image
+  (edit at ~1 MB) sets this floor — not the sum of every program's
+  BSS.
+* `qemu-system-i386` defaults to 128 MB, which is comfortably above
+  either floor.  Pass `-m 1` for the minimum-RAM smoke test or `-m 2M`
+  (or higher) for the full-program contract.
 
 ## Building and running BBoeOS
 

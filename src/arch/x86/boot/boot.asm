@@ -6,7 +6,8 @@
 ;;;                      boot bytes; jumps into the post-MBR region
 ;;;                      once those sectors are resident.
 ;;;   [0x7E00..]        Post-MBR real-mode bootstrap: second INT 13h
-;;;                      read pulls kernel.bin into physical 0x10000,
+;;;                      read pulls kernel.bin into physical 0x20000
+;;;                      (its final home — no later relocation copy),
 ;;;                      then VGA font copy / E820 probe / PIC remap /
 ;;;                      A20 / GDT / CR0.PE flip / far-jump into the
 ;;;                      32-bit `early_pe_entry`.  Padded to a fixed
@@ -14,10 +15,12 @@
 ;;;                      measure kernel.bin's sector count.
 ;;;
 ;;; After the PE flip, `early_pe_entry` runs in flat 32-bit at low
-;;; physical, copies kernel.bin from 0x10000 to 0x100000, builds the
-;;; boot PD + first kernel PT, enables paging, and far-jumps to
-;;; `high_entry` at the kernel-virt entry point (0xC0100000 — the very
-;;; first byte of kernel.bin per its `org` directive).
+;;; physical, builds the boot PD + first kernel PT, enables paging,
+;;; and far-jumps to `high_entry` at the kernel-virt entry point
+;;; (0xC0020000 — the very first byte of kernel.bin per its `org`
+;;; directive, which equals 0xC0000000 + KERNEL_LOAD_PHYS so the
+;;; kernel runs in the direct map without needing a separate
+;;; higher-half mapping).
 ;;;
 ;;; boot.asm intentionally has no IDT.  An exception during early-PE
 ;;; bootstrap triple-faults; the bootstrap is short and tested.  The
@@ -68,32 +71,71 @@
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x180000
         %endif
-        KERNEL_STACK_BYTES_BOOT   equ 0x4000
-        NET_BUFFER_BYTES_BOOT     equ 1536
-        PROGRAM_SCRATCH_BYTES_BOOT equ 128 * 1024
-        KERNEL_STACK_TOP_BOOT     equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
-        NET_TX_END_BOOT           equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
-        PROGRAM_SCRATCH_PHYS_BOOT equ (NET_TX_END_BOOT + 0xFFF) & ~0xFFF
-        BOOT_PD_PHYS              equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
-        FIRST_KERNEL_PT_PHYS      equ BOOT_PD_PHYS + 0x1000
-        KERNEL_LOAD_PHYS        equ 0x10000     ; INT 13h read destination
-        KERNEL_FINAL_PHYS       equ 0x100000    ; final post-relocation phys
-        HIGH_ENTRY_VIRT         equ 0xC0100000  ; kernel.bin org / first byte
+        ;; Kernel-side layout mirror.  Must match the equ chain in
+        ;; src/arch/x86/kernel.asm so that boot.asm's BOOT_PD_PHYS and
+        ;; FIRST_KERNEL_PT_PHYS resolve to the same physical addresses
+        ;; the kernel already expects.  In-memory layout (low to high):
+        ;;   KERNEL_RESERVED_BASE          (kernel stack)
+        ;;     + KERNEL_STACK_BYTES_BOOT       (8 KB)
+        ;;     + NET_BUFFER_BYTES_BOOT × 2     (RX 1.5 KB + TX 1.5 KB)
+        ;;     + SECTOR_BUFFER_BYTES_BOOT      (512 B)
+        ;;     + EXT2_SD_BUFFER_BYTES_BOOT     (1024 B)
+        ;;     ... page-align ...
+        ;;   PROGRAM_SCRATCH_PHYS_BOOT
+        ;;     + PROGRAM_SCRATCH_BYTES_BOOT    (32 KB)
+        ;;   BOOT_PD_PHYS                      (4 KB)
+        ;;   FIRST_KERNEL_PT_PHYS              (4 KB)
+        ;;
+        ;; kernel.bin loads directly to its final physical home — there's
+        ;; no real-mode-to-PE relocation copy.  KERNEL_LOAD_PHYS sits
+        ;; above the vDSO target frame at phys 0x10000 and below the VGA
+        ;; aperture at phys 0xA0000, so the entire reserved region fits
+        ;; in conventional memory and the OS boots under QEMU `-m 1`.
+        ;;
+        ;; BOOT_DISK_PHYS / DIRECTORY_SECTOR_PHYS are the embedded boot
+        ;; stash inside kernel.bin (offset BOOT_STASH_OFFSET): a 1-byte
+        ;; boot_disk slot followed by a 2-byte directory_sector slot.
+        ;; boot.asm writes both AFTER the kernel.bin INT 13h read so the
+        ;; load doesn't clobber them.  HIGH_ENTRY_VIRT is the kernel
+        ;; far-jump target (= 0xC0000000 + KERNEL_LOAD_PHYS, so the
+        ;; kernel runs at its direct-map alias).
+        BOOT_DISK_PHYS              equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
+        BOOT_PD_PHYS                equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
+        DIRECTORY_SECTOR_PHYS       equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
+        EXT2_SD_BUFFER_BYTES_BOOT   equ 1024
+        EXT2_SD_END_BOOT            equ NET_TX_END_BOOT + SECTOR_BUFFER_BYTES_BOOT + EXT2_SD_BUFFER_BYTES_BOOT
+        FIRST_KERNEL_PT_PHYS        equ BOOT_PD_PHYS + 0x1000
+        HIGH_ENTRY_VIRT             equ 0xC0020000
+        KERNEL_LOAD_PHYS            equ 0x20000
+        KERNEL_STACK_BYTES_BOOT     equ 0x2000
+        KERNEL_STACK_TOP_BOOT       equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
+        NET_BUFFER_BYTES_BOOT       equ 1536
+        NET_TX_END_BOOT             equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
+        PROGRAM_SCRATCH_BYTES_BOOT  equ 32 * 1024
+        PROGRAM_SCRATCH_PHYS_BOOT   equ (EXT2_SD_END_BOOT + 0xFFF) & ~0xFFF
+        SECTOR_BUFFER_BYTES_BOOT    equ 512
 
 start:
         xor ax, ax
         mov ds, ax
         mov es, ax
-        mov [BOOT_DISK_PHYS], dl
 
         ;; Dedicated stack at SS=0x9000, SP=0xFFF0 (linear 0x90000-0x9FFF0)
         ;; owns its entire segment so it can never collide with the
-        ;; kernel image at 0x7C00 / 0x10000 / 0x100000.
+        ;; kernel image at 0x7C00 / 0x20000 or the post-MBR boot bytes.
         cli
         mov ax, 9000h
         mov ss, ax
         mov sp, 0FFF0h
         sti
+
+        ;; Save the BIOS drive number in BP for the rest of the
+        ;; real-mode bootstrap.  Avoids burning a permanent low-memory
+        ;; reservation for a single byte; the saved value is written
+        ;; into kernel.bin's embedded boot_disk slot once the kernel
+        ;; image is loaded.  BP is otherwise unused by the BIOS calls
+        ;; below.
+        mov bp, dx                      ; BPL = drive number
 
         ;; Reset disk controllers before the first read; defensive on
         ;; real hardware, no-op on QEMU.
@@ -108,8 +150,8 @@ start:
         mov al, BOOT_SECTORS
         mov bx, 7E00h
         mov cx, 2                       ; CH=cyl0, CL=sector2
-        mov dh, 0
-        mov dl, [BOOT_DISK_PHYS]
+        mov dx, bp                      ; DL=drive (DH cleared next)
+        xor dh, dh                      ; head 0
         int 13h
         jc .error
 
@@ -123,10 +165,10 @@ start:
         hlt
         jmp .halt
 
-        ;; boot_disk and directory_sector live at fixed low-physical
-        ;; addresses (BOOT_DISK_PHYS / DIRECTORY_SECTOR_PHYS) so the
-        ;; high-half kernel can read them through the direct map after
-        ;; paging is on.  No storage in the boot binary itself.
+        ;; boot_disk and directory_sector are written into kernel.bin's
+        ;; embedded boot stash (BOOT_STASH_OFFSET) after the kernel.bin
+        ;; load completes.  The kernel reads them through PDE[768]'s
+        ;; direct map; no permanent low-physical reservation needed.
 
         times 508-($-$$) db 0
         ;; kernel_bytes (offset 508): total post-MBR bytes (boot's
@@ -139,33 +181,41 @@ kernel_bytes dw (BOOT_SECTORS + KERNEL_SECTORS) * 512
 ;;; ----- Post-MBR boot region (0x7E00 onwards) -----
 
 post_mbr_continue:
-        ;; Compute and stash directory_sector for the filesystem layer.
-        ;; directory_sector = ceil(kernel_bytes / 512) + 1 = the LBA
-        ;; of the first directory sector right after the kernel image.
-        ;; Stored at fixed low-phys DIRECTORY_SECTOR_PHYS so the high-
-        ;; half kernel can read it through the direct map.
+        ;; Compute directory_sector = ceil(kernel_bytes / 512) + 1, the
+        ;; LBA of the first directory sector right after the kernel
+        ;; image.  Cached in SI for the post-load stash write below;
+        ;; can't be written into kernel.bin's embedded slot yet because
+        ;; the INT 13h that loads kernel.bin would clobber it.
         mov ax, [kernel_bytes]
         add ax, 511
         shr ax, 9
         inc ax
-        mov [DIRECTORY_SECTOR_PHYS], ax
+        mov si, ax                      ; SI = directory_sector
 
         ;; Load kernel.bin from disk into physical KERNEL_LOAD_PHYS
-        ;; (= 0x1000:0x0000 in real mode = 0x10000 linear).  The
+        ;; (= 0x2000:0x0000 in real mode = 0x20000 linear).  The
         ;; sector count is passed by the build script; the start CHS
         ;; sector is the first sector after boot.bin (1 MBR + BOOT_SECTORS
         ;; post-MBR ⇒ sector BOOT_SECTORS + 2 in 1-based CHS).
-        mov ax, 1000h
+        mov ax, 2000h
         mov es, ax
         xor bx, bx
         mov ah, 02h
         mov al, KERNEL_SECTORS
         mov ch, 0
-        mov dh, 0
         mov cl, BOOT_SECTORS + 2
-        mov dl, [BOOT_DISK_PHYS]
+        mov dx, bp                      ; DL=drive (DH cleared next)
+        xor dh, dh                      ; head 0
         int 13h
         jc .error_post
+
+        ;; Stash boot_disk and directory_sector into kernel.bin's
+        ;; embedded slot (BOOT_STASH_OFFSET).  ES = 0x2000 so
+        ;; ES:BOOT_STASH_OFFSET = phys 0x20000 + offset = the
+        ;; boot_disk byte (followed by directory_sector dw).
+        mov ax, bp                               ; AL = drive number
+        mov [es:BOOT_STASH_OFFSET], al           ; boot_disk (1 byte)
+        mov [es:BOOT_STASH_OFFSET + 1], si       ; directory_sector (2 bytes)
 
         ;; Reset ES so the rest of the real-mode code addresses
         ;; segment 0 normally.
@@ -279,15 +329,7 @@ early_pe_entry:
         mov gs, ax
         mov esp, 0x9FFF0                ; pre-paging stack (still low memory)
 
-        ;; Step 1: Copy kernel.bin from KERNEL_LOAD_PHYS to
-        ;; KERNEL_FINAL_PHYS.  KERNEL_SECTORS * 512 bytes / 4 dwords.
-        mov esi, KERNEL_LOAD_PHYS
-        mov edi, KERNEL_FINAL_PHYS
-        mov ecx, KERNEL_SECTORS * 512 / 4
-        cld
-        rep movsd
-
-        ;; Step 2: Build the first kernel PT at FIRST_KERNEL_PT_PHYS.
+        ;; Step 1: Build the first kernel PT at FIRST_KERNEL_PT_PHYS.
         ;; PTE[j] = (j * 0x1000) | P | RW | G  (U/S=0, kernel-only).
         ;; This single PT covers physical 0..4 MB and is hooked into
         ;; the boot PD twice — at PDE[0] (identity) and PDE[768]
@@ -303,7 +345,7 @@ early_pe_entry:
         cmp ecx, 1024
         jb .fill_pt
 
-        ;; Step 3: Zero the boot PD at BOOT_PD_PHYS, then install the
+        ;; Step 2: Zero the boot PD at BOOT_PD_PHYS, then install the
         ;; first kernel PT at PDE[0] (identity for first 4 MB) and
         ;; PDE[768] (kernel direct map at virt 0xC0000000..0xC03FFFFF).
         mov edi, BOOT_PD_PHYS
@@ -314,7 +356,7 @@ early_pe_entry:
         mov dword [BOOT_PD_PHYS + 0*4], FIRST_KERNEL_PT_PHYS | 0x003
         mov dword [BOOT_PD_PHYS + 768*4], FIRST_KERNEL_PT_PHYS | 0x003
 
-        ;; Step 4: Set CR3 = boot PD, enable PG | WP in CR0.
+        ;; Step 3: Set CR3 = boot PD, enable PG | WP in CR0.
         ;; CR0.WP makes ring-0 writes honor R/W bits in PTEs (so a
         ;; kernel write through a read-only user page #PFs instead of
         ;; silently succeeding).
@@ -324,9 +366,9 @@ early_pe_entry:
         or eax, 0x80010000              ; CR0.PG | CR0.WP
         mov cr0, eax
 
-        ;; Step 5: Far-jump to the high-half kernel entry.  EIP becomes
+        ;; Step 4: Far-jump to the high-half kernel entry.  EIP becomes
         ;; the kernel-virt address of high_entry (= the first byte of
-        ;; kernel.bin per its `org 0xC0100000`).  The identity map at
+        ;; kernel.bin per its `org 0xC0020000`).  The identity map at
         ;; PDE[0] keeps low-physical addresses (boot.asm's GDT etc.)
         ;; reachable until the kernel re-lgdts and tears identity down.
         jmp dword BOOT_CODE_SELECTOR:HIGH_ENTRY_VIRT

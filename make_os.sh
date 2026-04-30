@@ -50,13 +50,19 @@ KERNEL_SECTORS=$(( ( KERNEL_SIZE + 511 ) / 512 ))
 
 # Compute the first page above kernel.bin.  The kernel stack, NIC buffers,
 # program-scratch buffer, boot PD, and first kernel PT are stacked here.
-KERNEL_RESERVED_BASE=$(( (0x100000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
+# KERNEL_LOAD_PHYS = 0x20000 (must match boot.asm + kernel.asm).
+KERNEL_RESERVED_BASE=$(( (0x20000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
 
-# Safety: stack top must stay within the initial 4 MB direct-map window
-# that early_pe_entry builds; high_entry's first instruction (mov esp,
-# kernel_stack_top) relies on it being reachable before any extra PTs exist.
-if [ $(( KERNEL_RESERVED_BASE + 0x4000 )) -ge $(( 4 * 1024 * 1024 )) ]; then
-    echo "make_os.sh: kernel.bin too large — stack top would exceed 4 MB" >&2
+# Safety: the entire kernel-side reserved region must stay below the
+# VGA aperture at phys 0xA0000.  Approximate region size: 8 KB stack +
+# 4 KB net (page-aligned from 3 KB) + 4 KB sector_buffer +
+# ext2_sd_buffer (page-aligned from 1.5 KB) + 32 KB program_scratch +
+# 4 KB boot PD + 4 KB first kernel PT = 56 KB = 0xE000.  Keeping the
+# whole region under 0xA0000 lets the OS boot under QEMU `-m 1` (1 MB
+# total), where conventional RAM ends at 0x9FC00.
+KERNEL_RESERVED_END=$(( KERNEL_RESERVED_BASE + 0xE000 ))
+if [ $KERNEL_RESERVED_END -ge $(( 0xA0000 )) ]; then
+    echo "make_os.sh: kernel reserved region (ends at $(printf 0x%x $KERNEL_RESERVED_END)) crosses the VGA hole at 0xA0000" >&2
     exit 1
 fi
 
