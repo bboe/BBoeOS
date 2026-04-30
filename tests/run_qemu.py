@@ -50,6 +50,8 @@ def run_commands(
     command_timeout: float = COMMAND_TIMEOUT,
     drive: Path = DEFAULT_IMAGE,
     floppy: bool = False,
+    machine: str | None = None,
+    memory: str | None = None,
     pcap: Path | None = None,
     retry: bool = True,
     snapshot: bool = False,
@@ -66,10 +68,21 @@ def run_commands(
     INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
     which is the harder path to keep working as the kernel evolves.
 
+    *memory* (e.g. ``"16M"``) appends ``-m <memory>`` to QEMU; *machine*
+    (e.g. ``"acpi=off"``) appends ``-machine <machine>``.  Both fall back
+    to ``BBOE_QEMU_MEMORY`` / ``BBOE_QEMU_MACHINE`` env vars when unset,
+    so the self-review driver can sweep configurations without per-script
+    CLI plumbing.  Defaults are still ``None`` (no flag) — existing callers
+    keep QEMU's defaults.
+
     When *retry* is True (the default) and a TimeoutError occurs, the entire
     QEMU session is retried once with 50% more time for both boot and command
     timeouts.  A second timeout raises immediately.
     """
+    if memory is None:
+        memory = os.environ.get("BBOE_QEMU_MEMORY") or None
+    if machine is None:
+        machine = os.environ.get("BBOE_QEMU_MACHINE") or None
     try:
         return _run_commands_once(
             commands,
@@ -77,6 +90,8 @@ def run_commands(
             command_timeout=command_timeout,
             drive=drive,
             floppy=floppy,
+            machine=machine,
+            memory=memory,
             pcap=pcap,
             snapshot=snapshot,
             with_net=with_net,
@@ -90,6 +105,8 @@ def run_commands(
             command_timeout=command_timeout * 1.5,
             drive=drive,
             floppy=floppy,
+            machine=machine,
+            memory=memory,
             pcap=pcap,
             snapshot=snapshot,
             with_net=with_net,
@@ -123,6 +140,8 @@ def _run_commands_once(
     command_timeout: float,
     drive: Path,
     floppy: bool,
+    machine: str | None,
+    memory: str | None,
     pcap: Path | None,
     snapshot: bool,
     with_net: bool,
@@ -152,6 +171,10 @@ def _run_commands_once(
             "-serial",
             "chardev:s",
         ]
+        if memory is not None:
+            qemu_args += ["-m", memory]
+        if machine is not None:
+            qemu_args += ["-machine", machine]
         if with_net:
             qemu_args += [
                 "-netdev",
@@ -277,6 +300,18 @@ def main() -> int:
         help="attach drive as primary floppy (if=floppy) instead of IDE",
     )
     parser.add_argument(
+        "--machine",
+        type=str,
+        default=None,
+        help="value for -machine (e.g. 'acpi=off'); falls back to $BBOE_QEMU_MACHINE",
+    )
+    parser.add_argument(
+        "--memory",
+        type=str,
+        default=None,
+        help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY",
+    )
+    parser.add_argument(
         "--net",
         action="store_true",
         help="attach NE2000 NIC (user-mode networking)",
@@ -305,6 +340,8 @@ def main() -> int:
         command_timeout=arguments.timeout,
         drive=arguments.drive,
         floppy=arguments.floppy,
+        machine=arguments.machine,
+        memory=arguments.memory,
         pcap=arguments.pcap,
         snapshot=arguments.snapshot,
         with_net=arguments.net,
