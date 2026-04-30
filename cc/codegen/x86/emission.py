@@ -38,6 +38,10 @@ from cc.ast_nodes import (
     If,
     Index,
     IndexAssign,
+    IndexMemberAccess,
+    IndexMemberAssign,
+    IndexMemberIndex,
+    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     MemberAccess,
@@ -1042,6 +1046,10 @@ class EmissionMixin:
             self.generate_member_access(expression)
         elif isinstance(expression, MemberIndex):
             self.generate_member_index(expression)
+        elif isinstance(expression, IndexMemberAccess):
+            self.generate_index_member_access(expression)
+        elif isinstance(expression, IndexMemberIndex):
+            self.generate_index_member_index(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -1914,6 +1922,12 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, IndexMemberAssign):
+            self.generate_index_member_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, IndexMemberIndexAssign):
+            self.generate_index_member_index_assign(statement)
             self.ax_clear()
         elif isinstance(statement, TailCall):
             self.generate_tail_call(statement)
