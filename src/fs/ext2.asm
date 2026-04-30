@@ -359,8 +359,8 @@ ext2_load:
         .el_direct:
         shl ax, 1                       ; index * 2 (word-sized entries in ext2_load_blks)
         movzx ebx, ax                   ; EBX (not BX) — ext2_load_blks lives in the
-                                        ; kernel image at virt 0xC01xxxxx, outside the
-                                        ; user shim's 16-bit alias window.
+                                        ; kernel image at virt 0xC01xxxxx, beyond
+                                        ; 16-bit reach.
         mov ax, [ext2_load_blks + ebx]
         .el_got_block:
         test ax, ax
@@ -1295,8 +1295,8 @@ ext2_delete:
         call write_sector
         jc .edl_err
         ;; Free direct blocks 0-11.  EBX (not BX) — ext2_dl_blks lives in
-        ;; the kernel image at virt 0xC01xxxxx, outside the user shim's
-        ;; 16-bit alias window.  See ext2_search_dir for the same reason.
+        ;; the kernel image at virt 0xC01xxxxx, beyond 16-bit reach.
+        ;; See ext2_search_dir for the same reason.
         mov ebx, ext2_dl_blks
         mov cx, 12
         .edl_free_direct:
@@ -2887,8 +2887,8 @@ ext2_search_dir:
         dec ecx
         jnz .esd_save
         ;; Search each direct block.  EBX (not BX) — ext2_dir_blks lives in
-        ;; the kernel image at virt 0xC01xxxxx, outside the user shim's 16-bit
-        ;; alias window, so truncating to BX would read random low memory.
+        ;; the kernel image at virt 0xC01xxxxx, beyond 16-bit reach, so
+        ;; truncating to BX would read random low memory.
         mov ebx, ext2_dir_blks          ; EBX = pointer into block list
         .esd_next_blk:
         mov ax, [ebx]
