@@ -6,12 +6,11 @@
 // The dispatchers tail-call through cc.py's __tail_call into the
 // per-fd-type handlers in fs/fd/{console,fs,net}.c.
 //
-// Two pieces still live in inline asm:
-// - fd_open: blocks on cc.py multi-output for vfs_find / vfs_create
-//   (it needs to read a cluster of vfs_found_* globals).
-// - fd_ioctl: cmd byte arrives in AL, but cc.py's __tail_call
-//   hardcodes the function pointer in EAX; the existing dispatcher
-//   uses jmp ebx specifically to keep AL intact for the handler.
+// Only fd_open still lives in inline asm.  It blocks on porting
+// fs/vfs.asm — fd_open reads a cluster of vfs_found_* globals
+// populated by vfs_find / vfs_create, which only become C-visible
+// once vfs.asm itself ports (via cc.py's file-scope function_pointer
+// support and an extern struct vfs_found global).
 //
 // Calling conventions (input/output registers, CF semantics) are
 // preserved across the port so external callers (syscall.asm and the
@@ -61,6 +60,7 @@ struct fd_ops_entry {
 // Forward declarations for the per-fd-type handlers.  The bodies
 // live in fs/fd/{console,fs,net}.c; only the symbol identity matters
 // for the static initializer below.
+int fd_ioctl_vga();
 int fd_read_console();
 int fd_read_dir();
 int fd_read_file();
@@ -78,6 +78,25 @@ struct fd_ops_entry fd_ops[8] = {
     { fd_read_net,     fd_write_net },      // FD_TYPE_NET (5)
     { 0,               0 },                 // FD_TYPE_UDP (6)
     { 0,               0 },                 // FD_TYPE_VGA (7)
+};
+
+// fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
+// means "no ioctl support".  Wrapped in a one-field struct because
+// cc.py rejects ``int (*name[N])()`` array-of-function_pointer at
+// file scope; the struct workaround is identical at the byte level.
+struct fd_ioctl_op {
+    int (*ioctl)();
+};
+
+struct fd_ioctl_op fd_ioctl_ops[8] = {
+    { 0 },                  // FD_TYPE_FREE (0)
+    { 0 },                  // FD_TYPE_CONSOLE (1)
+    { 0 },                  // FD_TYPE_DIRECTORY (2)
+    { 0 },                  // FD_TYPE_FILE (3)
+    { 0 },                  // FD_TYPE_ICMP (4)
+    { 0 },                  // FD_TYPE_NET (5)
+    { 0 },                  // FD_TYPE_UDP (6)
+    { fd_ioctl_vga },       // FD_TYPE_VGA (7)
 };
 
 // fd_table — kernel BSS, FD_MAX entries × 32 bytes.  The asm
@@ -179,6 +198,32 @@ void fd_init() {
     cursor = cursor + 1;
     cursor->type = FD_TYPE_CONSOLE;
     cursor->flags = O_WRONLY;
+}
+
+// fd_ioctl: dispatch on entry->type into fd_ioctl_ops[type].ioctl.
+// Inputs are AL = cmd, BX = fd, plus per-(type, cmd) extras (ECX/EDX)
+// that flow through to the handler unchanged.  The function pointer
+// is pinned to EBX so the tail-jump (``jmp ebx``) doesn't clobber AL
+// — fd_ioctl_vga reads AL directly to pick the sub-command.  Error
+// path: ``stc; ret`` with AX left at whatever the syscall layer
+// preserved (matching the asm version's contract).
+__attribute__((carry_return))
+int fd_ioctl(int cmd __attribute__((in_register("ax"))),
+             int fd_num __attribute__((in_register("bx")))) {
+    struct fd *entry;
+    struct fd_ioctl_op *op;
+    int (*handler)(int c __attribute__((in_register("ax"))),
+                   struct fd *e __attribute__((in_register("esi"))))
+                   __attribute__((pinned_register("ebx")));
+    if (!fd_lookup(fd_num, &entry)) {
+        return 0;
+    }
+    op = fd_ioctl_ops + entry->type;
+    handler = op->ioctl;
+    if (handler == 0) {
+        return 0;
+    }
+    __tail_call(handler, cmd, entry);
 }
 
 // fd_lookup: validate fd in BX, return ESI = entry pointer.  CF set
@@ -344,33 +389,9 @@ asm("fd_open:\n"
 "        stc\n"
 "        ret\n"
 "\n"
-"fd_ioctl:\n"
-"        call fd_lookup\n"
-"        jc .ioctl_err\n"
-"        movzx ebx, byte [esi+FD_OFFSET_TYPE]\n"
-"        shl ebx, 2              ; one dword per entry\n"
-"        mov ebx, [fd_ioctl_ops+ebx]\n"
-"        test ebx, ebx\n"
-"        jz .ioctl_err\n"
-"        jmp ebx\n"
-"        .ioctl_err:\n"
-"        stc\n"
-"        ret\n"
-"\n"
 "%include \"fs/fd/console.kasm\"\n"
 "%include \"fs/fd/fs.kasm\"\n"
 "%include \"fs/fd/net.kasm\"\n"
-"\n"
-"        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.\n"
-"fd_ioctl_ops:\n"
-"        dd 0                    ; FD_TYPE_FREE (0)\n"
-"        dd 0                    ; FD_TYPE_CONSOLE (1)\n"
-"        dd 0                    ; FD_TYPE_DIRECTORY (2)\n"
-"        dd 0                    ; FD_TYPE_FILE (3)\n"
-"        dd 0                    ; FD_TYPE_ICMP (4)\n"
-"        dd 0                    ; FD_TYPE_NET (5)\n"
-"        dd 0                    ; FD_TYPE_UDP (6)\n"
-"        dd fd_ioctl_vga         ; FD_TYPE_VGA (7)\n"
 "\n"
 "        DEV_VGA_PATH    db \"/dev/vga\", 0\n"
 "        fd_open_fd      dw 0\n"
