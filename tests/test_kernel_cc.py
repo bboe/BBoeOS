@@ -597,6 +597,61 @@ def test_out_register_capture_not_destroyed_by_pinned_push_pop() -> None:
     )
 
 
+def test_out_register_capture_widens_into_local_32bit() -> None:
+    """A 16-bit out_register captured into a 32-bit local slot zero-extends.
+
+    Without widening, ``mov [local], bx`` would write only the low 16
+    bits of the 4-byte slot, leaving the upper 16 bits stale.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int reader(int *byte_offset __attribute__((out_register("bx"))));
+
+        int caller() {
+            int offset;
+            int total;
+            reader(&offset);
+            total = offset + 1;
+            return total;
+        }
+    """,
+        bits=32,
+    )
+    # The capture must zero-extend BX into EBX before the 4-byte spill.
+    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' for 16-bit out_register into 32-bit slot:\n{asm}"
+
+
+def test_out_register_capture_widens_into_pinned_eregister_32bit() -> None:
+    """A 16-bit out_register captured into a pinned E-register zero-extends.
+
+    Scenario: ``offset`` auto-pins to EBX (multiple uses, one call → references > clobber).
+    ``reader`` returns its result via ``out_register("bx")``.  cc.py must emit
+    ``movzx ebx, bx`` to put the captured value into the pinned register with
+    clean upper bytes; a bare ``mov ebx, bx`` is invalid (mixed widths).
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int reader(int *byte_offset __attribute__((out_register("bx"))));
+
+        int chunk_size(int left) {
+            int offset;
+            int chunk;
+            reader(&offset);
+            chunk = 512 - offset;
+            if (chunk > left) {
+                chunk = left;
+            }
+            return chunk;
+        }
+    """,
+        bits=32,
+    )
+    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' capture into pinned EBX:\n{asm}"
+    assert "mov ebx, bx" not in asm, f"raw 'mov ebx, bx' is mixed-width and invalid:\n{asm}"
+
+
 def test_out_register_prototype_registers_convention() -> None:
     """A function prototype with out_register is retained in the AST and registers the convention."""
     # If the prototype is silently dropped, generate_call won't know about out_register
@@ -1347,6 +1402,176 @@ def test_tail_call_arg_count_mismatch_raises_error() -> None:
         }
     """)
     assert "__tail_call" in error, f"Expected __tail_call arity error, got: {error}"
+
+
+# ---------------------------------------------------------------------------
+# pinned_register on function_pointer locals (controls __tail_call register)
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_function_pointer_emits_jmp_via_pinned_register() -> None:
+    """``pinned_register("ebx")`` on a function_pointer makes __tail_call jmp ebx.
+
+    Motivation: fd_ioctl receives ``cmd`` in AL and tail-calls the
+    per-FD-type ioctl handler.  Routing the function pointer through
+    EAX would clobber AL before the handler reads it; pinning the
+    pointer to EBX keeps AL intact through the dispatch.
+    """
+    asm = _kernel(
+        """
+        int get_fn();
+        __attribute__((carry_return))
+        int dispatch(int cmd __attribute__((in_register("ax")))) {
+            int (*handler)(int c __attribute__((in_register("ax"))))
+                __attribute__((pinned_register("ebx")));
+            handler = get_fn();
+            __tail_call(handler, cmd);
+        }
+    """,
+        bits=32,
+    )
+    assert "jmp ebx" in asm, f"__tail_call with pinned_register must emit 'jmp ebx'\n{asm}"
+    assert "jmp eax" not in asm, f"must not jmp via eax when pinned to ebx\n{asm}"
+    # The pinned register receives the function-pointer value via the
+    # standard return-value plumbing (mov ebx, eax after the helper call).
+    assert "mov ebx, eax" in asm, f"must move return value into the pinned register\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# Dot member access on file-scope struct globals (extern struct support)
+# ---------------------------------------------------------------------------
+
+
+def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
+    """``obj.field`` on a file-scope struct global emits ``[_g_obj+offset]``.
+
+    Motivation: fd_open's port wants to read ``vfs_found.size`` etc.
+    after vfs_find populates the struct.  No base-register load needed
+    because the struct's address is a compile-time symbol.
+    """
+    asm = _kernel(
+        """
+        struct vfs_found_t { uint8_t type; uint8_t mode; uint16_t inode; uint32_t size; };
+        extern struct vfs_found_t vfs_found;
+        int read_size(int *r __attribute__((out_register("ax")))) {
+            *r = vfs_found.size;
+            return 1;
+        }
+    """,
+        bits=32,
+    )
+    assert "[_g_vfs_found+4]" in asm, f"expected direct memory access\n{asm}"
+
+
+def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
+    """``obj.field = expr;`` on a file-scope struct global emits direct stores."""
+    asm = _kernel(
+        """
+        struct slot { uint8_t kind; uint16_t value; };
+        struct slot entry;
+        void set() {
+            entry.kind = 5;
+            entry.value = 42;
+        }
+    """,
+        bits=32,
+    )
+    # cc.py packs struct fields tightly (no alignment padding), so the
+    # uint16_t value sits immediately after the uint8_t kind at offset 1.
+    assert "mov byte [_g_entry], al" in asm, f"expected byte write to _g_entry\n{asm}"
+    assert "mov word [_g_entry+1], ax" in asm, f"expected word write to _g_entry+1\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# File-scope function_pointer globals
+# ---------------------------------------------------------------------------
+
+
+def test_file_scope_function_pointer_emits_storage_and_indirect_call() -> None:
+    """File-scope function_pointer compiles to storage + indirect call.
+
+    ``int (*name)(...);`` emits ``_g_<name>`` storage and ``name(args)``
+    becomes ``mov eax, [_g_<name>]; call eax``.
+    """
+    asm = _kernel(
+        """
+        int (*vfs_find_fn)();
+        int dispatch() {
+            vfs_find_fn();
+            return 1;
+        }
+    """,
+        bits=32,
+    )
+    assert "_g_vfs_find_fn:" in asm, f"expected storage label\n{asm}"
+    assert "mov eax, [_g_vfs_find_fn]" in asm, f"expected indirect load\n{asm}"
+    assert "call eax" in asm, f"expected indirect call\n{asm}"
+
+
+def test_file_scope_function_pointer_assignment_uses_function_symbol() -> None:
+    """Bare function name decays to its address in an assignment.
+
+    ``vfs_find_fn = my_handler;`` emits ``mov eax, my_handler`` (the
+    function's link-time address) followed by ``mov [_g_name], eax``.
+    """
+    asm = _kernel(
+        """
+        int my_handler();
+        int (*vfs_find_fn)();
+        void register_handler() {
+            vfs_find_fn = my_handler;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov eax, my_handler" in asm, f"expected function-symbol load\n{asm}"
+    assert "mov [_g_vfs_find_fn], eax" in asm, f"expected store to global\n{asm}"
+
+
+def test_file_scope_function_pointer_tail_call() -> None:
+    """``__tail_call`` works on a file-scope function_pointer global.
+
+    Emits ``mov eax, [_g_<name>]; jmp eax`` after frame teardown.
+    """
+    asm = _kernel(
+        """
+        int (*vfs_find_fn)(int x __attribute__((in_register("ebx"))));
+        __attribute__((carry_return))
+        int dispatch(int v __attribute__((in_register("ebx")))) {
+            __tail_call(vfs_find_fn, v);
+        }
+    """,
+        bits=32,
+    )
+    assert "mov eax, [_g_vfs_find_fn]" in asm, f"expected indirect load before jmp\n{asm}"
+    assert "jmp eax" in asm, f"expected jmp eax\n{asm}"
+
+
+def test_dot_access_on_local_struct_still_rejected() -> None:
+    """Dot-access on a local struct value (not a pointer) still raises an error."""
+    error = _kernel_error(
+        """
+        struct s { uint8_t x; };
+        void bad() {
+            struct s local;
+            int y;
+            y = local.x;
+        }
+    """,
+        bits=32,
+    )
+    assert "dot member access" in error, f"Expected dot-access rejection, got: {error}"
+
+
+def test_pinned_register_on_non_function_pointer_rejected() -> None:
+    """``pinned_register`` on a plain int local is rejected at parse time."""
+    error = _kernel_error("""
+        void bad() {
+            int x __attribute__((pinned_register("ebx")));
+            x = 0;
+        }
+    """)
+    assert "pinned_register" in error, f"Expected pinned_register error, got: {error}"
 
 
 # ---------------------------------------------------------------------------

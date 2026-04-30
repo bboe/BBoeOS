@@ -688,15 +688,63 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit_constant_reference(reference)
 
     def generate_member_access(self, expression: MemberAccess, /) -> None:
-        """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue."""
-        if not expression.arrow:
-            message = "dot member access on local struct values is not yet supported; use a pointer and '->'"
-            raise CompileError(message, line=expression.line)
+        """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue.
+
+        The pointer form (``ptr->field``) loads the base via the pointer
+        variable.  The dot form (``obj.field``) is supported only for
+        file-scope struct globals where the address of the struct is a
+        compile-time symbol (``[_g_obj+offset]``); for those, no base
+        register is needed.
+        """
         object_name = expression.object_name
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
             message = f"undefined variable '{object_name}'"
             raise CompileError(message, line=expression.line)
+        # Dot-access path: ``obj.field`` on a file-scope struct global.
+        # The base address resolves to the symbol literal ``_g_<obj>``
+        # (or the asm_name target / extern-resolved name); the field load
+        # just adds the field offset.
+        if not expression.arrow:
+            if struct_type.endswith("*") or not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=expression.line)
+            if object_name not in self.global_scalars:
+                message = "dot member access on local struct values is not yet supported; use a pointer and '->'"
+                raise CompileError(message, line=expression.line)
+            tag = struct_type[7:]
+            layout = self.struct_layouts.get(tag)
+            if layout is None:
+                message = f"unknown struct '{tag}'"
+                raise CompileError(message, line=expression.line)
+            if expression.member_name not in layout:
+                message = f"struct '{tag}' has no field '{expression.member_name}'"
+                raise CompileError(message, line=expression.line)
+            offset, field_size, element_size = layout[expression.member_name]
+            is_array_field = field_size != element_size
+            base_symbol = self._local_address(object_name)
+            self.ax_clear()
+            if is_array_field:
+                # Array field: yield the field address as an immediate.
+                if offset:
+                    self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+                else:
+                    self.emit(f"        mov {self.target.acc}, {base_symbol}")
+                self.ax_clear()
+                return
+            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+            if field_size not in allowed_sizes:
+                message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
+                raise CompileError(message, line=expression.line)
+            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            if field_size == 1:
+                self.emit_byte_load_zx(addr)
+            elif field_size == 2 and self.target.int_size == 4:
+                self.emit(f"        movzx {self.target.acc}, word {addr}")
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+            self.ax_clear()
+            return
         if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
             message = f"'->' requires a pointer to struct, got type '{struct_type}'"
             raise CompileError(message, line=expression.line)
@@ -726,7 +774,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        mov {self.target.acc}, {base_reg}")
             self.ax_clear()
             return
-        if field_size not in (1, 2):
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
@@ -738,20 +787,57 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
+            # 32-bit target: clear upper bytes of EAX so downstream
+            # ``test eax, eax`` / signed compares don't read stale bits
+            # left behind by a wider previous load.
+            self.emit(f"        movzx {self.target.acc}, word {addr}")
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
         self.ax_clear()
 
     def generate_member_assign(self, statement: MemberAssign, /) -> None:
-        """Generate code for ``ptr->field = expr;``."""
-        if not statement.arrow:
-            message = "dot member assign on local struct values is not yet supported; use a pointer and '->'"
-            raise CompileError(message, line=statement.line)
+        """Generate code for ``ptr->field = expr;`` or ``obj.field = expr;``.
+
+        The dot form is supported on file-scope struct globals; the
+        target address resolves to ``[_g_obj+offset]`` directly.
+        """
         object_name = statement.object_name
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
             message = f"undefined variable '{object_name}'"
             raise CompileError(message, line=statement.line)
+        if not statement.arrow:
+            if struct_type.endswith("*") or not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=statement.line)
+            if object_name not in self.global_scalars:
+                message = "dot member assign on local struct values is not yet supported; use a pointer and '->'"
+                raise CompileError(message, line=statement.line)
+            tag = struct_type[7:]
+            layout = self.struct_layouts.get(tag)
+            if layout is None:
+                message = f"unknown struct '{tag}'"
+                raise CompileError(message, line=statement.line)
+            if statement.member_name not in layout:
+                message = f"struct '{tag}' has no field '{statement.member_name}'"
+                raise CompileError(message, line=statement.line)
+            offset, field_size, _element_size = layout[statement.member_name]
+            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+            if field_size not in allowed_sizes:
+                message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
+                raise CompileError(message, line=statement.line)
+            self.ax_clear()
+            self.generate_expression(statement.expr)
+            base_symbol = self._local_address(object_name)
+            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            if field_size == 1:
+                self.emit(f"        mov byte {addr}, al")
+            elif field_size == 2 and self.target.int_size == 4:
+                self.emit(f"        mov word {addr}, ax")
+            else:
+                self.emit(f"        mov {addr}, {self.target.acc}")
+            return
         if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
             message = f"'->' requires a pointer to struct, got type '{struct_type}'"
             raise CompileError(message, line=statement.line)
@@ -764,7 +850,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{statement.member_name}'"
             raise CompileError(message, line=statement.line)
         offset, field_size, _element_size = layout[statement.member_name]
-        if field_size not in (1, 2):
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
             message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=statement.line)
         self.ax_clear()
@@ -779,6 +866,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
         if field_size == 1:
             self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
         else:
             self.emit(f"        mov {addr}, {self.target.acc}")
 
@@ -1280,6 +1369,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.asm_symbol_globals[name] = declaration.asm_symbol
                 if declaration.is_extern:
                     self.extern_globals.add(name)
+                # Track the type so member-access codegen can resolve
+                # ``vfs_found.field`` on struct globals (only globals that
+                # are actually struct values participate, since
+                # variable_types is otherwise scoped to function locals).
+                if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
+                    self.variable_types[name] = declaration.type_name
+                # File-scope function_pointer globals (e.g. vfs.asm's
+                # vfs_find_fn) need the variable type recorded here so
+                # downstream codegen knows the symbol is callable; the
+                # per-param in_register map is re-published into
+                # ``function_pointer_in_registers`` from
+                # ``generate_function`` since that dict is per-function
+                # state.
+                if declaration.type_name == "function_pointer":
+                    self.variable_types[name] = "function_pointer"
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
@@ -1722,6 +1826,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     collect_function_pointer_vars(stmt.body)
 
         collect_function_pointer_vars(body)
+        # File-scope function_pointer globals are visible from every
+        # function body — add them so an indirect call through one
+        # isn't misclassified as ``unknown function`` below.
+        for global_name, declaration in self.global_scalars.items():
+            if declaration.type_name == "function_pointer":
+                function_pointer_vars.add(global_name)
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):
@@ -2400,6 +2510,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                             in_regs[param_index] = param.in_register
                     if in_regs:
                         self.function_pointer_in_registers[statement.name] = in_regs
+                if statement.pinned_register is not None:
+                    # Explicit pin via __attribute__((pinned_register(...))).
+                    # Storage lives in the register; no stack slot allocated,
+                    # so the loop continues past the slot-allocation tail.
+                    self.pinned_register[statement.name] = statement.pinned_register
+                    continue
                 if top_level and self._is_constant_alias(body=statements, statement=statement):
                     alias = self._constant_expression(statement.init)
                     self.constant_aliases[statement.name] = alias

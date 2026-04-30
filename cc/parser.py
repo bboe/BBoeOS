@@ -237,6 +237,13 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("preserve_register", reg_token[1][1:-1])
+        if attr_name == "pinned_register":
+            self.eat("LPAREN")
+            reg_token = self.eat("STRING")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("pinned_register", reg_token[1][1:-1])
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -951,6 +958,34 @@ class Parser:
             self.eat("EXTERN")
             is_extern = True
         type_string = self.parse_type()
+        # Function-pointer global: ``type (*name)(params);``.  The parens
+        # around ``*name`` distinguish this from a function definition
+        # (``type name(params)``).  Globals only — locals are handled in
+        # ``parse_variable_declaration``.
+        if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] == "STAR":
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            function_pointer_params_list = self.parse_parameters()
+            self.eat("RPAREN")
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                init = self.parse_expression()
+            self.eat("SEMI")
+            if is_extern and init is not None:
+                message = "extern declarations may not have an initializer"
+                raise CompileError(message, line=line)
+            return VarDecl(
+                function_pointer_params=function_pointer_params_list,
+                init=init,
+                is_extern=is_extern,
+                line=line,
+                name=name,
+                type_name="function_pointer",
+            )
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
@@ -1161,6 +1196,23 @@ class Parser:
             type_string = "function_pointer"
         else:
             name = self.eat("IDENT")[1]
+        # Optional trailing ``__attribute__((pinned_register("REG")))`` —
+        # currently only supported on function_pointer locals to control
+        # which register holds the pointer value (so __tail_call can
+        # ``jmp <reg>`` instead of clobbering EAX with the function
+        # address — needed when the user's calling convention uses AL/AX
+        # for an actual argument, e.g. fd_ioctl's ``cmd`` byte).
+        pinned_register_value: str | None = None
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "pinned_register":
+                pinned_register_value = value
+            else:
+                message = f"trailing {kind} attribute is not valid on local variable declarations"
+                raise CompileError(message, line=line)
+        if pinned_register_value is not None and type_string != "function_pointer":
+            message = "pinned_register attribute is currently only supported on function_pointer locals"
+            raise CompileError(message, line=line)
         # Optional [] or [N] for array declarations
         is_array = False
         size_expression: Node | None = None
@@ -1177,7 +1229,14 @@ class Parser:
         self.eat("SEMI")
         if is_array:
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(function_pointer_params=function_pointer_params_list, init=init, line=line, name=name, type_name=type_string)
+        return VarDecl(
+            function_pointer_params=function_pointer_params_list,
+            init=init,
+            line=line,
+            name=name,
+            pinned_register=pinned_register_value,
+            type_name=type_string,
+        )
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.

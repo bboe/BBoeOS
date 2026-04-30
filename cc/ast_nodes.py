@@ -424,6 +424,13 @@ class VarDecl(Node):
     ``is_extern`` is set for ``extern T name;`` file-scope declarations
     that name a symbol whose storage lives in another translation unit;
     the generator skips emitting ``_g_<name>:`` storage for these.
+
+    ``pinned_register`` carries the ``__attribute__((pinned_register("REG")))``
+    annotation on a function_pointer local — the variable's value lives
+    in the named CPU register and ``__tail_call`` jumps via that
+    register instead of EAX.  Useful when EAX/AL holds an actual
+    syscall argument (e.g. fd_ioctl's cmd byte) that the dispatcher
+    must preserve through to the handler.
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
@@ -432,6 +439,7 @@ class VarDecl(Node):
     init: Node | None
     is_extern: bool = field(default=False, kw_only=True)
     name: str
+    pinned_register: str | None = field(default=None, kw_only=True)
     type_name: str
 
 

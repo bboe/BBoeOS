@@ -505,19 +505,33 @@ class EmissionMixin:
                 self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
             # Capture out_register outputs before any register restores so the
             # callee-written registers haven't been overwritten by the pops yet.
+            #
+            # Width handling mirrors the in_register prologue: when the
+            # callee returned via a 16-bit name (e.g. ``out_register("bx")``)
+            # but the destination spans a wider slot (32-bit local or pinned
+            # E-register), zero-extend so the upper bytes are clean.
             si_captured: str | None = None
             for reg, arg in out_reg_captures:
                 if not isinstance(arg, AddressOf):
                     message = "out_register argument must be an address-of expression (&var)"
                     raise CompileError(message, line=statement.line)
                 dest_name = arg.name
+                widened = self.target.widen_gp(reg)
                 if dest_name in self.pinned_register:
                     dest_reg = self.pinned_register[dest_name]
-                    if dest_reg != reg:
+                    if dest_reg == reg:
+                        pass
+                    elif dest_reg == widened:
+                        self.emit(f"        movzx {dest_reg}, {reg}")
+                    else:
                         self.emit(f"        mov {dest_reg}, {reg}")
                 else:
                     dest = self._local_address(dest_name)
-                    self.emit(f"        mov [{dest}], {reg}")
+                    if widened != reg:
+                        self.emit(f"        movzx {widened}, {reg}")
+                        self.emit(f"        mov [{dest}], {widened}")
+                    else:
+                        self.emit(f"        mov [{dest}], {reg}")
                     if reg == self.target.si_register:
                         si_captured = dest_name
             if use_pusha:
@@ -607,6 +621,14 @@ class EmissionMixin:
                 return
             if vname in self.constant_aliases:
                 self.emit(f"        mov {self.target.acc}, {self.constant_aliases[vname]}")
+                self.ax_clear()
+                return
+            if vname in self.user_functions:
+                # A bare function name as an rvalue decays to the
+                # function's address (a link-time constant), so the
+                # value can be assigned to a function_pointer global,
+                # passed as an argument, etc.
+                self.emit(f"        mov {self.target.acc}, {vname}")
                 self.ax_clear()
                 return
             if vname in self.global_arrays:
@@ -1202,6 +1224,18 @@ class EmissionMixin:
         for global_name, declaration in self.global_scalars.items():
             self.variable_types[global_name] = declaration.type_name
             self.visible_vars.add(global_name)
+            # File-scope function_pointer globals carry a per-param
+            # in_register map.  Re-publish it into the per-function
+            # ``function_pointer_in_registers`` dict so indirect call
+            # sites and ``__tail_call`` can marshal arguments — the
+            # dict is reset to ``{}`` above for each function body.
+            if declaration.type_name == "function_pointer" and declaration.function_pointer_params:
+                in_regs: dict[int, str] = {}
+                for param_index, param in enumerate(declaration.function_pointer_params):
+                    if param.in_register is not None:
+                        in_regs[param_index] = param.in_register
+                if in_regs:
+                    self.function_pointer_in_registers[global_name] = in_regs
         for global_name, declaration in self.global_arrays.items():
             self.variable_types[global_name] = declaration.type_name
             self.variable_arrays.add(global_name)
@@ -1834,9 +1868,17 @@ class EmissionMixin:
         """Generate a ``__tail_call`` tail-dispatch statement.
 
         Tears down the current frame, loads each argument into its
-        declared ``in_register``, loads the function pointer into AX,
-        and emits ``jmp ax`` so the callee returns directly to the
-        current function's caller — AX and CF flow through unchanged.
+        declared ``in_register``, loads the function pointer into the
+        target register, and emits ``jmp <reg>`` so the callee returns
+        directly to the current function's caller — AX and CF flow
+        through unchanged.
+
+        The default target is EAX/AX.  A function_pointer local
+        declared with ``__attribute__((pinned_register("REG")))``
+        already lives in REG; the load is elided and the jump uses REG
+        directly.  This lets dispatchers preserve EAX/AL through to
+        the handler when AL carries an actual argument (fd_ioctl's
+        cmd byte).
         """
         fn = statement.fn
         if fn not in self.variable_types or self.variable_types[fn] != "function_pointer":
@@ -1849,14 +1891,18 @@ class EmissionMixin:
         if function_pointer_in_regs:
             register_args = [(function_pointer_in_regs[i], arg) for i, arg in enumerate(statement.args)]
             self._emit_register_arg_moves(register_args)
-        self._emit_load_var(fn, register=self.target.acc)
+        if fn in self.pinned_register:
+            target_register = self.pinned_register[fn]
+        else:
+            target_register = self.target.acc
+            self._emit_load_var(fn, register=target_register)
         if not self.elide_frame:
             if self.frame_size > 0:
                 self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
             self.emit(f"        pop {self.target.base_register}")
             for reg in reversed(self.current_preserve_registers):
                 self.emit(f"        pop {reg}")
-        self.emit(f"        jmp {self.target.acc}")
+        self.emit(f"        jmp {target_register}")
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.
