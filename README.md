@@ -7,6 +7,17 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 * nasm: `brew install nasm`
 * python3 (for `add_file.py`)
 
+## Minimum runtime requirements
+
+* **4 MB RAM** to boot the shell and run lightweight programs (`hello`, `ls`,
+  `cat`, `uptime`, etc.).  The kernel reserves ~2 MB statically for code,
+  stacks, NIC/program-load buffers, and the frame bitmap.
+* **5 MB RAM** to run every program in `bin/` — `edit` allocates a 1 MB
+  edit buffer in BSS, and `bigbss` reserves 256 KB.
+* `qemu-system-i386` defaults to 128 MB, which is comfortably above either
+  floor.  Pass `-m 16M` (or higher) if you want to test under tighter
+  constraints.
+
 ## Building and running BBoeOS
 
 * Build the binary
