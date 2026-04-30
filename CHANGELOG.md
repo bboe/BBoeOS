@@ -6,6 +6,42 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Move shell kill buffer into BSS (2026-04-30)
+- `shell.c` previously stored its Ctrl-K kill buffer at `SECTOR_BUFFER + 4`
+  (phys `0xF000`), reachable through the pre-Phase-4 user shim's identity
+  mapping of the low 1 MB.  Phase 4's per-program PDs no longer alias
+  that range, so any Ctrl-K / Ctrl-Y use silently page-faulted with
+  `EXC0E EIP=… CR2=0000F000`.  The kill buffer is now a file-scope
+  `char kill_buf[MAX_INPUT]` in shell.c BSS.
+- `SECTOR_BUFFER` is dropped from `src/include/constants.asm`; its only
+  remaining references live in archive/ pure-asm program sources and
+  the legacy `dns_query.asm` helper (not currently `%include`d by any
+  active program).  Each of those files now carries a private
+  `%assign SECTOR_BUFFER 0F000h` so test_archive's nasm pass still
+  assembles them.
+
+### Drop the 1 MB JUMP_TABLE / SYMBOL_BASE region (2026-04-30)
+- `asm.c` now keeps its symbol table and jump-size table in its own BSS
+  (a 1706-entry `struct Symbol` array plus a 4096-byte `jump_sizes` array)
+  instead of writing them through a 1 MB user-virt scratch region the
+  kernel pre-allocated and shared into every per-program PD.
+- `entry.asm` drops `jump_table_setup`, the `jump_table_frames[256]` table,
+  and the per-program `JUMP_TABLE_FRAME_COUNT`-page mapping loop —
+  ~256 frames (1 MB) saved at boot, no kernel-side bookkeeping needed.
+- `cc.py` gains struct-member access on indexed arrays
+  (`arr[i].field` rvalue/assign and `arr[i].field[n]` rvalue/assign) so
+  `asm.c` can express `symbol_table[index].name[k]` /
+  `.value` / `.type` / `.scope` directly in C.  The codegen emits
+  `[const_base+field_offset+bx]` (register last) so the self-hosted
+  assembler's `[disp+reg]` parser path picks up the trailing register.
+- `asm.c`'s scratch buffers (`line_buffer`, `output_buffer`,
+  `source_buffer`, `include_source_save`) move from post-`_bss_end`
+  scratch addresses into proper BSS arrays so the kernel's page-aligned
+  `user_image_end` maps the pages they live in.
+- Combined with the 2026-04-29 reductions, the minimum RAM target drops
+  to 2 MB; `edit` (1 MB BSS) and every other program in `bin/` boot at
+  `qemu-system-i386 -m 2M`.
+
 ### Port-arc cleanup (2026-04-29)
 - `src/drivers/console.c`: removed dead `put_string` function (no callers;
   inherited from the asm version but never referenced in the C tree).

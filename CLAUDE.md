@@ -32,7 +32,7 @@ The kernel is split across two flat binaries (`nasm -f bin`) concatenated on dis
 - **Boot-time stash** at phys `0x4D0` (`boot_disk`, byte) and `0x4D2` (`directory_sector`, word), set by `boot.asm` before paging and read by the kernel through the direct map.  Both sit just below ARGV (0x4DE..0x4FD) so cc.py-emitted argv writes / shell.c's `bin/<name>\0` staging can't clobber them through the Phase 3 user shim.
 - **Kernel stack** at phys `KERNEL_RESERVED_BASE..KERNEL_RESERVED_BASE+0x4000` (16 KB; currently ~`0x10A000..0x10E000`, shifts with `kernel.bin` size).  `KERNEL_RESERVED_BASE = page_align(0x100000 + sizeof(kernel.bin))` is computed by `make_os.sh` and passed via `-DKERNEL_RESERVED_BASE=N` to the second `kernel.asm` pass and to `boot.asm`.  Lives outside `kernel.bin` to avoid 16 KB of zero padding on disk; reachable immediately after paging because PDE[768]'s direct map covers phys `0..0x3FFFFF`; reserved via `frame_reserve_range` at boot.  `kernel_stack` / `kernel_stack_top` are `equ`s in `kernel.asm`.
 - **Resident kernel** (`kernel.bin`) is loaded at physical `0x100000` and runs at virtual `0xC0100000`.  The 256 MB direct map at `0xC0000000..0xCFFFFFFF` mirrors physical `0..256 MB` so the kernel can reach any frame the bitmap allocator returns.
-- **Phase 3 user shim:** programs still load at `PROGRAM_BASE = 0x600` and run with the legacy `USER_STACK_TOP = 0x8FFF0` layout via a one-PT shim at PDE[0] of `kernel_pd_template`.  PTEs `0..0xFF` map virt `0..0xFFFFF` (low 1 MB; covers PROGRAM_BASE / stack / vDSO / BUFFER) and PTEs `0x300..0x3FF` map virt `0x300000..0x3FFFFF` (1 MB at the 3 MB mark; covers `asm.c`'s SYMBOL_BASE / JUMP_TABLE).  PTEs `0x100..0x2FF` stay not-present so user code can't see the kernel image, the boot PD (phys `0x200000`), the first kernel PT (phys `0x201000`), the bitmap-allocated kernel PTs, or the shim PT itself through the alias.  Phase 4 replaces this with per-program PDs and proper memory protection.
+- **Phase 3 user shim:** programs still load at `PROGRAM_BASE = 0x600` and run with the legacy `USER_STACK_TOP = 0x8FFF0` layout via a one-PT shim at PDE[0] of `kernel_pd_template`.  PTEs `0..0xFF` map virt `0..0xFFFFF` (low 1 MB; covers PROGRAM_BASE / stack / vDSO / BUFFER); PTEs `0x100..0x3FF` stay not-present so user code can't see the kernel image, the boot PD (phys `0x200000`), the first kernel PT (phys `0x201000`), the bitmap-allocated kernel PTs, or the shim PT itself through the alias.  Phase 4 replaces this with per-program PDs and proper memory protection.
 - Kernel sector count and reserved-region base are both derived at build time: `make_os.sh` measures `kernel.bin`, passes the sector count to `boot.asm` as `-DKERNEL_SECTORS=N`, computes `KERNEL_RESERVED_BASE = page_align(0x100000 + sizeof(kernel.bin))`, then re-assembles `kernel.asm` and `boot.asm` with `-DKERNEL_RESERVED_BASE=N`.  A size-invariant check between the two `kernel.asm` passes confirms the change cannot shift the binary.  The boot-time `kernel_bytes` word at MBR offset 508 holds `(BOOT_SECTORS + KERNEL_SECTORS) * 512` so `add_file.py`'s host-side `compute_directory_sector` arithmetic still works.
 
 ### Static memory map
@@ -49,7 +49,7 @@ Kernel-side fixed-physical regions, all reached through the kernel direct map at
 | `0x0000E000..0x0000E1FF` | `0xC000E000..0xC000E1FF` | 512 B | FD table (kept low so 16-bit `[bx+offset]` accesses still work) | no |
 | `0x0000F000..0x0000F1FF` | `0xC000F000..0xC000F1FF` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
 | `0x0000F200..0x0000F5FF` | `0xC000F200..0xC000F5FF` | 1024 B | `ext2_sd_buffer` (sliding 2-sector window for `ext2_search_blk`) | no |
-| `0x00010000..0x00010FFF` | n/a | 4 KB | vDSO + JUMP_TABLE (shared user-virt frame; per-program PDs alias it user-side) | no |
+| `0x00010000..0x00010FFF` | n/a | 4 KB | vDSO (shared user-virt frame; per-program PDs alias it user-side) | no |
 | `0x00100000..` | `0xC0100000..` | ~38 KB | `kernel.bin` (resident kernel image) | yes |
 | `KERNEL_RESERVED_BASE` (~`0x10A000..0x10DFFF`) | `0xC010A000..` | 16 KB | `kernel_stack` (`KERNEL_RESERVED_BASE = page_align(0x100000 + kernel_size)`) | no |
 | ~`0x10E000..0x10E5FF` | `0xC010E000..` | 1.5 KB | `net_receive_buffer` (NE2000 RX scratch) | no |
@@ -66,8 +66,6 @@ User-side virtual layout (per per-program PD; same shape for every program PD th
 | `0x00000000..0x00000FFF` | 4 KB | NULL guard — not mapped (PTE[0] absent so `*(int *)0` raises #PF) |
 | `0x00001000..0x00001FFF` | 4 KB | shell↔program handoff frame at `USER_DATA_BASE` (ARGV at +0x4DE, EXEC_ARG at +0x4FC, BUFFER at +0x500) |
 | `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
-| `0x00011000..0x00011FFF` | 4 KB | JUMP_TABLE (cc.py-emitted dispatch entries) |
-| `0x00300000..0x003FFFFF` | 1 MB | `asm.c` SYMBOL_BASE (legacy 16-bit accessors; Phase 3 shim only) |
 | `0x08048000..` | program-sized | program text + BSS (Linux ELF-shaped load address) |
 | `0x3FFE0000..0x3FFEFFFF` | 64 KB | unmapped (stack guard region) |
 | `0x3FFF0000..0x3FFFFFFF` | 64 KB | user stack (16 pages, top at `USER_STACK_TOP`) |
