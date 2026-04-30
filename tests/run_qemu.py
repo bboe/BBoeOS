@@ -68,19 +68,25 @@ def run_commands(
     INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
     which is the harder path to keep working as the kernel evolves.
 
-    *memory* (e.g. ``"16M"``) appends ``-m <memory>`` to QEMU; *machine*
-    (e.g. ``"acpi=off"``) appends ``-machine <machine>``.  Both fall back
-    to ``BBOE_QEMU_MEMORY`` / ``BBOE_QEMU_MACHINE`` env vars when unset,
-    so the self-review driver can sweep configurations without per-script
-    CLI plumbing.  Defaults are still ``None`` (no flag) — existing callers
-    keep QEMU's defaults.
+    *memory* (e.g. ``"16M"``) appends ``-m <memory>`` to QEMU.  Defaults
+    to ``"1"`` (1 MB) — the OS's minimum-RAM target — so most tests run
+    against the same low-RAM configuration the kernel is sized for.
+    Tests that need more (e.g. test_kernel_cc 's cc-on-host stages, or
+    workloads that load large blobs into extended RAM) pass an explicit
+    value.  An unset memory falls back to ``BBOE_QEMU_MEMORY`` if set,
+    else ``"1"``.
+
+    *machine* (e.g. ``"acpi=off"``) appends ``-machine <machine>``;
+    falls back to ``BBOE_QEMU_MACHINE`` when unset, else no flag.  The
+    env-var fallbacks let the self-review driver sweep configurations
+    without per-script CLI plumbing.
 
     When *retry* is True (the default) and a TimeoutError occurs, the entire
     QEMU session is retried once with 50% more time for both boot and command
     timeouts.  A second timeout raises immediately.
     """
     if memory is None:
-        memory = os.environ.get("BBOE_QEMU_MEMORY") or None
+        memory = os.environ.get("BBOE_QEMU_MEMORY") or "1"
     if machine is None:
         machine = os.environ.get("BBOE_QEMU_MACHINE") or None
     try:
@@ -309,7 +315,7 @@ def main() -> int:
         "--memory",
         type=str,
         default=None,
-        help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY",
+        help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY, then '1' (1 MB)",
     )
     parser.add_argument(
         "--net",

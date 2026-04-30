@@ -89,6 +89,8 @@ def _launch_qemu(*, floppy: bool, serial_base: Path, monitor_path: Path) -> subp
         "chardev:s",
         "-display",
         "none",
+        "-m",
+        "1",
         "-monitor",
         f"unix:{monitor_path},server,nowait",
     ])

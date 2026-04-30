@@ -152,6 +152,8 @@ def _run_draw_session(
         "none",
         "-drive",
         f"file={image_path},format=raw,snapshot=on" + (",if=floppy" if floppy else ""),
+        "-m",
+        "1",
         "-monitor",
         f"unix:{monitor_path},server,nowait",
         "-serial",
