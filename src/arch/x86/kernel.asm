@@ -58,8 +58,6 @@ directory_sector dw 0                   ; offset 3
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
         ;;     kernel_stack                       (KERNEL_STACK_BYTES = 8 KB)
-        ;;     sector_buffer                      (SECTOR_BUFFER_BYTES = 512 B)
-        ;;     ... page-align up ...
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
         ;;   FRAME_BITMAP_PHYS                    (FRAME_BITMAP_BYTES = 8 KB)
@@ -70,15 +68,11 @@ directory_sector dw 0                   ; offset 3
         ;; The fallback below keeps direct nasm invocations working with
         ;; a valid (if not maximally packed) layout.
         ;;
-        ;; The post-kernel cluster (stack / sector_buffer / boot PD /
-        ;; first PT) lives outside kernel.bin so the on-disk image
+        ;; The post-kernel cluster (stack / boot PD / first PT /
+        ;; frame_bitmap) lives outside kernel.bin so the on-disk image
         ;; doesn't carry their zero-initialized bytes; the bitmap
         ;; allocator reserves the underlying frames via the
-        ;; `LOW_RESERVE_BYTES` sweep at boot.  Pre-relocation,
-        ;; sector_buffer sat at fixed low phys (0xF000) for 16-bit
-        ;; `[bx+offset]` reach; bbfs.asm / ext2.asm are now fully 32-bit
-        ;; (`mov ebx, sector_buffer`) so it lives in the post-kernel
-        ;; cluster like everything else.
+        ;; `LOW_RESERVE_BYTES` sweep at boot.
         ;;
         ;; The legacy program_scratch staging buffer (32 KB) is gone:
         ;; program_enter streams the binary directly from disk into
@@ -90,22 +84,23 @@ directory_sector dw 0                   ; offset 3
         ;; any allocator call, so the on-disk garbage at that physical
         ;; range doesn't matter.
         ;;
-        ;; ext2_search_blk's 1 KB sliding directory window
-        ;; (`ext2_sd_buffer`) is allocated dynamically by `ext2_init`
-        ;; from the bitmap allocator on a successful ext2 detect; bbfs
-        ;; systems never spend a frame on it.
+        ;; sector_buffer (512 B) and ext2_sd_buffer (1 KB) share a
+        ;; single 4 KB FS scratch frame allocated by `vfs_init` from
+        ;; the bitmap allocator on every boot (FS is always used).
+        ;; sector_buffer is now a `uint8_t *` pointer in src/fs/vfs.c
+        ;; BSS — bbfs.asm / ext2.asm callers indirect through
+        ;; `[sector_buffer]` to load the base, then `[reg + offset]`.
+        ;; ext2_sd_buffer is the runtime pointer at sector_buffer+512,
+        ;; populated by ext2_init only on a successful ext2 detect.
         ;;
-        ;; net_receive_buffer / net_transmit_buffer (4 KB each) are
-        ;; allocated dynamically by `network_initialize` from the
-        ;; bitmap allocator only when the NIC is detected; sessions
-        ;; booted without a NIC never spend the two frames.  The
-        ;; symbols themselves are C `uint8_t *` pointers in
-        ;; src/drivers/ne2k.c BSS — load via `mov edi,
-        ;; [net_receive_buffer]` (memory load through the equ shims).
+        ;; net_receive_buffer / net_transmit_buffer / arp_table /
+        ;; udp_buffer share one 4 KB NIC scratch frame allocated by
+        ;; `network_initialize` only when the NIC is detected;
+        ;; sessions booted without a NIC never spend the frame.
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x40000
         %endif
-        BOOT_PD_PHYS             equ (SECTOR_BUFFER_PHYS + SECTOR_BUFFER_BYTES + 0xFFF) & ~0xFFF
+        BOOT_PD_PHYS             equ KERNEL_STACK_TOP_PHYS
         DIRECT_MAP_BASE          equ 0C0000000h
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE         equ 768
@@ -120,12 +115,9 @@ directory_sector dw 0                   ; offset 3
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
         LOW_RESERVE_BYTES        equ FRAME_BITMAP_PHYS + FRAME_BITMAP_BYTES       ; bitmap-allocator sweep ceiling
-        SECTOR_BUFFER_BYTES      equ 512
-        SECTOR_BUFFER_PHYS       equ KERNEL_STACK_TOP_PHYS
         frame_bitmap             equ DIRECT_MAP_BASE + FRAME_BITMAP_PHYS
         kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
-        sector_buffer            equ DIRECT_MAP_BASE + SECTOR_BUFFER_PHYS
 
 high_entry:
         ;; --- Switch onto kernel-virt addresses for stack/GDT/IDT ---
@@ -200,10 +192,9 @@ high_entry:
 
         ;; Reserve only the regions the kernel still owns post-boot.
         ;; The IVT / BDA / E820-staging page / 0x600..0x7BFF gap /
-        ;; MBR + post-MBR boot code / FD-table page / sector_buffer
-        ;; page / boot stack are all dead by now and stay free in the
-        ;; bitmap so the user pool can grow into them.  Two narrow
-        ;; reserves:
+        ;; MBR + post-MBR boot code / FD-table page / boot stack are
+        ;; all dead by now and stay free in the bitmap so the user
+        ;; pool can grow into them.  Two narrow reserves:
         ;;
         ;;   1. vDSO target frame at phys 0x10000.  One 4 KB page.
         ;;      The vDSO is mapped into every per-program PD as a
@@ -211,8 +202,8 @@ high_entry:
         ;;      stay pinned.
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
         ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
-        ;;      kernel image, kernel stack, sector_buffer, boot PD,
-        ;;      first kernel PT, frame_bitmap.
+        ;;      kernel image, kernel stack, boot PD, first kernel
+        ;;      PT, frame_bitmap.
         mov eax, 0x10000
         mov ecx, 0x1000                 ; vDSO target page
         call frame_reserve_range

@@ -113,7 +113,7 @@ bbfs_create:
         mov ax, [directory_loaded_sector]
         mov [vfs_found_dir_sec], ax
         mov eax, ebx
-        sub eax, sector_buffer
+        sub eax, [sector_buffer]
         mov [vfs_found_dir_off], ax
         pop esi
         pop edi
@@ -213,7 +213,7 @@ bbfs_find:
         mov ax, [directory_loaded_sector]
         mov [vfs_found_dir_sec], ax
         mov eax, ebx
-        sub eax, sector_buffer
+        sub eax, [sector_buffer]
         mov [vfs_found_dir_off], ax
         pop ebx
         clc
@@ -247,7 +247,7 @@ bbfs_load:
         shr ecx, 1
         .copy:
         cld
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         rep movsw
         pop ecx
         sub ecx, 512
@@ -315,7 +315,7 @@ bbfs_mkdir:
         ;; Zero-fill sector_buffer and write to each subdir sector
         push edx
         push edi
-        mov edi, sector_buffer
+        mov edi, [sector_buffer]
         mov ecx, 256
         xor eax, eax
         cld
@@ -400,14 +400,15 @@ bbfs_read_dir:
         and ebx, 01FFh                  ; EBX = byte offset within sector
         call read_sector
         jc .brd_disk_err
-        cmp byte [sector_buffer+ebx], 0
+        mov eax, [sector_buffer]
+        cmp byte [eax+ebx], 0
         jne .brd_found
         add word [esi+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
         jmp .brd_next
         .brd_found:
         push esi
         mov esi, ebx
-        add esi, sector_buffer
+        add esi, [sector_buffer]
         mov ecx, DIRECTORY_ENTRY_SIZE
         cld
         rep movsb
@@ -608,7 +609,7 @@ bbfs_rename:
         mov ax, [directory_loaded_sector]
         push eax                         ; [ebp+4]
         mov eax, ebx
-        sub eax, sector_buffer
+        sub eax, [sector_buffer]
         push eax                         ; [ebp+0]
         mov ebp, esp
         ;; Locate the destination directory
@@ -669,7 +670,7 @@ bbfs_rename:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .frc_disk_err
-        mov ebx, sector_buffer
+        mov ebx, [sector_buffer]
         add ebx, [ebp+0]
         push edi
         push ecx
@@ -729,7 +730,7 @@ bbfs_rmdir:
         mov ax, [directory_loaded_sector]
         mov [bbfs_rd_parent_sec], ax
         mov eax, ebx
-        sub eax, sector_buffer
+        sub eax, [sector_buffer]
         mov [bbfs_rd_entry_off], ax
         ;; Scan subdir data sectors for any occupied entry
         mov ax, [bbfs_rd_subdir_sec]
@@ -737,7 +738,7 @@ bbfs_rmdir:
         .bbrd_check_sec:
         call read_sector
         jc .bbrd_disk_err
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         mov edi, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .bbrd_check_entry:
         cmp byte [esi], 0
@@ -753,7 +754,7 @@ bbfs_rmdir:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .bbrd_disk_err
-        mov ebx, sector_buffer
+        mov ebx, [sector_buffer]
         movzx eax, word [bbfs_rd_entry_off]
         add ebx, eax
         mov edi, ebx
@@ -798,7 +799,7 @@ bbfs_update_size:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .us_err
-        mov ebx, sector_buffer
+        mov ebx, [sector_buffer]
         movzx eax, word [esi+FD_OFFSET_DIRECTORY_OFFSET]
         add ebx, eax
         mov ax, [esi+FD_OFFSET_POSITION]
@@ -841,7 +842,7 @@ directory_load_entry:
         mov cl, 5                       ; DIRECTORY_ENTRY_SIZE = 32 = 2^5
         shl eax, cl
         mov ebx, eax
-        add ebx, sector_buffer
+        add ebx, [sector_buffer]
         mov ax, [directory_loaded_sector]
         call read_sector
         pop ecx
@@ -908,7 +909,7 @@ find_file:
         mov [directory_loaded_sector], ax
         call read_sector
         jc .ff_done
-        mov edi, sector_buffer
+        mov edi, [sector_buffer]
         mov ecx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .ff_search:
         cmp byte [edi], 0
@@ -960,7 +961,7 @@ find_file:
         xor ah, ah
         call read_sector
         jc .fdr_done
-        mov edi, sector_buffer
+        mov edi, [sector_buffer]
         mov ecx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .fdr_search:
         cmp byte [edi], 0
@@ -1014,7 +1015,7 @@ scan_directory_entries:
         xor ah, ah
         call read_sector
         jc .sd_done
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         mov cx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sd_entry:
         cmp byte [esi], 0
@@ -1060,7 +1061,7 @@ scan_directory_entries:
         call read_sector
         pop eax
         jc .sd_subdir_err
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         mov ecx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sd_sub_entry:
         cmp byte [esi], 0
@@ -1115,7 +1116,7 @@ scan_directory_entries:
         and al, 0Fh
         mov cl, 5
         shl ax, cl
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         movzx eax, ax
         add esi, eax
         pop ecx
@@ -1159,7 +1160,7 @@ subdir_find_free:
         stc
         ret
         .sff_scan_init:
-        mov ebx, sector_buffer
+        mov ebx, [sector_buffer]
         mov ecx, DIRECTORY_MAX_ENTRIES / DIRECTORY_SECTORS
         .sff_scan:
         cmp byte [ebx], 0

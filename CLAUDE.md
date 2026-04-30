@@ -47,12 +47,11 @@ Kernel-side fixed-physical regions, all reached through the kernel direct map at
 | `0x00020003..0x00020004` | `0xC0020003..0xC0020004` | 2 B | `directory_sector` (LBA of first directory sector) | yes |
 | `0x00020008..` | `0xC0020008..` | ~38 KB | `kernel.bin` `high_entry` and resident kernel code | yes |
 | `KERNEL_RESERVED_BASE` (~`0x2A000..0x2BFFF`) | `0xC002A000..` | 8 KB | `kernel_stack` (`KERNEL_RESERVED_BASE = page_align(0x20000 + kernel_size)`) | no |
-| ~`0x2C000..0x2C1FF` | `0xC002C000..` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
-| ~`0x2D000..0x2DFFF` | `0xC002D000..` | 4 KB | boot PD (`BOOT_PD_PHYS`; promoted to `kernel_pd_template`) | no |
-| ~`0x2E000..0x2EFFF` | `0xC002E000..` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
-| ~`0x2F000..0x30FFF` | `0xC002F000..` | 8 KB | `frame_bitmap` (256 MB ceiling; `frame_init` zero-fills before any allocator call, so the bytes don't ride on disk inside `kernel.bin`) | no |
-| ~`0x31000+` | `0xC0031000+` | -- | `LOW_RESERVE_BYTES` ceiling — the kernel reserves only this region (plus the vDSO target page at `0x10000`); everything else in conventional RAM is owned by the bitmap allocator (subject to E820's reserved regions, including the VGA aperture at `0xA0000..0xFFFFF`) | -- |
-| dynamic | dynamic | 4 KB | `ext2_sd_buffer` — frame allocated by `ext2_init` only when ext2 is detected (1 KB used for the 2-sector sliding directory window; bbfs systems never spend a frame on it) | no |
+| ~`0x2C000..0x2CFFF` | `0xC002C000..` | 4 KB | boot PD (`BOOT_PD_PHYS`; promoted to `kernel_pd_template`) | no |
+| ~`0x2D000..0x2DFFF` | `0xC002D000..` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
+| ~`0x2E000..0x2FFFF` | `0xC002E000..` | 8 KB | `frame_bitmap` (256 MB ceiling; `frame_init` zero-fills before any allocator call, so the bytes don't ride on disk inside `kernel.bin`) | no |
+| ~`0x30000+` | `0xC0030000+` | -- | `LOW_RESERVE_BYTES` ceiling — the kernel reserves only this region (plus the vDSO target page at `0x10000`); everything else in conventional RAM is owned by the bitmap allocator (subject to E820's reserved regions, including the VGA aperture at `0xA0000..0xFFFFF`) | -- |
+| dynamic | dynamic | 4 KB | FS scratch frame — allocated by `vfs_init` on every boot (FS is always used); sliced into two named pointers (`sector_buffer` at offset 0, `ext2_sd_buffer` at offset 512 when ext2 is detected). 1.5 KB used inside the 4 KB frame on ext2; 512 B used on bbfs.  bbfs systems leave `ext2_sd_buffer = 0` (no caller reaches the ext2_search_blk paths that read it). | no |
 | dynamic | dynamic | 4 KB | NIC scratch frame — allocated by `network_initialize` only when an NE2000 NIC is detected; sliced into four named pointers (`net_receive_buffer` at offset 0, `net_transmit_buffer` at 1536, `arp_table` at 3072, `udp_buffer` at 3168), 3.4 KB used inside the 4 KB frame.  Sessions without a NIC leave the four pointers at 0 and never spend the frame.  The ARP-table slice is zero-filled at init (lookup/add keys on `[entry] == 0` for empty slots); the other slices are fully overwritten on each use | no |
 
 User-side virtual layout (per per-program PD; same shape for every program PD that `address_space_create` builds):
