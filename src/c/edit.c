@@ -1,4 +1,4 @@
-#define EDIT_BUFFER_SIZE 0x100000
+#define EDIT_BUFFER_SIZE 0x70000
 #define EDIT_KILL_BUFFER_SIZE 0xA00
 
 /* All editor state is file-scope so helpers can read/mutate it

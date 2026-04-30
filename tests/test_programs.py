@@ -57,8 +57,10 @@ class ProgramTest:
     """One runtime test: shell commands to run and a regex the output must match.
 
     `memory` overrides `run_commands`'s 1 MB default for tests whose
-    program needs more (e.g. `edit` allocates a 1 MB BSS gap buffer
-    that won't fit in 1 MB QEMU's user pool).
+    program needs more.  No program in `bin/` currently does — every
+    user image fits comfortably in `-m 1` after `EDIT_BUFFER_SIZE`
+    dropped to 0x70000 (448 KB).  Kept on the dataclass as an escape
+    hatch for future heavier programs.
     """
 
     name: str
@@ -215,11 +217,11 @@ TESTS: list[ProgramTest] = [
     # The follow-up `hello` command confirms the shell is fully functional
     # again — catches PD teardown / VGA mode reset bugs that would
     # otherwise leave the shell wedged.  Doubles as a regression for the
-    # ~1 MB BSS allocation in the per-program PD.  Relies on
+    # 448 KB BSS allocation in the per-program PD.  Relies on
     # _wait_for_prompt's settle window to drain the spurious empty-line
     # prompt (from the trailing '\r' shell consumes after edit exits)
     # before this command's wait begins.
-    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!", memory="2"),
+    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!"),
     ProgramTest(
         # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
         # ending with a single executable probe so the final directory
