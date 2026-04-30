@@ -23,6 +23,10 @@ from cc.ast_nodes import (
     If,
     Index,
     IndexAssign,
+    IndexMemberAccess,
+    IndexMemberAssign,
+    IndexMemberIndex,
+    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     LogicalAnd,
@@ -590,12 +594,44 @@ class Parser:
         return If(body=body, cond=condition, else_body=else_body, line=token[2])
 
     def parse_index_assignment(self) -> Node:
-        """Parse an indexed assignment ``name[index] = expr;``."""
+        """Parse ``name[index] = expr;`` or ``name[index].member[n] = expr;``."""
         token = self.eat("IDENT")
         name = token[1]
         self.eat("LBRACKET")
         index = self.parse_expression()
         self.eat("RBRACKET")
+        if self.peek()[0] in ("DOT", "ARROW"):
+            arrow_token = self.eat()
+            arrow = arrow_token[0] == "ARROW"
+            member_token = self.eat("IDENT")
+            member_name = member_token[1]
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                elem_index = self.parse_expression()
+                self.eat("RBRACKET")
+                self.eat("ASSIGN")
+                expr = self.parse_expression()
+                self.eat("SEMI")
+                return IndexMemberIndexAssign(
+                    arrow=arrow,
+                    elem_index=elem_index,
+                    expr=expr,
+                    index=index,
+                    line=token[2],
+                    member_name=member_name,
+                    name=name,
+                )
+            self.eat("ASSIGN")
+            expr = self.parse_expression()
+            self.eat("SEMI")
+            return IndexMemberAssign(
+                arrow=arrow,
+                expr=expr,
+                index=index,
+                line=token[2],
+                member_name=member_name,
+                name=name,
+            )
         self.eat("ASSIGN")
         expr = self.parse_expression()
         self.eat("SEMI")
@@ -723,6 +759,30 @@ class Parser:
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
+                if self.peek()[0] in ("DOT", "ARROW"):
+                    arrow_token = self.eat()
+                    arrow = arrow_token[0] == "ARROW"
+                    member_token = self.eat("IDENT")
+                    member_name = member_token[1]
+                    if self.peek()[0] == "LBRACKET":
+                        self.eat("LBRACKET")
+                        elem_index = self.parse_expression()
+                        self.eat("RBRACKET")
+                        return IndexMemberIndex(
+                            arrow=arrow,
+                            elem_index=elem_index,
+                            index=index,
+                            line=line,
+                            member_name=member_name,
+                            name=token[1],
+                        )
+                    return IndexMemberAccess(
+                        arrow=arrow,
+                        index=index,
+                        line=line,
+                        member_name=member_name,
+                        name=token[1],
+                    )
                 return Index(index=index, line=line, name=token[1])
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()

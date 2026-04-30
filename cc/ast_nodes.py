@@ -195,6 +195,50 @@ class IndexAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class IndexMemberAccess(Node):
+    """Rvalue ``arr[i].field`` or ``arr[i]->field`` (struct array element member read)."""
+
+    arrow: bool
+    index: Node
+    member_name: str
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class IndexMemberAssign(Node):
+    """Statement ``arr[i].field = expr;`` or ``arr[i]->field = expr;``."""
+
+    arrow: bool
+    expr: Node
+    index: Node
+    member_name: str
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class IndexMemberIndex(Node):
+    """Rvalue ``arr[i].field[n]`` (element of an array-typed struct member)."""
+
+    arrow: bool
+    elem_index: Node
+    index: Node
+    member_name: str
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class IndexMemberIndexAssign(Node):
+    """Statement ``arr[i].field[n] = expr;``."""
+
+    arrow: bool
+    elem_index: Node
+    expr: Node
+    index: Node
+    member_name: str
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class InlineAsm(Node):
     """File-scope ``asm("...");`` directive.
 

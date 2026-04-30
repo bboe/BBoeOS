@@ -27,6 +27,10 @@ from cc.ast_nodes import (
     If,
     Index,
     IndexAssign,
+    IndexMemberAccess,
+    IndexMemberAssign,
+    IndexMemberIndex,
+    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     LogicalAnd,
@@ -950,6 +954,169 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
         self.ax_clear()
+
+    def _emit_struct_element_offset(self, index: Node, struct_size: int, /) -> None:
+        """Emit code that leaves ``index * struct_size`` in BX (uses AX as scratch)."""
+        acc = self.target.acc
+        bx = self.target.bx_register
+        self.generate_expression(index)  # AX = index
+        self.emit(f"        imul {acc}, {struct_size}")  # AX = index * struct_size
+        self.emit(f"        mov {bx}, {acc}")  # BX = byte offset
+
+    def _resolve_index_member_layout(self, name: str, member_name: str, line: int, /) -> tuple[str, int, int, int, int]:
+        """Return layout tuple for a struct array member access.
+
+        Tuple shape: ``(const_base, struct_size, field_offset, field_size, element_size)``.
+
+        Validates that *name* is a global array of a known struct type and
+        that *member_name* is a declared field.  Raises :exc:`CompileError`
+        for unknown names or fields.
+        """
+        declaration = self.global_arrays.get(name)
+        if declaration is None:
+            message = f"'{name}' is not a global struct array"
+            raise CompileError(message, line=line)
+        type_name = declaration.type_name
+        if not type_name.startswith("struct "):
+            message = f"'{name}' element type '{type_name}' is not a struct"
+            raise CompileError(message, line=line)
+        tag = type_name[7:]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=line)
+        if member_name not in layout:
+            message = f"struct '{tag}' has no field '{member_name}'"
+            raise CompileError(message, line=line)
+        const_base = self._resolve_constant(name)
+        assert const_base is not None
+        struct_size = self._type_size(type_name)
+        field_offset, field_size, element_size = layout[member_name]
+        return const_base, struct_size, field_offset, field_size, element_size
+
+    def generate_index_member_access(self, expression: IndexMemberAccess, /) -> None:
+        """Generate code for ``arr[i].field`` as an rvalue.
+
+        Computes the struct element byte offset (``i * struct_size``) into BX,
+        then loads the field from ``[const_base + BX + field_offset]``.
+        Array-typed fields yield the field address (as for ``ptr->arr_field``).
+        """
+        const_base, struct_size, field_offset, field_size, element_size = self._resolve_index_member_layout(
+            expression.name, expression.member_name, expression.line
+        )
+        acc = self.target.acc
+        bx = self.target.bx_register
+        self.ax_clear()
+        self._emit_struct_element_offset(expression.index, struct_size)  # BX = i*stride
+        is_array_field = field_size != element_size
+        if is_array_field:
+            # Yield the address of the array member.
+            if field_offset:
+                self.emit(f"        lea {acc}, [{const_base}+{field_offset}+{bx}]")
+            else:
+                self.emit(f"        lea {acc}, [{const_base}+{bx}]")
+            self.ax_clear()
+            return
+        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        if field_size == 1:
+            self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        movzx {acc}, word {addr}")
+        else:
+            self.emit(f"        mov {acc}, {addr}")
+        self.ax_clear()
+
+    def generate_index_member_assign(self, statement: IndexMemberAssign, /) -> None:
+        """Generate code for ``arr[i].field = expr;``.
+
+        Evaluates the rhs into AX and saves it; computes the struct element
+        offset into BX; restores AX; stores at ``[const_base + BX + field_offset]``.
+        """
+        const_base, struct_size, field_offset, field_size, _element_size = self._resolve_index_member_layout(
+            statement.name, statement.member_name, statement.line
+        )
+        allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed:
+            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=statement.line)
+        acc = self.target.acc
+        bx = self.target.bx_register
+        self.ax_clear()
+        self.generate_expression(statement.expr)  # AX = value
+        self.emit(f"        push {acc}")  # save value
+        self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
+        self.emit(f"        pop {acc}")  # AX = value
+        self.ax_clear()
+        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        if field_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
+        else:
+            self.emit(f"        mov {addr}, {acc}")
+
+    def generate_index_member_index(self, expression: IndexMemberIndex, /) -> None:
+        """Generate code for ``arr[i].field[n]`` as an rvalue.
+
+        Computes the struct element offset in BX, scales the element index by
+        element_size, adds them, then loads from
+        ``[const_base + BX + field_offset]``.
+        """
+        const_base, struct_size, field_offset, _field_size, element_size = self._resolve_index_member_layout(
+            expression.name, expression.member_name, expression.line
+        )
+        if element_size not in (1, 2):
+            message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=expression.line)
+        acc = self.target.acc
+        bx = self.target.bx_register
+        self.ax_clear()
+        self._emit_struct_element_offset(expression.index, struct_size)  # BX = i*stride
+        self.emit(f"        push {bx}")  # save struct element offset
+        self.generate_expression(expression.elem_index)  # AX = n
+        if element_size == 2:
+            self.emit(f"        shl {acc}, 1")  # AX = n*2
+        self.emit(f"        pop {bx}")  # BX = i*stride
+        self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
+        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        if element_size == 1:
+            self.emit_byte_load_zx(addr)
+        else:
+            self.emit(f"        mov {acc}, {addr}")
+        self.ax_clear()
+
+    def generate_index_member_index_assign(self, statement: IndexMemberIndexAssign, /) -> None:
+        """Generate code for ``arr[i].field[n] = expr;``.
+
+        Saves the rhs; computes ``i*struct_size`` into BX; saves BX;
+        computes ``n*element_size`` into AX; adds to BX; restores rhs;
+        stores at ``[const_base + BX + field_offset]``.
+        """
+        const_base, struct_size, field_offset, _field_size, element_size = self._resolve_index_member_layout(
+            statement.name, statement.member_name, statement.line
+        )
+        if element_size not in (1, 2):
+            message = f"indexing '{statement.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=statement.line)
+        acc = self.target.acc
+        bx = self.target.bx_register
+        self.ax_clear()
+        self.generate_expression(statement.expr)  # AX = value
+        self.emit(f"        push {acc}")  # save value
+        self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
+        self.emit(f"        push {bx}")  # save struct element offset
+        self.generate_expression(statement.elem_index)  # AX = n
+        if element_size == 2:
+            self.emit(f"        shl {acc}, 1")  # AX = n*2
+        self.emit(f"        pop {bx}")  # BX = i*stride
+        self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
+        self.emit(f"        pop {acc}")  # AX = value
+        self.ax_clear()
+        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        if element_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        else:
+            self.emit(f"        mov word {addr}, ax")
 
     def _emit_load_var(self, name: str, /, *, register: str = "bx") -> None:
         """Load a variable's value into *register*.

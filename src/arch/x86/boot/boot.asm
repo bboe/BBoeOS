@@ -60,11 +60,22 @@
         BOOT_CODE_SELECTOR      equ 08h
         BOOT_DATA_SELECTOR      equ 10h
 
-        ;; Physical addresses for early-PE page-table setup.  Boot PD
-        ;; and the first kernel PT live above 1 MB so the Phase 3
-        ;; user shim's 0..0xFFFFF identity mapping can't reach them.
-        BOOT_PD_PHYS            equ 0x200000
-        FIRST_KERNEL_PT_PHYS    equ 0x201000
+        ;; Physical addresses for early-PE page-table setup.  Boot PD and
+        ;; first kernel PT are positioned immediately above kernel.bin by
+        ;; make_os.sh, which computes KERNEL_RESERVED_BASE from the measured
+        ;; kernel.bin size and passes it as -DKERNEL_RESERVED_BASE=N.
+        ;; The fallback keeps direct nasm invocations buildable.
+        %ifndef KERNEL_RESERVED_BASE
+        %define KERNEL_RESERVED_BASE 0x180000
+        %endif
+        KERNEL_STACK_BYTES_BOOT   equ 0x4000
+        NET_BUFFER_BYTES_BOOT     equ 1536
+        PROGRAM_SCRATCH_BYTES_BOOT equ 128 * 1024
+        KERNEL_STACK_TOP_BOOT     equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
+        NET_TX_END_BOOT           equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
+        PROGRAM_SCRATCH_PHYS_BOOT equ (NET_TX_END_BOOT + 0xFFF) & ~0xFFF
+        BOOT_PD_PHYS              equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
+        FIRST_KERNEL_PT_PHYS      equ BOOT_PD_PHYS + 0x1000
         KERNEL_LOAD_PHYS        equ 0x10000     ; INT 13h read destination
         KERNEL_FINAL_PHYS       equ 0x100000    ; final post-relocation phys
         HIGH_ENTRY_VIRT         equ 0xC0100000  ; kernel.bin org / first byte

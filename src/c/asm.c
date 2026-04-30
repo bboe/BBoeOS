@@ -2,10 +2,24 @@
    inline-asm shim only where C can't express the operation: indirect
    table dispatch, syscalls, and the ``rep movsw`` blocks for include
    nesting.  Compiled with ``cc.py --bits 32`` for ring-0 protected
-   mode; the symbol and jump tables live at SYMBOL_BASE in extended
-   memory so they don't compete with segment-0 RAM. */
+   mode. */
 
 #include "asm_layout.h"
+
+/* Symbol-table and jump-size tables in BSS.  ``struct Symbol`` packs
+   32-byte name + 4-byte value + type + scope (no padding needed).
+   ``jump_sizes`` is one byte per relative jump: 0 = short (rel8),
+   1 = near (rel16/rel32).  Both live in the program's own BSS so
+   the kernel does not need to pre-allocate any shared frames for
+   asm. */
+struct Symbol {
+    char name[SYMBOL_NAME_LENGTH];
+    int value;
+    char type;
+    char scope;
+};
+struct Symbol symbol_table[SYMBOL_MAX];
+char jump_sizes[JUMP_MAX];
 
 /* File-scope globals that back the assembler's mutable state.  cc.py
    emits each as ``_g_<name>`` at the tail of the output; C code
@@ -51,20 +65,19 @@ char *include_push_arg;
 int include_save_fd;
 int include_save_position;
 int include_save_valid;
-/* Pointer to the parent's 512-byte SOURCE_BUFFER copy, held in
-   post-binary scratch RAM (main() sets it to ``_program_end + 1280``
-   — past LINE_BUFFER / OUTPUT_BUFFER / SOURCE_BUFFER).  Storing the
-   buffer as a C array instead would bake 512 zero bytes into the
-   binary; the scratch address keeps the on-disk size the same as
-   the NASM layout. */
-char *include_source_save;
+/* 512-byte BSS buffer holding the parent file's ``source_buffer``
+   contents while one ``%include`` level is active (zero stack depth
+   for nested includes — only one level is supported).  Lives in BSS
+   so the kernel maps it; the post-binary scratch placement used
+   pre-paging crashed once paging gave each program its own page-
+   aligned image. */
+char include_source_save[512];
 uint8_t iteration_count;
 int jump_index;
 int last_symbol_index;
-/* Pointer to the 256-byte line-accumulation buffer at
-   ``_program_end`` (main() initializes it).  read_line fills it
+/* 256-byte line-accumulation buffer.  read_line fills it
    null-terminated; abort_unknown_impl prints it. */
-char *line_buffer;
+char line_buffer[256];
 /* Macro table — ``%macro NAME N`` through ``%endmacro`` stores the
    body lines in ``macro_body_buffer`` (each null-terminated, packed
    one after another) and the metadata in parallel arrays indexed
@@ -108,10 +121,9 @@ int parse_operand_address_size;
    and stashes the displacement / immediate here for the caller to
    read after the call — cc.py's return ABI is AX-only. */
 int parse_operand_value;
-/* Pointer to the 512-byte output-byte buffer at ``_program_end + 256``
-   (= OUTPUT_BUFFER in the asm_layout.h #define).  main() initializes
-   it; ``emit_byte`` / ``flush_output`` index into it directly. */
-uint8_t *output_buffer;
+/* 512-byte output-byte buffer.  ``emit_byte`` / ``flush_output``
+   index into it directly. */
+uint8_t output_buffer[512];
 int output_fd;
 char *output_name;
 int output_position;
@@ -123,11 +135,9 @@ uint8_t pass;
    ``peek_label_value`` after the ``jnc`` instead of reading AX directly.
    Only valid on hit (CF clear); callers branch on CF first. */
 int peek_label_value;
-/* Pointer to the 512-byte source-file read buffer at
-   ``_program_end + 768`` (= SOURCE_BUFFER in the old %define).
-   main() initializes it; read_line / include_pop / include_push
-   index into it directly. */
-char *source_buffer;
+/* 512-byte source-file read buffer.  read_line / include_pop /
+   include_push index into it directly. */
+char source_buffer[512];
 int source_buffer_position;
 int source_buffer_valid;
 /* C-level alias for the SI register — the source cursor that every
@@ -221,8 +231,6 @@ void skip_comma();
 void skip_ws();
 __attribute__((regparm(1)))
 void symbol_add_constant(int value);
-__attribute__((regparm(1)))
-int symbol_entry_address(int index);
 __attribute__((regparm(1)))
 int symbol_lookup(int scope);
 __attribute__((regparm(1)))
@@ -945,7 +953,7 @@ void encode_rel8_jump(int opcode) {
     skip_ws();
     int bx = jump_index;
     jump_index += 1;
-    int current_size = far_read8(JUMP_TABLE + bx);
+    int current_size = jump_sizes[bx];
     int use_short = 1;
     if (current_size == 0) {
         /* Currently short; check whether the target is still in
@@ -956,7 +964,7 @@ void encode_rel8_jump(int opcode) {
             if (peek_label_target()) {
                 int rel = peek_label_value - (current_address + 2);
                 if (rel < -128 || rel > 127) {
-                    far_write8(JUMP_TABLE + bx, 1);
+                    jump_sizes[bx] = 1;
                     changed_flag = 1;
                     use_short = 0;
                 }
@@ -989,7 +997,7 @@ void encode_rel8_jump(int opcode) {
                 }
                 int rel = target - base;
                 if (rel >= -128 && rel <= 127) {
-                    far_write8(JUMP_TABLE + bx, 0);
+                    jump_sizes[bx] = 0;
                     changed_flag = 1;
                     use_short = 1;
                 }
@@ -1133,7 +1141,7 @@ void flush_output() {
         return;
     }
     asm("mov ebx, [_g_output_fd]\n"
-        "mov esi, OUTPUT_BUFFER\n"
+        "mov esi, _g_output_buffer\n"
         "mov ecx, [_g_output_position]\n"
         "mov ah, SYS_IO_WRITE\n"
         "call syscall");
@@ -2094,8 +2102,8 @@ void include_pop() {
     source_fd = include_save_fd;
     source_buffer_position = include_save_position;
     source_buffer_valid = include_save_valid;
-    asm("mov esi, [_g_include_source_save]\n"
-        "mov edi, SOURCE_BUFFER\n"
+    asm("mov esi, _g_include_source_save\n"
+        "mov edi, _g_source_buffer\n"
         "mov ecx, 256\n"
         "cld\nrep movsw");
     include_depth -= 1;
@@ -2115,8 +2123,8 @@ void include_push() {
     include_save_fd = source_fd;
     include_save_position = source_buffer_position;
     include_save_valid = source_buffer_valid;
-    asm("mov esi, SOURCE_BUFFER\n"
-        "mov edi, [_g_include_source_save]\n"
+    asm("mov esi, _g_source_buffer\n"
+        "mov edi, _g_include_source_save\n"
         "mov ecx, 256\n"
         "cld\nrep movsw");
     int i = 0;
@@ -2205,17 +2213,6 @@ int lookup_ident_here(int advance) {
 }
 
 int main(int argc, char *argv[]) {
-    /* Publish the scratch-buffer bases as C-visible pointers so
-       C code can index ``line_buffer[i]`` / ``source_buffer[i]`` and
-       so abort_unknown_impl can printf the bad source line.
-       ``include_source_save`` lives one SOURCE_BUFFER length past
-       SOURCE_BUFFER — an %include level saves the 512-byte
-       SOURCE_BUFFER into that scratch RAM instead of bloating the
-       binary. */
-    line_buffer = LINE_BUFFER;
-    output_buffer = OUTPUT_BUFFER;
-    source_buffer = SOURCE_BUFFER;
-    include_source_save = SOURCE_BUFFER + 512;
     default_bits = 16;
     parse_operand_address_size = 16;
     if (argc != 2) {
@@ -3131,7 +3128,7 @@ int read_line() {
 __attribute__((always_inline))
 int read_source_sector() {
     asm("mov ebx, [_g_source_fd]\n"
-        "mov edi, SOURCE_BUFFER\n"
+        "mov edi, _g_source_buffer\n"
         "mov ecx, 512\n"
         "mov ah, SYS_IO_READ\n"
         "call syscall");
@@ -3303,12 +3300,12 @@ void run_pass1() {
     pass = 1;
     symbol_count = 0;
     org_value = 0;
-    /* Initialise the JUMP_TABLE region to all-1 (= near). */
-    asm("mov edi, JUMP_TABLE\n"
-        "mov ecx, JUMP_MAX\n"
-        "mov al, 1\n"
-        "cld\n"
-        "rep stosb");
+    /* Initialise jump_sizes to all-1 (= near). */
+    int ji = 0;
+    while (ji < JUMP_MAX) {
+        jump_sizes[ji] = 1;
+        ji += 1;
+    }
     iteration_count = 0;
     while (1) {
         changed_flag = 0;
@@ -3415,21 +3412,17 @@ void skip_ws() {
    pads to SYMBOL_NAME_LENGTH with zeros; metadata lands at offset
    SYMBOL_NAME_LENGTH (value, type=0, scope byte).  Overflow jumps
    to die_symbol_overflow — silently corrupting past the table
-   would clobber LINE_BUFFER which lives immediately after. */
+   would clobber whichever BSS global cc.py emits next. */
 __attribute__((regparm(1)))
 void symbol_add(int value, int scope) {
     if (symbol_count >= SYMBOL_MAX) {
         die_symbol_overflow();
     }
-    int entry = symbol_entry_address(symbol_count);
+    int index = symbol_count;
     /* Copy up to SYMBOL_NAME_LENGTH - 1 chars from source_cursor
-       into the entry's name field, then zero-fill the remainder
-       through offset SYMBOL_NAME_LENGTH - 1.  source_cursor is
-       SI-pinned; advance it in-place and restore at the end so the
-       inner read compiles to ``mov al, [si]`` (the variable-offset
-       ``source_cursor[n]`` subscript would force a destructive
-       ``add si, <reg>`` — same hazard symbol_lookup's inner loop
-       dodges). */
+       into the entry's name field, then zero-fill the remainder.
+       source_cursor is SI-pinned; advance it in-place and restore
+       at the end so the inner read compiles to ``mov al, [si]``. */
     char *saved = source_cursor;
     int n = 0;
     while (n < SYMBOL_NAME_LENGTH - 1) {
@@ -3437,18 +3430,18 @@ void symbol_add(int value, int scope) {
         if (src == 0) {
             break;
         }
-        far_write8(entry + n, src);
+        symbol_table[index].name[n] = src;
         source_cursor += 1;
         n += 1;
     }
     while (n < SYMBOL_NAME_LENGTH) {
-        far_write8(entry + n, 0);
+        symbol_table[index].name[n] = 0;
         n += 1;
     }
     source_cursor = saved;
-    far_write32(entry + SYMBOL_NAME_LENGTH, value);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 4, 0);
-    far_write8(entry + SYMBOL_NAME_LENGTH + 5, scope & 0xFF);
+    symbol_table[index].value = value;
+    symbol_table[index].type = 0;
+    symbol_table[index].scope = scope & 0xFF;
     symbol_count += 1;
 }
 
@@ -3460,55 +3453,36 @@ void symbol_add(int value, int scope) {
 __attribute__((regparm(1)))
 void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
-    int offset = symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH + 4;
-    far_write8(offset, 1);
+    symbol_table[last_symbol_index].type = 1;
 }
 
-/* Compute the flat address of a symbol table entry: returns
-   ``SYMBOL_BASE + index * SYMBOL_ENTRY`` (36) in EAX.  Fastcall
-   ``regparm(1)`` so the index arrives in EAX directly.  Returning
-   the absolute address (rather than an ES-relative offset like the
-   16-bit version) lets every caller hand the result straight to
-   far_read* / far_write*, which under flat protected mode addressing is just
-   a normal indexed load. */
-__attribute__((regparm(1)))
-int symbol_entry_address(int index) {
-    return SYMBOL_BASE + index * SYMBOL_ENTRY;
-}
-
-/* Linear scan of the symbol table starting at SYMBOL_BASE.  Each
-   entry is SYMBOL_ENTRY (38) bytes: 32-char null-padded name,
-   4-byte value, 1-byte type, 1-byte scope.  Caller passes scope via
-   regparm(1) AX (low byte is compared against the entry's scope
-   byte; 0xFFFF selects globals since the low byte stored is 0xFF).
+/* Linear scan of the symbol table.  Caller passes scope via
+   regparm(1) AX (low byte compared against entry's scope byte;
+   0xFFFF selects globals since the stored low byte is 0xFF).
    Name pointer is ``source_cursor`` (SI-pinned).  On hit: returns
    AX = value, sets ``last_symbol_index`` to the entry index.  On
-   miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF.  No CF
-   return — all remaining callers test ``last_symbol_index`` for
-   hit/miss.  Accesses the symbol region via ``far_read8`` /
-   ``far_read32`` builtins; under protected mode flat DS this is a plain
-   ``mov`` indexed by the absolute address. */
+   miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF. */
 __attribute__((regparm(1)))
 int symbol_lookup(int scope) {
     int count = symbol_count;
-    int entry = SYMBOL_BASE;
     int index = 0;
     char *saved = source_cursor;
     last_symbol_index = 0xFFFF;
     while (index < count) {
-        int entry_scope = far_read8(entry + SYMBOL_NAME_LENGTH + 5);
+        int entry_scope = symbol_table[index].scope;
         if (entry_scope == (scope & 0xFF)) {
-            /* Walk source_cursor (= SI) and an entry cursor in
+            /* Walk source_cursor (= SI) and the entry name in
                parallel.  Reading ``source_cursor[0]`` lowers to a
                clean ``mov al, [si]``; the variable-offset subscript
                ``source_cursor[n]`` would force cc.py to ``add si,
                <reg>`` and wreck the SI alias.  Restore source_cursor
                from ``saved`` before returning or continuing. */
+            char *ent_name = symbol_table[index].name;
             int name_offset = 0;
             int mismatch = 0;
             while (1) {
                 int src = source_cursor[0];
-                int ent = far_read8(entry + name_offset);
+                int ent = ent_name[name_offset];
                 if (src != ent) {
                     mismatch = 1;
                     break;
@@ -3522,10 +3496,9 @@ int symbol_lookup(int scope) {
             source_cursor = saved;
             if (mismatch == 0) {
                 last_symbol_index = index;
-                return far_read32(entry + SYMBOL_NAME_LENGTH);
+                return symbol_table[index].value;
             }
         }
-        entry += SYMBOL_ENTRY;
         index += 1;
     }
     return 0;
@@ -3543,7 +3516,7 @@ void symbol_set(int value, int scope) {
         symbol_add(value, scope);
         last_symbol_index = symbol_count - 1;
     } else {
-        far_write32(symbol_entry_address(last_symbol_index) + SYMBOL_NAME_LENGTH, value);
+        symbol_table[last_symbol_index].value = value;
     }
 }
 
@@ -3591,11 +3564,10 @@ asm(
     "\n"
     "\n"
     "        ;; Memory layout.  The assembler's scratch buffers live past\n"
-    "        ;; _program_end (cc.py tail sentinel); the symbol and jump\n"
-    "        ;; tables live at SYMBOL_BASE (3 MB mark) so they don't\n"
-    "        ;; compete with segment-0 RAM.  Named constants are\n"
-    "        ;; ``#define``d in src/c/asm_layout.h and bridged into NASM\n"
-    "        ;; ``%define``s by cc.py at the top of the generated output.\n"
+    "        ;; _program_end (cc.py tail sentinel).  The symbol table and\n"
+    "        ;; jump-size table live in the program's own BSS (``symbol_table``\n"
+    "        ;; and ``jump_sizes``).  Named constants are ``#define``d in\n"
+    "        ;; src/c/asm_layout.h and bridged into NASM ``%define``s by cc.py.\n"
     "\n"
     ";;; -----------------------------------------------------------------------\n"
     ";;; Every function in the assembler — main, the pass driver, the\n"
@@ -3802,8 +3774,8 @@ asm(
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
     ";;; this inline-asm block (see the C declarations at the top of\n"
     ";;; src/c/asm.c).  cc.py emits a ``_program_end:`` sentinel at the\n"
-    ";;; very end of the output, which LINE_BUFFER and friends point at\n"
-    ";;; so the scratch buffers still sit immediately past the loaded\n"
-    ";;; image.\n"
+    ";;; very end of the output and lays out every file-scope global —\n"
+    ";;; including the four scratch arrays (line_buffer, output_buffer,\n"
+    ";;; source_buffer, include_source_save) — in BSS past it.\n"
     ";;; -----------------------------------------------------------------------\n"
 );

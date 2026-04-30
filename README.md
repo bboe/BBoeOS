@@ -9,13 +9,15 @@ A minimal x86 operating system with a single-file bootloader-plus-kernel, shell,
 
 ## Minimum runtime requirements
 
-* **4 MB RAM** to boot the shell and run lightweight programs (`hello`, `ls`,
-  `cat`, `uptime`, etc.).  The kernel reserves ~2 MB statically for code,
-  stacks, NIC/program-load buffers, and the frame bitmap.
-* **5 MB RAM** to run every program in `bin/` — `edit` allocates a 1 MB
-  edit buffer in BSS, and `bigbss` reserves 256 KB.
-* `qemu-system-i386` defaults to 128 MB, which is comfortably above either
-  floor.  Pass `-m 16M` (or higher) if you want to test under tighter
+* **2 MB RAM** to boot the shell and run every program in `bin/`,
+  including the self-hosted assembler (`asm`), the 1 MB-BSS editor (`edit`),
+  and the 256 KB-BSS BSS-stress test (`bigbss`).  The kernel reserves
+  ~1.2 MB for code, stacks, NIC buffers, and the frame bitmap (the reserved
+  region is packed right after `kernel.bin`); each program runs in its own
+  per-program PD, so the largest single user image (edit at ~1 MB) sets the
+  minimum, not the sum of every program's BSS.
+* `qemu-system-i386` defaults to 128 MB, which is comfortably above the
+  2 MB floor.  Pass `-m 2M` (or higher) if you want to test under tighter
   constraints.
 
 ## Building and running BBoeOS

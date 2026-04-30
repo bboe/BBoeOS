@@ -8,7 +8,11 @@
 ;; scratch slot that FUNCTION_GET_CHARACTER writes into on every
 ;; keypress; exec_path reuses the ARGV region (32 bytes), which is
 ;; free here because the shell never calls FUNCTION_PARSE_ARGV on its
-;; own command line.
+;; own command line.  ``SECTOR_BUFFER`` (phys 0xF000) lived in the
+;; live constants header until shell.c moved its kill buffer to BSS;
+;; this archive snapshot keeps a private %assign for the historical
+;; real-mode layout.
+%assign SECTOR_BUFFER 0F000h
 %assign exec_path   ARGV
 %assign kill_buffer SECTOR_BUFFER + 4
 

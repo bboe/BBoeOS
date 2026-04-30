@@ -1,3 +1,10 @@
+/* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
+   pre-Phase-4 the shell stashed it inside SECTOR_BUFFER (phys 0xF000)
+   reachable through the shim's identity user mapping, but per-program
+   PDs no longer alias the low 1 MB so a stale fixed-address access
+   would page-fault. */
+char kill_buf[MAX_INPUT];
+
 int strcmp(const char *a, const char *b) {
     int index = 0;
     while (1) {
@@ -69,13 +76,8 @@ int try_exec(char *name) {
 
 int main() {
     char *buf = BUFFER;
-    /* kill_buf lives inside SECTOR_BUFFER past the 1-byte scratch slot
-       that FUNCTION_GET_CHARACTER writes into on every keypress. */
-    char *kill_buf = SECTOR_BUFFER + 4;
     /* exec_path assembles "bin/<name>" for the fallback lookup.  ARGV
-       (32 bytes) is unused by the shell since main() takes no args,
-       and sits outside SECTOR_BUFFER so the directory-sector read
-       during find_file doesn't clobber the path mid-lookup. */
+       (32 bytes) is unused by the shell since main() takes no args. */
     char *exec_path = ARGV;
     int vga_fd = open("/dev/vga", O_WRONLY);
     int kill_len = 0;
