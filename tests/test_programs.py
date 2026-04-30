@@ -185,6 +185,7 @@ def _pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
 TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
+    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", timeout=10.0),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
@@ -239,9 +240,18 @@ TESTS: list[ProgramTest] = [
     ProgramTest("netinit", ["netinit"], r"NIC found: [0-9A-F:]+", with_net=True),
     ProgramTest("netrecv", ["netrecv"], r"Received:.*08 06", with_net=True, timeout=20.0),
     ProgramTest("netsend", ["netsend"], r"ARP request sent", with_net=True),
+    # Writing to virt 0x00400000 (PDE[1], no PT installed) raises #PF;
+    # the user-fault kill path tears down the PD and respawns the
+    # shell.  echo recovered then runs to confirm the new shell works.
+    ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00400000[\s\S]*recovered"),
     ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("pintest", ["pintest"], r"^first non-space: h$"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
+    # 1 KB recursive frames overflow the 16-page user stack into the
+    # unmapped page below it; same kill path as nullderef.  CR2 lands
+    # somewhere below 0x3FFF0000 (the stack base) — match the EXC0E
+    # signature loosely so future stack-size changes don't break this.
+    ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 

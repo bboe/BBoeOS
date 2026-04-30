@@ -39,6 +39,14 @@
 boot_disk        equ BOOT_DISK_VIRT
 directory_sector equ DIRECTORY_SECTOR_VIRT
 
+        ;; Sliding 2-sector window for ext2_search_blk's directory walk.
+        ;; Sits at low-phys 0xF200 (sector_buffer + 0x200, the next 1 KB
+        ;; of the same 4 KB frame) so the 1 KB doesn't burn disk space
+        ;; inside kernel.bin — same trick as kernel_stack / program_scratch.
+        ;; LOW_RESERVE_BYTES (0x202000) covers the entire 0..2 MB region,
+        ;; so this slot is pre-reserved by the bitmap allocator at boot
+        ;; and won't be handed out for general allocations.
+ext2_sd_buffer   equ 0xC000F200
         ;; Disk sector buffer at fixed low-phys 0xF000 (kernel-virt
         ;; 0xC000F000 via the direct map).  Stays at fixed phys for now;
         ;; PR A migrated bbfs.asm / ext2.asm to 32-bit register accesses

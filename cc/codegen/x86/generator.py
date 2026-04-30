@@ -641,7 +641,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"_g_{name}: {directive} {', '.join(rendered)}")
             else:
                 size_expression = self._constant_expression(declaration.size)
-                byte_count = f"({size_expression})*{stride}" if stride != 1 else size_expression
+                # Fold ``size * stride`` at compile time when the size is a
+                # plain integer — the self-hosted assembler in src/c/asm.c
+                # uses flat operator precedence, so emitting ``(N)*4`` next
+                # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
+                # the self-host group ``(N) * (4 - <next_term>)`` instead of
+                # ``(N)*4`` first.  Pre-folding to a literal sidesteps that.
+                if stride == 1:
+                    byte_count = size_expression
+                elif size_expression is not None and size_expression.isdigit():
+                    byte_count = str(int(size_expression) * stride)
+                else:
+                    byte_count = f"({size_expression})*{stride}"
                 if self.target_mode == "kernel":
                     self.emit(f"_g_{name}: times {byte_count} db 0")
                 else:
