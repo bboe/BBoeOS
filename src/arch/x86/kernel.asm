@@ -286,7 +286,7 @@ high_entry:
 %include "entry.asm"
 %include "fs/block.asm"
 %include "fs/fd.kasm"
-%include "fs/vfs.asm"
+%include "fs/vfs.kasm"
 %include "net/net.asm"
 %include "syscall.asm"
 %include "idt.asm"
