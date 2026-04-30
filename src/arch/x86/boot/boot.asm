@@ -71,31 +71,49 @@
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x180000
         %endif
-        KERNEL_STACK_BYTES_BOOT   equ 0x4000
-        NET_BUFFER_BYTES_BOOT     equ 1536
-        PROGRAM_SCRATCH_BYTES_BOOT equ 128 * 1024
-        KERNEL_STACK_TOP_BOOT     equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
-        NET_TX_END_BOOT           equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
-        PROGRAM_SCRATCH_PHYS_BOOT equ (NET_TX_END_BOOT + 0xFFF) & ~0xFFF
-        BOOT_PD_PHYS              equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
-        FIRST_KERNEL_PT_PHYS      equ BOOT_PD_PHYS + 0x1000
+        ;; Kernel-side layout mirror.  Must match the equ chain in
+        ;; src/arch/x86/kernel.asm so that boot.asm's BOOT_PD_PHYS and
+        ;; FIRST_KERNEL_PT_PHYS resolve to the same physical addresses
+        ;; the kernel already expects.  In-memory layout (low to high):
+        ;;   KERNEL_RESERVED_BASE          (kernel stack)
+        ;;     + KERNEL_STACK_BYTES_BOOT       (8 KB)
+        ;;     + NET_BUFFER_BYTES_BOOT × 2     (RX 1.5 KB + TX 1.5 KB)
+        ;;     + SECTOR_BUFFER_BYTES_BOOT      (512 B)
+        ;;     + EXT2_SD_BUFFER_BYTES_BOOT     (1024 B)
+        ;;     ... page-align ...
+        ;;   PROGRAM_SCRATCH_PHYS_BOOT
+        ;;     + PROGRAM_SCRATCH_BYTES_BOOT    (32 KB)
+        ;;   BOOT_PD_PHYS                      (4 KB)
+        ;;   FIRST_KERNEL_PT_PHYS              (4 KB)
+        ;;
         ;; kernel.bin loads directly to its final physical home — there's
-        ;; no real-mode-to-PE relocation copy.  The address sits above the
-        ;; vDSO target frame at phys 0x10000 and below the VGA aperture at
-        ;; phys 0xA0000, so the kernel image plus its KERNEL_RESERVED_BASE-
-        ;; rooted scratch region (stack, NIC bufs, program_scratch, boot
-        ;; PD, first kernel PT) all fit in conventional memory; the OS can
-        ;; boot under QEMU `-m 1` (1 MB total).
-        KERNEL_LOAD_PHYS        equ 0x20000     ; INT 13h read destination = final home
-        HIGH_ENTRY_VIRT         equ 0xC0020000  ; kernel.bin org / first byte
-        ;; Boot stash addresses inside the freshly-loaded kernel.bin.
-        ;; The kernel's `org` block reserves a tiny header — `jmp short
-        ;; high_entry` followed by `boot_disk db 0` (at offset
-        ;; BOOT_STASH_OFFSET) and `directory_sector dw 0` (at offset +1).
-        ;; boot.asm writes both AFTER the kernel.bin INT 13h, so the
-        ;; load doesn't clobber them.
-        BOOT_DISK_PHYS          equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
-        DIRECTORY_SECTOR_PHYS   equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
+        ;; no real-mode-to-PE relocation copy.  KERNEL_LOAD_PHYS sits
+        ;; above the vDSO target frame at phys 0x10000 and below the VGA
+        ;; aperture at phys 0xA0000, so the entire reserved region fits
+        ;; in conventional memory and the OS boots under QEMU `-m 1`.
+        ;;
+        ;; BOOT_DISK_PHYS / DIRECTORY_SECTOR_PHYS are the embedded boot
+        ;; stash inside kernel.bin (offset BOOT_STASH_OFFSET): a 1-byte
+        ;; boot_disk slot followed by a 2-byte directory_sector slot.
+        ;; boot.asm writes both AFTER the kernel.bin INT 13h read so the
+        ;; load doesn't clobber them.  HIGH_ENTRY_VIRT is the kernel
+        ;; far-jump target (= 0xC0000000 + KERNEL_LOAD_PHYS, so the
+        ;; kernel runs at its direct-map alias).
+        BOOT_DISK_PHYS              equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
+        BOOT_PD_PHYS                equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
+        DIRECTORY_SECTOR_PHYS       equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
+        EXT2_SD_BUFFER_BYTES_BOOT   equ 1024
+        EXT2_SD_END_BOOT            equ NET_TX_END_BOOT + SECTOR_BUFFER_BYTES_BOOT + EXT2_SD_BUFFER_BYTES_BOOT
+        FIRST_KERNEL_PT_PHYS        equ BOOT_PD_PHYS + 0x1000
+        HIGH_ENTRY_VIRT             equ 0xC0020000
+        KERNEL_LOAD_PHYS            equ 0x20000
+        KERNEL_STACK_BYTES_BOOT     equ 0x2000
+        KERNEL_STACK_TOP_BOOT       equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
+        NET_BUFFER_BYTES_BOOT       equ 1536
+        NET_TX_END_BOOT             equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
+        PROGRAM_SCRATCH_BYTES_BOOT  equ 32 * 1024
+        PROGRAM_SCRATCH_PHYS_BOOT   equ (EXT2_SD_END_BOOT + 0xFFF) & ~0xFFF
+        SECTOR_BUFFER_BYTES_BOOT    equ 512
 
 start:
         xor ax, ax

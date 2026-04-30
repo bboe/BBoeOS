@@ -6,7 +6,7 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
-### Reclaim conventional low memory + relocate boot stash into kernel.bin (2026-04-30)
+### Reclaim conventional low memory + tighten kernel-side reservations (2026-04-30)
 - `boot_disk` and `directory_sector` move out of fixed phys `0x4D0` /
   `0x4D2` and into a 3-byte stash at the top of `kernel.bin`.  The
   kernel image's first instruction is `jmp short high_entry` (a 2-byte
@@ -18,15 +18,30 @@ at the time.
   BP carries the BIOS drive number through to `post_mbr_continue`,
   which uses it for the second INT 13h and then writes it into the
   kernel's stash slot.
+- `sector_buffer` (512 B) and `ext2_sd_buffer` (1 KB) move out of
+  fixed phys `0xF000` / `0xF200` into the post-kernel reserved
+  region (right after the NIC TX buffer).  `bbfs.asm` and `ext2.asm`
+  are already 32-bit clean (`mov ebx, sector_buffer` / `[ebx+OFFSET]`),
+  so the legacy "16-bit `[bx+offset]`" justification for low-phys
+  pinning no longer applies.  The FD table is already in kernel BSS
+  (`struct fd fd_table[FD_MAX]` in `src/fs/fd.c`), so the historical
+  `0xE000` reservation was a phantom.
+- Kernel stack shrinks from 16 KB to 8 KB.  Linux i386 uses 8 KB and
+  BBoeOS's call depth is much shallower — every helper that recurses
+  was checked.
+- `program_scratch` shrinks from 128 KB to 32 KB.  Largest binary in
+  the tree is `asm` at ~17 KB; 32 KB leaves ~14 KB headroom.  Build
+  asserts the whole reserved region stays under `0xA0000`.
 - `high_entry` replaces the single `frame_reserve_range(0,
-  LOW_RESERVE_BYTES)` sweep with two narrow calls: one for the
-  0xE000..0x10FFF cluster (FD table / sector_buffer / ext2_sd_buffer /
-  vDSO) and one for `KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES` (kernel
-  image + KERNEL_RESERVED_BASE region).  Everything else in
-  conventional low memory — IVT/BDA at 0..0x4FF, `0x600-0x7BFF` gap,
-  MBR landing zone, dead post-MBR boot code, and the boot stack —
-  stays free.  Net win is ~115 KB more frames available to user
-  programs under `-m 1`.
+  LOW_RESERVE_BYTES)` sweep with two narrow calls: one for the vDSO
+  target frame at `0x10000` and one for `KERNEL_LOAD_PHYS..
+  LOW_RESERVE_BYTES` (kernel image + KERNEL_RESERVED_BASE region).
+  Everything else in conventional low memory — IVT/BDA at `0..0x4FF`,
+  `0x600-0x7BFF` gap, MBR landing zone, dead post-MBR boot code, the
+  unused page at `0xE000`, and the boot stack at `0x9F000` — stays
+  free.  Combined with the program_scratch / kernel_stack /
+  disk-buffer cuts, the user pool grows by ~225 KB under `-m 1` (from
+  ~316 KB to ~540 KB).
 
 ### Drop the kernel to phys 0x20000 / 1 MB minimum RAM (2026-04-30)
 - The kernel now loads at phys `0x20000` (in conventional RAM) instead
