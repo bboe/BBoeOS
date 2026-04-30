@@ -6,6 +6,27 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Drop ext2_sd_buffer reservation; drop _BOOT suffix in boot.asm (2026-04-30)
+- `ext2_sd_buffer` is no longer a static post-kernel reservation.
+  `ext2_init` calls `frame_alloc` on a successful ext2 detect, stashes
+  the kernel-virt of the 4 KB frame into a new `ext2_sd_buffer` BSS
+  variable in `src/fs/ext2.asm`, and the three access points in
+  `ext2_search_blk` switch from `mov edi, ext2_sd_buffer [+ 512]` to
+  `mov edi, [ext2_sd_buffer]` (and `add edi, 512` where needed).
+  bbfs systems never reach the allocation, so they save a 4 KB frame
+  in the kernel-side reserved region.  `EXT2_SD_BUFFER_BYTES` /
+  `EXT2_SD_BUFFER_PHYS` / the `ext2_sd_buffer` direct-map equ are
+  gone from `src/arch/x86/kernel.asm` and the matching mirror in
+  `boot.asm`.
+- The `_BOOT` suffix on the four size constants in `boot.asm`
+  (`KERNEL_STACK_BYTES_BOOT`, `NET_BUFFER_BYTES_BOOT`,
+  `SECTOR_BUFFER_BYTES_BOOT`, `EXT2_SD_BUFFER_BYTES_BOOT` — now
+  removed entirely) is gone.  The kernel-side and boot-side flat
+  binaries already have separate symbol namespaces, so the suffix
+  was just inconsistent disambiguation noise (the PHYS / VIRT
+  constants — `BOOT_PD_PHYS`, `FIRST_KERNEL_PT_PHYS`, etc. — never
+  carried the suffix).
+
 ### Drop program_scratch — stream binaries from disk into user frames (2026-04-30)
 - `program_enter` no longer relies on a kernel-side staging buffer.
   Each per-program user frame is allocated, zero-filled, and then
