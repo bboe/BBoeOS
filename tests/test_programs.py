@@ -240,10 +240,12 @@ TESTS: list[ProgramTest] = [
     ProgramTest("netinit", ["netinit"], r"NIC found: [0-9A-F:]+", with_net=True),
     ProgramTest("netrecv", ["netrecv"], r"Received:.*08 06", with_net=True, timeout=20.0),
     ProgramTest("netsend", ["netsend"], r"ARP request sent", with_net=True),
-    # Writing to virt 0x00400000 (PDE[1], no PT installed) raises #PF;
-    # the user-fault kill path tears down the PD and respawns the
-    # shell.  echo recovered then runs to confirm the new shell works.
-    ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00400000[\s\S]*recovered"),
+    # Writing to virt 0 raises #PF (PTE[0] is not-present in every
+    # per-program PD; the shell↔program handoff frame moved to
+    # USER_DATA_BASE = 0x1000 to keep page 0 unmapped).  The user-fault
+    # kill path tears down the PD and respawns the shell; echo recovered
+    # then runs to confirm the new shell works.
+    ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
     ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("pintest", ["pintest"], r"^first non-space: h$"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),

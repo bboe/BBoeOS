@@ -35,7 +35,8 @@
         PTE_USER_RW_SHARED      equ (PTE_USER_RW | ADDRESS_SPACE_PTE_SHARED)
 
         ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
-        ;;   PTE 0x00000             : private — ARGV, EXEC_ARG, BUFFER (low 4 KB)
+        ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
+        ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x00300..0x003FF   : shared  — asm.c JUMP_TABLE (256 × 4 KB)
         ;;   PTEs 0x08048..          : private — program text + BSS
@@ -119,13 +120,17 @@ program_enter:
         and eax, 0xFFFFF000
         mov [user_image_end], eax
 
-        ;; --- Map low frame (virt 0x000-0x0FFF) ---
-        ;; Contains EXEC_ARG (4 B at 0x4FC) and BUFFER (256 B at 0x500).
-        ;; Program code now lives at PROGRAM_BASE = 0x08048000, so the
-        ;; low frame is just the shell-to-program handoff region.
+        ;; --- Map shell↔program handoff frame at user-virt USER_DATA_BASE ---
+        ;; Holds ARGV (32 B at +0x4DE), EXEC_ARG (4 B at +0x4FC), and
+        ;; BUFFER (256 B at +0x500).  The frame sits at user-virt 0x1000
+        ;; (PTE[1]) so PTE[0] (virt 0..0xFFF) stays not-present and a NULL
+        ;; dereference from CPL=3 raises #PF instead of silently
+        ;; reading/writing the handoff frame.  In-frame offsets are
+        ;; ``<symbol> - USER_DATA_BASE`` so the per-symbol page offset
+        ;; survives any future shift of USER_DATA_BASE.
         call frame_alloc
         jc .panic
-        push eax                            ; [esp+0] = low frame phys
+        push eax                            ; [esp+0] = handoff frame phys
         mov edi, eax
         add edi, 0xC0000000                 ; kernel-virt of frame
         ;; Zero entire frame.
@@ -137,18 +142,18 @@ program_enter:
         pop edi
         ;; EXEC_ARG snapshot.
         mov eax, [exec_arg_snapshot]
-        mov [edi + EXEC_ARG], eax
+        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
         ;; BUFFER snapshot.
         push edi
         mov esi, buffer_snapshot
-        lea edi, [edi + BUFFER]
+        lea edi, [edi + (BUFFER - USER_DATA_BASE)]
         mov ecx, MAX_INPUT / 4
         rep movsd
         pop edi
-        ;; Map low frame at user-virt 0.
-        pop ecx                             ; low frame phys
+        ;; Map the frame at user-virt USER_DATA_BASE.
+        pop ecx                             ; handoff frame phys
         mov eax, [current_pd_phys]
-        xor ebx, ebx
+        mov ebx, USER_DATA_BASE
         mov edx, PTE_USER_RW
         call address_space_map_page
         jc .panic

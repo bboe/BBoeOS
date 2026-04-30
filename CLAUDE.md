@@ -63,7 +63,8 @@ User-side virtual layout (per per-program PD; same shape for every program PD th
 
 | User-virt range | Size | Purpose |
 |---|---|---|
-| `0x00000000..0x00000FFF` | 4 KB | shared low frame (BUFFER / EXEC_ARG / ARGV / boot_disk / directory_sector) |
+| `0x00000000..0x00000FFF` | 4 KB | NULL guard — not mapped (PTE[0] absent so `*(int *)0` raises #PF) |
+| `0x00001000..0x00001FFF` | 4 KB | shell↔program handoff frame at `USER_DATA_BASE` (ARGV at +0x4DE, EXEC_ARG at +0x4FC, BUFFER at +0x500) |
 | `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
 | `0x00011000..0x00011FFF` | 4 KB | JUMP_TABLE (cc.py-emitted dispatch entries) |
 | `0x00300000..0x003FFFFF` | 1 MB | `asm.c` SYMBOL_BASE (legacy 16-bit accessors; Phase 3 shim only) |

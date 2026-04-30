@@ -6,6 +6,28 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Phase 6 paging — NULL guard (2026-04-29)
+- The shell↔program handoff frame moves from user-virt 0..0xFFF
+  (PTE[0]) to `USER_DATA_BASE = 0x1000` (PTE[1]).  ARGV becomes
+  `0x14DE`, EXEC_ARG becomes `0x14FC`, BUFFER becomes `0x1500` —
+  same in-page offsets, just shifted up by one page.  PTE[0] now
+  stays not-present in every per-program PD, so a NULL dereference
+  from CPL=3 raises #PF and routes through the user-fault kill
+  path instead of silently reading/writing the handoff frame.
+- `src/arch/x86/entry.asm::program_enter` maps the handoff frame
+  at `USER_DATA_BASE` and uses `<symbol> - USER_DATA_BASE` for the
+  in-frame offsets when staging EXEC_ARG / BUFFER snapshots.
+- `src/c/nullderef.c` writes to virt 0 again (the previous
+  `0x00400000` workaround targeted PDE[1] precisely because
+  PTE[0]'s low frame was still mapped); test_programs now matches
+  `CR2=00000000` instead of `00400000`.  The `BOOT_DISK_PHYS` /
+  `DIRECTORY_SECTOR_PHYS` "kept below ARGV" comment in
+  `src/include/constants.asm` is stale — those bytes live at phys
+  0x4D0/0x4D2, kernel-only via the direct map, and user PDs no
+  longer alias the boot frame.
+- CLAUDE.md's user-virt table reflects the new `0x1000`-page
+  handoff slot and the explicit NULL guard at `0..0xFFF`.
+
 ### Phase 6 paging — ext2 walker straddle fix (2026-04-29)
 - `ext2_search_blk` (`src/fs/ext2.asm`) now uses a sliding 2-sector
   window (`ext2_sd_buffer`, 1024 B at fixed low-phys 0xF200) and
