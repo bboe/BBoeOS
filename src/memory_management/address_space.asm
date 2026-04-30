@@ -1,8 +1,8 @@
 ;;; ------------------------------------------------------------------------
 ;;; memory_management/address_space.asm — per-program address-space helpers.
 ;;;
-;;; Builds and tears down user page directories for Phase 4's per-program
-;;; PDs.  Kernel-half PDEs (768..1023, the 256 MB direct map at virtual
+;;; Builds and tears down per-program user page directories.  Kernel-half
+;;; PDEs (768..1023, the 256 MB direct map at virtual
 ;;; 0xC0000000..0xCFFFFFFF) are copied verbatim from `kernel_pd_template`
 ;;; at address_space_create time and never modified afterward — that
 ;;; invariant is what lets us avoid fan-out updates when the kernel
@@ -23,8 +23,8 @@
 ;;; pop chain).  The success-path return value lives in EAX for
 ;;; address_space_create only; the others communicate solely via CF.
 ;;;
-;;; No callers yet — these helpers are dormant until Phase 4's PR C
-;;; rewrites `program_enter` to build a fresh PD per program.
+;;; Called from `program_enter` (entry.asm), which builds a fresh PD
+;;; per program load and tears it down on `sys_exit`.
 ;;; ------------------------------------------------------------------------
 
 %define ADDRESS_SPACE_DIRECT_MAP_BASE   0xC0000000
@@ -85,10 +85,9 @@ address_space_destroy:
         ;; EAX = pd_phys.  Walks PDEs 0..767 (user half).  For each
         ;; present PDE, walks the PT, frees every present user-page
         ;; frame, then frees the PT frame itself.  PTEs with the
-        ;; `ADDRESS_SPACE_PTE_SHARED` AVL bit set (vDSO code page,
-        ;; asm.c JUMP_TABLE) are skipped — those frames live in shared
-        ;; tables managed by the kernel and outlive any one address
-        ;; space.  Finally frees the PD frame.  Caller must not have
+        ;; `ADDRESS_SPACE_PTE_SHARED` AVL bit set (vDSO code page) are
+        ;; skipped — those frames live in shared tables managed by the
+        ;; kernel and outlive any one address space.  Finally frees the PD frame.  Caller must not have
         ;; pd_phys loaded in CR3 — the `sys_exit` / kill path switches
         ;; CR3 to kernel_pd_template first.  Kernel-half PDEs are left
         ;; alone; the kernel-half PTs they reference are shared and
@@ -117,7 +116,7 @@ address_space_destroy:
         mov eax, [edx + ecx*4]
         test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pte
-        test eax, ADDRESS_SPACE_PTE_SHARED      ; shared frame (vDSO, JUMP_TABLE)?
+        test eax, ADDRESS_SPACE_PTE_SHARED      ; shared frame (vDSO)?
         jnz .next_pte                           ; yes — leave it for other PDs
         and eax, 0xFFFFF000                     ; user-page phys
         call frame_free

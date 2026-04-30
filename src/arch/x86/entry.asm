@@ -413,9 +413,9 @@ vdso_install:
 
         ;; Physical address of `kernel_pd_template`, the page directory
         ;; whose top-256 PDEs are copied into every per-program PD as
-        ;; the kernel half of the address space.  Phase 3 promotes the
-        ;; boot PD into this slot (= 0x1000) and stops here; Phase 4's
-        ;; per-address-space work consumes it from `address_space_create`.
+        ;; the kernel half of the address space.  `high_entry` records
+        ;; the boot PD's phys here; `address_space_create` reads it
+        ;; when seeding each new per-program PD's kernel half.
 kernel_pd_template_phys dd 0
 
         ;; Per-program-load state used by program_enter.

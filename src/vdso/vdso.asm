@@ -13,14 +13,13 @@
 ;;;   0x00010000  FUNCTION_TABLE (14 × 5-byte jmp slots = 70 bytes)
 ;;;   0x00010046  shared_die / shared_exit / shared_get_character / ...
 ;;;   0x00010XXX  print_datetime_month_lengths (read-only constant)
-;;;   end of file (~1.1 KB actual content, no page-padding pre-paging —
-;;;   Phase 3+ pads or zeroes when it maps the blob as a user code page)
+;;;   end of file (~1.1 KB actual content; the kernel maps the blob as
+;;;   a user code page so unused tail bytes within the page are
+;;;   irrelevant)
 ;;;
-;;; The 0x00010000 base sits below the user PROGRAM_BASE (0x600) and the
-;;; pre-paging stack region (0x80000-0x8FFF0) yet within the default
-;;; QEMU 128 MB RAM, so writes at boot work without a custom -m flag.
-;;; Post-paging (Phase 3+) the same virt address is mapped per address
-;;; space into the user PD at user-virt 0x00010000.
+;;; Each per-program PD aliases the shared vDSO frame at user-virt
+;;; 0x00010000 with the AVL[0] PTE_SHARED bit so
+;;; `address_space_destroy` skips frame_free on it.
 ;;; ------------------------------------------------------------------------
 
         org 0x00010000

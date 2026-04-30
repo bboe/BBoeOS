@@ -13,14 +13,14 @@
 ;;; covering virt 0xC0400000..0xCFFFFFFF), and jumps
 ;;; into `protected_mode_entry` for driver / VFS / NIC / shell bring-up.
 ;;;
-;;; Phase 4: each program runs in its own per-program PD built by
+;;; Each program runs in its own per-program PD built by
 ;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
 ;;; kernel half (PDEs 768..1023) is copy-imaged from
 ;;; `kernel_pd_template` so the kernel direct map is reachable from
 ;;; every address space.  The user half (PDEs 0..767) starts empty and
-;;; is populated only with the program's own pages, plus shared
-;;; vDSO/JUMP_TABLE PTEs marked with the AVL[0] PTE_SHARED bit so
-;;; `address_space_destroy` skips frame_free on them.  Programs run
+;;; is populated only with the program's own pages, plus the shared
+;;; vDSO PTE marked with the AVL[0] PTE_SHARED bit so
+;;; `address_space_destroy` skips frame_free on it.  Programs run
 ;;; with PROGRAM_BASE=0x08048000 and USER_STACK_TOP=0x40000000 (Linux
 ;;; ELF convention); BUFFER (0x500), EXEC_ARG (0x4FC), and the vDSO
 ;;; (0x10000) stay at low user-virt and reach the program through the
@@ -167,9 +167,10 @@ high_entry:
         mov eax, cr3
         mov cr3, eax
 
-        ;; Promote the boot PD into kernel_pd_template by recording its
-        ;; physical address.  Future per-program PDs (Phase 4) will
-        ;; copy its top-256 PDEs as their kernel-half mapping.
+        ;; Promote the boot PD into kernel_pd_template by recording
+        ;; its physical address.  `address_space_create` copies its
+        ;; top-256 PDEs into every per-program PD as the kernel-half
+        ;; mapping.
         mov dword [kernel_pd_template_phys], BOOT_PD_PHYS
 
         ;; --- Initialize the bitmap frame allocator from E820 ---
@@ -189,8 +190,8 @@ high_entry:
         ;; LOW_RESERVE_BYTES (0x202000) and above, so the kernel PTs
         ;; allocated next, every PD/PT/page built by
         ;; `address_space_create` / `address_space_map_page`, and the
-        ;; vDSO + JUMP_TABLE shared frames all land in the
-        ;; high-physical region above LOW_RESERVE_BYTES.
+        ;; shared vDSO frame all land in the high-physical region
+        ;; above LOW_RESERVE_BYTES.
         xor eax, eax
         mov ecx, LOW_RESERVE_BYTES
         call frame_reserve_range
@@ -258,13 +259,11 @@ high_entry:
         ;; gates / drivers / VFS / NIC / banner / shell.  Lives in
         ;; entry.asm's `protected_mode_entry`, trimmed to skip the
         ;; segment / ESP / lidt work `high_entry` already performed.
-        ;;
-        ;; Phase 4 PR C drops the temporary user shim that lived at
-        ;; PDE[0] of kernel_pd_template — programs now run in private
-        ;; per-program PDs built by `address_space_create` from
-        ;; `program_enter`.  kernel_pd_template's user half is
-        ;; entirely zero-filled, so kernel-mode code running on it
-        ;; cannot accidentally touch user memory.
+        ;; Programs run in private per-program PDs built by
+        ;; `address_space_create` from `program_enter`;
+        ;; kernel_pd_template's user half is zero-filled so
+        ;; kernel-mode code running on it cannot accidentally touch
+        ;; user memory.
         jmp protected_mode_entry
 
 .panic:
@@ -358,8 +357,10 @@ kernel_gdtr:
         ;; FUNCTION_TABLE (0x00010000) at boot by `vdso_install` in
         ;; entry.asm.  Holds the FUNCTION_TABLE jump block plus the
         ;; shared_* helper bodies; user programs call into it via the
-        ;; FUNCTION_* constants in constants.asm.  Phase 3 reaches it
-        ;; through the user shim that maps virt 0..0xFFFFF.
+        ;; FUNCTION_* constants in constants.asm.  Each per-program
+        ;; PD aliases the shared vDSO frame at user-virt 0x10000 with
+        ;; the AVL[0] PTE_SHARED bit so `address_space_destroy` skips
+        ;; it.
         align 4
 vdso_image:
         incbin "vdso.bin"

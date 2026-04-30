@@ -934,7 +934,7 @@ void emit_word(int value) {
 }
 
 /* Pick between short (rel8) and near (rel16) jump encoding per
-   call, using the pass-1 bitmap at ES:JUMP_TABLE indexed by
+   call, using the pass-1 bitmap ``jump_sizes[]`` indexed by
    ``jump_index``.  Takes the opcode via the ``regparm(1)`` fastcall
    convention (AX on entry); the body does its own ``push ax`` to
    save the value across ``skip_ws`` / ``peek_label_target`` calls
