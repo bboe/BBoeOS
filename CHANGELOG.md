@@ -6,6 +6,28 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Drop the kernel to phys 0x20000 / 1 MB minimum RAM (2026-04-30)
+- The kernel now loads at phys `0x20000` (in conventional RAM) instead
+  of `0x100000`.  `boot.asm`'s INT 13h reads `kernel.bin` directly to
+  its final home — `early_pe_entry` no longer needs the pre-paging
+  rep-movsd relocation copy.  `kernel.asm`'s `org` becomes
+  `0xC0020000`, which equals `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`,
+  so the kernel runs at its direct-map alias and PDE[768]'s 4 MB
+  direct map is the only mapping it needs (no separate higher-half
+  PT).
+- The entire kernel-side reserved region (image + 16 KB stack +
+  3 KB NIC bufs + 128 KB `program_scratch` + boot PD + first kernel
+  PT) now fits below the VGA aperture at `0xA0000`.  `make_os.sh`
+  asserts this at build time.  Combined with E820 marking the
+  reserved region above `0x9FC00`, the OS boots under
+  `qemu-system-i386 -m 1` (1 MB total).
+- New `tests/test_low_ram.py` smoke test boots the OS under `-m 1`
+  and runs `date` + `ls`.  Wired into the CI matrix to keep the new
+  contract honest.
+- `README.md`'s minimum-RAM section now describes both the 1 MB
+  small-program floor and the 2 MB full-program floor (driven by
+  `edit`'s 1 MB BSS and `asm`'s ~70 KB BSS).
+
 ### Move shell kill buffer into BSS (2026-04-30)
 - `shell.c` previously stored its Ctrl-K kill buffer at `SECTOR_BUFFER + 4`
   (phys `0xF000`), reachable through the pre-Phase-4 user shim's identity
