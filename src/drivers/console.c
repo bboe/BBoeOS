@@ -1,10 +1,9 @@
 // console.c — full ANSI escape sequence parser.
 //
 // put_character: unified output to screen (with ANSI parsing) and serial.
-// put_string:    print a null-terminated string at ESI via put_character.
 //
-// Same labels (put_character, put_string) and same register-level ABI
-// as the original drivers/console.asm.  All state lives in file-scope
+// Same register-level ABI as the original drivers/console.asm.  All state
+// lives in file-scope
 // globals; ansi_fg keeps its bare asm symbol name so drivers/vga.asm
 // (the one outside reader of [ansi_fg]) links unchanged.
 //
@@ -178,13 +177,4 @@ void put_character(char byte __attribute__((in_register("ax"))))
         return;
     }
     vga_teletype(byte);
-}
-
-void put_string(char *str __attribute__((in_register("esi"))))
-    __attribute__((preserve_register("eax")))
-{
-    while (str[0] != '\0') {
-        put_character(str[0]);
-        str = str + 1;
-    }
 }
