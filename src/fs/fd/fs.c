@@ -8,6 +8,12 @@
 // follow cc.py's `carry_return` ABI: AX = bytes copied (or -1 on
 // disk error), CF = error flag.
 
+// FS scratch frame pointer — defined in vfs.c, populated by
+// `vfs_init` from a `frame_alloc` + direct-map adjust.  Holds
+// the kernel-virt of the 4 KB frame whose first 512 bytes back
+// the per-sector disk read window.
+extern uint8_t *sector_buffer;
+
 // fd entry layout — match the asm-side FD_OFFSET_* offsets.  Only
 // `size` and `position` are touched here; the rest is opaque
 // padding to keep field offsets aligned with constants.asm.
@@ -40,11 +46,6 @@ int vfs_read_sec(int *byte_offset __attribute__((out_register("bx"))),
 // fs/fd.c file-scope global; fd_write stashes the user buffer
 // pointer here before jumping to this handler.
 extern uint8_t *fd_write_buffer;
-
-// sector_buffer is an asm `equ` to 0xC000F000 (kernel-virt alias of
-// phys 0xF000) declared in arch/x86/kernel.asm; cc.py recognises it
-// as a NAMED_CONSTANT, so a bare ``sector_buffer`` reference in C
-// emits the symbol literal — usable directly in pointer arithmetic.
 
 // In-flight read/write bookkeeping.  Lifted from the original
 // fs.asm's three trailing `dd 0` slots.  These are private to this

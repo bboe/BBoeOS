@@ -105,8 +105,6 @@ class CodeGeneratorBase:
         "O_TRUNC",
         "O_WRONLY",
         "register_table",
-        "SECTOR_BUFFER",
-        "sector_buffer",
         "SOCK_DGRAM",
         "SOCK_RAW",
         "STDERR",

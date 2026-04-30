@@ -224,7 +224,7 @@ program_enter:
         push edi
         push edx
         push ecx
-        mov esi, sector_buffer
+        mov esi, [sector_buffer]
         mov ecx, edx
         shl ecx, 9                          ; ECX = sector_in_page * 512
         add edi, ecx                        ; EDI = frame + offset

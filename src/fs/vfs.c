@@ -4,6 +4,21 @@
 // active filesystem implementation; ``vfs_init`` swaps the pointers
 // from bbfs to ext2 if an ext2 superblock is detected.
 //
+// vfs_init also allocates the FS scratch frame.  Layout (4 KB total,
+// ≤1.5 KB used):
+//
+//   0..511   sector_buffer       (512 B; populated by every disk read)
+//   512..1535  ext2_sd_buffer    (1 KB; ext2_search_blk's sliding
+//                                 2-sector directory window — only
+//                                 written on ext2 systems)
+//
+// Both are referenced from asm under their bare names.  The asm
+// `equ` shims below alias `_g_<name>` (cc.py's storage prefix) back
+// to the bare label so existing ``[sector_buffer + offset]`` sites
+// in bbfs.asm / ext2.asm read through the runtime pointer cell
+// after manual conversion to a ``mov reg, [sector_buffer]; mov X,
+// [reg + offset]`` two-instruction sequence.
+//
 // Each public ``vfs_X`` is a carry_return tail-call that forwards
 // to its ``vfs_X_fn`` global.  cc.py emits the load + frame teardown
 // + ``jmp eax`` so AX/CF flow back to the original caller unchanged.
@@ -53,6 +68,13 @@ struct fd {
     uint8_t _opaque[32];
 };
 
+// FS scratch frame pointer.  Populated by `vfs_init` from a
+// `frame_alloc` + direct-map adjust.  cc.py emits storage as
+// `_g_sector_buffer`; the asm `equ` shim aliases the bare name back
+// for inline-asm and bbfs.asm / ext2.asm callers.
+uint8_t *sector_buffer;
+asm("sector_buffer equ _g_sector_buffer");
+
 // ---------------------------------------------------------------------------
 // Function-pointer globals.  Each starts pointing at the bbfs
 // implementation (the static initialiser uses PR #256's user-function
@@ -77,12 +99,35 @@ int (*vfs_rmdir_fn)(uint8_t *name __attribute__((in_register("esi")))) = bbfs_rm
 int (*vfs_update_size_fn)(struct fd *e __attribute__((in_register("esi")))) = bbfs_update_size;
 
 // ---------------------------------------------------------------------------
-// vfs_init: detect filesystem, swap function pointers if ext2 is present.
-// ext2_init returns CF clear when the superblock magic matches; cc.py
-// translates that into ``if (ext2_init())`` evaluating to 1 (true).
+// vfs_init: allocate FS scratch, detect filesystem, swap function
+// pointers if ext2 is present.  ext2_init returns CF clear when the
+// superblock magic matches; cc.py translates that into
+// ``if (ext2_init())`` evaluating to 1 (true).
 // ---------------------------------------------------------------------------
 
+// vfs_init_scratch: allocate the FS scratch frame and store its
+// kernel-virt at `sector_buffer`.  Frame_alloc + direct-map adjust;
+// pulled out of vfs_init's C body because cc.py doesn't have a
+// pointer cast syntax for the int-to-`uint8_t *` conversion.
+void vfs_init_scratch();
+asm("vfs_init_scratch:\n"
+    "        push eax\n"
+    "        call frame_alloc\n"
+    "        jc .vis_oom\n"
+    "        add eax, 0xC0000000\n"
+    "        mov [_g_sector_buffer], eax\n"
+    "        pop eax\n"
+    "        ret\n"
+    ".vis_oom:\n"
+    // Frame allocator must succeed at boot — the bitmap was just
+    // populated from E820 with full conventional + extended RAM free.
+    // Hard-stop if it doesn't, rather than silently leaving
+    // sector_buffer = NULL.
+    "        hlt\n"
+    "        jmp .vis_oom\n");
+
 void vfs_init() {
+    vfs_init_scratch();
     if (ext2_init()) {
         vfs_chmod_fn = ext2_chmod;
         vfs_commit_write_sec_fn = ext2_commit_write_sec;

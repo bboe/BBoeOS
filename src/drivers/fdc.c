@@ -29,6 +29,15 @@
 uint8_t fdc_irq_flag;
 uint8_t fdc_motor_ready;
 
+// FS scratch frame pointer — defined in vfs.c, populated by
+// `vfs_init` before the first disk read.  fdc_dma_setup feeds the
+// low 24 bits of this pointer to the 8237 as the transfer's
+// physical address; the frame_alloc-managed pool sits inside the
+// kernel direct map (phys 0..256 MB), so kernel-virt minus
+// 0xC0000000 equals phys, and the high byte (bit 24..) is the
+// known-zero portion of the direct map base.
+extern uint8_t *sector_buffer;
+
 // Forward declarations for callees that come later alphabetically and
 // are invoked from earlier-alphabetical C functions.  asm-body
 // callees (resolved at NASM time inside other asm() blocks) don't
@@ -43,23 +52,25 @@ void fdc_sense_interrupt();
 void fdc_wait_irq();
 
 // Program 8237 DMA channel 2 for a 512-byte transfer at sector_buffer.
-// AL = mode byte (DMA_MODE_READ=0x46 or DMA_MODE_WRITE=0x4A).
-// The 8237 takes a 24-bit physical address.  sector_buffer is the
-// kernel-virtual alias (0xC000F000); bits[23:0] = 0x00F000 which is
-// the physical address 0xF000 — the same bytes the asm version loaded
-// at runtime via `mov ebx, sector_buffer; out bl; out bh; shr 16; out bl`.
+// AL = mode byte (DMA_MODE_READ=0x46 or DMA_MODE_WRITE=0x4A).  The
+// 8237 takes a 24-bit physical address; we pass the low 24 bits of
+// sector_buffer's kernel-virt, which equals the actual frame phys
+// because the bitmap allocator hands out frames inside the kernel
+// direct map (phys 0..256 MB) and 0xC0000000's bit 23..0 are zero.
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax")))
 {
+    int phys;
+    phys = sector_buffer;
     kernel_outb(0x0A, 0x06);                       // mask channel 2
     kernel_outb(0x0C, 0);                          // clear flip-flop
-    kernel_outb(0x04, sector_buffer & 0xFF);       // addr low
-    kernel_outb(0x04, (sector_buffer >> 8) & 0xFF);  // addr high
+    kernel_outb(0x04, phys & 0xFF);                // addr low
+    kernel_outb(0x04, (phys >> 8) & 0xFF);         // addr high
     kernel_outb(0x0C, 0);                          // clear flip-flop again
     kernel_outb(0x05, (512 - 1) & 0xFF);           // count low
-    kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF);   // count high
+    kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF);    // count high
     kernel_outb(0x0B, mode);                       // DMA mode
-    kernel_outb(0x81, (sector_buffer >> 16) & 0xFF);  // page
+    kernel_outb(0x81, (phys >> 16) & 0xFF);        // page
     kernel_outb(0x0A, 0x02);                       // unmask channel 2
 }
 

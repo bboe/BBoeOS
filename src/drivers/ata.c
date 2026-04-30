@@ -13,6 +13,11 @@
 // Stage 1 still uses INT 13h to load stage 2; only the post-boot disk
 // I/O flows through this driver.
 
+// FS scratch frame pointer — defined in vfs.c, populated by
+// `vfs_init` before any disk read.  ata_read_sector / ata_write_sector
+// stream PIO words directly into / out of the buffer it points at.
+extern uint8_t *sector_buffer;
+
 // Port addresses and command/status bits inlined as bare integers to
 // avoid clashing with the shared asm %include namespace.
 //   ATA_DATA              = 0x1F0   data port (16-bit)

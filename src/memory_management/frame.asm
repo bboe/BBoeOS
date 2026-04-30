@@ -23,6 +23,12 @@
 ;;; separately.
 ;;; ------------------------------------------------------------------------
 
+;; FRAME_BITMAP_BITS / FRAME_BITMAP_BYTES size the bitmap for a 256 MB
+;; ceiling.  The storage itself lives at FRAME_BITMAP_PHYS in the
+;; post-kernel reserved cluster (see kernel.asm) — extracting the
+;; bitmap from kernel.bin saves 8 KB of zero bytes on disk.  See
+;; project_frame_bitmap_dynamic_e820 in memory for the future move
+;; to E820-sized runtime allocation that 4 GB support will need.
 %define FRAME_BITMAP_BITS       (256 * 1024 * 1024 / 4096)
 %define FRAME_BITMAP_BYTES      (FRAME_BITMAP_BITS / 8)
 
@@ -272,9 +278,13 @@ frame_reserve_range:
         pop eax
         ret
 
+        ;; frame_bitmap storage lives at FRAME_BITMAP_PHYS in the
+        ;; post-kernel reserved cluster (kernel.asm), reached through
+        ;; the kernel direct map.  Keeping the 8 KB of zero-init storage
+        ;; outside kernel.bin trims the on-disk image.  frame_init
+        ;; populates the bitmap before any frame_alloc / frame_free
+        ;; runs, so the on-disk garbage there doesn't matter.
         align 4
-frame_bitmap:
-        times FRAME_BITMAP_BYTES db 0
 frame_free_count:
         dd 0
 frame_search_hint:

@@ -351,35 +351,67 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
 // network_initialize: probe + init wrapper.  CF clear if NIC came up,
 // CF set if no NIC was found (callers - currently only entry.asm -
 // soldier on; netinit / net programs surface "no NIC" via net_present).
-// Allocates the two scratch frames (net_receive_buffer and
-// net_transmit_buffer) via frame_alloc only when the NIC is actually
-// present so boot-without-NIC sessions don't spend two frames on
-// dead memory.  The allocation/store + direct-map adjust is tucked
-// into a single inline-asm block because cc.py doesn't have a
-// pointer cast syntax for the int-to-`uint8_t *` conversion.
+//
+// Allocates one 4 KB NIC scratch frame on a successful probe and
+// hands out per-buffer slices of it to the four named pointers
+// (net_receive_buffer, net_transmit_buffer, arp_table, udp_buffer).
+// The previous design used a separate frame per buffer, which paid
+// 16 KB of RAM for ~3.4 KB of actual data on every NIC-present boot;
+// packing drops that to one frame (4 KB).  Boot-without-NIC sessions
+// still spend zero frames.
+//
+// Frame layout (4 KB total, 3.4 KB used, ~660 B unused):
+//   0..1535   net_receive_buffer  (1.5 KB, max Ethernet frame)
+//   1536..3071  net_transmit_buffer  (1.5 KB)
+//   3072..3167  arp_table  (96 B; zero-filled below — lookup/add key on [entry] == 0)
+//   3168..3431  udp_buffer  (264 B; overwritten on each send, no zero-fill)
+//
+// The allocation + offset assignments are tucked into a single
+// inline-asm block because cc.py doesn't have a pointer cast syntax
+// for the int-to-`uint8_t *` conversion.
 int network_initialize() __attribute__((carry_return));
 asm("network_initialize:\n"
     "        push eax\n"
     "        push ebx\n"
+    "        push ecx\n"
+    "        push edi\n"
     "        call ne2k_probe\n"
     "        jc .ni_no_nic\n"
     "        call frame_alloc\n"
     "        jc .ni_oom\n"
     "        add eax, 0xC0000000\n"
+    // EAX = NIC scratch frame base (kernel-virt).  Slice into the four
+    // named pointers; offsets must match the frame layout above.
     "        mov [_g_net_receive_buffer], eax\n"
-    "        call frame_alloc\n"
-    "        jc .ni_oom\n"
-    "        add eax, 0xC0000000\n"
-    "        mov [_g_net_transmit_buffer], eax\n"
+    "        lea ebx, [eax + 1536]\n"
+    "        mov [_g_net_transmit_buffer], ebx\n"
+    "        lea ebx, [eax + 3072]\n"
+    "        mov [arp_table], ebx\n"
+    "        lea ebx, [eax + 3168]\n"
+    "        mov [udp_buffer], ebx\n"
+    // Zero the ARP-table slice (96 B) — frame_alloc returns a dirty
+    // page and the lookup/add paths key on `[entry] == 0` for empty
+    // slots.  The other slices are overwritten before they're read
+    // (NE2000 hardware fills RX, ARP / IP / UDP code fills TX and
+    // udp_buffer in full on each use).
+    "        mov edi, [arp_table]\n"
+    "        xor eax, eax\n"
+    "        mov ecx, 24\n"
+    "        cld\n"
+    "        rep stosd\n"
     "        call ne2k_init\n"
     "        mov byte [_g_net_present], 1\n"
     "        clc\n"
+    "        pop edi\n"
+    "        pop ecx\n"
     "        pop ebx\n"
     "        pop eax\n"
     "        ret\n"
     ".ni_oom:\n"
     ".ni_no_nic:\n"
     "        stc\n"
+    "        pop edi\n"
+    "        pop ecx\n"
     "        pop ebx\n"
     "        pop eax\n"
     "        ret\n");

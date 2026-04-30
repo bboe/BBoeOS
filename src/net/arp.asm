@@ -265,7 +265,7 @@ arp_table_add:
         push esi
         push edi
 
-        mov ebx, arp_table
+        mov ebx, [arp_table]
         mov ecx, ARP_TABLE_SIZE
         mov eax, [esi]
 
@@ -283,7 +283,7 @@ arp_table_add:
         movzx eax, word [arp_evict]
         mov edx, ARP_ENTRY_SIZE
         mul edx                         ; EDX:EAX = idx * ARP_ENTRY_SIZE
-        add eax, arp_table
+        add eax, [arp_table]
         mov ebx, eax
         pop edx
         movzx eax, word [arp_evict]
@@ -328,7 +328,7 @@ arp_table_lookup:
         call uptime_seconds
         mov dx, ax                      ; DX = now (seconds since boot, 16-bit)
 
-        mov ebx, arp_table
+        mov ebx, [arp_table]
         mov ecx, ARP_TABLE_SIZE
         mov eax, [esi]
 
@@ -359,6 +359,11 @@ arp_table_lookup:
         pop eax
         ret
 
-        ;; Variables
+        ;; Variables.  arp_table holds the kernel-virt of a 4 KB scratch
+        ;; frame whose first ARP_TABLE_SIZE * ARP_ENTRY_SIZE bytes (96 B)
+        ;; back the table; allocated by network_initialize on a successful
+        ;; NIC probe and zero-filled there.  Sessions booted without an
+        ;; NE2000 leave arp_table = 0 and never reach the lookup/add
+        ;; paths that read it (callers gate on net_present).
         arp_evict dw 0
-        arp_table times (ARP_TABLE_SIZE * ARP_ENTRY_SIZE) db 0
+        arp_table dd 0

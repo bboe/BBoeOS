@@ -71,7 +71,7 @@ udp_send:
         mov [.ud_dport], dx
 
         ;; Build UDP header + payload in udp_buffer
-        mov edi, udp_buffer
+        mov edi, [udp_buffer]
         cld
 
         mov ax, [.ud_sport]
@@ -94,7 +94,7 @@ udp_send:
         ;; Send via ip_send: protocol 17 (UDP)
         mov ebx, [.ud_destip]
         mov al, 17
-        mov esi, udp_buffer
+        mov esi, [udp_buffer]
         movzx ecx, word [.ud_plen]
         add ecx, 8                      ; UDP header + payload
         call ip_send
@@ -112,5 +112,10 @@ udp_send:
         .ud_sport  dw 0
         .ud_dport  dw 0
 
-        ;; Variables
-        udp_buffer times 256 db 0
+        ;; Variables.  udp_buffer holds the kernel-virt of a 4 KB scratch
+        ;; frame; udp_send fills the first 264 bytes (8 B header + up to
+        ;; 256 B payload) on each call.  Allocated by network_initialize
+        ;; on a successful NIC probe.  Sessions booted without an NE2000
+        ;; never reach udp_send (callers gate on net_present) so the
+        ;; pointer stays 0.
+        udp_buffer dd 0
