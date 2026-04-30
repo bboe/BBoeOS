@@ -47,13 +47,13 @@ Kernel-side fixed-physical regions, all reached through the kernel direct map at
 | `0x00020003..0x00020004` | `0xC0020003..0xC0020004` | 2 B | `directory_sector` (LBA of first directory sector) | yes |
 | `0x00020008..` | `0xC0020008..` | ~38 KB | `kernel.bin` `high_entry` and resident kernel code | yes |
 | `KERNEL_RESERVED_BASE` (~`0x2A000..0x2BFFF`) | `0xC002A000..` | 8 KB | `kernel_stack` (`KERNEL_RESERVED_BASE = page_align(0x20000 + kernel_size)`) | no |
-| ~`0x2C000..0x2C5FF` | `0xC002C000..` | 1.5 KB | `net_receive_buffer` (NE2000 RX scratch) | no |
-| ~`0x2C600..0x2CBFF` | `0xC002C600..` | 1.5 KB | `net_transmit_buffer` (NE2000 TX scratch) | no |
-| ~`0x2CC00..0x2CDFF` | `0xC002CC00..` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
+| ~`0x2C000..0x2C1FF` | `0xC002C000..` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
 | ~`0x2D000..0x2DFFF` | `0xC002D000..` | 4 KB | boot PD (`BOOT_PD_PHYS`; promoted to `kernel_pd_template`) | no |
 | ~`0x2E000..0x2EFFF` | `0xC002E000..` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
 | ~`0x2F000+` | `0xC002F000+` | -- | `LOW_RESERVE_BYTES` ceiling — the kernel reserves only this region (plus the vDSO target page at `0x10000`); everything else in conventional RAM is owned by the bitmap allocator (subject to E820's reserved regions, including the VGA aperture at `0xA0000..0xFFFFF`) | -- |
-| dynamic | dynamic | 4 KB | `ext2_sd_buffer` — frame allocated by `ext2_init` only when ext2 is detected (1 KB used for the 2-sector sliding directory window inside the frame; bbfs systems never spend a frame on it) | no |
+| dynamic | dynamic | 4 KB | `ext2_sd_buffer` — frame allocated by `ext2_init` only when ext2 is detected (1 KB used for the 2-sector sliding directory window; bbfs systems never spend a frame on it) | no |
+| dynamic | dynamic | 4 KB | `net_receive_buffer` — frame allocated by `network_initialize` only when an NE2000 NIC is detected (1.5 KB used for one max-size Ethernet frame; sessions without `-device ne2k_isa` never spend a frame on it) | no |
+| dynamic | dynamic | 4 KB | `net_transmit_buffer` — same allocation policy as `net_receive_buffer`; second of two NIC scratch frames | no |
 
 User-side virtual layout (per per-program PD; same shape for every program PD that `address_space_create` builds):
 
@@ -85,7 +85,7 @@ Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d <dir
 
 ### Networking
 
-NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers (`net_receive_buffer` / `net_transmit_buffer`, 1536 bytes each) live at fixed phys right after the kernel stack (currently ~`0x2C000`+), reached through the kernel direct map; the `equ` aliases are declared in `kernel.asm` so the buffers don't burn 3 KB of zero padding inside `kernel.bin`.
+NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts). Networking buffers (`net_receive_buffer` / `net_transmit_buffer`, 1.5 KB used inside a 4 KB frame each) are allocated dynamically by `network_initialize` from the bitmap allocator on a successful NIC probe; sessions booted without a NIC (or without the QEMU `-device ne2k_isa` flag) never spend the two frames.  asm callers load the kernel-virt pointers indirectly: `mov edi, [net_receive_buffer]`.
 
 ### Serial Console
 

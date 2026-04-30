@@ -6,6 +6,26 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Allocate net_receive_buffer / net_transmit_buffer on NIC probe (2026-04-30)
+- The two NE2000 scratch buffers move out of the post-kernel reserved
+  region.  `network_initialize` now `frame_alloc`s a 4 KB frame for
+  each (1.5 KB used inside) on a successful `ne2k_probe` and stores
+  the kernel-virt pointers into two new `uint8_t *` BSS variables in
+  `src/drivers/ne2k.c`.  Sessions without a NIC (or without QEMU's
+  `-device ne2k_isa` flag) never spend the two frames; the kernel
+  reserved region drops by another ~3 KB (or 8 KB after page
+  alignment) in the no-NIC case.
+- `NET_RECEIVE_BUFFER` / `NET_TRANSMIT_BUFFER` (uppercase aliases) and
+  `NET_BUFFER_BYTES` / `NET_*_BUFFER_PHYS` / the lowercase equ chain
+  are gone from `src/arch/x86/kernel.asm` and the matching boot.asm
+  mirror.  `cc/codegen/base.py` drops the four NET_*_BUFFER entries
+  from `NAMED_CONSTANTS`; the symbols are now regular C externs.
+- All asm/C callers update from `mov edi, NET_RECEIVE_BUFFER` (or
+  `mov edi, net_transmit_buffer`) to indirect loads
+  (`mov edi, [net_receive_buffer]`).  `src/net/ip.c` adds a scratch
+  register for the in-place checksum store at `+24` since the
+  destination address is no longer a build-time constant.
+
 ### Drop ext2_sd_buffer reservation; drop _BOOT suffix in boot.asm (2026-04-30)
 - `ext2_sd_buffer` is no longer a static post-kernel reservation.
   `ext2_init` calls `frame_alloc` on a successful ext2 detect, stashes

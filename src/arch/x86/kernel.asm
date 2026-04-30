@@ -58,7 +58,6 @@ directory_sector dw 0                   ; offset 3
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
         ;;     kernel_stack                       (KERNEL_STACK_BYTES = 8 KB)
-        ;;     net_receive_buffer / TX            (NET_BUFFER_BYTES × 2 = 3 KB)
         ;;     sector_buffer                      (SECTOR_BUFFER_BYTES = 512 B)
         ;;     ... page-align up ...
         ;;   BOOT_PD_PHYS                         (4 KB)
@@ -70,8 +69,8 @@ directory_sector dw 0                   ; offset 3
         ;; The fallback below keeps direct nasm invocations working with
         ;; a valid (if not maximally packed) layout.
         ;;
-        ;; The post-kernel cluster (stack / NIC / sector_buffer / boot
-        ;; PD / first PT) lives outside kernel.bin so the on-disk image
+        ;; The post-kernel cluster (stack / sector_buffer / boot PD /
+        ;; first PT) lives outside kernel.bin so the on-disk image
         ;; doesn't carry their zero-initialized bytes; the bitmap
         ;; allocator reserves the underlying frames via the
         ;; `LOW_RESERVE_BYTES` sweep at boot.  Pre-relocation,
@@ -89,9 +88,13 @@ directory_sector dw 0                   ; offset 3
         ;; from the bitmap allocator on a successful ext2 detect; bbfs
         ;; systems never spend a frame on it.
         ;;
-        ;; NET_RECEIVE_BUFFER / NET_TRANSMIT_BUFFER are bare uppercase
-        ;; aliases for the lowercase kernel-virt symbols — cc.py emits
-        ;; those names verbatim from C source via NAMED_CONSTANTS.
+        ;; net_receive_buffer / net_transmit_buffer (4 KB each) are
+        ;; allocated dynamically by `network_initialize` from the
+        ;; bitmap allocator only when the NIC is detected; sessions
+        ;; booted without a NIC never spend the two frames.  The
+        ;; symbols themselves are C `uint8_t *` pointers in
+        ;; src/drivers/ne2k.c BSS — load via `mov edi,
+        ;; [net_receive_buffer]` (memory load through the equ shims).
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x40000
         %endif
@@ -108,17 +111,10 @@ directory_sector dw 0                   ; offset 3
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
         LOW_RESERVE_BYTES        equ FIRST_KERNEL_PT_PHYS + 0x1000       ; bitmap-allocator sweep ceiling
-        NET_BUFFER_BYTES         equ 1536
-        NET_RECEIVE_BUFFER       equ net_receive_buffer
-        NET_RECEIVE_BUFFER_PHYS  equ KERNEL_STACK_TOP_PHYS
-        NET_TRANSMIT_BUFFER      equ net_transmit_buffer
-        NET_TRANSMIT_BUFFER_PHYS equ NET_RECEIVE_BUFFER_PHYS + NET_BUFFER_BYTES
         SECTOR_BUFFER_BYTES      equ 512
-        SECTOR_BUFFER_PHYS       equ NET_TRANSMIT_BUFFER_PHYS + NET_BUFFER_BYTES
+        SECTOR_BUFFER_PHYS       equ KERNEL_STACK_TOP_PHYS
         kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
-        net_receive_buffer       equ DIRECT_MAP_BASE + NET_RECEIVE_BUFFER_PHYS
-        net_transmit_buffer      equ DIRECT_MAP_BASE + NET_TRANSMIT_BUFFER_PHYS
         sector_buffer            equ DIRECT_MAP_BASE + SECTOR_BUFFER_PHYS
 
 high_entry:
@@ -205,8 +201,8 @@ high_entry:
         ;;      stay pinned.
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
         ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
-        ;;      kernel image, kernel stack, NIC RX/TX, sector_buffer,
-        ;;      boot PD, first kernel PT.
+        ;;      kernel image, kernel stack, sector_buffer, boot PD,
+        ;;      first kernel PT.
         mov eax, 0x10000
         mov ecx, 0x1000                 ; vDSO target page
         call frame_reserve_range
