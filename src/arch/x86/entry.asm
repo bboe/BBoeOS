@@ -1,9 +1,9 @@
 ;;; ------------------------------------------------------------------------
 ;;; entry.asm — 32-bit post-flip kernel entry.
 ;;;
-;;; protected_mode_entry runs once per boot — TSS / IRQ install, vDSO +
-;;; JUMP_TABLE shared-frame allocation, driver / VFS / NIC init, banner
-;;; — then falls through into shell_reload.
+;;; protected_mode_entry runs once per boot — TSS / IRQ install, vDSO
+;;; shared-frame allocation, driver / VFS / NIC init, banner — then
+;;; falls through into shell_reload.
 ;;;
 ;;; shell_reload is the re-entry point for SYS_EXIT (after the dying
 ;;; program's PD has been torn down by sys_exit).  It loads bin/shell
@@ -13,9 +13,9 @@
 ;;;
 ;;; program_enter builds a fresh per-program PD via address_space_create,
 ;;; populates the user-visible regions (program text + BSS, vDSO code
-;;; page, user stack, shared JUMP_TABLE region), restores BUFFER /
-;;; EXEC_ARG into the new program's first user frame, snapshots the
-;;; kernel ESP for sys_exit, switches CR3, and `iretd`s at CPL=3.
+;;; page, user stack), restores BUFFER / EXEC_ARG into the new program's
+;;; first user frame, snapshots the kernel ESP for sys_exit, switches
+;;; CR3, and `iretd`s at CPL=3.
 ;;;
 ;;; Any CPU exception fired past this point vectors through `idt.asm`'s
 ;;; `exc_common` and prints `EXCnn` on COM1.  CPL=3 faults — and CPL=0
@@ -38,12 +38,9 @@
         ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
         ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
-        ;;   PTEs 0x00300..0x003FF   : shared  — asm.c JUMP_TABLE (256 × 4 KB)
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0x3FFF0..0x3FFFF   : private — user stack (16 × 4 KB = 64 KB),
         ;;                             stack top = 0x40000000
-        JUMP_TABLE_FRAME_COUNT  equ 256
-        JUMP_TABLE_VIRT_BASE    equ 0x300000
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
         STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
@@ -236,27 +233,6 @@ program_enter:
         jmp .stack_page_loop
 .stack_pages_done:
 
-        ;; --- Map shared JUMP_TABLE pages ---
-        ;; Frames allocated at boot in `jump_table_setup` and stored in
-        ;; `jump_table_frames[256]`; mapped here with PTE_SHARED so
-        ;; address_space_destroy doesn't free them.  asm.c writes its
-        ;; symbol/jump tables here; other programs ignore the region.
-        xor esi, esi                        ; ESI = frame index 0..255
-.jt_page_loop:
-        cmp esi, JUMP_TABLE_FRAME_COUNT
-        jae .jt_pages_done
-        mov ebx, esi
-        shl ebx, 12
-        add ebx, JUMP_TABLE_VIRT_BASE       ; user-virt
-        mov ecx, [jump_table_frames + esi*4]
-        mov edx, PTE_USER_RW_SHARED
-        mov eax, [current_pd_phys]
-        call address_space_map_page
-        jc .panic
-        inc esi
-        jmp .jt_page_loop
-.jt_pages_done:
-
         ;; --- Snapshot kernel ESP for sys_exit ---
         mov [shell_esp], esp
 
@@ -296,8 +272,8 @@ protected_mode_entry:
         ;; — `high_entry` (kernel.asm) ran first and handed off here
         ;; with the kernel GDT / IDT live and ESP pointing at
         ;; `kernel_stack_top`.  We patch the TSS, ltr, bring up devices,
-        ;; allocate shared user-page frames (vDSO + JUMP_TABLE), and
-        ;; drop into shell_reload.
+        ;; allocate the shared vDSO user-page frame, and drop into
+        ;; shell_reload.
         ;;
         ;; Patch the TSS descriptor's base bytes with tss_data's linear
         ;; address (the bytes are scattered across descriptor offsets
@@ -346,12 +322,10 @@ protected_mode_entry:
         out PIC1_DATA_PORT, al
         sti
 
-        ;; Allocate shared user-page frames for the vDSO code page and
-        ;; the JUMP_TABLE region.  Both are mapped (with PTE_SHARED)
-        ;; into every per-program PD by program_enter; address_space_
-        ;; destroy skips them on teardown.
+        ;; Allocate shared user-page frames for the vDSO code page.
+        ;; Mapped (with PTE_SHARED) into every per-program PD by
+        ;; program_enter; address_space_destroy skips it on teardown.
         call vdso_install
-        call jump_table_setup
 
         call ata_init
         call fd_init
@@ -437,60 +411,6 @@ vdso_install:
         hlt
         jmp $-1
 
-jump_table_setup:
-        ;; Allocate JUMP_TABLE_FRAME_COUNT frames and stash their phys
-        ;; addresses in `jump_table_frames[]`.  Each per-program PD
-        ;; maps these into PTEs 0x300..0x3FF with PTE_SHARED, giving
-        ;; asm.c the 1 MB user-virt scratch region it expects at
-        ;; SYMBOL_BASE / JUMP_TABLE.  Frames are zero-initialised
-        ;; because frame_alloc returns from a bitmap; user code is
-        ;; expected to own all writes there.  Residue across program
-        ;; runs is fine for asm.c's two-pass approach (pass 1 fully
-        ;; rewrites pass-1's table from the source).
-        push eax
-        push ebx
-        push ecx
-        push edi
-        xor ecx, ecx
-        mov edi, jump_table_frames
-.alloc_loop:
-        cmp ecx, JUMP_TABLE_FRAME_COUNT
-        jae .done
-        push ecx
-        push edi
-        call frame_alloc
-        pop edi
-        pop ecx
-        jc .panic
-        mov [edi], eax
-        add edi, 4
-        ;; Zero the frame so JUMP_TABLE start state is well-defined.
-        push ecx
-        push edi
-        mov edi, eax
-        add edi, 0xC0000000
-        mov ecx, 1024
-        xor eax, eax
-        cld
-        rep stosd
-        pop edi
-        pop ecx
-        inc ecx
-        jmp .alloc_loop
-.done:
-        pop edi
-        pop ecx
-        pop ebx
-        pop eax
-        ret
-.panic:
-        mov dx, COM1_DATA
-        mov al, '!'
-        out dx, al
-        cli
-        hlt
-        jmp $-1
-
         ;; Physical address of `kernel_pd_template`, the page directory
         ;; whose top-256 PDEs are copied into every per-program PD as
         ;; the kernel half of the address space.  Phase 3 promotes the
@@ -515,12 +435,6 @@ shell_path      db "bin/shell", 0
         align 4
 buffer_snapshot         times MAX_INPUT db 0
 exec_arg_snapshot       dd 0
-
-        ;; JUMP_TABLE shared frames.  Allocated once at boot in
-        ;; `jump_table_setup`; mapped into every per-program PD by
-        ;; program_enter with PTE_SHARED so they survive teardown.
-        align 4
-jump_table_frames       times JUMP_TABLE_FRAME_COUNT dd 0
 
         ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
         ;; protected_mode_entry); all other fields stay zero because we
