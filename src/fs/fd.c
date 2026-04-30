@@ -1,332 +1,383 @@
-asm("
-;;; fd.c -- File descriptor table management
-;;;
-;;; fd_alloc:         Find the first free FD slot (AX = fd number, CF if full)
-;;; fd_close:         SYS_IO_CLOSE -- BX=fd; flushes writable files
-;;; fd_fstat:         SYS_IO_FSTAT -- BX=fd; returns AL=mode, CX:DX=size
-;;; fd_init:          Zero the FD table, pre-open fds 0/1/2 as console
-;;; fd_lookup:        Validate fd in BX, return SI = entry pointer (CF if invalid)
-;;; fd_open:          SYS_IO_OPEN  -- SI=filename, AL=flags, DL=mode; returns AX=fd
-;;; fd_pos_to_sector: Convert fd_pos to sector + offset (internal helper)
-;;; fd_read:          SYS_IO_READ  -- BX=fd, DI=buffer, CX=count; returns AX=bytes
-;;; fd_write:         SYS_IO_WRITE -- BX=fd, SI=buffer, CX=count; returns AX=bytes
+// fs/fd.c — File descriptor table management.
+//
+// Fully ported to C: the five simple helpers (fd_alloc, fd_close,
+// fd_fstat, fd_init, fd_lookup) plus the four dispatchers (fd_open,
+// fd_read, fd_write, fd_ioctl) and their dispatch tables.  The read /
+// write dispatchers tail-call through cc.py's __tail_call into the
+// per-fd-type handlers in fs/fd/{console,fs,net}.c; fd_ioctl pins the
+// function pointer to EBX so the cmd byte in AL survives the jump.
+//
+// The trailing asm() block is just the ``%include`` directives that
+// pull the per-fd-type handler bodies into the same NASM scope.
+//
+// Calling conventions (input/output registers, CF semantics) match
+// the original asm so external callers (syscall.asm and the
+// per-fd-type handlers) link unchanged.
 
-fd_alloc:
-        ;; Find first free FD slot
-        ;; Returns: AX = fd number, SI = entry pointer; CF set if table full
-        push ebx
-        push ecx
-        mov esi, fd_table
-        xor eax, eax
-        mov ecx, FD_MAX
-        .scan:
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FREE
-        je .found
-        add esi, FD_ENTRY_SIZE
-        inc eax
-        dec ecx
-        jnz .scan
-        pop ecx
-        pop ebx
-        stc
-        ret
-        .found:
-        pop ecx
-        pop ebx
-        clc
-        ret
+// Layout used by the helpers and the asm dispatchers; matches the
+// FD_OFFSET_* / FD_ENTRY_SIZE constants in include/constants.asm.
+struct fd {
+    uint8_t type;
+    uint8_t flags;
+    uint16_t start;
+    int size;
+    int position;
+    uint16_t directory_sector;
+    uint16_t directory_offset;
+    uint8_t mode;
+    uint8_t _rest[15];
+};
 
-;;; -----------------------------------------------------------------------
-;;; fd_close: Close a file descriptor
-;;; Input:  BX = fd number
-;;; Output: CF set on error
-;;;
-;;; For writable file FDs, calls vfs_update_size to write the final
-;;; position back to the directory entry as the file size.
-;;; -----------------------------------------------------------------------
-fd_close:
-        call fd_lookup
-        jc .close_err
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FILE
-        jne .close_free
-        test byte [esi+FD_OFFSET_FLAGS], O_WRONLY
-        jz .close_free
-        call vfs_update_size    ; ESI = fd_table entry -> updates dir entry size
-        .close_free:
-        push eax
-        push ecx
-        push edi
-        mov edi, esi
-        xor eax, eax
-        mov ecx, FD_ENTRY_SIZE / 2
-        cld
-        rep stosw
-        pop edi
-        pop ecx
-        pop eax
-        clc
-        ret
-        .close_err:
-        stc
-        ret
+// fd_lookup is forward-declared because fd_close calls it but the
+// helpers are emitted in alphabetical order below (fd_close lands
+// before fd_lookup).
+__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
+int fd_lookup(int fd_num __attribute__((in_register("bx"))),
+              struct fd *entry __attribute__((out_register("esi"))));
 
-;;; -----------------------------------------------------------------------
-;;; fd_fstat: Get file status from a file descriptor
-;;; Input:  BX = fd number
-;;; Output: AL = mode (file permission flags), CX:DX = size (32-bit)
-;;;         CF set on error
-;;; -----------------------------------------------------------------------
-fd_fstat:
-        call fd_lookup
-        jc .fstat_err
-        mov al, [esi+FD_OFFSET_MODE]
-        mov dx, [esi+FD_OFFSET_SIZE]
-        mov cx, [esi+FD_OFFSET_SIZE+2]
-        clc
-        ret
-        .fstat_err:
-        stc
-        ret
+// fs/vfs.asm: writes the fd's final position back into the directory
+// entry as the file size.  Used by fd_close on writable file fds.
+__attribute__((carry_return))
+int vfs_update_size(struct fd *entry __attribute__((in_register("esi"))));
 
-fd_init:
-        ;; Zero the entire FD table
-        push eax
-        push ecx
-        push edi
-        mov edi, fd_table
-        xor eax, eax
-        mov ecx, FD_MAX * FD_ENTRY_SIZE / 2
-        cld
-        rep stosw
-        ;; Pre-open fd 0 (stdin), fd 1 (stdout), fd 2 (stderr) as console
-        mov esi, fd_table
-        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [esi+FD_OFFSET_FLAGS], O_RDONLY
-        add esi, FD_ENTRY_SIZE
-        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [esi+FD_OFFSET_FLAGS], O_WRONLY
-        add esi, FD_ENTRY_SIZE
-        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        mov byte [esi+FD_OFFSET_FLAGS], O_WRONLY
-        pop edi
-        pop ecx
-        pop eax
-        ret
+// fs/vfs.asm: locates a file (vfs_find) or creates one (vfs_create);
+// both populate the vfs_found_* cluster and return CF clear on success.
+__attribute__((carry_return))
+int vfs_find(uint8_t *path __attribute__((in_register("esi"))));
+__attribute__((carry_return))
+int vfs_create(uint8_t *path __attribute__((in_register("esi"))));
 
-fd_lookup:
-        ;; Validate fd in BX, return SI = entry pointer
-        ;; CF set if invalid (out of range or slot is free)
-        cmp bx, FD_MAX
-        jae .invalid
-        push eax
-        movzx eax, bx
-        shl eax, 5              ; eax = fd_number * FD_ENTRY_SIZE (32)
-        mov esi, fd_table
-        add esi, eax
-        cmp byte [esi+FD_OFFSET_TYPE], FD_TYPE_FREE
-        je .invalid_pop
-        pop eax
-        clc
-        ret
-        .invalid_pop:
-        pop eax
-        .invalid:
-        stc
-        ret
+// vfs.asm globals populated by vfs_find / vfs_create.  Read by
+// fd_open after the call to populate the new fd entry.  ``size`` is
+// 32-bit; the asm side stores it as ``dd``.  ``inode`` doubles as
+// ``start sector`` for bbfs and ``inode number`` for ext2.  Use
+// ``asm_name`` rather than ``extern`` because the asm side owns the
+// labels and uses the bare names (``vfs_found_size``, not
+// ``_g_vfs_found_size``); ``extern`` would emit ``_g_<name>``
+// references that NASM can't resolve.
+uint8_t vfs_found_type __attribute__((asm_name("vfs_found_type")));
+uint8_t vfs_found_mode __attribute__((asm_name("vfs_found_mode")));
+uint16_t vfs_found_inode __attribute__((asm_name("vfs_found_inode")));
+uint32_t vfs_found_size __attribute__((asm_name("vfs_found_size")));
+uint16_t vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
+uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 
-;;; -----------------------------------------------------------------------
-;;; fd_open: Open a file and return a file descriptor
-;;; Input:  SI = filename, AL = flags (O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC)
-;;; Output: AX = fd number (CF clear), or -1 on error (CF set)
-;;; -----------------------------------------------------------------------
-fd_open:
-        push ecx
-        push edx
-        push edi
-        mov [fd_open_flags], al
-        mov [fd_open_name], esi
-        ;; Check synthetic device paths first (no filesystem lookup).
-        mov edi, DEV_VGA_PATH
-        mov ecx, 9                      ; \"/dev/vga\" + null
-        cld
-        repe cmpsb
-        jne .open_not_device
-        call fd_alloc
-        jc .open_err
-        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_VGA
-        mov cl, [fd_open_flags]
-        mov [esi+FD_OFFSET_FLAGS], cl
-        mov [fd_open_fd], ax
-        jmp .open_done
-        .open_not_device:
-        mov esi, [fd_open_name]
-        ;; Look up the file (vfs_find handles \".\" -> root directory)
-        call vfs_find           ; populates vfs_found_*
-        jc .open_not_found
-        jmp .open_populate
+// fd_ops dispatch table — one entry per FD_TYPE_*.  Each entry is a
+// (read_fn, write_fn) pair; a 0 slot means "unsupported".  Indexed
+// by fd entry's type byte.  The function-pointer fields are 4 bytes
+// each in 32-bit mode, so each entry is 8 bytes; fd_read / fd_write
+// compute (fd_ops + entry->type)->read / ->write to fetch the
+// handler.  The struct field's parameter list is intentionally empty
+// since cc.py doesn't carry function-pointer signatures through
+// struct types — the dispatchers below redeclare the local
+// function_pointer with the in_register annotations the handlers
+// expect.
+struct fd_ops_entry {
+    int (*read)();
+    int (*write)();
+};
 
-        .open_not_found:
-        ;; If O_CREAT is set, create the file
-        test byte [fd_open_flags], O_CREAT
-        jz .open_err
-        mov esi, [fd_open_name]
-        call vfs_create         ; SI=path -> vfs_found_*, CF on error
-        jc .open_err
-        jmp .open_populate
+// Forward declarations for the per-fd-type handlers.  The bodies
+// live in fs/fd/{console,fs,net}.c; only the symbol identity matters
+// for the static initializer below.
+int fd_ioctl_vga();
+int fd_read_console();
+int fd_read_dir();
+int fd_read_file();
+int fd_read_net();
+int fd_write_console();
+int fd_write_file();
+int fd_write_net();
 
-        .open_populate:
-        ;; vfs_found_* is now fully populated
-        call fd_alloc
-        jc .open_err
-        mov [fd_open_fd], ax
-        ;; Type, flags, mode, inode, size, position from vfs_found_*
-        mov cl, [vfs_found_type]
-        mov [esi+FD_OFFSET_TYPE], cl
-        mov cl, [fd_open_flags]
-        mov [esi+FD_OFFSET_FLAGS], cl
-        mov cl, [vfs_found_mode]
-        mov [esi+FD_OFFSET_MODE], cl
-        mov cx, [vfs_found_inode]
-        mov [esi+FD_OFFSET_START], cx
-        mov cx, [vfs_found_size]
-        mov [esi+FD_OFFSET_SIZE], cx
-        mov cx, [vfs_found_size+2]
-        mov [esi+FD_OFFSET_SIZE+2], cx
-        mov dword [esi+FD_OFFSET_POSITION], 0
-        mov cx, [vfs_found_dir_sec]
-        mov [esi+FD_OFFSET_DIRECTORY_SECTOR], cx
-        mov cx, [vfs_found_dir_off]
-        mov [esi+FD_OFFSET_DIRECTORY_OFFSET], cx
-        ;; O_TRUNC: reset size to 0
-        test byte [fd_open_flags], O_TRUNC
-        jz .open_done
-        mov word [esi+FD_OFFSET_SIZE], 0
-        mov word [esi+FD_OFFSET_SIZE+2], 0
-        .open_done:
-        mov ax, [fd_open_fd]
-        pop edi
-        pop edx
-        pop ecx
-        clc
-        ret
+struct fd_ops_entry fd_ops[8] = {
+    { 0,               0 },                 // FD_TYPE_FREE (0)
+    { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (1)
+    { fd_read_dir,     0 },                 // FD_TYPE_DIRECTORY (2)
+    { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (3)
+    { 0,               0 },                 // FD_TYPE_ICMP (4)
+    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (5)
+    { 0,               0 },                 // FD_TYPE_UDP (6)
+    { 0,               0 },                 // FD_TYPE_VGA (7)
+};
 
-        .open_err:
-        pop edi
-        pop edx
-        pop ecx
-        mov ax, -1
-        stc
-        ret
+// fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
+// means "no ioctl support".  Wrapped in a one-field struct because
+// cc.py rejects ``int (*name[N])()`` array-of-function_pointer at
+// file scope; the struct workaround is identical at the byte level.
+struct fd_ioctl_op {
+    int (*ioctl)();
+};
 
-;;; -----------------------------------------------------------------------
-;;; fd_pos_to_sector: Convert fd_pos to absolute sector + byte offset
-;;; Input:  SI = FD entry pointer
-;;; Output: AX = absolute sector number, BX = byte offset within sector
-;;; -----------------------------------------------------------------------
-fd_pos_to_sector:
-        push ecx
-        mov eax, [esi+FD_OFFSET_POSITION]
-        mov ebx, eax
-        shr eax, 9
-        movzx ecx, word [esi+FD_OFFSET_START]
-        add eax, ecx
-        and ebx, 01FFh
-        pop ecx
-        ret
+struct fd_ioctl_op fd_ioctl_ops[8] = {
+    { 0 },                  // FD_TYPE_FREE (0)
+    { 0 },                  // FD_TYPE_CONSOLE (1)
+    { 0 },                  // FD_TYPE_DIRECTORY (2)
+    { 0 },                  // FD_TYPE_FILE (3)
+    { 0 },                  // FD_TYPE_ICMP (4)
+    { 0 },                  // FD_TYPE_NET (5)
+    { 0 },                  // FD_TYPE_UDP (6)
+    { fd_ioctl_vga },       // FD_TYPE_VGA (7)
+};
 
-;;; -----------------------------------------------------------------------
-;;; fd_read / fd_write: Table-driven dispatch via fd_ops.
-;;;
-;;; fd_ops is a flat table of (read_fn, write_fn) dword pairs indexed by
-;;; FD_TYPE_*.  A zero entry means the operation is unsupported for that
-;;; type.  Adding a new fd type requires only a new row in fd_ops -- the
-;;; dispatch functions need no changes.
-;;; -----------------------------------------------------------------------
-fd_read:
-        call fd_lookup
-        jc .err
-        movzx ebx, byte [esi+FD_OFFSET_TYPE]
-        shl ebx, 3              ; * 8: each ops entry is two dwords
-        mov eax, [fd_ops+ebx]  ; read_fn
-        test eax, eax
-        jz .err
-        jmp eax
-        .err:
-        mov eax, -1
-        stc
-        ret
+// fd_table — kernel BSS, FD_MAX entries × 32 bytes.  The asm
+// dispatchers below (and the per-fd-type handlers in fs/fd/*.kasm)
+// reach into entries via ``[esi+FD_OFFSET_*]``; they reference the
+// bare ``fd_table`` symbol via the equ shim so they don't need to
+// know cc.py's _g_ prefix.
+struct fd fd_table[FD_MAX];
+asm("fd_table equ _g_fd_table");
 
-fd_write:
-        mov [fd_write_buffer], esi
-        call fd_lookup
-        jc .err
-        movzx ebx, byte [esi+FD_OFFSET_TYPE]
-        shl ebx, 3              ; * 8: each ops entry is two dwords
-        mov eax, [fd_ops+ebx+4] ; write_fn
-        test eax, eax
-        jz .err
-        jmp eax
-        .err:
-        mov eax, -1
-        stc
-        ret
+// fd_write_buffer — the dispatcher (fd_write below) stashes the
+// caller-supplied user buffer pointer here before tail-jumping to the
+// per-type write handler.  Hoisted out of asm so the C-ported
+// handlers in fs/fd/{console,fs,net}.c can read it directly.
+uint8_t *fd_write_buffer;
+asm("fd_write_buffer equ _g_fd_write_buffer");
 
-;;; -----------------------------------------------------------------------
-;;; fd_ioctl: Device-control dispatch.  Looks up BX=fd, then jumps to the
-;;; per-type ioctl handler in fd_ioctl_ops.  Handler receives AL=cmd plus
-;;; cmd-specific args in other registers and returns CF=0/1.
-;;; -----------------------------------------------------------------------
-fd_ioctl:
-        call fd_lookup
-        jc .err
-        movzx ebx, byte [esi+FD_OFFSET_TYPE]
-        shl ebx, 2              ; one dword per entry
-        mov ebx, [fd_ioctl_ops+ebx]
-        test ebx, ebx
-        jz .err
-        jmp ebx
-        .err:
-        stc
-        ret
+// fd_alloc: linear scan for the first FD_TYPE_FREE slot.  AX = fd
+// number, ESI = entry pointer; CF set if the table is full.
+__attribute__((carry_return))
+int fd_alloc(int *fd_num __attribute__((out_register("ax"))),
+             struct fd *entry __attribute__((out_register("esi")))) {
+    int i;
+    struct fd *cursor;
+    cursor = fd_table;
+    i = 0;
+    while (i < FD_MAX) {
+        if (cursor->type == FD_TYPE_FREE) {
+            // Order matters: *entry's mov-to-ESI emission also leaves
+            // EAX = cursor; *fd_num must follow so the trailing
+            // expression eval lands the fd number in EAX/AX.
+            *entry = cursor;
+            *fd_num = i;
+            return 1;
+        }
+        cursor = cursor + 1;
+        i = i + 1;
+    }
+    return 0;
+}
 
-%include \"fs/fd/console.asm\"
-%include \"fs/fd/fs.asm\"
-%include \"fs/fd/net.asm\"
+// fd_close: writable file fds flush their final position back to the
+// directory entry via vfs_update_size; then every fd type zeros its
+// slot (FD_TYPE_FREE = 0 by virtue of position 0 being the type
+// field).  CF set if the fd was already free / out of range.
+__attribute__((carry_return))
+int fd_close(int fd_num __attribute__((in_register("bx")))) {
+    struct fd *entry;
+    if (!fd_lookup(fd_num, &entry)) {
+        return 0;
+    }
+    if (entry->type == FD_TYPE_FILE) {
+        if ((entry->flags & O_WRONLY) != 0) {
+            vfs_update_size(entry);
+        }
+    }
+    memset(entry, 0, FD_ENTRY_SIZE);
+    return 1;
+}
 
-        ;; Operations table: (read_fn, write_fn) dword pairs indexed by FD_TYPE_*
-        ;; A zero entry means unsupported for that type.
-fd_ops:
-        dd 0,               0                 ; FD_TYPE_FREE (0)
-        dd fd_read_console, fd_write_console  ; FD_TYPE_CONSOLE (1)
-        dd fd_read_dir,     0                 ; FD_TYPE_DIRECTORY (2)
-        dd fd_read_file,    fd_write_file     ; FD_TYPE_FILE (3)
-        dd 0,               0                 ; FD_TYPE_ICMP (4)
-        dd fd_read_net,     fd_write_net      ; FD_TYPE_NET (5)
-        dd 0,               0                 ; FD_TYPE_UDP (6)
-        dd 0,               0                 ; FD_TYPE_VGA (7)
+// fd_fstat: AL = mode (file permission flags), CX:DX = 32-bit size
+// split (CX = high 16 bits, DX = low 16 bits).  CF set if the fd is
+// invalid.  ``mode`` uses ``out_register("ax")`` rather than
+// ``out_register("al")`` because the syscall dispatcher only looks at
+// AL — emitting through AX (with the high byte cleared by the
+// uint8_t-to-int widening) keeps the cc.py codegen path uniform with
+// the CX/DX captures and avoids the byte-alias mismatch in the
+// DerefAssign emission.
+__attribute__((carry_return))
+int fd_fstat(int *mode __attribute__((out_register("ax"))),
+             int *size_high __attribute__((out_register("cx"))),
+             int *size_low __attribute__((out_register("dx"))),
+             int fd_num __attribute__((in_register("bx")))) {
+    struct fd *entry;
+    if (!fd_lookup(fd_num, &entry)) {
+        return 0;
+    }
+    // Order matters: *size_low / *size_high emit explicit ``mov dx,
+    // ax`` / ``mov cx, ax`` so each capture is durable.  *mode (the
+    // ``out_register("ax")`` capture) skips the redundant ``mov ax,
+    // ax`` and instead relies on the trailing expression eval leaving
+    // EAX = mode at function exit, so it has to come last.
+    *size_low = entry->size & 0xFFFF;
+    *size_high = (entry->size >> 16) & 0xFFFF;
+    *mode = entry->mode;
+    return 1;
+}
 
-        ;; Ioctl dispatch table indexed by FD_TYPE_*.  Zero = unsupported.
-fd_ioctl_ops:
-        dd 0                    ; FD_TYPE_FREE (0)
-        dd 0                    ; FD_TYPE_CONSOLE (1)
-        dd 0                    ; FD_TYPE_DIRECTORY (2)
-        dd 0                    ; FD_TYPE_FILE (3)
-        dd 0                    ; FD_TYPE_ICMP (4)
-        dd 0                    ; FD_TYPE_NET (5)
-        dd 0                    ; FD_TYPE_UDP (6)
-        dd fd_ioctl_vga         ; FD_TYPE_VGA (7)
+// fd_init: zero the fd table, then pre-open fds 0/1/2 as console.
+void fd_init() {
+    struct fd *cursor;
+    memset(fd_table, 0, FD_MAX * FD_ENTRY_SIZE);
+    cursor = fd_table;
+    cursor->type = FD_TYPE_CONSOLE;
+    cursor->flags = O_RDONLY;
+    cursor = cursor + 1;
+    cursor->type = FD_TYPE_CONSOLE;
+    cursor->flags = O_WRONLY;
+    cursor = cursor + 1;
+    cursor->type = FD_TYPE_CONSOLE;
+    cursor->flags = O_WRONLY;
+}
 
-        DEV_VGA_PATH    db \"/dev/vga\", 0
-        fd_open_fd      dw 0
-        fd_open_flags   db 0
-        fd_open_mode    db 0
-        fd_open_name    dd 0
-        fd_write_buffer dd 0
-        ;; FD table.  Lives in kernel BSS at whatever kernel-virt
-        ;; address the linker assigns; bbfs.asm / ext2.asm reach FD
-        ;; entries via `[esi+FD_OFFSET_*]` (32-bit), so the table is
-        ;; no longer pinned to fixed low-physical 0xE000.
-        align 4
-fd_table:
-        times FD_MAX * FD_ENTRY_SIZE db 0
-");
+// fd_ioctl: dispatch on entry->type into fd_ioctl_ops[type].ioctl.
+// Inputs are AL = cmd, BX = fd, plus per-(type, cmd) extras (ECX/EDX)
+// that flow through to the handler unchanged.  The function pointer
+// is pinned to EBX so the tail-jump (``jmp ebx``) doesn't clobber AL
+// — fd_ioctl_vga reads AL directly to pick the sub-command.  Error
+// path: ``stc; ret`` with AX left at whatever the syscall layer
+// preserved (matching the asm version's contract).
+__attribute__((carry_return))
+int fd_ioctl(int cmd __attribute__((in_register("ax"))),
+             int fd_num __attribute__((in_register("bx")))) {
+    struct fd *entry;
+    struct fd_ioctl_op *op;
+    int (*handler)(int c __attribute__((in_register("ax"))),
+                   struct fd *e __attribute__((in_register("esi"))))
+                   __attribute__((pinned_register("ebx")));
+    if (!fd_lookup(fd_num, &entry)) {
+        return 0;
+    }
+    op = fd_ioctl_ops + entry->type;
+    handler = op->ioctl;
+    if (handler == 0) {
+        return 0;
+    }
+    __tail_call(handler, cmd, entry);
+}
+
+// fd_lookup: validate fd in BX, return ESI = entry pointer.  CF set
+// if the fd is out of range or its slot is FD_TYPE_FREE.  ECX is
+// preserved so the asm fd_open / fd_read / fd_write dispatchers can
+// keep ECX live across the call.
+__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
+int fd_lookup(int fd_num __attribute__((in_register("bx"))),
+              struct fd *entry __attribute__((out_register("esi")))) {
+    struct fd *cursor;
+    if (fd_num >= FD_MAX) {
+        return 0;
+    }
+    cursor = fd_table + fd_num;
+    if (cursor->type == FD_TYPE_FREE) {
+        return 0;
+    }
+    *entry = cursor;
+    return 1;
+}
+
+// fd_open: open the file at `name` with the given `flags`, returning
+// AX = fd or -1 (CF set on error).  /dev/vga is a synthetic device
+// that bypasses the filesystem and just allocates an FD_TYPE_VGA
+// slot.  Otherwise vfs_find populates vfs_found_*; if not found and
+// O_CREAT is set, vfs_create makes a fresh entry.  The new fd's
+// fields come from the vfs_found_* cluster, except O_TRUNC zeros
+// the size so a subsequent write rebuilds the file from scratch.
+__attribute__((carry_return))
+int fd_open(int *result __attribute__((out_register("ax"))),
+            uint8_t *name __attribute__((in_register("esi"))),
+            int flags __attribute__((in_register("ax")))) {
+    int fd_num;
+    struct fd *entry;
+    if (memcmp(name, "/dev/vga", 9) == 0) {
+        if (!fd_alloc(&fd_num, &entry)) {
+            *result = -1;
+            return 0;
+        }
+        entry->type = FD_TYPE_VGA;
+        entry->flags = flags;
+        *result = fd_num;
+        return 1;
+    }
+    if (!vfs_find(name)) {
+        if ((flags & O_CREAT) == 0) {
+            *result = -1;
+            return 0;
+        }
+        if (!vfs_create(name)) {
+            *result = -1;
+            return 0;
+        }
+    }
+    if (!fd_alloc(&fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    entry->type = vfs_found_type;
+    entry->flags = flags;
+    entry->mode = vfs_found_mode;
+    entry->start = vfs_found_inode;
+    entry->size = vfs_found_size;
+    entry->position = 0;
+    entry->directory_sector = vfs_found_dir_sec;
+    entry->directory_offset = vfs_found_dir_off;
+    if ((flags & O_TRUNC) != 0) {
+        entry->size = 0;
+    }
+    *result = fd_num;
+    return 1;
+}
+
+// fd_read: dispatch on entry->type into fd_ops[type].read.  Inputs
+// are BX = fd, EDI = user buffer, ECX = byte count.  fd_lookup
+// preserves ECX and EDI; the C frame spills them to slots and reloads
+// them just before the tail-jump.  Error path matches the asm-side
+// contract: AX = -1, CF set.  The handler's own AX/CF flow back
+// through the tail-jump unchanged.
+__attribute__((carry_return))
+int fd_read(int *result __attribute__((out_register("ax"))),
+            int fd_num __attribute__((in_register("bx"))),
+            uint8_t *buffer __attribute__((in_register("edi"))),
+            int count __attribute__((in_register("ecx")))) {
+    struct fd *entry;
+    struct fd_ops_entry *ops;
+    int (*handler)(struct fd *e __attribute__((in_register("esi"))),
+                   uint8_t *b __attribute__((in_register("edi"))),
+                   int c __attribute__((in_register("ecx"))));
+    if (!fd_lookup(fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    ops = fd_ops + entry->type;
+    handler = ops->read;
+    if (handler == 0) {
+        *result = -1;
+        return 0;
+    }
+    __tail_call(handler, entry, buffer, count);
+}
+
+// fd_write: dispatch on entry->type into fd_ops[type].write.  Inputs
+// are BX = fd, ESI = source buffer, ECX = byte count.  Stash ESI into
+// fd_write_buffer first (fd_lookup overwrites ESI with the entry
+// pointer); the per-type handlers read fd_write_buffer to fetch the
+// source bytes.  Error path: AX = -1, CF set, same as fd_read.
+__attribute__((carry_return))
+int fd_write(int *result __attribute__((out_register("ax"))),
+             int fd_num __attribute__((in_register("bx"))),
+             uint8_t *source __attribute__((in_register("esi"))),
+             int count __attribute__((in_register("ecx")))) {
+    struct fd *entry;
+    struct fd_ops_entry *ops;
+    int (*handler)(struct fd *e __attribute__((in_register("esi"))),
+                   int c __attribute__((in_register("ecx"))));
+    fd_write_buffer = source;
+    if (!fd_lookup(fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    ops = fd_ops + entry->type;
+    handler = ops->write;
+    if (handler == 0) {
+        *result = -1;
+        return 0;
+    }
+    __tail_call(handler, entry, count);
+}
+
+// All dispatchers are now C.  The remaining asm() block just brings
+// in the per-fd-type handler %includes (fs/fd/console.kasm /
+// fs.kasm / net.kasm) so their labels are visible at NASM-link
+// time.
+asm("%include \"fs/fd/console.kasm\"\n"
+    "%include \"fs/fd/fs.kasm\"\n"
+    "%include \"fs/fd/net.kasm\"\n");
