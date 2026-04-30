@@ -186,6 +186,12 @@ ext2_init:
         ;; Detect ext2 and initialise state.  1 KB, 2 KB, and 4 KB blocks supported.
         ;; Input:  (none)
         ;; Output: CF clear on success; CF set if not ext2
+        ;;
+        ;; On a successful detect, frame_alloc reserves a 4 KB frame
+        ;; from the bitmap allocator for ext2_search_blk's sliding
+        ;; 2-sector directory window (1 KB used).  bbfs systems never
+        ;; reach this allocation, so the frame is only spent when the
+        ;; FS is actually ext2.
         push ax
         push ebx
         push ecx
@@ -196,6 +202,13 @@ ext2_init:
         jc .ei_err
         cmp word [sector_buffer+EXT2_SB_MAGIC], EXT2_MAGIC
         jne .ei_err
+        ;; Allocate the directory-window frame and stash its kernel-virt
+        ;; alias in `ext2_sd_buffer`.  ext2_search_blk treats it as a
+        ;; 1 KB pair (bytes 0..511 = lo sector, 512..1023 = hi sector).
+        call frame_alloc
+        jc .ei_err
+        add eax, 0xC0000000             ; kernel-virt via direct map
+        mov [ext2_sd_buffer], eax
         ;; s_log_block_size: 0=1KB, 1=2KB, 2=4KB
         mov al, [sector_buffer+EXT2_SB_LOG_BLOCK_SIZE]
         mov [ext2_log_block_size], al
@@ -2982,7 +2995,7 @@ ext2_search_blk:
         call ext2_read_blk_sec
         jc .esb_not_found
         mov esi, sector_buffer
-        mov edi, ext2_sd_buffer
+        mov edi, [ext2_sd_buffer]
         mov ecx, 128                            ; 512 / 4
         cld
         rep movsd
@@ -3001,7 +3014,8 @@ ext2_search_blk:
         call ext2_read_blk_sec
         jc .esb_window_ready                    ; hi failed, but lo's enough to keep going
         mov esi, sector_buffer
-        mov edi, ext2_sd_buffer + 512
+        mov edi, [ext2_sd_buffer]
+        add edi, 512
         mov ecx, 128
         cld
         rep movsd
@@ -3011,7 +3025,7 @@ ext2_search_blk:
         mov bx, [ext2_sd_blk_off]
         and bx, 511
         movzx ebx, bx
-        mov edi, ext2_sd_buffer
+        mov edi, [ext2_sd_buffer]
         add edi, ebx
         ;; Validate rec_len (must be at least the 8-byte header).
         mov bx, [edi+EXT2_DIRENT_REC_LEN]
@@ -3244,8 +3258,12 @@ ext2_resolve_path:
         ext2_rn_old_path       dd 0     ; ext2_rename: pointer to old full path
         ext2_sd_blk_num        dw 0     ; ext2_search_blk: caller's block number (AX-spill, see search_blk header)
         ext2_sd_blk_off        dw 0     ; ext2_search_blk: block-relative byte offset of next entry (see search_blk header)
-        ;; ext2_sd_buffer (1 KB sliding 2-sector window) lives at fixed low-phys
-        ;; via kernel.asm's direct-map equ — keeps the bytes out of kernel.bin.
+        ;; ext2_sd_buffer holds the kernel-virt of the sliding 2-sector
+        ;; directory window (1 KB used inside a 4 KB frame).  Allocated
+        ;; by ext2_init via frame_alloc + direct-map adjust on a
+        ;; successful ext2 detect — bbfs systems leave it 0 and never
+        ;; reach the ext2_search_blk paths that read it.
+        ext2_sd_buffer         dd 0
         ext2_sd_lo_sec         dw 0     ; ext2_search_blk: sector index loaded at ext2_sd_buffer[0..511] (0xFFFF = invalid)
         ext2_sd_name           dd 0
         ext2_us_blks           times 14 dw 0  ; ext2_update_size: saved i_block[0..13]

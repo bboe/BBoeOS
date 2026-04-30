@@ -76,13 +76,9 @@
         ;; FIRST_KERNEL_PT_PHYS resolve to the same physical addresses
         ;; the kernel already expects.  In-memory layout (low to high):
         ;;   KERNEL_RESERVED_BASE          (kernel stack)
-        ;;     + KERNEL_STACK_BYTES_BOOT       (8 KB)
-        ;;     + NET_BUFFER_BYTES_BOOT × 2     (RX 1.5 KB + TX 1.5 KB)
-        ;;     + SECTOR_BUFFER_BYTES_BOOT      (512 B)
-        ;;     + EXT2_SD_BUFFER_BYTES_BOOT     (1024 B)
+        ;;     + KERNEL_STACK_BYTES            (8 KB)
+        ;;     + SECTOR_BUFFER_BYTES           (512 B)
         ;;     ... page-align ...
-        ;;   PROGRAM_SCRATCH_PHYS_BOOT
-        ;;     + PROGRAM_SCRATCH_BYTES_BOOT    (32 KB)
         ;;   BOOT_PD_PHYS                      (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS              (4 KB)
         ;;
@@ -100,20 +96,16 @@
         ;; far-jump target (= 0xC0000000 + KERNEL_LOAD_PHYS, so the
         ;; kernel runs at its direct-map alias).
         BOOT_DISK_PHYS              equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
-        BOOT_PD_PHYS                equ PROGRAM_SCRATCH_PHYS_BOOT + PROGRAM_SCRATCH_BYTES_BOOT
+        BOOT_PD_PHYS                equ (KERNEL_RESERVED_BASE                       \
+                                          + KERNEL_STACK_BYTES                      \
+                                          + SECTOR_BUFFER_BYTES                     \
+                                          + 0xFFF) & ~0xFFF
         DIRECTORY_SECTOR_PHYS       equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
-        EXT2_SD_BUFFER_BYTES_BOOT   equ 1024
-        EXT2_SD_END_BOOT            equ NET_TX_END_BOOT + SECTOR_BUFFER_BYTES_BOOT + EXT2_SD_BUFFER_BYTES_BOOT
         FIRST_KERNEL_PT_PHYS        equ BOOT_PD_PHYS + 0x1000
         HIGH_ENTRY_VIRT             equ 0xC0020000
         KERNEL_LOAD_PHYS            equ 0x20000
-        KERNEL_STACK_BYTES_BOOT     equ 0x2000
-        KERNEL_STACK_TOP_BOOT       equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES_BOOT
-        NET_BUFFER_BYTES_BOOT       equ 1536
-        NET_TX_END_BOOT             equ KERNEL_STACK_TOP_BOOT + NET_BUFFER_BYTES_BOOT * 2
-        PROGRAM_SCRATCH_BYTES_BOOT  equ 32 * 1024
-        PROGRAM_SCRATCH_PHYS_BOOT   equ (EXT2_SD_END_BOOT + 0xFFF) & ~0xFFF
-        SECTOR_BUFFER_BYTES_BOOT    equ 512
+        KERNEL_STACK_BYTES          equ 0x2000
+        SECTOR_BUFFER_BYTES         equ 512
 
 start:
         xor ax, ax

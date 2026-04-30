@@ -59,7 +59,7 @@ ip_send:
 
         ;; 2. Build Ethernet header at net_transmit_buffer
         mov esi, edi                    ; ESI = resolved dest MAC
-        mov edi, net_transmit_buffer
+        mov edi, [net_transmit_buffer]
         cld
         movsw                           ; Dest MAC
         movsw
@@ -107,13 +107,15 @@ ip_send:
         rep movsb
 
         ;; 5. Compute and store IP header checksum
-        mov esi, net_transmit_buffer + 14
+        mov esi, [net_transmit_buffer]
+        add esi, 14
         mov ecx, 20
         call ip_checksum
-        mov [net_transmit_buffer + 24], ax    ; Offset 14 + 10
+        mov edi, [net_transmit_buffer]
+        mov [edi + 24], ax              ; Offset 14 + 10
 
         ;; 6. Send the frame
-        mov esi, net_transmit_buffer
+        mov esi, [net_transmit_buffer]
         movzx ecx, word [.is_plen]
         add ecx, 34                     ; 14 (Eth) + 20 (IP) + payload
         call ne2k_send

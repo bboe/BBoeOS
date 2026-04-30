@@ -64,6 +64,7 @@ int ip_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
 // src/net/.
 extern uint8_t net_present;
 extern uint8_t mac_address[6];
+extern uint8_t *net_receive_buffer;
 
 // sys_net_mac: copy the 6-byte cached MAC into the caller's buffer at
 // EDI.  CF set if no NIC was ever probed (net_present stays zero).
@@ -122,8 +123,8 @@ int sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
     if (!fd_lookup(fd_num, &entry)) { *bytes_copied = 0; return 1; }
     if (entry->type == FD_TYPE_UDP) {
         if (!udp_receive(&payload, &payload_length)) { *bytes_copied = 0; return 1; }
-        // UDP dest port lives at NET_RECEIVE_BUFFER+36 (big-endian).
-        receive_buffer = NET_RECEIVE_BUFFER;
+        // UDP dest port lives at net_receive_buffer+36 (big-endian).
+        receive_buffer = net_receive_buffer;
         dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
         if (dest_port != (local_port & 0xFFFF)) { *bytes_copied = 0; return 1; }
     } else if (entry->type == FD_TYPE_ICMP) {

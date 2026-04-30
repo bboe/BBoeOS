@@ -51,7 +51,7 @@ arp_handle_packet:
         pop esi
 
         ;; Build ARP reply at net_transmit_buffer
-        mov edi, net_transmit_buffer
+        mov edi, [net_transmit_buffer]
         cld
 
         ;; Ethernet dest = requester's MAC (from offset +6 in received frame)
@@ -113,7 +113,7 @@ arp_handle_packet:
 
         ;; Send reply
         push esi
-        mov esi, net_transmit_buffer
+        mov esi, [net_transmit_buffer]
         mov ecx, 60
         call ne2k_send
         pop esi
@@ -181,7 +181,7 @@ arp_send_request:
         push edi
 
         ;; Build Ethernet + ARP frame at net_transmit_buffer
-        mov edi, net_transmit_buffer
+        mov edi, [net_transmit_buffer]
         cld
 
         ;; Ethernet dest: broadcast
@@ -246,7 +246,7 @@ arp_send_request:
         rep stosw
 
         ;; Send the frame
-        mov esi, net_transmit_buffer
+        mov esi, [net_transmit_buffer]
         mov ecx, 60
         call ne2k_send
 

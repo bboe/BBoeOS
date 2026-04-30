@@ -6,6 +6,70 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Allocate net_receive_buffer / net_transmit_buffer on NIC probe (2026-04-30)
+- The two NE2000 scratch buffers move out of the post-kernel reserved
+  region.  `network_initialize` now `frame_alloc`s a 4 KB frame for
+  each (1.5 KB used inside) on a successful `ne2k_probe` and stores
+  the kernel-virt pointers into two new `uint8_t *` BSS variables in
+  `src/drivers/ne2k.c`.  Sessions without a NIC (or without QEMU's
+  `-device ne2k_isa` flag) never spend the two frames; the kernel
+  reserved region drops by another ~3 KB (or 8 KB after page
+  alignment) in the no-NIC case.
+- `NET_RECEIVE_BUFFER` / `NET_TRANSMIT_BUFFER` (uppercase aliases) and
+  `NET_BUFFER_BYTES` / `NET_*_BUFFER_PHYS` / the lowercase equ chain
+  are gone from `src/arch/x86/kernel.asm` and the matching boot.asm
+  mirror.  `cc/codegen/base.py` drops the four NET_*_BUFFER entries
+  from `NAMED_CONSTANTS`; the symbols are now regular C externs.
+- All asm/C callers update from `mov edi, NET_RECEIVE_BUFFER` (or
+  `mov edi, net_transmit_buffer`) to indirect loads
+  (`mov edi, [net_receive_buffer]`).  `src/net/ip.c` adds a scratch
+  register for the in-place checksum store at `+24` since the
+  destination address is no longer a build-time constant.
+
+### Drop ext2_sd_buffer reservation; drop _BOOT suffix in boot.asm (2026-04-30)
+- `ext2_sd_buffer` is no longer a static post-kernel reservation.
+  `ext2_init` calls `frame_alloc` on a successful ext2 detect, stashes
+  the kernel-virt of the 4 KB frame into a new `ext2_sd_buffer` BSS
+  variable in `src/fs/ext2.asm`, and the three access points in
+  `ext2_search_blk` switch from `mov edi, ext2_sd_buffer [+ 512]` to
+  `mov edi, [ext2_sd_buffer]` (and `add edi, 512` where needed).
+  bbfs systems never reach the allocation, so they save a 4 KB frame
+  in the kernel-side reserved region.  `EXT2_SD_BUFFER_BYTES` /
+  `EXT2_SD_BUFFER_PHYS` / the `ext2_sd_buffer` direct-map equ are
+  gone from `src/arch/x86/kernel.asm` and the matching mirror in
+  `boot.asm`.
+- The `_BOOT` suffix on the four size constants in `boot.asm`
+  (`KERNEL_STACK_BYTES_BOOT`, `NET_BUFFER_BYTES_BOOT`,
+  `SECTOR_BUFFER_BYTES_BOOT`, `EXT2_SD_BUFFER_BYTES_BOOT` — now
+  removed entirely) is gone.  The kernel-side and boot-side flat
+  binaries already have separate symbol namespaces, so the suffix
+  was just inconsistent disambiguation noise (the PHYS / VIRT
+  constants — `BOOT_PD_PHYS`, `FIRST_KERNEL_PT_PHYS`, etc. — never
+  carried the suffix).
+
+### Drop program_scratch — stream binaries from disk into user frames (2026-04-30)
+- `program_enter` no longer relies on a kernel-side staging buffer.
+  Each per-program user frame is allocated, zero-filled, and then
+  populated sector-by-sector via `vfs_read_sec` + `sector_buffer` and
+  a memcpy through the kernel direct map.  The legacy 32 KB
+  `program_scratch` region is gone — saving ~32 KB in the kernel-side
+  reserved region under every QEMU memory configuration.
+- A static `program_fd` (`FD_ENTRY_SIZE` bytes in entry.asm BSS)
+  carries the file descriptor state vfs_read_sec needs (`type`,
+  `start`, `size`, `position`, `directory_sector`,
+  `directory_offset`).  Only one program loads at a time, so a single
+  slot suffices and there's no need to plumb it through the user fd
+  table.
+- BSS-trailer detection now happens AFTER Phase 1 (binary pages
+  loaded) by peeking the last loaded user frame at offset
+  `((binsize - 1) & 0xFFF) + 1 - {6,4}` — same magic checks
+  (BSS_MAGIC32 first, legacy BSS_MAGIC second) as the previous
+  scratch-walk logic.
+- `vfs_load`, `vfs_load_fn`, `bbfs_load`, and `ext2_load` references
+  drop from `vfs.c`'s function-pointer dispatch (the function bodies
+  in `bbfs.asm` / `ext2.asm` remain as dead code for now; a later
+  sweep can delete them).
+
 ### Reclaim conventional low memory + tighten kernel-side reservations (2026-04-30)
 - `boot_disk` and `directory_sector` move out of fixed phys `0x4D0` /
   `0x4D2` and into a 3-byte stash at the top of `kernel.bin`.  The

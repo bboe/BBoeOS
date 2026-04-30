@@ -4,7 +4,7 @@
 //
 //     ne2k_init                 setup; called by network_initialize
 //     ne2k_probe        → CF    reset + read PROM MAC into mac_address
-//     ne2k_receive      → CF    poll one frame; EDI = NET_RECEIVE_BUFFER,
+//     ne2k_receive      → CF    poll one frame; EDI = net_receive_buffer,
 //                               ECX = packet length, CF set if no packet
 //     ne2k_send (ESI,ECX) → CF  send one Ethernet frame
 //     network_initialize → CF   probe + init wrapper; sets net_present
@@ -37,11 +37,23 @@
 uint8_t mac_address[6];
 uint8_t net_present;
 
+// net_receive_buffer / net_transmit_buffer hold the kernel-virt of two
+// 4 KB scratch frames (1.5 KB used inside each: a max-size Ethernet
+// frame).  Allocated by `network_initialize` from the bitmap allocator
+// only when the NIC is detected — systems booted without a NIC never
+// spend the two frames.  asm callers (arp.asm, ip.c's inline asm,
+// ne2k.c's own inline asm, the syscall path) load the pointer through
+// the equ shims below: ``mov edi, [net_receive_buffer]``.
+uint8_t *net_receive_buffer;
+uint8_t *net_transmit_buffer;
+
 // Bare-name aliases for asm callers (entry.asm sets net_present indirectly
 // via network_initialize's return, but arp.asm/ip.c/syscall/net.asm read
 // these directly under the bare names).
 asm("mac_address equ _g_mac_address");
 asm("net_present equ _g_net_present");
+asm("net_receive_buffer equ _g_net_receive_buffer");
+asm("net_transmit_buffer equ _g_net_transmit_buffer");
 
 // Bring the NIC up for normal operation.  Must be called after a
 // successful ne2k_probe.  No return value — the asm version was
@@ -147,7 +159,7 @@ int ne2k_probe() __attribute__((carry_return)) {
 // ne2k_receive: poll the RX ring for one frame.  The body stays as one
 // inline-asm block — byte-for-byte equivalent to the original
 // drivers/ne2k.asm version — but the C declaration captures the multi-
-// register return (EDI = NET_RECEIVE_BUFFER pointer, ECX = packet
+// register return (EDI = net_receive_buffer pointer, ECX = packet
 // length, CF = packet-available) via out_register parameters and
 // carry_return so C callers see it as a normal function.
 __attribute__((carry_return))
@@ -214,7 +226,7 @@ asm("ne2k_receive:\n"
     "        mov al, 0x40\n"
     "        out dx, al\n"
 
-    // Frame data: round count up to even, then word-mode DMA into NET_RECEIVE_BUFFER.
+    // Frame data: round count up to even, then word-mode DMA into net_receive_buffer.
     "        push ecx\n"                // Save real length for ECX return.
     "        mov eax, ecx\n"
     "        inc eax\n"
@@ -238,7 +250,7 @@ asm("ne2k_receive:\n"
     "        out dx, al\n"
 
     "        shr ecx, 1\n"              // word count
-    "        mov edi, NET_RECEIVE_BUFFER\n"
+    "        mov edi, [net_receive_buffer]\n"
     "        mov dx, 0x310\n"
     "        cld\n"
     "        rep insw\n"
@@ -262,7 +274,7 @@ asm("ne2k_receive:\n"
     "        out dx, al\n"
 
     "        pop ecx\n"                 // Restore frame length.
-    "        mov edi, NET_RECEIVE_BUFFER\n"
+    "        mov edi, [net_receive_buffer]\n"
     "        clc\n"
     "        pop esi\n"
     "        pop edx\n"
@@ -339,11 +351,35 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
 // network_initialize: probe + init wrapper.  CF clear if NIC came up,
 // CF set if no NIC was found (callers - currently only entry.asm -
 // soldier on; netinit / net programs surface "no NIC" via net_present).
-int network_initialize() __attribute__((carry_return)) {
-    if (ne2k_probe()) {
-        ne2k_init();
-        net_present = 1;
-        return 1;
-    }
-    return 0;
-}
+// Allocates the two scratch frames (net_receive_buffer and
+// net_transmit_buffer) via frame_alloc only when the NIC is actually
+// present so boot-without-NIC sessions don't spend two frames on
+// dead memory.  The allocation/store + direct-map adjust is tucked
+// into a single inline-asm block because cc.py doesn't have a
+// pointer cast syntax for the int-to-`uint8_t *` conversion.
+int network_initialize() __attribute__((carry_return));
+asm("network_initialize:\n"
+    "        push eax\n"
+    "        push ebx\n"
+    "        call ne2k_probe\n"
+    "        jc .ni_no_nic\n"
+    "        call frame_alloc\n"
+    "        jc .ni_oom\n"
+    "        add eax, 0xC0000000\n"
+    "        mov [_g_net_receive_buffer], eax\n"
+    "        call frame_alloc\n"
+    "        jc .ni_oom\n"
+    "        add eax, 0xC0000000\n"
+    "        mov [_g_net_transmit_buffer], eax\n"
+    "        call ne2k_init\n"
+    "        mov byte [_g_net_present], 1\n"
+    "        clc\n"
+    "        pop ebx\n"
+    "        pop eax\n"
+    "        ret\n"
+    ".ni_oom:\n"
+    ".ni_no_nic:\n"
+    "        stc\n"
+    "        pop ebx\n"
+    "        pop eax\n"
+    "        ret\n");
