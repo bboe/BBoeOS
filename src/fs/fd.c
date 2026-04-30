@@ -1,19 +1,17 @@
 // fs/fd.c — File descriptor table management.
 //
-// Most of the file is now real C: the five simple helpers (fd_alloc,
-// fd_close, fd_fstat, fd_init, fd_lookup) plus the read/write
-// dispatchers (fd_read, fd_write) and the fd_ops table they index.
-// The dispatchers tail-call through cc.py's __tail_call into the
-// per-fd-type handlers in fs/fd/{console,fs,net}.c.
+// Fully ported to C: the five simple helpers (fd_alloc, fd_close,
+// fd_fstat, fd_init, fd_lookup) plus the four dispatchers (fd_open,
+// fd_read, fd_write, fd_ioctl) and their dispatch tables.  The read /
+// write dispatchers tail-call through cc.py's __tail_call into the
+// per-fd-type handlers in fs/fd/{console,fs,net}.c; fd_ioctl pins the
+// function pointer to EBX so the cmd byte in AL survives the jump.
 //
-// Only fd_open still lives in inline asm.  It blocks on porting
-// fs/vfs.asm — fd_open reads a cluster of vfs_found_* globals
-// populated by vfs_find / vfs_create, which only become C-visible
-// once vfs.asm itself ports (via cc.py's file-scope function_pointer
-// support and an extern struct vfs_found global).
+// The trailing asm() block is just the ``%include`` directives that
+// pull the per-fd-type handler bodies into the same NASM scope.
 //
-// Calling conventions (input/output registers, CF semantics) are
-// preserved across the port so external callers (syscall.asm and the
+// Calling conventions (input/output registers, CF semantics) match
+// the original asm so external callers (syscall.asm and the
 // per-fd-type handlers) link unchanged.
 
 // Layout used by the helpers and the asm dispatchers; matches the
@@ -41,6 +39,28 @@ int fd_lookup(int fd_num __attribute__((in_register("bx"))),
 // entry as the file size.  Used by fd_close on writable file fds.
 __attribute__((carry_return))
 int vfs_update_size(struct fd *entry __attribute__((in_register("esi"))));
+
+// fs/vfs.asm: locates a file (vfs_find) or creates one (vfs_create);
+// both populate the vfs_found_* cluster and return CF clear on success.
+__attribute__((carry_return))
+int vfs_find(uint8_t *path __attribute__((in_register("esi"))));
+__attribute__((carry_return))
+int vfs_create(uint8_t *path __attribute__((in_register("esi"))));
+
+// vfs.asm globals populated by vfs_find / vfs_create.  Read by
+// fd_open after the call to populate the new fd entry.  ``size`` is
+// 32-bit; the asm side stores it as ``dd``.  ``inode`` doubles as
+// ``start sector`` for bbfs and ``inode number`` for ext2.  Use
+// ``asm_name`` rather than ``extern`` because the asm side owns the
+// labels and uses the bare names (``vfs_found_size``, not
+// ``_g_vfs_found_size``); ``extern`` would emit ``_g_<name>``
+// references that NASM can't resolve.
+uint8_t vfs_found_type __attribute__((asm_name("vfs_found_type")));
+uint8_t vfs_found_mode __attribute__((asm_name("vfs_found_mode")));
+uint16_t vfs_found_inode __attribute__((asm_name("vfs_found_inode")));
+uint32_t vfs_found_size __attribute__((asm_name("vfs_found_size")));
+uint16_t vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
+uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 
 // fd_ops dispatch table — one entry per FD_TYPE_*.  Each entry is a
 // (read_fn, write_fn) pair; a 0 slot means "unsupported".  Indexed
@@ -245,6 +265,58 @@ int fd_lookup(int fd_num __attribute__((in_register("bx"))),
     return 1;
 }
 
+// fd_open: open the file at `name` with the given `flags`, returning
+// AX = fd or -1 (CF set on error).  /dev/vga is a synthetic device
+// that bypasses the filesystem and just allocates an FD_TYPE_VGA
+// slot.  Otherwise vfs_find populates vfs_found_*; if not found and
+// O_CREAT is set, vfs_create makes a fresh entry.  The new fd's
+// fields come from the vfs_found_* cluster, except O_TRUNC zeros
+// the size so a subsequent write rebuilds the file from scratch.
+__attribute__((carry_return))
+int fd_open(int *result __attribute__((out_register("ax"))),
+            uint8_t *name __attribute__((in_register("esi"))),
+            int flags __attribute__((in_register("ax")))) {
+    int fd_num;
+    struct fd *entry;
+    if (memcmp(name, "/dev/vga", 9) == 0) {
+        if (!fd_alloc(&fd_num, &entry)) {
+            *result = -1;
+            return 0;
+        }
+        entry->type = FD_TYPE_VGA;
+        entry->flags = flags;
+        *result = fd_num;
+        return 1;
+    }
+    if (!vfs_find(name)) {
+        if ((flags & O_CREAT) == 0) {
+            *result = -1;
+            return 0;
+        }
+        if (!vfs_create(name)) {
+            *result = -1;
+            return 0;
+        }
+    }
+    if (!fd_alloc(&fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    entry->type = vfs_found_type;
+    entry->flags = flags;
+    entry->mode = vfs_found_mode;
+    entry->start = vfs_found_inode;
+    entry->size = vfs_found_size;
+    entry->position = 0;
+    entry->directory_sector = vfs_found_dir_sec;
+    entry->directory_offset = vfs_found_dir_off;
+    if ((flags & O_TRUNC) != 0) {
+        entry->size = 0;
+    }
+    *result = fd_num;
+    return 1;
+}
+
 // fd_read: dispatch on entry->type into fd_ops[type].read.  Inputs
 // are BX = fd, EDI = user buffer, ECX = byte count.  fd_lookup
 // preserves ECX and EDI; the C frame spills them to slots and reloads
@@ -302,100 +374,10 @@ int fd_write(int *result __attribute__((out_register("ax"))),
     __tail_call(handler, entry, count);
 }
 
-// fd_open / fd_ioctl + their data and per-fd-type %include directives
-// stay in inline asm.  fd_open blocks on multi-output vfs_find /
-// vfs_create (it reads a cluster of vfs_found_* globals after each
-// call).  fd_ioctl blocks on the AL/EAX register conflict: the
-// syscall dispatcher delivers cmd in AL, but cc.py's __tail_call
-// hardcodes the function pointer in EAX — the asm version
-// specifically uses ``mov ebx, [...]; jmp ebx`` to keep AL intact for
-// the handler.
-asm("fd_open:\n"
-"        push ecx\n"
-"        push edx\n"
-"        push edi\n"
-"        mov [fd_open_flags], al\n"
-"        mov [fd_open_name], esi\n"
-"        ;; Check synthetic device paths first (no filesystem lookup).\n"
-"        mov edi, DEV_VGA_PATH\n"
-"        mov ecx, 9                      ; \"/dev/vga\" + null\n"
-"        cld\n"
-"        repe cmpsb\n"
-"        jne .open_not_device\n"
-"        call fd_alloc\n"
-"        jc .open_err\n"
-"        mov byte [esi+FD_OFFSET_TYPE], FD_TYPE_VGA\n"
-"        mov cl, [fd_open_flags]\n"
-"        mov [esi+FD_OFFSET_FLAGS], cl\n"
-"        mov [fd_open_fd], ax\n"
-"        jmp .open_done\n"
-"        .open_not_device:\n"
-"        mov esi, [fd_open_name]\n"
-"        ;; Look up the file (vfs_find handles \".\" -> root directory)\n"
-"        call vfs_find           ; populates vfs_found_*\n"
-"        jc .open_not_found\n"
-"        jmp .open_populate\n"
-"\n"
-"        .open_not_found:\n"
-"        ;; If O_CREAT is set, create the file\n"
-"        test byte [fd_open_flags], O_CREAT\n"
-"        jz .open_err\n"
-"        mov esi, [fd_open_name]\n"
-"        call vfs_create         ; SI=path -> vfs_found_*, CF on error\n"
-"        jc .open_err\n"
-"        jmp .open_populate\n"
-"\n"
-"        .open_populate:\n"
-"        ;; vfs_found_* is now fully populated\n"
-"        call fd_alloc\n"
-"        jc .open_err\n"
-"        mov [fd_open_fd], ax\n"
-"        ;; Type, flags, mode, inode, size, position from vfs_found_*\n"
-"        mov cl, [vfs_found_type]\n"
-"        mov [esi+FD_OFFSET_TYPE], cl\n"
-"        mov cl, [fd_open_flags]\n"
-"        mov [esi+FD_OFFSET_FLAGS], cl\n"
-"        mov cl, [vfs_found_mode]\n"
-"        mov [esi+FD_OFFSET_MODE], cl\n"
-"        mov cx, [vfs_found_inode]\n"
-"        mov [esi+FD_OFFSET_START], cx\n"
-"        mov cx, [vfs_found_size]\n"
-"        mov [esi+FD_OFFSET_SIZE], cx\n"
-"        mov cx, [vfs_found_size+2]\n"
-"        mov [esi+FD_OFFSET_SIZE+2], cx\n"
-"        mov dword [esi+FD_OFFSET_POSITION], 0\n"
-"        mov cx, [vfs_found_dir_sec]\n"
-"        mov [esi+FD_OFFSET_DIRECTORY_SECTOR], cx\n"
-"        mov cx, [vfs_found_dir_off]\n"
-"        mov [esi+FD_OFFSET_DIRECTORY_OFFSET], cx\n"
-"        ;; O_TRUNC: reset size to 0\n"
-"        test byte [fd_open_flags], O_TRUNC\n"
-"        jz .open_done\n"
-"        mov word [esi+FD_OFFSET_SIZE], 0\n"
-"        mov word [esi+FD_OFFSET_SIZE+2], 0\n"
-"        .open_done:\n"
-"        mov ax, [fd_open_fd]\n"
-"        pop edi\n"
-"        pop edx\n"
-"        pop ecx\n"
-"        clc\n"
-"        ret\n"
-"\n"
-"        .open_err:\n"
-"        pop edi\n"
-"        pop edx\n"
-"        pop ecx\n"
-"        mov ax, -1\n"
-"        stc\n"
-"        ret\n"
-"\n"
-"%include \"fs/fd/console.kasm\"\n"
-"%include \"fs/fd/fs.kasm\"\n"
-"%include \"fs/fd/net.kasm\"\n"
-"\n"
-"        DEV_VGA_PATH    db \"/dev/vga\", 0\n"
-"        fd_open_fd      dw 0\n"
-"        fd_open_flags   db 0\n"
-"        fd_open_mode    db 0\n"
-"        fd_open_name    dd 0\n"
-);
+// All dispatchers are now C.  The remaining asm() block just brings
+// in the per-fd-type handler %includes (fs/fd/console.kasm /
+// fs.kasm / net.kasm) so their labels are visible at NASM-link
+// time.
+asm("%include \"fs/fd/console.kasm\"\n"
+    "%include \"fs/fd/fs.kasm\"\n"
+    "%include \"fs/fd/net.kasm\"\n");
