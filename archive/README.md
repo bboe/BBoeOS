@@ -35,7 +35,7 @@ table is now 32-bit on both sides.
 | netrecv | 334            | 424         | 452       | +28   |
 | netsend | 187            | 215         | 255       | +40   |
 | ping    | 1034           | 1238        | 1558      | +320  |
-| shell   | 950            | 1189        | 1644      | +455  |
+| shell   | 950            | 1189        | 1650      | +461  |
 | uptime  | 50             | 67          | 100       | +33   |
 
 **arp (+44):** The three scratch arrays (`mac_buffer[6]`,
@@ -167,12 +167,14 @@ ICMP echo template) use ``memcpy`` from short string-literal
 constants instead of per-byte assignments, which collapses each
 ~8 × ``mov byte [...], imm`` burst into a single ``rep movsb``.
 
-**shell (+455):** The archived ``shell.asm`` has been edited so
-that both versions share the same scratch layout — ``SECTOR_BUFFER
-+ 4`` for the kill buffer and ``ARGV`` for the ``bin/<name>``
-exec path — instead of carrying ~290 bytes of zero-initialized
-trailing data inside the binary.  With storage out of the way,
-the entire delta is pure code overhead.  Helper call overhead
+**shell (+461):** The archived ``shell.asm`` reuses ``SECTOR_BUFFER
++ 4`` (private ``%assign``) for the kill buffer and ``ARGV`` for the
+``bin/<name>`` exec path so it can avoid carrying ~290 bytes of
+zero-initialized trailing data inside the binary.  The C version
+keeps ``kill_buf[MAX_INPUT]`` in BSS (the live live SECTOR_BUFFER
+fixed-address slot is no longer mapped in per-program PDs).  With
+the storage difference accounted for, the rest of the delta is pure
+code overhead.  Helper call overhead
 (push bp / mov bp,sp / pop bp / ret, plus stack argument
 passing on the cdecl-convention helpers ``cursor_back``,
 ``visual_bell``, ``insert_char``) is the bulk of it; the asm

@@ -7,11 +7,15 @@
         ;; src/include/constants.asm; once edit.c moved to BSS arrays the
         ;; live header dropped them.  This archive snapshot keeps private
         ;; %assigns so the historical real-mode layout still assembles
-        ;; under the current kernel ABI.
+        ;; under the current kernel ABI.  ``SECTOR_BUFFER`` is in the same
+        ;; situation: shell.c moved its kill buffer to BSS, the live
+        ;; header dropped the constant, but the disk-read scratch slot
+        ;; at phys 0xF000 is what this archive uses for sector reads.
         %assign EDIT_BUFFER_BASE 100000h
         %assign EDIT_BUFFER_SIZE 100000h
         %assign EDIT_KILL_BUFFER (EDIT_BUFFER_BASE + EDIT_BUFFER_SIZE)
         %assign EDIT_KILL_BUFFER_SIZE 0A00h
+        %assign SECTOR_BUFFER 0F000h
 
         ;; Gap buffer in extended memory [EDIT_BUFFER_BASE ..
         ;; EDIT_BUFFER_BASE+EDIT_BUFFER_SIZE):

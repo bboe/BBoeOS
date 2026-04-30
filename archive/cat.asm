@@ -2,6 +2,7 @@
         org 0600h
 
 %include "constants.asm"
+        %assign SECTOR_BUFFER 0F000h    ; legacy scratch slot at phys 0xF000
 
 main:
         cld

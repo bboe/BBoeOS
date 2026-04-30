@@ -80,7 +80,6 @@
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
-        %assign SECTOR_BUFFER 0F000h    ; Legacy scratch RAM at physical 0xF000.  The kernel's actual disk buffer is the BSS-allocated `sector_buffer` label in fs/block.asm; this constant survives only as a user-side scratch slot used by the shell's kill-buffer (still reachable through the Phase 3 shim's identity user mapping, and slated to become real BSS once cc.py-driven user BSS lands).
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
         %assign STDERR 2
