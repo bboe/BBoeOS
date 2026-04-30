@@ -54,7 +54,12 @@ _BBFS_DIRECTORY_MAX_ENTRIES = _BBFS_DIRECTORY_SECTORS * ENTRIES_PER_SECTOR  # 48
 
 @dataclass
 class ProgramTest:
-    """One runtime test: shell commands to run and a regex the output must match."""
+    """One runtime test: shell commands to run and a regex the output must match.
+
+    `memory` overrides `run_commands`'s 1 MB default for tests whose
+    program needs more (e.g. `edit` allocates a 1 MB BSS gap buffer
+    that won't fit in 1 MB QEMU's user pool).
+    """
 
     name: str
     commands: list[str]
@@ -63,6 +68,7 @@ class ProgramTest:
     with_net: bool = False
     timeout: float = _DEFAULT_PROGRAM_TIMEOUT
     skip: str | None = None
+    memory: str | None = None
 
 
 def _add_empty_filler(*, image: Path, name: str) -> None:
@@ -213,7 +219,7 @@ TESTS: list[ProgramTest] = [
     # _wait_for_prompt's settle window to drain the spurious empty-line
     # prompt (from the trailing '\r' shell consumes after edit exits)
     # before this command's wait begins.
-    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!"),
+    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!", memory="2"),
     ProgramTest(
         # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
         # ending with a single executable probe so the final directory
@@ -283,6 +289,7 @@ def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> 
             command_timeout=test.timeout,
             drive=drive,
             floppy=floppy,
+            memory=test.memory,
             snapshot=snapshot,
             with_net=test.with_net,
         )
