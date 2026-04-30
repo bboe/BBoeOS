@@ -6,6 +6,22 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Port-arc cleanup (2026-04-29)
+- `src/drivers/console.c`: removed dead `put_string` function (no callers;
+  inherited from the asm version but never referenced in the C tree).
+- `src/drivers/vga.c`: removed four `// Pure C: ...` comment lines (L209,
+  L297, L310, L501) that described the porting process rather than code
+  purpose; the surrounding hardware-quirk and register-ABI context was kept.
+- `cc/codegen/x86/emission.py` + `generator.py`: `in_register` prologue spill
+  is now elided when liveness analysis shows the local slot is never read in
+  the function body.  `TailCall` args that are `Var` refs to `in_register`
+  params now source from the named register directly rather than reloading
+  from the stack slot.  Together these remove the dead `mov [ebp-N], esi/edi`
+  spill from all 12 `__tail_call` thunks in `src/fs/vfs.c`.  Three new tests
+  in `tests/test_kernel_cc.py` lock in the optimization.
+- `archive/kernel/NOTES.md`: recorded that all four follow-up items from PR
+  #239 review have been resolved in this cleanup pass.
+
 ### Phase 6 paging — NULL guard (2026-04-29)
 - The shell↔program handoff frame moves from user-virt 0..0xFFF
   (PTE[0]) to `USER_DATA_BASE = 0x1000` (PTE[1]).  ARGV becomes
