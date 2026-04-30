@@ -35,13 +35,21 @@
         bits 32
         %include "constants.asm"
 
-        ;; The kernel reads boot-time state (boot_disk, directory_sector)
-        ;; via the direct map at fixed low-physical addresses set by
-        ;; boot.asm before paging.  EQU aliases let kernel includes
-        ;; (drivers/fs.asm, fs/bbfs.asm, …) keep using the natural
-        ;; `[boot_disk]` / `[directory_sector]` syntax.
-boot_disk        equ BOOT_DISK_VIRT
-directory_sector equ DIRECTORY_SECTOR_VIRT
+        ;; Trampoline + boot stash at the very top of kernel.bin.
+        ;; boot.asm's far-jump targets virt 0xC0020000 = the first byte
+        ;; of kernel.bin; the trampoline skips past the stash to
+        ;; high_entry.  boot.asm writes boot_disk and directory_sector
+        ;; here AFTER loading kernel.bin (so the writes don't get
+        ;; overwritten by the load), then the kernel reads them via
+        ;; PDE[768]'s direct map.  Embedding them inside kernel.bin lets
+        ;; us drop the legacy phys 0x4D0 / 0x4D2 reservation: the IVT /
+        ;; BDA / 0x600-0x7BFF gap / MBR landing zone all stay in the
+        ;; bitmap allocator's free pool.
+        jmp short high_entry            ; 2 bytes (offset 0)
+boot_disk        db 0                   ; offset 2  (BOOT_STASH_OFFSET)
+directory_sector dw 0                   ; offset 3
+        ;; Pad to align high_entry on a 4-byte boundary.
+        times 8 - ($ - $$) db 0
 
         ;; Sliding 2-sector window for ext2_search_blk's directory walk.
         ;; Sits at low-phys 0xF200 (sector_buffer + 0x200, the next 1 KB
@@ -187,19 +195,24 @@ high_entry:
         mov esi, E820_TABLE_VIRT
         call frame_init
 
-        ;; Reserve everything from phys 0 up to and including the
-        ;; boot PD and first kernel PT in one sweep.  Covers
-        ;; boot stash / ARGV / BUFFER / FD table / sector_buffer /
-        ;; vDSO target frame / kernel image (at KERNEL_LOAD_PHYS) /
-        ;; kernel stack / NE2000 RX/TX scratch / program_scratch /
-        ;; boot PD / first kernel PT.  The bitmap allocator only ever
-        ;; returns frames at phys LOW_RESERVE_BYTES and above, so the
-        ;; kernel PTs allocated next, every PD/PT/page built by
-        ;; `address_space_create` / `address_space_map_page`, and the
-        ;; shared vDSO frame all land in the high-physical region
-        ;; above LOW_RESERVE_BYTES.
-        xor eax, eax
-        mov ecx, LOW_RESERVE_BYTES
+        ;; Reserve only the regions the kernel still owns post-boot.
+        ;; The IVT / BDA / E820-staging page / 0x600..0x7BFF gap /
+        ;; MBR + post-MBR boot code / boot stack are all dead by now
+        ;; and stay free in the bitmap so the user pool can grow into
+        ;; them.  Three narrow reserves:
+        ;;
+        ;;   1. FD table (0xE000) + sector_buffer (0xF000) +
+        ;;      ext2_sd_buffer (0xF200) + vDSO target (0x10000).
+        ;;      Three contiguous pages: 0xE000..0x10FFF (12 KB).
+        ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
+        ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
+        ;;      kernel image, kernel stack, NIC RX/TX, program_scratch,
+        ;;      boot PD, first kernel PT.
+        mov eax, 0xE000
+        mov ecx, 0x10FFF + 1 - 0xE000   ; 0xE000..0x10FFF inclusive (3 pages)
+        call frame_reserve_range
+        mov eax, KERNEL_LOAD_PHYS
+        mov ecx, LOW_RESERVE_BYTES - KERNEL_LOAD_PHYS
         call frame_reserve_range
 
         ;; --- Allocate kernel PTs for installed RAM only ---

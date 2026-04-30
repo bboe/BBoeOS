@@ -88,12 +88,19 @@
         ;; boot under QEMU `-m 1` (1 MB total).
         KERNEL_LOAD_PHYS        equ 0x20000     ; INT 13h read destination = final home
         HIGH_ENTRY_VIRT         equ 0xC0020000  ; kernel.bin org / first byte
+        ;; Boot stash addresses inside the freshly-loaded kernel.bin.
+        ;; The kernel's `org` block reserves a tiny header — `jmp short
+        ;; high_entry` followed by `boot_disk db 0` (at offset
+        ;; BOOT_STASH_OFFSET) and `directory_sector dw 0` (at offset +1).
+        ;; boot.asm writes both AFTER the kernel.bin INT 13h, so the
+        ;; load doesn't clobber them.
+        BOOT_DISK_PHYS          equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
+        DIRECTORY_SECTOR_PHYS   equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
 
 start:
         xor ax, ax
         mov ds, ax
         mov es, ax
-        mov [BOOT_DISK_PHYS], dl
 
         ;; Dedicated stack at SS=0x9000, SP=0xFFF0 (linear 0x90000-0x9FFF0)
         ;; owns its entire segment so it can never collide with the
@@ -103,6 +110,14 @@ start:
         mov ss, ax
         mov sp, 0FFF0h
         sti
+
+        ;; Save the BIOS drive number in BP for the rest of the
+        ;; real-mode bootstrap.  Avoids burning a permanent low-memory
+        ;; reservation for a single byte; the saved value is written
+        ;; into kernel.bin's embedded boot_disk slot once the kernel
+        ;; image is loaded.  BP is otherwise unused by the BIOS calls
+        ;; below.
+        mov bp, dx                      ; BPL = drive number
 
         ;; Reset disk controllers before the first read; defensive on
         ;; real hardware, no-op on QEMU.
@@ -117,8 +132,8 @@ start:
         mov al, BOOT_SECTORS
         mov bx, 7E00h
         mov cx, 2                       ; CH=cyl0, CL=sector2
-        mov dh, 0
-        mov dl, [BOOT_DISK_PHYS]
+        mov dx, bp                      ; DL=drive (DH cleared next)
+        xor dh, dh                      ; head 0
         int 13h
         jc .error
 
@@ -132,10 +147,10 @@ start:
         hlt
         jmp .halt
 
-        ;; boot_disk and directory_sector live at fixed low-physical
-        ;; addresses (BOOT_DISK_PHYS / DIRECTORY_SECTOR_PHYS) so the
-        ;; high-half kernel can read them through the direct map after
-        ;; paging is on.  No storage in the boot binary itself.
+        ;; boot_disk and directory_sector are written into kernel.bin's
+        ;; embedded boot stash (BOOT_STASH_OFFSET) after the kernel.bin
+        ;; load completes.  The kernel reads them through PDE[768]'s
+        ;; direct map; no permanent low-physical reservation needed.
 
         times 508-($-$$) db 0
         ;; kernel_bytes (offset 508): total post-MBR bytes (boot's
@@ -148,16 +163,16 @@ kernel_bytes dw (BOOT_SECTORS + KERNEL_SECTORS) * 512
 ;;; ----- Post-MBR boot region (0x7E00 onwards) -----
 
 post_mbr_continue:
-        ;; Compute and stash directory_sector for the filesystem layer.
-        ;; directory_sector = ceil(kernel_bytes / 512) + 1 = the LBA
-        ;; of the first directory sector right after the kernel image.
-        ;; Stored at fixed low-phys DIRECTORY_SECTOR_PHYS so the high-
-        ;; half kernel can read it through the direct map.
+        ;; Compute directory_sector = ceil(kernel_bytes / 512) + 1, the
+        ;; LBA of the first directory sector right after the kernel
+        ;; image.  Cached in SI for the post-load stash write below;
+        ;; can't be written into kernel.bin's embedded slot yet because
+        ;; the INT 13h that loads kernel.bin would clobber it.
         mov ax, [kernel_bytes]
         add ax, 511
         shr ax, 9
         inc ax
-        mov [DIRECTORY_SECTOR_PHYS], ax
+        mov si, ax                      ; SI = directory_sector
 
         ;; Load kernel.bin from disk into physical KERNEL_LOAD_PHYS
         ;; (= 0x2000:0x0000 in real mode = 0x20000 linear).  The
@@ -170,11 +185,19 @@ post_mbr_continue:
         mov ah, 02h
         mov al, KERNEL_SECTORS
         mov ch, 0
-        mov dh, 0
         mov cl, BOOT_SECTORS + 2
-        mov dl, [BOOT_DISK_PHYS]
+        mov dx, bp                      ; DL=drive (DH cleared next)
+        xor dh, dh                      ; head 0
         int 13h
         jc .error_post
+
+        ;; Stash boot_disk and directory_sector into kernel.bin's
+        ;; embedded slot (BOOT_STASH_OFFSET).  ES = 0x2000 so
+        ;; ES:BOOT_STASH_OFFSET = phys 0x20000 + offset = the
+        ;; boot_disk byte (followed by directory_sector dw).
+        mov ax, bp                               ; AL = drive number
+        mov [es:BOOT_STASH_OFFSET], al           ; boot_disk (1 byte)
+        mov [es:BOOT_STASH_OFFSET + 1], si       ; directory_sector (2 bytes)
 
         ;; Reset ES so the rest of the real-mode code addresses
         ;; segment 0 normally.

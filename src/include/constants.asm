@@ -1,6 +1,5 @@
         %assign ARGV 14DEh              ; 32 bytes (16 word-sized pointers); = USER_DATA_BASE + 0x4DE
-        %assign BOOT_DISK_PHYS    0x4D0   ; byte: BIOS boot drive number, set by boot.asm.  Kernel-only via the direct map; user PDs no longer alias phys 0..0xFFF after the NULL-guard relocation.
-        %assign BOOT_DISK_VIRT    0xC00004D0   ; kernel-virt alias of BOOT_DISK_PHYS via direct map
+        %assign BOOT_STASH_OFFSET 2     ; offset within kernel.bin of boot_disk (db) followed by directory_sector (dw); written by boot.asm post-load and read by the kernel through the direct map.  Layout contract: kernel.asm's first instruction is `jmp short high_entry` which skips past these bytes.
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 1500h            ; 256 bytes; = USER_DATA_BASE + 0x500
@@ -10,8 +9,6 @@
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTOR_PHYS 0x4D2   ; word: LBA of first directory sector, set by boot.asm.  Kernel-only via the direct map — see BOOT_DISK_PHYS.
-        %assign DIRECTORY_SECTOR_VIRT 0xC00004D2   ; kernel-virt alias of DIRECTORY_SECTOR_PHYS
         %assign DIRECTORY_SECTORS 3
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists

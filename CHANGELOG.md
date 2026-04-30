@@ -6,6 +6,28 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Reclaim conventional low memory + relocate boot stash into kernel.bin (2026-04-30)
+- `boot_disk` and `directory_sector` move out of fixed phys `0x4D0` /
+  `0x4D2` and into a 3-byte stash at the top of `kernel.bin`.  The
+  kernel image's first instruction is `jmp short high_entry` (a 2-byte
+  trampoline at offset 0); `boot.asm` writes the stash through
+  `ES:BOOT_STASH_OFFSET` *after* the kernel.bin INT 13h read so the
+  load can't clobber it.  Eliminates the legacy IVT/BDA reservation —
+  page 0 is now in the bitmap allocator's free pool.
+- The MBR's pre-stack `mov [BOOT_DISK_PHYS], dl` becomes `mov bp, dx`;
+  BP carries the BIOS drive number through to `post_mbr_continue`,
+  which uses it for the second INT 13h and then writes it into the
+  kernel's stash slot.
+- `high_entry` replaces the single `frame_reserve_range(0,
+  LOW_RESERVE_BYTES)` sweep with two narrow calls: one for the
+  0xE000..0x10FFF cluster (FD table / sector_buffer / ext2_sd_buffer /
+  vDSO) and one for `KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES` (kernel
+  image + KERNEL_RESERVED_BASE region).  Everything else in
+  conventional low memory — IVT/BDA at 0..0x4FF, `0x600-0x7BFF` gap,
+  MBR landing zone, dead post-MBR boot code, and the boot stack —
+  stays free.  Net win is ~115 KB more frames available to user
+  programs under `-m 1`.
+
 ### Drop the kernel to phys 0x20000 / 1 MB minimum RAM (2026-04-30)
 - The kernel now loads at phys `0x20000` (in conventional RAM) instead
   of `0x100000`.  `boot.asm`'s INT 13h reads `kernel.bin` directly to
