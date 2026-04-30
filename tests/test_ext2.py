@@ -339,6 +339,69 @@ def _add_multi_sector_dir_filler(*, image: Path, test: ProgramTest) -> None:
     test.expect = r"^MULTISEC$"
 
 
+def _add_straddle_dir_filler(*, image: Path, test: ProgramTest) -> None:
+    """Place an entry whose 8-byte name spans a 512-byte sector boundary.
+
+    Pads bin/ with a chain of filler entries (rec_lens 12 / 16 / 20 via
+    name_lens 4 / 8 / 12) so the next entry — STRADDLE, name_len 8 —
+    has its header at offset boundary - 8 of bin/'s first block: header
+    in the lo 512-byte sector, name in the hi sector.  Looking it up
+    forces ext2_search_blk's name compare to read across the 512-byte
+    boundary; a regression that uses only the lo half of its sliding
+    window compares against stale bytes and reports the entry missing.
+
+    Stronger guarantee than `_add_multi_sector_dir_filler`, which adds
+    fixed-size stubs and only happens to straddle for specific
+    block_size + bin/ layouts.
+    """
+    block_size = _ext2_block_size(image=image)
+    initial_offset = _bin_block0_used_bytes(image=image)
+    target_header_offset = _pick_straddle_target_offset(block_size=block_size, initial_offset=initial_offset)
+    pad_name_lens = _decompose_straddle_pads(delta=target_header_offset - initial_offset)
+    target_name = "STRADDLE"
+    target_content = "STRADDLED\n"
+    ext2_start = compute_directory_sector(image_path=str(image))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        partition = Path(tmpdir) / "partition.ext2"
+        subprocess.run(
+            ["dd", f"if={image}", f"of={partition}", "bs=512", f"skip={ext2_start}", "status=none"],
+            check=True,
+        )
+        script_lines: list[str] = []
+        for index, name_len in enumerate(pad_name_lens):
+            # Unique name of exact length `name_len`: 'p' * (name_len - 3)
+            # then a 3-digit index — e.g. 'p000' (name_len=4), 'ppppp000'
+            # (name_len=8), 'ppppppppp000' (name_len=12).
+            pad_name = ("p" * (name_len - 3)) + f"{index:03d}"
+            assert len(pad_name) == name_len, (pad_name, name_len)
+            pad_path = Path(tmpdir) / pad_name
+            pad_path.write_text("PAD\n")
+            script_lines.append(f"write {pad_path} /bin/{pad_name}")
+        target_path = Path(tmpdir) / target_name
+        target_path.write_text(target_content)
+        script_lines.append(f"write {target_path} /bin/{target_name}")
+        script = "\n".join(script_lines) + "\n"
+        result = subprocess.run(
+            ["debugfs", "-w", str(partition)],
+            input=script.encode(),
+            capture_output=True,
+            check=False,
+        )
+        stderr_text = result.stderr.decode()
+        stderr_failed = any(
+            line.strip() for line in stderr_text.splitlines() if not line.startswith("debugfs ") and "Allocated inode:" not in line
+        )
+        if result.returncode != 0 or stderr_failed:
+            msg = f"debugfs straddle setup failed:\n{stderr_text}"
+            raise RuntimeError(msg)
+        subprocess.run(
+            ["dd", f"if={partition}", f"of={image}", "bs=512", f"seek={ext2_start}", "conv=notrunc", "status=none"],
+            check=True,
+        )
+    test.commands = [f"cat bin/{target_name}"]
+    test.expect = r"^STRADDLED$"
+
+
 def _bin_block0_first_block_num(*, debugfs_output: str) -> int:
     """Parse the first direct-block number from `debugfs stat <12>` output."""
     for line in debugfs_output.splitlines():
@@ -439,6 +502,29 @@ def _build_os(*, large_file: bool, temporary_directory: Path, block_size: int = 
         sys.exit(1)
     if large_file and block_size == 1024:
         _add_large_test_file(image=image)
+
+
+def _decompose_straddle_pads(*, delta: int) -> list[int]:
+    """Return name_lens for a chain of pads whose rec_lens sum to delta.
+
+    ext2 rec_len comes in steps of 4 starting at 12 (= 8-byte header
+    + name padded to a 4-byte boundary), so {12, 16, 20} via name_len
+    {4, 8, 12} composes any multiple of 4 ≥ 12 — and delta is one by
+    construction (see :func:`_pick_straddle_target_offset`).
+    """
+    name_lens: list[int] = []
+    remaining = delta
+    while remaining > 0:
+        if remaining == 12 or remaining > 20:
+            name_lens.append(4)
+            remaining -= 12
+        elif remaining == 16:
+            name_lens.append(8)
+            remaining -= 16
+        else:  # remaining == 20
+            name_lens.append(12)
+            remaining -= 20
+    return name_lens
 
 
 def _ext2_block_size(*, image: Path) -> int:
@@ -561,6 +647,22 @@ def _pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     )
 
 
+def _pick_straddle_target_offset(*, block_size: int, initial_offset: int) -> int:
+    """Return the smallest reachable header offset whose entry name straddles.
+
+    Header lands at boundary - 8: header bytes occupy the lo 512-byte
+    sector, the 8-byte name lives in the hi sector.  We need a boundary
+    whose distance from initial_offset is at least 12 (room for one
+    pad of minimum rec_len) and a multiple of 4 (rec_len granularity).
+    """
+    for boundary in range(512, block_size, 512):
+        delta = boundary - 8 - initial_offset
+        if delta >= 12 and delta % 4 == 0:
+            return boundary - 8
+    msg = f"no usable straddle boundary: block_size={block_size}, initial_offset={initial_offset}"
+    raise RuntimeError(msg)
+
+
 def _run_suite(
     *,
     fail_fast: bool,
@@ -646,6 +748,24 @@ BLOCK_SIZE_TESTS: list[ProgramTest] = [
         "rmdir",
         "rmdir_nonempty",
     }
+] + [
+    # 2 KB-only tests — exercises in-block boundaries (1024, 1536) that
+    # 1 KB blocks can't reach because bin/'s baseline entries already
+    # extend past 504, leaving no room to stage a straddle there.
+    ProgramTest(
+        # `_add_straddle_dir_filler` chains filler entries so STRADDLE's
+        # 8-byte header ends exactly at a 512-byte sector boundary,
+        # putting its name in the next sector.  ext2_search_blk's name
+        # compare has to read across the boundary; a regression that
+        # uses only the lo half of its sliding window matches against
+        # stale buffer bytes and reports the entry missing.  Stronger
+        # guarantee than multi_sector_dir, which only happens to
+        # straddle for particular block_size + bin/ layouts.
+        "straddle_dir",
+        commands=[],
+        expect="",
+        setup=lambda image, test: _add_straddle_dir_filler(image=image, test=test),
+    ),
 ]
 
 

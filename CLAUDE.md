@@ -35,6 +35,44 @@ The kernel is split across two flat binaries (`nasm -f bin`) concatenated on dis
 - **Phase 3 user shim:** programs still load at `PROGRAM_BASE = 0x600` and run with the legacy `USER_STACK_TOP = 0x8FFF0` layout via a one-PT shim at PDE[0] of `kernel_pd_template`.  PTEs `0..0xFF` map virt `0..0xFFFFF` (low 1 MB; covers PROGRAM_BASE / stack / vDSO / BUFFER) and PTEs `0x300..0x3FF` map virt `0x300000..0x3FFFFF` (1 MB at the 3 MB mark; covers `asm.c`'s SYMBOL_BASE / JUMP_TABLE).  PTEs `0x100..0x2FF` stay not-present so user code can't see the kernel image, the boot PD (phys `0x200000`), the first kernel PT (phys `0x201000`), the bitmap-allocated kernel PTs, or the shim PT itself through the alias.  Phase 4 replaces this with per-program PDs and proper memory protection.
 - Kernel sector count is derived at build time: `make_os.sh` measures `kernel.bin` and passes the count to `boot.asm` as `-DKERNEL_SECTORS=N`.  The boot-time `kernel_bytes` word at MBR offset 508 holds `(BOOT_SECTORS + KERNEL_SECTORS) * 512` so `add_file.py`'s host-side `compute_directory_sector` arithmetic still works.
 
+### Static memory map
+
+Kernel-side fixed-physical regions, all reached through the kernel direct map at virt `0xC0000000 + phys`.  The "in kernel.bin?" column flags whether the bytes occupy the on-disk image (`yes`) or live as bare frames pre-reserved by `LOW_RESERVE_BYTES = 0x202000` (`no`).  Update this table when adding a new fixed-phys region so newcomers can find every slot in one place.
+
+| Phys range | Kernel-virt | Size | Symbol / purpose | In kernel.bin? |
+|---|---|---|---|---|
+| `0x000004D0` | `0xC00004D0` | 1 B | `boot_disk` (BIOS drive number, set in real mode) | no |
+| `0x000004D2` | `0xC00004D2` | 2 B | `directory_sector` (LBA of first directory sector) | no |
+| `0x000004DE..0x000004FB` | `0xC00004DE..0xC00004FB` | 32 B | `ARGV` (shell-to-program argv staging) | no |
+| `0x000004FC` | `0xC00004FC` | 4 B | `EXEC_ARG` (per-program arg pointer) | no |
+| `0x00000500..0x000005FF` | `0xC0000500..0xC00005FF` | 256 B | `BUFFER` / E820 table (set by stage-2, read by bitmap allocator) | no |
+| `0x0000E000..0x0000E1FF` | `0xC000E000..0xC000E1FF` | 512 B | FD table (kept low so 16-bit `[bx+offset]` accesses still work) | no |
+| `0x0000F000..0x0000F1FF` | `0xC000F000..0xC000F1FF` | 512 B | `sector_buffer` (disk read buffer, used by `bbfs.asm` / `ext2.asm`) | no |
+| `0x0000F200..0x0000F5FF` | `0xC000F200..0xC000F5FF` | 1024 B | `ext2_sd_buffer` (sliding 2-sector window for `ext2_search_blk`) | no |
+| `0x00010000..0x00010FFF` | n/a | 4 KB | vDSO + JUMP_TABLE (shared user-virt frame; per-program PDs alias it user-side) | no |
+| `0x00100000..` | `0xC0100000..` | ~35 KB | `kernel.bin` (resident kernel image) | yes |
+| `0x00180000..0x00183FFF` | `0xC0180000..0xC0183FFF` | 16 KB | `kernel_stack` | no |
+| `0x00184000..0x001845FF` | `0xC0184000..0xC01845FF` | 1.5 KB | `net_receive_buffer` (NE2000 RX scratch) | no |
+| `0x001845C0..0x00184BBF` | `0xC01845C0..0xC0184BBF` | 1.5 KB | `net_transmit_buffer` (NE2000 TX scratch) | no |
+| `0x00185000..0x001A4FFF` | `0xC0185000..0xC01A4FFF` | 128 KB | `program_scratch` (vfs_load staging buffer) | no |
+| `0x00200000..0x00200FFF` | `0xC0200000..0xC0200FFF` | 4 KB | boot PD (`BOOT_PD_PHYS`; promoted to `kernel_pd_template`) | no |
+| `0x00201000..0x00201FFF` | `0xC0201000..0xC0201FFF` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
+| `0x00202000+` | `0xC0202000+` | -- | `LOW_RESERVE_BYTES` ceiling — all frames below this are pre-reserved at boot; everything past is owned by the bitmap allocator | -- |
+
+User-side virtual layout (per per-program PD; same shape for every program PD that `address_space_create` builds):
+
+| User-virt range | Size | Purpose |
+|---|---|---|
+| `0x00000000..0x00000FFF` | 4 KB | shared low frame (BUFFER / EXEC_ARG / ARGV / boot_disk / directory_sector) |
+| `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
+| `0x00011000..0x00011FFF` | 4 KB | JUMP_TABLE (cc.py-emitted dispatch entries) |
+| `0x00300000..0x003FFFFF` | 1 MB | `asm.c` SYMBOL_BASE (legacy 16-bit accessors; Phase 3 shim only) |
+| `0x08048000..` | program-sized | program text + BSS (Linux ELF-shaped load address) |
+| `0x3FFE0000..0x3FFEFFFF` | 64 KB | unmapped (stack guard region) |
+| `0x3FFF0000..0x3FFFFFFF` | 64 KB | user stack (16 pages, top at `USER_STACK_TOP`) |
+| `0x40000000` | -- | `USER_STACK_TOP` (one past end of stack) |
+| `0xC0000000..` | 1 GB | kernel half (PDEs 768..1023, copy-imaged from `kernel_pd_template`) |
+
 ### Filesystem
 
 Trivial read-only filesystem on the floppy disk:

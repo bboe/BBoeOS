@@ -2923,73 +2923,120 @@ ext2_search_blk:
         ;; Search all sectors of ext2 directory block AX for entry named [ext2_sd_name]
         ;; Output: AX = inode if found, CF if not found
         ;;
-        ;; Two pieces of outer-loop state are spilled to memory because
-        ;; the per-entry inner loop unavoidably clobbers AX and CX:
+        ;; Uses a sliding 2-sector window (ext2_sd_buffer, 1024 bytes) so a
+        ;; directory entry whose name straddles the 512-byte boundary inside
+        ;; a multi-sector block stays addressable across the boundary.  Tracks
+        ;; the block-relative byte offset of the next entry rather than just a
+        ;; within-block sector index, so the parser stays in sync after a
+        ;; straddling entry's rec_len carries it into the next sector.
+        ;;
+        ;; Spilled state (the per-entry inner loop clobbers AX/CX):
         ;;   ext2_sd_blk_num — the block number passed in.  AX is reused
         ;;       inside the loop to hold the candidate entry's inode (the
         ;;       eventual return value), so it can't simultaneously carry
-        ;;       the block number across iterations.  Without this spill,
-        ;;       a 1024-byte directory block whose first sector's last
-        ;;       entry has a non-zero inode would compute the wrong disk
-        ;;       sector when fetching sector 1, since AX would still hold
-        ;;       that last entry's inode instead of the block number.
-        ;;   ext2_sd_cur_sec — the within-block sector index.  CL gets
-        ;;       loaded with name_len before each ext2_names_match call.
-        ;;       Mirrors the ext2_ade_cur_sec pattern in ext2_add_dir_entry.
+        ;;       the block number across iterations.
+        ;;   ext2_sd_blk_off — block-relative byte offset of the next entry
+        ;;       to process.  Survives the rec_len advance that crosses a
+        ;;       512-byte boundary; the old ext2_sd_cur_sec only tracked the
+        ;;       within-block sector and lost the intra-sector position when
+        ;;       it bumped, which silently dropped entries laid past a
+        ;;       straddling entry's tail in the next sector.
+        ;;   ext2_sd_lo_sec — within-block sector index loaded at the lo half
+        ;;       of ext2_sd_buffer (0..511).  Sector lo_sec+1 (when in range)
+        ;;       sits at the hi half (512..1023).  0xFFFF is a sentinel for
+        ;;       "nothing loaded yet" so the first iteration always reloads.
         push ebx
         push ecx
         push edx
         push esi
         push edi
         mov [ext2_sd_blk_num], ax
-        ;; DX = sectors_per_block = 1 << (log_block_size + 1)
+        mov word [ext2_sd_blk_off], 0
+        mov word [ext2_sd_lo_sec], 0xFFFF       ; sentinel
+.esb_iter:
+        ;; DX = sectors_per_block = 1 << (log_block_size + 1).  Re-derived
+        ;; each iteration because ext2_read_blk_sec clobbers AX/BX/CX and
+        ;; we don't want to add another spill slot.
         xor ch, ch
         mov cl, [ext2_log_block_size]
         inc cl
         mov dx, 1
         shl dx, cl
-        mov word [ext2_sd_cur_sec], 0
-        .esb_sector:
-        mov cx, [ext2_sd_cur_sec]
-        cmp cx, dx
+        ;; Bounds check: blk_off >= sectors_per_block * 512 ?
+        mov bx, [ext2_sd_blk_off]
+        mov ax, dx
+        shl ax, 9
+        cmp bx, ax
         jae .esb_not_found
+        ;; needed_sec = blk_off >> 9
+        mov cx, bx
+        shr cx, 9                               ; CX = needed_sec
+        cmp cx, [ext2_sd_lo_sec]
+        je .esb_window_ready
+        ;; Reload window: read sector CX into lo half, sector CX+1 (if in
+        ;; range) into hi half.  Update lo_sec first so a later partial
+        ;; failure still records what's in the lo half.
+        mov [ext2_sd_lo_sec], cx
         mov ax, [ext2_sd_blk_num]
-        push dx
         mov bx, cx
         call ext2_read_blk_sec
-        pop dx
         jc .esb_not_found
-        ;; Scan directory entries in sector_buffer
-        mov esi, [ext2_sd_name]
-        mov edi, sector_buffer
-        .esb_entry:
-        ;; Bounds check
-        mov ebx, edi
-        sub ebx, sector_buffer
-        cmp ebx, 512
-        jae .esb_next_sector
-        ;; Validate rec_len
+        mov esi, sector_buffer
+        mov edi, ext2_sd_buffer
+        mov ecx, 128                            ; 512 / 4
+        cld
+        rep movsd
+        ;; Re-derive sectors_per_block (DX/CX clobbered above).
+        xor ch, ch
+        mov cl, [ext2_log_block_size]
+        inc cl
+        mov dx, 1
+        shl dx, cl
+        mov cx, [ext2_sd_lo_sec]
+        inc cx
+        cmp cx, dx
+        jae .esb_window_ready                   ; lo was the last sector
+        mov ax, [ext2_sd_blk_num]
+        mov bx, cx
+        call ext2_read_blk_sec
+        jc .esb_window_ready                    ; hi failed, but lo's enough to keep going
+        mov esi, sector_buffer
+        mov edi, ext2_sd_buffer + 512
+        mov ecx, 128
+        cld
+        rep movsd
+.esb_window_ready:
+        ;; in_window_off = blk_off & 511 — valid because lo_sec was just set
+        ;; to needed_sec, so blk_off lies in the lo half of the window.
+        mov bx, [ext2_sd_blk_off]
+        and bx, 511
+        movzx ebx, bx
+        mov edi, ext2_sd_buffer
+        add edi, ebx
+        ;; Validate rec_len (must be at least the 8-byte header).
         mov bx, [edi+EXT2_DIRENT_REC_LEN]
-        cmp bx, EXT2_DIRENT_NAME        ; minimum 8 bytes
-        jb .esb_next_sector
-        ;; Skip deleted entries (inode = 0)
+        cmp bx, EXT2_DIRENT_NAME
+        jb .esb_not_found
+        ;; Skip deleted entries (inode = 0).
         mov ax, [edi+EXT2_DIRENT_INODE]
         test ax, ax
         jz .esb_advance
-        ;; Compare name
-        push ax                         ; save inode
-        push ebx                        ; save rec_len
+        ;; Compare name.  Header lives in the lo half (because the entry
+        ;; start is in lo); a name that extends past byte 511 of the window
+        ;; is reachable in the hi half via edi+8+name_len, which is what the
+        ;; sliding window buys us over the original single-sector buffer.
+        push ax                                 ; save inode
+        push ebx                                ; save rec_len (low 16)
         push edi
         add edi, EXT2_DIRENT_NAME
-        mov cl, [edi-2]                 ; name_len is at EXT2_DIRENT_NAME_LEN = offset 6
-                                        ; edi now points to name (offset 8), so name_len
-                                        ; is at [edi-2]
-        call ext2_names_match           ; SI=search, DI=entry name, CL=namelen; CF=no match
+        mov cl, [edi-2]                         ; name_len at offset 6
+        mov esi, [ext2_sd_name]
+        call ext2_names_match
         pop edi
-        pop ebx                         ; rec_len
-        pop ax                          ; inode
+        pop ebx
+        pop ax
         jc .esb_advance
-        ;; Found!
+        ;; Found.
         pop edi
         pop esi
         pop edx
@@ -2997,14 +3044,11 @@ ext2_search_blk:
         pop ebx
         clc
         ret
-        .esb_advance:
-        movzx ebx, bx                   ; rec_len
-        add edi, ebx                    ; advance by rec_len
-        jmp .esb_entry
-        .esb_next_sector:
-        inc word [ext2_sd_cur_sec]
-        jmp .esb_sector
-        .esb_not_found:
+.esb_advance:
+        movzx ebx, bx                           ; rec_len
+        add [ext2_sd_blk_off], bx
+        jmp .esb_iter
+.esb_not_found:
         pop edi
         pop esi
         pop edx
@@ -3199,7 +3243,10 @@ ext2_resolve_path:
         ext2_rn_old_name       dd 0     ; ext2_rename: pointer to old basename
         ext2_rn_old_path       dd 0     ; ext2_rename: pointer to old full path
         ext2_sd_blk_num        dw 0     ; ext2_search_blk: caller's block number (AX-spill, see search_blk header)
-        ext2_sd_cur_sec        dw 0     ; ext2_search_blk: current sector index within block (CX-spill, see search_blk header)
+        ext2_sd_blk_off        dw 0     ; ext2_search_blk: block-relative byte offset of next entry (see search_blk header)
+        ;; ext2_sd_buffer (1 KB sliding 2-sector window) lives at fixed low-phys
+        ;; via kernel.asm's direct-map equ — keeps the bytes out of kernel.bin.
+        ext2_sd_lo_sec         dw 0     ; ext2_search_blk: sector index loaded at ext2_sd_buffer[0..511] (0xFFFF = invalid)
         ext2_sd_name           dd 0
         ext2_us_blks           times 14 dw 0  ; ext2_update_size: saved i_block[0..13]
         ext2_us_cur_ptr        dw 0     ; ext2_update_size: pointer index within current sector
