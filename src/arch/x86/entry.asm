@@ -74,8 +74,11 @@ pmode_irq6_handler:
 ;;;   * Active PD = `kernel_pd_template` (no user mappings).
 ;;;   * `vfs_find` (or equivalent) has populated `vfs_found_*` for
 ;;;     the binary file.
-;;;   * `buffer_snapshot` (256 B) and `exec_arg_snapshot` (4 B) hold
-;;;     the BUFFER / EXEC_ARG content the new program inherits.
+;;;   * `[next_handoff_frame_phys]` either holds the phys of a
+;;;     pre-allocated + populated USER_DATA handoff frame (sys_exec
+;;;     path: BUFFER / EXEC_ARG copied from the dying shell) or is
+;;;     zero (boot / sys_exit path: fresh shell, no inherited args
+;;;     — `program_enter` allocates + zeroes the frame itself).
 ;;;
 ;;; Streams the binary directly from disk into per-program user
 ;;; frames — sector-by-sector via `vfs_read_sec` and a private
@@ -116,38 +119,39 @@ program_enter:
         mov ax, [vfs_found_dir_off]
         mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
 
-        ;; --- Map shell↔program handoff frame at user-virt USER_DATA_BASE ---
-        ;; Holds ARGV (32 B at +0x4DE), EXEC_ARG (4 B at +0x4FC), and
-        ;; BUFFER (256 B at +0x500).  The frame sits at user-virt 0x1000
-        ;; (PTE[1]) so PTE[0] (virt 0..0xFFF) stays not-present and a NULL
-        ;; dereference from CPL=3 raises #PF instead of silently
-        ;; reading/writing the handoff frame.  In-frame offsets are
-        ;; ``<symbol> - USER_DATA_BASE`` so the per-symbol page offset
-        ;; survives any future shift of USER_DATA_BASE.
+        ;; --- Acquire and map the shell↔program handoff frame ---
+        ;; The frame holds ARGV (32 B at +0x4DE), EXEC_ARG (4 B at
+        ;; +0x4FC), and BUFFER (256 B at +0x500).  It sits at user-
+        ;; virt 0x1000 (PTE[1]) so PTE[0] (virt 0..0xFFF) stays
+        ;; not-present and a NULL deref from CPL=3 raises #PF instead
+        ;; of silently reading/writing this frame.  In-frame offsets
+        ;; are ``<symbol> - USER_DATA_BASE`` so the per-symbol page
+        ;; offset survives any future shift of USER_DATA_BASE.
+        ;;
+        ;; sys_exec's `.exec_load` (syscall.asm) pre-allocates this
+        ;; frame and populates it directly from the dying shell's
+        ;; user pages — no kernel staging buffer needed.  In that
+        ;; path [next_handoff_frame_phys] holds the populated phys.
+        ;; The boot / sys_exit path leaves it at zero, which means
+        ;; "fresh shell with no inherited args" — frame_alloc here
+        ;; and zero-fill the slot.
+        mov eax, [next_handoff_frame_phys]
+        test eax, eax
+        jnz .handoff_pre_allocated
         call frame_alloc
         jc .panic
-        push eax                            ; [esp+0] = handoff frame phys
+        push eax
         mov edi, eax
         add edi, 0xC0000000                 ; kernel-virt of frame
-        ;; Zero entire frame.
-        push edi
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop edi
-        ;; EXEC_ARG snapshot.
-        mov eax, [exec_arg_snapshot]
-        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
-        ;; BUFFER snapshot.
-        push edi
-        mov esi, buffer_snapshot
-        lea edi, [edi + (BUFFER - USER_DATA_BASE)]
-        mov ecx, MAX_INPUT / 4
-        rep movsd
-        pop edi
+        pop eax
+        .handoff_pre_allocated:
+        mov dword [next_handoff_frame_phys], 0
         ;; Map the frame at user-virt USER_DATA_BASE.
-        pop ecx                             ; handoff frame phys
+        mov ecx, eax                        ; handoff frame phys
         mov eax, [current_pd_phys]
         mov ebx, USER_DATA_BASE
         mov edx, PTE_USER_RW
@@ -468,18 +472,14 @@ shell_reload:
         ;; Active PD: kernel_pd_template (sys_exit just destroyed the
         ;; dying program's PD and switched off it, or this is the first
         ;; boot and CR3 was set up by high_entry).  Look up bin/shell
-        ;; (program_enter streams its bytes from disk on demand), reset
-        ;; the BUFFER / EXEC_ARG snapshots, and jmp program_enter.
+        ;; (program_enter streams its bytes from disk on demand) and
+        ;; jmp program_enter.  Leaving [next_handoff_frame_phys] at
+        ;; zero tells program_enter to allocate + zero a fresh handoff
+        ;; frame (a fresh shell inherits no args).
         mov esi, shell_path
         call vfs_find
         jc .shell_fail
-        ;; Fresh shell inherits no args.  Zero both snapshots.
-        mov edi, buffer_snapshot
-        mov ecx, MAX_INPUT / 4
-        xor eax, eax
-        cld
-        rep stosd
-        mov dword [exec_arg_snapshot], 0
+        mov dword [next_handoff_frame_phys], 0
         jmp program_enter
 
         .shell_fail:
@@ -547,14 +547,15 @@ program_fd              times FD_ENTRY_SIZE db 0
 shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
 
-        ;; BUFFER / EXEC_ARG cross-AS snapshot.  sys_exec writes these
-        ;; from the dying shell's user pages BEFORE address_space_destroy;
-        ;; program_enter copies them into the new program's first user
-        ;; frame at user-virt 0x500 / 0x4FC.  shell_reload zeroes them
-        ;; (a fresh shell inherits no args).
+        ;; sys_exec pre-allocates the new program's USER_DATA handoff
+        ;; frame and populates it directly from the dying shell's user
+        ;; pages (BUFFER + EXEC_ARG) via the kernel direct map, then
+        ;; passes the phys to program_enter through this slot.  The
+        ;; boot / sys_exit path leaves it at zero; program_enter
+        ;; treats zero as "no pre-allocation" and frame_allocs +
+        ;; zero-fills a fresh frame for the respawning shell.
         align 4
-buffer_snapshot         times MAX_INPUT db 0
-exec_arg_snapshot       dd 0
+next_handoff_frame_phys dd 0
 
         ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
         ;; protected_mode_entry); all other fields stay zero because we
