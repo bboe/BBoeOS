@@ -196,7 +196,7 @@ exc_common:
         ;; PD).
         mov eax, cr3
         push eax
-        mov eax, [kernel_pd_template_phys]
+        mov eax, [kernel_idle_pd_phys]
         mov cr3, eax
         pop eax
         call address_space_destroy

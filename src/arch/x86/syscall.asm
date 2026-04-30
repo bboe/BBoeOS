@@ -479,10 +479,10 @@ syscall_handler:
         pop edi
         pop esi
         mov esp, [shell_esp]
-        ;; Switch CR3 to kernel_pd_template, then destroy the dying shell's PD.
+        ;; Switch CR3 to kernel_idle_pd, then destroy the dying shell's PD.
         mov eax, cr3
         push eax
-        mov eax, [kernel_pd_template_phys]
+        mov eax, [kernel_idle_pd_phys]
         mov cr3, eax
         pop eax
         call address_space_destroy
@@ -502,7 +502,7 @@ syscall_handler:
         ;; re-enter shell_reload to respawn.
         mov eax, cr3
         push eax
-        mov eax, [kernel_pd_template_phys]
+        mov eax, [kernel_idle_pd_phys]
         mov cr3, eax
         pop eax
         call address_space_destroy

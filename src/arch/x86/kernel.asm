@@ -20,7 +20,7 @@
 ;;; Each program runs in its own per-program PD built by
 ;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
 ;;; kernel half (PDEs 768..1023) is copy-imaged from
-;;; `kernel_pd_template` so the kernel direct map is reachable from
+;;; `kernel_idle_pd` so the kernel direct map is reachable from
 ;;; every address space.  The user half (PDEs 0..767) starts empty and
 ;;; is populated only with the program's own pages, plus the shared
 ;;; vDSO PTE marked with the AVL[0] PTE_SHARED bit so
@@ -57,7 +57,7 @@ directory_sector dw 0                   ; offset 3
         ;;   vDSO target at phys 0x10000          (1 page, mapped per-PD)
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
-        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 8 KB)
+        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 4 KB)
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
         ;;   FRAME_BITMAP_PHYS                    (FRAME_BITMAP_BYTES = 8 KB)
@@ -110,7 +110,7 @@ directory_sector dw 0                   ; offset 3
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
         KERNEL_LOAD_PHYS         equ 0x20000
-        KERNEL_STACK_BYTES       equ 0x2000                              ; 8 KB
+        KERNEL_STACK_BYTES       equ 0x1000                              ; 4 KB (peak measured ~412 B; ~10× margin)
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
@@ -147,7 +147,7 @@ high_entry:
         jmp KERNEL_CODE_SELECTOR:.cs_reloaded
 .cs_reloaded:
 
-        ;; Switch ESP to the kernel stack (16 KB at KERNEL_RESERVED_BASE,
+        ;; Switch ESP to the kernel stack (4 KB at KERNEL_RESERVED_BASE,
         ;; reached through the direct map at kernel-virt
         ;; DIRECT_MAP_BASE + KERNEL_RESERVED_BASE; see KERNEL_STACK_PHYS
         ;; for why it lives here instead of inside kernel.bin).  Reachable
@@ -155,6 +155,24 @@ high_entry:
         ;; 0..0x3FFFFF.  TSS.ESP0 is patched to the same later in
         ;; protected_mode_entry.
         mov esp, kernel_stack_top
+
+        ;; Poison-fill the kernel stack with 0xDEADBEEF dwords.  Used
+        ;; as a canary for future stack-depth instrumentation: a debug
+        ;; routine can scan kernel_stack upward for the first
+        ;; non-poisoned dword to find the high-water mark (since stack
+        ;; values, once written, are never re-poisoned).  The 4 KB
+        ;; stack is sized at ~10× the measured peak (~412 B); the
+        ;; canary is also a tripwire if a future regression eats deep
+        ;; into the stack.  high_entry has nothing to preserve in
+        ;; EAX/ECX/EDI yet (boot's pre-paging code didn't pass
+        ;; anything through), so a one-shot rep stosd is fine.  Runs
+        ;; before lidt so any exception here triple-faults (which is
+        ;; what would happen without the fill).
+        mov edi, kernel_stack
+        mov ecx, KERNEL_STACK_BYTES / 4
+        mov eax, 0xDEADBEEF
+        cld
+        rep stosd
 
         ;; Patch the high-half offsets of the static IDT entries (the
         ;; macros only emit the low 16 bits — see idt.asm for why),
@@ -175,12 +193,6 @@ high_entry:
         mov dword [DIRECT_MAP_BASE + BOOT_PD_PHYS + 0*4], 0
         mov eax, cr3
         mov cr3, eax
-
-        ;; Promote the boot PD into kernel_pd_template by recording
-        ;; its physical address.  `address_space_create` copies its
-        ;; top-256 PDEs into every per-program PD as the kernel-half
-        ;; mapping.
-        mov dword [kernel_pd_template_phys], BOOT_PD_PHYS
 
         ;; --- Initialize the bitmap frame allocator from E820 ---
         ;;
@@ -255,8 +267,11 @@ high_entry:
         cmp ecx, 1024
         jb .pt_fill
 
-        ;; Install the new PT at PDE[ebx] in kernel_pd_template (which
+        ;; Install the new PT at PDE[ebx] in the boot PD (which
         ;; lives at BOOT_PD_PHYS, reached through the direct map).
+        ;; This kernel-half PDE block gets copy-imaged into
+        ;; `kernel_idle_pd` after the loop and inherited by every
+        ;; subsequent per-program PD via `address_space_create`.
         pop eax
         or eax, 0x003                           ; P | RW (kernel-only)
         mov edi, DIRECT_MAP_BASE + BOOT_PD_PHYS
@@ -266,19 +281,68 @@ high_entry:
         jmp .alloc_kernel_pt
 .alloc_done:
 
-        ;; Flush TLB after the PD changes.
-        mov eax, cr3
+        ;; --- Allocate the kernel idle PD; free the boot PD ---
+        ;;
+        ;; The boot PD now holds the final kernel-half mapping: PDE[768]
+        ;; (the 4 MB direct map for phys 0..0x3FFFFF) plus
+        ;; PDE[769..LAST_KERNEL_PDE-1] pointing at the per-4 MB PTs the
+        ;; loop above just allocated.  Build a fresh 4 KB
+        ;; `kernel_idle_pd` from a frame_alloc'd frame, copy-image the
+        ;; boot PD's kernel-half PDEs (768..1023) into it, leave the
+        ;; user-half (0..767) zero, switch CR3 to it, and free the
+        ;; boot PD.  The idle PD takes over both roles the boot PD
+        ;; had:
+        ;;   * canonical kernel-half PDE source for `address_space_create`
+        ;;   * CR3-swap target during `sys_exit` / kill-path teardown
+        ;;     (which cannot run on the dying user PD it is about to
+        ;;     frame_free).
+        ;; The idle PD lives wherever the bitmap allocator returned a
+        ;; frame — typically right after the kernel PTs allocated
+        ;; above — so it isn't pinned in the kernel-side reserved
+        ;; cluster.  After this block the boot PD's 4 KB cluster slot
+        ;; is just another conventional frame the bitmap allocator can
+        ;; hand out for user pages.
+        ;;
+        ;; PDE constants (768 = ADDRESS_SPACE_USER_PDE_COUNT,
+        ;;                256 = ADDRESS_SPACE_KERNEL_PDE_COUNT) are
+        ;; spelled as literals here because address_space.asm's
+        ;; `%define`s aren't visible until its `%include` later in
+        ;; kernel.asm.
+        call frame_alloc
+        jc .panic
+        mov [kernel_idle_pd_phys], eax
+        mov edi, eax
+        add edi, DIRECT_MAP_BASE
+        ;; Zero the entire frame (PDEs 0..1023).
+        push edi
+        mov ecx, 1024
+        xor eax, eax
+        cld
+        rep stosd
+        pop edi
+        ;; Copy boot PD's kernel-half (PDEs 768..1023) into the idle PD.
+        mov esi, DIRECT_MAP_BASE + BOOT_PD_PHYS + 768 * 4
+        add edi, 768 * 4
+        mov ecx, 256
+        rep movsd
+
+        ;; Switch CR3 to the idle PD, then free the boot PD.  The CR3
+        ;; reload flushes the TLB, retiring any cached BOOT_PD walks
+        ;; before the frame_free returns the boot PD's frame to the
+        ;; bitmap pool.
+        mov eax, [kernel_idle_pd_phys]
         mov cr3, eax
+        mov eax, BOOT_PD_PHYS
+        call frame_free
 
         ;; Continue with the existing post-flip init: TSS / IDT IRQ
         ;; gates / drivers / VFS / NIC / banner / shell.  Lives in
         ;; entry.asm's `protected_mode_entry`, trimmed to skip the
         ;; segment / ESP / lidt work `high_entry` already performed.
         ;; Programs run in private per-program PDs built by
-        ;; `address_space_create` from `program_enter`;
-        ;; kernel_pd_template's user half is zero-filled so
-        ;; kernel-mode code running on it cannot accidentally touch
-        ;; user memory.
+        ;; `address_space_create` from `program_enter`; the idle PD's
+        ;; user half is zero-filled so kernel-mode code running on it
+        ;; cannot accidentally touch user memory.
         jmp protected_mode_entry
 
 .panic:

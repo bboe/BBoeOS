@@ -3,10 +3,13 @@
 ;;;
 ;;; Builds and tears down per-program user page directories.  Kernel-half
 ;;; PDEs (768..1023, the 256 MB direct map at virtual
-;;; 0xC0000000..0xCFFFFFFF) are copied verbatim from `kernel_pd_template`
-;;; at address_space_create time and never modified afterward — that
-;;; invariant is what lets us avoid fan-out updates when the kernel
-;;; installs a new kernel-half mapping.
+;;; 0xC0000000..0xCFFFFFFF) are copied verbatim from `kernel_idle_pd`'s
+;;; kernel half at address_space_create time and never modified afterward
+;;; — that invariant is what lets us avoid fan-out updates when the
+;;; kernel installs a new kernel-half mapping.  `kernel_idle_pd` is
+;;; built once by `high_entry` (after the kernel-PT-alloc loop) and
+;;; serves both as the canonical PDE source and as the CR3 target
+;;; between programs.
 ;;;
 ;;; Public (CPL=0 only):
 ;;;   address_space_create()                  -> EAX = pd_phys, CF on OOM
@@ -38,8 +41,8 @@
 
 address_space_create:
         ;; Allocate one frame, zero it, then copy the top-256 PDEs from
-        ;; `kernel_pd_template` into the new PD's kernel-half slot.
-        ;; Output: EAX = pd_phys, CF clear on success; CF set on OOM.
+        ;; `kernel_idle_pd` into the new PD's kernel-half slot.  Output:
+        ;; EAX = pd_phys, CF clear on success; CF set on OOM.
         push ebx
         push ecx
         push edi
@@ -55,11 +58,11 @@ address_space_create:
         xor eax, eax
         cld
         rep stosd
-        ;; Copy top-256 PDEs from kernel_pd_template into PDE[768..1023].
+        ;; Copy top-256 PDEs from kernel_idle_pd into PDE[768..1023].
         ;; ESI = source kernel-virt, EDI = destination kernel-virt, both
         ;; offset by ADDRESS_SPACE_USER_PDE_COUNT * 4 bytes to skip the
         ;; user half.
-        mov esi, [kernel_pd_template_phys]
+        mov esi, [kernel_idle_pd_phys]
         add esi, ADDRESS_SPACE_DIRECT_MAP_BASE
         add esi, ADDRESS_SPACE_USER_PDE_COUNT * 4
         pop edi                                 ; PD direct-map base
@@ -89,7 +92,7 @@ address_space_destroy:
         ;; skipped — those frames live in shared tables managed by the
         ;; kernel and outlive any one address space.  Finally frees the PD frame.  Caller must not have
         ;; pd_phys loaded in CR3 — the `sys_exit` / kill path switches
-        ;; CR3 to kernel_pd_template first.  Kernel-half PDEs are left
+        ;; CR3 to kernel_idle_pd first.  Kernel-half PDEs are left
         ;; alone; the kernel-half PTs they reference are shared and
         ;; outlive every per-program PD.
         push eax

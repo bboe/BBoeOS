@@ -6,6 +6,43 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Reclaim the boot PD frame; introduce kernel_idle_pd (2026-04-30)
+- The boot PD frame (4 KB at `BOOT_PD_PHYS`) is no longer pinned for
+  the kernel's lifetime.  After the kernel-PT-alloc loop, `high_entry`
+  allocates a fresh kernel-only `kernel_idle_pd` from the bitmap,
+  copy-images PDEs 768..1023 from the boot PD into it (leaving PDEs
+  0..767 zero), switches CR3 to it, and `frame_free`s the boot PD.
+  The boot PD's 4 KB cluster slot becomes a regular conventional
+  frame the bitmap allocator can hand out for user pages.
+- `kernel_idle_pd` plays three roles: canonical kernel-half PDE
+  source for `address_space_create`, CR3 between programs (e.g.
+  `shell_reload` runs on it), and CR3-swap target during
+  `address_space_destroy` (which can't run on the dying user PD it
+  is about to `frame_free`).  Lives wherever the bitmap allocator
+  returned a frame, so it's no longer pinned in the kernel-side
+  reserved cluster.
+- `kernel_pd_template_phys` (the boot-PD pointer that backed
+  `address_space_create` and the kill-path CR3 swap) becomes
+  `kernel_idle_pd_phys` in `entry.asm`; rename propagates through
+  `idt.asm`'s exc_common and `syscall.asm`'s sys_exit / sys_exec
+  paths.  Behaviour is unchanged — the same PDE source and the same
+  CR3 target — just no longer overloaded with the boot PD's
+  permanent-frame role.
+
+### Shrink kernel stack 8 KB -> 4 KB; poison-fill at boot (2026-04-30)
+- Measured peak kernel stack usage at ~412 bytes across bbfs, ext2
+  (including cat_large + doubly-indirect cat/cp), networking
+  (ping/netinit), and ring-3 fault kill paths (gptest, nullderef,
+  stackbomb).  4 KB gives ~10x margin and drops one 4 KB page from
+  the post-kernel cluster, lowering the VGA-hole guard from
+  0x6000 to 0x5000 (24 KB -> 20 KB cluster post-shrink).
+- `high_entry` now poison-fills the freshly-switched-to kernel
+  stack with 0xDEADBEEF dwords.  The fill is one rep stosd at boot
+  and acts as a canary: a future stack-depth probe can scan
+  `kernel_stack` upward for the first non-poisoned dword to find
+  the high-water mark, since stack values, once written, are
+  never re-poisoned.
+
 ### Allocate net_receive_buffer / net_transmit_buffer on NIC probe (2026-04-30)
 - The two NE2000 scratch buffers move out of the post-kernel reserved
   region.  `network_initialize` now `frame_alloc`s a 4 KB frame for
