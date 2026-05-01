@@ -16,7 +16,8 @@ Usage:
     ./test_programs.py arp                      # one program (bbfs)
     ./test_programs.py --filesystem ext2        # ext2, full suite
     ./test_programs.py --filesystem ext2 cat    # one program (ext2)
-    ./test_programs.py --slow                   # include slow tests (bigbss tripwire, ext2 large-file)
+    ./test_programs.py --slow                   # bbfs + bigbss tripwire
+    ./test_programs.py --filesystem ext2 --slow # ext2 + bigbss + ext2 large-file / doubly-indirect
 """
 
 from __future__ import annotations
@@ -960,7 +961,7 @@ def main() -> int:
     parser.add_argument(
         "--slow",
         action="store_true",
-        help="include slow tests (bigbss tripwire, ext2 large-file and doubly-indirect I/O)",
+        help="include slow tests (bigbss tripwire on either filesystem; ext2 large-file and doubly-indirect on --filesystem ext2)",
     )
     arguments = parser.parse_args()
 
