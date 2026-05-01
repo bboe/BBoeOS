@@ -25,6 +25,29 @@ at the time.
   (captured before any prologue) and asserts it equals `C0` —
   detects regressions that would put the stack back at the old
   `0x40000000` top.
+- The `bigbss` program supersedes the prior 256 KB smoke test +
+  `bigbss800`: it declares `BIGBSS_PAGES` (in `src/c/bigbss_size.h`,
+  currently 261,493 — the page-precise maximum BSS that fits at
+  `-m 1025`, the max-beneficial RAM size for this OS).  At exactly
+  `-m 1024` QEMU/SeaBIOS plants ~128 KB of ACPI tables (type-3/4
+  in E820) near the top of the 1 GB block, eating ~32 frames out
+  of the bitmap; `-m 1025` is the smallest size where those
+  reservations land above the 1 GB direct-map clamp and the bottom
+  1 GB is fully type-1.  Above `-m 1025` there's no further benefit
+  (the kernel direct map is clamped at 1 GB regardless).
+  Three test entries pin the boundary on both sides:
+  - `bigbss` — `-m 1025`, succeeds.
+  - `bigbss_oom` — same program at `-m 1024` (one MB less RAM and
+    the ACPI reservation moves into the bitmap).  Must OOM.
+    Tripwire if `BIGBSS_PAGES` is set too low.
+  - `bigbss_fail` — `BIGBSS_PAGES + 1` pages, `-m 1025`, must OOM.
+    Tripwire if `BIGBSS_PAGES` is set too high.
+  When the kernel adds or removes pages — direct-map PT count
+  shifts, image grows, etc. — `BIGBSS_PAGES` drifts and one or both
+  tripwire tests will go red.  Re-probe at `-m 1025` (or any
+  `-m ≥ 1025`; the answer is identical) and update the constant.
+  BSS extends well above the old 1 GB user-virt ceiling that the
+  `USER_STACK_TOP` lift just unlocked.
 
 ### Graceful OOM during program load (2026-04-30)
 - `program_enter`'s `.panic` (which printed `!` on COM1 and halted the
