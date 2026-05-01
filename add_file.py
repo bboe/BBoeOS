@@ -330,10 +330,10 @@ def ext2_add_file(
 
     """
     filename = pathlib.Path(file_path).name
-    dest = f"/{subdirectory}/{filename}" if subdirectory else f"/{filename}"
+    destination = f"/{subdirectory}/{filename}" if subdirectory else f"/{filename}"
     with _ext2_partition(ext2_start_sector=ext2_start_sector, image_path=image_path) as tmp:
         result = subprocess.run(
-            [_DEBUGFS, "-w", "-R", f"write {file_path} {dest}", tmp],
+            [_DEBUGFS, "-w", "-R", f"write {file_path} {destination}", tmp],
             capture_output=True,
             check=False,
         )
@@ -351,7 +351,7 @@ def ext2_add_file(
             raise SystemExit(message)
         if executable:
             subprocess.run(
-                [_DEBUGFS, "-w", "-R", f"set_inode_field {dest} mode 0100755", tmp],
+                [_DEBUGFS, "-w", "-R", f"set_inode_field {destination} mode 0100755", tmp],
                 check=True,
                 capture_output=True,
             )
@@ -368,20 +368,58 @@ def ext2_add_files(
     image_path: str,
     subdirectory: str | None,
 ) -> None:
-    """Batched ext2 add — Task 4 batches into a single debugfs session.
+    """Add multiple files to an ext2 partition in a single debugfs session.
 
-    This temporary implementation just loops the existing single-file
-    helper so the new add_files() entry point compiles end-to-end while
-    we land the bbfs path first.
+    Runs one ``dd`` extract, one ``debugfs -w`` invocation fed a script
+    containing one ``write`` line per file (and one
+    ``set_inode_field`` line per file when ``executable`` is True),
+    and one ``dd`` splice — replacing N x 3 subprocesses with 3.
+
+    Raises
+    ------
+    SystemExit
+        If debugfs reports any non-banner / non-"Allocated inode"
+        stderr line, or returns non-zero.
+
     """
+    if not file_paths:
+        return
+    script_lines: list[str] = []
+    destinations: list[str] = []
     for file_path in file_paths:
-        ext2_add_file(
-            executable=executable,
-            ext2_start_sector=ext2_start_sector,
-            file_path=file_path,
-            image_path=image_path,
-            subdirectory=subdirectory,
+        filename = pathlib.Path(file_path).name
+        destination = f"/{subdirectory}/{filename}" if subdirectory else f"/{filename}"
+        script_lines.append(f"write {file_path} {destination}")
+        destinations.append(destination)
+    if executable:
+        script_lines.extend(f"set_inode_field {destination} mode 0100755" for destination in destinations)
+    script = "\n".join(script_lines) + "\n"
+
+    with _ext2_partition(ext2_start_sector=ext2_start_sector, image_path=image_path) as tmp:
+        result = subprocess.run(
+            [_DEBUGFS, "-w", tmp],
+            input=script.encode(),
+            capture_output=True,
+            check=False,
         )
+        stderr_text = result.stderr.decode()
+        # debugfs's `write` returns exit 0 even when it cannot allocate
+        # an inode (e.g. when the filesystem's inode table is full),
+        # printing "Could not allocate inode" on stderr instead.
+        # Treat any stderr line that isn't the version banner or the
+        # "Allocated inode: N" success line as a real failure.
+        stderr_failed = any(
+            line.strip() for line in stderr_text.splitlines() if not line.startswith("debugfs ") and "Allocated inode:" not in line
+        )
+        if result.returncode != 0 or stderr_failed:
+            message = f"Error: debugfs batch write failed:\n{stderr_text}"
+            raise SystemExit(message)
+
+    for file_path in file_paths:
+        filename = pathlib.Path(file_path).name
+        relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
+        file_size = pathlib.Path(file_path).stat().st_size
+        print(f"Added '{relative_path}' ({file_size} bytes) [ext2]")
 
 
 def ext2_make_directory(*, dirname: str, ext2_start_sector: int, image_path: str) -> None:

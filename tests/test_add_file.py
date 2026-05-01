@@ -66,6 +66,23 @@ def bbfs_image(base_image: Path, tmp_path: Path) -> Path:
     return image
 
 
+@pytest.fixture
+def ext2_image(tmp_path: Path) -> Path:
+    """Per-test fresh ext2 drive image.
+
+    Each test mutates the image (adds files), so the build cannot be
+    cached across tests the way ``base_image`` is.
+    """
+    image = tmp_path / "drive_ext2.img"
+    subprocess.run(
+        ["./make_os.sh", "--ext2", str(image)],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    return image
+
+
 def _bin_start_sector(*, image: Path) -> int:
     """Return the start sector of bin/ in the given image."""
     directory_sector = compute_directory_sector(image_path=str(image))
@@ -106,3 +123,70 @@ def test_three_fillers_one_save(bbfs_image: Path, tmp_path: Path) -> None:
             name=name,
         )
         assert entry is not None, f"{name!r} not found in bin/"
+
+
+def test_batch_runs_single_debugfs_session(
+    ext2_image: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """add_files() on ext2 must spawn exactly one debugfs process."""
+    files = []
+    for name in ("zalpha", "zbeta", "zgamma"):
+        path = tmp_path / name
+        path.write_text("hi\n")
+        files.append(str(path))
+
+    import add_file as add_file_module  # noqa: PLC0415
+
+    original_run = subprocess.run
+    debugfs_calls: list[list[str]] = []
+
+    def counting_run(  # type: ignore[misc]
+        command: list[str] | str,
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(command, list) and command and command[0].endswith("debugfs"):
+            debugfs_calls.append(list(command))
+        return original_run(command, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(add_file_module.subprocess, "run", counting_run)
+    add_files(
+        executable=False,
+        file_paths=files,
+        image_path=str(ext2_image),
+        subdirectory="bin",
+    )
+
+    # ext2_add_files batches all writes into a single debugfs session.
+    assert len(debugfs_calls) == 1, f"expected 1 debugfs invocation, got {len(debugfs_calls)}: {debugfs_calls}"
+
+
+def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
+    """Files added via add_files() are visible in the ext2 partition."""
+    files = []
+    for name in ("zalpha", "zbeta", "zgamma"):
+        path = tmp_path / name
+        path.write_text("hi\n")
+        files.append(str(path))
+    add_files(
+        executable=True,
+        file_paths=files,
+        image_path=str(ext2_image),
+        subdirectory="bin",
+    )
+    ext2_start_sector = compute_directory_sector(image_path=str(ext2_image))
+    partition = tmp_path / "partition.ext2"
+    subprocess.run(
+        ["dd", f"if={ext2_image}", f"of={partition}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
+        check=True,
+    )
+    listing = subprocess.run(
+        ["debugfs", "-R", "ls /bin", str(partition)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    for name in ("zalpha", "zbeta", "zgamma"):
+        assert name in listing, f"{name!r} not found in ext2 /bin listing"
