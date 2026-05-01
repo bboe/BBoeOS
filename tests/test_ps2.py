@@ -14,6 +14,7 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,6 +49,13 @@ def main() -> int:
         help="boot QEMU with the drive attached as a floppy (if=floppy)",
     )
     arguments = parser.parse_args()
+    subprocess.run(
+        ["./make_os.sh"],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     inject_keys(
         expected=b"hi\r\n",
         floppy=arguments.floppy,
