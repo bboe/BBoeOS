@@ -23,33 +23,37 @@ jobs:
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
-      - name: Install dependencies
+      - name: Install build dependencies
         if: matrix.suite != 'test_cc'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
+      - name: Install pytest
+        if: matrix.suite == 'test_unit'
+        run: pip install pytest
       - name: Run ${{ matrix.suite }}
-        run: python3 tests/${{ matrix.script }} ${{ matrix.extra_args }}
+        run: ${{ matrix.command }}
     strategy:
       fail-fast: false
       matrix:
         # test_programs_ext2 first so the longest job starts dispatching ahead of the others.
         include:
           - suite: test_programs_ext2
-            script: test_programs.py
-            extra_args: --filesystem ext2 --slow
+            command: python3 tests/test_programs.py --filesystem ext2 --slow
           - suite: test_archive
-            script: test_archive.py
+            command: python3 tests/test_archive.py
           - suite: test_asm
-            script: test_asm.py
+            command: python3 tests/test_asm.py
           - suite: test_bboefs
-            script: test_bboefs.py
+            command: python3 tests/test_bboefs.py
           - suite: test_cc
-            script: test_cc.py
+            command: python3 tests/test_cc.py
           - suite: test_draw
-            script: test_draw.py
+            command: python3 tests/test_draw.py
           - suite: test_floppy_boot
-            script: test_floppy_boot.py
+            command: python3 tests/test_floppy_boot.py
           - suite: test_programs_bbfs
-            script: test_programs.py
+            command: python3 tests/test_programs.py
+          - suite: test_unit
+            command: python3 -m pytest tests/unit/

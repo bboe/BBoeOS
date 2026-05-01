@@ -22,7 +22,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from add_file import (  # noqa: E402

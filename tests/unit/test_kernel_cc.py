@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
 
@@ -1263,17 +1263,17 @@ def test_extern_local_rejected() -> None:
     assert "extern" in error.lower(), f"Expected error about extern in function body, got: {error}"
 
 
-def test_net_transmit_buffer_named_constant() -> None:
-    """NET_TRANSMIT_BUFFER resolves as a named constant (immediate), not a memory operand."""
+def test_named_constant_emits_immediate_not_memory_operand() -> None:
+    """A NAMED_CONSTANTS identifier resolves as an immediate, not ``[name]``."""
     source = """
-        void test_net_buf() {
+        void test_buffer_addr() {
             uint8_t *buf;
-            buf = NET_TRANSMIT_BUFFER;
+            buf = BUFFER;
         }
     """
     output = _kernel(source)
-    assert "NET_TRANSMIT_BUFFER" in output
-    assert "[NET_TRANSMIT_BUFFER]" not in output
+    assert "BUFFER" in output
+    assert "[BUFFER]" not in output
 
 
 # ---------------------------------------------------------------------------
@@ -1411,11 +1411,17 @@ def test_tail_call_thunk_suppresses_in_register_spill() -> None:
     its in_register param as a Var arg never reads the local stack slot —
     the named register holds the value throughout.  The prologue should
     emit no ``mov [bp-N], <reg>`` spill for that param.
+
+    The function pointer is declared at file scope (matching how vfs.c
+    actually uses this pattern) so the function body is the single
+    TailCall statement the optimization is gated on — a local
+    declaration would make the body two statements and disqualify it.
     """
     asm = _kernel("""
+        int (*vfs_find_fn)(int p __attribute__((in_register("si"))));
+
         __attribute__((carry_return))
         int vfs_find(int path __attribute__((in_register("si")))) {
-            int (*vfs_find_fn)(int p __attribute__((in_register("si"))));
             __tail_call(vfs_find_fn, path);
         }
     """)
@@ -1432,11 +1438,15 @@ def test_tail_call_thunk_arg_sources_named_register() -> None:
     When the thunk body is ``__tail_call(fn, param)`` and param is an
     in_register param, the arg move should emit ``mov <target>, <named_reg>``
     rather than loading from the stack slot (``mov <target>, [bp-N]``).
+
+    File-scope ``vfs_find_fn`` keeps the body single-statement; see the
+    note on test_tail_call_thunk_suppresses_in_register_spill.
     """
     asm = _kernel("""
+        int (*vfs_find_fn)(int p __attribute__((in_register("di"))));
+
         __attribute__((carry_return))
         int vfs_find(int path __attribute__((in_register("si")))) {
-            int (*vfs_find_fn)(int p __attribute__((in_register("di"))));
             __tail_call(vfs_find_fn, path);
         }
     """)

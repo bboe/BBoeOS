@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
 
@@ -358,7 +358,14 @@ def test_member_access_uint16_write_32bit() -> None:
 
 
 def test_global_struct_array_bss_size() -> None:
-    """Global struct array with explicit size emits (N*sizeof) in BSS."""
+    """Global struct array sizes to (N * sizeof(struct)) in the BSS trailer.
+
+    cc.py reserves BSS via the trailer-magic protocol — emit ``dd N``
+    + ``dw 0xB032`` and let program_enter zero-fill at load — rather
+    than allocating bytes in the binary.  For ``struct item table[5]``
+    where struct item is 3 bytes (char=1 + int=2), the trailer must
+    declare 15 bytes via ``_bss_end equ _program_end + 15``.
+    """
     asm = _compile(
         """
         struct item { char x; int y; };
@@ -369,8 +376,7 @@ def test_global_struct_array_bss_size() -> None:
     """,
         bits=16,
     )
-    # struct item is 3 bytes (char=1 + int=2); 5 elements = 15 bytes
-    assert "(5)*3" in asm or "times 15" in asm, f"Expected '(5)*3' or 'times 15' for 5-element struct array BSS\n{asm}"
+    assert "_bss_end equ _program_end + 15" in asm, f"Expected '_bss_end equ _program_end + 15' for 5-element struct array BSS\n{asm}"
 
 
 def test_global_struct_array_compiles_and_assembles() -> None:
