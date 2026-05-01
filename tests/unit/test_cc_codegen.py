@@ -47,7 +47,7 @@ FD_OFFSET_START = 2
 FD_OFFSET_TYPE = 0
 
 
-def _compile(source_text: str, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
+def _compile(source_text: str, /, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
     """Run cc.py on *source_text*; return (success, output_or_stderr)."""
     text = textwrap.dedent(source_text)
     with tempfile.TemporaryDirectory(prefix="test_kernel_") as work:
@@ -67,7 +67,7 @@ def _compile(source_text: str, *, target: str = "user", bits: int = 16) -> tuple
         return True, out.read_text()
 
 
-def _compile_and_assemble(source_text: str, bits: int = 16) -> None:
+def _compile_and_assemble(source_text: str, /, *, bits: int = 16) -> None:
     """Compile *source_text* in user mode and assemble with nasm; fail on any error."""
     text = textwrap.dedent(source_text)
     with tempfile.TemporaryDirectory(prefix="test_kernel_cc_") as work:
@@ -95,7 +95,7 @@ def _compile_and_assemble(source_text: str, bits: int = 16) -> None:
             pytest.fail(f"nasm failed:\n{nasm_result.stderr}\n--- asm ---\n{asm.read_text()}")
 
 
-def _kernel(source_text: str, bits: int = 16) -> str:
+def _kernel(source_text: str, /, *, bits: int = 16) -> str:
     """Compile *source_text* in kernel mode; fail the test on error."""
     ok, output = _compile(source_text, target="kernel", bits=bits)
     if not ok:
@@ -103,7 +103,7 @@ def _kernel(source_text: str, bits: int = 16) -> str:
     return output
 
 
-def _kernel_error(source_text: str, bits: int = 16) -> str:
+def _kernel_error(source_text: str, /, *, bits: int = 16) -> str:
     """Compile in kernel mode expecting failure; return the error message."""
     ok, output = _compile(source_text, target="kernel", bits=bits)
     if ok:
@@ -111,12 +111,12 @@ def _kernel_error(source_text: str, bits: int = 16) -> str:
     return output
 
 
-def _peephole_run(lines: list[str]) -> list[str]:
+def _peephole_run(lines: list[str], /) -> list[str]:
     """Run the x86-16 peephole pipeline over a synthetic instruction list."""
     return Peepholer(lines=lines, target=X86CodegenTarget16()).run()
 
 
-def _user(source_text: str, bits: int = 16) -> str:
+def _user(source_text: str, /, *, bits: int = 16) -> str:
     """Compile *source_text* in user mode; fail the test on error."""
     ok, output = _compile(source_text, target="user", bits=bits)
     if not ok:
