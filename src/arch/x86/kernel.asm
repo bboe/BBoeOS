@@ -60,8 +60,8 @@ directory_sector dw 0                   ; offset 3
         ;;     kernel_stack                       (KERNEL_STACK_BYTES = 4 KB)
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
-        ;;   FRAME_BITMAP_PHYS                    (FRAME_BITMAP_BYTES = 8 KB)
-        ;;   LOW_RESERVE_BYTES                    (sweep ceiling)
+        ;;   FRAME_BITMAP_PHYS                    (frame_bitmap_bytes — runtime, ≤ 32 KB at the 1 GB direct-map cap)
+        ;;   end-of-reserved (= FRAME_BITMAP_PHYS + frame_bitmap_bytes)
         ;;
         ;; KERNEL_RESERVED_BASE is the first page above kernel.bin,
         ;; computed by make_os.sh and passed as -DKERNEL_RESERVED_BASE=N.
@@ -70,19 +70,17 @@ directory_sector dw 0                   ; offset 3
         ;;
         ;; The post-kernel cluster (stack / boot PD / first PT /
         ;; frame_bitmap) lives outside kernel.bin so the on-disk image
-        ;; doesn't carry their zero-initialized bytes; the bitmap
-        ;; allocator reserves the underlying frames via the
-        ;; `LOW_RESERVE_BYTES` sweep at boot.
+        ;; doesn't carry their zero-initialized bytes.  The kernel's
+        ;; reserve sweep covers [KERNEL_LOAD_PHYS, FRAME_BITMAP_PHYS +
+        ;; frame_bitmap_bytes); the bitmap's byte length is sized at
+        ;; boot from the highest type=1 E820 base (clamped to the
+        ;; direct-map ceiling — see LAST_KERNEL_PDE), so a `-m 1`
+        ;; session pays only ~20 bytes for the bitmap while a
+        ;; `-m 1024` session pays 32 KB.
         ;;
         ;; The legacy program_scratch staging buffer (32 KB) is gone:
         ;; program_enter streams the binary directly from disk into
         ;; per-program user frames via vfs_read_sec, sector by sector.
-        ;;
-        ;; frame_bitmap (8 KB, 256 MB ceiling) lives in the post-kernel
-        ;; cluster rather than inside kernel.bin so the 8 KB of zero-init
-        ;; storage isn't carried on disk.  frame_init zeroes it before
-        ;; any allocator call, so the on-disk garbage at that physical
-        ;; range doesn't matter.
         ;;
         ;; sector_buffer (512 B) and ext2_sd_buffer (1 KB) share a
         ;; single 4 KB FS scratch frame allocated by `vfs_init` from
@@ -105,7 +103,6 @@ directory_sector dw 0                   ; offset 3
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE         equ 768
         FIRST_KERNEL_PT_PHYS     equ BOOT_PD_PHYS + 0x1000
-        FRAME_BITMAP_BYTES       equ 0x2000                              ; 8 KB (256 MB ceiling, mirrored in frame.asm)
         FRAME_BITMAP_PHYS        equ FIRST_KERNEL_PT_PHYS + 0x1000
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
@@ -113,8 +110,7 @@ directory_sector dw 0                   ; offset 3
         KERNEL_STACK_BYTES       equ 0x1000                              ; 4 KB (peak measured ~412 B; ~10× margin)
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
-        LAST_KERNEL_PDE          equ 832         ; PDEs [768..831]: 64 entries × 4 MB = 256 MB
-        LOW_RESERVE_BYTES        equ FRAME_BITMAP_PHYS + FRAME_BITMAP_BYTES       ; bitmap-allocator sweep ceiling
+        LAST_KERNEL_PDE          equ 1024        ; PDEs [768..1023]: 256 entries × 4 MB = 1 GB direct map ceiling
         frame_bitmap             equ DIRECT_MAP_BASE + FRAME_BITMAP_PHYS
         kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
@@ -213,14 +209,15 @@ high_entry:
         ;;      shared user code page, so its phys location must
         ;;      stay pinned.
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
-        ;;      KERNEL_LOAD_PHYS..LOW_RESERVE_BYTES.  Covers the
-        ;;      kernel image, kernel stack, boot PD, first kernel
-        ;;      PT, frame_bitmap.
+        ;;      KERNEL_LOAD_PHYS..(FRAME_BITMAP_PHYS + frame_bitmap_bytes).
+        ;;      Covers the kernel image, kernel stack, boot PD, first
+        ;;      kernel PT, and the runtime-sized frame_bitmap.
         mov eax, 0x10000
         mov ecx, 0x1000                 ; vDSO target page
         call frame_reserve_range
         mov eax, KERNEL_LOAD_PHYS
-        mov ecx, LOW_RESERVE_BYTES - KERNEL_LOAD_PHYS
+        mov ecx, [frame_bitmap_bytes]
+        add ecx, FRAME_BITMAP_PHYS - KERNEL_LOAD_PHYS
         call frame_reserve_range
 
         ;; --- Allocate kernel PTs for installed RAM only ---

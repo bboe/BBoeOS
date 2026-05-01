@@ -1,12 +1,14 @@
 ;;; ------------------------------------------------------------------------
 ;;; memory_management/frame.asm — physical-frame bitmap allocator.
 ;;;
-;;; Tracks free vs in-use 4 KB physical frames in a static bitmap sized
-;;; for a 256 MB ceiling (8192 bytes, one bit per frame).  RAM beyond
-;;; the ceiling is ignored.  All entry points run at CPL=0.
+;;; Tracks free vs in-use 4 KB physical frames in a bitmap whose size is
+;;; chosen at boot from the highest E820 base seen.  RAM beyond the
+;;; clamp ceiling (LAST_KERNEL_PDE worth of direct-map coverage) is
+;;; ignored.  All entry points run at CPL=0.
 ;;;
 ;;; Public:
-;;;   frame_init(esi = e820 list)        scan E820, mark free regions
+;;;   frame_init(esi = e820 list)        scan E820, size & init bitmap,
+;;;                                       mark free regions
 ;;;   frame_alloc()         -> EAX = phys, CF on OOM (CF clear on hit)
 ;;;   frame_free(eax = phys)             clear the bit
 ;;;   frame_reserve_range(eax = base, ecx = length)
@@ -21,16 +23,22 @@
 ;;; shift-count masking — `shl ebx, cl` masks CL to 5 bits, so we can
 ;;; pass the raw frame number in CL as long as we mask the byte offset
 ;;; separately.
+;;;
+;;; The bitmap lives at the fixed kernel-virt address `frame_bitmap`
+;;; (= DIRECT_MAP_BASE + FRAME_BITMAP_PHYS, in the post-kernel cluster
+;;; — see kernel.asm).  Its byte length is `[frame_bitmap_bytes]`,
+;;; populated by frame_init from the highest type=1 E820 entry,
+;;; clamped so the bitmap never describes frames above the kernel
+;;; direct map's reach (LAST_KERNEL_PDE in kernel.asm).  See
+;;; project_frame_bitmap_dynamic_e820 in memory for the design notes.
 ;;; ------------------------------------------------------------------------
 
-;; FRAME_BITMAP_BITS / FRAME_BITMAP_BYTES size the bitmap for a 256 MB
-;; ceiling.  The storage itself lives at FRAME_BITMAP_PHYS in the
-;; post-kernel reserved cluster (see kernel.asm) — extracting the
-;; bitmap from kernel.bin saves 8 KB of zero bytes on disk.  See
-;; project_frame_bitmap_dynamic_e820 in memory for the future move
-;; to E820-sized runtime allocation that 4 GB support will need.
-%define FRAME_BITMAP_BITS       (256 * 1024 * 1024 / 4096)
-%define FRAME_BITMAP_BYTES      (FRAME_BITMAP_BITS / 8)
+;; Direct-map ceiling: the kernel can only reach phys < (LAST_KERNEL_PDE
+;; - FIRST_KERNEL_PDE) * 4 MB through the kernel direct map.  frame_init
+;; clamps `frame_max_phys` to this ceiling so the bitmap never describes
+;; frames the kernel has no virtual address for.  RAM above this is
+;; silently ignored (kmap window territory — phase 2).
+%define FRAME_DIRECT_MAP_LIMIT  ((LAST_KERNEL_PDE - FIRST_KERNEL_PDE) * 0x400000)
 
 frame_alloc:
         ;; First-fit scan from frame_search_hint.  Returns EAX = phys
@@ -59,7 +67,7 @@ frame_alloc:
         sub ebx, frame_bitmap
         shl ebx, 3                              ; bytes -> bits
         add eax, ebx                            ; EAX = absolute frame number
-        cmp eax, FRAME_BITMAP_BITS
+        cmp eax, [frame_bitmap_bits]
         jae .oom
         ;; Mark the bit set.  CL = bit position (low 5 bits used by SHL).
         mov ecx, eax
@@ -84,7 +92,9 @@ frame_alloc:
 .next_dword:
         add edi, 4
         xor ecx, ecx                            ; only the first dword respects the hint
-        cmp edi, frame_bitmap + FRAME_BITMAP_BYTES
+        mov ebx, frame_bitmap
+        add ebx, [frame_bitmap_bytes]
+        cmp edi, ebx
         jb .scan_dword
 .oom:
         stc
@@ -100,7 +110,7 @@ frame_free:
         push ebx
         push ecx
         shr eax, 12                             ; frame number
-        cmp eax, FRAME_BITMAP_BITS
+        cmp eax, [frame_bitmap_bits]
         jae .done
         mov ecx, eax
         mov ebx, 1
@@ -120,26 +130,106 @@ frame_free:
 
 frame_init:
         ;; ESI = pointer to the E820 list (24-byte entries; zero entry
-        ;; terminates).  Marks every type=1 region as free, leaving the
-        ;; rest reserved.  Caller follows up with frame_reserve_range
-        ;; for kernel-image / boot-PD / first-PT carve-outs.
+        ;; terminates).  Two passes:
+        ;;
+        ;;   1. Find the highest type=1 frame base across the table.
+        ;;      Clamp to FRAME_DIRECT_MAP_LIMIT (RAM beyond the kernel
+        ;;      direct map is unreachable and stays untracked).
+        ;;   2. Size the bitmap from that ceiling, fill all-1s, then
+        ;;      walk the table again marking every type=1 region as
+        ;;      free.
+        ;;
+        ;; Caller follows up with frame_reserve_range for kernel-image
+        ;; / boot-PD / first-PT / bitmap carve-outs.
         push eax
         push ebx
         push ecx
         push edx
         push edi
-        ;; Start from all-reserved.
-        mov edi, frame_bitmap
-        mov ecx, FRAME_BITMAP_BYTES / 4
-        mov eax, 0xFFFFFFFF
-        cld
-        rep stosd
-        mov dword [frame_free_count], 0
-.entry_loop:
+        push esi
+
+        ;; --- Pass 1: find the highest type=1 frame base ---
+        ;; ESI was just pushed and points at the E820 list head; we
+        ;; advance it during the scan and rewind from [esp] for pass 2.
+        mov dword [frame_max_phys], 0
+.scan_loop:
         mov eax, [esi + 0]                      ; base low
         mov ebx, [esi + 8]                      ; length low
         mov edx, [esi + 16]                     ; type
         ;; Zero-length terminator: low and high length both zero.
+        test ebx, ebx
+        jnz .scan_check
+        cmp dword [esi + 12], 0
+        je .scan_done
+.scan_check:
+        cmp edx, 1                              ; type 1 = usable RAM
+        jne .scan_next
+        ;; Skip entries whose base is above the 4 GB low-base ceiling.
+        cmp dword [esi + 4], 0
+        jne .scan_next
+        ;; Highest frame base fully contained in [base, base+length):
+        ;;   round_up_base   = (base + 0xFFF) & ~0xFFF
+        ;;   round_down_end  = (base + length) & ~0xFFF
+        ;; If round_up_base >= round_down_end the entry holds no full
+        ;; frame (e.g. sub-frame BIOS slivers) and we ignore it; else
+        ;; the highest fully-contained frame base is round_down_end -
+        ;; 0x1000.
+        mov ecx, eax
+        add ecx, 0xFFF
+        and ecx, ~0xFFF                         ; ECX = round_up_base
+        mov edx, eax
+        add edx, ebx
+        and edx, ~0xFFF                         ; EDX = round_down_end
+        cmp ecx, edx
+        jae .scan_next                          ; no full frame in this entry
+        sub edx, 0x1000                         ; EDX = highest frame base
+        cmp edx, [frame_max_phys]
+        jbe .scan_next
+        mov [frame_max_phys], edx
+.scan_next:
+        add esi, 24
+        jmp .scan_loop
+.scan_done:
+        ;; Clamp frame_max_phys to the direct-map ceiling.  Frames
+        ;; above this are unreachable through the kernel direct map.
+        mov eax, [frame_max_phys]
+        cmp eax, FRAME_DIRECT_MAP_LIMIT
+        jb .clamp_ok
+        mov eax, FRAME_DIRECT_MAP_LIMIT - 0x1000
+        mov [frame_max_phys], eax
+.clamp_ok:
+
+        ;; --- Size the bitmap and fill all-1s ---
+        ;;
+        ;; total_frames = (frame_max_phys >> 12) + 1
+        ;; dword_count  = (total_frames + 31) / 32          (round up)
+        ;; bitmap_bytes = dword_count * 4
+        ;; bitmap_bits  = dword_count * 32
+        mov eax, [frame_max_phys]
+        shr eax, 12                             ; highest frame number
+        inc eax                                 ; total frames
+        add eax, 31
+        shr eax, 5                              ; dword count
+        mov ecx, eax
+        shl ecx, 2
+        mov [frame_bitmap_bytes], ecx
+        shl eax, 5
+        mov [frame_bitmap_bits], eax
+
+        mov edi, frame_bitmap
+        mov ecx, [frame_bitmap_bytes]
+        shr ecx, 2                              ; dword count
+        mov eax, 0xFFFFFFFF
+        cld
+        rep stosd
+        mov dword [frame_free_count], 0
+
+        ;; --- Pass 2: mark every type=1 region as free ---
+        mov esi, [esp]                          ; ESI = E820 list head
+.entry_loop:
+        mov eax, [esi + 0]                      ; base low
+        mov ebx, [esi + 8]                      ; length low
+        mov edx, [esi + 16]                     ; type
         test ebx, ebx
         jnz .got_entry
         cmp dword [esi + 12], 0
@@ -147,8 +237,6 @@ frame_init:
 .got_entry:
         cmp edx, 1                              ; type 1 = usable RAM
         jne .skip
-        ;; Skip entries above the 4 GB low-base ceiling — bases above
-        ;; 4 GB live in [esi+4] and we don't model them in the bitmap.
         cmp dword [esi + 4], 0
         jne .skip
         call frame_mark_range_free              ; (eax = base, ebx = length)
@@ -162,6 +250,7 @@ frame_init:
         mov eax, [frame_free_count]
         mov [frame_total], eax
         mov dword [frame_search_hint], 0
+        pop esi
         pop edi
         pop edx
         pop ecx
@@ -172,6 +261,8 @@ frame_init:
 frame_mark_range_free:
         ;; EAX = base, EBX = length.  Marks complete frames within the
         ;; range as free; partial frames at either end are skipped.
+        ;; Out-of-range frames (above the bitmap clamp) are silently
+        ;; dropped.
         push eax
         push ebx
         push ecx
@@ -190,7 +281,7 @@ frame_mark_range_free:
 .loop:
         mov edx, eax
         shr edx, 12                             ; frame number
-        cmp edx, FRAME_BITMAP_BITS
+        cmp edx, [frame_bitmap_bits]
         jae .skip
         mov ebx, 1
         push ecx
@@ -210,9 +301,6 @@ frame_mark_range_free:
         inc dword [frame_free_count]
 .already_free:
         pop ecx
-        cmp eax, [frame_max_phys]
-        jbe .skip
-        mov [frame_max_phys], eax
 .skip:
         add eax, 0x1000
         cmp eax, ecx
@@ -247,7 +335,7 @@ frame_reserve_range:
 .loop:
         mov edx, eax
         shr edx, 12                             ; frame number
-        cmp edx, FRAME_BITMAP_BITS
+        cmp edx, [frame_bitmap_bits]
         jae .skip
         mov ebx, 1
         push ecx
@@ -280,16 +368,21 @@ frame_reserve_range:
 
         ;; frame_bitmap storage lives at FRAME_BITMAP_PHYS in the
         ;; post-kernel reserved cluster (kernel.asm), reached through
-        ;; the kernel direct map.  Keeping the 8 KB of zero-init storage
-        ;; outside kernel.bin trims the on-disk image.  frame_init
-        ;; populates the bitmap before any frame_alloc / frame_free
-        ;; runs, so the on-disk garbage there doesn't matter.
+        ;; the kernel direct map.  Keeping the storage outside
+        ;; kernel.bin trims the on-disk image; the underlying frames
+        ;; are reserved at boot via the LOW_RESERVE-region sweep, which
+        ;; uses the same dynamic bitmap_bytes value computed by
+        ;; frame_init.
         align 4
+frame_bitmap_bits:
+        dd 0
+frame_bitmap_bytes:
+        dd 0
 frame_free_count:
+        dd 0
+frame_max_phys:
         dd 0
 frame_search_hint:
         dd 0
 frame_total:
-        dd 0
-frame_max_phys:
         dd 0

@@ -6,6 +6,28 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Size frame_bitmap from E820; lift direct map to 1 GB (2026-04-30)
+- `frame_init` now does a two-pass E820 walk: pass 1 finds the highest
+  type=1 frame base, then sizes the bitmap to fit, then pass 2 marks
+  the free regions.  `frame_bitmap_bytes` and `frame_bitmap_bits`
+  become runtime variables in `frame.asm` BSS; `FRAME_BITMAP_BITS` /
+  `FRAME_BITMAP_BYTES` constants are gone.  The bitmap end is also
+  the kernel reserve sweep's ceiling, replacing the static
+  `LOW_RESERVE_BYTES` equ.
+- `LAST_KERNEL_PDE` rises from 832 to 1024, lifting the direct-map
+  ceiling from 256 MB to 1 GB.  `frame_init` clamps `frame_max_phys`
+  to this ceiling so the bitmap never describes frames the kernel
+  has no virtual address for; RAM above 1 GB stays untracked
+  (kmap-window territory — phase 2).
+- Cost on `-m 1`: ~20 bytes for the bitmap (one dword's worth) and
+  one kernel PT, vs. the prior static 8 KB and 64 PTs' worth of
+  ceiling.  Cost on `-m 1024`: 32 KB bitmap and 256 kernel PTs, all
+  reachable through the direct map.  The build-time VGA-hole
+  assertion is bumped from `0x5000` to `0xB000` (4 KB stack + 4 KB
+  boot PD + 4 KB first kernel PT + 32 KB worst-case bitmap) so the
+  kernel-reserved region still fits under `-m 1`'s 0x9FC00
+  conventional-RAM ceiling.
+
 ### Reclaim the boot PD frame; introduce kernel_idle_pd (2026-04-30)
 - The boot PD frame (4 KB at `BOOT_PD_PHYS`) is no longer pinned for
   the kernel's lifetime.  After the kernel-PT-alloc loop, `high_entry`
