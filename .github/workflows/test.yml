@@ -20,12 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
-        if: matrix.suite != 'test_cc'
+        if: matrix.suite != 'test_cc_compatibility'
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
       - name: Install build dependencies
-        if: matrix.suite != 'test_cc'
+        if: matrix.suite != 'test_cc_compatibility'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
@@ -48,8 +48,8 @@ jobs:
             command: python3 tests/test_asm.py
           - suite: test_bboefs
             command: python3 tests/test_bboefs.py
-          - suite: test_cc
-            command: python3 tests/test_cc.py
+          - suite: test_cc_compatibility
+            command: python3 tests/test_cc_compatibility.py
           - suite: test_draw
             command: python3 tests/test_draw.py
           - suite: test_floppy_boot

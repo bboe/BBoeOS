@@ -7,8 +7,8 @@ type errors and syntax mistakes that cc.py's minimal parser might
 miss.
 
 Usage:
-    tests/test_cc.py            # check all C sources
-    tests/test_cc.py cat        # check one program
+    tests/test_cc_compatibility.py            # check all C sources
+    tests/test_cc_compatibility.py cat        # check one program
 """
 
 from __future__ import annotations
