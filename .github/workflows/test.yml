@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    name: ${{ matrix.suite }}
     runs-on: ubuntu-latest
     env:
       BBOE_ASM_SELF_HOST_TIMEOUT: 32
