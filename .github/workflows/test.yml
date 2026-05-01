@@ -38,10 +38,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # test_programs_ext2 first so the longest job starts dispatching ahead of the others.
+        # The two longest jobs (test_programs_ext2 and test_programs_bbfs, both
+        # running with --slow) lead the matrix so they start dispatching ahead
+        # of the shorter ones.
         include:
           - suite: test_programs_ext2
             command: python3 tests/test_programs.py --filesystem ext2 --slow
+          - suite: test_programs_bbfs
+            command: python3 tests/test_programs.py --slow
           - suite: test_archive
             command: python3 tests/test_archive.py
           - suite: test_asm
@@ -54,8 +58,6 @@ jobs:
             command: python3 tests/test_draw.py
           - suite: test_floppy_boot
             command: python3 tests/test_floppy_boot.py
-          - suite: test_programs_bbfs
-            command: python3 tests/test_programs.py
           - suite: test_programs_floppy
             command: python3 tests/test_programs.py --floppy
           - suite: test_unit

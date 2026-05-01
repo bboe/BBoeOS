@@ -574,7 +574,15 @@ TESTS: list[ProgramTest] = [
     # kmap_map / kmap_unmap end-to-end.  The verify pass after the
     # write loop catches any kmap zero-fill that lands at the wrong
     # phys.
-    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="2048", slow=True, timeout=180.0),
+    ProgramTest(
+        "bigbss",
+        ["bigbss"],
+        r"^bigbss: OK$",
+        filesystems=_BBFS_ONLY,
+        memory="2048",
+        slow=True,
+        timeout=180.0,
+    ),
     # Tripwire-low: same program at -m 2047 (one MB less RAM, ~256
     # fewer frames in the bitmap).  At -m 2047 BIGBSS_PAGES + per-PD
     # overhead no longer fits, and program_enter OOMs partway
@@ -586,6 +594,7 @@ TESTS: list[ProgramTest] = [
         "bigbss_oom",
         ["bigbss", "echo hello"],
         r"^exec: out of memory$[\s\S]+^hello$",
+        filesystems=_BBFS_ONLY,
         memory="2047",
         slow=True,
         timeout=120.0,
@@ -598,6 +607,7 @@ TESTS: list[ProgramTest] = [
         "bigbss_fail",
         ["bigbss_fail", "echo hello"],
         r"^exec: out of memory$[\s\S]+^hello$",
+        filesystems=_BBFS_ONLY,
         memory="2048",
         slow=True,
         timeout=60.0,
