@@ -4,7 +4,7 @@
 //
 //   Cursor  : vga_get_cursor / vga_set_cursor (CRTC index/data pair)
 //   Display : vga_clear_screen / vga_scroll_up / vga_teletype /
-//             vga_write_attribute (text framebuffer at 0xC00B8000)
+//             vga_write_attribute (text framebuffer at DIRECT_MAP_BASE + 0xB8000)
 //   Mode 13h: vga_fill_block / vga_set_palette_color
 //   Mode set: vga_set_mode (programs Misc/Seq/CRTC/GC/AC + DAC + clears FB)
 //   ioctl   : fd_ioctl_vga (SYS_IO_IOCTL backend for /dev/vga fds)
@@ -191,7 +191,7 @@ asm("vga_clear_screen:\n"
     "        push edx\n"
     "        push edi\n"
 
-    "        mov edi, 0xC00B8000\n"
+    "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov ax, 0x0720\n"            // 0x07 attribute, 0x20 ' '
     "        mov ecx, 80 * 25\n"
     "        cld\n"
@@ -206,7 +206,7 @@ asm("vga_clear_screen:\n"
     "        pop eax\n"
     "        ret");
 
-// EDI = 0xC00A0000 + row*2560 + col*8 — flat 32-bit linear address.
+// EDI = DIRECT_MAP_BASE + 0xA0000 + row*2560 + col*8 — flat 32-bit linear address.
 // Writes 8 rows of 8 pixels each, advancing 320 bytes per row.
 void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
                     int col_row __attribute__((in_register("bx"))))
@@ -224,7 +224,14 @@ void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
 
     col = col_row & 0xFF;
     row = (col_row >> 8) & 0xFF;
-    base = 0xC00A0000 + row * 2560 + col * 8;
+    /* VGA mode-13 framebuffer at phys 0xA0000, kernel-virt =
+       DIRECT_MAP_BASE + 0xA0000.  cc.py doesn't resolve NASM equ
+       symbols inside C expressions, so the value is folded in here.
+       Keep in sync with KERNEL_VIRT_BASE (= DIRECT_MAP_BASE) in
+       constants.asm — the inline-asm sites in this file reference
+       DIRECT_MAP_BASE symbolically; only this C-side expression
+       needs a manual update when the base shifts. */
+    base = 0xFF8A0000 + row * 2560 + col * 8;
 
     row_index = 0;
     while (row_index < 8) {
@@ -276,13 +283,13 @@ asm("vga_scroll_up:\n"
     "        push esi\n"
     "        push edi\n"
 
-    "        mov esi, 0xC00B8000 + 80 * 2\n"          // source: row 1
-    "        mov edi, 0xC00B8000\n"                   // dest:   row 0
+    "        mov esi, DIRECT_MAP_BASE + 0xB8000 + 80 * 2\n"          // source: row 1
+    "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"                   // dest:   row 0
     "        mov ecx, (25 - 1) * 80\n"
     "        cld\n"
     "        rep movsw\n"
 
-    "        mov edi, 0xC00B8000 + (25 - 1) * 80 * 2\n"
+    "        mov edi, DIRECT_MAP_BASE + 0xB8000 + (25 - 1) * 80 * 2\n"
     "        mov ax, 0x0720\n"
     "        mov ecx, 80\n"
     "        rep stosw\n"
@@ -469,16 +476,16 @@ asm("vga_set_mode:\n"
     "        dec cx\n"
     "        jnz .vga_set_mode_dac\n"
 
-    // 11. Clear framebuffer (text → 0xC00B8000 / 0x0720, mode 13 → 0xC00A0000 / 0).
+    // 11. Clear framebuffer (text → DIRECT_MAP_BASE + 0xB8000 / 0x0720, mode 13 → DIRECT_MAP_BASE + 0xA0000 / 0).
     "        cmp ah, 0x13\n"
     "        je .vga_set_mode_clear_graphics\n"
-    "        mov edi, 0xC00B8000\n"
+    "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov ax, 0x0720\n"
     "        mov ecx, 80 * 25\n"
     "        rep stosw\n"
     "        jmp .vga_set_mode_clear_done\n"
     ".vga_set_mode_clear_graphics:\n"
-    "        mov edi, 0xC00A0000\n"
+    "        mov edi, DIRECT_MAP_BASE + 0xA0000\n"
     "        xor eax, eax\n"
     "        mov ecx, 320 * 200 / 2\n"
     "        cld\n"
@@ -552,7 +559,7 @@ asm("vga_teletype:\n"
     "        movzx ebx, dl\n"
     "        add eax, ebx\n"
     "        shl eax, 1\n"                       // byte offset
-    "        add eax, 0xC00B8000\n"
+    "        add eax, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov edi, eax\n"
 
     "        mov al, cl\n"
@@ -624,7 +631,7 @@ asm("vga_write_attribute:\n"
     "        movzx ebx, dl\n"
     "        add eax, ebx\n"
     "        shl eax, 1\n"
-    "        add eax, 0xC00B8000\n"
+    "        add eax, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov edi, eax\n"
 
     "        mov al, cl\n"

@@ -1,15 +1,16 @@
 ;;; ------------------------------------------------------------------------
 ;;; memory_management/address_space.asm — per-program address-space helpers.
 ;;;
-;;; Builds and tears down per-program user page directories.  Kernel-half
-;;; PDEs (768..1023, sized at boot to cover installed RAM up to ~1020 MB
-;;; through PDEs 768..1022 plus the kmap window at PDE 1023) are copied
-;;; verbatim from `kernel_idle_pd`'s kernel half at address_space_create
-;;; time and never modified afterward — that invariant is what lets us
-;;; avoid fan-out updates when the kernel installs a new kernel-half
-;;; mapping.  `kernel_idle_pd` is built once by `high_entry` (after the
-;;; kernel-PT-alloc loop) and serves both as the canonical PDE source
-;;; and as the CR3 target between programs.
+;;; Builds and tears down per-program user page directories.
+;;; Kernel-half PDEs (FIRST_KERNEL_PDE..1023; that's PDEs
+;;; 1022..1023 — one direct-map PT plus the kmap window — at the
+;;; current KERNEL_VIRT_BASE = 0xFF800000) are copied verbatim from
+;;; `kernel_idle_pd`'s kernel half at address_space_create time and
+;;; never modified afterward — that invariant is what lets us avoid
+;;; fan-out updates when the kernel installs a new kernel-half
+;;; mapping.  `kernel_idle_pd` is built once by `high_entry` (after
+;;; the kernel-PT-alloc loop) and serves both as the canonical PDE
+;;; source and as the CR3 target between programs.
 ;;;
 ;;; All PD / PT reads and writes go through `kmap_map` /
 ;;; `kmap_unmap` (memory_management/kmap.asm) so PD or PT frames
@@ -37,14 +38,18 @@
 ;;; per program load and tears it down on `sys_exit`.
 ;;; ------------------------------------------------------------------------
 
-%define ADDRESS_SPACE_DIRECT_MAP_BASE   0xC0000000
-%define ADDRESS_SPACE_KERNEL_PDE_COUNT  256             ; PDEs 768..1023 are kernel-half
+;; Counts derive from kernel.asm's `FIRST_KERNEL_PDE` `equ` so that
+;; lifting KERNEL_VIRT_BASE only touches one constant chain — NASM
+;; resolves `equ` forward references across `%include`s, so it's
+;; safe to reference symbols from the parent file here.
+%define ADDRESS_SPACE_DIRECT_MAP_BASE   DIRECT_MAP_BASE
+%define ADDRESS_SPACE_KERNEL_PDE_COUNT  (1024 - FIRST_KERNEL_PDE)
 %define ADDRESS_SPACE_PDE_PRESENT       0x001
 %define ADDRESS_SPACE_PDE_RW            0x002
 %define ADDRESS_SPACE_PDE_USER          0x004
 %define ADDRESS_SPACE_PDE_USER_RW       (ADDRESS_SPACE_PDE_PRESENT | ADDRESS_SPACE_PDE_RW | ADDRESS_SPACE_PDE_USER)
 %define ADDRESS_SPACE_PTE_SHARED        0x200           ; AVL[0]: frame is shared, address_space_destroy skips frame_free
-%define ADDRESS_SPACE_USER_PDE_COUNT    768             ; PDEs 0..767 are user-half
+%define ADDRESS_SPACE_USER_PDE_COUNT    FIRST_KERNEL_PDE
 
 address_space_create:
         ;; Allocate one frame, zero it, then copy the top-256 PDEs
@@ -70,7 +75,7 @@ address_space_create:
         xor eax, eax
         cld
         rep stosd
-        ;; Copy the kernel-half PDEs (768..1023) from kernel_idle_pd.
+        ;; Copy the kernel-half PDEs (FIRST_KERNEL_PDE..1023) from kernel_idle_pd.
         mov eax, [kernel_idle_pd_phys]
         call kmap_map                           ; EAX = idle_kvirt
         mov esi, eax

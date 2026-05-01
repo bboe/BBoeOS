@@ -288,15 +288,17 @@ TESTS: list[ProgramTest] = [
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # 1 KB recursive frames overflow the 16-page user stack into the
     # unmapped page below it; same kill path as nullderef.  CR2 lands
-    # somewhere below 0xBFFF0000 (the stack base) — match the EXC0E
-    # signature loosely so future stack-size changes don't break this.
+    # somewhere below STACK_VIRT_BASE (= USER_STACK_TOP - 0x10000) — match
+    # the EXC0E signature loosely so future stack-size or KERNEL_VIRT_BASE
+    # changes don't break this.
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
-    # Confirms the user stack lives at the new top (USER_STACK_TOP =
-    # 0xC0000000, sitting at the user/kernel boundary).  ESP at iretd
-    # equals USER_STACK_TOP, so the high byte is 0xC0 — any other
-    # value (e.g. 0x40 from the pre-lift layout) means the lift
-    # didn't take effect.
-    ProgramTest("stacktop", ["stacktop"], r"^stacktop: high=C0$"),
+    # Confirms the user stack lives at the user/kernel boundary
+    # (USER_STACK_TOP = KERNEL_VIRT_BASE).  ESP at iretd equals
+    # USER_STACK_TOP, so the high byte is the high byte of
+    # KERNEL_VIRT_BASE (currently 0xff at base 0xFF800000) — any
+    # other value (e.g. 0xc0 from a prior lift, or 0x40 from the
+    # original layout) means the constants drifted out of sync.
+    ProgramTest("stacktop", ["stacktop"], r"^stacktop: high=FF$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 

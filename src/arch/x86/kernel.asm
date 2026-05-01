@@ -6,20 +6,24 @@
 ;;; conventional RAM (above the vDSO target at 0x10000, below the VGA
 ;;; aperture at 0xA0000) so the entire kernel-side reserved region
 ;;; fits under 1 MB and the OS can boot under QEMU `-m 1`.  The
-;;; kernel `org` is 0xC0000000 + KERNEL_LOAD_PHYS, which means the
-;;; kernel runs at its direct-map alias — no separate higher-half PT.
+;;; kernel `org` is KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS, which means
+;;; the kernel runs at its direct-map alias — no separate
+;;; higher-half PT.
 ;;;
 ;;; The very first byte of kernel.bin is `high_entry`, which boot.asm's
-;;; far-jump targets at virtual address HIGH_ENTRY_VIRT (0xC0020000).
-;;; high_entry installs the kernel GDT/IDT/stack, drops the boot
-;;; identity mapping, initializes the bitmap frame allocator, allocates
-;;; only the kernel direct-map PTs needed for installed RAM beyond the
-;;; first 4 MB, and jumps into `protected_mode_entry` for driver / VFS
-;;; / NIC / shell bring-up.
+;;; far-jump targets at virtual address HIGH_ENTRY_VIRT
+;;; (KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS = 0xFF820000).  high_entry
+;;; installs the kernel GDT/IDT/stack, drops the boot identity
+;;; mapping, initializes the bitmap frame allocator, allocates the
+;;; kernel direct-map PTs needed for installed RAM (a no-op when
+;;; FIRST_KERNEL_PDE = 1022 — the first kernel PT covering phys
+;;; 0..4 MB suffices), brings up the kmap window via `kmap_init`,
+;;; and jumps into `protected_mode_entry` for driver / VFS / NIC /
+;;; shell bring-up.
 ;;;
 ;;; Each program runs in its own per-program PD built by
 ;;; `address_space_create` from `program_enter` (entry.asm).  The PD's
-;;; kernel half (PDEs 768..1023) is copy-imaged from
+;;; kernel half (PDEs FIRST_KERNEL_PDE..1023) is copy-imaged from
 ;;; `kernel_idle_pd` so the kernel direct map is reachable from
 ;;; every address space.  The user half (PDEs 0..767) starts empty and
 ;;; is populated only with the program's own pages, plus the shared
@@ -31,7 +35,7 @@
 ;;; per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
-        org 0C0020000h
+        org 0FF820000h
         bits 32
         %include "constants.asm"
 
@@ -99,17 +103,21 @@ directory_sector dw 0                   ; offset 3
         %define KERNEL_RESERVED_BASE 0x40000
         %endif
         BOOT_PD_PHYS             equ KERNEL_STACK_TOP_PHYS
-        DIRECT_MAP_BASE          equ 0C0000000h
+        DIRECT_MAP_BASE          equ 0FF800000h          ; equals KERNEL_VIRT_BASE; the user/kernel split lives here
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
-        FIRST_KERNEL_PDE         equ 768
+        FIRST_KERNEL_PDE         equ 1022                ; KERNEL_VIRT_BASE / 0x400000; one PDE of direct map + the kmap window at PDE 1023
         FIRST_KERNEL_PT_PHYS     equ BOOT_PD_PHYS + 0x1000
         FRAME_BITMAP_PHYS        equ FIRST_KERNEL_PT_PHYS + 0x1000
         ;; Direct-map ceiling: kernel-virt addresses below
         ;; DIRECT_MAP_BASE + FRAME_DIRECT_MAP_LIMIT alias the
         ;; corresponding low-physical frames 1:1 via PDEs
         ;; FIRST_KERNEL_PDE..LAST_KERNEL_PDE-1 (PDE 1023 belongs to
-        ;; the kmap window).  Frames at higher physical addresses
-        ;; need a kmap_map slot — see memory_management/kmap.asm.
+        ;; the kmap window).  At FIRST_KERNEL_PDE = 1022 the direct
+        ;; map covers exactly 4 MB — sufficient for the resident
+        ;; kernel image (~29 KB) plus boot reserved cluster (≤140 KB)
+        ;; with massive headroom.  Frames at higher physical
+        ;; addresses need a kmap_map slot — see
+        ;; memory_management/kmap.asm.
         FRAME_DIRECT_MAP_LIMIT   equ (LAST_KERNEL_PDE - FIRST_KERNEL_PDE) * 0x400000
         ;; Bitmap clamp.  RAM above this is silently ignored — the
         ;; allocator can describe at most ~4 GB minus one page (the
@@ -298,7 +306,7 @@ high_entry:
         ;; PDE[769..LAST_KERNEL_PDE-1] pointing at the per-4 MB PTs the
         ;; loop above just allocated.  Build a fresh 4 KB
         ;; `kernel_idle_pd` from a frame_alloc'd frame, copy-image the
-        ;; boot PD's kernel-half PDEs (768..1023) into it, leave the
+        ;; boot PD's kernel-half PDEs (FIRST_KERNEL_PDE..1023) into it, leave the
         ;; user-half (0..767) zero, switch CR3 to it, and free the
         ;; boot PD.  The idle PD takes over both roles the boot PD
         ;; had:
@@ -330,10 +338,13 @@ high_entry:
         cld
         rep stosd
         pop edi
-        ;; Copy boot PD's kernel-half (PDEs 768..1023) into the idle PD.
-        mov esi, DIRECT_MAP_BASE + BOOT_PD_PHYS + 768 * 4
-        add edi, 768 * 4
-        mov ecx, 256
+        ;; Copy boot PD's kernel-half (PDEs FIRST_KERNEL_PDE..1023)
+        ;; into the idle PD.  At FIRST_KERNEL_PDE = 1022 that's two
+        ;; entries: the direct-map PT and the (still-zero) kmap
+        ;; window slot which kmap_init populates next.
+        mov esi, DIRECT_MAP_BASE + BOOT_PD_PHYS + FIRST_KERNEL_PDE * 4
+        add edi, FIRST_KERNEL_PDE * 4
+        mov ecx, 1024 - FIRST_KERNEL_PDE
         rep movsd
 
         ;; Switch CR3 to the idle PD, then free the boot PD.  The CR3

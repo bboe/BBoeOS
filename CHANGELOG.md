@@ -6,6 +6,63 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Lift KERNEL_VIRT_BASE 0xC0000000 → 0xFF800000 (2026-04-30)
+- Move the user/kernel virtual-address split from `0xC0000000` (3 GB
+  user / 1 GB kernel) to `0xFF800000` (~3.99 GB user / 4 MB kernel
+  direct map + 4 MB kmap window).  The kmap window already abstracts
+  away the size of the direct map, so the resident kernel
+  (~170 KB worst case: ~29 KB image + ≤140 KB reserved cluster) fits
+  in a single 4 MB PDE with 25× headroom.  Per-program user-virt
+  rises from ~3 GB to ~3.99 GB.
+- Constants moved in lockstep: `KERNEL_VIRT_BASE`, `USER_STACK_TOP`
+  (constants.asm), `DIRECT_MAP_BASE` (kernel.asm), the kernel.asm
+  `org` directive, and the boot.asm `HIGH_ENTRY_VIRT`.
+  `FIRST_KERNEL_PDE` derives the rest: 768 → 1022 (=
+  `KERNEL_VIRT_BASE / 0x400000`).  `address_space.asm`'s constants
+  now reference `DIRECT_MAP_BASE` and `FIRST_KERNEL_PDE` directly so
+  any future shift only touches the chain in kernel.asm.
+- Hardcoded 0xC0000000 literals replaced: `idt.asm` user-fault
+  triage uses `KERNEL_VIRT_BASE`; the inline asm in `ne2k.c` and
+  `vfs.c` references `DIRECT_MAP_BASE`.  vga.c's text/mode-13
+  framebuffer addresses move to `DIRECT_MAP_BASE + 0xB8000` /
+  `+ 0xA0000` in inline asm; the one C-side expression
+  (`vga_fill_block`'s base computation) stays as a hardcoded
+  `0xFF8A0000` since cc.py doesn't resolve NASM equ symbols inside
+  C expressions — flagged with a comment so it stays in sync.
+- `high_entry`'s direct-map auto-grow loop is now a no-op (the
+  loop bound `FIRST_KERNEL_PDE + 1 = 1023` equals `LAST_KERNEL_PDE`,
+  so the body never executes).  The first kernel PT, allocated by
+  boot.asm pre-paging at `FIRST_KERNEL_PT_PHYS` and installed at
+  `boot_pd[FIRST_KERNEL_PDE]`, is the entire kernel direct map.
+  Saves ~256 frames at large -m: at -m 2048 BIGBSS_PAGES rises
+  exactly +254 (523,341 → 523,595) — the freed direct-map PT
+  slots flow into the user pool.
+- bigbss tests stay anchored at -m 2048 with the new BIGBSS_PAGES =
+  523,595.  bigbss_oom (-m 2047) and bigbss_fail (-m 2048,
+  BIGBSS_PAGES + 1) keep their tripwire roles.  `stacktop`'s expected
+  ESP high byte changes from `C0` to `FF`.
+- Empirical landscape for the new layout (binsize ≈ 233; bisected
+  with bigbss):
+  - User-virt cap (theoretical) is 1,013,687 pages, derived from
+    `floor((KERNEL_VIRT_BASE - PROGRAM_BASE - binsize) / 4 KB)`.
+    But QEMU's i440fx PC machine defaults `max_ram_below_4g` to
+    `0xE0000000` (3.5 GB), with the `[0xE0000000..0xFFFFFFFF]`
+    range reserved as the PCI hole.  Any `-m N` above 3.5 GB
+    spills the excess to himem at phys ≥ 4 GB, which our 32-bit
+    OS can't reach (no PAE; `frame_max_phys` clamps at
+    `FRAME_PHYSICAL_LIMIT = 0xFFFFF000`).  So the *practical*
+    BIGBSS_PAGES ceiling is RAM-bound, not user-virt-bound:
+    - -m 1025 → 261,716 + 254 ≈ 261,970 (RAM-bound)
+    - -m 2048 → 523,595 (RAM-bound, our test anchor)
+    - -m 4096+ → roughly 785,000 (RAM-bound, ~3.07 GB BSS,
+      saturates the 3.5 GB lowmem region after per-PD overhead
+      and QEMU/kernel reservations).  -m 8192 / 16384 give the
+      same answer as -m 4096 — the extra RAM is invisible.
+    Going past this cap requires PAE in the guest kernel
+    (qemu-system-x86_64 with a 36-bit-aware OS) or a 64-bit
+    rewrite.  Bumping `KERNEL_VIRT_BASE` further is not load-
+    bearing on the practical ceiling.
+
 ### Kmap window unlocks RAM above the kernel direct-map ceiling (2026-04-30)
 - New `src/memory_management/kmap.asm` reserves PDE 1023 (virt
   `0xFFC00000..0xFFFFFFFF`) as a kernel-only window of demand-mapped

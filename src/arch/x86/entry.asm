@@ -40,9 +40,9 @@
         ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
-        ;;   PTEs 0xBFFE0..0xBFFEF   : NOT MAPPED — stack guard (overflow → #PF)
-        ;;   PTEs 0xBFFF0..0xBFFFF   : private — user stack (16 × 4 KB = 64 KB),
-        ;;                             stack top = 0xC0000000 (== kernel boundary)
+        ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
+        ;;   PTEs 0xFF7F0..0xFF7FF   : private — user stack (16 × 4 KB = 64 KB),
+        ;;                             stack top = 0xFF800000 (== kernel boundary)
         ;;
         ;; The stack sits just below the user/kernel split so user
         ;; programs get the full 3 GB of user-virt between PROGRAM_BASE
@@ -54,7 +54,7 @@
         ;; frames above it (up to FRAME_PHYSICAL_LIMIT, ~4 GB) reach
         ;; the kernel via a slot in the kmap window.
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
-        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0xC0000000 (one past last page; user/kernel boundary)
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; one past last page; user/kernel boundary (= KERNEL_VIRT_BASE)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
@@ -648,7 +648,7 @@ vdso_install:
 
         ;; Physical address of the kernel idle PD — a long-lived 4 KB
         ;; kernel-only page directory built in `high_entry` by
-        ;; copy-imaging the boot PD's kernel half (PDEs 768..1023)
+        ;; copy-imaging the boot PD's kernel half (PDEs FIRST_KERNEL_PDE..1023)
         ;; into a fresh frame_alloc'd frame and leaving the user half
         ;; (PDEs 0..767) zero.  Used as the canonical kernel-half PDE
         ;; source for `address_space_create`, as CR3 between programs

@@ -33,11 +33,11 @@ uint8_t fdc_motor_ready;
 // `vfs_init` before the first disk read.  fdc_dma_setup feeds the
 // low 24 bits of this pointer to the 8237 as the transfer's
 // physical address; the frame_alloc-managed pool sits inside the
-// kernel direct map (phys 0..1 GB at LAST_KERNEL_PDE = 1024), so
-// kernel-virt minus 0xC0000000 equals phys.  The 8237 only takes 24
-// bits, so a frame above the 16 MB ISA-DMA ceiling would still be a
-// problem here; vfs_init's first-fit allocation lands in low memory
-// in practice.
+// kernel direct map (phys 0..4 MB at FIRST_KERNEL_PDE = 1022), so
+// kernel-virt minus DIRECT_MAP_BASE equals phys.  The 8237 only
+// takes 24 bits, so a frame above the 16 MB ISA-DMA ceiling would
+// still be a problem here; vfs_init's first-fit allocation lands
+// in low memory in practice.
 extern uint8_t *sector_buffer;
 
 // Forward declarations for callees that come later alphabetically and
@@ -58,7 +58,8 @@ void fdc_wait_irq();
 // 8237 takes a 24-bit physical address; we pass the low 24 bits of
 // sector_buffer's kernel-virt, which equals the actual frame phys
 // because the bitmap allocator hands out frames inside the kernel
-// direct map and 0xC0000000's bit 23..0 are zero.
+// direct map and DIRECT_MAP_BASE's bit 23..0 are zero (true for
+// any 4 MB-aligned base, including the current 0xFF800000).
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax")))
 {
