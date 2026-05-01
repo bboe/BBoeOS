@@ -194,6 +194,11 @@ TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
     ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", timeout=10.0),
+    # 800 MB BSS — exercises the full kernel direct map (LAST_KERNEL_PDE
+    # = 1024) and the dynamic frame_bitmap.  Needs `-m 1024` for the
+    # user pool, and a generous timeout because TCG zero-fills 800 MB
+    # of fresh frames during program_enter's BSS phase.
+    ProgramTest("bigbss800", ["bigbss800"], r"^bigbss800: OK$", memory="1024", timeout=120.0),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),

@@ -104,7 +104,7 @@ cat boot.bin kernel.bin > os.bin
 # netrecv / netsend / ping stay out of the list until ne2k.asm and
 # net/*.asm get ported to 32-bit and `network_initialize` runs from
 # `protected_mode_entry`.
-PROGRAMS="arp asm asmesc bigbss bits booltest cat cftest chmod cp date dns draw echo edit fctest gdemo gptest gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend nullderef okptest pintest ping rm rmdir shell stackbomb uptime"
+PROGRAMS="arp asm asmesc bigbss bigbss800 bits booltest cat cftest chmod cp date dns draw echo edit fctest gdemo gptest gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend nullderef okptest pintest ping rm rmdir shell stackbomb uptime"
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"
