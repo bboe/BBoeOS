@@ -115,7 +115,7 @@
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
-        %assign USER_STACK_TOP 40000000h        ; Ring-3 stack top; 64 KB region 0x3FFF0000-0x40000000
+        %assign USER_STACK_TOP 0C0000000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xBFFF0000-0xC0000000, 64 KB guard at 0xBFFE0000-0xBFFF0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xBFFFFFFC, 0xC0000000) without crossing into the kernel half.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with

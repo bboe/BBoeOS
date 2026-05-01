@@ -184,29 +184,43 @@ def _pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
 TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
-    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", timeout=10.0),
-    # 800 MB BSS — exercises the full kernel direct map (LAST_KERNEL_PDE
-    # = 1024) and the dynamic frame_bitmap.  Needs `-m 1024` for the
-    # user pool, and a generous timeout because TCG zero-fills 800 MB
-    # of fresh frames during program_enter's BSS phase.
-    ProgramTest("bigbss800", ["bigbss800"], r"^bigbss800: OK$", memory="1024", timeout=120.0),
-    # OOM recovery: `-m 802` is one MB below the empirically-measured
-    # threshold for bigbss800 to fit (the program needs ~800.85 MB
-    # for BSS + PD + PTs + stack + handoff, and the kernel reserves
-    # ~2 MB for its own image / direct-map PTs / idle PD / FS scratch
-    # — everything balances right at -m 803).  At -m 802, phase-2 BSS
-    # allocation runs almost to completion (~199K frames mapped)
-    # before frame_alloc returns CF — exercising the full
-    # address_space_destroy teardown path the recovery handler relies
-    # on.  Asserts both that "exec: out of memory" appears and that a
-    # follow-up `hello` runs in the respawned shell: a stray
-    # giant-BSS program no longer takes the OS down with it.
+    # Maximum-BSS success case.  bigbss declares BIGBSS_PAGES (see
+    # src/c/bigbss_size.h) of BSS — the largest array that fits at
+    # -m 1025, the max-beneficial RAM size for this OS.  At -m 1025
+    # the bottom 1 GB is fully type-1 RAM in E820 (ACPI reservations
+    # land above the 1 GB direct-map clamp), so the bitmap exposes
+    # the maximum possible free-frame count.  Going above -m 1025
+    # adds no benefit (kernel direct map is clamped at 1 GB).  Also
+    # exercises post-USER_STACK_TOP-lift user-virt: BSS extends well
+    # above the old 1 GB user-virt ceiling.
+    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="1025", timeout=120.0),
+    # Tripwire-low: same program at -m 1024 (one MB less RAM).  At
+    # -m 1024 specifically, QEMU/SeaBIOS plants ~128 KB of ACPI
+    # tables (type-3/4 in E820) near the top of the 1 GB block —
+    # ~32 frames now vanish from the bitmap and bigbss no longer
+    # fits.  Asserts the OOM message AND a follow-up `hello` runs
+    # in the respawned shell.  If BIGBSS_PAGES is set too low, the
+    # program would fit even with the ACPI reservation in the way
+    # and this test would fail (no OOM message).
     ProgramTest(
-        "bigbss800_oom",
-        ["bigbss800", "hello"],
+        "bigbss_oom",
+        ["bigbss", "hello"],
         r"^exec: out of memory$[\s\S]+^Hello world!$",
-        memory="802",
-        timeout=30.0,
+        memory="1024",
+        timeout=60.0,
+    ),
+    # Tripwire-high: bigbss_fail declares BIGBSS_PAGES + 1 of BSS —
+    # exactly one page beyond what bigbss fits — and asserts OOM at
+    # -m 1025 (the max-beneficial RAM size).  If BIGBSS_PAGES is
+    # set too high, this program would also fit and this test would
+    # fail (no OOM message).  Together bigbss_oom + bigbss_fail pin
+    # BIGBSS_PAGES to the page-precise ceiling.
+    ProgramTest(
+        "bigbss_fail",
+        ["bigbss_fail", "hello"],
+        r"^exec: out of memory$[\s\S]+^Hello world!$",
+        memory="1025",
+        timeout=60.0,
     ),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
@@ -273,9 +287,15 @@ TESTS: list[ProgramTest] = [
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # 1 KB recursive frames overflow the 16-page user stack into the
     # unmapped page below it; same kill path as nullderef.  CR2 lands
-    # somewhere below 0x3FFF0000 (the stack base) — match the EXC0E
+    # somewhere below 0xBFFF0000 (the stack base) — match the EXC0E
     # signature loosely so future stack-size changes don't break this.
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
+    # Confirms the user stack lives at the new top (USER_STACK_TOP =
+    # 0xC0000000, sitting at the user/kernel boundary).  ESP at iretd
+    # equals USER_STACK_TOP, so the high byte is 0xC0 — any other
+    # value (e.g. 0x40 from the pre-lift layout) means the lift
+    # didn't take effect.
+    ProgramTest("stacktop", ["stacktop"], r"^stacktop: high=C0$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 
