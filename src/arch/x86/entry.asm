@@ -40,10 +40,21 @@
         ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
-        ;;   PTEs 0x3FFF0..0x3FFFF   : private — user stack (16 × 4 KB = 64 KB),
-        ;;                             stack top = 0x40000000
+        ;;   PTEs 0xBFFE0..0xBFFEF   : NOT MAPPED — stack guard (overflow → #PF)
+        ;;   PTEs 0xBFFF0..0xBFFFF   : private — user stack (16 × 4 KB = 64 KB),
+        ;;                             stack top = 0xC0000000 (== kernel boundary)
+        ;;
+        ;; The stack sits just below the user/kernel split so user
+        ;; programs get the full 3 GB of user-virt between PROGRAM_BASE
+        ;; and the stack for text + BSS + future heap.  Dense use is
+        ;; still capped at ~1 GB by the kernel direct-map ceiling
+        ;; (LAST_KERNEL_PDE = 1024) — the kernel must zero-fill each
+        ;; user frame through its kernel-virt alias during the BSS
+        ;; phase, and frames above the direct map are unreachable
+        ;; until phase 2 adds a kmap window.  Sparse 3 GB virt is
+        ;; available right now.
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
-        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0x40000000 (one past last page)
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0xC0000000 (one past last page; user/kernel boundary)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:

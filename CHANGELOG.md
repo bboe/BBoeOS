@@ -6,6 +6,26 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Lift USER_STACK_TOP to 0xC0000000 (2026-04-30)
+- The user stack moves from `[0x3FFF0000, 0x40000000)` to
+  `[0xBFFF0000, 0xC0000000)`, with the guard region at
+  `0xBFFE0000..0xBFFEFFFF`.  `USER_STACK_TOP` (one past the last
+  user page) now sits exactly at the user/kernel boundary so
+  programs get the full 3 GB of user-virt between `PROGRAM_BASE`
+  (`0x08048000`) and the stack for text + BSS + future heap.
+- `STACK_VIRT_BASE` and `STACK_VIRT_END` derive from `USER_STACK_TOP`
+  in entry.asm, so flipping the constant in constants.asm propagates
+  through `address_space_create`'s stack-PT loop and
+  `program_enter`'s `iretd` ESP automatically.
+- Sparse 3 GB user-virt is unlocked by this change.  Dense use is
+  still capped at ~1 GB by the kernel direct-map ceiling — frames
+  above that line are unreachable from kernel-virt for
+  `program_enter`'s zero-fill until phase 2 adds a kmap window.
+- New `stacktop` C program + test entry probes the high byte of ESP
+  (captured before any prologue) and asserts it equals `C0` —
+  detects regressions that would put the stack back at the old
+  `0x40000000` top.
+
 ### Graceful OOM during program load (2026-04-30)
 - `program_enter`'s `.panic` (which printed `!` on COM1 and halted the
   kernel on any allocator failure) is replaced by a `.oom` recovery
