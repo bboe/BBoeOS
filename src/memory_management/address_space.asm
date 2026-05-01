@@ -175,7 +175,20 @@ address_space_map_page:
         ;; pd_phys == current CR3 (the typical caller is `program_enter`
         ;; building a PD that's not yet installed, so the invlpg is
         ;; unnecessary).  Output: CF clear on success; CF set on OOM
-        ;; (with no PTE installed and no PT leaked).
+        ;; or out-of-range user_virt (with no PTE installed and no PT
+        ;; leaked).
+        ;;
+        ;; user_virt must be in the user half ([0, KERNEL_VIRT_BASE)).
+        ;; A user_virt at or above KERNEL_VIRT_BASE would land on PDE
+        ;; >= FIRST_KERNEL_PDE (768) — those PDEs are copy-imaged from
+        ;; `kernel_idle_pd` and point at PTs shared by every PD; the
+        ;; "PDE present" branch below would then write a user-RW PTE
+        ;; into the shared kernel PT and corrupt every program's
+        ;; kernel direct map.  Reject with CF=1 before any side
+        ;; effects so the caller's OOM-recovery path can tear down
+        ;; the partial PD without touching kernel-half mappings.
+        cmp ebx, KERNEL_VIRT_BASE
+        jae .out_of_range
         push eax                                ; saved EAX = pd_phys
         push ebx                                ; saved EBX = user_virt
         push ecx                                ; saved ECX = phys
@@ -258,6 +271,11 @@ address_space_map_page:
         pop ecx
         pop ebx
         pop eax
+        ret
+.out_of_range:
+        ;; user_virt is in the kernel half — refuse before touching
+        ;; the PD.  No prologue saves to unwind.
+        stc
         ret
 
 address_space_unmap_page:
