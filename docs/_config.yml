@@ -1,4 +1,5 @@
 title: BBoeOS
 description: A minimal x86 operating system — bootloader, paged high-half kernel, shell, VFS, networking, self-hosted assembler, and C compiler.
+url: https://bboeos.bryceboe.com
 theme: jekyll-theme-cayman
 show_downloads: false
