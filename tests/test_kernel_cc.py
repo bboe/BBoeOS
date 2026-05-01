@@ -2553,3 +2553,150 @@ def test_not_variable_emits_jne() -> None:
         bits=32,
     )
     assert "jne" in asm or "jnz" in asm, f"Expected jne/jnz (false-jump) for !var in:\n{asm}"
+
+
+# ---------------------------------------------------------------------------
+# User-mode codegen smoke tests (former tests/programs/ runtime checks)
+#
+# These verify cc.py features whose correctness is fully readable from the
+# emitted assembly — moved here from QEMU runtime tests because inspecting
+# the asm pinpoints which emission shape regressed without paying a boot.
+# ---------------------------------------------------------------------------
+
+
+def test_user_file_scope_asm_escape() -> None:
+    """File-scope and statement-form ``asm(...)`` blocks emit verbatim.
+
+    File-scope ``asm("asmesc_table: db 42, ...")`` plants the byte table
+    at file scope; statement-form ``asm(...)`` inside a function emits
+    the manual instructions inline — verifying both escapes see the
+    same symbol table the surrounding C code does (the file-scope
+    ``int value;`` becomes ``_g_value``).
+    """
+    ok, asm = _compile(
+        r"""
+        asm("asmesc_table: db 42, 99, 7, 11");
+
+        int value;
+
+        int main() {
+            asm("mov ebx, asmesc_table\nmov al, [ebx+2]\nxor ah, ah\nmov [_g_value], ax");
+            return 0;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "asmesc_table: db 42, 99, 7, 11" in asm, f"missing file-scope asm() emission:\n{asm}"
+    assert "mov ebx, asmesc_table" in asm, f"missing statement-form asm() emission:\n{asm}"
+    assert "mov [_g_value], ax" in asm, f"missing _g_value substitution from inline asm:\n{asm}"
+
+
+def test_user_include_directive_pulls_macro_and_helper() -> None:
+    """``#include "..."`` exposes #define macros and helper functions.
+
+    Both the ``INCTEST_MAGIC`` ``#define`` and the ``inctest_square``
+    function defined in a sibling header are visible to the including
+    translation unit's emitted asm.
+    """
+    with tempfile.TemporaryDirectory(prefix="test_include_") as work:
+        work_path = Path(work)
+        (work_path / "helper.h").write_text(
+            "#define INCTEST_MAGIC 3054\nint inctest_square(int x) {\n    return x * x;\n}\n",
+        )
+        source = work_path / "main.c"
+        source.write_text(
+            '#include "helper.h"\n\nint main() {\n    return inctest_square(INCTEST_MAGIC);\n}\n',
+        )
+        out = work_path / "main.asm"
+        result = subprocess.run(
+            ["python3", str(CC), "--bits", "32", "--target", "user", str(source), str(out)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        assert result.returncode == 0, f"compile failed:\n{result.stderr}"
+        asm = out.read_text()
+    assert "%define INCTEST_MAGIC 3054" in asm, f"missing macro expansion:\n{asm}"
+    assert "inctest_square:" in asm, f"missing helper function emission:\n{asm}"
+
+
+def test_user_asm_register_pins_global_to_register() -> None:
+    """``__attribute__((asm_register("si")))`` aliases a global to ESI.
+
+    The global gets no ``_g_<name>`` storage slot, and reads/writes
+    compile to direct ESI references rather than memory accesses.
+    """
+    ok, asm = _compile(
+        r"""
+        __attribute__((asm_register("si")))
+        char *cursor;
+
+        char source[] = {' ', ' ', 'h', 'e', 'l', 'l', 'o', 0};
+
+        int main() {
+            cursor = source;
+            return cursor[0];
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "_g_cursor" not in asm, f"asm_register global should have no storage slot:\n{asm}"
+    assert "mov esi, _g_source" in asm, f"expected ESI assignment from source[]:\n{asm}"
+
+
+def test_user_file_scope_bss_globals() -> None:
+    """File-scope scalars and zero-init arrays land in BSS via ``_g_<name>``.
+
+    counter (int=4) + history (int[8]=32) + label (char[8]=8) sums to
+    44 bytes of zero-initialized storage, emitted as ``_bss_end equ
+    _program_end + 44`` at the trailer.  Reads/writes go through the
+    ``_g_<name>`` symbols, not stack locals.
+    """
+    ok, asm = _compile(
+        r"""
+        int counter;
+        int history[8];
+        char label[8];
+
+        int main() {
+            counter = 1;
+            history[0] = 2;
+            label[0] = 'a';
+            return counter + history[0] + label[0];
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "_g_counter" in asm, f"missing _g_counter reference:\n{asm}"
+    assert "_g_history" in asm, f"missing _g_history reference:\n{asm}"
+    assert "_g_label" in asm, f"missing _g_label reference:\n{asm}"
+    assert "_bss_end equ _program_end + 44" in asm, f"expected 4+32+8=44 BSS bytes:\n{asm}"
+
+
+def test_user_brace_init_global_array_emits_dd_table() -> None:
+    """File-scope ``int arr[] = {...}`` emits a ``_g_<name>: dd ...`` table.
+
+    NASM resolves ``sizeof(arr)`` at assemble time, so the values are
+    folded into the binary's data section instead of being copied at
+    runtime; emission is a literal ``dd v0, v1, ...`` line.
+    """
+    ok, asm = _compile(
+        r"""
+        int fib[] = {1, 1, 2, 3, 5, 8, 13, 21, 34, 55};
+
+        int main() {
+            return fib[9];
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "_g_fib: dd 1, 1, 2, 3, 5, 8, 13, 21, 34, 55" in asm, f"missing brace-init dd table:\n{asm}"

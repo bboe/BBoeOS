@@ -183,7 +183,6 @@ def _pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
 
 TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
-    ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
     # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,341 of
     # BSS at -m 2048 — large enough that ~half the frames sit
@@ -264,10 +263,7 @@ TESTS: list[ProgramTest] = [
         setup=_pad_bin_to_full_directory,
     ),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
-    ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
-    ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
-    ProgramTest("inctest", ["inctest"], r"^square = 144$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"arp\*"),
@@ -280,7 +276,6 @@ TESTS: list[ProgramTest] = [
     # then runs to confirm the new shell works.
     ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
     ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
-    ProgramTest("pintest", ["pintest"], r"^first non-space: h$"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # 1 KB recursive frames overflow the 16-page user stack into the
     # unmapped page below it; same kill path as nullderef.  CR2 lands
