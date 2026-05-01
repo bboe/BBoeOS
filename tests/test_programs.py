@@ -16,7 +16,7 @@ Usage:
     ./test_programs.py arp                      # one program (bbfs)
     ./test_programs.py --filesystem ext2        # ext2, full suite
     ./test_programs.py --filesystem ext2 cat    # one program (ext2)
-    ./test_programs.py --filesystem ext2 --slow # include slow ext2 tests
+    ./test_programs.py --slow                   # include slow tests (bigbss tripwire, ext2 large-file)
 """
 
 from __future__ import annotations
@@ -75,8 +75,9 @@ class ProgramTest:
     that only make sense for one backend (e.g. the ext2-specific
     directory-walk stress tests) restrict it to a single entry.
 
-    ``slow`` marks ext2 stress tests that take seconds-to-tens-of-seconds
-    each; ``--slow`` on the runner opts them in.
+    ``slow`` marks tests that take seconds-to-tens-of-seconds each (the
+    bigbss tripwire trio at -m 2047/2048, the ext2 large-file and
+    doubly-indirect stress tests); ``--slow`` on the runner opts them in.
 
     ``memory`` overrides ``run_commands``'s 1 MB default for tests whose
     program needs more (currently only the bigbss family).
@@ -572,7 +573,7 @@ TESTS: list[ProgramTest] = [
     # kmap_map / kmap_unmap end-to-end.  The verify pass after the
     # write loop catches any kmap zero-fill that lands at the wrong
     # phys.
-    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="2048", timeout=180.0),
+    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="2048", slow=True, timeout=180.0),
     # Tripwire-low: same program at -m 2047 (one MB less RAM, ~256
     # fewer frames in the bitmap).  At -m 2047 BIGBSS_PAGES + per-PD
     # overhead no longer fits, and program_enter OOMs partway
@@ -585,6 +586,7 @@ TESTS: list[ProgramTest] = [
         ["bigbss", "echo hello"],
         r"^exec: out of memory$[\s\S]+^hello$",
         memory="2047",
+        slow=True,
         timeout=120.0,
     ),
     # Tripwire-high: bigbss_fail declares BIGBSS_PAGES + 1 of BSS —
@@ -596,6 +598,7 @@ TESTS: list[ProgramTest] = [
         ["bigbss_fail", "echo hello"],
         r"^exec: out of memory$[\s\S]+^hello$",
         memory="2048",
+        slow=True,
         timeout=60.0,
     ),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
@@ -957,7 +960,7 @@ def main() -> int:
     parser.add_argument(
         "--slow",
         action="store_true",
-        help="include slow ext2 tests (large-file and doubly-indirect I/O)",
+        help="include slow tests (bigbss tripwire, ext2 large-file and doubly-indirect I/O)",
     )
     arguments = parser.parse_args()
 
