@@ -6,6 +6,17 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Add three missing CI suites (2026-05-01)
+- `.github/workflows/test.yml` gains `test_cc_bits`,
+  `test_kernel_archive`, and `test_ps2` matrix entries.  All three
+  test files already existed in `tests/` but weren't wired into CI:
+  `test_cc_bits.py` keeps `cc.py --bits=16` honest as a fallback,
+  `test_kernel_archive.py` verifies `archive/kernel/` snapshot
+  byte-counts vs the README, and `test_ps2.py` is the only test that
+  exercises the native PS/2 keyboard path (other suites feed serial).
+- `test_kernel_archive` joins `test_cc_compatibility` in skipping the
+  apt cache + install steps since it only reads files.
+
 ### Reorganize the test tree (2026-05-01)
 - Programs that only exist as fixtures for `tests/test_programs.py`
   move from `src/c/` to `tests/programs/`; `make_os.sh
