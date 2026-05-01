@@ -1,35 +1,46 @@
 /* Empirically-measured page-precise ceiling on BSS — the largest
    array `bigbss` can declare and still complete program_enter's
-   phase-2 BSS allocation under the 1 GB direct-map cap.
+   phase-2 BSS allocation at -m 2048.
 
-   Anchored at -m 1025, the smallest QEMU memory size where the OS
-   can take full advantage of its 1 GB direct map.  At exactly
-   -m 1024 QEMU/SeaBIOS plants ~128 KB of ACPI tables (type-3 and
-   type-4 in E820) near the top of the 1 GB block, eating ~32
-   frames out of the bitmap.  At -m ≥ 1025 those reservations shift
-   above the 1 GB clamp and the bottom 1 GB is fully type-1, giving
-   us the full 262,144 frames minus kernel reservations.  Above
-   -m 1025 there's no further benefit — the kernel direct map is
-   clamped to 1 GB regardless.
+   Anchored at -m 2048 to exercise the kmap window
+   (memory_management/kmap.asm) end-to-end.  At this size the user
+   pool spans ~2 GB of physical RAM but the kernel direct map only
+   covers ~1020 MB (PDEs 768..1022); every frame above that handed
+   out by the bitmap allocator is reached through a kmap_map slot
+   in PDE 1023's window.  With BIGBSS_PAGES = 523,341, roughly half
+   of program_enter's phase-2 zero-fills go through the slow path,
+   proving the kmap helpers correctly alias high-physical frames.
+
+   Below -m 2048 the user pool shrinks and BIGBSS_PAGES no longer
+   fits; above -m 2048 BIGBSS_PAGES rises further as more high
+   frames become addressable through kmap.  This constant is *not*
+   the absolute kernel ceiling — it's the ceiling for this specific
+   -m, deliberately chosen because it straddles the direct-map
+   boundary and gives both halves of kmap solid coverage.
 
    Kept in a shared header so `bigbss` (uses this exact count) and
    `bigbss_fail` (uses this + 1 page, asserts OOM) stay coupled.
    Three tests pin the boundary:
 
-     * bigbss      — BSS_PAGES = BIGBSS_PAGES.  Must fit at -m 1025
-                     (the max-beneficial RAM size).
-     * bigbss_oom  — BSS_PAGES = BIGBSS_PAGES.  Must OOM at -m 1024
-                     (one MB less; ACPI reservation moves into the
-                     bitmap and ~32 frames disappear).  Tripwire if
-                     BIGBSS_PAGES is set too low.
+     * bigbss      — BSS_PAGES = BIGBSS_PAGES.  Must fit at -m 2048.
+                     About half the BSS frames (~263K) sit above
+                     FRAME_DIRECT_MAP_LIMIT and exercise the kmap
+                     slow path during program_enter's phase 2 zero
+                     fill — direct end-to-end kmap coverage.
+     * bigbss_oom  — BSS_PAGES = BIGBSS_PAGES.  Must OOM at -m 2047
+                     (one MB less RAM = ~256 fewer frames; the
+                     bitmap can no longer fit BIGBSS_PAGES + per-PD
+                     overhead).  Tripwire if BIGBSS_PAGES is set
+                     too low — a downward drift > ~256 frames would
+                     start fitting at -m 2047 and the test would
+                     pass without OOMing.
      * bigbss_fail — BSS_PAGES = BIGBSS_PAGES + 1.  Must OOM at
-                     -m 1025.  Tripwire if BIGBSS_PAGES is set too
-                     high.
+                     -m 2048.  Tripwire if BIGBSS_PAGES is set too
+                     high — page-precise.
 
    When the kernel adds or removes pages — direct-map PT count
    shifts, kernel image grows, new boot-time allocations land — re-
-   probe at -m 1025 (or any -m ≥ 1025; the answer is identical) and
-   update this constant.  The two tripwire tests will go red (one
-   or both) when it drifts. */
+   probe at -m 2048 and update this constant.  The two tripwire
+   tests will go red (one or both) when it drifts. */
 
-#define BIGBSS_PAGES 261493
+#define BIGBSS_PAGES 523341

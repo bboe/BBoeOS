@@ -28,17 +28,14 @@
 ;;; (= DIRECT_MAP_BASE + FRAME_BITMAP_PHYS, in the post-kernel cluster
 ;;; — see kernel.asm).  Its byte length is `[frame_bitmap_bytes]`,
 ;;; populated by frame_init from the highest type=1 E820 entry,
-;;; clamped so the bitmap never describes frames above the kernel
-;;; direct map's reach (LAST_KERNEL_PDE in kernel.asm).  See
-;;; project_frame_bitmap_dynamic_e820 in memory for the design notes.
+;;; clamped to FRAME_PHYSICAL_LIMIT (~4 GB - one page, the 32-bit
+;;; physical address-space ceiling).  Frames the kernel can't reach
+;;; through the direct map (phys >= FRAME_DIRECT_MAP_LIMIT, ~1020 MB
+;;; at LAST_KERNEL_PDE = 1023) still appear in the bitmap and are
+;;; reachable via the kmap window — see memory_management/kmap.asm.
+;;; See project_frame_bitmap_dynamic_e820 in memory for the design
+;;; notes.
 ;;; ------------------------------------------------------------------------
-
-;; Direct-map ceiling: the kernel can only reach phys < (LAST_KERNEL_PDE
-;; - FIRST_KERNEL_PDE) * 4 MB through the kernel direct map.  frame_init
-;; clamps `frame_max_phys` to this ceiling so the bitmap never describes
-;; frames the kernel has no virtual address for.  RAM above this is
-;; silently ignored (kmap window territory — phase 2).
-%define FRAME_DIRECT_MAP_LIMIT  ((LAST_KERNEL_PDE - FIRST_KERNEL_PDE) * 0x400000)
 
 frame_alloc:
         ;; First-fit scan from frame_search_hint.  Returns EAX = phys
@@ -151,6 +148,12 @@ frame_init:
         ;; --- Pass 1: find the highest type=1 frame base ---
         ;; ESI was just pushed and points at the E820 list head; we
         ;; advance it during the scan and rewind from [esp] for pass 2.
+        ;; Frames above FRAME_DIRECT_MAP_LIMIT need a kmap window slot
+        ;; for kernel access; the bitmap describes them anyway, since
+        ;; the kmap helpers transparently expose them to the rest of
+        ;; the kernel.  Only frames above FRAME_PHYSICAL_LIMIT are
+        ;; truly unreachable — the 32-bit physical address-space
+        ;; ceiling — and those are dropped at clamp time.
         mov dword [frame_max_phys], 0
 .scan_loop:
         mov eax, [esi + 0]                      ; base low
@@ -190,12 +193,14 @@ frame_init:
         add esi, 24
         jmp .scan_loop
 .scan_done:
-        ;; Clamp frame_max_phys to the direct-map ceiling.  Frames
-        ;; above this are unreachable through the kernel direct map.
+        ;; Clamp frame_max_phys to the 32-bit physical limit.  Anything
+        ;; above FRAME_PHYSICAL_LIMIT is unaddressable in 32-bit phys
+        ;; (no PAE).  Frames in (FRAME_DIRECT_MAP_LIMIT, FRAME_PHYSICAL_LIMIT]
+        ;; stay in the bitmap and reach the kernel via kmap_map.
         mov eax, [frame_max_phys]
-        cmp eax, FRAME_DIRECT_MAP_LIMIT
+        cmp eax, FRAME_PHYSICAL_LIMIT
         jb .clamp_ok
-        mov eax, FRAME_DIRECT_MAP_LIMIT - 0x1000
+        mov eax, FRAME_PHYSICAL_LIMIT - 0x1000
         mov [frame_max_phys], eax
 .clamp_ok:
 

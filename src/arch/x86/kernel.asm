@@ -104,13 +104,26 @@ directory_sector dw 0                   ; offset 3
         FIRST_KERNEL_PDE         equ 768
         FIRST_KERNEL_PT_PHYS     equ BOOT_PD_PHYS + 0x1000
         FRAME_BITMAP_PHYS        equ FIRST_KERNEL_PT_PHYS + 0x1000
+        ;; Direct-map ceiling: kernel-virt addresses below
+        ;; DIRECT_MAP_BASE + FRAME_DIRECT_MAP_LIMIT alias the
+        ;; corresponding low-physical frames 1:1 via PDEs
+        ;; FIRST_KERNEL_PDE..LAST_KERNEL_PDE-1 (PDE 1023 belongs to
+        ;; the kmap window).  Frames at higher physical addresses
+        ;; need a kmap_map slot — see memory_management/kmap.asm.
+        FRAME_DIRECT_MAP_LIMIT   equ (LAST_KERNEL_PDE - FIRST_KERNEL_PDE) * 0x400000
+        ;; Bitmap clamp.  RAM above this is silently ignored — the
+        ;; allocator can describe at most ~4 GB minus one page (the
+        ;; 32-bit physical address space ceiling).  At -m 4096 the
+        ;; bitmap costs ~128 KB; sessions with smaller -m pay less
+        ;; (frame_init sizes the bitmap from the highest E820 base).
+        FRAME_PHYSICAL_LIMIT     equ 0xFFFFF000
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
         KERNEL_LOAD_PHYS         equ 0x20000
         KERNEL_STACK_BYTES       equ 0x1000                              ; 4 KB (peak measured ~412 B; ~10× margin)
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
-        LAST_KERNEL_PDE          equ 1024        ; PDEs [768..1023]: 256 entries × 4 MB = 1 GB direct map ceiling
+        LAST_KERNEL_PDE          equ 1023        ; PDEs [768..1022]: 255 entries × 4 MB = ~1020 MB direct map; PDE 1023 reserved for the kmap window
         frame_bitmap             equ DIRECT_MAP_BASE + FRAME_BITMAP_PHYS
         kernel_stack             equ DIRECT_MAP_BASE + KERNEL_STACK_PHYS
         kernel_stack_top         equ DIRECT_MAP_BASE + KERNEL_STACK_TOP_PHYS
@@ -332,6 +345,19 @@ high_entry:
         mov eax, BOOT_PD_PHYS
         call frame_free
 
+        ;; --- Bring up the kmap window ---
+        ;;
+        ;; Allocates one frame for the window PT and installs it at
+        ;; idle_pd[KMAP_WINDOW_PDE] (= 1023).  Every per-program PD
+        ;; built afterward inherits PDE 1023 verbatim through
+        ;; address_space_create's kernel-half copy-image, so the
+        ;; window is reachable from every CR3.  Must run before the
+        ;; first user PD is built (i.e. before shell_reload), and
+        ;; before any kmap_map call could land on a slot — which
+        ;; means before vdso_install in protected_mode_entry below
+        ;; (the first kmap-using callsite past this point).
+        call kmap_init
+
         ;; Continue with the existing post-flip init: TSS / IDT IRQ
         ;; gates / drivers / VFS / NIC / banner / shell.  Lives in
         ;; entry.asm's `protected_mode_entry`, trimmed to skip the
@@ -357,6 +383,7 @@ high_entry:
 %include "memory_management/access.asm"
 %include "memory_management/address_space.asm"
 %include "memory_management/frame.asm"
+%include "memory_management/kmap.asm"
 %include "drivers/ata.kasm"
 %include "drivers/console.kasm"
 %include "drivers/fdc.kasm"

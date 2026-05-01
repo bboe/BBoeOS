@@ -55,17 +55,18 @@ KERNEL_RESERVED_BASE=$(( (0x20000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
 
 # Safety: the entire kernel-side reserved region must stay below the
 # VGA aperture at phys 0xA0000.  Worst-case region size: 4 KB stack +
-# 4 KB boot PD + 4 KB first kernel PT + 32 KB frame_bitmap (sized at
-# boot from E820, capped by the 1 GB direct-map ceiling at
-# LAST_KERNEL_PDE) = 44 KB = 0xB000.  Keeping the whole region under
-# 0xA0000 lets the OS boot under QEMU `-m 1` (1 MB total), where
-# conventional RAM ends at 0x9FC00.  On `-m 1` the bitmap is actually
-# ~20 bytes (one dword's worth), so the runtime region is much smaller
-# than the worst case checked here.
+# 4 KB boot PD + 4 KB first kernel PT + 128 KB frame_bitmap (sized at
+# boot from E820, capped by FRAME_PHYSICAL_LIMIT ~ 4 GB, so the bitmap
+# tops out at ~1M frames / 8 bits/byte = 128 KB on -m 4096) = 140 KB
+# = 0x23000.  Keeping the whole region under 0xA0000 lets the OS boot
+# under QEMU `-m 1` (1 MB total), where conventional RAM ends at
+# 0x9FC00.  On `-m 1` the bitmap is actually ~20 bytes (one dword's
+# worth), so the runtime region is much smaller than the worst case
+# checked here.
 # (sector_buffer / ext2_sd_buffer share a dynamically-allocated 4 KB
 # fs scratch frame populated by `vfs_init`, so they no longer occupy
 # a static slot in this region.)
-KERNEL_RESERVED_END=$(( KERNEL_RESERVED_BASE + 0xB000 ))
+KERNEL_RESERVED_END=$(( KERNEL_RESERVED_BASE + 0x23000 ))
 if [ $KERNEL_RESERVED_END -ge $(( 0xA0000 )) ]; then
     echo "make_os.sh: kernel reserved region (ends at $(printf 0x%x $KERNEL_RESERVED_END)) crosses the VGA hole at 0xA0000" >&2
     exit 1

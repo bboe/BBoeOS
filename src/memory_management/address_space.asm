@@ -2,15 +2,21 @@
 ;;; memory_management/address_space.asm — per-program address-space helpers.
 ;;;
 ;;; Builds and tears down per-program user page directories.  Kernel-half
-;;; PDEs (768..1023, the kernel direct map at virtual
-;;; 0xC0000000..0xFFFFFFFF, sized at boot to cover installed RAM up to
-;;; 1 GB) are copied verbatim from `kernel_idle_pd`'s
-;;; kernel half at address_space_create time and never modified afterward
-;;; — that invariant is what lets us avoid fan-out updates when the
-;;; kernel installs a new kernel-half mapping.  `kernel_idle_pd` is
-;;; built once by `high_entry` (after the kernel-PT-alloc loop) and
-;;; serves both as the canonical PDE source and as the CR3 target
-;;; between programs.
+;;; PDEs (768..1023, sized at boot to cover installed RAM up to ~1020 MB
+;;; through PDEs 768..1022 plus the kmap window at PDE 1023) are copied
+;;; verbatim from `kernel_idle_pd`'s kernel half at address_space_create
+;;; time and never modified afterward — that invariant is what lets us
+;;; avoid fan-out updates when the kernel installs a new kernel-half
+;;; mapping.  `kernel_idle_pd` is built once by `high_entry` (after the
+;;; kernel-PT-alloc loop) and serves both as the canonical PDE source
+;;; and as the CR3 target between programs.
+;;;
+;;; All PD / PT reads and writes go through `kmap_map` /
+;;; `kmap_unmap` (memory_management/kmap.asm) so PD or PT frames
+;;; allocated above the direct-map ceiling
+;;; (FRAME_DIRECT_MAP_LIMIT, ~1020 MB) remain reachable.  Frames
+;;; below the ceiling fast-path through the direct map and don't
+;;; consume a kmap slot — the helper handles both transparently.
 ;;;
 ;;; Public (CPL=0 only):
 ;;;   address_space_create()                  -> EAX = pd_phys, CF on OOM
@@ -41,8 +47,12 @@
 %define ADDRESS_SPACE_USER_PDE_COUNT    768             ; PDEs 0..767 are user-half
 
 address_space_create:
-        ;; Allocate one frame, zero it, then copy the top-256 PDEs from
-        ;; `kernel_idle_pd` into the new PD's kernel-half slot.  Output:
+        ;; Allocate one frame, zero it, then copy the top-256 PDEs
+        ;; from `kernel_idle_pd` into the new PD's kernel-half slot.
+        ;; Both PDs are accessed through kmap so a high-physical PD
+        ;; frame stays reachable.  The idle PD itself was allocated
+        ;; in `high_entry` before any high frames were handed out, so
+        ;; its kmap_map fast-paths to the direct-map alias.  Output:
         ;; EAX = pd_phys, CF clear on success; CF set on OOM.
         push ebx
         push ecx
@@ -50,27 +60,34 @@ address_space_create:
         push esi
         call frame_alloc
         jc .oom
-        ;; Zero all 1024 PDEs via the direct map.
-        push eax                                ; save pd_phys for return
+        ;; EAX = new pd_phys.  Save it for the return; map the new PD.
+        push eax                                ; [esp+4] = pd_phys (return value)
+        call kmap_map                           ; EAX = pd_kvirt
+        push eax                                ; [esp+0] = pd_kvirt (for unmap)
+        ;; Zero all 1024 PDEs.
         mov edi, eax
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
-        push edi                                ; remember PD direct-map base
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        ;; Copy top-256 PDEs from kernel_idle_pd into PDE[768..1023].
-        ;; ESI = source kernel-virt, EDI = destination kernel-virt, both
-        ;; offset by ADDRESS_SPACE_USER_PDE_COUNT * 4 bytes to skip the
-        ;; user half.
-        mov esi, [kernel_idle_pd_phys]
-        add esi, ADDRESS_SPACE_DIRECT_MAP_BASE
+        ;; Copy the kernel-half PDEs (768..1023) from kernel_idle_pd.
+        mov eax, [kernel_idle_pd_phys]
+        call kmap_map                           ; EAX = idle_kvirt
+        mov esi, eax
         add esi, ADDRESS_SPACE_USER_PDE_COUNT * 4
-        pop edi                                 ; PD direct-map base
+        mov edi, [esp]                          ; new pd_kvirt
         add edi, ADDRESS_SPACE_USER_PDE_COUNT * 4
         mov ecx, ADDRESS_SPACE_KERNEL_PDE_COUNT
         rep movsd
-        pop eax                                 ; restore pd_phys
+        ;; Reload idle_kvirt for the unmap.  ESI was advanced past
+        ;; the copy; back it up to the original kvirt.
+        mov eax, esi
+        sub eax, ADDRESS_SPACE_USER_PDE_COUNT * 4
+        sub eax, ADDRESS_SPACE_KERNEL_PDE_COUNT * 4
+        call kmap_unmap                         ; release idle PD kmap (fast-path no-op)
+        pop eax                                 ; new pd_kvirt
+        call kmap_unmap                         ; release new PD kmap
+        pop eax                                 ; pd_phys (return value)
         clc
         pop esi
         pop edi
@@ -86,35 +103,36 @@ address_space_create:
         ret
 
 address_space_destroy:
-        ;; EAX = pd_phys.  Walks PDEs 0..767 (user half).  For each
-        ;; present PDE, walks the PT, frees every present user-page
-        ;; frame, then frees the PT frame itself.  PTEs with the
-        ;; `ADDRESS_SPACE_PTE_SHARED` AVL bit set (vDSO code page) are
-        ;; skipped — those frames live in shared tables managed by the
-        ;; kernel and outlive any one address space.  Finally frees the PD frame.  Caller must not have
-        ;; pd_phys loaded in CR3 — the `sys_exit` / kill path switches
-        ;; CR3 to kernel_idle_pd first.  Kernel-half PDEs are left
-        ;; alone; the kernel-half PTs they reference are shared and
-        ;; outlive every per-program PD.
+        ;; EAX = pd_phys.  Walks PDEs 0..767 (user half) through a
+        ;; kmap_map alias of the PD frame.  For each present PDE,
+        ;; kmap_maps the PT, frees every present user-page frame
+        ;; (skipping ADDRESS_SPACE_PTE_SHARED entries — vDSO and
+        ;; friends live in shared tables managed by the kernel),
+        ;; then unmaps and frees the PT frame itself.  Finally
+        ;; unmaps and frees the PD frame.  Caller must not have
+        ;; pd_phys loaded in CR3 — the `sys_exit` / kill path
+        ;; switches CR3 to kernel_idle_pd first.  Kernel-half PDEs
+        ;; are left alone; the kernel-half PTs they reference are
+        ;; shared and outlive every per-program PD.
         push eax
         push ebx
         push ecx
         push edx
         push edi
         push esi
-        mov esi, eax                            ; ESI = pd_phys (saved)
-        mov edi, eax
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDI = PD direct-map address
+        mov esi, eax                            ; ESI = pd_phys (saved for the final free)
+        call kmap_map                           ; EAX = pd_kvirt
+        mov edi, eax                            ; EDI = pd_kvirt; PT walks below preserve EDI
         xor ebx, ebx                            ; EBX = PDE index
 .pde_loop:
         mov eax, [edi + ebx*4]
         test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pde
-        ;; PDE present: walk the PT.
-        mov edx, eax
-        and edx, 0xFFFFF000                     ; EDX = PT phys
-        push edx                                ; save for the PT-frame free
-        add edx, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDX = PT direct-map address
+        ;; PDE present: kmap the PT, walk its PTEs.
+        and eax, 0xFFFFF000                     ; EAX = PT phys
+        push eax                                ; remember for the final frame_free
+        call kmap_map                           ; EAX = PT kvirt
+        mov edx, eax                            ; EDX = PT kvirt; preserved across kmap_/frame_free calls
         xor ecx, ecx                            ; ECX = PTE index
 .pte_loop:
         mov eax, [edx + ecx*4]
@@ -128,14 +146,18 @@ address_space_destroy:
         inc ecx
         cmp ecx, 1024
         jb .pte_loop
-        ;; Free the PT frame itself.
+        ;; Release the PT mapping, then free the PT frame.
+        mov eax, edx
+        call kmap_unmap
         pop eax                                 ; PT phys (saved at .pde_loop)
         call frame_free
 .next_pde:
         inc ebx
         cmp ebx, ADDRESS_SPACE_USER_PDE_COUNT
         jb .pde_loop
-        ;; Free the PD frame.
+        ;; Release the PD mapping, then free the PD frame.
+        mov eax, edi
+        call kmap_unmap
         mov eax, esi
         call frame_free
         pop esi
@@ -154,53 +176,68 @@ address_space_map_page:
         ;; building a PD that's not yet installed, so the invlpg is
         ;; unnecessary).  Output: CF clear on success; CF set on OOM
         ;; (with no PTE installed and no PT leaked).
-        push eax
-        push ebx
-        push ecx
-        push edx
+        push eax                                ; saved EAX = pd_phys
+        push ebx                                ; saved EBX = user_virt
+        push ecx                                ; saved ECX = phys
+        push edx                                ; saved EDX = flags
         push edi
         push esi
         ;; ESI = PDE index = user_virt >> 22.
         mov esi, ebx
         shr esi, 22
-        ;; EDI = PD direct-map address.
+        ;; Map the PD via kmap.  Pushed pd_kvirt stays on the stack
+        ;; until the final unmap; all subsequent reads of the
+        ;; saved-prologue values shift by +4 to compensate.
+        call kmap_map                           ; EAX = pd_kvirt
+        push eax                                ; [esp+0] = pd_kvirt
         mov edi, eax
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
         mov eax, [edi + esi*4]
         test eax, ADDRESS_SPACE_PDE_PRESENT
         jnz .pde_present
         ;; PDE not present: allocate a fresh PT, zero it, install the PDE.
         call frame_alloc
-        jc .oom
-        push eax                                ; save PT phys
+        jc .oom_pd_mapped
+        push eax                                ; remember PT phys for the PDE install
+        call kmap_map                           ; EAX = PT kvirt
+        push eax                                ; remember PT kvirt for the unmap
         mov edi, eax
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EDI = PT direct-map address
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop eax                                 ; restore PT phys
-        ;; Install PDE = pt_phys | P | RW | U.  Reload EDI from the
-        ;; PD-direct-map base saved on the prologue stack ([esp+20] is
-        ;; the saved EAX = pd_phys).
-        mov edi, [esp + 20]                     ; saved EAX = pd_phys
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
+        pop eax                                 ; PT kvirt
+        call kmap_unmap                         ; release the zero-fill mapping
+        pop eax                                 ; PT phys
+        ;; Install PDE = pt_phys | P | RW | U.  EDI was clobbered by
+        ;; the rep stosd; reload pd_kvirt from [esp].
+        mov edi, [esp]                          ; pd_kvirt
         mov edx, eax
         or edx, ADDRESS_SPACE_PDE_USER_RW
         mov [edi + esi*4], edx
+        ;; EAX still holds the PT phys; jump past the .pde_present
+        ;; PT-phys extract since we already have it.
+        jmp .pt_write
 .pde_present:
         ;; EAX = PDE value; mask off flag bits to get PT phys.
         and eax, 0xFFFFF000
-        add eax, ADDRESS_SPACE_DIRECT_MAP_BASE  ; EAX = PT direct-map address
-        ;; PTE index = (user_virt >> 12) & 0x3FF.
-        mov ebx, [esp + 16]                     ; saved EBX = user_virt
+.pt_write:
+        ;; EAX = PT phys; map it for the PTE write.
+        call kmap_map                           ; EAX = PT kvirt
+        push eax                                ; [esp+0] = PT kvirt; pd_kvirt at [esp+4]
+        ;; After the PT-kvirt push and the pd-kvirt push, original
+        ;; saved EBX (user_virt) is at [esp + 24], saved ECX (phys)
+        ;; at [esp + 20], saved EDX (flags) at [esp + 16].
+        mov ebx, [esp + 24]                     ; user_virt
         shr ebx, 12
         and ebx, 0x3FF
-        ;; Build PTE = (phys & ~0xFFF) | flags.
-        mov ecx, [esp + 12]                     ; saved ECX = phys
+        mov ecx, [esp + 20]                     ; phys
         and ecx, 0xFFFFF000
-        or ecx, [esp + 8]                       ; saved EDX = flags
+        or ecx, [esp + 16]                      ; flags
         mov [eax + ebx*4], ecx
+        pop eax                                 ; PT kvirt
+        call kmap_unmap
+        pop eax                                 ; pd_kvirt
+        call kmap_unmap
         clc
         pop esi
         pop edi
@@ -209,9 +246,11 @@ address_space_map_page:
         pop ebx
         pop eax
         ret
-.oom:
-        ;; frame_alloc failed before we modified the PD.  Just unwind
-        ;; the prologue.
+.oom_pd_mapped:
+        ;; frame_alloc failed after the PD was kmap'd.  Release the
+        ;; PD mapping before unwinding so the kmap slot doesn't leak.
+        pop eax                                 ; pd_kvirt
+        call kmap_unmap
         stc
         pop esi
         pop edi
@@ -226,35 +265,47 @@ address_space_unmap_page:
         ;; no-op if the PDE or PTE was already not-present.  Does not
         ;; free the underlying frame — caller's responsibility.  Issues
         ;; `invlpg` if pd_phys == current CR3 so the just-cleared
-        ;; mapping doesn't linger in the TLB.
+        ;; mapping doesn't linger in the TLB.  PD and PT are both
+        ;; reached through kmap so high-physical PD/PT frames stay
+        ;; addressable.
         push eax
         push ebx
         push ecx
+        push edx
         push edi
         push esi
-        ;; ESI = PDE index, EDI = PD direct-map address.
         mov esi, ebx
-        shr esi, 22
-        mov edi, eax
-        add edi, ADDRESS_SPACE_DIRECT_MAP_BASE
-        mov ecx, [edi + esi*4]
+        shr esi, 22                             ; ESI = PDE index
+        call kmap_map                           ; EAX = pd_kvirt (input was pd_phys)
+        push eax                                ; [esp+0] = pd_kvirt
+        mov ecx, [eax + esi*4]
         test ecx, ADDRESS_SPACE_PDE_PRESENT
-        jz .done
-        ;; ECX = PT direct-map address; EDI = PTE index.
-        and ecx, 0xFFFFF000
-        add ecx, ADDRESS_SPACE_DIRECT_MAP_BASE
+        jz .release_pd
+        ;; PDE present: kmap the PT, clear the PTE.
+        and ecx, 0xFFFFF000                     ; ECX = PT phys
+        mov eax, ecx
+        call kmap_map                           ; EAX = PT kvirt
+        mov edx, eax                            ; EDX = PT kvirt
         mov edi, ebx
         shr edi, 12
-        and edi, 0x3FF
-        mov dword [ecx + edi*4], 0
-        ;; Invalidate the TLB if this PD is the live one.
+        and edi, 0x3FF                          ; EDI = PTE index
+        mov dword [edx + edi*4], 0
+        ;; Release the PT mapping.
+        mov eax, edx
+        call kmap_unmap
+        ;; Invalidate the TLB if this PD is the live one.  After the
+        ;; pd_kvirt push the prologue's saved EAX (pd_phys) is at
+        ;; [esp + 24] (6 prologue dwords + the pd_kvirt push).
         mov ecx, cr3
-        cmp ecx, eax
-        jne .done
+        cmp ecx, [esp + 24]
+        jne .release_pd
         invlpg [ebx]
-.done:
+.release_pd:
+        pop eax                                 ; pd_kvirt
+        call kmap_unmap
         pop esi
         pop edi
+        pop edx
         pop ecx
         pop ebx
         pop eax

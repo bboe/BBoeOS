@@ -6,6 +6,54 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Kmap window unlocks RAM above the kernel direct-map ceiling (2026-04-30)
+- New `src/memory_management/kmap.asm` reserves PDE 1023 (virt
+  `0xFFC00000..0xFFFFFFFF`) as a kernel-only window of demand-mapped
+  slots.  `kmap_init` (called from `high_entry` after the kernel idle
+  PD takes over) allocates one frame as the window PT and installs it
+  at `kernel_idle_pd[1023]`; every per-program PD inherits PDE 1023
+  through `address_space_create`'s kernel-half copy-image, so the
+  window is reachable from every CR3.
+- `kmap_map(eax = phys) → eax = kernel_virt` fast-paths to
+  `phys + DIRECT_MAP_BASE` for frames below `FRAME_DIRECT_MAP_LIMIT`
+  (~1020 MB now that PDE 1023 belongs to the window) and falls back
+  to a slot in the window for higher frames.  `kmap_unmap` releases
+  the slot — no-op for the direct-map fast path.  Single-CPU, no
+  preemption, no recursive map-without-unmap, so a small fixed pool
+  (`KMAP_SLOT_COUNT = 4`) suffices; slot exhaustion panics.
+- `LAST_KERNEL_PDE` drops from 1024 to 1023 so `high_entry`'s
+  direct-map auto-grow loop stops at PDE 1022, leaving PDE 1023 for
+  the kmap window.  Direct map ceiling shifts from 1024 MB to
+  ~1020 MB; bitmap clamp moves to a separate `FRAME_PHYSICAL_LIMIT`
+  constant (= 0xFFFFF000, the 32-bit physical address-space
+  ceiling).  At -m 4096 the bitmap now describes ~1M frames and
+  costs ~128 KB; sessions with smaller -m pay less.
+- All "phys → kernel-virt to read/write" sites in the kernel go
+  through `kmap_map`/`kmap_unmap` now: `program_enter`'s handoff /
+  phase-1 / phase-2 / stack / trailer-peek frames, `vdso_install`'s
+  vDSO copy, `sys_exec.exec_load`'s handoff frame zero-fill +
+  EXEC_ARG/BUFFER copy, and the four `address_space_*` helpers'
+  PD/PT walks.  Frames below the direct-map ceiling fast-path
+  through the helper without claiming a slot, so the calling code
+  is uniform regardless of which side of the boundary the
+  allocator returned.
+- `make_os.sh`'s VGA-hole assert grows from `0xB000` (44 KB worst
+  case at the old 32 KB bitmap budget) to `0x23000` (140 KB worst
+  case at the new 128 KB bitmap budget).  The runtime region on
+  -m 1 is still ~12 KB; the assert is a static safety net so
+  `kernel.bin` growing into the high-bitmap regime can't silently
+  cross the VGA aperture.
+- `bigbss` re-anchored at -m 2048 with `BIGBSS_PAGES = 523,341` —
+  about double the old -m 1025 value of 261,493.  At -m 2048
+  roughly half the BSS frames sit above `FRAME_DIRECT_MAP_LIMIT`
+  and exercise the kmap slow path during program_enter's phase-2
+  zero fill, so `bigbss` doubles as a kmap end-to-end smoke test
+  in addition to the boundary tripwire.  `bigbss_oom` shifts to
+  -m 2047 (one MB less RAM, ~256 fewer frames; same BSS no longer
+  fits) and `bigbss_fail` to -m 2048 with `BIGBSS_PAGES + 1` for
+  the page-precise upper tripwire.  Each bigbss-class test takes
+  ~15 s now (was ~5 s) because it touches ~2 GB of memory.
+
 ### Lift USER_STACK_TOP to 0xC0000000 (2026-04-30)
 - The user stack moves from `[0x3FFF0000, 0x40000000)` to
   `[0xBFFF0000, 0xC0000000)`, with the guard region at
