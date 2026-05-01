@@ -31,13 +31,13 @@ uint8_t fdc_motor_ready;
 
 // FS scratch frame pointer — defined in vfs.c, populated by
 // `vfs_init` before the first disk read.  fdc_dma_setup feeds the
-// low 24 bits of this pointer to the 8237 as the transfer's
-// physical address; the frame_alloc-managed pool sits inside the
-// kernel direct map (phys 0..4 MB at FIRST_KERNEL_PDE = 1022), so
-// kernel-virt minus DIRECT_MAP_BASE equals phys.  The 8237 only
-// takes 24 bits, so a frame above the 16 MB ISA-DMA ceiling would
-// still be a problem here; vfs_init's first-fit allocation lands
-// in low memory in practice.
+// 8237's 24-bit address register with the FRAME PHYS, computed as
+// `(int)sector_buffer - DIRECT_MAP_BASE`.  `sector_buffer` is a
+// kernel-virt pointer; subtracting `DIRECT_MAP_BASE` gives the
+// underlying low-memory phys.  The 8237 only takes 24 bits, so a
+// frame above the 16 MB ISA-DMA ceiling would still be a problem
+// here; vfs_init's first-fit allocation lands well below 16 MB in
+// practice.
 extern uint8_t *sector_buffer;
 
 // Forward declarations for callees that come later alphabetically and
@@ -55,16 +55,16 @@ void fdc_wait_irq();
 
 // Program 8237 DMA channel 2 for a 512-byte transfer at sector_buffer.
 // AL = mode byte (DMA_MODE_READ=0x46 or DMA_MODE_WRITE=0x4A).  The
-// 8237 takes a 24-bit physical address; we pass the low 24 bits of
-// sector_buffer's kernel-virt, which equals the actual frame phys
-// because the bitmap allocator hands out frames inside the kernel
-// direct map and DIRECT_MAP_BASE's bit 23..0 are zero (true for
-// any 4 MB-aligned base, including the current 0xFF800000).
+// 8237 takes a 24-bit physical address; we feed it the FRAME PHYS,
+// computed as `sector_buffer - DIRECT_MAP_BASE`.  The literal
+// 0xFF800000 below must equal `DIRECT_MAP_BASE` in
+// src/arch/x86/kernel.asm — cc.py doesn't resolve NASM equ symbols
+// inside C expressions, so this is a manual link.  Keep in sync.
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax")))
 {
     int phys;
-    phys = sector_buffer;
+    phys = sector_buffer - 0xFF800000;
     kernel_outb(0x0A, 0x06);                       // mask channel 2
     kernel_outb(0x0C, 0);                          // clear flip-flop
     kernel_outb(0x04, phys & 0xFF);                // addr low
