@@ -88,7 +88,7 @@ make_os.sh            Build script
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes by version and date.
+See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for a detailed history of changes by version and date.
 
 ## Resources
 

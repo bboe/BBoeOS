@@ -1,5 +1,6 @@
 ---
-title: BBoeOS
+title: Home
+nav_order: 1
 ---
 
 # BBoeOS
@@ -17,10 +18,11 @@ directories.
 - [Memory map](memory_map.html) — kernel-side fixed-physical regions and the per-program user-virt layout
 - [Syscall interface](syscalls.html) — the INT 30h syscall table with argument-register conventions
 - [File structure](file_structure.html) — file-by-file breakdown of `src/` and the host-side build scripts
+- [Changelog](CHANGELOG.html) — detailed history of changes by version and date
 
 ## Source
 
 The canonical instructions for working in the repository live in
-[`CLAUDE.md`](https://github.com/bboe/bboeos/blob/main/CLAUDE.md) at the repo
+[`CLAUDE.md`](https://github.com/bboe/BBoeOS/blob/main/CLAUDE.md) at the repo
 root. The pages here host the longer reference tables that used to clutter
 that file.
