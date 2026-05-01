@@ -56,5 +56,7 @@ jobs:
             command: python3 tests/test_floppy_boot.py
           - suite: test_programs_bbfs
             command: python3 tests/test_programs.py
+          - suite: test_programs_floppy
+            command: python3 tests/test_programs.py --floppy
           - suite: test_unit
             command: python3 -m pytest tests/unit/
