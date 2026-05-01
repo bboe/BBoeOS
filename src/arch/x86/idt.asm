@@ -181,7 +181,7 @@ exc_common:
         cmp dword [esp], 14
         jne .halt_kernel
         mov eax, cr2
-        cmp eax, 0xC0000000
+        cmp eax, KERNEL_VIRT_BASE
         jae .halt_kernel
 
         .kill_program:

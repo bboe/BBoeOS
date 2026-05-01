@@ -6,6 +6,149 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Lift KERNEL_VIRT_BASE 0xC0000000 → 0xFF800000 (2026-04-30)
+- Move the user/kernel virtual-address split from `0xC0000000` (3 GB
+  user / 1 GB kernel) to `0xFF800000` (~3.99 GB user / 4 MB kernel
+  direct map + 4 MB kmap window).  The kmap window already abstracts
+  away the size of the direct map, so the resident kernel
+  (~170 KB worst case: ~29 KB image + ≤140 KB reserved cluster) fits
+  in a single 4 MB PDE with 25× headroom.  Per-program user-virt
+  rises from ~3 GB to ~3.99 GB.
+- Constants moved in lockstep: `KERNEL_VIRT_BASE`, `USER_STACK_TOP`
+  (constants.asm), `DIRECT_MAP_BASE` (kernel.asm), the kernel.asm
+  `org` directive, and the boot.asm `HIGH_ENTRY_VIRT`.
+  `FIRST_KERNEL_PDE` derives the rest: 768 → 1022 (=
+  `KERNEL_VIRT_BASE / 0x400000`).  `address_space.asm`'s constants
+  now reference `DIRECT_MAP_BASE` and `FIRST_KERNEL_PDE` directly so
+  any future shift only touches the chain in kernel.asm.
+- Hardcoded 0xC0000000 literals replaced: `idt.asm` user-fault
+  triage uses `KERNEL_VIRT_BASE`; the inline asm in `ne2k.c` and
+  `vfs.c` references `DIRECT_MAP_BASE`.  vga.c's text/mode-13
+  framebuffer addresses move to `DIRECT_MAP_BASE + 0xB8000` /
+  `+ 0xA0000` in inline asm; the one C-side expression
+  (`vga_fill_block`'s base computation) stays as a hardcoded
+  `0xFF8A0000` since cc.py doesn't resolve NASM equ symbols inside
+  C expressions — flagged with a comment so it stays in sync.
+- `high_entry`'s direct-map auto-grow loop is now a no-op (the
+  loop bound `FIRST_KERNEL_PDE + 1 = 1023` equals `LAST_KERNEL_PDE`,
+  so the body never executes).  The first kernel PT, allocated by
+  boot.asm pre-paging at `FIRST_KERNEL_PT_PHYS` and installed at
+  `boot_pd[FIRST_KERNEL_PDE]`, is the entire kernel direct map.
+  Saves ~256 frames at large -m: at -m 2048 BIGBSS_PAGES rises
+  exactly +254 (523,341 → 523,595) — the freed direct-map PT
+  slots flow into the user pool.
+- bigbss tests stay anchored at -m 2048 with the new BIGBSS_PAGES =
+  523,595.  bigbss_oom (-m 2047) and bigbss_fail (-m 2048,
+  BIGBSS_PAGES + 1) keep their tripwire roles.  `stacktop`'s expected
+  ESP high byte changes from `C0` to `FF`.
+- Empirical landscape for the new layout (binsize ≈ 233; bisected
+  with bigbss):
+  - User-virt cap (theoretical) is 1,013,687 pages, derived from
+    `floor((KERNEL_VIRT_BASE - PROGRAM_BASE - binsize) / 4 KB)`.
+    But QEMU's i440fx PC machine defaults `max_ram_below_4g` to
+    `0xE0000000` (3.5 GB), with the `[0xE0000000..0xFFFFFFFF]`
+    range reserved as the PCI hole.  Any `-m N` above 3.5 GB
+    spills the excess to himem at phys ≥ 4 GB, which our 32-bit
+    OS can't reach (no PAE; `frame_max_phys` clamps at
+    `FRAME_PHYSICAL_LIMIT = 0xFFFFF000`).  So the *practical*
+    BIGBSS_PAGES ceiling is RAM-bound, not user-virt-bound:
+    - -m 1025 → 261,716 + 254 ≈ 261,970 (RAM-bound)
+    - -m 2048 → 523,595 (RAM-bound, our test anchor)
+    - -m 4096+ → roughly 785,000 (RAM-bound, ~3.07 GB BSS,
+      saturates the 3.5 GB lowmem region after per-PD overhead
+      and QEMU/kernel reservations).  -m 8192 / 16384 give the
+      same answer as -m 4096 — the extra RAM is invisible.
+    Going past this cap requires PAE in the guest kernel
+    (qemu-system-x86_64 with a 36-bit-aware OS) or a 64-bit
+    rewrite.  Bumping `KERNEL_VIRT_BASE` further is not load-
+    bearing on the practical ceiling.
+
+### Kmap window unlocks RAM above the kernel direct-map ceiling (2026-04-30)
+- New `src/memory_management/kmap.asm` reserves PDE 1023 (virt
+  `0xFFC00000..0xFFFFFFFF`) as a kernel-only window of demand-mapped
+  slots.  `kmap_init` (called from `high_entry` after the kernel idle
+  PD takes over) allocates one frame as the window PT and installs it
+  at `kernel_idle_pd[1023]`; every per-program PD inherits PDE 1023
+  through `address_space_create`'s kernel-half copy-image, so the
+  window is reachable from every CR3.
+- `kmap_map(eax = phys) → eax = kernel_virt` fast-paths to
+  `phys + DIRECT_MAP_BASE` for frames below `FRAME_DIRECT_MAP_LIMIT`
+  (~1020 MB now that PDE 1023 belongs to the window) and falls back
+  to a slot in the window for higher frames.  `kmap_unmap` releases
+  the slot — no-op for the direct-map fast path.  Single-CPU, no
+  preemption, no recursive map-without-unmap, so a small fixed pool
+  (`KMAP_SLOT_COUNT = 4`) suffices; slot exhaustion panics.
+- `LAST_KERNEL_PDE` drops from 1024 to 1023 so `high_entry`'s
+  direct-map auto-grow loop stops at PDE 1022, leaving PDE 1023 for
+  the kmap window.  Direct map ceiling shifts from 1024 MB to
+  ~1020 MB; bitmap clamp moves to a separate `FRAME_PHYSICAL_LIMIT`
+  constant (= 0xFFFFF000, the 32-bit physical address-space
+  ceiling).  At -m 4096 the bitmap now describes ~1M frames and
+  costs ~128 KB; sessions with smaller -m pay less.
+- All "phys → kernel-virt to read/write" sites in the kernel go
+  through `kmap_map`/`kmap_unmap` now: `program_enter`'s handoff /
+  phase-1 / phase-2 / stack / trailer-peek frames, `vdso_install`'s
+  vDSO copy, `sys_exec.exec_load`'s handoff frame zero-fill +
+  EXEC_ARG/BUFFER copy, and the four `address_space_*` helpers'
+  PD/PT walks.  Frames below the direct-map ceiling fast-path
+  through the helper without claiming a slot, so the calling code
+  is uniform regardless of which side of the boundary the
+  allocator returned.
+- `make_os.sh`'s VGA-hole assert grows from `0xB000` (44 KB worst
+  case at the old 32 KB bitmap budget) to `0x23000` (140 KB worst
+  case at the new 128 KB bitmap budget).  The runtime region on
+  -m 1 is still ~12 KB; the assert is a static safety net so
+  `kernel.bin` growing into the high-bitmap regime can't silently
+  cross the VGA aperture.
+- `bigbss` re-anchored at -m 2048 with `BIGBSS_PAGES = 523,341` —
+  about double the old -m 1025 value of 261,493.  At -m 2048
+  roughly half the BSS frames sit above `FRAME_DIRECT_MAP_LIMIT`
+  and exercise the kmap slow path during program_enter's phase-2
+  zero fill, so `bigbss` doubles as a kmap end-to-end smoke test
+  in addition to the boundary tripwire.  `bigbss_oom` shifts to
+  -m 2047 (one MB less RAM, ~256 fewer frames; same BSS no longer
+  fits) and `bigbss_fail` to -m 2048 with `BIGBSS_PAGES + 1` for
+  the page-precise upper tripwire.  Each bigbss-class test takes
+  ~15 s now (was ~5 s) because it touches ~2 GB of memory.
+- Empirical -m / BIGBSS_PAGES landscape after kmap landed (probed
+  with bigbss; binsize = 233 bytes):
+  - **Boot**: any `-m`, including `-m 16384` and beyond — RAM
+    above `FRAME_PHYSICAL_LIMIT` is silently ignored, so the OS
+    treats `-m 8192` exactly like `-m 4096`.
+  - **Page-precise BIGBSS_PAGES at -m 4096**: 753,591 (also the
+    saturating value at any larger `-m`).  The cap is user-virt:
+    `user_image_end = page_align_up(PROGRAM_BASE + binsize +
+    BIGBSS_PAGES * 4 KB) ≤ KERNEL_VIRT_BASE` requires
+    `BIGBSS_PAGES ≤ floor((KERNEL_VIRT_BASE - PROGRAM_BASE -
+    binsize) / 4 KB) = 753591` for bigbss's binsize.
+  - **RAM/user-virt crossover**: `-m 2949`.  At ≥ -m 2949 the
+    bitmap allocator has enough free frames to cover BIGBSS_PAGES
+    + per-PD overhead; below that, RAM bottlenecks.  Reference
+    points: -m 1025 → 261,716 (RAM-bound), -m 2048 → 523,341
+    (RAM-bound), -m 2949..16384 → 753,591 (user-virt-bound).
+
+### address_space_map_page rejects user_virt in the kernel half (2026-04-30)
+- Latent bug surfaced while probing the new BIGBSS_PAGES ceiling
+  at -m 4096: a BSS large enough that
+  `user_image_end > KERNEL_VIRT_BASE` (= 0xC0000000) drove
+  program_enter's phase-2 loop to call `address_space_map_page`
+  with user_virt in the kernel half.  PDE >= 768 was already
+  present (copy-imaged from `kernel_idle_pd`), so the
+  "PDE present" branch wrote a user-RW PTE into the shared
+  kernel direct-map PT — corrupting kernel mappings for every
+  PD that copy-imaged that PDE.  The fault fired from the user
+  program itself: `EXC0E EIP=08048021 CR2=C00000E9 ERR=07`
+  (user-mode write to a present non-user page) once the
+  corruption made the direct map unreachable for ring 3.
+- Fix: gate on `user_virt < KERNEL_VIRT_BASE` at the top of
+  `address_space_map_page` and return `CF=1` on out-of-range,
+  before any PD/PT operations.  Existing callers
+  (`program_enter`'s phase 1 / phase 2 / stack loops,
+  `sys_exec`'s handoff map) already route `CF=1` through the OOM
+  recovery path, so a giant-BSS program now gets
+  `exec: out of memory` + a clean shell respawn instead of
+  silent kernel-direct-map corruption.
+
 ### Lift USER_STACK_TOP to 0xC0000000 (2026-04-30)
 - The user stack moves from `[0x3FFF0000, 0x40000000)` to
   `[0xBFFF0000, 0xC0000000)`, with the guard region at

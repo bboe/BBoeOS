@@ -379,7 +379,7 @@ asm("network_initialize:\n"
     "        jc .ni_no_nic\n"
     "        call frame_alloc\n"
     "        jc .ni_oom\n"
-    "        add eax, 0xC0000000\n"
+    "        add eax, DIRECT_MAP_BASE\n"
     // EAX = NIC scratch frame base (kernel-virt).  Slice into the four
     // named pointers; offsets must match the frame layout above.
     "        mov [_g_net_receive_buffer], eax\n"

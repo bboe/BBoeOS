@@ -441,12 +441,11 @@ syscall_handler:
         .exec_load:
         ;; Pre-allocate the new program's USER_DATA handoff frame from
         ;; the bitmap allocator and populate it *directly* from the
-        ;; dying shell's user pages.  The bitmap pool sits inside the
-        ;; kernel direct map, so the new frame is reachable at
-        ;; kernel-virt (phys + 0xC0000000) regardless of which PD is
-        ;; active — we don't need any cross-AS staging buffer.  The
-        ;; phys is handed off to program_enter via
-        ;; [next_handoff_frame_phys].
+        ;; dying shell's user pages.  The frame is reached through
+        ;; kmap_map so it stays addressable even when the bitmap
+        ;; allocator hands out a frame above the direct-map ceiling
+        ;; (FRAME_DIRECT_MAP_LIMIT, ~1020 MB).  The phys is handed off
+        ;; to program_enter via [next_handoff_frame_phys].
         ;;
         ;; Reads from BUFFER (user-virt 0x1500) and EXEC_ARG (user-virt
         ;; 0x14FC) below resolve through the shell's PD because we
@@ -459,15 +458,16 @@ syscall_handler:
         mov [next_handoff_frame_phys], eax
         push esi
         push edi
-        mov edi, eax
-        add edi, 0xC0000000             ; kernel-virt of new frame
+        call kmap_map                   ; EAX = handoff kvirt
+        push eax                        ; [esp+0] = kvirt; saved for unmap below
         ;; Zero entire frame so unused slots (ARGV etc.) start clean.
-        push edi
+        mov edi, eax
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop edi
+        ;; Reload kvirt (rep stosd advanced edi past the frame).
+        mov edi, [esp]
         ;; Copy EXEC_ARG (4 B) and BUFFER (256 B) from the shell PD's
         ;; user pages into the new frame at the matching offsets.
         mov eax, [EXEC_ARG]
@@ -476,6 +476,8 @@ syscall_handler:
         add edi, (BUFFER - USER_DATA_BASE)
         mov ecx, MAX_INPUT / 4
         rep movsd
+        pop eax                         ; handoff kvirt
+        call kmap_unmap
         pop edi
         pop esi
         mov esp, [shell_esp]

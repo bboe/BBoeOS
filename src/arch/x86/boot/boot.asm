@@ -17,10 +17,10 @@
 ;;; After the PE flip, `early_pe_entry` runs in flat 32-bit at low
 ;;; physical, builds the boot PD + first kernel PT, enables paging,
 ;;; and far-jumps to `high_entry` at the kernel-virt entry point
-;;; (0xC0020000 — the very first byte of kernel.bin per its `org`
-;;; directive, which equals 0xC0000000 + KERNEL_LOAD_PHYS so the
-;;; kernel runs in the direct map without needing a separate
-;;; higher-half mapping).
+;;; (HIGH_ENTRY_VIRT = 0xFF820000 — the very first byte of
+;;; kernel.bin per its `org` directive, which equals KERNEL_VIRT_BASE
+;;; + KERNEL_LOAD_PHYS so the kernel runs in the direct map without
+;;; needing a separate higher-half mapping).
 ;;;
 ;;; boot.asm intentionally has no IDT.  An exception during early-PE
 ;;; bootstrap triple-faults; the bootstrap is short and tested.  The
@@ -91,13 +91,14 @@
         ;; boot_disk slot followed by a 2-byte directory_sector slot.
         ;; boot.asm writes both AFTER the kernel.bin INT 13h read so the
         ;; load doesn't clobber them.  HIGH_ENTRY_VIRT is the kernel
-        ;; far-jump target (= 0xC0000000 + KERNEL_LOAD_PHYS, so the
-        ;; kernel runs at its direct-map alias).
+        ;; far-jump target (= KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS, so
+        ;; the kernel runs at its direct-map alias).
         BOOT_DISK_PHYS              equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
         BOOT_PD_PHYS                equ KERNEL_RESERVED_BASE + KERNEL_STACK_BYTES
         DIRECTORY_SECTOR_PHYS       equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
+        FIRST_KERNEL_PDE            equ 1022                ; KERNEL_VIRT_BASE / 0x400000; must equal kernel.asm's value
         FIRST_KERNEL_PT_PHYS        equ BOOT_PD_PHYS + 0x1000
-        HIGH_ENTRY_VIRT             equ 0xC0020000
+        HIGH_ENTRY_VIRT             equ 0xFF820000          ; KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS
         KERNEL_LOAD_PHYS            equ 0x20000
         KERNEL_STACK_BYTES          equ 0x1000
 
@@ -318,8 +319,9 @@ early_pe_entry:
         ;; Step 1: Build the first kernel PT at FIRST_KERNEL_PT_PHYS.
         ;; PTE[j] = (j * 0x1000) | P | RW | G  (U/S=0, kernel-only).
         ;; This single PT covers physical 0..4 MB and is hooked into
-        ;; the boot PD twice — at PDE[0] (identity) and PDE[768]
-        ;; (kernel direct map at virt 0xC0000000).
+        ;; the boot PD twice — at PDE[0] (identity) and
+        ;; PDE[FIRST_KERNEL_PDE] (kernel direct map at virt
+        ;; KERNEL_VIRT_BASE).
         mov edi, FIRST_KERNEL_PT_PHYS
         xor ecx, ecx
 .fill_pt:
@@ -333,14 +335,15 @@ early_pe_entry:
 
         ;; Step 2: Zero the boot PD at BOOT_PD_PHYS, then install the
         ;; first kernel PT at PDE[0] (identity for first 4 MB) and
-        ;; PDE[768] (kernel direct map at virt 0xC0000000..0xC03FFFFF).
+        ;; PDE[FIRST_KERNEL_PDE] (kernel direct map at virt
+        ;; KERNEL_VIRT_BASE..KERNEL_VIRT_BASE+0x3FFFFF).
         mov edi, BOOT_PD_PHYS
         xor eax, eax
         mov ecx, 1024
         rep stosd
 
         mov dword [BOOT_PD_PHYS + 0*4], FIRST_KERNEL_PT_PHYS | 0x003
-        mov dword [BOOT_PD_PHYS + 768*4], FIRST_KERNEL_PT_PHYS | 0x003
+        mov dword [BOOT_PD_PHYS + FIRST_KERNEL_PDE*4], FIRST_KERNEL_PT_PHYS | 0x003
 
         ;; Step 3: Set CR3 = boot PD, enable PG | WP in CR0.
         ;; CR0.WP makes ring-0 writes honor R/W bits in PTEs (so a

@@ -40,21 +40,21 @@
         ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
-        ;;   PTEs 0xBFFE0..0xBFFEF   : NOT MAPPED — stack guard (overflow → #PF)
-        ;;   PTEs 0xBFFF0..0xBFFFF   : private — user stack (16 × 4 KB = 64 KB),
-        ;;                             stack top = 0xC0000000 (== kernel boundary)
+        ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
+        ;;   PTEs 0xFF7F0..0xFF7FF   : private — user stack (16 × 4 KB = 64 KB),
+        ;;                             stack top = 0xFF800000 (== kernel boundary)
         ;;
         ;; The stack sits just below the user/kernel split so user
         ;; programs get the full 3 GB of user-virt between PROGRAM_BASE
         ;; and the stack for text + BSS + future heap.  Dense use is
-        ;; still capped at ~1 GB by the kernel direct-map ceiling
-        ;; (LAST_KERNEL_PDE = 1024) — the kernel must zero-fill each
-        ;; user frame through its kernel-virt alias during the BSS
-        ;; phase, and frames above the direct map are unreachable
-        ;; until phase 2 adds a kmap window.  Sparse 3 GB virt is
-        ;; available right now.
+        ;; bounded by the bitmap allocator's free-frame count: the
+        ;; kernel zero-fills each user frame through a kmap_map alias
+        ;; (memory_management/kmap.asm), so frames below the
+        ;; direct-map ceiling fast-path through the direct map and
+        ;; frames above it (up to FRAME_PHYSICAL_LIMIT, ~4 GB) reach
+        ;; the kernel via a slot in the kmap window.
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
-        STACK_VIRT_END          equ USER_STACK_TOP                      ; 0xC0000000 (one past last page; user/kernel boundary)
+        STACK_VIRT_END          equ USER_STACK_TOP                      ; one past last page; user/kernel boundary (= KERNEL_VIRT_BASE)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
@@ -153,14 +153,16 @@ program_enter:
         call frame_alloc
         jc .oom
         mov [pending_frame_phys], eax
-        push eax
+        call kmap_map                       ; EAX = handoff_kvirt
+        push eax                            ; save kvirt for the unmap below
         mov edi, eax
-        add edi, 0xC0000000                 ; kernel-virt of frame
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop eax
+        pop eax                             ; handoff_kvirt
+        call kmap_unmap
+        mov eax, [pending_frame_phys]       ; reload phys for .handoff_map
         jmp .handoff_map
         .handoff_have:
         ;; Pre-allocated by sys_exec — already populated.  Transfer
@@ -194,8 +196,8 @@ program_enter:
         jc .oom
         mov [last_binary_frame_phys], eax   ; remember for trailer peek
         mov [pending_frame_phys], eax       ; track for OOM cleanup
-        mov edi, eax
-        add edi, 0xC0000000                 ; EDI = kernel-virt of frame
+        call kmap_map                       ; EAX = kvirt
+        mov edi, eax                        ; EDI = kvirt; held across the sector copy below
 
         ;; Zero entire frame so the partial last sector lands on a
         ;; zero background.
@@ -262,6 +264,11 @@ program_enter:
         inc edx
         jmp .phase1_sector_loop
 .phase1_page_done:
+        ;; Release the kmap before installing the user-side mapping.
+        ;; The frame keeps its data — we just don't need its kernel
+        ;; alias anymore.  EDI holds the kvirt from the page setup.
+        mov eax, edi
+        call kmap_unmap
         ;; Map the frame into the per-program PD at virt_cursor.
         mov ecx, [pending_frame_phys]       ; frame phys
         mov eax, [current_pd_phys]
@@ -278,12 +285,14 @@ program_enter:
         ;; binsize is vfs_found_size; the trailer (6-byte BSS_MAGIC32 or
         ;; legacy 4-byte BSS_MAGIC) sits at offset (binsize - N) within
         ;; the file, which lands inside the last loaded frame at offset
-        ;; ((binsize - 1) & 0xFFF) + 1 - N.
+        ;; ((binsize - 1) & 0xFFF) + 1 - N.  The frame was kmap_unmap'd
+        ;; at the end of phase 1 — re-map it briefly for the peek.
         xor ebx, ebx                        ; default bss_size = 0
         mov eax, [last_binary_frame_phys]
         test eax, eax
         jz .have_bss_size                   ; empty file (no binary loaded)
-        add eax, 0xC0000000                 ; EAX = kernel-virt of last frame
+        call kmap_map                       ; EAX = trailer kvirt
+        push eax                            ; save kvirt for the unmap below
         mov ecx, [vfs_found_size]
         sub ecx, 1
         and ecx, 0xFFF
@@ -294,13 +303,16 @@ program_enter:
         cmp word [eax + ecx - 2], BSS_MAGIC32
         jne .check_old_trailer
         mov ebx, [eax + ecx - 6]
-        jmp .have_bss_size
+        jmp .trailer_peek_done
 .check_old_trailer:
         cmp ecx, 4
-        jb .have_bss_size
+        jb .trailer_peek_done
         cmp word [eax + ecx - 2], BSS_MAGIC
-        jne .have_bss_size
+        jne .trailer_peek_done
         movzx ebx, word [eax + ecx - 4]
+.trailer_peek_done:
+        pop eax                             ; trailer kvirt
+        call kmap_unmap
 .have_bss_size:
 
         ;; --- Compute user_image_end ---
@@ -321,12 +333,15 @@ program_enter:
         call frame_alloc
         jc .oom
         mov [pending_frame_phys], eax
+        call kmap_map                       ; EAX = kvirt
+        push eax                            ; save kvirt for the unmap below
         mov edi, eax
-        add edi, 0xC0000000
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
+        pop eax                             ; kvirt
+        call kmap_unmap
         mov ecx, [pending_frame_phys]
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
@@ -355,12 +370,15 @@ program_enter:
         call frame_alloc
         jc .oom
         mov [pending_frame_phys], eax
+        call kmap_map                       ; EAX = kvirt
+        push eax                            ; save kvirt for the unmap below
         mov edi, eax
-        add edi, 0xC0000000
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
+        pop eax                             ; kvirt
+        call kmap_unmap
         mov ecx, [pending_frame_phys]
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
@@ -589,11 +607,16 @@ shell_reload:
 
 vdso_install:
         ;; Allocate one frame for the vDSO code page and copy
-        ;; `vdso_image` (the embedded blob from kernel.asm) into it via
-        ;; the kernel direct map.  program_enter installs the frame at
-        ;; user-virt FUNCTION_TABLE (0x10000) in every per-program PD
-        ;; with PTE_SHARED, so user programs see the vDSO and
-        ;; address_space_destroy never frees the frame.
+        ;; `vdso_image` (the embedded blob from kernel.asm) into it
+        ;; through a kmap_map alias.  program_enter installs the
+        ;; frame at user-virt FUNCTION_TABLE (0x10000) in every
+        ;; per-program PD with PTE_SHARED, so user programs see the
+        ;; vDSO and address_space_destroy never frees the frame.  At
+        ;; boot the bitmap allocator's first hits are in low
+        ;; conventional RAM, so this kmap_map fast-paths to the
+        ;; direct-map alias and doesn't claim a slot — but going
+        ;; through the helper keeps the code uniform with every
+        ;; other "phys → kernel-virt to write" path.
         push eax
         push ecx
         push esi
@@ -601,12 +624,15 @@ vdso_install:
         call frame_alloc
         jc .panic
         mov [vdso_code_phys], eax
+        call kmap_map                   ; EAX = kvirt
+        push eax                        ; save kvirt for the unmap below
         mov edi, eax
-        add edi, 0xC0000000             ; direct-map kernel-virt of frame
         mov esi, vdso_image
         mov ecx, (vdso_image_end - vdso_image) / 4
         cld
         rep movsd
+        pop eax                         ; kvirt
+        call kmap_unmap
         pop edi
         pop esi
         pop ecx
@@ -622,7 +648,7 @@ vdso_install:
 
         ;; Physical address of the kernel idle PD — a long-lived 4 KB
         ;; kernel-only page directory built in `high_entry` by
-        ;; copy-imaging the boot PD's kernel half (PDEs 768..1023)
+        ;; copy-imaging the boot PD's kernel half (PDEs FIRST_KERNEL_PDE..1023)
         ;; into a fresh frame_alloc'd frame and leaving the user half
         ;; (PDEs 0..767) zero.  Used as the canonical kernel-half PDE
         ;; source for `address_space_create`, as CR3 between programs

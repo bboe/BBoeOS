@@ -1,6 +1,6 @@
 /* Smoke test for the access_ok pointer validation in syscall handlers.
    Calls SYS_IO_WRITE with a kernel-half buffer pointer (KERNEL_VIRT_BASE
-   = 0xC0000000) and asserts: the kernel does NOT take a #PF (no EXC0E
+   = 0xFF800000) and asserts: the kernel does NOT take a #PF (no EXC0E
    on the serial console), the syscall returns CF=1, and EAX is < 0.
    Pairs with the okptest entry in tests/test_programs.py.
 

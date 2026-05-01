@@ -184,42 +184,43 @@ def _pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
 TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
-    # Maximum-BSS success case.  bigbss declares BIGBSS_PAGES (see
-    # src/c/bigbss_size.h) of BSS — the largest array that fits at
-    # -m 1025, the max-beneficial RAM size for this OS.  At -m 1025
-    # the bottom 1 GB is fully type-1 RAM in E820 (ACPI reservations
-    # land above the 1 GB direct-map clamp), so the bitmap exposes
-    # the maximum possible free-frame count.  Going above -m 1025
-    # adds no benefit (kernel direct map is clamped at 1 GB).  Also
-    # exercises post-USER_STACK_TOP-lift user-virt: BSS extends well
-    # above the old 1 GB user-virt ceiling.
-    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="1025", timeout=120.0),
-    # Tripwire-low: same program at -m 1024 (one MB less RAM).  At
-    # -m 1024 specifically, QEMU/SeaBIOS plants ~128 KB of ACPI
-    # tables (type-3/4 in E820) near the top of the 1 GB block —
-    # ~32 frames now vanish from the bitmap and bigbss no longer
-    # fits.  Asserts the OOM message AND a follow-up `hello` runs
-    # in the respawned shell.  If BIGBSS_PAGES is set too low, the
-    # program would fit even with the ACPI reservation in the way
-    # and this test would fail (no OOM message).
+    # Maximum-BSS success case AND kmap-window smoke test.  bigbss
+    # declares BIGBSS_PAGES (see src/c/bigbss_size.h) = 523,341 of
+    # BSS at -m 2048 — large enough that ~half the frames sit
+    # above FRAME_DIRECT_MAP_LIMIT (~1020 MB).  program_enter's
+    # phase-2 zero-fills those high frames through the kmap window
+    # (memory_management/kmap.asm), so a successful run validates
+    # kmap_map / kmap_unmap end-to-end.  The verify pass after the
+    # write loop catches any kmap zero-fill that lands at the wrong
+    # phys.
+    ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", memory="2048", timeout=180.0),
+    # Tripwire-low: same program at -m 2047 (one MB less RAM, ~256
+    # fewer frames in the bitmap).  At -m 2047 BIGBSS_PAGES + per-PD
+    # overhead no longer fits, and program_enter OOMs partway
+    # through phase 2 (also exercising address_space_destroy on a
+    # partially-built PD whose user PTs landed both below and above
+    # the direct-map ceiling).  Asserts the OOM message AND a
+    # follow-up `hello` runs in the respawned shell.  If
+    # BIGBSS_PAGES drifts down by more than ~256 frames, this test
+    # starts fitting and we lose the lower tripwire.
     ProgramTest(
         "bigbss_oom",
         ["bigbss", "hello"],
         r"^exec: out of memory$[\s\S]+^Hello world!$",
-        memory="1024",
-        timeout=60.0,
+        memory="2047",
+        timeout=120.0,
     ),
     # Tripwire-high: bigbss_fail declares BIGBSS_PAGES + 1 of BSS —
-    # exactly one page beyond what bigbss fits — and asserts OOM at
-    # -m 1025 (the max-beneficial RAM size).  If BIGBSS_PAGES is
-    # set too high, this program would also fit and this test would
-    # fail (no OOM message).  Together bigbss_oom + bigbss_fail pin
-    # BIGBSS_PAGES to the page-precise ceiling.
+    # exactly one page beyond what bigbss fits at -m 2048 — and
+    # asserts OOM.  Page-precise: any upward drift in BIGBSS_PAGES
+    # makes this fit and the test fails (no OOM message).  Together
+    # bigbss_oom + bigbss_fail pin BIGBSS_PAGES to the page-precise
+    # ceiling at -m 2048.
     ProgramTest(
         "bigbss_fail",
         ["bigbss_fail", "hello"],
         r"^exec: out of memory$[\s\S]+^Hello world!$",
-        memory="1025",
+        memory="2048",
         timeout=60.0,
     ),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
@@ -287,15 +288,17 @@ TESTS: list[ProgramTest] = [
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # 1 KB recursive frames overflow the 16-page user stack into the
     # unmapped page below it; same kill path as nullderef.  CR2 lands
-    # somewhere below 0xBFFF0000 (the stack base) — match the EXC0E
-    # signature loosely so future stack-size changes don't break this.
+    # somewhere below STACK_VIRT_BASE (= USER_STACK_TOP - 0x10000) — match
+    # the EXC0E signature loosely so future stack-size or KERNEL_VIRT_BASE
+    # changes don't break this.
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
-    # Confirms the user stack lives at the new top (USER_STACK_TOP =
-    # 0xC0000000, sitting at the user/kernel boundary).  ESP at iretd
-    # equals USER_STACK_TOP, so the high byte is 0xC0 — any other
-    # value (e.g. 0x40 from the pre-lift layout) means the lift
-    # didn't take effect.
-    ProgramTest("stacktop", ["stacktop"], r"^stacktop: high=C0$"),
+    # Confirms the user stack lives at the user/kernel boundary
+    # (USER_STACK_TOP = KERNEL_VIRT_BASE).  ESP at iretd equals
+    # USER_STACK_TOP, so the high byte is the high byte of
+    # KERNEL_VIRT_BASE (currently 0xff at base 0xFF800000) — any
+    # other value (e.g. 0xc0 from a prior lift, or 0x40 from the
+    # original layout) means the constants drifted out of sync.
+    ProgramTest("stacktop", ["stacktop"], r"^stacktop: high=FF$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 

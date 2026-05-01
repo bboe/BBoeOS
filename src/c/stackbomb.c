@@ -1,6 +1,6 @@
 /* Smoke test for the stack guard region (16 pages just below the 64
-   KB user stack — top of stack at USER_STACK_TOP = 0xC0000000, so
-   the guard sits at 0xBFFE0000..0xBFFEFFFF).  Recurses with a 1 KB
+   KB user stack — top of stack at USER_STACK_TOP = 0xFF800000, so
+   the guard sits at 0xFF7E0000..0xFF7EFFFF).  Recurses with a 1 KB
    local frame until the guard page faults; the kernel sees a
    user-mode #PF with cr2 inside the guard region, tears down the
    PD, and re-enters shell_reload.  Pairs with the `stackbomb` entry
