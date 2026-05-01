@@ -258,7 +258,7 @@ class CodeGeneratorBase:
         Two byte-index nodes share a base when their keys match,
         meaning a single ``mov bx, <base>`` can serve both.
         """
-        return node.name
+        return node.array.name
 
     @staticmethod
     def _check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
@@ -402,8 +402,8 @@ class CodeGeneratorBase:
 
     def _index_cache_key(self, expression: Node, /) -> tuple[str, int] | None:
         """Return the register cache key for an index expression, or None."""
-        if isinstance(expression, Index) and isinstance(expression.index, Int) and expression.name in self.array_labels:
-            return (self.array_labels[expression.name], expression.index.value * 2)
+        if isinstance(expression, Index) and isinstance(expression.index, Int) and expression.array.name in self.array_labels:
+            return (self.array_labels[expression.array.name], expression.index.value * 2)
         return None
 
     def _is_byte_eq(self, node: Node, /) -> bool:
@@ -415,9 +415,9 @@ class CodeGeneratorBase:
         return (
             isinstance(node, Index)
             and isinstance(node.index, Int)
-            and node.name not in self.array_labels
-            and node.name in self.visible_vars
-            and self.variable_types.get(node.name) in self.BYTE_SCALAR_TYPES
+            and node.array.name not in self.array_labels
+            and node.array.name in self.visible_vars
+            and self.variable_types.get(node.array.name) in self.BYTE_SCALAR_TYPES
         )
 
     def _is_byte_scalar(self, name: str, /) -> bool:
@@ -486,7 +486,7 @@ class CodeGeneratorBase:
         if isinstance(node, Var):
             return self.variable_types.get(node.name) in self.UNSIGNED_TYPES
         if isinstance(node, Index):
-            return self.variable_types.get(node.name) in self.UNSIGNED_TYPES
+            return self.variable_types.get(node.array.name) in self.UNSIGNED_TYPES
         if isinstance(node, BinaryOperation):
             return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
         return False
@@ -704,7 +704,7 @@ class CodeGeneratorBase:
         if isinstance(node, String):
             return "pointer"
         if isinstance(node, Index):
-            variable_type = self.variable_types.get(node.name)
+            variable_type = self.variable_types.get(node.array.name)
             if variable_type in ("char", "char*"):
                 return "char"
             return "integer"
