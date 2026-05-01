@@ -635,7 +635,7 @@ class Parser:
         self.eat("ASSIGN")
         expr = self.parse_expression()
         self.eat("SEMI")
-        return IndexAssign(expr=expr, index=index, line=token[2], name=name)
+        return IndexAssign(array=Var(line=token[2], name=name), expr=expr, index=index, line=token[2])
 
     def parse_logical_and(self) -> Node:
         """Parse a left-associative ``&&`` expression.
@@ -783,7 +783,7 @@ class Parser:
                         member_name=member_name,
                         name=token[1],
                     )
-                return Index(index=index, line=line, name=token[1])
+                return Index(array=Var(line=line, name=token[1]), index=index, line=line)
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 arrow = arrow_token[0] == "ARROW"
@@ -841,7 +841,7 @@ class Parser:
                     operation="+",
                     right=index,
                 )
-            return AddressOf(line=line, name=name_token[1])
+            return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "LPAREN":
             self.eat()
             expression = self.parse_expression()
@@ -941,7 +941,7 @@ class Parser:
             self.eat("ASSIGN")
             expr = self.parse_expression()
             self.eat("SEMI")
-            return DerefAssign(expr=expr, line=token[2], name=name_token[1])
+            return DerefAssign(expr=expr, line=token[2], pointer=Var(line=token[2], name=name_token[1]))
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":

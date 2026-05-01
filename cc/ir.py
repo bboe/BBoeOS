@@ -269,7 +269,7 @@ class Builder:
             case ast_nodes.Assign(name=name, expr=expr):
                 source = self._build_expr(expr, out, strings=strings)
                 out.append(Copy(destination=name, source=source))
-            case ast_nodes.IndexAssign(name=base, index=index_node, expr=expr):
+            case ast_nodes.IndexAssign(array=ast_nodes.Var(name=base), index=index_node, expr=expr):
                 index_value = self._build_expr(index_node, out, strings=strings)
                 source = self._build_expr(expr, out, strings=strings)
                 out.append(IndexAssign(base=base, index=index_value, source=source))
@@ -478,7 +478,7 @@ class Builder:
                 temp = self._tmp()
                 out.append(Call(args=arg_values, destination=temp, name=name))
                 return temp
-            case ast_nodes.Index(name=base, index=index_node):
+            case ast_nodes.Index(array=ast_nodes.Var(name=base), index=index_node):
                 index_value = self._build_expr(index_node, out, strings=strings)
                 temp = self._tmp()
                 out.append(Index(base=base, destination=temp, index=index_value))

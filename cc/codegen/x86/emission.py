@@ -475,8 +475,8 @@ class EmissionMixin:
             # loop; the pop loop then has nothing to restore for them.
             captured_pinned_registers: set[str] = set()
             for _, capture_arg in out_reg_captures:
-                if isinstance(capture_arg, AddressOf) and capture_arg.name in self.pinned_register:
-                    captured_pinned_registers.add(self.pinned_register[capture_arg.name])
+                if isinstance(capture_arg, AddressOf) and capture_arg.var.name in self.pinned_register:
+                    captured_pinned_registers.add(self.pinned_register[capture_arg.var.name])
             clobbers: frozenset[str] = frozenset(self.target.register_pool)
             saved = [r for r in self._pinned_registers_to_save(clobbers) if r not in captured_pinned_registers]
             use_pusha = discard_return and len(saved) >= 3
@@ -521,7 +521,7 @@ class EmissionMixin:
                 if not isinstance(arg, AddressOf):
                     message = "out_register argument must be an address-of expression (&var)"
                     raise CompileError(message, line=statement.line)
-                dest_name = arg.name
+                dest_name = arg.var.name
                 widened = self.target.widen_gp(reg)
                 if dest_name in self.pinned_register:
                     dest_reg = self.pinned_register[dest_name]
@@ -690,7 +690,7 @@ class EmissionMixin:
             self.ax_local = vname
         elif isinstance(expression, Index):
             self.ax_clear()
-            vname = expression.name
+            vname = expression.array.name
             index_expression = expression.index
             self._check_defined(vname, line=expression.line)
             if isinstance(index_expression, Int) and vname in self.array_labels:
@@ -1031,7 +1031,7 @@ class EmissionMixin:
                 self.emit(f"        pop {self.target.count_register}")
             self.ax_clear()
         elif isinstance(expression, AddressOf):
-            name = expression.name
+            name = expression.var.name
             if name in self.out_register_locals:
                 message = f"cannot take address of out_register parameter '{name}'"
                 raise CompileError(message, line=expression.line)
@@ -1090,10 +1090,10 @@ class EmissionMixin:
                 call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
                 self.emit_store_local(expression=call, name=destination)
             case ir.Index(destination=destination, base=base, index=index):
-                expression = Index(index=self._ir_value_to_ast(index), name=base)
+                expression = Index(array=Var(name=base), index=self._ir_value_to_ast(index))
                 self.emit_store_local(expression=expression, name=destination)
             case ir.IndexAssign(base=base, index=index, source=source):
-                stmt = IndexAssign(expr=self._ir_value_to_ast(source), index=self._ir_value_to_ast(index), name=base)
+                stmt = IndexAssign(array=Var(name=base), expr=self._ir_value_to_ast(source), index=self._ir_value_to_ast(index))
                 self.generate_index_assign(stmt)
             case ir.Label(name=name):
                 # Control can arrive at an IR label from any preceding
@@ -1131,9 +1131,9 @@ class EmissionMixin:
         """Return True if node or any descendant is Var(name).
 
         Conservative: any str field equal to name is treated as a possible
-        variable read so that nodes like IndexAssign and DerefAssign (which
-        store the array/pointer name as a plain str rather than a Var) are
-        not silently missed.
+        variable read so that nodes like Assign, MemberAssign, and the
+        IndexMember* family (which still store the target's name as a plain
+        str rather than a Var) are not silently missed.
         """
         if isinstance(node, Var):
             return node.name == name
@@ -1643,7 +1643,7 @@ class EmissionMixin:
                 self.ax_clear()
 
     def generate_index_assign(self, statement: IndexAssign, /) -> None:
-        """Generate assembly for ``name[index] = expr;``.
+        """Generate assembly for ``array[index] = expr;``.
 
         When the base pointer lives in memory (not a named constant) and
         a different ``asm_register("si")`` global is active, loading the
@@ -1652,7 +1652,7 @@ class EmissionMixin:
         pinned value.  Matches the read-side guard in generate_expression.
         """
         self.ax_clear()
-        name = statement.name
+        name = statement.array.name
         is_byte = self._is_byte_var(name)
         self._check_defined(name, line=statement.line)
         # Evaluate value into AX, then store at base+index.
@@ -1905,10 +1905,10 @@ class EmissionMixin:
             self.generate_call(statement, discard_return=True)
             self.ax_clear()
         elif isinstance(statement, DerefAssign):
-            if statement.name not in self.out_register_locals:
-                message = f"pointer dereference write to non-out_register variable '{statement.name}' not supported"
+            if statement.pointer.name not in self.out_register_locals:
+                message = f"pointer dereference write to non-out_register variable '{statement.pointer.name}' not supported"
                 raise CompileError(message, line=statement.line)
-            reg = self.out_register_locals[statement.name]
+            reg = self.out_register_locals[statement.pointer.name]
             self.generate_expression(statement.expr)
             # Source defaults to the accumulator; if the out_register
             # target is narrower (e.g. 16-bit ``dx`` against 32-bit

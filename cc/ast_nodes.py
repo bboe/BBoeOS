@@ -33,7 +33,7 @@ class Node:
 class AddressOf(Node):
     """Address-of expression ``&name``."""
 
-    name: str
+    var: Var
 
 
 @dataclass(kw_only=True, slots=True)
@@ -100,10 +100,10 @@ class Continue(Node):
 
 @dataclass(kw_only=True, slots=True)
 class DerefAssign(Node):
-    """Pointer dereference assignment ``*name = expr;``."""
+    """Pointer dereference assignment ``*pointer = expr;``."""
 
     expr: Node
-    name: str
+    pointer: Var
 
 
 @dataclass(kw_only=True, slots=True)
@@ -179,19 +179,19 @@ class If(Node):
 
 @dataclass(kw_only=True, slots=True)
 class Index(Node):
-    """Subscript expression ``name[index]``."""
+    """Subscript expression ``array[index]``."""
 
+    array: Var
     index: Node
-    name: str
 
 
 @dataclass(kw_only=True, slots=True)
 class IndexAssign(Node):
-    """Indexed assignment ``name[index] = expr;``."""
+    """Indexed assignment ``array[index] = expr;``."""
 
+    array: Var
     expr: Node
     index: Node
-    name: str
 
 
 @dataclass(kw_only=True, slots=True)

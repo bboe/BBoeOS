@@ -17,11 +17,13 @@ from dataclasses import fields
 from typing import ClassVar
 
 from cc.ast_nodes import (
+    AddressOf,
     ArrayDecl,
     Assign,
     BinaryOperation,
     Call,
     Char,
+    DerefAssign,
     DoWhile,
     Function,
     If,
@@ -372,7 +374,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         e.g. ``"BUFFER+128+12"`` without emitting any instructions.
         Returns ``None`` for runtime (non-constant) bases.
         """
-        vname = node.name
+        vname = node.array.name
         const_base = self._resolve_constant(vname)
         if const_base is None:
             return None
@@ -458,7 +460,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         direct = self._byte_index_direct(node)
         if direct is not None:
             return (f"byte [{direct}]", False)
-        vname = node.name
+        vname = node.array.name
         offset = node.index.value
         guarded = self._si_scratch_guard_begin(vname)
         self._emit_load_var(vname, register=self.target.si_register)
@@ -1684,8 +1686,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                             collect_index_vars(item)
 
         def count_visit(node: Node, *, role: str = "other") -> None:
-            if isinstance(node, (Var, Assign, Index, IndexAssign)):
+            if isinstance(node, (Var, Assign)):
                 counts[node.name] = counts.get(node.name, 0) + 1
+            elif isinstance(node, (Index, IndexAssign)):
+                counts[node.array.name] = counts.get(node.array.name, 0) + 1
             if isinstance(node, VarDecl) and node.init is not None:
                 init_count[node.name] = init_count.get(node.name, 0) + 1
                 init_expr[node.name] = node.init
@@ -1720,7 +1724,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     count_visit(node.right, role="other")
                 return
             if isinstance(node, (Index, IndexAssign)):
+                # The `array` Var was already tallied via the counts[] branch
+                # above; recursing into it would double-count and add a
+                # spurious other_uses tally.  Walk the remaining children
+                # explicitly and bail before the generic walk.
                 collect_index_vars(node.index)
+                count_visit(node.index)
+                if isinstance(node, IndexAssign):
+                    count_visit(node.expr)
+                return
+            if isinstance(node, AddressOf):
+                # ``&x`` computes an address, not a value read — pre-refactor
+                # AddressOf carried ``name`` as a plain str so the inner var
+                # never tallied; preserve that by skipping the generic walk's
+                # descent into ``var``.
+                return
+            if isinstance(node, DerefAssign):
+                # ``*p = expr`` writes through a pointer — pre-refactor the
+                # pointer was a str field, so it never counted as a read.
+                # Walk only the right-hand side.
+                count_visit(node.expr)
+                return
             for node_field in fields(node):
                 value = getattr(node, node_field.name)
                 if isinstance(value, Node):
