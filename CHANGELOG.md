@@ -6,6 +6,34 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Graceful OOM during program load (2026-04-30)
+- `program_enter`'s `.panic` (which printed `!` on COM1 and halted the
+  kernel on any allocator failure) is replaced by a `.oom` recovery
+  path: free the dangling frame from the just-failed alloc-then-map
+  pair, free any pre-allocated handoff frame from sys_exec,
+  `address_space_destroy` the partial PD, surface "exec: out of
+  memory" on the console, and `jmp shell_reload` to re-spawn the
+  shell.  A stray giant-BSS program (e.g. `int huge[1<<24]`) no
+  longer takes the OS down with it.
+- A `loading_shell_flag` distinguishes "loading the shell" (set by
+  `shell_reload`, cleared by `program_enter` immediately before
+  `iretd`) from "loading a user program".  An OOM during the shell
+  load itself is still fatal — `.oom` falls through to `.panic` —
+  because there is genuinely nothing to fall back to in that case.
+- `pending_frame_phys` (BSS in entry.asm) tracks the currently-
+  unmapped frame between `frame_alloc` and `address_space_map_page`
+  so the recovery path can free it without leaking.  Each alloc-then-
+  map pair sets it after the alloc and clears it after the map; the
+  `.oom` handler frees it if non-zero.
+- New `bigbss800_oom` test (in `tests/test_programs.py`) boots under
+  `-m 802` — one MB below the empirically-measured fit threshold of
+  803 MB for bigbss800 — runs the program (which exhausts the user
+  pool partway through phase-2 BSS allocation, ~199K frames mapped),
+  and asserts the OOM message appears AND a follow-up `hello` runs
+  in the respawned shell.  The boundary `-m` exercises the full
+  `address_space_destroy` teardown path the recovery handler relies
+  on, not just the early-OOM fast path.
+
 ### Size frame_bitmap from E820; lift direct map to 1 GB (2026-04-30)
 - `frame_init` now does a two-pass E820 walk: pass 1 finds the highest
   type=1 frame base, then sizes the bitmap to fit, then pass 2 marks

@@ -97,7 +97,7 @@ program_enter:
 
         ;; --- Allocate fresh PD ---
         call address_space_create
-        jc .panic
+        jc .oom
         mov [current_pd_phys], eax
 
         ;; --- Set up kernel-side fd struct from vfs_found_* ---
@@ -138,9 +138,10 @@ program_enter:
         ;; and zero-fill the slot.
         mov eax, [next_handoff_frame_phys]
         test eax, eax
-        jnz .handoff_pre_allocated
+        jnz .handoff_have
         call frame_alloc
-        jc .panic
+        jc .oom
+        mov [pending_frame_phys], eax
         push eax
         mov edi, eax
         add edi, 0xC0000000                 ; kernel-virt of frame
@@ -149,15 +150,21 @@ program_enter:
         cld
         rep stosd
         pop eax
-        .handoff_pre_allocated:
+        jmp .handoff_map
+        .handoff_have:
+        ;; Pre-allocated by sys_exec — already populated.  Transfer
+        ;; ownership from next_handoff_frame_phys to pending_frame_phys
+        ;; so the OOM handler frees it exactly once.
         mov dword [next_handoff_frame_phys], 0
-        ;; Map the frame at user-virt USER_DATA_BASE.
+        mov [pending_frame_phys], eax
+        .handoff_map:
         mov ecx, eax                        ; handoff frame phys
         mov eax, [current_pd_phys]
         mov ebx, USER_DATA_BASE
         mov edx, PTE_USER_RW
         call address_space_map_page
-        jc .panic
+        jc .oom
+        mov dword [pending_frame_phys], 0
 
         ;; --- Phase 1: stream binary pages directly from disk ---
         ;; Each loaded user frame is zero-filled then populated sector-
@@ -173,9 +180,9 @@ program_enter:
         jae .phase1_done                    ; past binary end
 
         call frame_alloc
-        jc .panic
+        jc .oom
         mov [last_binary_frame_phys], eax   ; remember for trailer peek
-        push eax                            ; frame phys for map call
+        mov [pending_frame_phys], eax       ; track for OOM cleanup
         mov edi, eax
         add edi, 0xC0000000                 ; EDI = kernel-virt of frame
 
@@ -222,7 +229,7 @@ program_enter:
         pop edi
         pop edx
         pop ebx
-        jc .panic                           ; disk error mid-program-load
+        jc .oom                             ; disk error mid-program-load
 
         ;; Copy EBX bytes from sector_buffer to (frame + sector_in_page * 512).
         push esi
@@ -245,12 +252,13 @@ program_enter:
         jmp .phase1_sector_loop
 .phase1_page_done:
         ;; Map the frame into the per-program PD at virt_cursor.
-        pop ecx                             ; frame phys
+        mov ecx, [pending_frame_phys]       ; frame phys
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
-        jc .panic
+        jc .oom
+        mov dword [pending_frame_phys], 0
         add dword [virt_cursor], 0x1000
         jmp .phase1_page_loop
 .phase1_done:
@@ -300,20 +308,21 @@ program_enter:
         cmp eax, [user_image_end]
         jae .prog_pages_done
         call frame_alloc
-        jc .panic
-        push eax
+        jc .oom
+        mov [pending_frame_phys], eax
         mov edi, eax
         add edi, 0xC0000000
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop ecx
+        mov ecx, [pending_frame_phys]
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
-        jc .panic
+        jc .oom
+        mov dword [pending_frame_phys], 0
         add dword [virt_cursor], 0x1000
         jmp .phase2_page_loop
 .prog_pages_done:
@@ -324,7 +333,7 @@ program_enter:
         mov ecx, [vdso_code_phys]
         mov edx, PTE_USER_RX_SHARED
         call address_space_map_page
-        jc .panic
+        jc .oom
 
         ;; --- Map user stack (private, 16 frames, zeroed) ---
         mov dword [virt_cursor], STACK_VIRT_BASE
@@ -333,20 +342,21 @@ program_enter:
         cmp eax, STACK_VIRT_END
         jae .stack_pages_done
         call frame_alloc
-        jc .panic
-        push eax
+        jc .oom
+        mov [pending_frame_phys], eax
         mov edi, eax
         add edi, 0xC0000000
         mov ecx, 1024
         xor eax, eax
         cld
         rep stosd
-        pop ecx
+        mov ecx, [pending_frame_phys]
         mov eax, [current_pd_phys]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
-        jc .panic
+        jc .oom
+        mov dword [pending_frame_phys], 0
         add dword [virt_cursor], 0x1000
         jmp .stack_page_loop
 .stack_pages_done:
@@ -357,6 +367,12 @@ program_enter:
         ;; --- Switch to the new PD ---
         mov eax, [current_pd_phys]
         mov cr3, eax
+
+        ;; The PD is built and live; if anything below this point
+        ;; faulted we'd be in a different recovery story.  Clear the
+        ;; loading-shell flag so the next program load (post-iretd
+        ;; sys_exec) gets graceful OOM recovery again.
+        mov dword [loading_shell_flag], 0
 
         ;; --- iretd into ring 3 ---
         ;; Reload data segments to USER_DATA_SELECTOR before the iretd
@@ -375,15 +391,79 @@ program_enter:
         push dword PROGRAM_BASE
         iretd
 
+.oom:
+        ;; Allocator OOM (or disk error) during program load.  If we
+        ;; were loading the shell itself, halt the kernel — there is
+        ;; nothing to fall back to.  Otherwise tear down the partial
+        ;; PD, surface a message, and bring up a fresh shell so the
+        ;; user can recover and retry.
+        cmp dword [loading_shell_flag], 0
+        jne .panic
+
+        ;; Free the dangling frame from the alloc-then-map pair that
+        ;; just failed (set by every frame_alloc; cleared by every
+        ;; matching successful map).  Zero means nothing to free.
+        mov eax, [pending_frame_phys]
+        test eax, eax
+        jz .oom_no_pending
+        call frame_free
+        mov dword [pending_frame_phys], 0
+.oom_no_pending:
+
+        ;; Free the pre-allocated handoff frame from sys_exec, if it
+        ;; never got consumed (e.g. address_space_create OOM'd before
+        ;; we reached the handoff section).  The .handoff_have path
+        ;; clears it itself before mapping.
+        mov eax, [next_handoff_frame_phys]
+        test eax, eax
+        jz .oom_no_handoff
+        call frame_free
+        mov dword [next_handoff_frame_phys], 0
+.oom_no_handoff:
+
+        ;; Tear down the partial PD.  address_space_destroy walks user
+        ;; PDEs only and frees mapped user pages (skipping shared,
+        ;; e.g. the vDSO PTE), then PTs, then the PD frame.  Safe on a
+        ;; half-built PD.  CR3 is kernel_idle_pd at this point — the
+        ;; caller (boot, sys_exit, sys_exec) switched to it before
+        ;; entering program_enter — so we don't need to switch CR3.
+        mov eax, [current_pd_phys]
+        test eax, eax
+        jz .oom_no_pd
+        call address_space_destroy
+        mov dword [current_pd_phys], 0
+.oom_no_pd:
+
+        ;; Reset kernel ESP and surface the failure.  The kernel stack
+        ;; may have transient pushes from inner alloc+map pairs; reset
+        ;; to a known top before the put_character loop and the jmp
+        ;; into shell_reload.
+        mov esp, kernel_stack_top
+        mov esi, oom_msg
+.oom_print:
+        mov al, [esi]
+        test al, al
+        jz .oom_done
+        call put_character
+        inc esi
+        jmp .oom_print
+.oom_done:
+
+        ;; Bring up a fresh shell.  shell_reload sets
+        ;; loading_shell_flag = 1 before re-entering program_enter, so
+        ;; an OOM during the shell load truly panics.
+        jmp shell_reload
+
 .panic:
-        ;; Allocator OOM during program load.  No graceful recovery
-        ;; yet — halt with '!' on COM1 (matches high_entry's panic).
+        ;; OOM while loading the shell — print '!' on COM1 and halt.
         mov dx, COM1_DATA
         mov al, '!'
         out dx, al
         cli
         hlt
         jmp $-1
+
+oom_msg db "exec: out of memory", 13, 10, 0
 
 protected_mode_entry:
         ;; Segment registers, ESP, GDTR, and IDTR are already in place
@@ -477,6 +557,13 @@ shell_reload:
         ;; jmp program_enter.  Leaving [next_handoff_frame_phys] at
         ;; zero tells program_enter to allocate + zero a fresh handoff
         ;; frame (a fresh shell inherits no args).
+        ;;
+        ;; loading_shell_flag = 1 promotes any OOM in this load to a
+        ;; hard panic (.oom → .panic in program_enter); program_enter
+        ;; clears it back to 0 immediately before iretd so the
+        ;; subsequent sys_exec from the running shell gets graceful
+        ;; recovery again.
+        mov dword [loading_shell_flag], 1
         mov esi, shell_path
         call vfs_find
         jc .shell_fail
@@ -543,6 +630,17 @@ last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trai
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+
+        ;; OOM-recovery tracking.  pending_frame_phys is set immediately
+        ;; after every frame_alloc that has not yet been mapped via
+        ;; address_space_map_page; the .oom handler frees it before
+        ;; tearing down the partial PD.  loading_shell_flag is 1 while
+        ;; shell_reload is bringing up the shell — an OOM in that
+        ;; window is fatal because there's nothing to fall back to.
+        ;; user-program loads run with the flag clear and recover by
+        ;; printing a message and re-entering shell_reload.
+loading_shell_flag      dd 0
+pending_frame_phys      dd 0
 
         ;; Kernel-side fd struct used by program_enter to stream the
         ;; program binary directly from disk into per-program user
