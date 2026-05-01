@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import add_file, compute_directory_sector, ext2_add_file  # noqa: E402
+from add_file import add_empty_files, add_file, compute_directory_sector, ext2_add_file  # noqa: E402
 
 _DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
 _LARGE_FILE_TIMEOUT = float(os.environ.get("BBOE_LARGE_FILE_TIMEOUT", "6.0"))
@@ -197,24 +197,6 @@ TESTS: list[ProgramTest] = [
 DOUBLY_INDIRECT_SENTINEL = b"EXT2_DOUBLY_INDIRECT_OK"
 DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
 EXT2_DIRECT_BLOCKS = 12  # ext2 directory blocks ext2_search_dir walks (i_block[0..11])
-
-
-def _add_empty_filler(*, image: Path, name: str) -> None:
-    """Add a 0-byte file named `name` to bin/.
-
-    Cheap padding — no data blocks consumed, only one inode and ~16
-    bytes of directory entry.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        empty = Path(tmpdir) / name
-        empty.touch()
-        add_file(
-            allow_empty=True,
-            executable=False,
-            file_path=str(empty),
-            image_path=str(image),
-            subdirectory="bin",
-        )
 
 
 def _add_exec_probe(*, image: Path, name: str) -> None:
@@ -602,23 +584,27 @@ def _pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
       _zexec_last: inserted after bin/ reaches the 12-block ceiling →
                    the literal final directory entry.
 
+    Fillers are inserted in batches of `batch_size` (one debugfs session
+    per batch, instead of one per filler).  After each batch we re-check
+    the directory state; a batch may overshoot the threshold by up to
+    `batch_size - 1` fillers — fine, the test only needs ≥ the threshold.
+
     The test's commands and expected regex are written here, post-setup,
     so the probe names the test asserts stay pinned to the names this
     helper actually wrote — robust to PROGRAMS growing in make_os.sh.
     """
+    batch_size = 32
+    hard_limit = 1500
     filler_index = 0
 
-    def add_filler() -> None:
+    def add_batch() -> None:
         nonlocal filler_index
-        _add_empty_filler(image=image, name=f"_pad{filler_index:04d}")
-        filler_index += 1
-        if filler_index > 1500:
+        if filler_index + batch_size > hard_limit:
             msg = "filler limit hit"
             raise RuntimeError(msg)
-
-    def grow_until_blocks(target_blocks: int) -> None:
-        while _bin_dir_blocks(image=image) < target_blocks:
-            add_filler()
+        names = [f"_pad{filler_index + offset:04d}" for offset in range(batch_size)]
+        add_empty_files(image_path=str(image), names=names, subdirectory="bin")
+        filler_index += batch_size
 
     # Add empty fillers until bin's block 0 has filled past byte 512 —
     # i.e. it has spilled into sector 1.  The next inserted entry lands
@@ -626,16 +612,19 @@ def _pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     # ext2_search_blk to walk sector 1 of block 0 and read it as the
     # entry actually living there — the exact path the fix targets.
     while _bin_block0_used_bytes(image=image) < 768:
-        add_filler()
+        add_batch()
     _add_exec_probe(image=image, name="_zexec_a")
 
     # Pad the directory until it spans roughly half its 12-block ceiling,
     # then insert _zexec_b — a probe in a "middle" block.  Then pad to
     # the full 12-block cap before adding _zexec_last so the final probe
     # is the literal last entry of the literal last walkable block.
-    grow_until_blocks(target_blocks=EXT2_DIRECT_BLOCKS // 2)
+    while _bin_dir_blocks(image=image) < EXT2_DIRECT_BLOCKS // 2:
+        add_batch()
     _add_exec_probe(image=image, name="_zexec_b")
-    grow_until_blocks(target_blocks=EXT2_DIRECT_BLOCKS)
+
+    while _bin_dir_blocks(image=image) < EXT2_DIRECT_BLOCKS:
+        add_batch()
     _add_exec_probe(image=image, name="_zexec_last")
 
     test.commands = ["arp", "_zexec_a", "_zexec_b", "_zexec_last"]
