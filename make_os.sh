@@ -108,8 +108,8 @@ cat boot.bin kernel.bin > os.bin
 # --with-test-programs is passed (default builds keep them out so a
 # normal boot has just the user programs).  Both lists are sorted so
 # the on-disk directory layout is stable across builds.
-USER_PROGRAMS=$(find src/c -maxdepth 1 -name '*.c' -printf '%f\n' | sed 's/\.c$//' | sort | tr '\n' ' ')
-TEST_PROGRAMS=$(find tests/programs -maxdepth 1 -name '*.c' -printf '%f\n' | sed 's/\.c$//' | sort | tr '\n' ' ')
+USER_PROGRAMS=$(find src/c -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
+TEST_PROGRAMS=$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
 if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
     PROGRAMS="$USER_PROGRAMS $TEST_PROGRAMS"
 else
