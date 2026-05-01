@@ -190,3 +190,32 @@ def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
     ).stdout
     for name in ("zalpha", "zbeta", "zgamma"):
         assert name in listing, f"{name!r} not found in ext2 /bin listing"
+
+
+def test_cli_accepts_multiple_files(bbfs_image: Path, tmp_path: Path) -> None:
+    """CLI invoked with multiple positional file args adds all of them."""
+    paths = []
+    for name in ("zone", "ztwo", "zthree"):
+        path = tmp_path / name
+        path.write_bytes(b"hi\n")
+        paths.append(str(path))
+    result = subprocess.run(
+        ["./add_file.py", "--image", str(bbfs_image), "-d", "bin", *paths],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    bin_start = _bin_start_sector(image=bbfs_image)
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
+    image_data = bytearray(bbfs_image.read_bytes())
+    for name in ("zone", "ztwo", "zthree"):
+        entry = find_entry(
+            directory_sectors=directory_sectors,
+            directory_start_sector=bin_start,
+            image=image_data,
+            name=name,
+        )
+        assert entry is not None, f"{name!r} not in image after CLI batch add"

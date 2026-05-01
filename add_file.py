@@ -557,22 +557,23 @@ def load_image(image_path: str, /) -> bytearray:
 
 def main() -> None:
     """CLI entry point for adding files to a BBoeOS drive image."""
-    parser = argparse.ArgumentParser(description="Add a file to a BBoeOS drive image.")
+    parser = argparse.ArgumentParser(description="Add files to a BBoeOS drive image.")
     parser.add_argument(
         "-d",
         "--subdir",
         dest="subdirectory",
-        help="place the file inside this subdirectory under root",
+        help="place the files inside this subdirectory under root",
     )
     parser.add_argument(
         "-x",
         "--executable",
         action="store_true",
-        help="mark the file as executable (sets FLAG_EXECUTE)",
+        help="mark the files as executable (sets FLAG_EXECUTE)",
     )
     parser.add_argument(
-        "file",
-        help="path to the file to add (or directory name with --mkdir)",
+        "files",
+        nargs="+",
+        help="path(s) to file(s) to add (or single directory name with --mkdir)",
     )
     parser.add_argument(
         "--image",
@@ -583,17 +584,19 @@ def main() -> None:
         "--mkdir",
         action="store_true",
         dest="make_directory",
-        help="create a subdirectory under root named <file>",
+        help="create a subdirectory under root named <files> (one positional arg only)",
     )
     arguments = parser.parse_args()
     if arguments.make_directory:
         if arguments.subdirectory or arguments.executable:
             parser.error("--mkdir does not accept -d or -x")
-        make_directory(dirname=arguments.file, image_path=arguments.image)
+        if len(arguments.files) != 1:
+            parser.error("--mkdir takes exactly one positional argument")
+        make_directory(dirname=arguments.files[0], image_path=arguments.image)
     else:
-        add_file(
+        add_files(
             executable=arguments.executable,
-            file_path=arguments.file,
+            file_paths=arguments.files,
             image_path=arguments.image,
             subdirectory=arguments.subdirectory,
         )
