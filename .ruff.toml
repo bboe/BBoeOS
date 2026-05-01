@@ -6,7 +6,7 @@ preview = true
 target-version = "py312"
 
 [lint.per-file-ignores]
-"add_file.py" = ["S404", "S603"]
+"add_file.py" = ["C901", "PLR0914", "S404", "S603"]
 "cc/*.py" = ["ARG002", "B007", "C901", "DOC201", "DOC501", "ERA001", "PLR0904", "PLR0911", "PLR0912", "PLR0914", "PLR0915", "PLR0916", "PLR2004", "PLR6201", "SIM108"]
 "run_qemu.py" = ["DOC201", "DOC501", "S"]
 "test_*.py" = ["DOC201", "DOC501", "INP001", "PLR0913", "PLR0914", "PLR2004", "PT018", "S"]

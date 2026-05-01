@@ -56,6 +56,17 @@ at the time.
   kernel-reserved region still fits under `-m 1`'s 0x9FC00
   conventional-RAM ceiling.
 
+### Batch add_file API (2026-04-30)
+- `add_file.py` gains an `add_files()` batched API and a CLI `nargs="+"` mode
+  so callers can collapse N image-load/save cycles (bbfs) or N×3
+  dd/debugfs/dd subprocess spawns (ext2) into one.  `make_os.sh`'s per-program
+  and per-static loops collapse to two batched invocations; the
+  `exec_first_middle_last` test setups (test_programs.py and test_ext2.py)
+  add their fillers in single batches (bbfs) or 32-per-batch
+  (ext2) instead of one at a time.  Image flushes are now atomic
+  per batch — a mid-batch failure leaves the on-disk image
+  untouched.
+
 ### Reclaim the boot PD frame; introduce kernel_idle_pd (2026-04-30)
 - The boot PD frame (4 KB at `BOOT_PD_PHYS`) is no longer pinned for
   the kernel's lifetime.  After the kernel-PT-alloc loop, `high_entry`

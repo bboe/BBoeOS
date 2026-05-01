@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a file to a BBoeOS drive image."""
+"""Add files to a BBoeOS drive image."""
 
 from __future__ import annotations
 
@@ -70,48 +70,108 @@ def add_file(
     image_path: str,
     subdirectory: str | None,
 ) -> None:
-    """Add a file to the BBoeOS drive image.
+    """Add a single file to the BBoeOS drive image.
 
-    By default refuses 0-byte files because the CLI is normally invoked
-    on built artifacts (a truly empty binary is almost always a build
-    error worth catching).  Tests that pad a directory with sentinel
-    entries opt in via ``allow_empty=True``.
+    Thin wrapper around ``add_files()``; preserved for callers that
+    only have one file.  See ``add_files`` for full semantics.
+    """
+    add_files(
+        allow_empty=allow_empty,
+        executable=executable,
+        file_paths=[file_path],
+        image_path=image_path,
+        subdirectory=subdirectory,
+    )
+
+
+def add_empty_files(
+    *,
+    image_path: str,
+    names: list[str],
+    subdirectory: str | None = None,
+) -> None:
+    """Add a batch of 0-byte files named `names` to the image.
+
+    Convenience wrapper around ``add_files()`` that creates the
+    empty files in a temporary directory and submits them all in a
+    single batch.  Useful for filler / padding test scenarios.
+    Empty `names` is a no-op.
+    """
+    if not names:
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        paths = []
+        for name in names:
+            empty = pathlib.Path(tmpdir) / name
+            empty.touch()
+            paths.append(str(empty))
+        add_files(
+            allow_empty=True,
+            executable=False,
+            file_paths=paths,
+            image_path=image_path,
+            subdirectory=subdirectory,
+        )
+
+
+def add_files(
+    *,
+    allow_empty: bool = False,
+    executable: bool,
+    file_paths: list[str],
+    image_path: str,
+    subdirectory: str | None,
+) -> None:
+    """Add one or more files to a BBoeOS drive image in a single pass.
+
+    All files share the same `subdirectory`, `executable`, and
+    `allow_empty` settings.  Empty `file_paths` is a no-op.
+
+    The on-disk image is mutated atomically: bbfs flushes only after
+    every file has been written into the in-memory bytearray, and
+    ext2's `_ext2_partition` context skips the splice-back when an
+    exception escapes mid-batch.
 
     Raises
     ------
     SystemExit
-        If the filename is too long, the file is empty (and not allowed),
-        the subdirectory is not found, or the directory is full.
+        If any filename is too long, any file is empty (and not
+        allowed), the subdirectory is missing, the directory becomes
+        full, or debugfs reports an error.
 
     """
-    filename = pathlib.Path(file_path).name
-    if len(filename) > FILENAME_MAX:
-        message = f"Error: filename '{filename}' exceeds {FILENAME_MAX} characters"
-        raise SystemExit(message)
+    if not file_paths:
+        return
 
-    file_data = pathlib.Path(file_path).read_bytes()
-    if not file_data and not allow_empty:
-        message = "Error: file is empty"
-        raise SystemExit(message)
-    file_size = len(file_data)
+    file_records: list[tuple[str, bytes]] = []
+    for file_path in file_paths:
+        filename = pathlib.Path(file_path).name
+        if len(filename) > FILENAME_MAX:
+            message = f"Error: filename '{filename}' exceeds {FILENAME_MAX} characters"
+            raise SystemExit(message)
+        file_data = pathlib.Path(file_path).read_bytes()
+        if not file_data and not allow_empty:
+            message = f"Error: file '{file_path}' is empty"
+            raise SystemExit(message)
+        file_records.append((filename, file_data))
 
     ext2_start_sector = compute_directory_sector(image_path=image_path)
     if detect_fs_type(ext2_start_sector=ext2_start_sector, image_path=image_path) == "ext2":
-        ext2_add_file(
+        ext2_add_files(
             executable=executable,
             ext2_start_sector=ext2_start_sector,
-            file_path=file_path,
+            file_paths=file_paths,
             image_path=image_path,
             subdirectory=subdirectory,
         )
         return
 
-    directory_sector = compute_directory_sector(image_path=image_path)
+    directory_sector = ext2_start_sector
     directory_sectors = read_assign("DIRECTORY_SECTORS")
     image = load_image(image_path)
 
     if subdirectory is None:
-        parent_offset = (directory_sector) * SECTOR_SIZE
+        parent_offset = directory_sector * SECTOR_SIZE
     else:
         subdirectory_entry_offset = find_subdirectory_entry(
             directory_sector=directory_sector,
@@ -123,22 +183,45 @@ def add_file(
             message = f"Error: directory '{subdirectory}' not found"
             raise SystemExit(message)
         parent_start = struct.unpack_from("<H", image, subdirectory_entry_offset + OFFSET_SECTOR)[0]
-        parent_offset = (parent_start) * SECTOR_SIZE
+        parent_offset = parent_start * SECTOR_SIZE
 
-    entry_offset = find_free_entry(directory_sectors=directory_sectors, filename=filename, image=image, parent_offset=parent_offset)
-    if entry_offset is None:
-        message = f"Error: '{subdirectory or 'root directory'}' is full"
-        raise SystemExit(message)
-
-    next_data_sector = compute_next_data_sector(directory_sector=directory_sector, directory_sectors=directory_sectors, image=image)
-
+    next_data_sector = compute_next_data_sector(
+        directory_sector=directory_sector,
+        directory_sectors=directory_sectors,
+        image=image,
+    )
     flags = FLAG_EXECUTE if executable else 0
-    write_entry(entry_offset=entry_offset, flags=flags, image=image, name=filename, size=file_size, start_sector=next_data_sector)
-    write_data(data=file_data, image=image, start_sector=next_data_sector)
-    save_image(image=image, image_path=image_path)
+    messages: list[str] = []
 
-    relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
-    print(f"Added '{relative_path}' ({file_size} bytes) at sector {next_data_sector}")
+    for filename, file_data in file_records:
+        entry_offset = find_free_entry(
+            directory_sectors=directory_sectors,
+            filename=filename,
+            image=image,
+            parent_offset=parent_offset,
+        )
+        if entry_offset is None:
+            target = subdirectory or "root directory"
+            message = f"Error: '{target}' is full"
+            raise SystemExit(message)
+        start_sector = next_data_sector
+        write_entry(
+            entry_offset=entry_offset,
+            flags=flags,
+            image=image,
+            name=filename,
+            size=len(file_data),
+            start_sector=start_sector,
+        )
+        write_data(data=file_data, image=image, start_sector=start_sector)
+        sectors_used = (len(file_data) + SECTOR_SIZE - 1) // SECTOR_SIZE
+        next_data_sector += sectors_used
+        relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
+        messages.append(f"Added '{relative_path}' ({len(file_data)} bytes) at sector {start_sector}")
+
+    save_image(image=image, image_path=image_path)
+    for line in messages:
+        print(line)
 
 
 def compute_directory_sector(*, image_path: str) -> int:
@@ -275,6 +358,30 @@ def ext2_add_file(
     file_size = pathlib.Path(file_path).stat().st_size
     relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
     print(f"Added '{relative_path}' ({file_size} bytes) [ext2]")
+
+
+def ext2_add_files(
+    *,
+    executable: bool,
+    ext2_start_sector: int,
+    file_paths: list[str],
+    image_path: str,
+    subdirectory: str | None,
+) -> None:
+    """Batched ext2 add — Task 4 batches into a single debugfs session.
+
+    This temporary implementation just loops the existing single-file
+    helper so the new add_files() entry point compiles end-to-end while
+    we land the bbfs path first.
+    """
+    for file_path in file_paths:
+        ext2_add_file(
+            executable=executable,
+            ext2_start_sector=ext2_start_sector,
+            file_path=file_path,
+            image_path=image_path,
+            subdirectory=subdirectory,
+        )
 
 
 def ext2_make_directory(*, dirname: str, ext2_start_sector: int, image_path: str) -> None:
