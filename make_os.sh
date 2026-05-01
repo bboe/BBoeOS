@@ -54,14 +54,18 @@ KERNEL_SECTORS=$(( ( KERNEL_SIZE + 511 ) / 512 ))
 KERNEL_RESERVED_BASE=$(( (0x20000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
 
 # Safety: the entire kernel-side reserved region must stay below the
-# VGA aperture at phys 0xA0000.  Region size: 4 KB stack + 4 KB boot
-# PD + 4 KB first kernel PT + 8 KB frame_bitmap = 20 KB = 0x5000.
-# Keeping the whole region under 0xA0000 lets the OS boot under QEMU
-# `-m 1` (1 MB total), where conventional RAM ends at 0x9FC00.
+# VGA aperture at phys 0xA0000.  Worst-case region size: 4 KB stack +
+# 4 KB boot PD + 4 KB first kernel PT + 32 KB frame_bitmap (sized at
+# boot from E820, capped by the 1 GB direct-map ceiling at
+# LAST_KERNEL_PDE) = 44 KB = 0xB000.  Keeping the whole region under
+# 0xA0000 lets the OS boot under QEMU `-m 1` (1 MB total), where
+# conventional RAM ends at 0x9FC00.  On `-m 1` the bitmap is actually
+# ~20 bytes (one dword's worth), so the runtime region is much smaller
+# than the worst case checked here.
 # (sector_buffer / ext2_sd_buffer share a dynamically-allocated 4 KB
 # fs scratch frame populated by `vfs_init`, so they no longer occupy
 # a static slot in this region.)
-KERNEL_RESERVED_END=$(( KERNEL_RESERVED_BASE + 0x5000 ))
+KERNEL_RESERVED_END=$(( KERNEL_RESERVED_BASE + 0xB000 ))
 if [ $KERNEL_RESERVED_END -ge $(( 0xA0000 )) ]; then
     echo "make_os.sh: kernel reserved region (ends at $(printf 0x%x $KERNEL_RESERVED_END)) crosses the VGA hole at 0xA0000" >&2
     exit 1
@@ -100,7 +104,7 @@ cat boot.bin kernel.bin > os.bin
 # netrecv / netsend / ping stay out of the list until ne2k.asm and
 # net/*.asm get ported to 32-bit and `network_initialize` runs from
 # `protected_mode_entry`.
-PROGRAMS="arp asm asmesc bigbss bits booltest cat cftest chmod cp date dns draw echo edit fctest gdemo gptest gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend nullderef okptest pintest ping rm rmdir shell stackbomb uptime"
+PROGRAMS="arp asm asmesc bigbss bigbss800 bits booltest cat cftest chmod cp date dns draw echo edit fctest gdemo gptest gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend nullderef okptest pintest ping rm rmdir shell stackbomb uptime"
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"

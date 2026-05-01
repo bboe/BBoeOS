@@ -2,8 +2,9 @@
 ;;; memory_management/address_space.asm — per-program address-space helpers.
 ;;;
 ;;; Builds and tears down per-program user page directories.  Kernel-half
-;;; PDEs (768..1023, the 256 MB direct map at virtual
-;;; 0xC0000000..0xCFFFFFFF) are copied verbatim from `kernel_idle_pd`'s
+;;; PDEs (768..1023, the kernel direct map at virtual
+;;; 0xC0000000..0xFFFFFFFF, sized at boot to cover installed RAM up to
+;;; 1 GB) are copied verbatim from `kernel_idle_pd`'s
 ;;; kernel half at address_space_create time and never modified afterward
 ;;; — that invariant is what lets us avoid fan-out updates when the
 ;;; kernel installs a new kernel-half mapping.  `kernel_idle_pd` is

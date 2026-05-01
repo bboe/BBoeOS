@@ -194,6 +194,29 @@ TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
     ProgramTest("bigbss", ["bigbss"], r"^bigbss: OK$", timeout=10.0),
+    # 800 MB BSS — exercises the full kernel direct map (LAST_KERNEL_PDE
+    # = 1024) and the dynamic frame_bitmap.  Needs `-m 1024` for the
+    # user pool, and a generous timeout because TCG zero-fills 800 MB
+    # of fresh frames during program_enter's BSS phase.
+    ProgramTest("bigbss800", ["bigbss800"], r"^bigbss800: OK$", memory="1024", timeout=120.0),
+    # OOM recovery: `-m 802` is one MB below the empirically-measured
+    # threshold for bigbss800 to fit (the program needs ~800.85 MB
+    # for BSS + PD + PTs + stack + handoff, and the kernel reserves
+    # ~2 MB for its own image / direct-map PTs / idle PD / FS scratch
+    # — everything balances right at -m 803).  At -m 802, phase-2 BSS
+    # allocation runs almost to completion (~199K frames mapped)
+    # before frame_alloc returns CF — exercising the full
+    # address_space_destroy teardown path the recovery handler relies
+    # on.  Asserts both that "exec: out of memory" appears and that a
+    # follow-up `hello` runs in the respawned shell: a stray
+    # giant-BSS program no longer takes the OS down with it.
+    ProgramTest(
+        "bigbss800_oom",
+        ["bigbss800", "hello"],
+        r"^exec: out of memory$[\s\S]+^Hello world!$",
+        memory="802",
+        timeout=30.0,
+    ),
     ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
