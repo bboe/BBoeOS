@@ -42,6 +42,7 @@ from add_file import (  # noqa: E402
     NAME_FIELD,
     OFFSET_SECTOR,
     SECTOR_SIZE,
+    add_empty_files,
     add_file,
     compute_directory_sector,
     find_subdirectory_entry,
@@ -71,20 +72,6 @@ class ProgramTest:
     timeout: float = _DEFAULT_PROGRAM_TIMEOUT
     skip: str | None = None
     memory: str | None = None
-
-
-def _add_empty_filler(*, image: Path, name: str) -> None:
-    """Add a 0-byte file named `name` to bin/."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        empty = Path(tmpdir) / name
-        empty.touch()
-        add_file(
-            allow_empty=True,
-            executable=False,
-            file_path=str(empty),
-            image_path=str(image),
-            subdirectory="bin",
-        )
 
 
 def _add_exec_probe(*, image: Path, name: str) -> None:
@@ -137,13 +124,14 @@ def _pad_bin_to_full_directory(image: Path, test: ProgramTest) -> None:
 
     bbfs subdirectories don't carry . / ..; bin/ starts populated with
     the PROGRAMS list (count varies as PROGRAMS grows).  The setup
-    counts the existing entries, adds (47 - existing) empty fillers,
-    then writes _zexec_last as the literal final entry (slot 47, in
-    sector 2 of bbfs's 3-sector directory).  Asserts arp (slot 0,
-    sector 0), a runtime-picked sector-1 entry (slots 16..31, name
-    chosen from the post-padding bin/ layout so the test stays robust
-    to PROGRAMS reordering), and _zexec_last (slot 47, sector 2) all
-    resolve so the lookup walks all three of bbfs's directory sectors.
+    counts the existing entries, adds (47 - existing) empty fillers
+    in a single batched image flush, then writes _zexec_last as the
+    literal final entry (slot 47, in sector 2 of bbfs's 3-sector
+    directory).  Asserts arp (slot 0, sector 0), a runtime-picked
+    sector-1 entry (slots 16..31, name chosen from the post-padding
+    bin/ layout so the test stays robust to PROGRAMS reordering), and
+    _zexec_last (slot 47, sector 2) all resolve so the lookup walks
+    all three of bbfs's directory sectors.
     """
     names = _bin_entry_names(image=image)
     used = sum(1 for name in names if name is not None)
@@ -151,8 +139,11 @@ def _pad_bin_to_full_directory(image: Path, test: ProgramTest) -> None:
     if fillers_needed < 0:
         msg = f"bin/ already at or past cap ({used}/{_BBFS_DIRECTORY_MAX_ENTRIES}); cannot place _zexec_last"
         raise RuntimeError(msg)
-    for filler_index in range(fillers_needed):
-        _add_empty_filler(image=image, name=f"_pad{filler_index:02d}")
+    add_empty_files(
+        image_path=str(image),
+        names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],
+        subdirectory="bin",
+    )
     _add_exec_probe(image=image, name="_zexec_last")
 
     middle_name, middle_expect = _pick_sector1_probe(names=_bin_entry_names(image=image))
