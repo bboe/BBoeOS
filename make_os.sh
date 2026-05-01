@@ -122,12 +122,18 @@ if [ "$FS_TYPE" = "ext2" ]; then
 fi
 
 ./add_file.py --mkdir --image "$IMAGE" bin || exit 1
+PROGRAM_PATHS=""
 for name in $PROGRAMS; do
-    ./add_file.py -x -d bin --image "$IMAGE" "$PBUILD/$name" || exit 1
+    PROGRAM_PATHS="$PROGRAM_PATHS $PBUILD/$name"
 done
+./add_file.py -x -d bin --image "$IMAGE" $PROGRAM_PATHS || exit 1
 
 # Static reference files used by cat / cp / asm tests.
 ./add_file.py --mkdir --image "$IMAGE" src || exit 1
+STATIC_FILES=""
 for f in static/*; do
-    [ -f "$f" ] && ./add_file.py -d src --image "$IMAGE" "$f" || exit 1
+    [ -f "$f" ] && STATIC_FILES="$STATIC_FILES $f"
 done
+if [ -n "$STATIC_FILES" ]; then
+    ./add_file.py -d src --image "$IMAGE" $STATIC_FILES || exit 1
+fi
