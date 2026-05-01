@@ -1,5 +1,6 @@
 ---
 title: File structure
+nav_order: 5
 ---
 
 # File structure

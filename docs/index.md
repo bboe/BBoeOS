@@ -1,5 +1,6 @@
 ---
-title: BBoeOS
+title: Home
+nav_order: 1
 ---
 
 # BBoeOS
@@ -21,6 +22,6 @@ directories.
 ## Source
 
 The canonical instructions for working in the repository live in
-[`CLAUDE.md`](https://github.com/bboe/bboeos/blob/main/CLAUDE.md) at the repo
+[`CLAUDE.md`](https://github.com/bboe/BBoeOS/blob/main/CLAUDE.md) at the repo
 root. The pages here host the longer reference tables that used to clutter
 that file.
