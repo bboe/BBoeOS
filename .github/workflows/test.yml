@@ -30,12 +30,26 @@ jobs:
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Run ${{ matrix.suite }}
-        run: python3 tests/${{ matrix.suite }}.py ${{ matrix.extra_args }}
+        run: python3 tests/${{ matrix.script }} ${{ matrix.extra_args }}
     strategy:
       fail-fast: false
       matrix:
-        # test_ext2 first so the longest job starts dispatching ahead of the others.
-        suite: [test_ext2, test_archive, test_asm, test_bboefs, test_cc, test_draw, test_floppy_boot, test_programs]
+        # test_programs_ext2 first so the longest job starts dispatching ahead of the others.
         include:
-          - suite: test_ext2
-            extra_args: --slow
+          - suite: test_programs_ext2
+            script: test_programs.py
+            extra_args: --filesystem ext2 --slow
+          - suite: test_archive
+            script: test_archive.py
+          - suite: test_asm
+            script: test_asm.py
+          - suite: test_bboefs
+            script: test_bboefs.py
+          - suite: test_cc
+            script: test_cc.py
+          - suite: test_draw
+            script: test_draw.py
+          - suite: test_floppy_boot
+            script: test_floppy_boot.py
+          - suite: test_programs_bbfs
+            script: test_programs.py
