@@ -6,11 +6,11 @@ fifo/timeout plumbing behind a simple API and CLI.
 
 Module API:
     from run_qemu import run_commands
-    output = run_commands(["netinit"], with_net=True)
+    output = run_commands(["arp 10.0.2.2"], with_net=True)
 
 CLI:
-    ./run_qemu.py netinit
-    ./run_qemu.py --net netinit
+    ./run_qemu.py uptime
+    ./run_qemu.py --net "arp 10.0.2.2"
     ./run_qemu.py --timeout 15 "echo hello" "uptime"
 """
 

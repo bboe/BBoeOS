@@ -2,8 +2,8 @@
    page beyond what `bigbss` proves fits — to assert the boundary in
    bigbss_size.h is page-precise.  Pairs with the `bigbss_fail`
    entry in tests/test_programs.py, which boots -m 1024 and expects
-   OOM (the recovery message + a follow-up `hello` running in the
-   respawned shell).  If BIGBSS_PAGES drifts above the actual
+   OOM (the recovery message + a follow-up `echo hello` running in
+   the respawned shell).  If BIGBSS_PAGES drifts above the actual
    ceiling, this program would also fit and the test would fail
    (no OOM message). */
 

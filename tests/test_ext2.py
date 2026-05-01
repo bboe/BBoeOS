@@ -16,7 +16,7 @@ directory entries into the fixed 32-byte bbfs format.
 
 Usage:
     ./test_ext2.py            # run the full suite
-    ./test_ext2.py hello      # run one program
+    ./test_ext2.py uptime     # run one program
 """
 
 from __future__ import annotations
@@ -125,8 +125,7 @@ TESTS: list[ProgramTest] = [
         expect="",
         setup=lambda image, test: _pad_bin_to_full_directory(image=image, test=test),
     ),
-    ProgramTest("hello", ["hello"], r"Hello world!"),
-    ProgramTest("ls", ["ls bin"], r"hello\*"),
+    ProgramTest("ls", ["ls bin"], r"arp\*"),
     ProgramTest(
         "mkdir",
         ["mkdir mydir", "ls mydir"],
@@ -713,7 +712,7 @@ def _run_test(*, floppy: bool, temporary_directory: Path, test: ProgramTest) -> 
 
 
 # Subset of tests to re-run with 2 KB blocks (exercises the variable-block-size paths).
-# Excludes tests that don't touch ext2 (echo, hello, uptime).
+# Excludes tests that don't touch ext2 (echo, uptime).
 BLOCK_SIZE_TESTS: list[ProgramTest] = [
     t
     for t in TESTS
@@ -765,7 +764,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'hello')")
+    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'uptime')")
     parser.add_argument(
         "--fail-fast",
         action="store_true",

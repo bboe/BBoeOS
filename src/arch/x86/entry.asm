@@ -560,8 +560,8 @@ protected_mode_entry:
         call ps2_init
         call vfs_init
         ;; Probe the NE2000 NIC and bring it up if present.  CF set =
-        ;; no NIC, which is fine — netinit / net programs surface that
-        ;; via a "no NIC" message rather than halting the kernel.
+        ;; no NIC, which is fine — net programs surface that via a
+        ;; "no NIC" message rather than halting the kernel.
         call network_initialize
 
         call vga_clear_screen

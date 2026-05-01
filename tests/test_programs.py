@@ -10,7 +10,7 @@ Skips `shell` (implicit) and `asm` (covered by test_asm.py).
 
 Usage:
     ./test_programs.py            # run the full suite
-    ./test_programs.py netinit    # run one program
+    ./test_programs.py arp        # run one program
 """
 
 from __future__ import annotations
@@ -200,13 +200,13 @@ TESTS: list[ProgramTest] = [
     # through phase 2 (also exercising address_space_destroy on a
     # partially-built PD whose user PTs landed both below and above
     # the direct-map ceiling).  Asserts the OOM message AND a
-    # follow-up `hello` runs in the respawned shell.  If
+    # follow-up `echo hello` runs in the respawned shell.  If
     # BIGBSS_PAGES drifts down by more than ~256 frames, this test
     # starts fitting and we lose the lower tripwire.
     ProgramTest(
         "bigbss_oom",
-        ["bigbss", "hello"],
-        r"^exec: out of memory$[\s\S]+^Hello world!$",
+        ["bigbss", "echo hello"],
+        r"^exec: out of memory$[\s\S]+^hello$",
         memory="2047",
         timeout=120.0,
     ),
@@ -218,8 +218,8 @@ TESTS: list[ProgramTest] = [
     # ceiling at -m 2048.
     ProgramTest(
         "bigbss_fail",
-        ["bigbss_fail", "hello"],
-        r"^exec: out of memory$[\s\S]+^Hello world!$",
+        ["bigbss_fail", "echo hello"],
+        r"^exec: out of memory$[\s\S]+^hello$",
         memory="2048",
         timeout=60.0,
     ),
@@ -227,30 +227,30 @@ TESTS: list[ProgramTest] = [
     ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
-    ProgramTest("chmod", ["chmod +x hello"], r"\$"),
+    ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     # 'draw\nq' runs `draw`, then draw reads the trailing 'q' from the
     # serial buffer and exits its main loop (back to text mode).  draw
     # has no serial output of its own — all writes go to VGA — so the
-    # follow-up `hello` is what the regex matches: if draw crashed or
-    # left the shell wedged in graphics mode, hello would never run.
+    # follow-up `echo hello` is what the regex matches: if draw crashed
+    # or left the shell wedged in graphics mode, echo would never run.
     # See the `edit` entry below for the same pattern with Ctrl+Q.
-    ProgramTest("draw", ["draw\nq", "hello"], r"^\$ draw[\s\S]+Hello world!"),
+    ProgramTest("draw", ["draw\nq", "echo hello"], r"^\$ draw[\s\S]+^hello$"),
     ProgramTest("echo", ["echo foo bar baz"], r"^foo bar baz$"),
     ProgramTest("echo_many_args", ["echo a b c d e", "ls"], r"^a b c d e$"),
     # 'edit hello\n\x11' runs `edit hello`, then edit consumes the trailing
     # Ctrl+Q (\x11) from the serial buffer.  hello doesn't exist in cwd, so
     # edit opens with an empty buffer; with dirty=0 a single Ctrl+Q exits.
-    # The follow-up `hello` command confirms the shell is fully functional
-    # again — catches PD teardown / VGA mode reset bugs that would
-    # otherwise leave the shell wedged.  Doubles as a regression for the
-    # 448 KB BSS allocation in the per-program PD.  Relies on
+    # The follow-up `echo hello` command confirms the shell is fully
+    # functional again — catches PD teardown / VGA mode reset bugs that
+    # would otherwise leave the shell wedged.  Doubles as a regression
+    # for the 448 KB BSS allocation in the per-program PD.  Relies on
     # _wait_for_prompt's settle window to drain the spurious empty-line
     # prompt (from the trailing '\r' shell consumes after edit exits)
     # before this command's wait begins.
-    ProgramTest("edit", ["edit hello\n\x11", "hello"], r"^hello  line 1  col 1[\s\S]+Hello world!"),
+    ProgramTest("edit", ["edit hello\n\x11", "echo hello"], r"^hello  line 1  col 1[\s\S]+^hello$"),
     ProgramTest(
         # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
         # ending with a single executable probe so the final directory
@@ -267,16 +267,12 @@ TESTS: list[ProgramTest] = [
     ProgramTest("gdemo", ["gdemo"], r"glob\[4\] = 15"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("gtable", ["gtable"], r"fib\[9\] = 55"),
-    ProgramTest("hello", ["hello"], r"Hello world!"),
     ProgramTest("inctest", ["inctest"], r"^square = 144$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
-    ProgramTest("ls", ["ls bin"], r"hello\*"),
+    ProgramTest("ls", ["ls bin"], r"arp\*"),
     ProgramTest("mkdir", ["mkdir tmpd", "ls"], r"tmpd/"),
     ProgramTest("mv", ["mkdir tmpe", "mv tmpe tmpf", "ls"], r"tmpf/"),
-    ProgramTest("netinit", ["netinit"], r"NIC found: [0-9A-F:]+", with_net=True),
-    ProgramTest("netrecv", ["netrecv"], r"Received:.*08 06", with_net=True, timeout=20.0),
-    ProgramTest("netsend", ["netsend"], r"ARP request sent", with_net=True),
     # Writing to virt 0 raises #PF (PTE[0] is not-present in every
     # per-program PD; the shell↔program handoff frame moved to
     # USER_DATA_BASE = 0x1000 to keep page 0 unmapped).  The user-fault
@@ -354,7 +350,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'netinit')")
+    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'arp')")
     parser.add_argument(
         "--fail-fast",
         action="store_true",
