@@ -32,16 +32,19 @@ from cc.codegen.x86.peephole import Peepholer  # noqa: E402
 from cc.target import X86CodegenTarget16  # noqa: E402
 
 # FD layout constants from src/include/constants.asm (must match exactly).
-# Used by the struct-fd layout-pinning tests below.
-FD_OFFSET_TYPE = 0
-FD_OFFSET_FLAGS = 1
-FD_OFFSET_START = 2
-FD_OFFSET_SIZE = 4
-FD_OFFSET_POSITION = 8
-FD_OFFSET_DIRECTORY_SECTOR = 12
-FD_OFFSET_DIRECTORY_OFFSET = 14
-FD_OFFSET_MODE = 16
+# Used by the struct-fd layout-pinning tests below.  Sorted alphabetically
+# per project convention; the byte-offset values themselves trace the
+# struct fd layout (type@0, flags@1, start@2, size@4, position@8,
+# directory_sector@12, directory_offset@14, mode@16, entry_size=32).
 FD_ENTRY_SIZE = 32
+FD_OFFSET_DIRECTORY_OFFSET = 14
+FD_OFFSET_DIRECTORY_SECTOR = 12
+FD_OFFSET_FLAGS = 1
+FD_OFFSET_MODE = 16
+FD_OFFSET_POSITION = 8
+FD_OFFSET_SIZE = 4
+FD_OFFSET_START = 2
+FD_OFFSET_TYPE = 0
 
 
 def _compile(source_text: str, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
