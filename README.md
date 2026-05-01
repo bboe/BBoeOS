@@ -80,6 +80,7 @@ src/memory_management/  Bitmap frame allocator (frame.asm)
 src/net/              ARP, IP, ICMP, UDP
 src/syscall/          Per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
 src/c/                User-space programs (C sources, compiled by cc.py)
+tests/programs/       Test-only programs that exercise specific cc.py / kernel paths
 add_file.py           Host-side script to add files to drive image
 cc.py                 Host-side C subset compiler
 make_os.sh            Build script

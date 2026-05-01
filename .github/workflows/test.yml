@@ -23,19 +23,37 @@ jobs:
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
-      - name: Install dependencies
+      - name: Install build dependencies
         if: matrix.suite != 'test_cc'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
+      - name: Install pytest
+        if: matrix.suite == 'test_unit'
+        run: pip install pytest
       - name: Run ${{ matrix.suite }}
-        run: python3 tests/${{ matrix.suite }}.py ${{ matrix.extra_args }}
+        run: ${{ matrix.command }}
     strategy:
       fail-fast: false
       matrix:
-        # test_ext2 first so the longest job starts dispatching ahead of the others.
-        suite: [test_ext2, test_archive, test_asm, test_bboefs, test_cc, test_draw, test_floppy_boot, test_programs]
+        # test_programs_ext2 first so the longest job starts dispatching ahead of the others.
         include:
-          - suite: test_ext2
-            extra_args: --slow
+          - suite: test_programs_ext2
+            command: python3 tests/test_programs.py --filesystem ext2 --slow
+          - suite: test_archive
+            command: python3 tests/test_archive.py
+          - suite: test_asm
+            command: python3 tests/test_asm.py
+          - suite: test_bboefs
+            command: python3 tests/test_bboefs.py
+          - suite: test_cc
+            command: python3 tests/test_cc.py
+          - suite: test_draw
+            command: python3 tests/test_draw.py
+          - suite: test_floppy_boot
+            command: python3 tests/test_floppy_boot.py
+          - suite: test_programs_bbfs
+            command: python3 tests/test_programs.py
+          - suite: test_unit
+            command: python3 -m pytest tests/unit/

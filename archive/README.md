@@ -27,13 +27,9 @@ table is now 32-bit on both sides.
 | date    | 15             | 21          | 21        |  0    |
 | dns     | 724            | 935         | 1437      | +502  |
 | edit    | 2018           | 2668        | 3340      | +672  |
-| hello   | 22             | 28          | 29        | +1    |
 | ls      | 135            | 179         | 198       | +19   |
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 253         | 280       | +27   |
-| netinit | 72             | 94          | 85        | -9    |
-| netrecv | 334            | 424         | 452       | +28   |
-| netsend | 187            | 215         | 255       | +40   |
 | ping    | 1034           | 1238        | 1558      | +320  |
 | shell   | 950            | 1189        | 1650      | +461  |
 | uptime  | 50             | 67          | 100       | +33   |
@@ -100,17 +96,6 @@ where the asm hits memory directly.  The deep call graph (``move_*``,
 ``buf_*``, ``check_*``, ``do_*`` helpers) also pays for register
 spilling cc.py's IR-based codegen does at every helper boundary.
 
-**hello (+1):** The C compiler emits a null terminator on every string
-literal. The assembly version omits it since `FUNCTION_DIE` uses an
-explicit length.
-
-**hello 16→32 (+6 ASM, +6 C):** Each `mov esi, imm` / `mov ecx, imm`
-in 32-bit takes 5 bytes (one byte op + 4 bytes immediate) where the
-16-bit form was 3 bytes (one byte op + 2 bytes immediate); the two
-loads in main account for the +4, the wider PC-relative jump
-displacement and the [bits 32] directive's effect on rel-jump
-encoding contribute the rest.
-
 **ls (+19):** The assembly version uses inline `repne scasb` with a
 25-byte cap to find the name length, then `FUNCTION_WRITE_STDOUT`
 directly; the C version routes through `strlen()` and
@@ -132,21 +117,6 @@ literal handling adds a null terminator per string × 4 strings.
 The 16-bit baseline's +4 was almost entirely null-terminator
 overhead; the +20 here picks up cc.py's frame setup and 32-bit
 prologue/epilogue cost too.
-
-**netrecv (+69):** The C version uses stack-local `receive_buffer[128]`
-and `mac_buffer[6]` in `main`'s BP frame where the assembly version
-used `BUFFER + 128` and `BUFFER`.  The delta is otherwise ordinary
-C-compiler overhead: null-terminated strings, the net_open CF
-normalization, fd stashed in a memory local so it survives across
-`FUNCTION_WRITE_STDOUT` calls, and printf-style hex formatting instead
-of the asm version's inline `FUNCTION_PRINT_HEX` loop.
-
-**netsend (+34):** Null terminators on three strings, the net_open
-CF-to-integer normalization, and storing fd to a local all add a
-handful of bytes.  The asm version kept fd in BX and used
-length-bearing messages without null terminators.  The C version uses
-a stack-local ``mac_buffer[6]`` in `main`'s BP frame; the asm version
-uses ``BUFFER``.
 
 **ping (+320):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /

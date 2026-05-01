@@ -350,7 +350,7 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
 
 // network_initialize: probe + init wrapper.  CF clear if NIC came up,
 // CF set if no NIC was found (callers - currently only entry.asm -
-// soldier on; netinit / net programs surface "no NIC" via net_present).
+// soldier on; net programs surface "no NIC" via net_present).
 //
 // Allocates one 4 KB NIC scratch frame on a successful probe and
 // hands out per-buffer slices of it to the four named pointers

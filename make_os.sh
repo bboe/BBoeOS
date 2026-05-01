@@ -4,12 +4,14 @@ FS_TYPE=bbfs
 IMAGE=drive.img
 EXT2_BLOCK_SIZE=1024
 EXT2_INODE_COUNT=
+WITH_TEST_PROGRAMS=0
 for arg in "$@"; do
     case "$arg" in
         --ext2) FS_TYPE=ext2 ;;
         --bbfs) FS_TYPE=bbfs ;;
         --ext2-block-size=*) EXT2_BLOCK_SIZE="${arg#*=}" ;;
         --ext2-inode-count=*) EXT2_INODE_COUNT="${arg#*=}" ;;
+        --with-test-programs) WITH_TEST_PROGRAMS=1 ;;
         -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
         *) IMAGE="$arg" ;;
     esac
@@ -101,18 +103,31 @@ fi
 
 cat boot.bin kernel.bin > os.bin
 
-# Curated list of protected mode-ready user programs.  arp / dns / netinit /
-# netrecv / netsend / ping stay out of the list until ne2k.asm and
-# net/*.asm get ported to 32-bit and `network_initialize` runs from
-# `protected_mode_entry`.
-PROGRAMS="arp asm asmesc bigbss bigbss_fail bits booltest cat cftest chmod cp date dns draw echo edit fctest gdemo gptest gtable hello inctest loop loop_array ls mkdir mv netinit netrecv netsend nullderef okptest pintest ping rm rmdir shell stackbomb stacktop uptime"
+# User-facing programs are every src/c/*.c file; test-only fixtures
+# live under tests/programs/ and only ship in the drive image when
+# --with-test-programs is passed (default builds keep them out so a
+# normal boot has just the user programs).  Both lists are sorted so
+# the on-disk directory layout is stable across builds.
+USER_PROGRAMS=$(find src/c -maxdepth 1 -name '*.c' -printf '%f\n' | sed 's/\.c$//' | sort | tr '\n' ' ')
+TEST_PROGRAMS=$(find tests/programs -maxdepth 1 -name '*.c' -printf '%f\n' | sed 's/\.c$//' | sort | tr '\n' ' ')
+if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
+    PROGRAMS="$USER_PROGRAMS $TEST_PROGRAMS"
+else
+    PROGRAMS="$USER_PROGRAMS"
+fi
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"
-for name in $PROGRAMS; do
+for name in $USER_PROGRAMS; do
     python3 cc.py --bits 32 "src/c/$name.c" "$PBUILD/$name.asm" || exit 1
     nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || exit 1
 done
+if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
+    for name in $TEST_PROGRAMS; do
+        python3 cc.py --bits 32 "tests/programs/$name.c" "$PBUILD/$name.asm" || exit 1
+        nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || exit 1
+    done
+fi
 
 dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
