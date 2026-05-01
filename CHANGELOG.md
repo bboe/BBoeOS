@@ -53,6 +53,44 @@ at the time.
   fits) and `bigbss_fail` to -m 2048 with `BIGBSS_PAGES + 1` for
   the page-precise upper tripwire.  Each bigbss-class test takes
   ~15 s now (was ~5 s) because it touches ~2 GB of memory.
+- Empirical -m / BIGBSS_PAGES landscape after kmap landed (probed
+  with bigbss; binsize = 233 bytes):
+  - **Boot**: any `-m`, including `-m 16384` and beyond — RAM
+    above `FRAME_PHYSICAL_LIMIT` is silently ignored, so the OS
+    treats `-m 8192` exactly like `-m 4096`.
+  - **Page-precise BIGBSS_PAGES at -m 4096**: 753,591 (also the
+    saturating value at any larger `-m`).  The cap is user-virt:
+    `user_image_end = page_align_up(PROGRAM_BASE + binsize +
+    BIGBSS_PAGES * 4 KB) ≤ KERNEL_VIRT_BASE` requires
+    `BIGBSS_PAGES ≤ floor((KERNEL_VIRT_BASE - PROGRAM_BASE -
+    binsize) / 4 KB) = 753591` for bigbss's binsize.
+  - **RAM/user-virt crossover**: `-m 2949`.  At ≥ -m 2949 the
+    bitmap allocator has enough free frames to cover BIGBSS_PAGES
+    + per-PD overhead; below that, RAM bottlenecks.  Reference
+    points: -m 1025 → 261,716 (RAM-bound), -m 2048 → 523,341
+    (RAM-bound), -m 2949..16384 → 753,591 (user-virt-bound).
+
+### address_space_map_page rejects user_virt in the kernel half (2026-04-30)
+- Latent bug surfaced while probing the new BIGBSS_PAGES ceiling
+  at -m 4096: a BSS large enough that
+  `user_image_end > KERNEL_VIRT_BASE` (= 0xC0000000) drove
+  program_enter's phase-2 loop to call `address_space_map_page`
+  with user_virt in the kernel half.  PDE >= 768 was already
+  present (copy-imaged from `kernel_idle_pd`), so the
+  "PDE present" branch wrote a user-RW PTE into the shared
+  kernel direct-map PT — corrupting kernel mappings for every
+  PD that copy-imaged that PDE.  The fault fired from the user
+  program itself: `EXC0E EIP=08048021 CR2=C00000E9 ERR=07`
+  (user-mode write to a present non-user page) once the
+  corruption made the direct map unreachable for ring 3.
+- Fix: gate on `user_virt < KERNEL_VIRT_BASE` at the top of
+  `address_space_map_page` and return `CF=1` on out-of-range,
+  before any PD/PT operations.  Existing callers
+  (`program_enter`'s phase 1 / phase 2 / stack loops,
+  `sys_exec`'s handoff map) already route `CF=1` through the OOM
+  recovery path, so a giant-BSS program now gets
+  `exec: out of memory` + a clean shell respawn instead of
+  silent kernel-direct-map corruption.
 
 ### Lift USER_STACK_TOP to 0xC0000000 (2026-04-30)
 - The user stack moves from `[0x3FFF0000, 0x40000000)` to
