@@ -185,7 +185,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     ProgramTest("asmesc", ["asmesc"], r"^value = 7$"),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
-    # declares BIGBSS_PAGES (see src/c/bigbss_size.h) = 523,341 of
+    # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,341 of
     # BSS at -m 2048 — large enough that ~half the frames sit
     # above FRAME_DIRECT_MAP_LIMIT (~1020 MB).  program_enter's
     # phase-2 zero-fills those high frames through the kmap window
@@ -304,9 +304,14 @@ TESTS: list[ProgramTest] = [
 
 
 def _build_os(*, temporary_directory: Path) -> None:
-    """Run make_os.sh; abort if the build fails."""
+    """Run make_os.sh --with-test-programs; abort if the build fails."""
     image = temporary_directory / BASE_IMAGE
-    result = subprocess.run(["./make_os.sh", str(image)], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["./make_os.sh", "--with-test-programs", str(image)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         sys.exit(1)
