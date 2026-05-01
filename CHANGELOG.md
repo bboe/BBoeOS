@@ -6,6 +6,31 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.8.1...main)
 
+### Reorganize the test tree (2026-05-01)
+- Programs that only exist as fixtures for `tests/test_programs.py`
+  move from `src/c/` to `tests/programs/`; `make_os.sh
+  --with-test-programs` gates whether they ship in the drive image's
+  `bin/`.  Both source-program lists are discovered by globbing
+  instead of hand-maintained.
+- Drop netinit / netsend / netrecv as redundant with `arp` (every
+  syscall they hit is on `arp`'s critical path), and drop `hello`
+  once `echo` takes over as the recovery-probe oracle in the bigbss
+  / draw / edit follow-ups.  Their `archive/*.asm` reference
+  snapshots and README rows go too.
+- Pure cc.py codegen smoke tests (`asmesc`, `gdemo`, `gtable`,
+  `inctest`, `pintest`) move from QEMU runs to compile-and-inspect-
+  asm pytest cases in `tests/unit/test_kernel_cc.py` — same
+  coverage, no boot.
+- Merge `test_ext2.py` into `test_programs.py` with a `--filesystem
+  {bbfs,ext2}` flag.  ext2 mode runs `e2fsck -f -n` after each test
+  and finishes with a 2 KB-block-size matrix re-run of the FS-
+  touching subset.
+- pytest test files (`test_add_file.py`, `test_kernel_cc.py`,
+  `test_struct.py`) relocate to `tests/unit/` so `pytest
+  tests/unit/` runs them all; `.github/workflows/test.yml` gains a
+  `test_unit` job and the matrix entries carry an explicit `command`
+  field.
+
 ### Lift KERNEL_VIRT_BASE 0xC0000000 → 0xFF800000 (2026-04-30)
 - Move the user/kernel virtual-address split from `0xC0000000` (3 GB
   user / 1 GB kernel) to `0xFF800000` (~3.99 GB user / 4 MB kernel
