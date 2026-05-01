@@ -39,7 +39,7 @@ at the time.
 ### Drivers and kernel ports to C
 - Drivers ported from assembly to C: ATA, FDC, NE2000, PS/2, RTC, VGA, ANSI console, serial.
 - File-descriptor table, console / network / file backends ported to C.
-- INT 30h dispatcher consolidated; the four non-trivial network handlers ported to C.
+- `INT 30h` dispatcher consolidated; the four non-trivial network handlers ported to C.
 - Reboot and shutdown helpers ported to C.
 
 ### Toolchain
@@ -77,7 +77,7 @@ at the time.
   programs call `FUNCTION_DIE` / `FUNCTION_PRINT_STRING` / etc. exactly
   as before — only the addresses change.  Decouples user-side helper
   code from kernel-virt addressing ahead of paging.
-- Probe the BIOS memory map via INT 15h AX=E820 in the MBR and stash
+- Probe the BIOS memory map via `INT 15h AX=E820` in the MBR and stash
   24-byte entries at physical 0x500 (terminated by a zero entry).
   Result is unconsumed at this point — the post-paging bitmap frame
   allocator will use it to mark free vs reserved physical RAM.
@@ -91,7 +91,7 @@ at the time.
 ### Kernel
 - Move userland programs to ring 3.  Add user code (0x18) and user data
   (0x20) GDT descriptors, a 32-bit TSS at selector 0x28 with SS0/ESP0
-  pointing at the kernel stack, and raise the INT 30h gate to DPL=3.
+  pointing at the kernel stack, and raise the `INT 30h` gate to DPL=3.
   `program_enter` now reloads DS/ES/FS/GS to the user data selector and
   `iretd`s into a fresh ring-3 stack at `USER_STACK_TOP` (0x8FFF0)
   instead of `jmp PROGRAM_BASE`.  IRQ handlers, exception stubs, the
@@ -140,7 +140,7 @@ at the time.
   `vga_set_mode(VIDEO_MODE_TEXT_80x25)` to render glyphs (mode 03h's
   SR03=0x05 selects that slot).  Lives in
   `src/arch/x86/boot/vga_font.asm`, included in the MBR's [bits 16]
-  region so it runs while INT 10h is still mapped.
+  region so it runs while `INT 10h` is still mapped.
 - Drop the dead `rtc_tick_init` / `rtc_tick_irq0` from `drivers/rtc.asm`
   — the IVT-based PIT handler was orphaned by the protected-mode port
   (`protected_mode_entry` does the equivalent setup against the
@@ -153,7 +153,7 @@ at the time.
 - Port block I/O, VFS, bbfs, and ext2 to flat 32-bit addressing.
 
 ### Syscalls
-- 32-bit INT 30h dispatcher.  Handlers receive args in E-regs with the
+- 32-bit `INT 30h` dispatcher.  Handlers receive args in E-regs with the
   same semantic shape as the 16-bit ABI (BX=fd, ESI/EDI=buffer,
   ECX=count, AL=flags).  Saved-EFLAGS CF propagates to the user via
   the iretd frame.
@@ -200,15 +200,15 @@ at the time.
 ## [0.7.0](https://github.com/bboe/BBoeOS/compare/0.6.0...0.7.0) (2026-04-23)
 
 ### Boot
-- Shrink stage 1 MBR to the minimum required to load stage 2 and jump: set DS/ES/SS:SP, reset disk, INT 13h read, jump to `boot_shell`.  `clear_screen`, `WELCOME` / `DISK_FAILURE` strings, the `put_string` call, the dead geometry-query variables (`sectors_per_track` / `heads_per_cylinder`, written but never read), and the `pic_remap` / `rtc_tick_init` / `install_syscalls` / `network_initialize` calls all move into stage 2's `boot_shell` where the full console driver (`drivers/ansi.asm`) is available.  On disk error stage 1 now prints `!` via INT 10h AH=0Eh and halts instead of pulling in a string printer.
+- Shrink stage 1 MBR to the minimum required to load stage 2 and jump: set DS/ES/SS:SP, reset disk, `INT 13h` read, jump to `boot_shell`.  `clear_screen`, `WELCOME` / `DISK_FAILURE` strings, the `put_string` call, the dead geometry-query variables (`sectors_per_track` / `heads_per_cylinder`, written but never read), and the `pic_remap` / `rtc_tick_init` / `install_syscalls` / `network_initialize` calls all move into stage 2's `boot_shell` where the full console driver (`drivers/ansi.asm`) is available.  On disk error stage 1 now prints `!` via `INT 10h AH=0Eh` and halts instead of pulling in a string printer.
 - Drop `src/arch/x86/boot/ansi_minimal.asm` entirely.  Its `put_string` and `serial_character` move into `drivers/ansi.asm` alongside `put_character` (their natural home — `serial_character` is the COM1 write primitive that `put_character` already called; `put_string` is a thin wrapper around `put_character`).  `put_character_raw` is removed — it only existed because `put_string` predated the full ANSI parser and needed an escape-free output routine; the new `put_string` calls `put_character` directly, which handles `\n → \r\n` the same way.  The file name was misleading anyway ("minimal" suggested a stage-1-only helper, but drivers/vga.asm and drivers/ansi.asm were calling `serial_character` out of it).
 - `sys_exit` no longer re-prints the welcome banner on every shell reload.  Split `boot_shell` so `kernel_init`, `WELCOME`, and the one-time driver inits (`vga_font_load`, `ps2_init`, `fdc_init`, `vfs_init`) stay in the boot path, and a new `shell_reload` entry handles just `fd_init` plus the shell VFS load.  `sys_exit` now `jmp shell_reload` instead of `jmp boot_shell`.
 
 ### Tree layout
-- Reorganize `src/kernel/` into Linux-style subtrees.  Only genuinely x86/PC-specific code lives under `src/arch/x86/`: `boot/` (bootloader: `bboeos.asm`, `stage1.asm`, `stage1_5.asm` — the protected mode switch, née `protected mode.asm`; `stage2.asm`), `idt.asm`, `pic.asm`, `syscall.asm` (INT 30h dispatcher), `system.asm` (8042 reboot + ACPI shutdown), and a new `kernel.asm` aggregator.  Hardware drivers lift to `src/drivers/` (`ata.asm`, `fdc.asm`, `ps2.asm`, `rtc.asm`, `vga.asm`, plus the NE2000 NIC moved out of `net/`, and `ansi.asm` as the console driver delegating to vga).  Filesystem code consolidates under `src/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`, `block.asm` block dispatcher, `vfs.asm`).  Network stack in `src/net/` keeps the protocol layer only (`arp.asm`, `icmp.asm`, `ip.asm`, `udp.asm`).  Shared utilities in `src/lib/`, syscall handlers in `src/syscall/`.  `make_os.sh` adds `-i src/` so `%include "drivers/ata.asm"` / `"fs/fd.asm"` / `"net/net.asm"` / … resolve at the top level.  `src/arch/x86/boot/stage2.asm` no longer `%include`s the kernel itself — it contains only the boot handoff (jump table, `boot_shell`, `bss_setup`).  `bboeos.asm` now composes the flat binary as `stage1 + stage2 + kernel.asm`, where `kernel.asm` is the new aggregator that lists every subsystem in one place.  Motivation: the protected mode port is about to land on a dedicated `protectedmode` branch cut from `main`; the subtree is its natural home, and the boot / kernel split keeps `stage2.asm` focused on the boot-to-shell handoff instead of doubling as a kernel catalog.  `tests/test_pmode.sh` and `tests/test_idt.sh` both run green again (they had broken on the earlier `arch/` sub-move)
+- Reorganize `src/kernel/` into Linux-style subtrees.  Only genuinely x86/PC-specific code lives under `src/arch/x86/`: `boot/` (bootloader: `bboeos.asm`, `stage1.asm`, `stage1_5.asm` — the protected mode switch, née `protected mode.asm`; `stage2.asm`), `idt.asm`, `pic.asm`, `syscall.asm` (`INT 30h` dispatcher), `system.asm` (8042 reboot + ACPI shutdown), and a new `kernel.asm` aggregator.  Hardware drivers lift to `src/drivers/` (`ata.asm`, `fdc.asm`, `ps2.asm`, `rtc.asm`, `vga.asm`, plus the NE2000 NIC moved out of `net/`, and `ansi.asm` as the console driver delegating to vga).  Filesystem code consolidates under `src/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`, `block.asm` block dispatcher, `vfs.asm`).  Network stack in `src/net/` keeps the protocol layer only (`arp.asm`, `icmp.asm`, `ip.asm`, `udp.asm`).  Shared utilities in `src/lib/`, syscall handlers in `src/syscall/`.  `make_os.sh` adds `-i src/` so `%include "drivers/ata.asm"` / `"fs/fd.asm"` / `"net/net.asm"` / … resolve at the top level.  `src/arch/x86/boot/stage2.asm` no longer `%include`s the kernel itself — it contains only the boot handoff (jump table, `boot_shell`, `bss_setup`).  `bboeos.asm` now composes the flat binary as `stage1 + stage2 + kernel.asm`, where `kernel.asm` is the new aggregator that lists every subsystem in one place.  Motivation: the protected mode port is about to land on a dedicated `protectedmode` branch cut from `main`; the subtree is its natural home, and the boot / kernel split keeps `stage2.asm` focused on the boot-to-shell handoff instead of doubling as a kernel catalog.  `tests/test_pmode.sh` and `tests/test_idt.sh` both run green again (they had broken on the earlier `arch/` sub-move)
 
 ### Kernel
-- New `pic.asm` / `pic_remap`: reprograms both 8259s so master IRQ 0-7 vector to 0x20-0x27 and slave IRQ 8-15 to 0x28-0x2F, leaving every line masked.  Called from `stage1.asm` right before `rtc_tick_init`, i.e. after the last BIOS INT 13h read but before any IRQ handler installs.  `rtc_tick_init` moves its IVT slot from 8*4 to 0x20*4 and now unmasks IRQ 0 at the master PIC itself (pic_remap leaves it masked); `fdc_install_irq` moves from 0Eh*4 to 26h*4.  Prerequisite for the upcoming protected mode flip — CPU exceptions 0-31 overlap the legacy BIOS PIC vectors, so IRQ 0 under BIOS defaults would alias onto the double-fault vector and IRQ 5 onto #GP
+- New `pic.asm` / `pic_remap`: reprograms both 8259s so master IRQ 0-7 vector to 0x20-0x27 and slave IRQ 8-15 to 0x28-0x2F, leaving every line masked.  Called from `stage1.asm` right before `rtc_tick_init`, i.e. after the last BIOS `INT 13h` read but before any IRQ handler installs.  `rtc_tick_init` moves its IVT slot from 8*4 to 0x20*4 and now unmasks IRQ 0 at the master PIC itself (pic_remap leaves it masked); `fdc_install_irq` moves from 0Eh*4 to 26h*4.  Prerequisite for the upcoming protected mode flip — CPU exceptions 0-31 overlap the legacy BIOS PIC vectors, so IRQ 0 under BIOS defaults would alias onto the double-fault vector and IRQ 5 onto #GP
 - `rtc_tick_init` reprograms the PIT from the BIOS default ~18.2 Hz to 100 Hz (10 ms/tick), giving `rtc_sleep_ms` 10 ms granularity (was 55 ms) and `uptime` sub-second precision underneath the `HH:MM:SS` display.  `TICKS_PER_SECOND` becomes 100; `rtc_sleep_ms` rounds to whole 10 ms ticks
 - `fd_read_console`: `sti` at the top of the idle polling loop so PIT IRQ 0 can advance `system_ticks` while the shell is waiting for input.  Prior behaviour held IF=0 for the entire wait (syscalls enter with IF=0 and nothing re-enabled it), which silently starved the tick counter and kept `uptime` pinned at `00:00:00`
 - New `SYS_RTC_MILLIS` (31h) returns `DX:AX` = milliseconds since boot, derived from `system_ticks × MS_PER_TICK` so the ms count is exact.  Existing `SYS_RTC_SLEEP` / `SYS_RTC_UPTIME` shift up to 32h / 33h to keep the group alphabetical.  cc.py's `ticks()` builtin (which emitted `int 1Ah`, dead since `rtc_tick_init` replaced the BIOS IRQ 0 handler) is replaced by `uptime_ms()` — full 32-bit `DX:AX` return when the caller assigns to `unsigned long`, low 16 bits when assigned to `int`.  `ping` prints `time=N ms` accordingly
@@ -216,7 +216,7 @@ at the time.
 - Rename `src/arch/x86/protected mode.asm` → `src/arch/x86/boot/stage1_5.asm` and colocate it under `boot/`.  The file is already the stage-1.5 of the boot flow (16→32-bit mode switch between the MBR and the protected mode kernel), so give it the positional name.  `tests/pmode_test.asm` and `tests/idt_test.asm` `%include` paths and their shell wrappers' `nasm -i` search paths follow.
 
 ### Drivers
-- New native VGA mode-set driver (`vga_set_mode`) replaces the last INT 10h in stage 2 (the former `SYS_VIDEO_MODE`).  Table-driven register writer covering modes 03h (80x25 text) and 13h (320x200 256-colour): programs Misc Output, Sequencer 1-4, CRTC 0-18h, GC 0-8, and AC 0-14h in the standard unlock / reset / re-enable sequence.  New `vga_fill_block` writes an 8x8 tile into the mode-13h framebuffer at A000h:0 at a grid position with a palette-index colour.  `draw.c` rewritten to use mode 13h with real pixel tiles: 40x25 grid, WASD navigation, J/K palette cycle across 16 standard VGA colours, Q to quit back to text mode.
+- New native VGA mode-set driver (`vga_set_mode`) replaces the last `INT 10h` in stage 2 (the former `SYS_VIDEO_MODE`).  Table-driven register writer covering modes 03h (80x25 text) and 13h (320x200 256-colour): programs Misc Output, Sequencer 1-4, CRTC 0-18h, GC 0-8, and AC 0-14h in the standard unlock / reset / re-enable sequence.  New `vga_fill_block` writes an 8x8 tile into the mode-13h framebuffer at A000h:0 at a grid position with a palette-index colour.  `draw.c` rewritten to use mode 13h with real pixel tiles: 40x25 grid, WASD navigation, J/K palette cycle across 16 standard VGA colours, Q to quit back to text mode.
 - Fix VGA cursor column always zero in `vga_set_cursor` / `vga_teletype` / `vga_write_attribute`.  `mul bx` clobbered DX before `movzx bx, dl` could read the column, so `col` was always 0 and every glyph wrote to column 0 of its row.  Switched to `imul ax, ax, VGA_COLS` (186+ three-operand form), which leaves DX intact.
 
 ### Filesystem

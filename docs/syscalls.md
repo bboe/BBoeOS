@@ -3,9 +3,9 @@ title: Syscall interface (INT 30h)
 nav_order: 4
 ---
 
-# Syscall interface (INT 30h)
+# Syscall interface (`INT 30h`)
 
-Programs loaded from the filesystem can use INT 30h for OS services.
+Programs loaded from the filesystem can use `INT 30h` for OS services.
 Syscall numbers are defined symbolically as `SYS_*` constants in
 [`src/include/constants.asm`](https://github.com/bboe/BBoeOS/blob/main/src/include/constants.asm) — programs reference the names, not the numbers.
 

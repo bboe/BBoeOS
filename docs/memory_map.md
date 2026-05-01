@@ -22,7 +22,7 @@ still owns: the vDSO target frame at `0x10000` (one 4 KB page) and
 KERNEL_RESERVED_BASE region; the bitmap end is runtime, sized by `frame_init`
 from E820). Everything else in conventional low memory — IVT/BDA at
 `0..0x4FF`, `0x600..0x7BFF` gap, MBR landing zone at `0x7C00..0x7DFF`, dead
-post-MBR boot code at `0x7E00..0xDFFF`, the unused page-0xE region, and the
+post-MBR boot code at `0x7E00..0xDFFF`, the unused page-`0xE` region, and the
 boot stack at `0x9F000` — stays in the bitmap allocator's free pool. The
 build script asserts that `KERNEL_RESERVED_BASE + 0x23000 < 0xA0000`
 (worst-case stack + boot PD + first kernel PT + 128 KB bitmap at the
