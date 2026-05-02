@@ -278,7 +278,7 @@ def default_scenario() -> Scenario:
                 steps=[
                     ShellStep(command="arp 10.0.2.2"),
                     ShellStep(command="dns bboeos.bryceboe.com"),
-                    ShellStep(command="ping bryceboe.com"),
+                    ShellStep(command="ping bboeos.bryceboe.com"),
                 ],
             ),
             Section(
