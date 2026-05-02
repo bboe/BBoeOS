@@ -5,6 +5,8 @@ nav_order: 10
 
 # BBoeOS
 
+![bboeos demo]({{ "/gifs/demo.gif" | relative_url }})
+
 A minimal x86 operating system with a real-mode bootloader (`boot.bin`) and a
 paged high-half kernel (`kernel.bin`) concatenated on disk, plus a shell, VFS
 (bbfs + ext2), networking stack, self-hosted assembler, and C compiler. Boots
