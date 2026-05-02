@@ -1,0 +1,13 @@
+<script>
+(function () {
+  var STORAGE_KEY = 'jtd-color-scheme';
+  var siteDefault = {{ site.color_scheme | default: "light" | jsonify }};
+  var stored = null;
+  try { stored = localStorage.getItem(STORAGE_KEY); } catch (e) {}
+  var theme = (stored === 'light' || stored === 'dark') ? stored : siteDefault;
+  document.documentElement.setAttribute('data-bboeos-theme', theme);
+  if (theme !== siteDefault && typeof jtd !== 'undefined' && jtd.setTheme) {
+    jtd.setTheme(theme);
+  }
+})();
+</script>

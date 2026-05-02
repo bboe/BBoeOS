@@ -121,7 +121,7 @@ Each unique string literal becomes its own `_str_NN` label in the read-only data
 
 - Scalars: `int x = 5;` works at file scope and in locals.
 - Arrays: `int a[3] = {1, 2, 3};` for both globals and stack-allocated locals; trailing commas allowed; missing entries zero-fill.
-- Struct array elements: `struct Point pts[2] = {{1, 2}, {3, 4}};` (positional).
+- Struct array elements: {% raw %}`struct Point pts[2] = {{1, 2}, {3, 4}};`{% endraw %} (positional).
 
 Not supported: designated initializers, compound literals, nested struct-of-struct initializers, runtime-sized local arrays.
 
