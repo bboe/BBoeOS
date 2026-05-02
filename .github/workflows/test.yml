@@ -43,7 +43,6 @@ jobs:
 
   test:
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
     name: ${{ matrix.suite }}
     runs-on: ubuntu-latest
     env:
@@ -54,22 +53,31 @@ jobs:
       BBOE_LARGE_FILE_TIMEOUT: 30
       BBOE_PROGRAM_TIMEOUT: 10
     steps:
+      # Each suite must run (not be skipped at the job level) so the matrix
+      # expands and posts a status check matching its required-checks name on
+      # main's branch protection. On documentation-only PRs every step below
+      # is gated to no-op, leaving the suite as a quick passing check.
+      - name: Note docs-only no-op
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change; ${{ matrix.suite }} marked passing without running."
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/cache@v4
-        if: matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
       - name: Install build dependencies
-        if: matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Install pytest
-        if: matrix.suite == 'test_unit'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite == 'test_unit'
         run: pip install pytest
       - name: Run ${{ matrix.suite }}
+        if: needs.changes.outputs.docs_only != 'true'
         run: ${{ matrix.command }}
     strategy:
       fail-fast: false

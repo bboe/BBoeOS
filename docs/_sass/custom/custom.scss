@@ -20,6 +20,14 @@
   }
 }
 
+.js-theme-toggle-icon::before {
+  content: "\263E"; // ☾ — shown in light mode (click to switch to dark)
+}
+
+[data-bboeos-theme="dark"] .js-theme-toggle-icon::before {
+  content: "\2600"; // ☀ — shown in dark mode (click to switch to light)
+}
+
 .page-nav {
   display: flex;
   justify-content: space-between;

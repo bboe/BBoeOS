@@ -23,36 +23,15 @@
 <script>
 (function () {
   var STORAGE_KEY = 'jtd-color-scheme';
-
-  function safeGetStored() {
-    try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
-  }
-  function safeSetStored(value) {
-    try { localStorage.setItem(STORAGE_KEY, value); } catch (e) {}
-  }
-
   if (typeof jtd === 'undefined' || !jtd.setTheme) return;
-
-  var stored = safeGetStored();
-  if (stored === 'light' || stored === 'dark') {
-    jtd.setTheme(stored);
-  }
-
-  function updateIcon() {
-    var icon = document.querySelector('.js-theme-toggle-icon');
-    if (!icon) return;
-    icon.textContent = jtd.getTheme() === 'dark' ? '☀' : '☾';
-  }
-
   var toggle = document.querySelector('.js-theme-toggle');
-  if (toggle) {
-    updateIcon();
-    toggle.addEventListener('click', function () {
-      var next = jtd.getTheme() === 'dark' ? 'light' : 'dark';
-      jtd.setTheme(next);
-      safeSetStored(next);
-      updateIcon();
-    });
-  }
+  if (!toggle) return;
+  toggle.addEventListener('click', function () {
+    var current = document.documentElement.getAttribute('data-bboeos-theme') || 'light';
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-bboeos-theme', next);
+    jtd.setTheme(next);
+    try { localStorage.setItem(STORAGE_KEY, next); } catch (e) {}
+  });
 })();
 </script>
