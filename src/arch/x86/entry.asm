@@ -709,6 +709,6 @@ next_handoff_frame_phys dd 0
 tss_data:
         times 104 db 0
 
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.9.0 (2026/05/01)", 13, 10, 0
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.9.1 (2026/05/02)", 13, 10, 0
 
 ;;; -----------------------------------------------------------------------

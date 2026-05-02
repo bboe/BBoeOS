@@ -9,7 +9,11 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.0...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.1...main)
+
+## [0.9.1](https://github.com/bboe/BBoeOS/compare/0.9.0...0.9.1) (2026-05-02)
+
+- **Bugfix:** the C-ported `fd_ioctl` / `fd_lookup` (`src/fs/fd.c`) clobbered ECX and EDX during dispatch — `fd_lookup`'s entry-pointer math trashed EDX, and `fd_ioctl`'s array-index multiply trashed ECX — silently destroying the user-passed sub-command args before `fd_ioctl_vga` read them.  Every VGA ioctl feeds args through those registers (DL=mode, CL/CH=col/row+DL=color, CL/CH/DL/DH=index/r/g/b), so `vga_set_mode` saw a garbage byte in AL, found no matching mode-table entry, and bailed early without clearing the framebuffer.  User-visible fallout: Ctrl+L didn't clear the shell screen, `edit` re-stamped a new `h` on top of the previous frame each keystroke, and `draw` never actually entered mode 13h (its fill_block writes landed at `0xA0000` while text mode kept reading `0xB8000`).  Fix: add `preserve_register("ecx")` and `preserve_register("edx")` to both functions so cc.py spills them at entry and restores them before every return path, including the tail `jmp ebx` into `fd_ioctl_vga`.
 
 ## [0.9.0](https://github.com/bboe/BBoeOS/compare/0.8.1...0.9.0) (2026-05-01)
 
