@@ -15,7 +15,7 @@
 ;;;
 ;;; Dispatch is a flat jump table indexed by AH.  SYS_* numbers are sparse
 ;;; (the high nibble groups subsystems — 0x0 fs, 0x1 io, 0x2 net, 0x3 rtc,
-;;; 0xF sys), so most of the 0xF4 table entries are `.iret_invalid` fillers
+;;; 0xF sys), so most of the 0xF5 table entries are `.iret_invalid` fillers
 ;;; emitted by `times` at each group boundary.  ~1 KB total; the table is
 ;;; the syscall manifest.
 ;;;
@@ -29,7 +29,7 @@
 ;;;   [esp+32]  eip / [esp+36] cs / [esp+40] eflags  (CPU iretd frame)
 ;;; ------------------------------------------------------------------------
 
-        SYSCALL_COUNT           equ SYS_SYS_SHUTDOWN + 1        ; one past the last valid number
+        SYSCALL_COUNT           equ SYS_SYS_SHUTDOWN + 1        ; one past the highest SYS_* — bound for the dispatcher range check
         SYSCALL_SAVED_EAX       equ 28
         SYSCALL_SAVED_EDX       equ 20
         SYSCALL_SAVED_EFLAGS    equ 40
@@ -112,6 +112,8 @@ syscall_handler:
         SYS_ENTRY SYS_RTC_MILLIS,    .rtc_millis
         SYS_ENTRY SYS_RTC_SLEEP,     .rtc_sleep
         SYS_ENTRY SYS_RTC_UPTIME,    .rtc_uptime
+        SYS_ENTRY SYS_VIDEO_MAP,     .video_map
+        SYS_ENTRY SYS_SYS_BREAK,     .sys_break
         SYS_ENTRY SYS_SYS_EXEC,      .sys_exec
         SYS_ENTRY SYS_SYS_EXIT,      .sys_exit
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
@@ -410,12 +412,134 @@ syscall_handler:
         jmp .iret_cf
 
         ;; ------------------------------------------------------------
+        ;; Video handlers.
+        ;; ------------------------------------------------------------
+
+        ;; SYS_VIDEO_MAP: map the mode-13h framebuffer into the calling
+        ;; program's PD at MODE13H_USER_VIRT (RW, U/S=1).  Idempotent —
+        ;; mapping an already-mapped slot just overwrites the PTEs with
+        ;; the same values.
+        ;;
+        ;; In:   (none)
+        ;; Out:  EAX = MODE13H_USER_VIRT, CF=0 on success.
+        ;;       CF=1 with AX = -1 on PT-allocation failure.
+        ;;
+        ;; Uses .iret_cf_eax to preserve the full 32-bit user-virt address.
+        ;;
+        ;; The mode-13h framebuffer is 64000 bytes ((320*200) — 8 bits per
+        ;; pixel, 320x200 indexed-colour).  Fits in 16 pages; we map the
+        ;; whole 16 pages (the trailing ~1.5 KB past the actual FB end is
+        ;; physical RAM that's part of the same VGA aperture and harmless
+        ;; to expose).
+        .video_map:
+        push esi
+        push edi
+        push ecx
+        push edx
+        mov  esi, MODE13H_USER_VIRT     ; ESI walks vaddrs
+        mov  edi, MODE13H_PHYS          ; EDI walks paddrs
+        mov  ecx, (MODE13H_BYTES + 0xFFF) >> 12   ; ECX = remaining pages
+.video_map_loop:
+        push ecx
+        push edi
+        mov  eax, [current_pd_phys]
+        mov  ebx, esi                   ; vaddr
+        mov  ecx, edi                   ; phys
+        mov  edx, PTE_USER_RW
+        call address_space_map_page
+        pop  edi
+        pop  ecx
+        jc   .video_map_oom
+        add  esi, 0x1000
+        add  edi, 0x1000
+        dec  ecx
+        jnz  .video_map_loop
+        mov  eax, MODE13H_USER_VIRT
+        clc
+        jmp  .video_map_done
+.video_map_oom:
+        mov  ax, -1
+        stc
+.video_map_done:
+        pop  edx
+        pop  ecx
+        pop  edi
+        pop  esi
+        jmp  .iret_cf_eax
+
+        ;; ------------------------------------------------------------
         ;; Process control handlers.  sys_exec loads the program and
         ;; jmps — never returns through .iret_cf.  sys_exit teleports
         ;; back to the kernel's saved ESP (set by shell_reload /
         ;; sys_exec before each `jmp PROGRAM_BASE`) and re-enters
         ;; shell_reload, which respawns the shell from a clean state.
         ;; ------------------------------------------------------------
+
+        ;; SYS_SYS_BREAK: set/query the program break.  Linux semantics —
+        ;; pass 0 to query, an absolute address to set; EAX always holds
+        ;; the resulting break (caller compares to requested to detect
+        ;; failure).  CF=0 always.
+        ;;
+        ;; current_program_break and current_program_break_min are initialised
+        ;; in program_enter (entry.asm) at program load: both start at the
+        ;; page-aligned end of the program's loaded image (text + BSS).
+        ;;
+        ;; Phase A simplification: grow-only.  Requests at or below the
+        ;; current break leave it unchanged — userland malloc keeps the
+        ;; freed range in its free-list and reuses it.
+        ;;
+        ;; In:   EBX = new break (0 = query)
+        ;; Out:  EAX = resulting break, CF = 0.  Caller compares EAX to
+        ;;       requested to detect OOM (returns unchanged old break).
+        ;;
+        ;; Uses .iret_cf_eax to preserve the full 32-bit EAX (the default
+        ;; .iret_cf path sign-extends AX into EAX, which would truncate
+        ;; user-space addresses to 16 bits).
+        .sys_break:
+        push esi
+        push edi
+        push ebx                                ; [esp] = saved requested
+        ;; Query?
+        test ebx, ebx
+        jz   .sys_break_done
+        ;; Below floor?  (Includes the case where caller passes a value
+        ;; in the kernel half or otherwise nonsensical.)
+        cmp  ebx, [current_program_break_min]
+        jb   .sys_break_done
+        ;; Above stack guard?
+        cmp  ebx, STACK_VIRT_BASE - 0x10000
+        jae  .sys_break_done
+        ;; Shrink or no-op?  Phase A returns the unchanged break.
+        cmp  ebx, [current_program_break]
+        jbe  .sys_break_done
+        ;; --- Grow loop ---
+        ;; ESI walks page-by-page from page_align_up(old_break) to ebx.
+        mov  esi, [current_program_break]
+        add  esi, 0xFFF
+        and  esi, 0xFFFFF000
+.sys_break_grow:
+        cmp  esi, [esp]                         ; reload requested
+        jae  .sys_break_commit
+        call frame_alloc
+        jc   .sys_break_done                      ; OOM — leave break unchanged
+        mov  ecx, eax                           ; phys
+        mov  ebx, esi                           ; vaddr
+        mov  eax, [current_pd_phys]
+        mov  edx, PTE_USER_RW
+        call address_space_map_page
+        jc   .sys_break_done                      ; map fail — small frame leak ok for Phase A
+        add  esi, 0x1000
+        jmp  .sys_break_grow
+.sys_break_commit:
+        mov  ebx, [esp]                         ; requested
+        mov  [current_program_break], ebx
+.sys_break_done:
+        mov  eax, [current_program_break]
+        pop  ebx                                ; balance the stack (discards saved requested)
+        pop  edi
+        pop  esi
+        clc
+        jmp  .iret_cf_eax
 
         .sys_exec:
         ;; ESI = filename in the calling shell's user-virt.  Active PD
@@ -522,6 +646,17 @@ syscall_handler:
         call shutdown
         stc
         jmp .iret_cf
+
+;;; ------------------------------------------------------------
+;;; Per-program break state, reset on every program load by
+;;; program_enter (entry.asm) to user_image_end (page-aligned end
+;;; of text + BSS).  current_program_break_min is the floor —
+;;; sys_break refuses to shrink below it.  Phase A is grow-only so
+;;; the floor is also the only lower bound the handler ever sees.
+;;; ------------------------------------------------------------
+        align 4
+current_program_break     dd 0
+current_program_break_min dd 0
 
 ;;; The four net_* C handlers and their `extern` declarations of
 ;;; fd_alloc / fd_lookup / udp_send / udp_receive / icmp_receive /

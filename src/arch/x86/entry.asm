@@ -323,6 +323,14 @@ program_enter:
         and eax, 0xFFFFF000
         mov [user_image_end], eax
 
+        ;; --- Initialise the program break to top of loaded image ---
+        ;; current_program_break starts at user_image_end (page-aligned end
+        ;; of the program's text + BSS).  current_program_break_min is the
+        ;; floor — sys_break refuses to shrink below it.  Both reset on
+        ;; every program load (boot shell, sys_exec, sys_exit reload).
+        mov [current_program_break],     eax
+        mov [current_program_break_min], eax
+
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
         ;; by Phase 1; loop until user_image_end.
@@ -396,6 +404,18 @@ program_enter:
         ;; --- Switch to the new PD ---
         mov eax, [current_pd_phys]
         mov cr3, eax
+
+        ;; --- Enable x87 FPU for ring-3 ---
+        ;; CR0.EM=0 (use FPU instructions, don't trap with #NM),
+        ;; CR0.MP=1 (track FPU state for FWAIT correctness),
+        ;; CR0.NE=1 (native FP error reporting via #MF instead of
+        ;; legacy IRQ-13).  Single-tasking — no FXSAVE/FXRSTOR on
+        ;; context switch (there are no context switches).  _start
+        ;; runs FNINIT to reset FPU state at program entry.
+        mov eax, cr0
+        and eax, ~(1 << 2)              ; clear EM
+        or  eax, (1 << 1) | (1 << 5)    ; set MP, NE
+        mov cr0, eax
 
         ;; The PD is built and live; if anything below this point
         ;; faulted we'd be in a different recovery story.  Clear the
