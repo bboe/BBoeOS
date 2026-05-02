@@ -47,7 +47,7 @@ qemu-system-i386 -drive file=drive.img,format=raw -serial stdio
 
 ```
 Welcome to BBoeOS!
-Version 0.9.1 (2026/05/02)
+Version 0.9.2 (2026/05/02)
 $
 ```
 

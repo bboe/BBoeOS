@@ -9,7 +9,9 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.1...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.2...main)
+
+## [0.9.2](https://github.com/bboe/BBoeOS/compare/0.9.1...0.9.2) (2026-05-02)
 
 - **Bugfix:** `bbfs_create` (`src/fs/bbfs.asm`) hardcoded the new directory entry's flag byte to `0`, silently dropping the mode argument the kernel handed it.  Any program that asked the kernel to create an executable file (`asm` writing the assembled `out`, `cp` preserving the source's mode, etc.) ended up non-executable on bbfs and the user had to run `chmod +x` afterwards.  ext2 already honoured the same DL register via `ext2_cr_mode`; bbfs now mirrors that pattern with a new `bbfs_create_mode` static, masked to `FLAG_EXECUTE` so a stray `FLAG_DIRECTORY` from a caller doesn't accidentally make a file directory-flagged.
 
