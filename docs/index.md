@@ -1,6 +1,6 @@
 ---
 title: Home
-nav_order: 1
+nav_order: 10
 ---
 
 # BBoeOS
@@ -12,9 +12,18 @@ in 16-bit real mode, flips into flat 32-bit protected mode with paging, runs
 the kernel at ring 0 and userland programs at ring 3 in per-program page
 directories.
 
+## Start here
+
+- [Getting started](getting_started.html) — build, boot, run a built-in, add a file, write a tiny C program
+- [Requirements](requirements.html) — external tools the build, the OS image, and the test suites depend on
+- [Programs](programs.html) — catalog of the executables that ship in `bin/`
+
+## Writing programs
+
+- [C subset reference](c_subset.html) — what `cc.py` accepts, the vDSO, and the compiler's builtin functions
+
 ## Reference
 
-- [Requirements](requirements.html) — external tools the build, the OS image, and the test suites depend on
 - [Architecture](architecture.html) — boot path, post-flip bring-up, ring-3 userland, paging and per-program address spaces, build-time derivation
 - [Memory map](memory_map.html) — kernel-side fixed-physical regions and the per-program user-virt layout
 - [Syscall interface](syscalls.html) — the `INT 30h` syscall table with argument-register conventions
