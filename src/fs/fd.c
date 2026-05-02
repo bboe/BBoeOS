@@ -224,10 +224,16 @@ void fd_init() {
 // Inputs are AL = cmd, BX = fd, plus per-(type, cmd) extras (ECX/EDX)
 // that flow through to the handler unchanged.  The function pointer
 // is pinned to EBX so the tail-jump (``jmp ebx``) doesn't clobber AL
-// — fd_ioctl_vga reads AL directly to pick the sub-command.  Error
-// path: ``stc; ret`` with AX left at whatever the syscall layer
-// preserved (matching the asm version's contract).
+// — fd_ioctl_vga reads AL directly to pick the sub-command.  ECX/EDX
+// are preserved across the dispatch (this body does ``mov ecx, eax``
+// for the array-index multiply and the nested fd_lookup writes EDX)
+// so VGA_IOCTL_FILL_BLOCK / VGA_IOCTL_MODE / VGA_IOCTL_SET_PALETTE
+// see the user's CX / DL / DX intact in fd_ioctl_vga.  Error path:
+// ``stc; ret`` with AX left at whatever the syscall layer preserved
+// (matching the asm version's contract).
 __attribute__((carry_return))
+__attribute__((preserve_register("ecx")))
+__attribute__((preserve_register("edx")))
 int fd_ioctl(int cmd __attribute__((in_register("ax"))),
              int fd_num __attribute__((in_register("bx")))) {
     struct fd *entry;
@@ -247,10 +253,15 @@ int fd_ioctl(int cmd __attribute__((in_register("ax"))),
 }
 
 // fd_lookup: validate fd in BX, return ESI = entry pointer.  CF set
-// if the fd is out of range or its slot is FD_TYPE_FREE.  ECX is
-// preserved so the asm fd_open / fd_read / fd_write dispatchers can
-// keep ECX live across the call.
-__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
+// if the fd is out of range or its slot is FD_TYPE_FREE.  ECX/EDX
+// are preserved (this body lands ``mov edx, eax`` on the entry-pointer
+// computation) so callers further up the dispatch chain — fd_ioctl,
+// fd_read, fd_write — can keep CX/DL/DX live across the lookup; that
+// matters for VGA ioctls (DL=mode/color, CL/CH=row/col) and
+// console writes that latch CX through to the per-type handler.
+__attribute__((carry_return))
+__attribute__((preserve_register("ecx")))
+__attribute__((preserve_register("edx")))
 int fd_lookup(int fd_num __attribute__((in_register("bx"))),
               struct fd *entry __attribute__((out_register("esi")))) {
     struct fd *cursor;
