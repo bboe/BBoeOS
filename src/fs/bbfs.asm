@@ -3,7 +3,7 @@
 ;;; VFS interface (called through vfs.asm function pointers):
 ;;; bbfs_chmod:             SI=path, AL=mode → CF on error (AL=error code)
 ;;; bbfs_commit_write_sec:  → CF on disk error
-;;; bbfs_create:            SI=path → vfs_found_*, CF on error
+;;; bbfs_create:            SI=path, DL=mode → vfs_found_*, CF on error
 ;;; bbfs_delete:            SI=path → CF on error (AL=error code)
 ;;; bbfs_find:              SI=path → vfs_found_*, CF if not found
 ;;; bbfs_init:              → (no-op: no persistent state to initialise)
@@ -50,7 +50,8 @@ bbfs_commit_write_sec:
 
 bbfs_create:
         ;; Create a new empty file entry and populate vfs_found_*
-        ;; Input:  SI = null-terminated path (may contain one '/')
+        ;; Input:  SI = null-terminated path (may contain one '/'),
+        ;;         DL = mode flags (FLAG_EXECUTE bit honoured; others zero)
         ;; Output: CF clear, vfs_found_* set; CF set on error
         push ebx
         push ecx
@@ -58,6 +59,7 @@ bbfs_create:
         push edi
         push esi
         mov [bbfs_create_name], esi
+        mov [bbfs_create_mode], dl    ; stash before scan_directory_entries clobbers DX
         call scan_directory_entries   ; BX = free root entry index, DX = next data sector
         mov [bbfs_create_sector], dx
         ;; scan_directory_entries clobbers SI; restore path pointer from saved variable
@@ -96,7 +98,9 @@ bbfs_create:
         push ebx
         call write_directory_name
         pop ebx
-        mov byte [ebx+DIRECTORY_OFFSET_FLAGS], 0
+        mov al, [bbfs_create_mode]
+        and al, FLAG_EXECUTE          ; only FLAG_EXECUTE is meaningful for files
+        mov [ebx+DIRECTORY_OFFSET_FLAGS], al
         mov ax, [bbfs_create_sector]
         mov [ebx+DIRECTORY_OFFSET_SECTOR], ax
         mov word [ebx+DIRECTORY_OFFSET_SIZE], 0
@@ -108,7 +112,9 @@ bbfs_create:
         mov [vfs_found_inode], ax
         mov word [vfs_found_size], 0
         mov word [vfs_found_size+2], 0
-        mov byte [vfs_found_mode], 0
+        mov al, [bbfs_create_mode]
+        and al, FLAG_EXECUTE
+        mov [vfs_found_mode], al
         mov byte [vfs_found_type], FD_TYPE_FILE
         mov ax, [directory_loaded_sector]
         mov [vfs_found_dir_sec], ax
@@ -1199,6 +1205,7 @@ write_directory_name:
         jnz .pad
         ret
 
+        bbfs_create_mode   db 0   ; bbfs_create: FLAG_EXECUTE bit (others ignored)
         bbfs_create_name   dd 0   ; 32-bit kernel-virt or user-virt path pointer
         bbfs_create_sector dw 0
         bbfs_pws_sector    dw 0

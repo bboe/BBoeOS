@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import run_commands  # noqa: E402
 
-from add_file import FLAG_DIRECTORY, SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
+from add_file import FLAG_DIRECTORY, FLAG_EXECUTE, SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = float(os.environ.get("BBOE_FS_COMMAND_TIMEOUT", "1"))
@@ -55,6 +55,7 @@ def main() -> int:
 
     tests = [
         ("copy_large", test_copy_large),
+        ("copy_preserves_executable_flag", test_copy_preserves_executable_flag),
         ("copy_to_subdirectory", test_copy_to_subdirectory),
         ("cross_directory_move", test_cross_directory_move),
         ("make_directory_high_sector", test_make_directory_high_sector),
@@ -160,6 +161,34 @@ def test_copy_large(*, directory_sector: int, directory_sectors: int, floppy: bo
     source_data = image[source_sector * SECTOR_SIZE :][:source_size]
     assert big_size == source_size, f"size {big_size} != {source_size}"
     assert big_data == source_data, "copied data does not match source"
+
+
+def test_copy_preserves_executable_flag(
+    *,
+    directory_sector: int,
+    directory_sectors: int,
+    floppy: bool,
+    temporary_directory: Path,
+) -> None:
+    """``cp`` of an executable should pass the +x bit through to bbfs_create.
+
+    Regression for the bbfs bug where bbfs_create hardcoded the new
+    entry's flag byte to 0, dropping the mode argument the kernel
+    handed it.
+    """
+    drive = make_drive(name="copy_executable_flag", temporary_directory=temporary_directory)
+    run_commands(["cp bin/cat hello"], command_timeout=COMMAND_TIMEOUT, drive=drive, floppy=floppy)
+    image = drive.read_bytes()
+
+    hello = find_entry(
+        directory_sectors=directory_sectors,
+        directory_start_sector=directory_sector,
+        image=image,
+        name="hello",
+    )
+    assert hello is not None, "cp did not create 'hello'"
+    flags = hello[0]
+    assert flags & FLAG_EXECUTE, f"cp should preserve +x; got flags=0x{flags:02x}"
 
 
 def test_copy_to_subdirectory(*, directory_sector: int, directory_sectors: int, floppy: bool, temporary_directory: Path) -> None:
