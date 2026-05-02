@@ -1,0 +1,35 @@
+{%- comment -%}
+  Walk every site page once, find the highest-keyed page that comes
+  before this one and the lowest-keyed page that comes after.
+  Outputs `prev_url` and `next_url` (empty strings if absent).
+{%- endcomment -%}
+
+{%- if site.docs -%}
+  {%- assign site_pages = site.docs -%}
+{%- else -%}
+  {%- assign site_pages = site.html_pages -%}
+{%- endif -%}
+
+{%- assign query_page = page -%}
+{%- include prev_next/set_site_order.html -%}
+{%- assign page_site_order = site_order -%}
+
+{%- assign prev_site_order = -1 -%}
+{%- assign next_site_order = 1000000000 -%}
+{%- assign prev_url = "" -%}
+{%- assign prev_title = "" -%}
+{%- assign next_url = "" -%}
+{%- assign next_title = "" -%}
+
+{%- for query_page in site_pages -%}
+  {%- include prev_next/set_site_order.html -%}
+  {%- if site_order < page_site_order and site_order > prev_site_order -%}
+    {%- assign prev_site_order = site_order -%}
+    {%- assign prev_url = query_page.url | relative_url -%}
+    {%- assign prev_title = query_page.title -%}
+  {%- elsif site_order > page_site_order and site_order < next_site_order -%}
+    {%- assign next_site_order = site_order -%}
+    {%- assign next_url = query_page.url | relative_url -%}
+    {%- assign next_title = query_page.title -%}
+  {%- endif -%}
+{%- endfor -%}

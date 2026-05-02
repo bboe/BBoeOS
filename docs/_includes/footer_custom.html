@@ -1,3 +1,25 @@
+{%- include prev_next/set_prev_next.html -%}
+{%- if prev_url != "" or next_url != "" -%}
+<nav class="page-nav" aria-label="Page navigation">
+  {%- if prev_url != "" -%}
+    <a class="page-nav-link page-nav-prev" href="{{ prev_url }}" rel="prev">
+      <span class="page-nav-arrow" aria-hidden="true">&larr;</span>
+      <span class="page-nav-label">{{ prev_title }}</span>
+    </a>
+  {%- else -%}
+    <span class="page-nav-link page-nav-disabled" aria-hidden="true"></span>
+  {%- endif -%}
+  {%- if next_url != "" -%}
+    <a class="page-nav-link page-nav-next" href="{{ next_url }}" rel="next">
+      <span class="page-nav-label">{{ next_title }}</span>
+      <span class="page-nav-arrow" aria-hidden="true">&rarr;</span>
+    </a>
+  {%- else -%}
+    <span class="page-nav-link page-nav-disabled" aria-hidden="true"></span>
+  {%- endif -%}
+</nav>
+{%- endif -%}
+
 <script>
 (function () {
   var STORAGE_KEY = 'jtd-color-scheme';

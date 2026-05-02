@@ -1,0 +1,32 @@
+{%- comment -%}
+  Compute a single integer sort key (`site_order`) for `query_page`.
+  Pages without a numeric `nav_order` sort to the end (999999999).
+
+  Adapted from https://github.com/MiDataInt/just-the-docs-mdi:
+  the parent / grand_parent branches make this work for nested
+  navigation. Our docs are flat today, but keeping the full version
+  means nested sections will sort correctly without re-editing.
+{%- endcomment -%}
+
+{%- assign site_order = 999999999 -%}
+{%- if query_page.grand_parent -%}
+  {%- for parent in site_pages -%}
+    {%- if parent.title == query_page.parent -%}
+      {%- assign parent_order = parent.nav_order | times: 1000 -%}
+      {%- for grandparent in site_pages -%}
+        {%- if grandparent.title == parent.parent -%}
+          {%- assign site_order = grandparent.nav_order | times: 1000000 | plus: parent_order | plus: query_page.nav_order -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- elsif query_page.parent -%}
+  {%- assign page_order = query_page.nav_order | times: 1000 -%}
+  {%- for parent in site_pages -%}
+    {%- if parent.title == query_page.parent -%}
+      {%- assign site_order = parent.nav_order | times: 1000000 | plus: page_order -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- else -%}
+  {%- assign site_order = query_page.nav_order | times: 1000000 -%}
+{%- endif -%}
