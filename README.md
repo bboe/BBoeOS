@@ -1,5 +1,7 @@
 # BBoeOS
 
+![bboeos demo](docs/gifs/demo.gif)
+
 A minimal x86 operating system: a real-mode bootloader hands off to a
 paged 32-bit protected-mode kernel that runs userland programs at
 ring 3.  Includes a shell, VFS with bbfs and ext2 backends, NE2000

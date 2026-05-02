@@ -5,6 +5,8 @@ nav_order: 20
 
 # Getting started
 
+![bboeos demo]({{ "/gifs/demo.gif" | relative_url }})
+
 A short walkthrough: build the OS, boot it in QEMU, run a built-in, add a file, compile and run a tiny C program.
 
 ## 1. Install dependencies
