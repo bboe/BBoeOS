@@ -14,6 +14,7 @@ directories.
 
 ## Reference
 
+- [Requirements](requirements.html) — external tools the build, the OS image, and the test suites depend on
 - [Architecture](architecture.html) — boot path, post-flip bring-up, ring-3 userland, paging and per-program address spaces, build-time derivation
 - [Memory map](memory_map.html) — kernel-side fixed-physical regions and the per-program user-virt layout
 - [Syscall interface](syscalls.html) — the `INT 30h` syscall table with argument-register conventions

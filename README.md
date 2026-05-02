@@ -19,8 +19,12 @@ vDSO page.
 
 ## Dependencies
 
-* nasm: `brew install nasm`
-* python3 (for `add_file.py`, `cc.py`, and the `tests/` harness)
+* `e2fsprogs` — only when building with `--ext2`
+* `nasm` — assembler
+* `python3` — runs `add_file.py`, `cc.py`, and the `tests/` harness (stdlib only)
+* `qemu-system-i386` — to boot the OS
+
+macOS: `brew install e2fsprogs nasm qemu`.  Ubuntu: `sudo apt-get install -y e2fsprogs nasm qemu-system-x86`.  See [`docs/requirements.md`](docs/requirements.md) for the full list, including the macOS keg-only `PATH` gotcha for `e2fsprogs`.
 
 ## Minimum runtime requirements
 

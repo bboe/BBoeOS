@@ -1,6 +1,6 @@
 ---
 title: Syscall interface (INT 30h)
-nav_order: 4
+nav_order: 5
 ---
 
 # Syscall interface (`INT 30h`)
