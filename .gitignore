@@ -14,3 +14,6 @@ tools/libc/test_program/hello
 
 # tools/record_demo.py transient output
 _demo_capture/
+
+# tools/fetch_doom.sh checks doomgeneric source out here
+/third_party/
