@@ -120,6 +120,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx"}),
         "rename": frozenset({"ax", "di", "si"}),
         "rmdir": frozenset({"ax", "si"}),
+        "seek": frozenset({"ax", "bx", "cx"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "set_exec_arg": frozenset({"ax"}),
         "set_palette_color": frozenset({"ax", "bx", "cx", "dx"}),

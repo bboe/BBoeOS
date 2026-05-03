@@ -791,6 +791,14 @@ TESTS: list[ProgramTest] = [
     # somewhere below STACK_VIRT_BASE (= USER_STACK_TOP - 0x10000) — match
     # the EXC0E signature loosely so future stack-size or KERNEL_VIRT_BASE
     # changes don't break this.
+    # Exercises SYS_IO_SEEK end-to-end: SEEK_SET/CUR/END, EOF clamping,
+    # and the read-cursor invariant.  Opens a known stable file
+    # (src/macro_sm.asm, 1052 bytes) so the position-clamp assertion
+    # stays meaningful across rebuilds.  Program name is 4 chars so
+    # the new bin/ directory entry (rec_len 12) lands at offset 492 in
+    # block 0, where the straddle_dir test still finds a usable
+    # boundary at 512 — longer names push past 492 and break it.
+    ProgramTest("seek", ["seek"], r"^seek: OK$"),
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
     # Confirms the user stack lives at the user/kernel boundary
     # (USER_STACK_TOP = KERNEL_VIRT_BASE).  ESP at iretd equals

@@ -95,7 +95,14 @@
         %assign SYS_IO_IOCTL 12h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
         %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
         %assign SYS_IO_READ  14h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_WRITE 15h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_SEEK  15h    ; BX=fd, ECX=offset, AL=whence (0/1/2); returns EAX=new position, CF on error
+        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+
+        ;; SEEK_* whence values — passed in AL of SYS_IO_SEEK.  Match POSIX so
+        ;; libc lseek can pass the user value through unchanged.
+        %assign SEEK_SET 0
+        %assign SEEK_CUR 1
+        %assign SEEK_END 2
 
         %assign SYS_NET_MAC 20h
         %assign SYS_NET_OPEN 21h

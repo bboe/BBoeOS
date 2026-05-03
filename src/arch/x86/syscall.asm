@@ -103,6 +103,7 @@ syscall_handler:
         SYS_ENTRY SYS_IO_IOCTL,      .io_ioctl
         SYS_ENTRY SYS_IO_OPEN,       .io_open
         SYS_ENTRY SYS_IO_READ,       .io_read
+        SYS_ENTRY SYS_IO_SEEK,       .io_seek
         SYS_ENTRY SYS_IO_WRITE,      .io_write
         SYS_ENTRY SYS_NET_MAC,       .net_mac
         SYS_ENTRY SYS_NET_OPEN,      .net_open
@@ -293,6 +294,15 @@ syscall_handler:
         pop ebx
         jc .io_rw_bad_pointer
         call fd_read
+        jmp .iret_cf_eax
+
+        .io_seek:
+        ;; BX = fd, ECX = offset (signed 32-bit), AL = whence (0/1/2).
+        ;; fd_seek returns EAX = new position (or -1 on error), CF=1 on
+        ;; error.  Routed through .iret_cf_eax to preserve the full
+        ;; 32-bit position (files can exceed 16 bits — ext2 grows to
+        ;; multi-MB easily, and Doom's WAD is several MB).
+        call fd_seek
         jmp .iret_cf_eax
 
         .io_write:
