@@ -97,7 +97,17 @@ int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg) {
         : "+a"(eax_in_out), [cf]"=&qm"(cf),
           "+b"(fd), "+c"(ecx_arg), "+d"(edx_arg));
     if (cf & 1) { errno = _errno_from_al(eax_in_out & 0xFF); return -1; }
-    return 0;
+    /* Return the kernel's full EAX so commands that report data wider
+     * than 16 bits get their value through.  Notably:
+     *
+     *   CONSOLE_IOCTL_TRY_GETC      — one byte in AX (low 8)
+     *   CONSOLE_IOCTL_TRY_GET_EVENT — (pressed << 16) | bbkey in EAX
+     *
+     * Truncating to AX here would clip the press flag of every BBKEY
+     * event, which made Doom see release-only events and ignore
+     * keypresses entirely.  Most ioctls return 0, so existing callers
+     * that ignore the return are unaffected. */
+    return (int)eax_in_out;
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
@@ -143,6 +153,13 @@ int open(const char *path, int flags, ...) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
+    /* Kernel SYS_IO_READ returns the byte count in AX (16 bits) — a
+     * 70 KB request would actually advance the file position by 70 KB
+     * but report (70 KB & 0xFFFF) = 4464 bytes back, fooling callers
+     * into re-reading already-consumed data.  Cap each syscall at
+     * 65535 so AX never wraps; POSIX permits short reads, so callers
+     * that need more (fread, our wrapper) just loop. */
+    if (count > 0xFFFFu) count = 0xFFFFu;
     unsigned int eax_out, cf;
     __asm__ volatile (
         "mov %[buf], %%edi\n\t"
@@ -186,6 +203,8 @@ int stat(const char *path, struct stat *buf) {
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
+    /* Same 16-bit AX truncation as read — cap each syscall at 65535. */
+    if (count > 0xFFFFu) count = 0xFFFFu;
     unsigned int eax_out, cf;
     __asm__ volatile (
         "mov %[buf], %%esi\n\t"

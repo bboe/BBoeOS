@@ -118,10 +118,24 @@ int strncmp(const char *a, const char *b, size_t n) {
 }
 
 char *strncpy(char *dst, const char *src, size_t n) {
-    char *r = dst;
-    while (n && (*dst++ = *src++)) n--;
-    while (n--) *dst++ = 0;
-    return r;
+    /* POSIX: write exactly n bytes total — copy src until '\0' (or n
+     * bytes), then NUL-pad the rest.  The previous impl had an
+     * off-by-one when src was shorter than n: the `(*dst++ = *src++)`
+     * inside the while-condition advanced dst past the NUL, then the
+     * tail loop wrote n more zeros, overrunning by one byte.  Doom's
+     * w_wad.c lumpinfo loop hit this — a strncpy(name, ..., 8) on a
+     * <8-char name (e.g. "PNAMES") clobbered the low byte of the
+     * adjacent wad_file pointer in the lumpinfo_t struct. */
+    size_t i = 0;
+    while (i < n && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    while (i < n) {
+        dst[i] = 0;
+        i++;
+    }
+    return dst;
 }
 
 char *strrchr(const char *s, int c) {
