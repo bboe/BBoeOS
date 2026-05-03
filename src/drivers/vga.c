@@ -271,6 +271,27 @@ void vga_get_cursor(int *dx_out __attribute__((out_register("dx"))))
     *dx_out = (row << 8) | col;
 }
 
+// vga_reset_text_mode: idempotent restore of 80x25 text mode.  Called
+// from `shell_reload` so that any program that switched the card into
+// a graphics mode (e.g. Doom into mode 13h) and exited — cleanly via
+// SYS_SYS_EXIT or via a crash through the IDT — leaves the user
+// looking at a usable text console rather than a frozen frame of
+// pixels.  No-op when the card is already in text mode, so the boot
+// fall-through path doesn't clobber the welcome banner.
+void vga_reset_text_mode();
+
+asm("vga_reset_text_mode:\n"
+    "        cmp byte [_g_vga_current_mode], VIDEO_MODE_TEXT_80x25\n"
+    "        je .vga_reset_text_mode_done\n"
+    "        push eax\n"
+    "        mov al, VIDEO_MODE_TEXT_80x25\n"
+    "        call vga_set_mode\n"                    // also clears the framebuffer
+    "        mov byte [_g_vga_current_mode], VIDEO_MODE_TEXT_80x25\n"
+    "        pop eax\n"
+    "        call vga_clear_screen\n"                // homes the cursor
+    "    .vga_reset_text_mode_done:\n"
+    "        ret");
+
 // vga_scroll_up: scroll the text framebuffer up one row.  The top row is
 // discarded; the bottom row is cleared to 0x0720.  Preserves everything.
 // Stays as inline asm for the same reason as vga_clear_screen — `rep
