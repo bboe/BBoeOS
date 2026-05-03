@@ -10,7 +10,7 @@ CC      := clang      # force clang — `?=` would lose to Make's built-in CC=cc
 CFLAGS  := --target=i386-pc-none-elf -m32 -ffreestanding -fno-pic \
            -fno-stack-protector -nostdlib -nostdinc -O2 -Wall -Wextra -Werror \
            -Iinclude
-C_SRCS  := ctype.c errno.c math.c stdio.c stdlib.c string.c syscall.c
+C_SRCS  := builtins.c ctype.c errno.c math.c stdio.c stdlib.c string.c syscall.c
 OBJS     = $(C_SRCS:.c=.o) $(S_SRCS:.S=.o)
 S_SRCS  := _start.S setjmp.S
 

@@ -7,9 +7,11 @@
 #define EXIT_SUCCESS 0
 #define RAND_MAX     0x7FFFFFFF
 
+int    abs(int x);
 void   abort(void) __attribute__((noreturn));
 int    atexit(void (*fn)(void));
 int    atoi(const char *s);
+double atof(const char *s);    /* stub: returns 0.0 */
 long   atol(const char *s);
 void  *bsearch(const void *key, const void *base, size_t nmemb, size_t size, int (*cmp)(const void *, const void *));
 void  *calloc(size_t nmemb, size_t size);
@@ -23,5 +25,6 @@ void  *realloc(void *p, size_t n);
 void   srand(unsigned int seed);
 long   strtol(const char *s, char **end, int base);
 unsigned long strtoul(const char *s, char **end, int base);
+int    system(const char *cmd);    /* stub: returns -1, sets errno=ENOSYS */
 
 #endif

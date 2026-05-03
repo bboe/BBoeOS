@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /* All syscalls follow the BBoeOS convention: AH = syscall number,
@@ -62,6 +64,24 @@ int close(int fd) {
     return 0;
 }
 
+int gettimeofday(struct timeval *tv, struct timezone *tz) {
+    /* Returns the same monotonic ms-since-boot value via SYS_RTC_MILLIS
+     * for both fields — Doom only cares about deltas for frame timing,
+     * not absolute wall-clock.  tz is ignored (POSIX-compliant). */
+    (void)tz;
+    if (tv == 0) return 0;
+    unsigned int ms_lo, ms_hi;
+    __asm__ volatile (
+        "mov $0x31, %%ah\n\t"           /* SYS_RTC_MILLIS */
+        "int $0x30\n\t"
+        : "=a"(ms_lo), "=d"(ms_hi));
+    /* DX:AX is ms; pack to a 32-bit ms count, then split into sec / usec. */
+    unsigned int total_ms = (ms_hi << 16) | (ms_lo & 0xFFFF);
+    tv->tv_sec  = total_ms / 1000;
+    tv->tv_usec = (total_ms % 1000) * 1000;
+    return 0;
+}
+
 /* Generic ioctl: AH=SYS_IO_IOCTL, BX=fd, AL=cmd, ECX/EDX=args.
  * Bind inputs directly to the kernel's expected registers to keep the
  * extended-asm constraint count low — the alternative ("g" everywhere
@@ -96,6 +116,14 @@ off_t lseek(int fd, off_t offset, int whence) {
         : "ebx", "ecx");
     if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return (off_t)-1; }
     return (off_t)eax_out;
+}
+
+int mkdir(const char *path, int mode) {
+    /* Stub: would route to SYS_FS_MKDIR (01h) but Doom only calls
+     * mkdir() to create save-game / config dirs we don't support
+     * anyway.  Return failure so callers fall back to the cwd. */
+    (void)path; (void)mode;
+    return -1;
 }
 
 int open(const char *path, int flags, ...) {
@@ -147,6 +175,14 @@ void *sbrk(ptrdiff_t increment) {
     void *old = (void*)_current_break;
     _current_break = requested;
     return old;
+}
+
+int stat(const char *path, struct stat *buf) {
+    /* Stub: Doom uses stat() only for IWAD-search heuristics (probe a
+     * few candidate paths).  Returning failure makes Doom fall through
+     * to the explicit -iwad command-line path we hand it. */
+    (void)path; (void)buf;
+    return -1;
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
