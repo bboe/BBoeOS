@@ -9,6 +9,19 @@ networking (ARP / IP / ICMP / UDP), a self-hosted assembler, and a
 custom C subset compiler that translates `src/c/*.c` to NASM-compatible
 assembly on the host.
 
+It also runs Doom:
+
+[![doom on bboeos](docs/gifs/doom.gif)](docs/gifs/doom.webm)
+
+(click the gif for the higher-quality WebM)
+
+The Doom port lives in `tools/doom/` and links against a hand-rolled
+freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
+[`tools/build_doom.py`](tools/build_doom.py); shareware-WAD
+provisioning: [`tools/fetch_wad.sh`](tools/fetch_wad.sh); one-shot
+"build + install on a fresh disk image":
+[`tools/install_doom.sh`](tools/install_doom.sh).
+
 The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`)
 concatenated on disk.  `boot.bin` is the MBR + post-MBR real-mode
 bootstrap + 32-bit paging bring-up; `kernel.bin` is the high-half
