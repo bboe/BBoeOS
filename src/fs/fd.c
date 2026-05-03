@@ -16,6 +16,16 @@
 
 // Layout used by the helpers and the asm dispatchers; matches the
 // FD_OFFSET_* / FD_ENTRY_SIZE constants in include/constants.asm.
+//
+// event_head / event_tail / event_buf form a per-fd PS/2 event ring
+// (FD_TYPE_CONSOLE only).  The C code never touches the ring directly
+// — the producer is an asm broadcaster in drivers/ps2.c that walks
+// the table from IRQ context, and the consumer is the inline asm in
+// fs/fd/console.c that drains a single fd's slots when userspace
+// calls CONSOLE_IOCTL_TRY_GET_EVENT.  event_buf is declared as bytes
+// because cc.py doesn't carry int-array struct fields end-to-end;
+// the asm sides reach in via FD_OFFSET_EVENT_BUF + index*4 for the
+// 32-bit (pressed << 16) | bbkey slots.
 struct fd {
     uint8_t type;
     uint8_t flags;
@@ -25,7 +35,11 @@ struct fd {
     uint16_t directory_sector;
     uint16_t directory_offset;
     uint8_t mode;
-    uint8_t _rest[15];
+    uint8_t event_head;
+    uint8_t event_tail;
+    uint8_t _pad;
+    uint8_t event_buf[32];
+    uint8_t _rest[12];
 };
 
 // fd_lookup is forward-declared because fd_close calls it but the
@@ -80,6 +94,7 @@ struct fd_ops_entry {
 // Forward declarations for the per-fd-type handlers.  The bodies
 // live in fs/fd/{console,fs,net}.c; only the symbol identity matters
 // for the static initializer below.
+int fd_ioctl_console();
 int fd_ioctl_vga();
 int fd_read_console();
 int fd_read_dir();
@@ -110,7 +125,7 @@ struct fd_ioctl_op {
 
 struct fd_ioctl_op fd_ioctl_ops[8] = {
     { 0 },                  // FD_TYPE_FREE (0)
-    { 0 },                  // FD_TYPE_CONSOLE (1)
+    { fd_ioctl_console },   // FD_TYPE_CONSOLE (1)
     { 0 },                  // FD_TYPE_DIRECTORY (2)
     { 0 },                  // FD_TYPE_FILE (3)
     { 0 },                  // FD_TYPE_ICMP (4)
@@ -119,7 +134,7 @@ struct fd_ioctl_op fd_ioctl_ops[8] = {
     { fd_ioctl_vga },       // FD_TYPE_VGA (7)
 };
 
-// fd_table — kernel BSS, FD_MAX entries × 32 bytes.  The asm
+// fd_table — kernel BSS, FD_MAX entries × FD_ENTRY_SIZE bytes.  The asm
 // dispatchers below (and the per-fd-type handlers in fs/fd/*.kasm)
 // reach into entries via ``[esi+FD_OFFSET_*]``; they reference the
 // bare ``fd_table`` symbol via the equ shim so they don't need to
