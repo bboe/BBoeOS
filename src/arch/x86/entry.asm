@@ -423,6 +423,16 @@ program_enter:
         ;; sys_exec) gets graceful OOM recovery again.
         mov dword [loading_shell_flag], 0
 
+        ;; Drain the cooked-ASCII PS/2 ring so the new program doesn't
+        ;; inherit bytes the previous program left buffered (programs
+        ;; that drain TRY_GET_EVENT but not TRY_GETC — e.g. a fullscreen
+        ;; game — would otherwise leave up to KB_BUFFER_SIZE gameplay
+        ;; keys stale in ps2_buf when they exit).  The per-fd event
+        ;; queues for TRY_GET_EVENT don't need draining here — fd_init
+        ;; above already memset the entire fd_table to zero, which
+        ;; clears head / tail / buffer for every console fd in one shot.
+        call ps2_drain
+
         ;; --- iretd into ring 3 ---
         ;; Reload data segments to USER_DATA_SELECTOR before the iretd
         ;; (iretd doesn't reload DS/ES/FS/GS).  CPL=0 can still

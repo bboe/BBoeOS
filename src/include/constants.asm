@@ -18,10 +18,22 @@
         %assign ERROR_NOT_FOUND 04h     ; File not found
         %assign ERROR_PROTECTED 05h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 14FCh          ; 4 bytes (dword pointer under --bits 32); before BUFFER; = USER_DATA_BASE + 0x4FC
-        %assign FD_ENTRY_SIZE 32
+        %assign FD_ENTRY_SIZE 64
+        ;; Per-fd PS/2 event ring (FD_TYPE_CONSOLE only).  Events are
+        ;; (pressed << 16) | bbkey, 32-bit slots.  Linux's evdev pattern:
+        ;; each readable console fd gets its own queue, populated by
+        ;; the PS/2 IRQ broadcaster (drivers/ps2.c) and drained by
+        ;; CONSOLE_IOCTL_TRY_GET_EVENT (fs/fd/console.c).  The queue
+        ;; lives inline in the fd entry so it dies with fd_close /
+        ;; fd_init — no global state to drain across program boundaries.
+        ;; Length must be a power of 2 for the head/tail mask.
+        %assign FD_EVENT_QUEUE_LEN 8
         %assign FD_MAX 8
         %assign FD_OFFSET_DIRECTORY_OFFSET 14    ; offset of dir_off field within FD entry
         %assign FD_OFFSET_DIRECTORY_SECTOR 12    ; offset of dir_sec field within FD entry
+        %assign FD_OFFSET_EVENT_BUF 20  ; FD_EVENT_QUEUE_LEN * 4 bytes; 4-aligned for dword loads
+        %assign FD_OFFSET_EVENT_HEAD 17 ; ring read cursor (uint8); == TAIL means empty
+        %assign FD_OFFSET_EVENT_TAIL 18 ; ring write cursor (uint8); (TAIL+1)&mask == HEAD means full
         %assign FD_OFFSET_FLAGS 1       ; offset of flags field within FD entry
         %assign FD_OFFSET_MODE 16       ; offset of mode field (file permission flags)
         %assign FD_OFFSET_POSITION 8         ; offset of pos field within FD entry (32-bit)
@@ -143,6 +155,11 @@
         %assign VGA_GC_INDEX    03CEh
         %assign VGA_SEQ_DATA    03C5h
         %assign VGA_SEQ_INDEX   03C4h
+
+        ;; Console ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_CONSOLE).
+        ;; Both are non-blocking peeks into the keyboard input streams.
+        %assign CONSOLE_IOCTL_TRY_GETC      00h  ; AX = ASCII byte (0 if empty)
+        %assign CONSOLE_IOCTL_TRY_GET_EVENT 01h  ; EAX = (pressed<<16)|bbkey (0 if empty)
 
         ;; VGA ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_VGA)
         %assign VGA_IOCTL_FILL_BLOCK    00h  ; CL=col, CH=row, DL=color (mode 13h 8x8 tile)
