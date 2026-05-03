@@ -7,5 +7,10 @@
 __pycache__/
 build/
 
+# C / asm build artefacts
+*.o
+*.a
+tools/libc/test_program/hello
+
 # tools/record_demo.py transient output
 _demo_capture/

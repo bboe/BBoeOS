@@ -30,7 +30,9 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 31h   | rtc_millis   | Get milliseconds since boot, DX:AX = ms                 |
 | 32h   | rtc_sleep    | Busy-wait for CX milliseconds                           |
 | 33h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
-| F0h   | sys_exec     | Execute program, SI = filename, CF on error            |
-| F1h   | sys_exit     | Reload and return to shell                             |
-| F2h   | sys_reboot   | Reboot                                                |
-| F3h   | sys_shutdown | Shutdown                                              |
+| 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt; CF on OOM |
+| F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
+| F1h   | sys_exec     | Execute program, SI = filename, CF on error            |
+| F2h   | sys_exit     | Reload and return to shell                             |
+| F3h   | sys_reboot   | Reboot                                                |
+| F4h   | sys_shutdown | Shutdown                                              |

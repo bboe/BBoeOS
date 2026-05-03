@@ -106,10 +106,13 @@
         %assign SYS_RTC_SLEEP 32h       ; CX=milliseconds: busy-wait via the PIT tick counter
         %assign SYS_RTC_UPTIME 33h      ; returns AX = seconds since boot
 
-        %assign SYS_SYS_EXEC 0F0h
-        %assign SYS_SYS_EXIT 0F1h
-        %assign SYS_SYS_REBOOT 0F2h
-        %assign SYS_SYS_SHUTDOWN 0F3h
+        %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
+
+        %assign SYS_SYS_BREAK 0F0h        ; EBX = new break (0 = query); returns EAX = resulting break, CF=0
+        %assign SYS_SYS_EXEC 0F1h
+        %assign SYS_SYS_EXIT 0F2h
+        %assign SYS_SYS_REBOOT 0F3h
+        %assign SYS_SYS_SHUTDOWN 0F4h
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
@@ -146,3 +149,13 @@
         ;; nothing in the tree currently asks for them.
         %assign VIDEO_MODE_TEXT_80x25      03h  ; 80x25 color text (default)
         %assign VIDEO_MODE_VGA_320x200_256 13h  ; VGA 256-color 320x200
+
+        ;; Mode-13h framebuffer placement.  SYS_VIDEO_MAP exposes the
+        ;; physical aperture at MODE13H_PHYS into the calling program's
+        ;; PD at MODE13H_USER_VIRT, RW + U/S=1.  The framebuffer is
+        ;; 320*200 = 64000 bytes (8-bit indexed colour) — fits in 16
+        ;; pages; the trailing ~1.5 KB past the FB end is harmless VGA
+        ;; aperture RAM.
+        %assign MODE13H_BYTES     320 * 200   ; 64000 bytes (16 pages worth)
+        %assign MODE13H_PHYS      0A0000h     ; physical address of the mode-13h framebuffer
+        %assign MODE13H_USER_VIRT 0B8000000h  ; user-virt slot where SYS_VIDEO_MAP exposes the framebuffer

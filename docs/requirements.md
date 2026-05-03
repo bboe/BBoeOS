@@ -30,7 +30,16 @@ Both ship together in the **`e2fsprogs`** package.
 
 All test runners are bare-Python QEMU drivers; they need every build dependency above plus `qemu-system-i386`.
 
-The one exception is `tests/test_unit.py`, which uses **`pytest`** (`pip install pytest`).
+Tests under `tests/unit/` use **`pytest`** (`pip install pytest`).
+
+The libc tests need **`clang`**:
+
+- `tests/unit/test_libbboeos.py` runs clang in its host-native default mode to compile each unit test's tiny C program.  Same compiler as the smoke test below, so installing one covers both.
+- `tests/test_libbboeos_qemu.py` (the libc on-OS smoke test) drives the freestanding cross-compile (`--target=i386-pc-none-elf -m32 -ffreestanding -nostdinc -nostdlib`) plus a few build-system tools:
+
+  - **`make`** — invoked as `make -C tools/libc`; reuses the Makefile's CFLAGS so the test doesn't duplicate them.
+  - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against `libbboeos.a` and the `tools/libc/program.ld` linker script.
+  - **`ar`** (GNU `ar`, also from `binutils`) — packs the libc objects into `libbboeos.a`.
 
 ## Install commands
 
@@ -38,12 +47,16 @@ Ubuntu / Debian:
 
 ```sh
 sudo apt-get install -y e2fsprogs nasm qemu-system-x86
+# Plus, for the libc on-OS smoke test:
+sudo apt-get install -y binutils clang make
 ```
 
 macOS (Homebrew):
 
 ```sh
 brew install e2fsprogs nasm qemu
+# Plus, for the libc on-OS smoke test (clang + make + ld ship with Xcode CLT):
+xcode-select --install
 ```
 
 ### macOS gotcha: `e2fsprogs` is keg-only
