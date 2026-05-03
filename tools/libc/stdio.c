@@ -131,8 +131,18 @@ size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp) {
     return (size_t)n / size;
 }
 
-int fseek(FILE *fp, long off, int whence) { (void)fp; (void)off; (void)whence; return -1; }
-long ftell(FILE *fp) { (void)fp; return -1; }
+int fseek(FILE *fp, long off, int whence) {
+    /* lseek returns the new absolute position; fseek discards it and
+     * returns 0 on success, -1 on error (per ISO C). */
+    return lseek(fp->fd, (off_t)off, whence) == (off_t)-1 ? -1 : 0;
+}
+
+long ftell(FILE *fp) {
+    /* SEEK_CUR with offset 0 returns the current position without
+     * moving it — the standard ftell trick. */
+    off_t pos = lseek(fp->fd, 0, SEEK_CUR);
+    return pos == (off_t)-1 ? -1L : (long)pos;
+}
 
 size_t fwrite(const void *buf, size_t size, size_t nmemb, FILE *fp) {
     ssize_t n = write(fp->fd, buf, size * nmemb);

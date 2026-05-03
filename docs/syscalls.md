@@ -21,7 +21,8 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 12h   | io_ioctl     | Device control, BX = fd, AL = cmd, args in other regs per (fd_type, cmd); CF on err |
 | 13h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
 | 14h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
-| 15h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
+| 15h   | io_seek      | Seek file fd, BX = fd, ECX = offset, AL = whence (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2); EAX = new position (clamped to [0, size]), CF on err |
+| 16h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |

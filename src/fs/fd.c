@@ -357,6 +357,50 @@ int fd_read(int *result __attribute__((out_register("ax"))),
     __tail_call(handler, entry, buffer, count);
 }
 
+// fd_seek: reposition the read/write cursor for a regular file fd.
+// Inputs: BX = fd, ECX = signed offset, AL = whence (SEEK_SET=0,
+// SEEK_CUR=1, SEEK_END=2).  Returns EAX = new absolute position
+// (clamped to [0, size]), CF set on bad fd / wrong type / unknown
+// whence.  Only FD_TYPE_FILE is seekable — sockets, console, and
+// directories all error.  We clamp rather than fail on out-of-range
+// because Doom's WAD reader sometimes seeks past EOF and expects the
+// next read to return 0 bytes (EOF semantics).
+__attribute__((carry_return))
+int fd_seek(int *result __attribute__((out_register("ax"))),
+            int fd_num __attribute__((in_register("bx"))),
+            int offset __attribute__((in_register("ecx"))),
+            int whence __attribute__((in_register("ax")))) {
+    struct fd *entry;
+    int new_position;
+    if (!fd_lookup(fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    if (entry->type != FD_TYPE_FILE) {
+        *result = -1;
+        return 0;
+    }
+    if (whence == SEEK_SET) {
+        new_position = offset;
+    } else if (whence == SEEK_CUR) {
+        new_position = entry->position + offset;
+    } else if (whence == SEEK_END) {
+        new_position = entry->size + offset;
+    } else {
+        *result = -1;
+        return 0;
+    }
+    if (new_position < 0) {
+        new_position = 0;
+    }
+    if (new_position > entry->size) {
+        new_position = entry->size;
+    }
+    entry->position = new_position;
+    *result = new_position;
+    return 1;
+}
+
 // fd_write: dispatch on entry->type into fd_ops[type].write.  Inputs
 // are BX = fd, ESI = source buffer, ECX = byte count.  Stash ESI into
 // fd_write_buffer first (fd_lookup overwrites ESI with the entry

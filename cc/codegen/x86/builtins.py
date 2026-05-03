@@ -810,6 +810,23 @@ class BuiltinsMixin:
         self._emit_syscall("FS_RMDIR")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 
+    def builtin_seek(self, arguments: list[Node], /) -> None:
+        """Generate code for the seek() builtin.
+
+        ``seek(fd, offset, whence)`` emits ``mov bx, <fd> /
+        mov cx, <offset> / mov al, <whence> / mov ah, SYS_IO_SEEK /
+        int 30h``.  Returns the new absolute position in AX (clamped to
+        [0, file_size]) or -1 on bad fd / wrong type / unknown whence.
+        whence is SEEK_SET (0), SEEK_CUR (1), or SEEK_END (2).
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="seek")
+        fd_argument, offset_argument, whence_argument = arguments
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=offset_argument, register=self.target.count_register)
+        self.emit_register_from_argument(argument=whence_argument, register="al")
+        self._emit_syscall("IO_SEEK")
+        self.ax_clear()
+
     def builtin_sendto(self, arguments: list[Node], /) -> None:
         """Generate code for the sendto() builtin.
 

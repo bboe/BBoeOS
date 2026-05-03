@@ -91,6 +91,10 @@ void print_mac(const char *buffer);
 void reboot(void) __attribute__((noreturn));
 /* Receive UDP datagram filtered by port (BBoeOS-specific) */
 int recvfrom(int fd, char *buffer, int length, int port);
+/* Reposition file fd's read cursor; whence is SEEK_SET / SEEK_CUR / SEEK_END.
+   Returns the new absolute position (clamped to [0, file_size]) or -1 on
+   error.  POSIX's lseek takes off_t; BBoeOS uses int and returns int. */
+int seek(int fd, int offset, int whence);
 /* Send UDP datagram (BBoeOS-specific) */
 int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
 /* Publish the argument pointer for the next exec()'d program */

@@ -192,6 +192,7 @@ class X86CodegenTarget(CodegenTarget):
         "IO_IOCTL": ("mov ah, SYS_IO_IOCTL", "int 30h"),
         "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
         "IO_READ": ("mov ah, SYS_IO_READ", "int 30h"),
+        "IO_SEEK": ("mov ah, SYS_IO_SEEK", "int 30h"),
         "IO_WRITE": ("mov ah, SYS_IO_WRITE", "int 30h"),
         "NET_MAC": ("mov ah, SYS_NET_MAC", "int 30h"),
         "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),

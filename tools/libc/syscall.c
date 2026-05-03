@@ -81,9 +81,21 @@ int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg) {
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    (void)fd; (void)offset; (void)whence;
-    errno = ESPIPE;
-    return (off_t)-1;
+    unsigned int eax_out, cf;
+    __asm__ volatile (
+        "mov %[fd], %%bx\n\t"
+        "mov %[offset], %%ecx\n\t"
+        "mov %[whence], %%al\n\t"
+        "mov $0x15, %%ah\n\t"           /* SYS_IO_SEEK */
+        "int $0x30\n\t"
+        "setc %b[cf]\n\t"
+        : "=a"(eax_out), [cf]"=&q"(cf)
+        : [fd]"g"((unsigned short)fd),
+          [offset]"g"((unsigned int)offset),
+          [whence]"g"((unsigned char)whence)
+        : "ebx", "ecx");
+    if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return (off_t)-1; }
+    return (off_t)eax_out;
 }
 
 int open(const char *path, int flags, ...) {
@@ -143,7 +155,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
         "mov %[buf], %%esi\n\t"
         "mov %[len], %%ecx\n\t"
         "mov %[fd], %%bx\n\t"
-        "mov $0x15, %%ah\n\t"           /* SYS_IO_WRITE */
+        "mov $0x16, %%ah\n\t"           /* SYS_IO_WRITE */
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)
