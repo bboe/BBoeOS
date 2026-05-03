@@ -17,3 +17,7 @@ _demo_capture/
 
 # tools/fetch_doom.sh checks doomgeneric source out here
 /third_party/
+
+# tools/fetch_wad.sh downloads doom1.wad here (shareware, freely
+# redistributable but big and not part of our source)
+/wads/
