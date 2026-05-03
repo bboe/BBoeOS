@@ -166,6 +166,10 @@ int puts(const char *s) {
     return fputc('\n', stdout) == EOF ? EOF : 0;
 }
 
+int remove(const char *path) { (void)path; return -1; }
+
+int rename(const char *old, const char *new) { (void)old; (void)new; return -1; }
+
 void rewind(FILE *fp) { (void)fp; }
 
 int snprintf(char *buf, size_t cap, const char *fmt, ...) {
@@ -180,6 +184,15 @@ int sprintf(char *buf, const char *fmt, ...) {
     int n = vsnprintf(buf, (size_t)-1, fmt, ap);
     va_end(ap);
     return n;
+}
+
+int sscanf(const char *buf, const char *fmt, ...) {
+    /* Stub: Doom uses sscanf only for parsing its config file and demo
+     * headers; returning 0 (no items matched) makes those calls behave
+     * as if the input was empty, leaving Doom's hard-coded defaults in
+     * place.  Cheap correct-enough behaviour for Phase A. */
+    (void)buf; (void)fmt;
+    return 0;
 }
 
 int vfprintf(FILE *fp, const char *fmt, va_list ap) {

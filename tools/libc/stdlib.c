@@ -105,6 +105,8 @@ static void release(block_header *block) {
 
 /* ---------- public surface (alphabetical) ---------- */
 
+int abs(int x) { return x < 0 ? -x : x; }
+
 void abort(void) { _exit(134); }    /* 128 + SIGABRT(6) */
 
 int atexit(void (*fn)(void)) {
@@ -113,8 +115,9 @@ int atexit(void (*fn)(void)) {
     return 0;
 }
 
-int  atoi(const char *s) { return (int)strtol(s, NULL, 10); }
-long atol(const char *s) { return strtol(s, NULL, 10); }
+double atof(const char *s) { (void)s; return 0.0; }
+int    atoi(const char *s) { return (int)strtol(s, NULL, 10); }
+long   atol(const char *s) { return strtol(s, NULL, 10); }
 
 void *bsearch(const void *key, const void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)) {
     const unsigned char *a = base;
@@ -282,3 +285,5 @@ long strtol(const char *s, char **end, int base) {
 }
 
 unsigned long strtoul(const char *s, char **end, int base) { return (unsigned long)strtol(s, end, base); }
+
+int system(const char *cmd) { (void)cmd; return -1; }    /* no shell — always fails */
