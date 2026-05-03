@@ -455,7 +455,14 @@ syscall_handler:
         mov  eax, [current_pd_phys]
         mov  ebx, esi                   ; vaddr
         mov  ecx, edi                   ; phys
-        mov  edx, PTE_USER_RW
+        ;; PTE_USER_RW_SHARED: the AVL[0] PTE_SHARED bit makes
+        ;; address_space_destroy skip frame_free on the underlying
+        ;; phys pages.  Critical here because MODE13H_PHYS (0xA0000)
+        ;; is the VGA aperture, not bitmap-allocator-owned RAM —
+        ;; freeing it would inject phantom frames into the free list
+        ;; and the next allocation could hand the VGA aperture out
+        ;; as user heap, with predictably weird crashes.
+        mov  edx, PTE_USER_RW_SHARED
         call address_space_map_page
         pop  edi
         pop  ecx
