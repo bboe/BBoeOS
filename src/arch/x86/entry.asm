@@ -599,6 +599,11 @@ protected_mode_entry:
         ;; Fall through into shell_reload.
 
 shell_reload:
+        ;; Restore 80x25 text mode if a dying program left the VGA card
+        ;; in a graphics mode (e.g. Doom in mode 13h).  No-op on the
+        ;; first-boot fall-through (vga_current_mode starts at 0x03), so
+        ;; the welcome banner above stays on screen.
+        call vga_reset_text_mode
         ;; Active PD: kernel_idle_pd (sys_exit just destroyed the
         ;; dying program's PD and switched CR3 off it, or this is the
         ;; first boot and CR3 was set up by high_entry).  Look up bin/shell
