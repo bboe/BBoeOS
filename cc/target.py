@@ -255,6 +255,38 @@ class X86CodegenTarget16(X86CodegenTarget):
     register_pool: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
     non_acc_registers: ClassVar[frozenset[str]] = frozenset({"bx", "cx", "dx", "si", "di", "bp"})
 
+    #: Per-builtin clobbers added on top of the generator's base
+    #: ``BUILTIN_CLOBBERS`` table.  The kernel returns full 32-bit
+    #: longs in EAX; on 16-bit, three RTC-related builtins emit
+    #: extra split / combine glue (see ``LONG_AFTER_SYSCALL`` and
+    #: ``LONG_TO_EAX``) that touches DX, so DX is clobbered for any
+    #: caller that has a variable pinned there.
+    BUILTIN_CLOBBERS_EXTRA: ClassVar[dict[str, frozenset[str]]] = {
+        "datetime": frozenset({"dx"}),
+        "print_datetime": frozenset({"dx"}),
+        "uptime_ms": frozenset({"dx"}),
+    }
+
+    #: Instructions to emit immediately after a syscall whose return
+    #: value is a 32-bit long.  16-bit ``unsigned long`` storage uses
+    #: the DX:AX shape, so split EAX (set by the kernel) into DX:AX.
+    #: 32-bit targets don't define this and the generator emits
+    #: nothing.
+    LONG_AFTER_SYSCALL: ClassVar[tuple[str, ...]] = (
+        "mov edx, eax",
+        "shr edx, 16",
+    )
+
+    #: Instructions to emit before calling an EAX-shaped callee with a
+    #: 32-bit long that currently lives in the target's native shape.
+    #: 16-bit holds longs as DX:AX, so combine into EAX.  32-bit
+    #: targets don't define this — the value already lives in EAX.
+    LONG_TO_EAX: ClassVar[tuple[str, ...]] = (
+        "shl edx, 16",
+        "movzx eax, ax",
+        "or eax, edx",
+    )
+
     @staticmethod
     def preamble_lines() -> list[str]:
         """No preamble needed for 16-bit real-mode targets."""

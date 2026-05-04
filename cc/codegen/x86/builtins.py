@@ -112,10 +112,14 @@ class BuiltinsMixin:
         """Generate code for the datetime() builtin.
 
         Returns unsigned seconds since 1970-01-01 UTC in EAX.  Valid
-        through 2106-02-07 (32-bit epoch overflow).
+        through 2106-02-07 (32-bit epoch overflow).  On the 16-bit
+        target an extra ``mov edx, eax / shr edx, 16`` splits the
+        return into the DX:AX shape that 16-bit ``unsigned long``
+        storage paths read.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="datetime")
         self._emit_syscall("RTC_DATETIME")
+        self._emit_long_after_syscall()
 
     def builtin_die(self, arguments: list[Node], /) -> None:
         """Generate code for the die() builtin.
@@ -648,9 +652,14 @@ class BuiltinsMixin:
         """Generate code for the print_datetime(unsigned long) builtin.
 
         Prints the epoch value as ``YYYY-MM-DD HH:MM:SS`` (no newline).
+        The vDSO entry point reads the full epoch in EAX; on the 16-bit
+        target an extra ``shl edx, 16 / movzx eax, ax / or eax, edx``
+        recombines the DX:AX shape held in 16-bit ``unsigned long``
+        storage into EAX before the call.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
+        self._emit_long_to_eax()
         self.emit("        call FUNCTION_PRINT_DATETIME")
 
     def builtin_print_ip(self, arguments: list[Node], /) -> None:
@@ -945,10 +954,14 @@ class BuiltinsMixin:
 
         Returns milliseconds since boot in EAX (via SYS_RTC_MILLIS).
         Wraps at 2^32 ms (~49.7 days).  Callers assigning to ``int``
-        on the 32-bit target also get the full 32-bit value.
+        on the 32-bit target also get the full 32-bit value.  On the
+        16-bit target the trailing ``mov edx, eax / shr edx, 16``
+        splits the return into the DX:AX shape that 16-bit
+        ``unsigned long`` storage paths read.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="uptime_ms")
         self._emit_syscall("RTC_MILLIS")
+        self._emit_long_after_syscall()
 
     def builtin_video_mode(self, arguments: list[Node], /) -> None:
         """Generate code for the video_mode(fd, mode) builtin.

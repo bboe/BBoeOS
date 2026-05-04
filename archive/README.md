@@ -30,7 +30,7 @@ table is now 32-bit on both sides.
 | ls      | 135            | 179         | 198       | +19   |
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 253         | 280       | +27   |
-| ping    | 1034           | 1238        | 1558      | +320  |
+| ping    | 1034           | 1238        | 1554      | +316  |
 | shell   | 950            | 1189        | 1650      | +461  |
 | uptime  | 50             | 67          | 100       | +33   |
 
@@ -118,7 +118,7 @@ The 16-bit baseline's +4 was almost entirely null-terminator
 overhead; the +20 here picks up cc.py's frame setup and 32-bit
 prologue/epilogue cost too.
 
-**ping (+320):** Both versions build ICMP echo requests in userspace
+**ping (+316):** Both versions build ICMP echo requests in userspace
 over the same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` /
 ``SYS_NET_SENDTO`` / ``SYS_NET_RECVFROM`` path.  The four scratch
 arrays (``dns_ip[4]``, ``packet_buffer[128]``, ``query_buffer[512]``,
