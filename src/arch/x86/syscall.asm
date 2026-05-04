@@ -394,11 +394,8 @@ syscall_handler:
 
         .rtc_datetime:
         ;; Returns EAX = unsigned epoch seconds (UTC), valid through
-        ;; 2106-02-07.  CF clear (never errors).  rtc_read_epoch_impl
-        ;; is the full-EAX form; the rtc_read_epoch wrapper that splits
-        ;; into DX:AX still exists for ext2's on-disk timestamp writers
-        ;; that want the value pre-split.
-        call rtc_read_epoch_impl
+        ;; 2106-02-07.  CF clear (never errors).
+        call rtc_read_epoch
         clc
         jmp .iret_cf_eax
 

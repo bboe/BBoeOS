@@ -5,7 +5,7 @@
 //     INT 1Ah AH=04h (date) → rtc_read_date  (CH=cent, CL=yr, DH=mo, DL=dy)
 //     INT 1Ah AH=02h (time) → rtc_read_time  (CH=hr,  CL=min, DH=sec)
 //     INT 1Ah AH=00h (ticks)→ rtc_tick_read  (EAX = ticks since boot)
-//     INT 15h AH=86h (sleep)→ rtc_sleep_ms   (CX  = milliseconds)
+//     INT 15h AH=86h (sleep)→ rtc_sleep_ms   (ECX = milliseconds)
 //
 // The PIT is reprogrammed to 100 Hz (10 ms/tick) and the IRQ 0 handler
 // (`pmode_irq0_handler` in entry.asm) is wired into the protected mode
@@ -40,15 +40,8 @@ uint32_t system_ticks;
 // the asm consumer doesn't need to know about that.
 asm("system_ticks equ _g_system_ticks");
 
-// Forward declaration: rtc_read_epoch_impl (sorts after rtc_read_epoch
-// alphabetically) is called from rtc_read_epoch's asm() body.
-uint32_t rtc_read_epoch_impl()
-    __attribute__((preserve_register("ebx")))
-    __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("esi")));
-
 // Forward declaration: rtc_read_time_internal sorts after
-// rtc_read_epoch_impl alphabetically and is called from its body.
+// rtc_read_epoch alphabetically and is called from its body.
 void rtc_read_time_internal(int *cx __attribute__((out_register("cx"))),
                             int *dx __attribute__((out_register("dx"))));
 
@@ -94,20 +87,11 @@ asm("rtc_read_date_internal:\n"
     "    pop eax\n"
     "    ret");
 
-// rtc_read_epoch: returns DX:AX = unsigned epoch seconds since
+// rtc_read_epoch: returns EAX = unsigned epoch seconds since
 // 1970-01-01 UTC, valid through 2106-02-07.  CF clear (never errors).
-// The substantive C content lives in rtc_read_epoch_impl; the
-// public symbol is a thin wrapper that splits the 32-bit EAX result
-// into the asm-side DX:AX shape callers expect.
-void rtc_read_epoch();
-
-asm("rtc_read_epoch:\n"
-    "    call rtc_read_epoch_impl\n"
-    "    mov edx, eax\n"
-    "    shr edx, 16\n"
-    "    ret");
-
-uint32_t rtc_read_epoch_impl()
+// Preserves EBX/ECX/ESI; clobbers EAX/EDX (the trailing imuls leave
+// junk in EDX, which every caller treats as scratch anyway).
+uint32_t rtc_read_epoch()
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("esi")))

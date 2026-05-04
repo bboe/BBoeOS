@@ -1181,9 +1181,8 @@ ext2_chmod:
         .echm_clear:
         and word [ebx + EXT2_INODE_MODE], ~EXT2_S_IXALL
         .echm_flush:
-        call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [ebx + EXT2_INODE_CTIME], ax
-        mov [ebx + EXT2_INODE_CTIME + 2], dx
+        call rtc_read_epoch             ; EAX = epoch; EBX/ECX/ESI/sector_buffer preserved
+        mov [ebx + EXT2_INODE_CTIME], eax
         mov ax, [ext2_last_blk_sec]
         call write_sector
         jc .echm_err
@@ -1329,9 +1328,8 @@ ext2_delete:
         jnz .edl_save_blks
         pop esi
         ;; Set i_dtime, zero i_links_count, flush inode before freeing blocks
-        call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [ebx + EXT2_INODE_DTIME], ax
-        mov [ebx + EXT2_INODE_DTIME + 2], dx
+        call rtc_read_epoch             ; EAX = epoch; EBX/ECX/ESI/sector_buffer preserved
+        mov [ebx + EXT2_INODE_DTIME], eax
         mov word [ebx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2263,9 +2261,8 @@ ext2_rmdir:
         mov ax, [ext2_rdr_inode]
         call ext2_read_inode            ; BX = inode ptr
         ;; Set i_dtime, zero i_links_count, flush before freeing blocks
-        call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [ebx + EXT2_INODE_DTIME], ax
-        mov [ebx + EXT2_INODE_DTIME + 2], dx
+        call rtc_read_epoch             ; EAX = epoch; EBX/ECX/ESI/sector_buffer preserved
+        mov [ebx + EXT2_INODE_DTIME], eax
         mov word [ebx + EXT2_INODE_LINKS_COUNT], 0
         mov ax, [ext2_last_blk_sec]
         call write_sector
@@ -2380,25 +2377,20 @@ ext2_rmdir:
 ext2_set_mtime_ctime_now:
         ;; Set inode mtime and ctime to the current wall-clock time.
         ;; Input:  BX = pointer to inode in sector_buffer
-        ;; Clobbers: AX, DX
-        call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [ebx + EXT2_INODE_MTIME], ax
-        mov [ebx + EXT2_INODE_MTIME + 2], dx
-        mov [ebx + EXT2_INODE_CTIME], ax
-        mov [ebx + EXT2_INODE_CTIME + 2], dx
+        ;; Clobbers: EAX, EDX
+        call rtc_read_epoch             ; EAX = epoch; EBX/ECX/ESI/sector_buffer preserved
+        mov [ebx + EXT2_INODE_MTIME], eax
+        mov [ebx + EXT2_INODE_CTIME], eax
         ret
 
 ext2_set_timestamps_now:
         ;; Set inode atime, mtime, and ctime to the current wall-clock time.
         ;; Input:  BX = pointer to inode in sector_buffer
-        ;; Clobbers: AX, DX
-        call rtc_read_epoch             ; DX:AX = epoch; BX and sector_buffer preserved
-        mov [ebx + EXT2_INODE_ATIME], ax
-        mov [ebx + EXT2_INODE_ATIME + 2], dx
-        mov [ebx + EXT2_INODE_MTIME], ax
-        mov [ebx + EXT2_INODE_MTIME + 2], dx
-        mov [ebx + EXT2_INODE_CTIME], ax
-        mov [ebx + EXT2_INODE_CTIME + 2], dx
+        ;; Clobbers: EAX, EDX
+        call rtc_read_epoch             ; EAX = epoch; EBX/ECX/ESI/sector_buffer preserved
+        mov [ebx + EXT2_INODE_ATIME], eax
+        mov [ebx + EXT2_INODE_MTIME], eax
+        mov [ebx + EXT2_INODE_CTIME], eax
         ret
 
 ext2_update_size:
