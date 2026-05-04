@@ -55,6 +55,12 @@ EXCLUDED_AUDIO_BACKENDS = frozenset({
 CFLAGS = (
     "--target=i386-pc-none-elf",
     "-m32",
+    "-DFEATURE_SOUND",  # turns on the doomgeneric sound_module / music_module
+    # registrations in i_sound.c so DG_sound_module (defined in our
+    # tools/doom/i_sound_bboeos.c backend) is picked up at link time.
+    # i_sound.c also `#include <SDL_mixer.h>` under FEATURE_SOUND;
+    # we satisfy that with an empty shim header in tools/doom/ (added
+    # to the include path below).
     "-march=i386",  # bboeos kernel hasn't enabled SSE/SSE2/AVX in CR4 — without
     "-mno-mmx",  # this clang on macOS picks SSE for memcpy/memset and the
     "-mno-sse",  # kernel takes #UD on the first SSE op (EXC06).  Linux clang
@@ -88,6 +94,7 @@ CFLAGS = (
     "-DDOOMGENERIC_RESY=200",
     f"-I{LIBC / 'include'}",
     f"-I{THIRD_PARTY}",
+    f"-I{REPO / 'tools' / 'doom' / 'include'}",  # SDL_mixer.h shim
 )
 
 
@@ -217,7 +224,16 @@ def main() -> None:
     _build_libbboeos()
 
     objects = [_compile_one(source=source) for source in _doomgeneric_sources()]
-    objects.append(_compile_one(source=DOOM_DIR / "bboeos_doomgeneric.c"))
+    # Local sources: bboeos_doomgeneric.c is the DG_* backend (display,
+    # input, time); audio_mixer.c + i_sound_bboeos.c provide the
+    # 8-voice mixer and the sound_module_t adapter that opens
+    # /dev/audio (referenced by doomgeneric/i_sound.c when built with
+    # -DFEATURE_SOUND, set in CFLAGS above).
+    objects.extend([
+        _compile_one(source=DOOM_DIR / "bboeos_doomgeneric.c"),
+        _compile_one(source=DOOM_DIR / "audio_mixer.c"),
+        _compile_one(source=DOOM_DIR / "i_sound_bboeos.c"),
+    ])
 
     _link(objects=objects)
     size = OUTPUT.stat().st_size
