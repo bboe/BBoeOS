@@ -9,11 +9,38 @@ All notable changes to BBoeOS are documented in this file. Dates reflect
 when changes landed, grouped under the version that was (or will be) current
 at the time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.2...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.10.0...main)
 
-- **Kernel:** Sound Blaster 16 driver (`src/drivers/sb16.c`).  Probes the SB16 DSP at boot, allocates a 4 KB DMA frame in the direct-map range, and exposes `/dev/audio` as an OSS-style 8-bit unsigned mono 11025 Hz write-PCM device with a single `AUDIO_IOCTL_QUERY` ioctl (`src/fs/fd/audio.c`).  Single-cycle synchronous playback model: each `fd_write_audio` chunks the user buffer into <= 4 KB pieces, copies into the DMA buffer, and `sb16_play` programs 8237 channel 1 + DSP cmd `0x14` then blocks via `sti`+`hlt` until IRQ 5 (vector 0x25, vectored in `src/arch/x86/entry.asm`) signals the chunk played.  Single-opener, no-scheduler-needed.  Manual smoke programs in `tests/programs/audio_open.c` (open/close cycle) and `tests/programs/audio_tone.c` (1.1 kHz square wave).
+## [0.10.0](https://github.com/bboe/BBoeOS/compare/0.9.2...0.10.0) (2026-05-04)
 
-- **Doom SFX:** sound effects in the Doom port via the `/dev/audio` driver above.  New 8-voice software mixer (`tools/doom/audio_mixer.c`, sum-clamp at 8 bits) drives the device from `tools/doom/i_sound_bboeos.c`'s `sound_module_t` adapter once per Doom tick (~315 samples / ~28 ms).  Music is stubbed.  `tools/build_doom.py` defines `-DFEATURE_SOUND` so doomgeneric registers our backend.  Doom keeps booting silently when the SB16 isn't present.  Mixer math has pytest unit tests (`tests/unit/test_audio_mixer.py`) and there's an end-to-end smoke test (`tests/test_doom_sound_qemu.py`, gated on `wads/doom1.wad`) that captures Doom's audio with `-audiodev wav,...` and checks RMS energy.
+### Doom port
+- BBoeOS now boots and runs [doomgeneric](https://github.com/ozkl/doomgeneric).  `tools/build_doom.py` clones the upstream third_party/doomgeneric on demand, cross-compiles with the freestanding clang toolchain, and links it with `libbboeos.a` + `tools/libc/program.ld` into a flat-binary `bin/doom`.  `tools/fetch_wad.sh` downloads the shareware `doom1.wad` (SHA256 verified).  `tools/install_doom.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld` / `objcopy` / `ar` (Linux native, `x86_64-elf-*`, `llvm-*`, `ld.lld`) so the same script works on Linux + macOS.
+- `tools/doom/bboeos_doomgeneric.c` implements `DG_Init` / `DG_DrawFrame` / `DG_GetKey` / `DG_GetTicksMs` / `DG_SleepMs` over the new kernel surface (mode-13h framebuffer via `SYS_VIDEO_MAP`, `SYS_RTC_MILLIS` / `SYS_RTC_SLEEP`, the per-fd PS/2 event ring).  WASD + arrow keys move, Ctrl/F fires, Space/E uses, Esc opens the menu.
+- `tools/record_doom.py` drives QEMU through the monitor socket to capture screendumps every 200 ms, encoding to WebM (VP9 via ffmpeg) and/or GIF (palettegen + paletteuse + gifsicle).
+- `tests/test_doom_qemu.py` is a two-stage smoke test: bootstrap (always) verifies the engine reaches IWAD lookup; the main-loop stage verifies `DrawFrame` ticks at least 30 frames when `wads/doom1.wad` is present.
+
+### Doom SFX
+- 8-voice software mixer (`tools/doom/audio_mixer.c`, sum-clamp at 8 bits) drives the new kernel `/dev/audio` device (see Sound below) from `tools/doom/i_sound_bboeos.c`'s `sound_module_t` adapter once per Doom tick (~315 samples / ~28 ms).  Music is stubbed.  `tools/build_doom.py` defines `-DFEATURE_SOUND` so doomgeneric registers our backend.  Doom keeps booting silently when the SB16 isn't present.  Mixer math has pytest unit tests (`tests/unit/test_audio_mixer.py`); end-to-end smoke test in `tests/test_doom_sound_qemu.py` (gated on `wads/doom1.wad`) captures Doom's audio with `-audiodev wav,...` and checks RMS energy.
+
+### Sound
+- **Sound Blaster 16 driver (`src/drivers/sb16.c`)**, exposed as OSS-style `/dev/audio` (`src/fs/fd/audio.c`).  Probes the SB16 DSP at boot via the standard reset-and-0xAA handshake; on success allocates a 4 KB DMA frame in the direct-map range so the kernel can `memcpy` into it.  Single-cycle synchronous playback model: `fd_write_audio` chunks the user buffer into <= 4 KB pieces, copies into the DMA buffer, and `sb16_play` programs 8237 channel 1 + DSP cmd `0x14` then blocks via `sti`+`hlt` until IRQ 5 (vector 0x25 in `entry.asm`) signals the chunk played.  Single-opener; `AUDIO_IOCTL_QUERY` lets userspace probe presence before opening.  Manual smoke programs in `tests/programs/audio_open.c` (open/close cycle) and `tests/programs/audio_tone.c` (1.1 kHz square wave).
+
+### Userspace toolchain (libc)
+- New freestanding libc shim `tools/libc/libbboeos.a` (`tools/libc/Makefile`) covering ctype, errno, math, stdio, stdlib, string, syscall, and `_start`/setjmp.  Pinned to `-march=i386 -mno-{mmx,sse,sse2} -mno-implicit-float -fno-{vectorize,slp-vectorize}` so Apple clang doesn't sneak SIMD into memcpy/struct-init paths the kernel hasn't enabled in CR4.  Pytest unit tests in `tests/unit/test_libbboeos.py` cross-check each pure function against the host libc; on-OS smoke test in `tests/test_libbboeos_qemu.py`.
+- Linker script `tools/libc/program.ld` for clang-built userland binaries.
+- Headers and impls extended for doomgeneric needs (`malloc`/`free`/`realloc`, `printf` formatters, `qsort`, `<setjmp.h>` long-jump).  Also includes the compiler-rt builtins clang -O2 needs at link time (e.g. `__udivdi3`, `__moddi3`).
+- Doom-driven libc bug fixes plus Apple clang compatibility tweaks (more `-mno-implicit-float` paths, `-fno-vectorize` to defeat the loop+SLP vectorizers, etc.).
+
+### Kernel
+- **`SYS_IO_SEEK` syscall** (`fd_seek` in `src/fs/fd.c`) with libc `lseek` / `fseek` wrappers.  Clamps out-of-range offsets so the WAD reader's seek-past-EOF pattern works.
+- **x87 FPU enabled** (`SYS_SYS_BREAK` for sbrk-style heap probing; `SYS_VIDEO_MAP` to expose the mode-13h aperture into the calling program's PD as `PTE_USER_RW_SHARED`).  Lets clang-emitted FP code in libc + doomgeneric run without `#UD`.
+- **Per-fd PS/2 keyboard event ring** with positional `BBKEY_*` codes (`src/drivers/ps2.c`, `tools/libc/include/bbkeys.h`).  Each readable console fd gets its own queue, populated by the IRQ broadcaster and drained by `CONSOLE_IOCTL_TRY_GET_EVENT`.  Doom's `DG_GetKey` consumes events directly without re-parsing CSI sequences or synthesising modifier keys.
+- **Text mode restored on every `shell_reload`** so a dying program (Doom in mode 13h) leaves a usable shell.
+- **`io_ioctl` preserves the full 32-bit EAX** on return (the asm dispatcher previously zero-extended only AX, dropping the high half some VGA-aperture queries returned).
+
+### Build / test tooling
+- `make_os.sh --sectors` flag for larger drive images (Doom needs more than the floppy default).
+- `tests/test_programs.py` straddle-test setup extended to look for sector boundaries across multiple ext2 blocks, so adding new test programs to `tests/programs/` doesn't push `bin/` past the first block.
 
 ## [0.9.2](https://github.com/bboe/BBoeOS/compare/0.9.1...0.9.2) (2026-05-02)
 
