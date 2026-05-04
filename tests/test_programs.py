@@ -546,8 +546,17 @@ def _ext2_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
 
 
 def _ext2_pick_straddle_target_offset(*, block_size: int, initial_offset: int) -> int:
-    """Return the smallest reachable header offset whose entry name straddles."""
-    for boundary in range(512, block_size, 512):
+    """Return the smallest reachable header offset that straddles a 512-byte sector boundary inside a block.
+
+    Block-boundary candidates (boundary % block_size == 0) are skipped:
+    ext2 forbids directory entries from spanning a block boundary, so a
+    straddle there would just be invalid layout.  We search up to four
+    blocks ahead so the test still works when bin/ has grown enough to
+    push initial_offset past the first block's mid-sector.
+    """
+    for boundary in range(512, 4 * block_size, 512):
+        if boundary % block_size == 0:
+            continue
         delta = boundary - 8 - initial_offset
         if delta >= 12 and delta % 4 == 0:
             return boundary - 8

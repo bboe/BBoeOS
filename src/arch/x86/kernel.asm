@@ -401,6 +401,7 @@ high_entry:
 %include "drivers/ne2k.kasm"
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.kasm"
+%include "drivers/sb16.kasm"
 %include "drivers/serial.kasm"
 %include "drivers/vga.kasm"
 %include "entry.asm"

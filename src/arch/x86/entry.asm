@@ -27,6 +27,7 @@
 ;;; ------------------------------------------------------------------------
 
         PMODE_IRQ0_VECTOR       equ 0x20        ; matches the pic_remap master base
+        PMODE_IRQ5_VECTOR       equ 0x25
         PMODE_IRQ6_VECTOR       equ 0x26
 
         ;; User-page PTE flag bundles.
@@ -67,6 +68,27 @@ pmode_irq0_handler:
         inc dword [system_ticks]
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
+        pop eax
+        iretd
+
+pmode_irq5_handler:
+        ;; SB16 single-cycle DMA block complete.  Read DSP_READ_STATUS
+        ;; to ack the 8-bit IRQ on the card, set audio_wakeup so the
+        ;; blocking writer (in drivers/sb16.c sb16_play) sees that the
+        ;; chunk has played, EOI PIC1.
+        ;;
+        ;; SB16_DSP_READ_STATUS (0x22E) is > 0xFF, so the immediate-port
+        ;; form `in al, port` won't encode (NASM silently truncates the
+        ;; 16-bit constant to 8 bits, would land on port 0x2E instead).
+        ;; Load the port into DX and use `in al, dx`.
+        push eax
+        push edx
+        mov dx, SB16_DSP_READ_STATUS
+        in al, dx
+        mov byte [audio_wakeup], 1
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
+        pop edx
         pop eax
         iretd
 
@@ -564,6 +586,9 @@ protected_mode_entry:
         mov eax, pmode_irq0_handler
         mov bl, PMODE_IRQ0_VECTOR
         call idt_set_gate32
+        mov eax, pmode_irq5_handler
+        mov bl, PMODE_IRQ5_VECTOR
+        call idt_set_gate32
         mov eax, pmode_irq6_handler
         mov bl, PMODE_IRQ6_VECTOR
         call idt_set_gate32
@@ -588,6 +613,7 @@ protected_mode_entry:
         call fd_init
         call fdc_init
         call ps2_init
+        call sb16_init
         call vfs_init
         ;; Probe the NE2000 NIC and bring it up if present.  CF set =
         ;; no NIC, which is fine — net programs surface that via a
