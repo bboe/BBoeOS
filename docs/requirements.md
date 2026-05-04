@@ -41,6 +41,17 @@ The libc tests need **`clang`**:
   - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against `libbboeos.a` and the `tools/libc/program.ld` linker script.
   - **`ar`** (GNU `ar`, also from `binutils`) — packs the libc objects into `libbboeos.a`.
 
+## Doom port (`tools/build_doom.py`)
+
+The Doom build needs the libc deps above (clang, make, ar) plus a GNU-compatible linker + objcopy.  `build_doom.py` auto-picks the first one it finds on `$PATH`, in order:
+
+- `x86_64-elf-ld` / `x86_64-elf-objcopy` (GNU cross-binutils — typical macOS install)
+- `i686-elf-ld` / `i686-elf-objcopy` (32-bit GNU cross-binutils)
+- `ld.lld` / `llvm-objcopy` (LLVM toolchain — both platforms)
+- `ld` / `objcopy` (system binutils — Linux default)
+
+Apple's `/usr/bin/ld` (mach-o) doesn't speak GNU options like `-T` or `-Map=`, so installing one of the above is required on macOS.
+
 ## Install commands
 
 Ubuntu / Debian:
@@ -49,14 +60,20 @@ Ubuntu / Debian:
 sudo apt-get install -y e2fsprogs nasm qemu-system-x86
 # Plus, for the libc on-OS smoke test:
 sudo apt-get install -y binutils clang make
+# Plus, for the Doom port (lld is one option; binutils above also works):
+sudo apt-get install -y lld llvm
 ```
 
 macOS (Homebrew):
 
 ```sh
 brew install e2fsprogs nasm qemu
-# Plus, for the libc on-OS smoke test (clang + make + ld ship with Xcode CLT):
+# Plus, for the libc on-OS smoke test (clang + make ship with Xcode CLT):
 xcode-select --install
+# Plus, for the Doom port — pick one of:
+brew install x86_64-elf-binutils    # GNU cross-binutils, simplest
+# OR
+brew install lld llvm               # LLVM toolchain, also works
 ```
 
 ### macOS gotcha: `e2fsprogs` is keg-only

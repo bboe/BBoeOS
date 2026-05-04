@@ -55,11 +55,15 @@ static void _emit_str(struct sink *s, const char *p, size_t n) {
     }
 }
 
-static int _utoa(unsigned int v, int base, int upper, char *out) {
-    char tmp[12]; int i = 0;
+static int _utoa(unsigned int v, int base, int upper, int min_digits, char *out) {
+    /* min_digits implements integer precision: %.<N>d pads with leading
+     * zeros so the digit count is at least N (Doom's HU_Init relies on
+     * this for STCFN%.3d → "STCFN033" not "STCFN33"). */
+    char tmp[16]; int i = 0;
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     if (v == 0) tmp[i++] = '0';
     else while (v) { tmp[i++] = digits[v % base]; v /= base; }
+    while (i < min_digits && i < (int)sizeof(tmp)) tmp[i++] = '0';
     int n = i;
     while (i--) *out++ = tmp[i];
     *out = 0;
@@ -124,11 +128,20 @@ int fputs(const char *s, FILE *fp) {
 }
 
 size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp) {
+    /* Loop until we hit `total`, EOF, or error.  bboeos's SYS_IO_READ
+     * caps each call at AX = uint16, so a 70 KB request comes back as
+     * a short read with the high 16 bits truncated; Doom's W_ReadLump
+     * (called for sprite lumps that can be 60+ KB) needs every byte. */
     size_t total = size * nmemb;
-    ssize_t n = read(fp->fd, buf, total);
-    if (n < 0) { fp->err = 1; return 0; }
-    if ((size_t)n < total) fp->eof = 1;
-    return (size_t)n / size;
+    size_t done = 0;
+    char *cbuf = (char *)buf;
+    while (done < total) {
+        ssize_t n = read(fp->fd, cbuf + done, total - done);
+        if (n < 0) { fp->err = 1; return done / size; }
+        if (n == 0) { fp->eof = 1; break; }
+        done += n;
+    }
+    return done / size;
 }
 
 int fseek(FILE *fp, long off, int whence) {
@@ -240,15 +253,15 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
             case '%': _emit(&s, '%'); continue;
             case 'X':
                 if (alt) { prefix[0] = '0'; prefix[1] = 'X'; }
-                body_len = _utoa(va_arg(ap, unsigned int), 16, 1, num);
+                body_len = _utoa(va_arg(ap, unsigned int), 16, 1, prec, num);
                 break;
             case 'c': { num[0] = (char)va_arg(ap, int); num[1] = 0; body_len = 1; break; }
             case 'd':
             case 'i': {
                 int v = va_arg(ap, int);
-                if (v < 0) { prefix[0] = '-'; body_len = _utoa((unsigned)(-v), 10, 0, num); }
-                else if (plus) { prefix[0] = '+'; body_len = _utoa((unsigned)v, 10, 0, num); }
-                else body_len = _utoa((unsigned)v, 10, 0, num);
+                if (v < 0) { prefix[0] = '-'; body_len = _utoa((unsigned)(-v), 10, 0, prec, num); }
+                else if (plus) { prefix[0] = '+'; body_len = _utoa((unsigned)v, 10, 0, prec, num); }
+                else body_len = _utoa((unsigned)v, 10, 0, prec, num);
                 break;
             }
             case 'e': case 'f': case 'g': {
@@ -258,11 +271,11 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
                 continue;
             }
             case 'o':
-                body_len = _utoa(va_arg(ap, unsigned int), 8, 0, num);
+                body_len = _utoa(va_arg(ap, unsigned int), 8, 0, prec, num);
                 break;
             case 'p':
                 prefix[0] = '0'; prefix[1] = 'x';
-                body_len = _utoa(va_arg(ap, unsigned int), 16, 0, num);
+                body_len = _utoa(va_arg(ap, unsigned int), 16, 0, 0, num);
                 break;
             case 's': {
                 const char *p = va_arg(ap, const char *);
@@ -277,11 +290,11 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
                 continue;
             }
             case 'u':
-                body_len = _utoa(va_arg(ap, unsigned int), 10, 0, num);
+                body_len = _utoa(va_arg(ap, unsigned int), 10, 0, prec, num);
                 break;
             case 'x':
                 if (alt) { prefix[0] = '0'; prefix[1] = 'x'; }
-                body_len = _utoa(va_arg(ap, unsigned int), 16, 0, num);
+                body_len = _utoa(va_arg(ap, unsigned int), 16, 0, prec, num);
                 break;
             default:  _emit(&s, '%'); _emit(&s, conv); continue;
         }

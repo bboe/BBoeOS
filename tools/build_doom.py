@@ -21,6 +21,7 @@ Audio backends we exclude (no kernel audio yet):
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,7 +31,9 @@ LIBC = REPO / "tools" / "libc"
 DOOM_DIR = REPO / "tools" / "doom"
 THIRD_PARTY = REPO / "third_party" / "doomgeneric" / "doomgeneric"
 BUILD = REPO / "build" / "doom"
-OUTPUT = BUILD / "doom"  # flat binary; copy to disk image as bin/doom
+ELF_OUTPUT = BUILD / "doom.elf"  # ELF with symbols — addr2line uses this
+MAP_OUTPUT = BUILD / "doom.map"  # ld map — function-by-function VMA layout
+OUTPUT = BUILD / "doom"  # flat binary — copy to disk image as bin/doom
 
 EXCLUDED_PLATFORM_BACKENDS = frozenset({
     "doomgeneric_allegro",
@@ -52,12 +55,24 @@ EXCLUDED_AUDIO_BACKENDS = frozenset({
 CFLAGS = (
     "--target=i386-pc-none-elf",
     "-m32",
+    "-march=i386",  # bboeos kernel hasn't enabled SSE/SSE2/AVX in CR4 — without
+    "-mno-mmx",  # this clang on macOS picks SSE for memcpy/memset and the
+    "-mno-sse",  # kernel takes #UD on the first SSE op (EXC06).  Linux clang
+    "-mno-sse2",  # happens not to emit SSE for the i386 target by default.
+    "-mno-implicit-float",  # Apple clang ignores -mno-sse2 in some struct-init
+    # / memcpy paths (vsnprintf was zeroing locals with pxor xmm3, xmm3 even
+    # with -march=i386 -mno-sse2).  -mno-implicit-float forbids any implicit FP
+    # or SIMD register use; explicit x87 in math.c via inline asm is unaffected.
+    "-fno-vectorize",  # Apple clang's loop vectorizer also ignores -march=i386
+    "-fno-slp-vectorize",  # and rewrites our zero-pad loops to xorps + movsd
+    # SIMD writes — turn off both vectorisers (loop + straight-line) so it can't.
     "-ffreestanding",
     "-fno-pic",
     "-fno-stack-protector",
     "-nostdlib",
     "-nostdinc",
     "-O2",
+    "-g",  # DWARF debug info → addr2line on doom.elf maps EIP back to source
     "-w",  # doomgeneric has many warnings under -Wall; suppress
     # CMAP256: pixel_t = uint8_t (palette indices), so DG_ScreenBuffer
     # ends up holding what VGA mode 13h wants directly — DG_DrawFrame is
@@ -77,8 +92,20 @@ CFLAGS = (
 
 
 def _build_libbboeos() -> None:
-    """Run make -C tools/libc to produce libbboeos.a + _start.o."""
-    subprocess.check_call(["make", "-C", str(LIBC)])
+    """Run make -C tools/libc to produce libbboeos.a + _start.o.
+
+    Forwards a GNU-compatible ``AR`` so the archive's symbol index is
+    in the format ld.lld / x86_64-elf-ld expects.  macOS's BSD ``ar``
+    produces a ``__.SYMDEF`` index that the cross-linker can read but
+    sometimes silently mis-indexes for objects with our --target,
+    surfacing as undefined-reference errors at link time.
+    """
+    archiver = _find_tool(
+        candidates=("x86_64-elf-ar", "i686-elf-ar", "llvm-ar", "ar"),
+        purpose="GNU-compatible ar",
+    )
+    env = os.environ | {"AR": archiver}
+    subprocess.check_call(["make", "-C", str(LIBC)], env=env)
 
 
 def _compile_one(*, source: Path) -> Path:
@@ -107,24 +134,68 @@ def _ensure_doomgeneric_fetched() -> None:
     subprocess.check_call([str(REPO / "tools" / "fetch_doom.sh")])
 
 
+def _find_tool(*, candidates: tuple[str, ...], purpose: str) -> str:
+    """Pick the first executable in *candidates* that exists on PATH.
+
+    macOS's /usr/bin/ld is Apple's mach-o linker — it doesn't understand
+    GNU options like -T (linker script) or -Map (link map) that we
+    need.  The portable fix is to try a sequence of candidates: GNU
+    cross-binutils first (``brew install x86_64-elf-binutils`` on
+    macOS, present by default on Linux as plain ``ld``/``objcopy``),
+    then ``ld.lld``/``llvm-objcopy`` from the LLVM toolchain.
+    """
+    for tool in candidates:
+        path = shutil.which(tool)
+        if path is not None:
+            return tool
+    message = (
+        f"build_doom: cannot find a {purpose}; tried {candidates}.  "
+        f"On macOS: `brew install x86_64-elf-binutils` (gives x86_64-elf-ld + x86_64-elf-objcopy) "
+        f"or `brew install lld llvm` (gives ld.lld + llvm-objcopy).  "
+        f"On Linux: `apt install binutils` (default) or `apt install lld llvm`."
+    )
+    raise SystemExit(message)
+
+
 def _link(*, objects: list[Path]) -> None:
-    """Ld the objects + libbboeos.a → flat binary at bin/doom."""
+    """Link to ELF (with symbols + .map), then objcopy to flat binary.
+
+    The flat binary is what bboeos's program loader consumes; the ELF
+    sits next to it for addr2line / objdump when something faults.
+    Doing the link once + objcopy is faster than two separate ld runs
+    and guarantees the two artefacts share addresses byte-for-byte.
+    """
+    linker = _find_tool(
+        candidates=("x86_64-elf-ld", "i686-elf-ld", "ld.lld", "ld"),
+        purpose="GNU-compatible linker",
+    )
+    objcopy = _find_tool(
+        candidates=("x86_64-elf-objcopy", "i686-elf-objcopy", "llvm-objcopy", "objcopy"),
+        purpose="GNU-compatible objcopy",
+    )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    if OUTPUT.exists():
-        OUTPUT.unlink()
+    for stale in (OUTPUT, ELF_OUTPUT, MAP_OUTPUT):
+        if stale.exists():
+            stale.unlink()
     subprocess.check_call([
-        "ld",
+        linker,
         "-m",
         "elf_i386",
         "-T",
         str(LIBC / "program.ld"),
-        "--oformat",
-        "binary",
+        f"-Map={MAP_OUTPUT}",
         "-o",
-        str(OUTPUT),
+        str(ELF_OUTPUT),
         str(LIBC / "_start.o"),
         *[str(obj) for obj in objects],
         str(LIBC / "libbboeos.a"),
+    ])
+    subprocess.check_call([
+        objcopy,
+        "-O",
+        "binary",
+        str(ELF_OUTPUT),
+        str(OUTPUT),
     ])
 
 

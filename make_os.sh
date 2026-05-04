@@ -4,6 +4,7 @@ FS_TYPE=bbfs
 IMAGE=drive.img
 EXT2_BLOCK_SIZE=1024
 EXT2_INODE_COUNT=
+SECTORS=2880        # default = 1.44 MB floppy size; override for larger images
 WITH_TEST_PROGRAMS=0
 for arg in "$@"; do
     case "$arg" in
@@ -11,6 +12,7 @@ for arg in "$@"; do
         --bbfs) FS_TYPE=bbfs ;;
         --ext2-block-size=*) EXT2_BLOCK_SIZE="${arg#*=}" ;;
         --ext2-inode-count=*) EXT2_INODE_COUNT="${arg#*=}" ;;
+        --sectors=*) SECTORS="${arg#*=}" ;;
         --with-test-programs) WITH_TEST_PROGRAMS=1 ;;
         -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
         *) IMAGE="$arg" ;;
@@ -129,12 +131,12 @@ if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
     done
 fi
 
-dd bs=512 count=2880 if=/dev/zero of="$IMAGE"
+dd bs=512 count="$SECTORS" if=/dev/zero of="$IMAGE"
 dd conv=notrunc if=os.bin of="$IMAGE"
 
 if [ "$FS_TYPE" = "ext2" ]; then
     EXT2_START=$(python3 -c "from add_file import compute_directory_sector; print(compute_directory_sector(image_path='$IMAGE'))") || exit 1
-    mke2fs -b "$EXT2_BLOCK_SIZE" -t ext2 -m 0 -E offset=$((EXT2_START * 512)) ${EXT2_INODE_COUNT:+-N "$EXT2_INODE_COUNT"} "$IMAGE" $(( (2880 - EXT2_START) / 2 )) || exit 1
+    mke2fs -b "$EXT2_BLOCK_SIZE" -t ext2 -m 0 -E offset=$((EXT2_START * 512)) ${EXT2_INODE_COUNT:+-N "$EXT2_INODE_COUNT"} "$IMAGE" $(( (SECTORS - EXT2_START) / 2 )) || exit 1
 fi
 
 ./add_file.py --mkdir --image "$IMAGE" bin || exit 1

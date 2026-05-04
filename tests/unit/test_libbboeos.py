@@ -505,10 +505,24 @@ int main(void) {
     }
     {   if (bboeos_strncmp("hello", "help", 3)) { printf("strncmp eq\n"); fail++; }
     }
-    {   char b[8], nref[8] = {0};
-        bboeos_strncpy(b, "hi", 8);
-        strncpy(nref, "hi", 8);
-        if (memcmp(b, nref, 8)) { printf("strncpy\n"); fail++; }
+    {   /* strncpy must write EXACTLY n bytes — no more, no less.
+         * Sentinel-pad both sides of the dst so we catch the
+         * off-by-one overrun bug we hit on Doom's lumpinfo. */
+        char b[16], nref[16];
+        memset(b, 0xAA, 16);
+        memset(nref, 0xAA, 16);
+        bboeos_strncpy(b + 4, "hi", 8);
+        strncpy(nref + 4, "hi", 8);
+        if (memcmp(b, nref, 16)) { printf("strncpy short src\n"); fail++; }
+        /* Also check the n=exact-strlen case + n=longer case. */
+        memset(b, 0xAA, 16); memset(nref, 0xAA, 16);
+        bboeos_strncpy(b + 4, "exact", 5);    /* no NUL written */
+        strncpy(nref + 4, "exact", 5);
+        if (memcmp(b, nref, 16)) { printf("strncpy exact len\n"); fail++; }
+        memset(b, 0xAA, 16); memset(nref, 0xAA, 16);
+        bboeos_strncpy(b + 4, "longer than n", 4);    /* truncate */
+        strncpy(nref + 4, "longer than n", 4);
+        if (memcmp(b, nref, 16)) { printf("strncpy truncate\n"); fail++; }
     }
     {   char *foobar = "foobar";
         if (bboeos_strrchr(foobar, 'o') != foobar+2) { printf("strrchr\n"); fail++; }

@@ -14,7 +14,7 @@ set -eu
 
 DEST="wads/doom1.wad"
 URL="https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"
-EXPECTED_SHA256="5b2e249b9c5133ec987b3ea77596381dc0d6bc1cee712bbc9d92c83dba6a01a8"
+EXPECTED_SHA256="1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
 
 verify() {
     actual=$(sha256sum "$1" | awk '{print $1}')
