@@ -178,12 +178,12 @@ asm("rtc_read_time_internal:\n"
     "    pop eax\n"
     "    ret");
 
-// rtc_sleep_ms: CX = milliseconds.  Busy-waits at least CX ms.
+// rtc_sleep_ms: ECX = milliseconds.  Busy-waits at least ECX ms.
 // 10 ms granularity (one PIT tick).  Preserves all registers.
 // Syscall handlers enter with IF=0 (INT clears it), so we sti
 // inside — IRQ 0 must fire for the tick counter to advance.
 // pushf/popf around the body keeps the caller's IF intact.
-void rtc_sleep_ms(int ms __attribute__((in_register("cx"))));
+void rtc_sleep_ms(int ms __attribute__((in_register("ecx"))));
 
 asm("rtc_sleep_ms:\n"
     "    pushf\n"
@@ -191,7 +191,7 @@ asm("rtc_sleep_ms:\n"
     "    push ebx\n"
     "    push ecx\n"
     "    push edx\n"
-    "    movzx eax, cx\n"
+    "    mov eax, ecx\n"
     "    add eax, 9\n"           // round up to whole ticks (MS_PER_TICK - 1)
     "    xor edx, edx\n"
     "    mov ebx, 10\n"          // MS_PER_TICK

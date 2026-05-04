@@ -111,8 +111,8 @@ class BuiltinsMixin:
     def builtin_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the datetime() builtin.
 
-        Returns unsigned seconds since 1970-01-01 UTC in DX:AX. Valid
-        through the year 2106 (32-bit epoch overflow).
+        Returns unsigned seconds since 1970-01-01 UTC in EAX.  Valid
+        through 2106-02-07 (32-bit epoch overflow).
         """
         self._check_argument_count(arguments=arguments, expected=0, name="datetime")
         self._emit_syscall("RTC_DATETIME")
@@ -893,8 +893,9 @@ class BuiltinsMixin:
     def builtin_sleep(self, arguments: list[Node], /) -> None:
         """Generate code for the sleep(milliseconds) builtin.
 
-        ``sleep(ms)`` emits ``mov cx, <ms> / mov ah, SYS_RTC_SLEEP /
-        int 30h``.  Busy-waits for the requested duration.
+        ``sleep(ms)`` emits ``mov ecx, <ms> / mov ah, SYS_RTC_SLEEP /
+        int 30h``.  Busy-waits for the requested duration.  ECX accepts
+        the full 32-bit ms count (~49.7 days max).
         """
         self._check_argument_count(arguments=arguments, expected=1, name="sleep")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.count_register)
@@ -942,11 +943,9 @@ class BuiltinsMixin:
     def builtin_uptime_ms(self, arguments: list[Node], /) -> None:
         """Generate code for the uptime_ms() builtin.
 
-        Returns milliseconds since boot in DX:AX (via SYS_RTC_MILLIS).
-        Callers assigning to ``unsigned long`` get the full 32-bit value
-        (wraps at ~49.7 days); callers using ``int`` truncate to the
-        low 16 bits (wraps at ~65.5 s, fine for short elapsed intervals
-        such as ping round trips).
+        Returns milliseconds since boot in EAX (via SYS_RTC_MILLIS).
+        Wraps at 2^32 ms (~49.7 days).  Callers assigning to ``int``
+        on the 32-bit target also get the full 32-bit value.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="uptime_ms")
         self._emit_syscall("RTC_MILLIS")

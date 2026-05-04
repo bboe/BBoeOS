@@ -173,7 +173,7 @@ shared_print_character:
         ret
 
 shared_print_datetime:
-        ;; DX:AX = unsigned seconds since 1970-01-01 00:00:00 UTC.
+        ;; EAX = unsigned seconds since 1970-01-01 00:00:00 UTC.
         ;; Prints YYYY-MM-DD HH:MM:SS (no trailing newline).
         ;;
         ;; Stack frame (below saved EBP):
@@ -191,13 +191,6 @@ shared_print_datetime:
         push ecx
         push edx
         push esi
-
-        ;; Combine DX:AX into a single 32-bit EAX.
-        movzx ebx, ax
-        movzx edx, dx
-        shl edx, 16
-        or ebx, edx
-        mov eax, ebx
 
         mov ecx, 86400
         xor edx, edx

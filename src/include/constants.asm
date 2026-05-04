@@ -63,7 +63,7 @@
         %assign FUNCTION_PARSE_ARGV         FUNCTION_TABLE + 15 ; DI=argv buf: split EXEC_ARG, CX=argc
         %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_TABLE + 20 ; AL=byte: print 1-3 decimal digits
         %assign FUNCTION_PRINT_CHARACTER    FUNCTION_TABLE + 25 ; AL=char: print to stdout
-        %assign FUNCTION_PRINT_DATETIME     FUNCTION_TABLE + 30 ; DX:AX=epoch seconds: print YYYY-MM-DD HH:MM:SS
+        %assign FUNCTION_PRINT_DATETIME     FUNCTION_TABLE + 30 ; EAX=epoch seconds: print YYYY-MM-DD HH:MM:SS
         %assign FUNCTION_PRINT_DECIMAL      FUNCTION_TABLE + 35 ; AL=byte: print 2 zero-padded decimal digits
         %assign FUNCTION_PRINT_HEX          FUNCTION_TABLE + 40 ; AL=byte: print 2 hex digits
         %assign FUNCTION_PRINT_IP           FUNCTION_TABLE + 45 ; SI=4-byte IP: print dotted decimal
@@ -136,10 +136,10 @@
         %assign SYS_NET_OPEN 21h
         %assign SYS_NET_RECVFROM 22h
         %assign SYS_NET_SENDTO 23h
-        %assign SYS_RTC_DATETIME 30h    ; returns DX:AX = unsigned epoch seconds (1970-01-01 UTC)
-        %assign SYS_RTC_MILLIS 31h      ; returns DX:AX = milliseconds since boot
-        %assign SYS_RTC_SLEEP 32h       ; CX=milliseconds: busy-wait via the PIT tick counter
-        %assign SYS_RTC_UPTIME 33h      ; returns AX = seconds since boot
+        %assign SYS_RTC_DATETIME 30h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
+        %assign SYS_RTC_MILLIS 31h      ; returns EAX = milliseconds since boot
+        %assign SYS_RTC_SLEEP 32h       ; ECX=milliseconds: busy-wait via the PIT tick counter
+        %assign SYS_RTC_UPTIME 33h      ; returns EAX = seconds since boot
 
         %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
 

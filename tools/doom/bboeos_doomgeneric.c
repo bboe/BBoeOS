@@ -174,15 +174,14 @@ int DG_GetKey(int *pressed, unsigned char *key) {
 }
 
 uint32_t DG_GetTicksMs(void) {
-    /* SYS_RTC_MILLIS returns DX:AX = ms since boot.  Recompose into a
-     * full uint32_t so doomgeneric_Tick sees a monotonic millisecond
-     * counter (wraps at ~49.7 days; far past any realistic Doom session). */
-    unsigned int ms_lo, ms_hi;
+    /* SYS_RTC_MILLIS returns EAX = ms since boot, monotonic, wraps at
+     * ~49.7 days (far past any realistic Doom session). */
+    unsigned int ms;
     __asm__ volatile (
         "mov $0x31, %%ah\n\t"               /* SYS_RTC_MILLIS */
         "int $0x30\n\t"
-        : "=a"(ms_lo), "=d"(ms_hi));
-    return (ms_hi << 16) | (ms_lo & 0xFFFF);
+        : "=a"(ms));
+    return ms;
 }
 
 void DG_Init(void) {
@@ -214,18 +213,13 @@ void DG_SetWindowTitle(const char *title) {
 }
 
 void DG_SleepMs(uint32_t ms) {
-    /* SYS_RTC_SLEEP takes CX (16 bits) so cap one syscall at 65535 ms;
-     * Doom sleeps small intervals (1–16 ms for frame pacing) so this
-     * loop almost never iterates more than once. */
-    while (ms > 0) {
-        unsigned short chunk = (unsigned short)(ms > 0xFFFF ? 0xFFFF : ms);
-        __asm__ volatile (
-            "mov %[ms], %%cx\n\t"
-            "mov $0x32, %%ah\n\t"           /* SYS_RTC_SLEEP */
-            "int $0x30\n\t"
-            : : [ms]"r"(chunk) : "ax", "cx");
-        ms -= chunk;
-    }
+    /* SYS_RTC_SLEEP takes ECX (full 32-bit ms count). */
+    if (ms == 0) return;
+    __asm__ volatile (
+        "mov %[ms], %%ecx\n\t"
+        "mov $0x32, %%ah\n\t"               /* SYS_RTC_SLEEP */
+        "int $0x30\n\t"
+        : : [ms]"r"(ms) : "ax", "ecx");
 }
 
 extern void doomgeneric_Create(int argc, char **argv);
