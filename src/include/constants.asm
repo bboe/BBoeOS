@@ -40,14 +40,15 @@
         %assign FD_OFFSET_SIZE 4        ; offset of size field within FD entry (32-bit)
         %assign FD_OFFSET_START 2       ; offset of start_sec field within FD entry
         %assign FD_OFFSET_TYPE 0        ; offset of type field within FD entry
-        %assign FD_TYPE_CONSOLE 1
-        %assign FD_TYPE_DIRECTORY 2
-        %assign FD_TYPE_FILE 3
+        %assign FD_TYPE_AUDIO 1     ; SB16 PCM stream (/dev/audio); see drivers/sb16.c
+        %assign FD_TYPE_CONSOLE 2
+        %assign FD_TYPE_DIRECTORY 3
+        %assign FD_TYPE_FILE 4
         %assign FD_TYPE_FREE 0      ; Must stay 0: fd_init zeroes the table; fd_alloc treats 0 as free
-        %assign FD_TYPE_ICMP 4
-        %assign FD_TYPE_NET 5
-        %assign FD_TYPE_UDP 6
-        %assign FD_TYPE_VGA 7
+        %assign FD_TYPE_ICMP 5
+        %assign FD_TYPE_NET 6
+        %assign FD_TYPE_UDP 7
+        %assign FD_TYPE_VGA 8
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
@@ -89,6 +90,21 @@
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
+        ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
+        ;; C drivers/sb16.c uses bare integers for the offset registers (matches
+        ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
+        ;; would clash with these %assigns).  Reference table:
+        ;;   SB16_BASE              = 0x220
+        ;;   DSP_RESET (W)          = +0x06   write 1, wait, write 0
+        ;;   DSP_DATA (R)           = +0x0A   read DSP responses
+        ;;   DSP_WRITE (W)          = +0x0C   command + data byte writes
+        ;;   DSP_WRITE_STATUS (R)   = +0x0C   bit 7 high = DSP write buffer full
+        ;;   DSP_READ_STATUS (R)    = +0x0E   bit 7 high = DSP_DATA has data;
+        ;;                                    ALSO acks 8-bit IRQ on read
+        ;;   MIXER_INDEX (W)        = +0x04
+        ;;   MIXER_DATA (R/W)       = +0x05
+        %assign SB16_BASE             0x220
+        %assign SB16_DSP_READ_STATUS  0x22E   ; referenced from asm IRQ 5 handler
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
         %assign STDERR 2
@@ -165,6 +181,9 @@
         %assign VGA_IOCTL_FILL_BLOCK    00h  ; CL=col, CH=row, DL=color (mode 13h 8x8 tile)
         %assign VGA_IOCTL_MODE          01h  ; DL=mode; also clears screen and serial
         %assign VGA_IOCTL_SET_PALETTE   02h  ; CL=index, CH=r, DL=g, DH=b (6-bit DAC)
+
+        ;; Audio ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_AUDIO).
+        %assign AUDIO_IOCTL_QUERY       00h  ; AX = 1 if SB16 present, 0 otherwise
 
         ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL).
         ;; Only the two modes that programs actually switch between are

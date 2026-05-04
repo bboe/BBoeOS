@@ -92,27 +92,49 @@ struct fd_ops_entry {
 };
 
 // Forward declarations for the per-fd-type handlers.  The bodies
-// live in fs/fd/{console,fs,net}.c; only the symbol identity matters
-// for the static initializer below.
+// live in fs/fd/{audio,console,fs,net}.c; only the symbol identity
+// matters for the static initializer below.  fd_close_audio is called
+// directly from fd_close (not via the fd_ops table) so the per-type
+// teardown stays a one-liner alongside the existing FD_TYPE_FILE
+// flush branch.
+void fd_close_audio();
+int fd_ioctl_audio();
 int fd_ioctl_console();
 int fd_ioctl_vga();
 int fd_read_console();
 int fd_read_dir();
 int fd_read_file();
 int fd_read_net();
+int fd_write_audio();
 int fd_write_console();
 int fd_write_file();
 int fd_write_net();
 
-struct fd_ops_entry fd_ops[8] = {
+// Set by drivers/sb16.c on successful DSP probe.  Read by fd_open's
+// /dev/audio branch (refuses open when 0).  Mirrors the asm-name
+// shim used in drivers/ne2k.c so cc.py emits the bare name reference
+// the asm-side `_g_sb16_present` can satisfy at link time.
+uint8_t sb16_present __attribute__((asm_name("_g_sb16_present")));
+
+// Forward decls for the SB16 driver's per-open / per-close callbacks.
+// sb16_open allocates the DMA frame and arms the controller; called
+// from fd_open's /dev/audio branch.  sb16_close tears down; called
+// from fd_close when the entry type is FD_TYPE_AUDIO.  Both are
+// stubbed in early tasks and filled in tasks 7 and 10.
+__attribute__((carry_return))
+int sb16_open();
+void sb16_close();
+
+struct fd_ops_entry fd_ops[9] = {
     { 0,               0 },                 // FD_TYPE_FREE (0)
-    { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (1)
-    { fd_read_dir,     0 },                 // FD_TYPE_DIRECTORY (2)
-    { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (3)
-    { 0,               0 },                 // FD_TYPE_ICMP (4)
-    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (5)
-    { 0,               0 },                 // FD_TYPE_UDP (6)
-    { 0,               0 },                 // FD_TYPE_VGA (7)
+    { 0,               fd_write_audio },    // FD_TYPE_AUDIO (1)
+    { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (2)
+    { fd_read_dir,     0 },                 // FD_TYPE_DIRECTORY (3)
+    { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (4)
+    { 0,               0 },                 // FD_TYPE_ICMP (5)
+    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (6)
+    { 0,               0 },                 // FD_TYPE_UDP (7)
+    { 0,               0 },                 // FD_TYPE_VGA (8)
 };
 
 // fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
@@ -123,15 +145,16 @@ struct fd_ioctl_op {
     int (*ioctl)();
 };
 
-struct fd_ioctl_op fd_ioctl_ops[8] = {
+struct fd_ioctl_op fd_ioctl_ops[9] = {
     { 0 },                  // FD_TYPE_FREE (0)
-    { fd_ioctl_console },   // FD_TYPE_CONSOLE (1)
-    { 0 },                  // FD_TYPE_DIRECTORY (2)
-    { 0 },                  // FD_TYPE_FILE (3)
-    { 0 },                  // FD_TYPE_ICMP (4)
-    { 0 },                  // FD_TYPE_NET (5)
-    { 0 },                  // FD_TYPE_UDP (6)
-    { fd_ioctl_vga },       // FD_TYPE_VGA (7)
+    { fd_ioctl_audio },     // FD_TYPE_AUDIO (1)
+    { fd_ioctl_console },   // FD_TYPE_CONSOLE (2)
+    { 0 },                  // FD_TYPE_DIRECTORY (3)
+    { 0 },                  // FD_TYPE_FILE (4)
+    { 0 },                  // FD_TYPE_ICMP (5)
+    { 0 },                  // FD_TYPE_NET (6)
+    { 0 },                  // FD_TYPE_UDP (7)
+    { fd_ioctl_vga },       // FD_TYPE_VGA (8)
 };
 
 // fd_table — kernel BSS, FD_MAX entries × FD_ENTRY_SIZE bytes.  The asm
@@ -187,6 +210,9 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
         if ((entry->flags & O_WRONLY) != 0) {
             vfs_update_size(entry);
         }
+    }
+    if (entry->type == FD_TYPE_AUDIO) {
+        sb16_close();
     }
     memset(entry, 0, FD_ENTRY_SIZE);
     return 1;
@@ -310,6 +336,44 @@ int fd_open(int *result __attribute__((out_register("ax"))),
             return 0;
         }
         entry->type = FD_TYPE_VGA;
+        entry->flags = flags;
+        *result = fd_num;
+        return 1;
+    }
+    // /dev/audio — refuse if SB16 absent or already opened by another fd
+    // (single-opener; matches OSS /dev/dsp semantics).  sb16_open
+    // allocates the DMA frame and starts the SB16 in auto-init
+    // playback; close path tears it down via sb16_close in fd_close.
+    if (memcmp(name, "/dev/audio", 11) == 0) {
+        struct fd *cursor;
+        int i;
+        if (sb16_present == 0) {
+            *result = -1;
+            return 0;
+        }
+        cursor = fd_table;
+        i = 0;
+        while (i < FD_MAX) {
+            if (cursor->type == FD_TYPE_AUDIO) {
+                *result = -1;
+                return 0;
+            }
+            cursor = cursor + 1;
+            i = i + 1;
+        }
+        if (!sb16_open()) {
+            *result = -1;
+            return 0;
+        }
+        if (!fd_alloc(&fd_num, &entry)) {
+            // sb16_open succeeded but no fd slot available.  Tear down
+            // the device so we don't leak the DMA frame.  Rare in
+            // practice (FD_MAX = 8).
+            sb16_close();
+            *result = -1;
+            return 0;
+        }
+        entry->type = FD_TYPE_AUDIO;
         entry->flags = flags;
         *result = fd_num;
         return 1;
@@ -448,6 +512,7 @@ int fd_write(int *result __attribute__((out_register("ax"))),
 // in the per-fd-type handler %includes (fs/fd/console.kasm /
 // fs.kasm / net.kasm) so their labels are visible at NASM-link
 // time.
-asm("%include \"fs/fd/console.kasm\"\n"
+asm("%include \"fs/fd/audio.kasm\"\n"
+    "%include \"fs/fd/console.kasm\"\n"
     "%include \"fs/fd/fs.kasm\"\n"
     "%include \"fs/fd/net.kasm\"\n");

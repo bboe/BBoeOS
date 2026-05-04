@@ -72,6 +72,7 @@ class CodeGeneratorBase:
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
         "ARGV",
         "arp_frame",
+        "AUDIO_IOCTL_QUERY",
         "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_NAME_LENGTH",
@@ -84,6 +85,7 @@ class CodeGeneratorBase:
         "EXEC_ARG",
         "FD_ENTRY_SIZE",
         "FD_MAX",
+        "FD_TYPE_AUDIO",
         "FD_TYPE_CONSOLE",
         "FD_TYPE_DIRECTORY",
         "FD_TYPE_FILE",

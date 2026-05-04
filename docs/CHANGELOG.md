@@ -11,6 +11,8 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.9.2...main)
 
+- **Kernel:** Sound Blaster 16 driver (`src/drivers/sb16.c`).  Probes the SB16 DSP at boot, allocates a 4 KB DMA frame in the direct-map range, and exposes `/dev/audio` as an OSS-style 8-bit unsigned mono 11025 Hz write-PCM device with a single `AUDIO_IOCTL_QUERY` ioctl (`src/fs/fd/audio.c`).  Single-cycle synchronous playback model: each `fd_write_audio` chunks the user buffer into <= 4 KB pieces, copies into the DMA buffer, and `sb16_play` programs 8237 channel 1 + DSP cmd `0x14` then blocks via `sti`+`hlt` until IRQ 5 (vector 0x25, vectored in `src/arch/x86/entry.asm`) signals the chunk played.  Single-opener, no-scheduler-needed.  Manual smoke programs in `tests/programs/audio_open.c` (open/close cycle) and `tests/programs/audio_tone.c` (1.1 kHz square wave).
+
 ## [0.9.2](https://github.com/bboe/BBoeOS/compare/0.9.1...0.9.2) (2026-05-02)
 
 - **Bugfix:** `bbfs_create` (`src/fs/bbfs.asm`) hardcoded the new directory entry's flag byte to `0`, silently dropping the mode argument the kernel handed it.  Any program that asked the kernel to create an executable file (`asm` writing the assembled `out`, `cp` preserving the source's mode, etc.) ended up non-executable on bbfs and the user had to run `chmod +x` afterwards.  ext2 already honoured the same DL register via `ext2_cr_mode`; bbfs now mirrors that pattern with a new `bbfs_create_mode` static, masked to `FLAG_EXECUTE` so a stray `FLAG_DIRECTORY` from a caller doesn't accidentally make a file directory-flagged.
