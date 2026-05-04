@@ -267,9 +267,15 @@ syscall_handler:
         jmp .iret_cf
 
         .io_ioctl:
-        ;; BX = fd, AL = cmd, other regs per (fd_type, cmd).
+        ;; BX = fd, AL = cmd, other regs per (fd_type, cmd).  Use
+        ;; .iret_cf_eax (full 32-bit return) rather than .iret_cf
+        ;; (movsx ax->eax) so per-fd-type handlers that report values
+        ;; wider than 16 bits get them through to userspace.
+        ;; CONSOLE_IOCTL_TRY_GET_EVENT is the current case: it returns
+        ;; (pressed << 16) | bbkey, and the .iret_cf sign-extend
+        ;; would silently zero the press flag at bit 16.
         call fd_ioctl
-        jmp .iret_cf
+        jmp .iret_cf_eax
 
         .io_open:
         ;; SI = filename, AL = flags, DL = mode (when O_CREAT).
