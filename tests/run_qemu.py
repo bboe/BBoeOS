@@ -288,6 +288,7 @@ class QemuSession:
 def _build_qemu_args(
     *,
     drive: Path,
+    extra_qemu_args: list[str],
     floppy: bool,
     machine: str | None,
     memory: str,
@@ -330,6 +331,7 @@ def _build_qemu_args(
         ]
         if pcap is not None:
             qemu_args += ["-object", f"filter-dump,id=f0,netdev=net0,file={pcap}"]
+    qemu_args += extra_qemu_args
     return qemu_args
 
 
@@ -338,6 +340,7 @@ def qemu_session(
     *,
     boot_timeout: float = BOOT_TIMEOUT,
     drive: Path = DEFAULT_IMAGE,
+    extra_qemu_args: list[str] | None = None,
     floppy: bool = False,
     machine: str | None = None,
     memory: str | None = None,
@@ -375,6 +378,8 @@ def qemu_session(
         memory = os.environ.get("BBOE_QEMU_MEMORY") or "1"
     if machine is None:
         machine = os.environ.get("BBOE_QEMU_MACHINE") or None
+    if extra_qemu_args is None:
+        extra_qemu_args = []
     with tempfile.TemporaryDirectory(prefix="run_qemu_") as temp_dir:
         temporary_directory = Path(temp_dir)
         serial_base = temporary_directory / SERIAL_BASENAME
@@ -383,6 +388,7 @@ def qemu_session(
         monitor_path = temporary_directory / "monitor" if monitor else None
         qemu_args = _build_qemu_args(
             drive=drive,
+            extra_qemu_args=extra_qemu_args,
             floppy=floppy,
             machine=machine,
             memory=memory,
