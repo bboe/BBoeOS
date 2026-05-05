@@ -574,7 +574,7 @@ protected_mode_entry:
         mov ax, TSS_SELECTOR
         ltr ax
 
-        ;; Reprogram PIT to 100 Hz (MS_PER_TICK=10 ms/tick).
+        ;; Reprogram PIT to 1000 Hz (MS_PER_TICK=1 ms/tick).
         mov al, PIT_MODE2_LOHI_CH0
         out PIT_COMMAND, al
         mov al, PIT_DIVISOR & 0xFF
