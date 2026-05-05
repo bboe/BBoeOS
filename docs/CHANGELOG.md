@@ -11,6 +11,7 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.10.0...main)
 
+- **drivers/rtc**: fix `date` returning a wildly off month/day that drifted forward by ~50 ms of `system_ticks` per call.  The C-port `rtc_read` (`drivers: port rtc.asm to C`, 2026-04-28) compiled `kernel_outb(0x70, reg); return kernel_inb(0x71)` into `mov edx, 0x70 / out dx, al / mov edx, 0x71 / in al, dx`, clobbering `EDX` — but `rtc_read_date_internal` writes the month into `DH` and then calls `rtc_read` again for the day, so the second call's `mov edx, 0x71` zeroed `DH` before `mov dl, al` landed.  C then read `epoch_month = 0`, computed `month_index = -1`, and `rtc_month_days[-1]` indexed exactly onto `_g_system_ticks` in the global layout.  Restore `rtc_read` to the original immediate-port asm shape (`out 0x70, al / in al, 0x71 / ret`) so it preserves `EDX` again.  `tests/test_programs.py`'s `date` test now runs the command three times and requires the dates to agree.
 - **kernel**: widen `SYS_RTC_DATETIME`, `SYS_RTC_MILLIS`, `SYS_RTC_UPTIME` to return the full 32-bit value in `EAX` (was `DX:AX` for the first two, sign-extended `AX` for uptime — which silently truncated past 9 h and zero-wrapped at 18 h).  `SYS_RTC_SLEEP` now reads the full duration from `ECX` (was `CX`, capped at 65 535 ms).  vDSO `shared_print_datetime`, the libc `gettimeofday`, and the Doom `DG_GetTicksMs` / `DG_SleepMs` helpers updated to match.
 
 ## [0.10.0](https://github.com/bboe/BBoeOS/compare/0.9.2...0.10.0) (2026-05-04)

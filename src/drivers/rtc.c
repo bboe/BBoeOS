@@ -59,10 +59,17 @@ int rtc_is_leap_year(int year) {
 }
 
 // Read one CMOS register.  AL = register index → AL = value.
-uint8_t rtc_read(uint8_t reg __attribute__((in_register("ax")))) {
-    kernel_outb(0x70, reg);
-    return kernel_inb(0x71);
-}
+// Implemented in asm with immediate-port I/O so DX is preserved — the
+// rtc_read_{date,time}_internal helpers below accumulate BCD bytes
+// across multiple rtc_read calls into DH/DL, and the kernel_outb /
+// kernel_inb builtins would clobber DX with the port number on each
+// call (destroying the month before the day write completes).
+uint8_t rtc_read(uint8_t reg __attribute__((in_register("ax"))));
+
+asm("rtc_read:\n"
+    "    out 0x70, al\n"
+    "    in al, 0x71\n"
+    "    ret");
 
 // rtc_read_date: returns CH=century, CL=year, DH=month, DL=day (all BCD).
 // Internal helper that the C side calls; the asm-side ABI is unused.
