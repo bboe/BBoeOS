@@ -166,6 +166,46 @@ def test_asm_name_with_offset_compiles() -> None:
     assert "[vfs_found_size+2]" in output
 
 
+def test_cast_pointer_byte_compiles() -> None:
+    """``(uint8_t *)expr`` parses as a transparent pointer cast.
+
+    cc.py's type system is loose; the cast is parsed and discarded so
+    the operand carries through unchanged.  This lets the source use
+    casts for clang compatibility without diverging behaviour.
+    """
+    asm = _kernel("""
+        void f(uint16_t *src) {
+            uint8_t *dst;
+            dst = (uint8_t *)src;
+            dst[0] = 0;
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_cast_int_compiles() -> None:
+    """``(int)expr`` parses as a transparent scalar cast."""
+    asm = _kernel("""
+        int f(char c) {
+            return (int)c;
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_cast_in_compound_expression_compiles() -> None:
+    """``base + (uint8_t *)offset`` cast inside a larger expression."""
+    asm = _kernel("""
+        uint8_t buffer[16];
+        void f(int n) {
+            uint8_t *p;
+            p = buffer + (uint8_t *)n;
+            p[0] = 0;
+        }
+    """)
+    assert "f:" in asm
+
+
 def test_char_compared_inside_logical_and_is_validated() -> None:
     """``&&`` legs each go through the validator independently."""
     error = _kernel_error("""

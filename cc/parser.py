@@ -844,6 +844,16 @@ class Parser:
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "LPAREN":
             self.eat()
+            # Pointer-cast or void-cast: `(<type>)expr`.  cc.py's type
+            # system is loose (everything is a 16/32-bit register or a
+            # pointer-sized address) so the cast is a parse-time no-op
+            # — we eat the type, then continue parsing the operand and
+            # return it directly.  This lets sources written for clang
+            # use casts like `(uint8_t *)ptr` without diverging.
+            if self.peek()[0] in TYPE_TOKENS:
+                self.parse_type()
+                self.eat("RPAREN")
+                return self.parse_primary()
             expression = self.parse_expression()
             self.eat("RPAREN")
             return expression
