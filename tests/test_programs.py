@@ -88,6 +88,7 @@ class ProgramTest:
     commands: list[str]
     expect: str
     setup: Callable[[Path, ProgramTest], None] | None = None
+    extra_qemu_args: list[str] = field(default_factory=list)
     filesystems: frozenset[str] = field(default=_ALL_FILESYSTEMS)
     memory: str | None = None
     skip: str | None = None
@@ -759,6 +760,17 @@ TESTS: list[ProgramTest] = [
     ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
     ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
+    # play_midi opens /dev/midi, queues a 1 s A4 tone on OPL voice 0, and exits.
+    # The QEMU SB16 device exposes the OPL3 synth at 0x388/0x38A so opl_probe
+    # succeeds; without -device sb16 the open returns -1.  The audiodev=none
+    # backend keeps the SB16 wired up without spawning a host audio sink.
+    ProgramTest(
+        "play_midi",
+        ["play_midi"],
+        r"^play_midi: done$",
+        extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
+        timeout=3.0,
+    ),
     ProgramTest(
         "rename",
         ["cp src/parse_ip.asm out.asm", "mv out.asm renamed.asm", "cat renamed.asm"],
@@ -908,6 +920,7 @@ def _run_test(*, filesystem: str, floppy: bool, temporary_directory: Path, test:
             test.commands,
             command_timeout=test.timeout,
             drive=drive,
+            extra_qemu_args=test.extra_qemu_args or None,
             floppy=floppy,
             memory=test.memory,
             snapshot=snapshot,
