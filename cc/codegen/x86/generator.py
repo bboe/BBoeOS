@@ -382,6 +382,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.type_size(base)
         return 1
 
+    def _bx_holds_pinned_var(self) -> bool:
+        """Return True if any variable is auto-pinned to BX/EBX.
+
+        The struct-array-indexing generators clobber BX as a scratch
+        register for the byte offset.  When BX also holds a pinned
+        function parameter or local, the clobber loses the variable's
+        value — subsequent reads emit ``mov ax, bx`` (or ``mov eax,
+        ebx``) and pick up the offset instead of the value.  Callers
+        wrap the clobber with ``push bx``/``pop bx`` when this helper
+        returns True.
+        """
+        return any(reg == self.target.bx_register for reg in self.pinned_register.values())
+
     def _byte_index_direct(self, node: Index, /) -> str | None:
         """Return a direct NASM memory operand for a constant-base Index.
 
@@ -1024,6 +1037,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         acc = self.target.acc
         bx = self.target.bx_register
         self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {bx}")
         self._emit_struct_element_offset(expression.index, struct_size)  # BX = i*stride
         is_array_field = field_size != element_size
         if is_array_field:
@@ -1032,6 +1048,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        lea {acc}, [{const_base}+{field_offset}+{bx}]")
             else:
                 self.emit(f"        lea {acc}, [{const_base}+{bx}]")
+            if protect_bx:
+                self.emit(f"        pop {bx}")
             self.ax_clear()
             return
         addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
@@ -1041,6 +1059,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        movzx {acc}, word {addr}")
         else:
             self.emit(f"        mov {acc}, {addr}")
+        if protect_bx:
+            self.emit(f"        pop {bx}")
         self.ax_clear()
 
     def generate_index_member_assign(self, statement: IndexMemberAssign, /) -> None:
@@ -1059,8 +1079,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         acc = self.target.acc
         bx = self.target.bx_register
         self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        # When BX holds a pinned variable, push the live BX *before* the
+        # rhs.  Rhs sits on top of the stack so the post-offset pop
+        # restores it directly into AX without addressing tricks (SP
+        # isn't a base register in 16-bit mode, ruling out
+        # ``[sp+N]``-style indexed loads).
+        if protect_bx:
+            self.emit(f"        push {bx}")
         self.generate_expression(statement.expr)  # AX = value
-        self.emit(f"        push {acc}")  # save value
+        self.emit(f"        push {acc}")  # save value (top of stack)
         self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
         self.emit(f"        pop {acc}")  # AX = value
         self.ax_clear()
@@ -1071,6 +1099,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov word {addr}, ax")
         else:
             self.emit(f"        mov {addr}, {acc}")
+        if protect_bx:
+            self.emit(f"        pop {bx}")  # restore pinned var
 
     def generate_index_member_index(self, expression: IndexMemberIndex, /) -> None:
         """Generate code for ``arr[i].field[n]`` as an rvalue.
