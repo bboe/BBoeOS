@@ -7,7 +7,7 @@
 //     INT 1Ah AH=00h (ticks)→ rtc_tick_read  (EAX = ticks since boot)
 //     INT 15h AH=86h (sleep)→ rtc_sleep_ms   (ECX = milliseconds)
 //
-// The PIT is reprogrammed to 100 Hz (10 ms/tick) and the IRQ 0 handler
+// The PIT is reprogrammed to 1000 Hz (1 ms/tick) and the IRQ 0 handler
 // (`pmode_irq0_handler` in entry.asm) is wired into the protected mode
 // IDT during `protected_mode_entry`, replacing the BIOS default
 // ~18.2 Hz tick.  Constants used by entry.asm and fdc.asm
@@ -170,7 +170,7 @@ asm("rtc_read_time_internal:\n"
     "    ret");
 
 // rtc_sleep_ms: ECX = milliseconds.  Busy-waits at least ECX ms.
-// 10 ms granularity (one PIT tick).  Preserves all registers.
+// 1 ms granularity (one PIT tick).  Preserves all registers.
 // Syscall handlers enter with IF=0 (INT clears it), so we sti
 // inside — IRQ 0 must fire for the tick counter to advance.
 // pushf/popf around the body keeps the caller's IF intact.
@@ -183,9 +183,9 @@ asm("rtc_sleep_ms:\n"
     "    push ecx\n"
     "    push edx\n"
     "    mov eax, ecx\n"
-    "    add eax, 9\n"           // round up to whole ticks (MS_PER_TICK - 1)
+    "    add eax, MS_PER_TICK - 1\n"           // round up to whole ticks (MS_PER_TICK - 1)
     "    xor edx, edx\n"
-    "    mov ebx, 10\n"          // MS_PER_TICK
+    "    mov ebx, MS_PER_TICK\n"          // MS_PER_TICK
     "    div ebx\n"
     "    test eax, eax\n"
     "    jnz .rsm_have_ticks\n"
@@ -231,7 +231,7 @@ void rtc_wait_steady() {
 }
 
 // uptime_seconds: AX = elapsed seconds since boot.  Preserves ECX, EDX.
-// Computes EAX = system_ticks / TICKS_PER_SECOND (= 100).
+// Computes EAX = system_ticks / TICKS_PER_SECOND (= 1000).
 void uptime_seconds();
 
 asm("uptime_seconds:\n"
@@ -239,7 +239,7 @@ asm("uptime_seconds:\n"
     "    push edx\n"
     "    call rtc_tick_read\n"
     "    xor edx, edx\n"
-    "    mov ecx, 100\n"
+    "    mov ecx, TICKS_PER_SECOND\n"
     "    div ecx\n"
     "    pop edx\n"
     "    pop ecx\n"

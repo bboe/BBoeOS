@@ -160,10 +160,10 @@
         ;; the rest of the 8259A constants.
         %assign PIT_CHANNEL0       0x40
         %assign PIT_COMMAND        0x43
-        %assign PIT_DIVISOR        11932         ; 1193182 / 11932 ≈ 99.998 Hz
+        %assign PIT_DIVISOR        1193          ; 1193182 / 1193 ≈ 999.85 Hz
         %assign PIT_MODE2_LOHI_CH0 00110100b     ; ch0, lo/hi access, mode 2, binary
-        %assign MS_PER_TICK        10
-        %assign TICKS_PER_SECOND   100
+        %assign MS_PER_TICK        1
+        %assign TICKS_PER_SECOND   1000          ; = 1000 / MS_PER_TICK
 
         ;; VGA hardware register ports (used by both the real-mode boot
         ;; path's vga_font_load and the post-flip vga driver).
