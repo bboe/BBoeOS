@@ -183,9 +183,9 @@ asm("rtc_sleep_ms:\n"
     "    push ecx\n"
     "    push edx\n"
     "    mov eax, ecx\n"
-    "    add eax, 9\n"           // round up to whole ticks (MS_PER_TICK - 1)
+    "    add eax, MS_PER_TICK - 1\n"           // round up to whole ticks (MS_PER_TICK - 1)
     "    xor edx, edx\n"
-    "    mov ebx, 10\n"          // MS_PER_TICK
+    "    mov ebx, MS_PER_TICK\n"          // MS_PER_TICK
     "    div ebx\n"
     "    test eax, eax\n"
     "    jnz .rsm_have_ticks\n"
@@ -239,7 +239,7 @@ asm("uptime_seconds:\n"
     "    push edx\n"
     "    call rtc_tick_read\n"
     "    xor edx, edx\n"
-    "    mov ecx, 100\n"
+    "    mov ecx, TICKS_PER_SECOND\n"
     "    div ecx\n"
     "    pop edx\n"
     "    pop ecx\n"
