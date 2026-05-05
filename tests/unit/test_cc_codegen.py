@@ -2527,6 +2527,48 @@ def test_struct_array_initializer_unspecified_fields_zero() -> None:
     assert "dw 0" in asm
 
 
+def test_struct_array_field_assign_preserves_pinned_arg() -> None:
+    """``arr[i].field = arg`` must not clobber ``arg`` when arg is auto-pinned to BX/EBX.
+
+    Regression: cc.py auto-pins parameters 1..N to its register pool
+    (``dx, cx, bx, di``).  The struct-array-indexing codegen uses BX
+    as a scratch register for the byte offset (``BX = i * struct_size``),
+    which silently clobbered the third parameter's value before the
+    field store had a chance to read it.
+
+    Symptom in the wild (BBoeOS ``midi_ring_push``): a 4-arg function
+    storing ``reg`` (the third arg) into ``arr[i].reg`` actually wrote
+    ``i * struct_size`` (the offset) instead of the real ``reg`` value.
+    """
+    asm = _kernel(
+        """
+        struct slot {
+            uint32_t a;
+            uint8_t  b;
+            uint8_t  c;
+            uint8_t  d;
+            uint8_t  _pad;
+        };
+        struct slot ring[8];
+        uint8_t tail;
+        void push_to_ring(uint32_t aval, int bval, int cval, int dval) {
+            ring[tail].a = aval;
+            ring[tail].b = bval;
+            ring[tail].c = cval;
+            ring[tail].d = dval;
+        }
+    """,
+        bits=32,
+    )
+    push_function = asm.split("push_to_ring:")[1].split("\nret\n")[0]
+    # Each field store must save+restore EBX around the offset-compute
+    # clobber.  Without the fix, push_to_ring emits the offset compute
+    # (`mov ebx, eax`) without first preserving the pinned EBX, and the
+    # subsequent reads of `cval` (which lives in EBX) read the offset.
+    assert push_function.count("push ebx") >= 4, f"Expected `push ebx` around each field store; got:\n{push_function}"
+    assert push_function.count("pop ebx") >= 4, f"Expected matching `pop ebx` after each field store; got:\n{push_function}"
+
+
 def test_struct_array_member_index_emits_byte_load() -> None:
     """``ptr->byte_array[i]`` loads one byte (zero-extended), not its address."""
     asm = _kernel("""
