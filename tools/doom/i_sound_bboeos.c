@@ -99,15 +99,30 @@ static boolean BBoe_Init(boolean use_sfx_prefix) {
 
 /* Music: delegated to chocolate-doom's music_opl_module (i_oplmusic.c).
  * The upstream I_OPL_* functions are file-static; the only public
- * entry point is the music_opl_module function-pointer table declared
- * extern in i_sound.h.  BBoe_MusicPoll calls opl_bboeos_poll() — the
- * BBoeOS extension in opl_bboeos.c — instead of an upstream slot
- * because chocolate-doom's engine is callback-driven and does not
- * export a poll function. */
+ * entry point is the music_opl_module function-pointer table.
+ *
+ * Chocolate 3.1.0's i_oplmusic.c defines that table as
+ * `const music_module_t music_opl_module`, while doomgeneric's older
+ * i_sound.h has a non-const `extern music_module_t music_opl_module;`.
+ * We accept the doomgeneric extern here — the cv-qualifier mismatch is
+ * invisible at link time on this i386 target — and let the chocolate
+ * TU dodge the colliding extern via tools/doom/chocolate_compat.h
+ * (the shim pre-includes i_sound.h with the symbol renamed to a
+ * sacrificial name so chocolate's definition wins).
+ *
+ * BBoe_MusicPoll calls opl_bboeos_poll() — the BBoeOS extension in
+ * opl_bboeos.c — instead of an upstream slot because chocolate-doom's
+ * engine is callback-driven and does not export a poll function. */
 extern void opl_bboeos_poll(void);
 
 static boolean BBoe_MusicInit(void) {
-    return music_opl_module.Init();
+    boolean ok = music_opl_module.Init();
+    if (ok) {
+        printf("[bboeos doom] OPL music enabled\n");
+    } else {
+        printf("[bboeos doom] OPL music unavailable\n");
+    }
+    return ok;
 }
 
 static boolean BBoe_MusicIsPlaying(void) {

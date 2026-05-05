@@ -37,3 +37,14 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | F2h   | sys_exit     | Reload and return to shell                             |
 | F3h   | sys_reboot   | Reboot                                                |
 | F4h   | sys_shutdown | Shutdown                                              |
+
+## `/dev/midi` ioctls (FD_TYPE_MIDI = 6)
+
+| AL  | Name              | Behavior                                                    |
+|-----|-------------------|-------------------------------------------------------------|
+| 00h | MIDI_IOCTL_DRAIN  | block via `sti`/`hlt` until the kernel ring drains (head == tail), AX = 0, CF clear |
+| 01h | MIDI_IOCTL_FLUSH  | drop queued events, KEY_OFF all 18 voices, AX = 0, CF clear |
+| 02h | MIDI_IOCTL_QUERY  | AX = `g_opl3_present` (0 or 1), CF clear                    |
+
+Wire format on `/dev/midi` is 6-byte commands: `(delay_lo, delay_hi,
+bank, reg, value, reserved)`.

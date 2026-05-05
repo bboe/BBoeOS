@@ -3,10 +3,12 @@
 
 Pipeline:
   1. fetch doomgeneric source (third_party/doomgeneric, GPLv2) if missing
-  2. build libbboeos.a (tools/libc/Makefile)
-  3. compile each non-platform-backend doomgeneric .c file
-  4. compile our bboeos backend (tools/doom/bboeos_doomgeneric.c)
-  5. link everything plus tools/libc/_start.o through tools/libc/program.ld
+  2. fetch chocolate-doom OPL stack (third_party/chocolate-doom-opl, GPL-2)
+     if missing
+  3. build libbboeos.a (tools/libc/Makefile)
+  4. compile each non-platform-backend doomgeneric .c file
+  5. compile our bboeos backend (tools/doom/bboeos_doomgeneric.c)
+  6. link everything plus tools/libc/_start.o through tools/libc/program.ld
      into a flat binary
 
 Each .c file's .o lands in build/doom/ so re-runs are incremental.
@@ -27,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+CHOCOLATE_OPL = REPO / "third_party" / "chocolate-doom-opl"
 LIBC = REPO / "tools" / "libc"
 DOOM_DIR = REPO / "tools" / "doom"
 THIRD_PARTY = REPO / "third_party" / "doomgeneric" / "doomgeneric"
@@ -50,6 +53,15 @@ EXCLUDED_AUDIO_BACKENDS = frozenset({
     "i_allegrosound",
     "i_sdlmusic",
     "i_sdlsound",
+})
+# doomgeneric ships an older, header-incompatible copy of these chocolate-doom
+# helpers (memio.{c,h}, mus2mid.{c,h}); we use the chocolate-doom 3.1.0 versions
+# fetched into third_party/chocolate-doom-opl/ instead, so the older copies
+# must not also be linked or the stable symbols (mem_fread, mus2mid, ...)
+# collide.
+EXCLUDED_DOOMGENERIC_AUDIO_HELPERS = frozenset({
+    "memio",
+    "mus2mid",
 })
 EXCLUDED_WAD_BACKENDS = frozenset({
     # tools/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
@@ -103,6 +115,7 @@ CFLAGS = (
     f"-I{LIBC / 'include'}",
     f"-I{THIRD_PARTY}",
     f"-I{REPO / 'tools' / 'doom' / 'include'}",  # SDL_mixer.h shim
+    f"-I{CHOCOLATE_OPL}",  # fetched chocolate-doom OPL stack
 )
 
 
@@ -123,11 +136,15 @@ def _build_libbboeos() -> None:
     subprocess.check_call(["make", "-C", str(LIBC)], env=env)
 
 
-def _compile_one(*, source: Path) -> Path:
-    """Compile one .c → build/doom/<name>.o.  Returns the .o path."""
+def _compile_one(*, source: Path, extra_cflags: tuple[str, ...] = ()) -> Path:
+    """Compile one .c → build/doom/<name>.o.  Returns the .o path.
+
+    *extra_cflags* are appended after the global CFLAGS so per-source
+    additions (e.g. ``-include`` for the chocolate-doom shim) win.
+    """
     obj = BUILD / f"{source.stem}.o"
     subprocess.check_call(
-        ["clang", *CFLAGS, "-c", str(source), "-o", str(obj)],
+        ["clang", *CFLAGS, *extra_cflags, "-c", str(source), "-o", str(obj)],
     )
     return obj
 
@@ -138,8 +155,13 @@ def _doomgeneric_sources() -> list[Path]:
     Excludes platform backends (we provide our own) and audio backends
     (no kernel audio yet).
     """
-    excluded = EXCLUDED_PLATFORM_BACKENDS | EXCLUDED_AUDIO_BACKENDS | EXCLUDED_WAD_BACKENDS
+    excluded = EXCLUDED_PLATFORM_BACKENDS | EXCLUDED_AUDIO_BACKENDS | EXCLUDED_DOOMGENERIC_AUDIO_HELPERS | EXCLUDED_WAD_BACKENDS
     return sorted(source for source in THIRD_PARTY.glob("*.c") if source.stem not in excluded)
+
+
+def _ensure_chocolate_opl_fetched() -> None:
+    """Run tools/fetch_chocolate_opl.sh — itself idempotent on the pinned commit."""
+    subprocess.check_call([str(REPO / "tools" / "fetch_chocolate_opl.sh")])
 
 
 def _ensure_doomgeneric_fetched() -> None:
@@ -228,6 +250,7 @@ def main() -> None:
         shutil.rmtree(BUILD)
     BUILD.mkdir(parents=True, exist_ok=True)
 
+    _ensure_chocolate_opl_fetched()
     _ensure_doomgeneric_fetched()
     _build_libbboeos()
 
@@ -247,6 +270,26 @@ def main() -> None:
         _compile_one(source=DOOM_DIR / "audio_mixer.c"),
         _compile_one(source=DOOM_DIR / "bboeos_wad_file.c"),
         _compile_one(source=DOOM_DIR / "i_sound_bboeos.c"),
+        _compile_one(source=DOOM_DIR / "opl_bboeos.c"),
+    ])
+    # Fetched chocolate-doom OPL music stack (third_party/chocolate-doom-opl/,
+    # populated by tools/fetch_chocolate_opl.sh above).  i_oplmusic registers
+    # `music_opl_module`, the doomgeneric MIDI music backend referenced from
+    # i_sound_bboeos.c; midifile parses Standard MIDI File chunks for
+    # i_oplmusic; mus2mid converts MUS lumps to MIDI; opl_queue is the timed
+    # event queue chocolate uses to schedule OPL writes; memio is chocolate's
+    # in-memory file IO shim used by the MUS / MIDI parsers.  ``-include
+    # tools/doom/chocolate_compat.h`` defines the ``PACKED_STRUCT`` macro
+    # these sources use; doomgeneric's doomtype.h (resolved via
+    # -Ithird_party/doomgeneric/...) ships ``PACKEDATTR`` but not
+    # ``PACKED_STRUCT``, so the chocolate sources alone need the shim.
+    chocolate_cflags = (f"-include{REPO / 'tools' / 'doom' / 'chocolate_compat.h'}",)
+    objects.extend([
+        _compile_one(source=CHOCOLATE_OPL / "i_oplmusic.c", extra_cflags=chocolate_cflags),
+        _compile_one(source=CHOCOLATE_OPL / "memio.c", extra_cflags=chocolate_cflags),
+        _compile_one(source=CHOCOLATE_OPL / "midifile.c", extra_cflags=chocolate_cflags),
+        _compile_one(source=CHOCOLATE_OPL / "mus2mid.c", extra_cflags=chocolate_cflags),
+        _compile_one(source=CHOCOLATE_OPL / "opl_queue.c", extra_cflags=chocolate_cflags),
     ])
 
     _link(objects=objects)

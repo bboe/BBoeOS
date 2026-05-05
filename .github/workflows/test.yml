@@ -100,6 +100,10 @@ jobs:
             command: python3 tests/test_cc_bits.py
           - suite: test_cc_compatibility
             command: python3 tests/test_cc_compatibility.py
+          - suite: test_doom_music_qemu
+            command: python3 tests/test_doom_music_qemu.py
+          - suite: test_doom_sound_qemu
+            command: python3 tests/test_doom_sound_qemu.py
           - suite: test_draw
             command: python3 tests/test_draw.py
           - suite: test_floppy_boot
