@@ -648,7 +648,13 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         timeout=_LARGE_FILE_TIMEOUT,
     ),
-    ProgramTest("date", ["date"], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
+    # Three calls in a row must agree on the date — catches DX-clobber-style
+    # bugs where consecutive RTC reads return drifting / mismatched values.
+    ProgramTest(
+        "date",
+        ["date", "date", "date"],
+        r"(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}[\s\S]*?\1 \d{2}:\d{2}:\d{2}[\s\S]*?\1 \d{2}:\d{2}:\d{2}",
+    ),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
     ProgramTest(
         "doubly_indirect_cat",
