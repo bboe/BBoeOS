@@ -98,8 +98,10 @@ struct fd_ops_entry {
 // teardown stays a one-liner alongside the existing FD_TYPE_FILE
 // flush branch.
 void fd_close_audio();
+void fd_close_midi();
 int fd_ioctl_audio();
 int fd_ioctl_console();
+int fd_ioctl_midi();
 int fd_ioctl_vga();
 int fd_read_console();
 int fd_read_dir();
@@ -108,13 +110,21 @@ int fd_read_net();
 int fd_write_audio();
 int fd_write_console();
 int fd_write_file();
+int fd_write_midi();
 int fd_write_net();
+void midi_reset_state();
 
 // Set by drivers/sb16.c on successful DSP probe.  Read by fd_open's
 // /dev/audio branch (refuses open when 0).  Mirrors the asm-name
 // shim used in drivers/ne2k.c so cc.py emits the bare name reference
 // the asm-side `_g_sb16_present` can satisfy at link time.
 uint8_t sb16_present __attribute__((asm_name("_g_sb16_present")));
+
+// Set by drivers/opl3.c on successful OPL3 probe.  Read by fd_open's
+// /dev/midi branch (refuses open when 0).  Same asm-name shim as
+// sb16_present so cc.py emits the bare name reference the asm-side
+// `_g_opl3_present` can satisfy at link time.
+uint8_t opl3_present __attribute__((asm_name("_g_opl3_present")));
 
 // Forward decls for the SB16 driver's per-open / per-close callbacks.
 // sb16_open allocates the DMA frame and arms the controller; called
@@ -125,16 +135,17 @@ __attribute__((carry_return))
 int sb16_open();
 void sb16_close();
 
-struct fd_ops_entry fd_ops[9] = {
+struct fd_ops_entry fd_ops[10] = {
     { 0,               0 },                 // FD_TYPE_FREE (0)
     { 0,               fd_write_audio },    // FD_TYPE_AUDIO (1)
     { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (2)
     { fd_read_dir,     0 },                 // FD_TYPE_DIRECTORY (3)
     { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (4)
     { 0,               0 },                 // FD_TYPE_ICMP (5)
-    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (6)
-    { 0,               0 },                 // FD_TYPE_UDP (7)
-    { 0,               0 },                 // FD_TYPE_VGA (8)
+    { 0,               fd_write_midi },     // FD_TYPE_MIDI (6)
+    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (7)
+    { 0,               0 },                 // FD_TYPE_UDP (8)
+    { 0,               0 },                 // FD_TYPE_VGA (9)
 };
 
 // fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
@@ -145,16 +156,17 @@ struct fd_ioctl_op {
     int (*ioctl)();
 };
 
-struct fd_ioctl_op fd_ioctl_ops[9] = {
+struct fd_ioctl_op fd_ioctl_ops[10] = {
     { 0 },                  // FD_TYPE_FREE (0)
     { fd_ioctl_audio },     // FD_TYPE_AUDIO (1)
     { fd_ioctl_console },   // FD_TYPE_CONSOLE (2)
     { 0 },                  // FD_TYPE_DIRECTORY (3)
     { 0 },                  // FD_TYPE_FILE (4)
     { 0 },                  // FD_TYPE_ICMP (5)
-    { 0 },                  // FD_TYPE_NET (6)
-    { 0 },                  // FD_TYPE_UDP (7)
-    { fd_ioctl_vga },       // FD_TYPE_VGA (8)
+    { fd_ioctl_midi },      // FD_TYPE_MIDI (6)
+    { 0 },                  // FD_TYPE_NET (7)
+    { 0 },                  // FD_TYPE_UDP (8)
+    { fd_ioctl_vga },       // FD_TYPE_VGA (9)
 };
 
 // fd_table — kernel BSS, FD_MAX entries × FD_ENTRY_SIZE bytes.  The asm
@@ -206,13 +218,14 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
     if (!fd_lookup(fd_num, &entry)) {
         return 0;
     }
-    if (entry->type == FD_TYPE_FILE) {
+    if (entry->type == FD_TYPE_AUDIO) {
+        sb16_close();
+    } else if (entry->type == FD_TYPE_FILE) {
         if ((entry->flags & O_WRONLY) != 0) {
             vfs_update_size(entry);
         }
-    }
-    if (entry->type == FD_TYPE_AUDIO) {
-        sb16_close();
+    } else if (entry->type == FD_TYPE_MIDI) {
+        fd_close_midi();
     }
     memset(entry, 0, FD_ENTRY_SIZE);
     return 1;
@@ -378,6 +391,36 @@ int fd_open(int *result __attribute__((out_register("ax"))),
         *result = fd_num;
         return 1;
     }
+    // /dev/midi — refuse if OPL3 absent or already opened by another fd
+    // (single-opener; mirrors /dev/audio semantics).  midi_reset_state
+    // zeros the queue + silences the chip so a fresh open starts clean.
+    if (memcmp(name, "/dev/midi", 10) == 0) {
+        struct fd *cursor;
+        int i;
+        if (opl3_present == 0) {
+            *result = -1;
+            return 0;
+        }
+        cursor = fd_table;
+        i = 0;
+        while (i < FD_MAX) {
+            if (cursor->type == FD_TYPE_MIDI) {
+                *result = -1;
+                return 0;
+            }
+            cursor = cursor + 1;
+            i = i + 1;
+        }
+        if (!fd_alloc(&fd_num, &entry)) {
+            *result = -1;
+            return 0;
+        }
+        entry->type = FD_TYPE_MIDI;
+        entry->flags = flags;
+        midi_reset_state();
+        *result = fd_num;
+        return 1;
+    }
     if (!vfs_find(name)) {
         if ((flags & O_CREAT) == 0) {
             *result = -1;
@@ -515,4 +558,5 @@ int fd_write(int *result __attribute__((out_register("ax"))),
 asm("%include \"fs/fd/audio.kasm\"\n"
     "%include \"fs/fd/console.kasm\"\n"
     "%include \"fs/fd/fs.kasm\"\n"
+    "%include \"fs/fd/midi.kasm\"\n"
     "%include \"fs/fd/net.kasm\"\n");

@@ -91,6 +91,7 @@ class CodeGeneratorBase:
         "FD_TYPE_FILE",
         "FD_TYPE_FREE",
         "FD_TYPE_ICMP",
+        "FD_TYPE_MIDI",
         "FD_TYPE_NET",
         "FD_TYPE_UDP",
         "FD_TYPE_VGA",

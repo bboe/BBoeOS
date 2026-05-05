@@ -46,9 +46,10 @@
         %assign FD_TYPE_FILE 4
         %assign FD_TYPE_FREE 0      ; Must stay 0: fd_init zeroes the table; fd_alloc treats 0 as free
         %assign FD_TYPE_ICMP 5
-        %assign FD_TYPE_NET 6
-        %assign FD_TYPE_UDP 7
-        %assign FD_TYPE_VGA 8
+        %assign FD_TYPE_MIDI 6      ; OPL3 register-write stream (/dev/midi); see drivers/opl3.c
+        %assign FD_TYPE_NET 7
+        %assign FD_TYPE_UDP 8
+        %assign FD_TYPE_VGA 9
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
@@ -82,6 +83,11 @@
         %assign O_RDONLY 00h
         %assign O_TRUNC  20h
         %assign O_WRONLY 01h
+        ;; OPL3 (built into SB16): two register banks at 0x388/9 and 0x38A/B.
+        %assign OPL3_BANK0_STATUS 0x388
+        %assign OPL3_BANK0_DATA   0x389
+        %assign OPL3_BANK1_STATUS 0x38A
+        %assign OPL3_BANK1_DATA   0x38B
         ;; 8259A PIC ports + EOI byte.  Used by the boot path's pic_remap
         ;; sequence and by the kernel-side IRQ handlers / drivers.
         %assign PIC1_CMD_PORT   0x20
@@ -184,6 +190,11 @@
 
         ;; Audio ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_AUDIO).
         %assign AUDIO_IOCTL_QUERY       00h  ; AX = 1 if SB16 present, 0 otherwise
+
+        ;; MIDI ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_MIDI).
+        %assign MIDI_IOCTL_DRAIN 0x00   ; block via sti/hlt until head == tail; AX = 0, CF clear
+        %assign MIDI_IOCTL_FLUSH 0x01   ; drop queued events, KEY_OFF all voices, CF clear
+        %assign MIDI_IOCTL_QUERY 0x02   ; AX = g_opl3_present, CF clear
 
         ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL).
         ;; Only the two modes that programs actually switch between are
