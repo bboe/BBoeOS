@@ -83,7 +83,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "checksum": frozenset({"ax", "bx", "cx", "si"}),
         "chmod": frozenset({"ax", "si"}),
         "close": frozenset({"ax", "bx"}),
-        "datetime": frozenset({"ax", "dx"}),
+        "datetime": frozenset({"ax"}),
         "die": frozenset(),
         "exec": frozenset({"ax", "si"}),
         "exit": frozenset(),
@@ -110,7 +110,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "net_open": frozenset({"ax", "dx"}),
         "open": frozenset({"ax", "dx", "si"}),
         "parse_ip": frozenset({"ax", "di", "si"}),
-        "print_datetime": frozenset({"ax", "bx", "cx", "dx", "si"}),
+        "print_datetime": frozenset({"ax"}),
         "print_ip": frozenset({"ax", "cx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),
         "printf": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
@@ -129,7 +129,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "strlen": frozenset({"ax", "cx", "di"}),
         "unlink": frozenset({"ax", "si"}),
         "uptime": frozenset({"ax"}),
-        "uptime_ms": frozenset({"ax", "dx"}),
+        "uptime_ms": frozenset({"ax"}),
         "video_mode": frozenset({"ax", "bx", "dx"}),
         "write": frozenset({"ax", "bx", "cx", "si"}),
     }
@@ -177,6 +177,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise ValueError(message)
         target: CodegenTarget = X86CodegenTarget32() if bits == 32 else X86CodegenTarget16()
         super().__init__(constant_values=constant_values, defines=defines, target=target)
+        # Materialise the per-target clobber table once at init.  The
+        # class-level BUILTIN_CLOBBERS table is 32-bit-correct; targets
+        # that need extras (16-bit declares ``BUILTIN_CLOBBERS_EXTRA``
+        # for the long-shape adapter glue around RTC syscalls) augment
+        # by name.  Plain ``dict |`` overrides on key collision rather
+        # than unioning the values, so patch only the overlapping keys
+        # instead of recomputing a no-op union for every entry.  Both
+        # lookup sites (per-call-site emit, whole-program pinning-cost
+        # pass) hit this table once per builtin call site, but it
+        # never changes for the lifetime of the generator.
+        target_extra: dict[str, frozenset[str]] = getattr(target, "BUILTIN_CLOBBERS_EXTRA", {})
+        self._builtin_clobbers: dict[str, frozenset[str]] = dict(self.BUILTIN_CLOBBERS)
+        for name, extra in target_extra.items():
+            self._builtin_clobbers[name] |= extra
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.ax_is_byte: bool = False
@@ -1151,6 +1165,32 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {register}, [{self._local_address(name)}]")
 
+    def _emit_long_after_syscall(self) -> None:
+        """Settle a long-returning syscall's value into the target's shape.
+
+        The kernel always returns 32-bit longs in EAX.  Targets whose
+        ``unsigned long`` storage uses a different shape (16-bit's
+        DX:AX) declare the bridging instructions in
+        ``target.LONG_AFTER_SYSCALL``; targets that don't need any
+        normalization (32-bit, where the value already lives in EAX)
+        omit the attribute and the helper emits nothing.
+        """
+        for instruction in getattr(self.target, "LONG_AFTER_SYSCALL", ()):
+            self.emit(f"        {instruction}")
+
+    def _emit_long_to_eax(self) -> None:
+        """Place a long, currently in the target's shape, into EAX.
+
+        Mirror of :meth:`_emit_long_after_syscall` for the call-site
+        direction: when feeding an EAX-shaped callee (such as the
+        ``FUNCTION_PRINT_DATETIME`` vDSO entry point) from a long held
+        in the target's native representation.  Targets that already
+        hold longs in EAX omit ``LONG_TO_EAX`` and the helper emits
+        nothing.
+        """
+        for instruction in getattr(self.target, "LONG_TO_EAX", ()):
+            self.emit(f"        {instruction}")
+
     def _emit_syscall(self, name: str, /) -> None:
         """Emit the invocation sequence for a named kernel syscall.
 
@@ -2054,7 +2094,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     if node.name not in self.BUILTIN_CLOBBERS:
                         message = f"unknown function: {node.name}"
                         raise CompileError(message, line=node.line)
-                    for register in self.BUILTIN_CLOBBERS[node.name]:
+                    for register in self._builtin_clobbers[node.name]:
                         if register in clobber_counts:
                             clobber_counts[register] += 1
             for slot in getattr(type(node), "__slots__", ()):

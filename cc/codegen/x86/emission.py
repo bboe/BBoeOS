@@ -556,7 +556,7 @@ class EmissionMixin:
         if handler is None:
             message = f"unknown function: {name}"
             raise CompileError(message, line=statement.line)
-        clobbers = self.BUILTIN_CLOBBERS[name]
+        clobbers = self._builtin_clobbers[name]
         saved = self._pinned_registers_to_save(clobbers)
         use_pusha = discard_return and len(saved) >= 3
         if use_pusha:

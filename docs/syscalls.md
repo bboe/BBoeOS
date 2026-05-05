@@ -27,10 +27,10 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
 | 23h   | net_sendto   | Send datagram via fd: BX=fd, SI=buf, CX=len, DI=IP; UDP also uses DX=src port, BP=dst port (ignored for ICMP); AX=bytes, CF err |
-| 30h   | rtc_datetime | Get wall-clock time, DX:AX = unsigned seconds since 1970-01-01 UTC |
-| 31h   | rtc_millis   | Get milliseconds since boot, DX:AX = ms                 |
-| 32h   | rtc_sleep    | Busy-wait for CX milliseconds                           |
-| 33h   | rtc_uptime   | Get uptime in seconds, AX = elapsed seconds             |
+| 30h   | rtc_datetime | Get wall-clock time, EAX = unsigned seconds since 1970-01-01 UTC |
+| 31h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |
+| 32h   | rtc_sleep    | Busy-wait for ECX milliseconds                                   |
+| 33h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
 | 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt; CF on OOM |
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
 | F1h   | sys_exec     | Execute program, SI = filename, CF on error            |

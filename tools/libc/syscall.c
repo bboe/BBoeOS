@@ -70,13 +70,11 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
      * not absolute wall-clock.  tz is ignored (POSIX-compliant). */
     (void)tz;
     if (tv == 0) return 0;
-    unsigned int ms_lo, ms_hi;
+    unsigned int total_ms;
     __asm__ volatile (
         "mov $0x31, %%ah\n\t"           /* SYS_RTC_MILLIS */
         "int $0x30\n\t"
-        : "=a"(ms_lo), "=d"(ms_hi));
-    /* DX:AX is ms; pack to a 32-bit ms count, then split into sec / usec. */
-    unsigned int total_ms = (ms_hi << 16) | (ms_lo & 0xFFFF);
+        : "=a"(total_ms));
     tv->tv_sec  = total_ms / 1000;
     tv->tv_usec = (total_ms % 1000) * 1000;
     return 0;

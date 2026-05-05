@@ -11,6 +11,8 @@ at the time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.10.0...main)
 
+- **kernel**: widen `SYS_RTC_DATETIME`, `SYS_RTC_MILLIS`, `SYS_RTC_UPTIME` to return the full 32-bit value in `EAX` (was `DX:AX` for the first two, sign-extended `AX` for uptime — which silently truncated past 9 h and zero-wrapped at 18 h).  `SYS_RTC_SLEEP` now reads the full duration from `ECX` (was `CX`, capped at 65 535 ms).  vDSO `shared_print_datetime`, the libc `gettimeofday`, and the Doom `DG_GetTicksMs` / `DG_SleepMs` helpers updated to match.
+
 ## [0.10.0](https://github.com/bboe/BBoeOS/compare/0.9.2...0.10.0) (2026-05-04)
 
 ### Doom port

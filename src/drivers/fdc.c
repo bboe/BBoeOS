@@ -215,7 +215,7 @@ asm("fdc_motor_start:\n"
     "    mov dx, 0x3F2\n"          // FDC_DOR
     "    mov al, 0x1C\n"           // MOTOR_0 | RESET_NOT | DMA_IRQ
     "    out dx, al\n"
-    "    mov cx, 500\n"
+    "    mov ecx, 500\n"
     "    call rtc_sleep_ms\n"
     "    mov byte [_g_fdc_irq_flag], 0\n"
     "    mov al, 0x07\n"           // CMD_RECALIBRATE

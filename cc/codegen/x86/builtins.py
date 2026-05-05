@@ -111,11 +111,15 @@ class BuiltinsMixin:
     def builtin_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the datetime() builtin.
 
-        Returns unsigned seconds since 1970-01-01 UTC in DX:AX. Valid
-        through the year 2106 (32-bit epoch overflow).
+        Returns unsigned seconds since 1970-01-01 UTC in EAX.  Valid
+        through 2106-02-07 (32-bit epoch overflow).  On the 16-bit
+        target an extra ``mov edx, eax / shr edx, 16`` splits the
+        return into the DX:AX shape that 16-bit ``unsigned long``
+        storage paths read.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="datetime")
         self._emit_syscall("RTC_DATETIME")
+        self._emit_long_after_syscall()
 
     def builtin_die(self, arguments: list[Node], /) -> None:
         """Generate code for the die() builtin.
@@ -648,9 +652,14 @@ class BuiltinsMixin:
         """Generate code for the print_datetime(unsigned long) builtin.
 
         Prints the epoch value as ``YYYY-MM-DD HH:MM:SS`` (no newline).
+        The vDSO entry point reads the full epoch in EAX; on the 16-bit
+        target an extra ``shl edx, 16 / movzx eax, ax / or eax, edx``
+        recombines the DX:AX shape held in 16-bit ``unsigned long``
+        storage into EAX before the call.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
+        self._emit_long_to_eax()
         self.emit("        call FUNCTION_PRINT_DATETIME")
 
     def builtin_print_ip(self, arguments: list[Node], /) -> None:
@@ -893,8 +902,9 @@ class BuiltinsMixin:
     def builtin_sleep(self, arguments: list[Node], /) -> None:
         """Generate code for the sleep(milliseconds) builtin.
 
-        ``sleep(ms)`` emits ``mov cx, <ms> / mov ah, SYS_RTC_SLEEP /
-        int 30h``.  Busy-waits for the requested duration.
+        ``sleep(ms)`` emits ``mov ecx, <ms> / mov ah, SYS_RTC_SLEEP /
+        int 30h``.  Busy-waits for the requested duration.  ECX accepts
+        the full 32-bit ms count (~49.7 days max).
         """
         self._check_argument_count(arguments=arguments, expected=1, name="sleep")
         self.emit_register_from_argument(argument=arguments[0], register=self.target.count_register)
@@ -942,14 +952,16 @@ class BuiltinsMixin:
     def builtin_uptime_ms(self, arguments: list[Node], /) -> None:
         """Generate code for the uptime_ms() builtin.
 
-        Returns milliseconds since boot in DX:AX (via SYS_RTC_MILLIS).
-        Callers assigning to ``unsigned long`` get the full 32-bit value
-        (wraps at ~49.7 days); callers using ``int`` truncate to the
-        low 16 bits (wraps at ~65.5 s, fine for short elapsed intervals
-        such as ping round trips).
+        Returns milliseconds since boot in EAX (via SYS_RTC_MILLIS).
+        Wraps at 2^32 ms (~49.7 days).  Callers assigning to ``int``
+        on the 32-bit target also get the full 32-bit value.  On the
+        16-bit target the trailing ``mov edx, eax / shr edx, 16``
+        splits the return into the DX:AX shape that 16-bit
+        ``unsigned long`` storage paths read.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="uptime_ms")
         self._emit_syscall("RTC_MILLIS")
+        self._emit_long_after_syscall()
 
     def builtin_video_mode(self, arguments: list[Node], /) -> None:
         """Generate code for the video_mode(fd, mode) builtin.

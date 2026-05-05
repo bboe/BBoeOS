@@ -64,13 +64,12 @@ syscall_handler:
         ;; carrying the result.  Sign-extend AX into EAX so 32-bit user code
         ;; can compare the result directly (AX=-1 → EAX=-1 for error tests,
         ;; AX=0 → EAX=0 for EOF tests), then propagate CF and iretd.
-        ;; Syscalls that return DX:AX are expected to recompose the 32-bit
-        ;; value via DX in user code.
         movsx eax, ax
-        ;; Fall through to .iret_cf_eax — handlers wanting to return a full
-        ;; 32-bit value in EAX (currently io_read / io_write, whose byte
-        ;; counts can exceed 32767) prepare EAX themselves and ``jmp
-        ;; .iret_cf_eax`` to skip the sign-extend.
+        ;; Fall through to .iret_cf_eax — handlers returning a full 32-bit
+        ;; value in EAX (io_read / io_write byte counts; io_seek / sys_break
+        ;; addresses; rtc_datetime / rtc_millis / rtc_uptime monotonic
+        ;; counters; io_ioctl per-cmd values) prepare EAX themselves and
+        ;; ``jmp .iret_cf_eax`` to skip the sign-extend.
         .iret_cf_eax:
         jnc .iret_cf_clear
         or dword [esp + SYSCALL_SAVED_EFLAGS], 1
@@ -394,38 +393,35 @@ syscall_handler:
         ;; ------------------------------------------------------------
 
         .rtc_datetime:
-        ;; Returns DX:AX = unsigned epoch seconds (UTC), valid through
+        ;; Returns EAX = unsigned epoch seconds (UTC), valid through
         ;; 2106-02-07.  CF clear (never errors).
         call rtc_read_epoch
-        mov [esp + SYSCALL_SAVED_EDX], dx
         clc
-        jmp .iret_cf
+        jmp .iret_cf_eax
 
         .rtc_millis:
-        ;; Returns DX:AX = milliseconds since boot.  Wraps at 2^32 ms
+        ;; Returns EAX = milliseconds since boot.  Wraps at 2^32 ms
         ;; (~49.7 days).  CF clear.
         call rtc_tick_read
         imul eax, MS_PER_TICK
-        mov edx, eax
-        shr edx, 16
-        mov [esp + SYSCALL_SAVED_EDX], dx
         clc
-        jmp .iret_cf
+        jmp .iret_cf_eax
 
         .rtc_sleep:
-        ;; CX = milliseconds.  rtc_sleep_ms preserves all registers; CF clear.
+        ;; ECX = milliseconds.  rtc_sleep_ms preserves all registers; CF clear.
         call rtc_sleep_ms
         clc
         jmp .iret_cf
 
         .rtc_uptime:
-        ;; Returns AX = seconds since boot.  CF clear.
+        ;; Returns EAX = seconds since boot.  CF clear.  Wraps at 2^32 s
+        ;; (~136 years).
         call rtc_tick_read
         xor edx, edx
         mov ecx, TICKS_PER_SECOND
         div ecx
         clc
-        jmp .iret_cf
+        jmp .iret_cf_eax
 
         ;; ------------------------------------------------------------
         ;; Video handlers.
