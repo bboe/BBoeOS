@@ -72,24 +72,35 @@ pmode_irq0_handler:
         iretd
 
 pmode_irq5_handler:
-        ;; SB16 single-cycle DMA block complete.  Read DSP_READ_STATUS
-        ;; to ack the 8-bit IRQ on the card, set audio_wakeup so the
-        ;; blocking writer (in drivers/sb16.c sb16_play) sees that the
-        ;; chunk has played, EOI PIC1.
-        ;;
+        ;; SB16 auto-init block boundary.  Refill the just-finished DMA
+        ;; half from the software ring (sb16_refill in drivers/sb16.c)
+        ;; while the DSP keeps streaming the other half.  Order:
+        ;;   1. Ack the 8-bit IRQ on the card by reading DSP_READ_STATUS.
+        ;;      Doing this before the EOI matters — if we EOI PIC1 first
+        ;;      while the card is still asserting IRQ 5, the next sti
+        ;;      will re-enter immediately.
+        ;;   2. Run sb16_refill to drain the ring → just-finished half
+        ;;      (sets audio_wakeup so a ring-full producer parked on
+        ;;      sti+hlt advances).
+        ;;   3. EOI PIC1.
         ;; SB16_DSP_READ_STATUS (0x22E) is > 0xFF, so the immediate-port
         ;; form `in al, port` won't encode (NASM silently truncates the
         ;; 16-bit constant to 8 bits, would land on port 0x2E instead).
         ;; Load the port into DX and use `in al, dx`.
-        push eax
-        push edx
+        ;;
+        ;; The handler runs with IF=0 (interrupt gate), so sb16_refill
+        ;; can read audio_ring_head and update audio_ring_tail without
+        ;; bracketing.  pushad/popad covers every C-clobbered GP reg;
+        ;; DS/ES are unchanged and both kernel + user data segments
+        ;; are flat 4 GB so cc.py's flat addressing works regardless
+        ;; of which selector userland left in DS.
+        pushad
         mov dx, SB16_DSP_READ_STATUS
         in al, dx
-        mov byte [audio_wakeup], 1
+        call sb16_refill
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        pop edx
-        pop eax
+        popad
         iretd
 
 pmode_irq6_handler:
