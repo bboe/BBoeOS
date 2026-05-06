@@ -13,23 +13,31 @@
  * backend (`i_sound_bboeos.c`, `opl_bboeos.c`) and doomgeneric core
  * compile unaffected.
  *
- * Items provided here:
+ * Items provided here (alphabetical):
  *
- *   PACKED_STRUCT(...)         — packed-struct macro (chocolate's
- *                                src/doomtype.h has it; doomgeneric's
- *                                only ships PACKEDATTR).
+ *   I_Realloc                  — chocolate's i_system.c provides this as
+ *                                realloc + I_Error on failure; we forward
+ *                                straight to libc realloc.
  *
- *   opl_driver_ver_t (+ enum)  — chocolate i_sound.h splits OPL "driver
- *   I_SetOPLDriverVer            version" out from the engine's
- *                                gameversion enum (`exe_doom_*` in
- *                                d_mode.h).  doomgeneric's i_sound.h
- *                                lacks both; declare them here so
- *                                i_oplmusic.c compiles.
+ *   M_TempFile                 — chocolate's m_misc.c hard-codes "/tmp/"
+ *                                in the non-Windows build; bboeos has no
+ *                                /tmp directory, so we redirect M_TempFile
+ *                                to bboeos_chocolate_temp_file (defined
+ *                                inline below) which drops the prefix.
  *
  *   M_fopen / M_remove         — chocolate's m_misc.h wraps fopen /
  *                                remove for Windows path handling.
  *                                doomgeneric drops the wrappers; map
  *                                straight to libc.
+ *
+ *   PACKED_STRUCT(...)         — packed-struct macro (chocolate's
+ *                                src/doomtype.h has it; doomgeneric's
+ *                                only ships PACKEDATTR).
+ *
+ *   SDL_SwapBE16 / SDL_SwapBE32  — big-endian byteswap helpers
+ *                                chocolate's midifile.c expects from
+ *                                SDL_endian.h.  i386 is little-endian,
+ *                                so both always do an actual byteswap.
  *
  *   music_opl_module rename    — chocolate declares
  *                                  `extern const music_module_t
@@ -46,6 +54,13 @@
  *                                bboeos backend in i_sound_bboeos.c
  *                                references the renamed symbol via
  *                                its own extern decl.
+ *
+ *   opl_driver_ver_t (+ enum)  — chocolate i_sound.h splits OPL "driver
+ *   I_SetOPLDriverVer            version" out from the engine's
+ *                                gameversion enum (`exe_doom_*` in
+ *                                d_mode.h).  doomgeneric's i_sound.h
+ *                                lacks both; declare them here so
+ *                                i_oplmusic.c compiles.
  */
 #ifndef BBOEOS_CHOCOLATE_COMPAT_H
 #define BBOEOS_CHOCOLATE_COMPAT_H
@@ -53,6 +68,47 @@
 #include <stdint.h>  /* for the SDL_SwapBE* helpers below */
 #include <stdio.h>   /* for fopen / remove that we forward to */
 #include <stdlib.h>  /* for realloc that I_Realloc forwards to */
+#include <string.h>  /* for strlen / memcpy in bboeos_chocolate_temp_file */
+
+/* Chocolate's i_system.c provides I_Realloc as realloc + I_Error on
+ * failure.  We forward to plain realloc; allocation failure here will
+ * simply return NULL, which midifile.c's track-event loader treats as
+ * an error anyway. */
+static inline void *I_Realloc(void *pointer, size_t size) {
+    return realloc(pointer, size);
+}
+
+/* doomgeneric's m_misc.c hard-codes "/tmp/" into M_TempFile on every
+ * non-Windows / non-DJGPP build, then i_oplmusic.c::I_OPL_RegisterSong
+ * round-trips the MUS-to-MID conversion through that path: write the
+ * converted MIDI to disk, read it back via MIDI_LoadFile.  bboeos has
+ * no /tmp directory, and our path resolver treats a leading '/' as
+ * "subdir under root with empty name," so both write and read fail.
+ *
+ * Override M_TempFile inside chocolate sources only (this header is
+ * `-include`d for them via tools/build_doom.py) to drop the /tmp/
+ * prefix entirely — the file is created in the program's cwd instead.
+ * The macro is a plain identifier rename so m_misc.h's declaration
+ * (`char *M_TempFile(char *s);`) becomes a forward declaration of
+ * bboeos_chocolate_temp_file, which is then defined inline below.
+ * Caller balance is preserved: M_TempFile's contract is "returns a
+ * malloc'd path the caller must free()," which the inline still
+ * honours. */
+static inline char *bboeos_chocolate_temp_file(char *suffix) {
+    size_t length = strlen(suffix);
+    char *path = (char *)malloc(length + 1);
+    if (path != 0) {
+        memcpy(path, suffix, length + 1);
+    }
+    return path;
+}
+#define M_TempFile bboeos_chocolate_temp_file
+
+/* Chocolate's m_misc.h wraps these for Windows path handling.  On the
+ * GCC / clang freestanding build we just forward to libc (libbboeos
+ * provides fopen + remove). */
+#define M_fopen(filename, mode)  fopen((filename), (mode))
+#define M_remove(path)           remove((path))
 
 #ifndef PACKED_STRUCT
 #if defined(__GNUC__) || defined(__clang__)
@@ -61,24 +117,6 @@
 #define PACKED_STRUCT(...) struct __VA_ARGS__
 #endif
 #endif
-
-/* Chocolate i_sound.h adds an "OPL driver version" enum that selects
- * between the per-game OPL voice-allocation behaviours; doomgeneric's
- * older i_sound.h omits it.  Reproduce verbatim from chocolate's
- * src/i_sound.h so identifiers and ordering match. */
-typedef enum {
-    opl_doom1_1_666,    /* Doom 1 v1.666                     */
-    opl_doom2_1_666,    /* Doom 2 v1.666, Hexen, Heretic     */
-    opl_doom_1_9        /* Doom v1.9, Strife                 */
-} opl_driver_ver_t;
-
-void I_SetOPLDriverVer(opl_driver_ver_t ver);
-
-/* Chocolate's m_misc.h wraps these for Windows path handling.  On the
- * GCC / clang freestanding build we just forward to libc (libbboeos
- * provides fopen + remove). */
-#define M_fopen(filename, mode)  fopen((filename), (mode))
-#define M_remove(path)           remove((path))
 
 /* chocolate's i_swap.h pulls SDL_endian.h for the SDL_SwapBE16 /
  * SDL_SwapBE32 byteswap helpers used by midifile.c (Standard MIDI Files
@@ -96,14 +134,6 @@ static inline uint32_t SDL_SwapBE32(uint32_t value) {
          | ((value << 24) & 0xFF000000u);
 }
 
-/* Chocolate's i_system.c provides I_Realloc as realloc + I_Error on
- * failure.  We forward to plain realloc; allocation failure here will
- * simply return NULL, which midifile.c's track-event loader treats as
- * an error anyway. */
-static inline void *I_Realloc(void *pointer, size_t size) {
-    return realloc(pointer, size);
-}
-
 /* Resolve the const-vs-non-const `music_opl_module` collision between
  * chocolate's i_oplmusic.c and doomgeneric's i_sound.h.
  *
@@ -117,5 +147,17 @@ static inline void *I_Realloc(void *pointer, size_t size) {
 #define music_opl_module __dg_music_opl_module_unused
 #include "i_sound.h"
 #undef music_opl_module
+
+/* Chocolate i_sound.h adds an "OPL driver version" enum that selects
+ * between the per-game OPL voice-allocation behaviours; doomgeneric's
+ * older i_sound.h omits it.  Reproduce verbatim from chocolate's
+ * src/i_sound.h so identifiers and ordering match. */
+typedef enum {
+    opl_doom1_1_666,    /* Doom 1 v1.666                     */
+    opl_doom2_1_666,    /* Doom 2 v1.666, Hexen, Heretic     */
+    opl_doom_1_9        /* Doom v1.9, Strife                 */
+} opl_driver_ver_t;
+
+void I_SetOPLDriverVer(opl_driver_ver_t ver);
 
 #endif
