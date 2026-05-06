@@ -126,8 +126,11 @@ asm("vfs_init_scratch:\n"
     "        hlt\n"
     "        jmp .vis_oom\n");
 
+void sector_cache_init();
+
 void vfs_init() {
     vfs_init_scratch();
+    sector_cache_init();
     if (ext2_init()) {
         vfs_chmod_fn = ext2_chmod;
         vfs_commit_write_sec_fn = ext2_commit_write_sec;

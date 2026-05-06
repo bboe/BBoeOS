@@ -151,13 +151,11 @@ int open(const char *path, int flags, ...) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
-    /* Kernel SYS_IO_READ returns the byte count in AX (16 bits) — a
-     * 70 KB request would actually advance the file position by 70 KB
-     * but report (70 KB & 0xFFFF) = 4464 bytes back, fooling callers
-     * into re-reading already-consumed data.  Cap each syscall at
-     * 65535 so AX never wraps; POSIX permits short reads, so callers
-     * that need more (fread, our wrapper) just loop. */
-    if (count > 0xFFFFu) count = 0xFFFFu;
+    /* Kernel fd_read implementations write the full byte count to
+     * EAX and the syscall dispatcher routes IO_READ through
+     * .iret_cf_eax (no AX→EAX sign-extend), so a 70 KB request comes
+     * back as 70 KB.  Pass count through unmodified and read all 32
+     * bits of the kernel's return. */
     unsigned int eax_out, cf;
     __asm__ volatile (
         "mov %[buf], %%edi\n\t"
@@ -172,7 +170,7 @@ ssize_t read(int fd, void *buf, size_t count) {
           [fd] "g"((unsigned short)fd)
         : "edi", "ecx", "ebx");
     if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return -1; }
-    return (ssize_t)(eax_out & 0xFFFF);
+    return (ssize_t)eax_out;
 }
 
 void *sbrk(ptrdiff_t increment) {
@@ -201,8 +199,8 @@ int stat(const char *path, struct stat *buf) {
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
-    /* Same 16-bit AX truncation as read — cap each syscall at 65535. */
-    if (count > 0xFFFFu) count = 0xFFFFu;
+    /* Same 32-bit return shape as read: kernel fd_write writes EAX,
+     * dispatcher uses .iret_cf_eax. */
     unsigned int eax_out, cf;
     __asm__ volatile (
         "mov %[buf], %%esi\n\t"
@@ -217,5 +215,5 @@ ssize_t write(int fd, const void *buf, size_t count) {
           [fd] "g"((unsigned short)fd)
         : "esi", "ecx", "ebx");
     if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return -1; }
-    return (ssize_t)(eax_out & 0xFFFF);
+    return (ssize_t)eax_out;
 }

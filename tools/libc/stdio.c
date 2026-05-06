@@ -129,9 +129,10 @@ int fputs(const char *s, FILE *fp) {
 
 size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp) {
     /* Loop until we hit `total`, EOF, or error.  bboeos's SYS_IO_READ
-     * caps each call at AX = uint16, so a 70 KB request comes back as
-     * a short read with the high 16 bits truncated; Doom's W_ReadLump
-     * (called for sprite lumps that can be 60+ KB) needs every byte. */
+     * returns full 32-bit byte counts so a single syscall typically
+     * satisfies the whole request, but POSIX permits short reads
+     * (e.g. ext2 fs_read can return short on a sector boundary) so
+     * we still loop. */
     size_t total = size * nmemb;
     size_t done = 0;
     char *cbuf = (char *)buf;

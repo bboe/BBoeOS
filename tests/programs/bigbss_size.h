@@ -45,4 +45,4 @@
    probe at -m 2048 and update this constant.  The two tripwire
    tests will go red (one or both) when it drifts. */
 
-#define BIGBSS_PAGES 523595
+#define BIGBSS_PAGES 523593
