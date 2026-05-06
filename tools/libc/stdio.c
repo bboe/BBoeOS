@@ -99,7 +99,7 @@ int fgetc(FILE *fp) {
 }
 
 FILE *fopen(const char *path, const char *mode) {
-    int flags = (mode[0] == 'w') ? O_WRONLY : O_RDONLY;
+    int flags = (mode[0] == 'w') ? (O_WRONLY | O_CREAT | O_TRUNC) : O_RDONLY;
     int fd = open(path, flags);
     if (fd < 0) return NULL;
     FILE *fp = malloc(sizeof(FILE));

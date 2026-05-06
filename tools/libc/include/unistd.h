@@ -3,9 +3,15 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#define O_CREAT  0x40
+/* Match src/include/constants.asm — the kernel ignores any flag bit it
+ * doesn't recognise, so the previous (0x40) value silently turned every
+ * libc-side O_CREAT into a no-op.  Until now nothing in userland passed
+ * O_CREAT through libc; chocolate-doom's MUS-to-MID temp-file dance is
+ * the first caller that needs it. */
+#define O_CREAT  0x10
 #define O_RDONLY 0
 #define O_RDWR   2
+#define O_TRUNC  0x20
 #define O_WRONLY 1
 #define SEEK_CUR 1
 #define SEEK_END 2
