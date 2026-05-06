@@ -739,7 +739,7 @@ ext2_read_dir:
 ext2_add_dir_entry:
         ;; Insert a new directory entry in a directory inode.
         ;; Scans direct blocks for a deleted slot or last-entry slack; allocates if needed.
-        ;; Input:  AX = dir inode, DI = null-terminated name, BX = new inode number
+        ;; Input:  AX = dir inode, EDI = null-terminated name, BX = new inode number
         ;; Output: CF on error
         ;;
         ;; EBP doubles as the sector_buffer base register inside the
@@ -751,7 +751,7 @@ ext2_add_dir_entry:
         push ebp
         mov ebp, [sector_buffer]
         mov [ext2_ade_inode], bx
-        mov [ext2_ade_name], di
+        mov [ext2_ade_name], edi        ; full 32-bit user-virt — narrowing to DI silently truncated path pointers > 64 KiB
         ;; Compute min_rec_len = (8 + namelen + 3) & ~3
         xor cx, cx
         .ead_namelen:
