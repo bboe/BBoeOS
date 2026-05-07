@@ -13,6 +13,7 @@
         %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT     07h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
+        %assign ERROR_INTERRUPTED 08h     ; Cooperative-interrupt return (SIGINT) — maps to EINTR in libc
         %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found
@@ -72,6 +73,7 @@
         %assign FUNCTION_PRINT_STRING       FUNCTION_TABLE + 55 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF             FUNCTION_TABLE + 60 ; cdecl: push args R-to-L, push fmt, call
         %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 65 ; SI=buf, CX=len: write to stdout
+        %assign VDSO_SIGRETURN_OFFSET 0100h           ; trampoline lives at VDSO_VIRT + 0x100
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
@@ -154,6 +156,15 @@
         %assign SYS_SYS_EXIT 0F2h
         %assign SYS_SYS_REBOOT 0F3h
         %assign SYS_SYS_SHUTDOWN 0F4h
+        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGRETURN 0F6h    ; restore from sigcontext on user stack; never returns to caller
+
+        ;; Signal numbers (POSIX-numbered).  Currently only SIGINT is delivered.
+        %assign SIGINT 2
+
+        ;; signal() handler sentinels (POSIX-valued).
+        %assign SIG_DFL 0
+        %assign SIG_IGN 1
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
