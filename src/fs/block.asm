@@ -10,6 +10,16 @@ disk_read_sector:
         jb fdc_read_sector
         jmp ata_read_sector
 
+;;; disk_read_sectors: bulk read entry point.  AX = start LBA,
+;;; CX = sector count (1..256), EDI = destination kernel-virt.
+;;; Same dispatch shape as disk_read_sector — just routes the
+;;; multi-sector helper instead.  The cache layer calls this on a
+;;; miss to prefetch a run of sectors in one driver round-trip.
+disk_read_sectors:
+        cmp byte [boot_disk], 80h
+        jb fdc_read_sectors
+        jmp ata_read_sectors
+
 disk_write_sector:
         cmp byte [boot_disk], 80h
         jb fdc_write_sector

@@ -256,6 +256,38 @@ int fdc_read_sector(int lba __attribute__((in_register("ax"))))
     return 1;
 }
 
+// Multi-sector read.  Loops over fdc_read_sector and copies each
+// sector into the caller's buffer; the FDC's hardware multi-sector
+// READ command is track-bound and the cross-track plumbing isn't
+// worth the complexity for floppy-mode performance.  Side effect:
+// clobbers sector_buffer.
+int fdc_read_sectors(int lba __attribute__((in_register("ax"))),
+                     int count __attribute__((in_register("cx"))),
+                     uint8_t *dest __attribute__((in_register("edi"))))
+    __attribute__((carry_return))
+    __attribute__((preserve_register("eax")))
+    __attribute__((preserve_register("ebx")))
+    __attribute__((preserve_register("ecx")))
+    __attribute__((preserve_register("edx")))
+    __attribute__((preserve_register("esi")))
+    __attribute__((preserve_register("edi")))
+{
+    int saved_lba;
+    int saved_count;
+    int i;
+    saved_lba = lba & 0xFFFF;
+    saved_count = count;
+    i = 0;
+    while (i < saved_count) {
+        if (!fdc_read_sector(saved_lba + i)) {
+            return 0;
+        }
+        memcpy(dest + i * 512, sector_buffer, 512);
+        i = i + 1;
+    }
+    return 1;
+}
+
 // Wait for RQM=1, DIO=1 (host can read), then read one byte from
 // FDC data.  Returns AL = byte; clobbers AX, DX (matches asm).
 asm("fdc_recv:\n"

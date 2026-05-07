@@ -88,6 +88,50 @@ int ata_read_sector(int lba __attribute__((in_register("ax"))))
     return 0;
 }
 
+// AX = LBA, CX = sector count (1..256; 256 encoded as 0 per ATA
+// spec), EDI = destination kernel-virt → sector_buffer-bypass
+// streaming PIO read of CX consecutive sectors into [EDI].  Same
+// CF return shape as ata_read_sector.  ATA's READ-SECTORS command
+// fires a DRQ phase per sector, so we wait+INSW once per sector
+// inside one command instead of issuing CX separate commands.
+int ata_read_sectors(int lba __attribute__((in_register("ax"))),
+                     int count __attribute__((in_register("cx"))),
+                     uint8_t *dest __attribute__((in_register("edi"))))
+    __attribute__((carry_return))
+    __attribute__((preserve_register("eax")))
+    __attribute__((preserve_register("ebx")))
+    __attribute__((preserve_register("ecx")))
+    __attribute__((preserve_register("edx")))
+    __attribute__((preserve_register("esi")))
+    __attribute__((preserve_register("edi")))
+{
+    int saved_lba;
+    int saved_count;
+    int remaining;
+    saved_lba = lba & 0xFFFF;
+    saved_count = count & 0xFF;             // 0 means 256 in the ATA spec
+    while ((kernel_inb(0x1F7) & 0x80) != 0) {}
+    kernel_outb(0x1F6, 0xE0);               // master + LBA
+    kernel_outb(0x1F2, saved_count);
+    kernel_outb(0x1F3, saved_lba & 0xFF);
+    kernel_outb(0x1F4, (saved_lba >> 8) & 0xFF);
+    kernel_outb(0x1F5, 0);
+    kernel_outb(0x1F7, 0x20);               // ATA_CMD_READ
+    if (saved_count == 0) {
+        saved_count = 256;
+    }
+    remaining = saved_count;
+    while (remaining > 0) {
+        if (!ata_wait_drq()) {
+            return 0;
+        }
+        kernel_insw(0x1F0, dest, 256);
+        dest = dest + 512;
+        remaining = remaining - 1;
+    }
+    return 1;
+}
+
 // Spin until BSY clears, then return CF=1 (= return 0) if ERR is
 // set, CF=0 (= return 1) if DRQ is set.  cc.py's carry_return
 // convention inverts the natural error reading: a `return 1` becomes
