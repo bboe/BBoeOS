@@ -53,12 +53,13 @@ Two paths set the kernel global `pending_sigint` (a single byte in kernel BSS):
 
 ### Delivery
 
-Every interrupt and syscall return path passes through the `SIGINT_TAIL_CHECK` macro (defined in `src/arch/x86/sigint.asm`, inlined into the IRET epilogues in `idt.asm` and the INT 30h handler in `entry.asm`). The macro:
+Every interrupt and syscall return path passes through the `SIGINT_TAIL_CHECK` macro (defined in `src/include/irq_tail.inc`, inlined into the IRQ 0/5/6 handlers in `src/arch/x86/entry.asm`, the IRQ 1 handler `ps2_irq1_handler` in `src/drivers/ps2.c`, the IRQ 6 handler `fdc_irq6_handler` in `src/drivers/fdc.c`, and the INT 30h handler in `src/arch/x86/syscall.asm`). The macro:
 
-1. Tests `pending_sigint`; if clear, falls through to the normal IRET.
-2. Clears `pending_sigint`.
-3. Checks the IRET frame's CS: if `RPL != 3` the signal is suppressed (the kernel itself does not receive SIGINT — only user programs do).
-4. Dispatches according to the registered handler (`signal_handler` in entry.asm BSS, one dword per program, reset to `SIG_DFL` on each `shell_reload`).
+1. Checks the IRET frame's CS: if `RPL != 3` the signal is suppressed (the kernel itself does not receive SIGINT — only user programs do).
+2. Tests `pending_sigint`; if clear, falls through to popad + IRET.
+3. Tests `in_sigint_handler`; if set, falls through to popad + IRET (block re-entry until SYS_SYS_SIGRETURN clears the flag).
+4. Reads `sigint_handler` (entry.asm BSS, one dword per program, reset to `SIG_DFL` on each `shell_reload`).
+5. Branches: SIG_DFL → `signal_dispatch_kill` (does NOT clear `pending_sigint` — the program is dying anyway); SIG_IGN → clear `pending_sigint`, fall through; user-virt → `signal_dispatch_user` (which clears `pending_sigint` itself).
 
 ### Dispatch modes
 
@@ -68,18 +69,18 @@ Every interrupt and syscall return path passes through the `SIGINT_TAIL_CHECK` m
 
 ### Handler resume via vDSO trampoline
 
-The vDSO page (mapped read-only at user-virt `0x10000`) contains a two-instruction trampoline `__kernel_sigreturn` at offset `0x450` (user-virt `0x10450`):
+The vDSO page (mapped read-only at user-virt `0x10000`) contains a two-instruction trampoline `__kernel_sigreturn` at user-virt `0x10450` (`FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET`):
 
 ```nasm
 mov ah, SYS_SYS_SIGRETURN   ; AH = F6h
 int 30h
 ```
 
-`signal_dispatch_user` pushes the trampoline address as the return address on the user stack so the handler executes a plain `ret` to reach it. `sys_sigreturn` (INT 30h AH=F6h) then:
+`signal_dispatch_user` writes the trampoline address as the first dword of the on-stack sigcontext so the handler executes a plain `ret` to reach it. After the trampoline pops that return address, the user ESP points one dword into the sigcontext (so saved_eip lives at `[user_esp + 4]`, saved_eflags at `[user_esp + 8]`, saved_esp at `[user_esp + 12]`, etc.). `sys_sigreturn` (INT 30h AH=F6h) then:
 
-1. Validates that `[user_esp + 4]` (the saved sigcontext pointer) is within the user address space.
-2. Restores EIP, EFLAGS (with `IF` forced to 1 and `IOPL` forced to 0), ESP, and the general-purpose registers from the sigcontext.
-3. Issues an `iretd` directly into the restored context, never returning through the normal syscall epilogue.
+1. Validates that the sigcontext's saved_eip and saved_esp are both within the user address space (`PROGRAM_BASE..KERNEL_VIRT_BASE`); failure routes to `signal_dispatch_kill`.
+2. Restores EIP, ESP, and a sanitized subset of EFLAGS (arithmetic flags + DF + TF; IF forced on, IOPL/VM/NT/RF cleared per `USER_EFLAGS_MASK` in `src/include/constants.asm`), plus the general-purpose registers from the sigcontext.
+3. Clears `in_sigint_handler` and (if a SIGINT arrived during the handler) re-dispatches it before the final `iretd` so back-to-back Ctrl+Cs are not lost.
 
 ### Cooperative interruption of blocking syscalls
 
