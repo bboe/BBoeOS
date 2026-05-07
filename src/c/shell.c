@@ -75,6 +75,15 @@ int try_exec(char *name) {
 }
 
 int main() {
+    /* Ignore SIGINT — the shell prefers to keep its line editor alive when
+       the user types Ctrl+C at the prompt.  Cooked 0x03 still arrives in
+       the byte stream so the line editor can choose to display ^C and
+       reset its input buffer; without SIG_IGN, the kernel-side default is
+       to kill the program (which here would mean reloading the shell). */
+    asm("mov ebx, SIGINT\n"
+        "mov ecx, SIG_IGN\n"
+        "mov ah, SYS_SYS_SIGNAL\n"
+        "int 30h\n");
     char *buf = BUFFER;
     /* exec_path assembles "bin/<name>" for the fallback lookup.  ARGV
        (32 bytes) is unused by the shell since main() takes no args. */
