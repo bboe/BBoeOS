@@ -301,15 +301,21 @@ def _build_qemu_args(
     snapshot: bool,
     with_net: bool,
 ) -> list[str]:
-    """Compose the ``qemu-system-i386`` argv from a session's parameters."""
+    """Compose the ``qemu-system-i386`` argv from a session's parameters.
+
+    Honors ``BBOE_QEMU_BINARY`` if set, so a custom QEMU build (e.g. one
+    with the SB16 OPL3 patch) can be plugged in without touching code.
+    Defaults to whatever ``qemu-system-i386`` resolves to on $PATH.
+    """
     drive_spec = f"file={drive},format=raw"
     if floppy:
         drive_spec += ",if=floppy"
     if snapshot:
         drive_spec += ",snapshot=on"
     monitor_arg = f"unix:{monitor_path},server,nowait" if monitor_path is not None else "none"
+    qemu_binary = os.environ.get("BBOE_QEMU_BINARY") or "qemu-system-i386"
     qemu_args = [
-        "qemu-system-i386",
+        qemu_binary,
         "-chardev",
         f"pipe,id=s,path={serial_base}",
         "-display",
