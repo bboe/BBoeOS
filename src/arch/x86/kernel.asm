@@ -399,6 +399,7 @@ high_entry:
 %include "drivers/console.kasm"
 %include "drivers/fdc.kasm"
 %include "drivers/ne2k.kasm"
+%include "drivers/opl3.kasm"
 %include "drivers/ps2.kasm"
 %include "drivers/rtc.kasm"
 %include "drivers/sb16.kasm"

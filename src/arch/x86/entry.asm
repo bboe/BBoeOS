@@ -59,16 +59,17 @@
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 pmode_irq0_handler:
-        ;; PIT tick.  Increment `system_ticks` (dword in rtc.asm's
-        ;; data region, reachable via flat DS), EOI the master PIC,
-        ;; iretd.  Interrupt gate entry leaves IF=0 for the body, so
-        ;; the `inc dword [mem]` is safe against reentrancy; on a
-        ;; single CPU we don't need the LOCK prefix.
-        push eax
+        ;; PIT tick.  Increment system_ticks, drain due midi events,
+        ;; EOI the master PIC, iretd.  Interrupt gate entry leaves IF=0
+        ;; for the body; on a single CPU we don't need LOCK on the inc.
+        ;; midi_drain_due is bounded to MIDI_DRAIN_PER_TICK iterations
+        ;; so the ISR latency stays O(1).
+        pushad
         inc dword [system_ticks]
+        call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        pop eax
+        popad
         iretd
 
 pmode_irq5_handler:

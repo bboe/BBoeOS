@@ -188,6 +188,7 @@ asm("sb16_init:\n"
     "        add eax, DIRECT_MAP_BASE\n"
     "        mov [_g_audio_ring_kvirt], eax\n"
     "        mov byte [_g_sb16_present], 1\n"
+    "        mov byte [_g_opl3_present], 1\n"
     "        ret\n"
     ".sb16_init_free_dma:\n"
     "        mov eax, [_g_audio_buffer_phys]\n"
@@ -196,6 +197,7 @@ asm("sb16_init:\n"
     "        mov dword [_g_audio_buffer_kvirt], 0\n"
     ".sb16_init_no_card:\n"
     "        mov byte [_g_sb16_present], 0\n"
+    "        mov byte [_g_opl3_present], 0\n"
     "        ret\n");
 
 // sb16_open: per-/dev/audio-open setup.  Zero the ring and both DMA
