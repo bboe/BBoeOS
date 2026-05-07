@@ -625,3 +625,16 @@ shared_write_stdout:
         align 2
 print_datetime_month_lengths:
         dw 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+
+;;; -----------------------------------------------------------------------
+;;; sigreturn trampoline — fixed at VDSO_VIRT + VDSO_SIGRETURN_OFFSET.
+;;; signal_dispatch_user sets IRET return-address to this address so that
+;;; when the user-mode signal handler returns, execution falls here and
+;;; SYS_SYS_SIGRETURN restores the interrupted context.
+;;; -----------------------------------------------------------------------
+
+        times (VDSO_SIGRETURN_OFFSET - ($ - $$)) db 0
+__kernel_sigreturn:
+        mov eax, SYS_SYS_SIGRETURN              ; 0xF6
+        int 0x30
+        ;; never returns
