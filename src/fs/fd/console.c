@@ -114,11 +114,19 @@ void put_character(char byte __attribute__((in_register("ax"))))
 // user buffer pointer here before jumping to this handler.
 extern uint8_t *fd_write_buffer;
 
-// Read one byte from PS/2 ring or COM1 into *destination.  Always
-// returns CF clear; AX = 1 on success, 0 if max_bytes was 0.  Polls
-// continuously — the syscall handler entered with IF=0 (the INT 30h
-// gate clears it) so we sti once before the polling loop to let
-// IRQ 1 fire and the keyboard ring populate.
+// drivers/ps2.c — set to 1 when a SIGINT is pending delivery.  The
+// equ alias (_g_pending_sigint equ pending_sigint) is published by
+// ps2.c; only the C extern is needed here to avoid a duplicate
+// definition.
+extern uint8_t pending_sigint;
+
+// Read one byte from PS/2 ring or COM1 into *destination.  Returns CF
+// clear (return 1) with AX = 1 on success, or CF clear (return 1) with
+// AX = 0 if max_bytes was 0.  Returns CF set (return 0) with AX =
+// 0x08 (ERROR_INTERRUPTED) if pending_sigint is detected before a byte
+// arrives.  Polls continuously — the syscall handler entered with IF=0
+// (the INT 30h gate clears it) so we sti once before the polling loop
+// to let IRQ 1 fire and the keyboard ring populate.
 __attribute__((carry_return))
 int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                     uint8_t *destination __attribute__((in_register("edi"))),
@@ -130,12 +138,26 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
     }
     asm("sti");
     while (1) {
+        if (pending_sigint != 0) {
+            // Cooperative interrupt: bail out so the syscall epilogue's
+            // SIGINT_TAIL_CHECK delivers the signal on iret.
+            // ERROR_INTERRUPTED = 0x08 (constants.asm).
+            *bytes_read = 0x08;
+            return 0;
+        }
         byte = ps2_getc();
         if (byte != '\0') {
             break;
         }
         if ((kernel_inb(0x3FD) & 0x01) != 0) {
             byte = kernel_inb(0x3F8);
+            if (byte == '\x03') {
+                // Serial Ctrl+C — set the flag so the next IRQ epilogue
+                // (or this same syscall's epilogue, after we return)
+                // delivers.  The byte is also returned in the buffer
+                // so SIG_IGN'd programs see it as normal input.
+                pending_sigint = 1;
+            }
             break;
         }
     }
