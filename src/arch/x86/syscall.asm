@@ -696,14 +696,14 @@ syscall_handler:
         stc
         jmp .iret_cf
 
-        ;; SYS_SYS_SIGRETURN: restore from sigcontext on user stack.
-        ;; Phase 4 (Task 12) fills this in.  Until then, treat as no-op
-        ;; failure: any caller invoking it without a real signal frame
-        ;; on the stack is buggy.
+        ;; SYS_SYS_SIGRETURN: restore the interrupted register state
+        ;; from a sigcontext on the user stack and iretd back to user
+        ;; code.  signal_resume_after_handler owns the popad and iretd
+        ;; — it never returns through .iret_cf — so this entry is a
+        ;; bare jmp.  See signal.c for the full sigcontext layout and
+        ;; offset arithmetic.
         .sys_sigreturn:
-        mov al, ERROR_INVALID
-        stc
-        jmp .iret_cf
+        jmp signal_resume_after_handler
 
 ;;; ------------------------------------------------------------
 ;;; Per-program break state, reset on every program load by

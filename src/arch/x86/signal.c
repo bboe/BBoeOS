@@ -1,14 +1,25 @@
-// signal.c — SIGINT dispatch primitives.  Two entry points:
-//   signal_dispatch_kill  — reset to a known kernel ESP, tear down the
-//                           dying program's PD, jump to shell_reload.
-//                           Reused by the SIG_DFL path and by handler-
-//                           validation failures in SYS_SYS_SIGRETURN.
-//   signal_dispatch_user  — capture interrupted register state into a
-//                           sigcontext on the user stack, rewrite the
-//                           CPU iret frame to enter the registered
-//                           ring-3 handler, and iretd.  Reached from
-//                           the SIGINT_TAIL_CHECK macro with pushad
-//                           slots still on the kernel stack.
+// signal.c — SIGINT dispatch primitives.  Three entry points:
+//   signal_dispatch_kill          — reset to a known kernel ESP, tear
+//                                   down the dying program's PD, jump
+//                                   to shell_reload.  Reused by the
+//                                   SIG_DFL path and by handler-
+//                                   validation failures in
+//                                   SYS_SYS_SIGRETURN.
+//   signal_dispatch_user          — capture interrupted register state
+//                                   into a sigcontext on the user
+//                                   stack, rewrite the CPU iret frame
+//                                   to enter the registered ring-3
+//                                   handler, and iretd.  Reached from
+//                                   the SIGINT_TAIL_CHECK macro with
+//                                   pushad slots still on the kernel
+//                                   stack.
+//   signal_resume_after_handler   — restore the interrupted register
+//                                   state from a sigcontext on the
+//                                   user stack, then iretd back to the
+//                                   pre-signal user code.  Reached
+//                                   from .sys_sigreturn (SYS_SYS_-
+//                                   SIGRETURN) via the vDSO trampoline
+//                                   that the user handler returns to.
 //
 // signal_dispatch_kill never returns.  It is reachable only from kernel
 // context (IRQ epilogue or syscall epilogue), so it can clobber every
@@ -39,6 +50,7 @@ void put_character(char byte);
 
 void signal_dispatch_kill();
 void signal_dispatch_user();
+void signal_resume_after_handler();
 
 asm("signal_dispatch_kill:\n"
     "        mov esp, kernel_stack_top\n"
@@ -122,4 +134,95 @@ asm("signal_dispatch_user:\n"
     "        mov byte [in_sigint_handler], 1\n"
     "        mov byte [pending_sigint], 0\n"
     "        add esp, 32\n"                         // drop pushad slots
+    "        iretd\n");
+
+// signal_resume_after_handler — service SYS_SYS_SIGRETURN.  Restore the
+// interrupted register state (saved by signal_dispatch_user into a
+// sigcontext on the user stack) into the syscall-entry kernel frame, so
+// the syscall epilogue's popad + iretd resumes user code at the point
+// the SIGINT preempted it.
+//
+// Reach path: signal_dispatch_user iretds into the user handler with
+// ESP pointing at sigcontext base.  The handler runs as a plain C-style
+// function and ends with `ret`, which pops the first dword (the
+// trampoline address at sigcontext+0) into EIP and lands the CPU at the
+// vDSO sigreturn trampoline (FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET).
+// The trampoline executes `mov eax, 0xF6 / int 0x30` and we re-enter
+// the kernel through the syscall dispatcher.  Cross-priv iret + pushad
+// produced the standard syscall frame:
+//   [esp +  0..28]  pushad slots EDI..EAX (junk — the trampoline only
+//                   touched EAX)
+//   [esp + 32]      iret EIP   (back into the trampoline; unused)
+//   [esp + 36]      iret CS
+//   [esp + 40]      iret EFLAGS
+//   [esp + 44]      iret ESP   (== sigcontext base + 4, because the
+//                                handler's `ret` popped the trampoline
+//                                address)
+//   [esp + 48]      iret SS
+//
+// Let edi = [esp + 44] = sigcontext_base + 4.  The remaining sigcontext
+// fields (signum at +4, saved_eip at +8, ..., saved_edi at +44) are
+// reachable as [edi + 0], [edi + 4], ..., [edi + 40].
+//
+// We:
+//   1. Validate saved_eip is in user-virt (PROGRAM_BASE..KERNEL_VIRT_BASE).
+//      Fail → signal_dispatch_kill (corrupt sigcontext == bad program).
+//   2. Validate saved_esp is in user-virt (PROGRAM_BASE..=KERNEL_VIRT_BASE,
+//      since USER_STACK_TOP == KERNEL_VIRT_BASE is the legal high bound).
+//   3. Rewrite iret EIP / EFLAGS / ESP from saved_eip / saved_eflags /
+//      saved_esp.
+//   4. Rewrite the kernel-stack pushad slots from saved_eax .. saved_edi
+//      so the syscall epilogue's popad sees the user's pre-signal regs.
+//   5. Clear in_sigint_handler so SIGINT can deliver again.
+//   6. If pending_sigint was set during the handler, redeliver it now —
+//      either kill (SIG_DFL), drop it (SIG_IGN), or jump straight to
+//      signal_dispatch_user, which reads the just-rewritten [esp + 44]
+//      and builds a fresh sigcontext on the now-restored user stack.
+//   7. popad + iretd to user code at saved_eip.
+//
+// The function never returns to its caller.  .sys_sigreturn jumps here
+// rather than calling — we own the popad and iretd.
+asm("signal_resume_after_handler:\n"
+    "        mov edi, [esp + 44]\n"                 // user ESP = sigcontext_base + 4
+    "        mov eax, [edi + 4]\n"                  // saved_eip
+    "        cmp eax, PROGRAM_BASE\n"
+    "        jb  signal_dispatch_kill\n"
+    "        cmp eax, KERNEL_VIRT_BASE\n"
+    "        jae signal_dispatch_kill\n"
+    "        mov eax, [edi + 12]\n"                 // saved_esp
+    "        cmp eax, PROGRAM_BASE\n"
+    "        jb  signal_dispatch_kill\n"
+    "        cmp eax, KERNEL_VIRT_BASE\n"
+    "        ja  signal_dispatch_kill\n"
+    "        mov eax, [edi + 4]\n"                  // saved_eip
+    "        mov [esp + 32], eax\n"                 // iret EIP
+    "        mov eax, [edi + 8]\n"                  // saved_eflags
+    "        mov [esp + 40], eax\n"                 // iret EFLAGS
+    "        mov eax, [edi + 12]\n"                 // saved_esp
+    "        mov [esp + 44], eax\n"                 // iret ESP
+    "        mov eax, [edi + 16]\n"                 // saved_eax  -> pushad EAX slot
+    "        mov [esp + 28], eax\n"
+    "        mov eax, [edi + 20]\n"                 // saved_ecx
+    "        mov [esp + 24], eax\n"
+    "        mov eax, [edi + 24]\n"                 // saved_edx
+    "        mov [esp + 20], eax\n"
+    "        mov eax, [edi + 28]\n"                 // saved_ebx
+    "        mov [esp + 16], eax\n"
+    "        mov eax, [edi + 32]\n"                 // saved_ebp
+    "        mov [esp + 8], eax\n"
+    "        mov eax, [edi + 36]\n"                 // saved_esi
+    "        mov [esp + 4], eax\n"
+    "        mov eax, [edi + 40]\n"                 // saved_edi
+    "        mov [esp + 0], eax\n"
+    "        mov byte [in_sigint_handler], 0\n"
+    "        cmp byte [pending_sigint], 0\n"
+    "        je  .signal_resume_no_pending\n"
+    "        mov eax, [sigint_handler]\n"
+    "        cmp eax, SIG_DFL\n"
+    "        je  signal_dispatch_kill\n"
+    "        cmp eax, SIG_IGN\n"
+    "        jne signal_dispatch_user\n"
+    "        mov byte [pending_sigint], 0\n"
+    ".signal_resume_no_pending:\n"
+    "        popad\n"
     "        iretd\n");
