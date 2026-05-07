@@ -11,9 +11,7 @@ assembly on the host.
 
 It also runs Doom:
 
-[![doom on bboeos](docs/gifs/doom.gif)](docs/gifs/doom.webm)
-
-(click the gif for the higher-quality WebM)
+<video src="docs/gifs/doom.mp4" autoplay controls loop muted playsinline width="720"></video>
 
 The Doom port lives in `tools/doom/` and links against a hand-rolled
 freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
