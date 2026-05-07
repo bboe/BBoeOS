@@ -71,7 +71,6 @@ pmode_irq0_handler:
         call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
@@ -104,16 +103,17 @@ pmode_irq5_handler:
         call sb16_refill
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
 pmode_irq6_handler:
-        ;; FDC command complete.  EOI.
-        push eax
+        ;; FDC command complete.  EOI.  pushad/popad (rather than the
+        ;; minimal `push eax / pop eax`) so the SIGINT_TAIL_CHECK macro
+        ;; sees a pushad-shape stack and can capture full register state
+        ;; into a sigcontext if a user handler is registered.
+        pushad
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        pop eax
         SIGINT_TAIL_CHECK
         iretd
 

@@ -134,12 +134,14 @@ asm("fdc_install_irq:\n"
 // IRQ 6 stub — flag that the controller has signalled completion,
 // EOI to the master PIC, iretd.  Installed at FDC_IRQ6_VECTOR
 // (0x26) by fdc_install_irq.  Same shape as ps2_irq1_handler.
+// pushad/popad (rather than the minimal `push eax / pop eax`) so the
+// SIGINT_TAIL_CHECK macro sees a pushad-shape stack and can capture
+// full register state into a sigcontext if a user handler is registered.
 asm("fdc_irq6_handler:\n"
-    "    push eax\n"
+    "    pushad\n"
     "    mov byte [_g_fdc_irq_flag], 1\n"
     "    mov al, 0x20\n"           // PIC_EOI
     "    out 0x20, al\n"           // PIC1_CMD_PORT
-    "    pop eax\n"
     "    SIGINT_TAIL_CHECK\n"
     "    iretd");
 

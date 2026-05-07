@@ -78,7 +78,6 @@ syscall_handler:
         and dword [esp + SYSCALL_SAVED_EFLAGS], ~1
         .iret_cf_write:
         mov [esp + SYSCALL_SAVED_EAX], eax
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
