@@ -411,6 +411,7 @@ high_entry:
 %include "fs/sector_cache.kasm"
 %include "fs/vfs.kasm"
 %include "net/net.asm"
+%include "signal.kasm"
 %include "syscall.asm"
 %include "idt.asm"
 %include "system.kasm"
