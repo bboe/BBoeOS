@@ -417,7 +417,6 @@ ps2_irq1_handler:
         call ps2_handle_scancode
         mov al, 0x20
         out 0x20, al
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
