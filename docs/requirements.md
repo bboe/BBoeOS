@@ -26,6 +26,10 @@ Both ship together in the **`e2fsprogs`** package.
 
 - **`qemu-system-i386`** — the primary target. `qemu-system-x86_64 -machine pc` also works.
 
+### Audio caveats
+
+- **OPL music is silent in QEMU.** QEMU 8.x's `sb16` device emulates only the DSP for PCM playback; writes to the chip's OPL register ports (`0x388` / `0x38A`) are accepted but no FM audio is synthesized. To hear Doom's music, run on real SB16 hardware (or an emulator that includes OPL FM synthesis, e.g. DOSBox via passthrough). Doom's SFX (PCM through `/dev/audio`) is unaffected and works in QEMU.
+
 ## Tests
 
 All test runners are bare-Python QEMU drivers; they need every build dependency above plus `qemu-system-i386`.

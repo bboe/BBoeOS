@@ -6,7 +6,11 @@
  * module opens /dev/audio at init, mixes Doom's voices through the
  * 8-channel software mixer in audio_mixer.c, and writes one tick's
  * worth of mixed PCM (~315 samples at 11025 Hz / 35 Hz) per Update
- * call.  Music is stubbed.
+ * call.  Music is delegated to chocolate-doom's i_oplmusic.c via the
+ * upstream music_opl_module struct (its I_OPL_* functions are static,
+ * so the only legal entry point is through the function-pointer
+ * table).  The Poll slot is the BBoeOS-specific opl_bboeos_poll
+ * extension (upstream's engine is callback-driven and has no Poll).
  *
  * Function definitions are in alphabetical order (see CLAUDE.md);
  * the two module-struct definitions sit at the bottom because they
@@ -93,52 +97,72 @@ static boolean BBoe_Init(boolean use_sfx_prefix) {
     return true;
 }
 
-/* Music: stubbed.  doomgeneric's InitMusicModule unconditionally
- * assigns music_module = &DG_music_module under -DFEATURE_SOUND, and
- * the I_*Music* dispatchers in i_sound.c then call music_module->X
- * WITHOUT NULL-checking individual function pointers.  So we have to
- * supply a real (no-op) function for every slot or Doom will crash
- * the first time it tries to play a song. */
+/* Music: delegated to chocolate-doom's music_opl_module (i_oplmusic.c).
+ * The upstream I_OPL_* functions are file-static; the only public
+ * entry point is the music_opl_module function-pointer table.
+ *
+ * Chocolate 3.1.0's i_oplmusic.c defines that table as
+ * `const music_module_t music_opl_module`, while doomgeneric's older
+ * i_sound.h has a non-const `extern music_module_t music_opl_module;`.
+ * We accept the doomgeneric extern here — the cv-qualifier mismatch is
+ * invisible at link time on this i386 target — and let the chocolate
+ * TU dodge the colliding extern via tools/doom/chocolate_compat.h
+ * (the shim pre-includes i_sound.h with the symbol renamed to a
+ * sacrificial name so chocolate's definition wins).
+ *
+ * BBoe_MusicPoll calls opl_bboeos_poll() — the BBoeOS extension in
+ * opl_bboeos.c — instead of an upstream slot because chocolate-doom's
+ * engine is callback-driven and does not export a poll function. */
+extern void opl_bboeos_poll(void);
+
 static boolean BBoe_MusicInit(void) {
-    return true;        /* claim success so I_InitMusic doesn't error */
+    boolean ok = music_opl_module.Init();
+    if (ok) {
+        printf("[bboeos doom] OPL music enabled\n");
+    } else {
+        printf("[bboeos doom] OPL music unavailable\n");
+    }
+    return ok;
 }
 
 static boolean BBoe_MusicIsPlaying(void) {
-    return false;
+    return music_opl_module.MusicIsPlaying();
 }
 
 static void BBoe_MusicPause(void) {
+    music_opl_module.PauseMusic();
 }
 
 static void BBoe_MusicPlaySong(void *handle, boolean looping) {
-    (void)handle;
-    (void)looping;
+    music_opl_module.PlaySong(handle, looping);
 }
 
 static void BBoe_MusicPoll(void) {
+    opl_bboeos_poll();
 }
 
 static void *BBoe_MusicRegisterSong(void *data, int len) {
-    (void)data;
-    (void)len;
-    return NULL;
+    return music_opl_module.RegisterSong(data, len);
 }
 
 static void BBoe_MusicResume(void) {
+    music_opl_module.ResumeMusic();
 }
 
 static void BBoe_MusicSetVolume(int volume) {
-    (void)volume;
+    music_opl_module.SetMusicVolume(volume);
 }
 
 static void BBoe_MusicShutdown(void) {
+    music_opl_module.Shutdown();
 }
 
 static void BBoe_MusicStopSong(void) {
+    music_opl_module.StopSong();
 }
 
 static void BBoe_MusicUnRegisterSong(void *handle) {
-    (void)handle;
+    music_opl_module.UnRegisterSong(handle);
 }
 
 static void BBoe_Shutdown(void) {
