@@ -167,6 +167,19 @@
         %assign SIG_DFL 0
         %assign SIG_IGN 1
 
+        ;; EFLAGS sanitization for SYS_SYS_SIGRETURN.  The saved EFLAGS
+        ;; in a sigcontext lives on the user stack and is fully under
+        ;; user control, so a malicious handler could otherwise return
+        ;; through the trampoline with IOPL=3 (ring-3 in/out) or VM=1
+        ;; (Virtual-8086 entry), etc.  We whitelist only the user-
+        ;; arithmetic flags + TF + DF + OF (forced IF separately) and
+        ;; discard IOPL (bits 12-13), NT (14), RF (16), VM (17), AC
+        ;; (18), VIF/VIP/ID (19-21).  Mirrors Linux's restore_sigcontext
+        ;; FIX_EFLAGS rationale.  Kept bits: CF=0, PF=2, AF=4, ZF=6,
+        ;; SF=7, TF=8, DF=10, OF=11 → 0xDD5.
+        %assign USER_EFLAGS_MASK 0xDD5
+        %assign EFLAGS_IF_BIT    0x200      ; IF (bit 9) — forced on after sanitize
+
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults

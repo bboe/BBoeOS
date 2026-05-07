@@ -197,6 +197,14 @@ asm("signal_resume_after_handler:\n"
     "        mov eax, [edi + 4]\n"                  // saved_eip
     "        mov [esp + 32], eax\n"                 // iret EIP
     "        mov eax, [edi + 8]\n"                  // saved_eflags
+    // Sanitize before reloading into the iret frame: the user controls
+    // every bit of saved_eflags via the on-stack sigcontext, so without
+    // masking a handler could return with IOPL=3 (ring-3 in/out) or
+    // VM=1 (Virtual-8086 entry) — privilege escalation.  Keep only
+    // CF/PF/AF/ZF/SF/TF/DF/OF; force IF=1 so user code stays
+    // interruptible.
+    "        and eax, USER_EFLAGS_MASK\n"
+    "        or  eax, EFLAGS_IF_BIT\n"
     "        mov [esp + 40], eax\n"                 // iret EFLAGS
     "        mov eax, [edi + 12]\n"                 // saved_esp
     "        mov [esp + 44], eax\n"                 // iret ESP
