@@ -14,6 +14,7 @@
         %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT     07h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
         %assign ERROR_INTERRUPTED 08h     ; Cooperative-interrupt return (SIGINT) — maps to EINTR in libc
+        %assign ERROR_INVALID     09h     ; Invalid argument (bad signum, out-of-range handler address, etc.)
         %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
         %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND 04h     ; File not found

@@ -29,7 +29,7 @@
 ;;;   [esp+32]  eip / [esp+36] cs / [esp+40] eflags  (CPU iretd frame)
 ;;; ------------------------------------------------------------------------
 
-        SYSCALL_COUNT           equ SYS_SYS_SHUTDOWN + 1        ; one past the highest SYS_* — bound for the dispatcher range check
+        SYSCALL_COUNT           equ SYS_SYS_SIGRETURN + 1       ; one past the highest SYS_* — bound for the dispatcher range check
         SYSCALL_SAVED_EAX       equ 28
         SYSCALL_SAVED_EDX       equ 20
         SYSCALL_SAVED_EFLAGS    equ 40
@@ -119,6 +119,8 @@ syscall_handler:
         SYS_ENTRY SYS_SYS_EXIT,      .sys_exit
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
         SYS_ENTRY SYS_SYS_SHUTDOWN,  .sys_shutdown
+        SYS_ENTRY SYS_SYS_SIGNAL,    .sys_signal
+        SYS_ENTRY SYS_SYS_SIGRETURN, .sys_sigreturn
 
         ;; Per-case handler bodies follow.  All but the four net_*
         ;; handlers are inlined here — each one is just a `call
@@ -664,6 +666,43 @@ syscall_handler:
         ;; Returns only if the host ignores the shutdown port — surface
         ;; CF=1 so userspace can fall back.
         call shutdown
+        stc
+        jmp .iret_cf
+
+        ;; SYS_SYS_SIGNAL: register a signal handler.
+        ;; In:  EBX = signum (must be SIGINT)
+        ;;      ECX = handler — SIG_DFL (0), SIG_IGN (1), or user-virt
+        ;;            address (PROGRAM_BASE <= ECX < KERNEL_VIRT_BASE).
+        ;; Out: EAX = previous handler value, CF clear on success.
+        ;;      CF set + AL = ERROR_INVALID on bad signum or out-of-range
+        ;;      handler address.
+        ;; The previous handler is returned so callers can restore the
+        ;; prior state on cleanup, mirroring POSIX signal().
+        .sys_signal:
+        cmp ebx, SIGINT
+        jne .sys_signal_bad
+        cmp ecx, SIG_IGN
+        jbe .sys_signal_ok              ; ECX in {0, 1}
+        cmp ecx, PROGRAM_BASE
+        jb  .sys_signal_bad
+        cmp ecx, KERNEL_VIRT_BASE
+        jae .sys_signal_bad
+        .sys_signal_ok:
+        mov eax, [sigint_handler]       ; previous handler -> EAX
+        mov [sigint_handler], ecx
+        clc
+        jmp .iret_cf_eax               ; full EAX preserved, CF=0
+        .sys_signal_bad:
+        mov al, ERROR_INVALID
+        stc
+        jmp .iret_cf
+
+        ;; SYS_SYS_SIGRETURN: restore from sigcontext on user stack.
+        ;; Phase 4 (Task 12) fills this in.  Until then, treat as no-op
+        ;; failure: any caller invoking it without a real signal frame
+        ;; on the stack is buggy.
+        .sys_sigreturn:
+        mov al, ERROR_INVALID
         stc
         jmp .iret_cf
 
