@@ -418,6 +418,7 @@ ps2_irq1_handler:
         mov al, 0x20
         out 0x20, al
         popad
+        SIGINT_TAIL_CHECK
         iretd
 
 ps2_broadcast_event:

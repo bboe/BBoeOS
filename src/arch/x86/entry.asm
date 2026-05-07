@@ -58,33 +58,7 @@
         STACK_VIRT_END          equ USER_STACK_TOP                      ; one past last page; user/kernel boundary (= KERNEL_VIRT_BASE)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
-;; SIGINT dispatch tail — invoke from IRQ / syscall handler before iretd.
-;; Stack at invocation: popad has already executed, so [esp] is the iret
-;; EIP and [esp + 4] is the iret CS.  Skips dispatch when:
-;;   - interrupted CS is not user code (we'd kill kernel context),
-;;   - pending_sigint is clear (nothing to do),
-;;   - in_sigint_handler is set (already inside a handler — block re-entry
-;;     until SYS_SYS_SIGRETURN clears the flag).
-;; On dispatch:
-;;   SIG_DFL  → signal_dispatch_kill (never returns)
-;;   SIG_IGN  → clear pending_sigint, fall through to iretd
-;;   user-virt→ Task 11 will route to signal_dispatch_user; for now
-;;              treat as SIG_DFL (kill).
-%macro SIGINT_TAIL_CHECK 0
-        cmp word [esp + 4], USER_CODE_SELECTOR
-        jne %%no_dispatch
-        cmp byte [pending_sigint], 0
-        je  %%no_dispatch
-        cmp byte [in_sigint_handler], 0
-        jne %%no_dispatch
-        mov eax, [sigint_handler]
-        cmp eax, SIG_DFL
-        je  signal_dispatch_kill
-        cmp eax, SIG_IGN
-        jne signal_dispatch_kill        ; user-handler dispatch arrives in Task 11; kill for now
-        mov byte [pending_sigint], 0
-%%no_dispatch:
-%endmacro
+%include "irq_tail.inc"
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment system_ticks, drain due midi events,
