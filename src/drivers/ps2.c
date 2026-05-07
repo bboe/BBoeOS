@@ -104,6 +104,13 @@
 #define BBKEY_SLASH         63
 #define BBKEY_KP_STAR       64
 
+// pending_sigint is defined as a NASM label (db 0) in entry.asm.
+// cc.py mangles global accesses to the _g_ prefix; the equ below
+// makes _g_pending_sigint resolve to the entry.asm label so that
+// plain C assignments compile and link correctly.
+extern uint8_t pending_sigint;
+asm("_g_pending_sigint equ pending_sigint");
+
 // Ring buffer: single-producer (IRQ context, IF=0) /
 // single-consumer (main loop) so head and tail don't need atomics.
 // Cooked ASCII path (drained by fd_read_console / TRY_GETC); event
@@ -345,6 +352,9 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
             if (upper >= 'A' && upper <= 'Z') {
                 ascii = upper - ('A' - 1);
             }
+        }
+        if (ascii == '\x03') {
+            pending_sigint = 1;
         }
         if (ascii != '\0') {
             ps2_putc(ascii);
