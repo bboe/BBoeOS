@@ -15,6 +15,7 @@
  *   05h ERROR_PROTECTED       -> EACCES
  *   06h ERROR_NOT_EMPTY       -> ENOTEMPTY (mapped to EACCES; not in our errno.h)
  *   07h ERROR_FAULT           -> EFAULT
+ *   08h ERROR_INTERRUPTED     -> EINTR
  */
 static unsigned int _current_break = 0;
 
@@ -27,6 +28,7 @@ static int _errno_from_al(int al) {
         case 0x05: return EACCES;       /* ERROR_PROTECTED */
         case 0x06: return EACCES;       /* ERROR_NOT_EMPTY (no ENOTEMPTY in our errno.h) */
         case 0x07: return EFAULT;       /* ERROR_FAULT */
+        case 0x08: return EINTR;        /* ERROR_INTERRUPTED */
         default:   return EIO;
     }
 }
