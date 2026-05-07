@@ -635,6 +635,6 @@ print_datetime_month_lengths:
 
         times (VDSO_SIGRETURN_OFFSET - ($ - $$)) db 0
 __kernel_sigreturn:
-        mov eax, SYS_SYS_SIGRETURN              ; 0xF6
+        mov ah, SYS_SYS_SIGRETURN               ; 0xF6 in AH — dispatcher reads AH
         int 0x30
         ;; never returns
