@@ -365,6 +365,12 @@ program_enter:
         mov [current_program_break],     eax
         mov [current_program_break_min], eax
 
+        ;; Reset SIGINT state — every new program starts in SIG_DFL with
+        ;; no pending signal and no handler frame on its stack.
+        mov dword [sigint_handler],  SIG_DFL
+        mov byte  [pending_sigint],    0
+        mov byte  [in_sigint_handler], 0
+
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
         ;; by Phase 1; loop until user_image_end.
@@ -740,6 +746,16 @@ last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trai
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+
+        ;; SIGINT delivery state.  One global slot suffices because only one
+        ;; user program runs at a time — program_enter zeroes the lot on every
+        ;; load so it behaves as if it were per-program.  sigint_handler is a
+        ;; user-virt address (or SIG_DFL=0 / SIG_IGN=1); the address is only
+        ;; valid in the active PD, hence the zero-on-transition rule.
+sigint_handler        dd 0
+pending_sigint        db 0
+in_sigint_handler     db 0
+        align 4
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via
