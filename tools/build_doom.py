@@ -51,6 +51,14 @@ EXCLUDED_AUDIO_BACKENDS = frozenset({
     "i_sdlmusic",
     "i_sdlsound",
 })
+EXCLUDED_WAD_BACKENDS = frozenset({
+    # tools/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
+    # slurps the WAD into a malloc'd buffer and exposes it through
+    # wad_file_t::mapped, so W_CacheLumpNum bypasses fread entirely.
+    # Drop doomgeneric's stock W_StdC_* implementations to avoid a
+    # duplicate-symbol clash with our backend at link time.
+    "w_file_stdc",
+})
 
 CFLAGS = (
     "--target=i386-pc-none-elf",
@@ -130,7 +138,7 @@ def _doomgeneric_sources() -> list[Path]:
     Excludes platform backends (we provide our own) and audio backends
     (no kernel audio yet).
     """
-    excluded = EXCLUDED_PLATFORM_BACKENDS | EXCLUDED_AUDIO_BACKENDS
+    excluded = EXCLUDED_PLATFORM_BACKENDS | EXCLUDED_AUDIO_BACKENDS | EXCLUDED_WAD_BACKENDS
     return sorted(source for source in THIRD_PARTY.glob("*.c") if source.stem not in excluded)
 
 
@@ -229,9 +237,15 @@ def main() -> None:
     # 8-voice mixer and the sound_module_t adapter that opens
     # /dev/audio (referenced by doomgeneric/i_sound.c when built with
     # -DFEATURE_SOUND, set in CFLAGS above).
+    # bboeos_wad_file.c provides a `stdc_wad_file` symbol — the default
+    # backend doomgeneric falls through to without `-mmap` — that
+    # slurps the entire WAD into a malloc'd buffer at OpenFile time.
+    # tools/build_doom.py's EXCLUDED_WAD_BACKENDS drops doomgeneric's
+    # stock W_StdC_* so this one wins at link time.
     objects.extend([
         _compile_one(source=DOOM_DIR / "bboeos_doomgeneric.c"),
         _compile_one(source=DOOM_DIR / "audio_mixer.c"),
+        _compile_one(source=DOOM_DIR / "bboeos_wad_file.c"),
         _compile_one(source=DOOM_DIR / "i_sound_bboeos.c"),
     ])
 
