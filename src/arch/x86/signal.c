@@ -35,6 +35,14 @@ asm("signal_dispatch_kill:\n"
     "        mov eax, [_g_current_pd_phys]\n"
     "        test eax, eax\n"
     "        jz .signal_dispatch_kill_no_pd\n"
+    // Switch CR3 to kernel_idle_pd before address_space_destroy frees
+    // the dying PD's frame; mirrors .sys_exit (syscall.asm).  Without
+    // this, CR3 is left dangling at a freed-then-reallocated frame and
+    // the next kernel-virt access through it page-faults (EXC0E).
+    "        push eax\n"
+    "        mov eax, [kernel_idle_pd_phys]\n"
+    "        mov cr3, eax\n"
+    "        pop eax\n"
     "        push eax\n"
     "        call address_space_destroy\n"
     "        add esp, 4\n"
