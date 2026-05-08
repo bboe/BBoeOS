@@ -8,6 +8,7 @@ extern int errno;
  * syscall.c translate ERROR_* to the matching E* constant here. */
 #define EPERM    1
 #define ENOENT   2
+#define EINTR    4
 #define EIO      5
 #define EBADF    9
 #define ENOMEM  12

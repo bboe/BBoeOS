@@ -7,14 +7,15 @@
  * arg registers per docs/syscalls.md, CF=1 on error with AL holding
  * an ERROR_* code.  Wrappers translate ERROR_* -> errno.
  *
- * ERROR_* values come from src/include/constants.asm:
+ * ERROR_* values come from src/include/constants.asm (alphabetical-by-name):
  *   01h ERROR_DIRECTORY_FULL  -> ENOSPC
  *   02h ERROR_EXISTS          -> EEXIST
- *   03h ERROR_NOT_EXECUTE     -> EACCES
- *   04h ERROR_NOT_FOUND       -> ENOENT
- *   05h ERROR_PROTECTED       -> EACCES
- *   06h ERROR_NOT_EMPTY       -> ENOTEMPTY (mapped to EACCES; not in our errno.h)
- *   07h ERROR_FAULT           -> EFAULT
+ *   03h ERROR_FAULT           -> EFAULT
+ *   04h ERROR_INTERRUPTED     -> EINTR
+ *   05h ERROR_NOT_EMPTY       -> ENOTEMPTY (mapped to EACCES; not in our errno.h)
+ *   06h ERROR_NOT_EXECUTE     -> EACCES
+ *   07h ERROR_NOT_FOUND       -> ENOENT
+ *   08h ERROR_PROTECTED       -> EACCES
  */
 static unsigned int _current_break = 0;
 
@@ -22,11 +23,12 @@ static int _errno_from_al(int al) {
     switch (al) {
         case 0x01: return ENOSPC;       /* ERROR_DIRECTORY_FULL */
         case 0x02: return EEXIST;       /* ERROR_EXISTS */
-        case 0x03: return EACCES;       /* ERROR_NOT_EXECUTE */
-        case 0x04: return ENOENT;       /* ERROR_NOT_FOUND */
-        case 0x05: return EACCES;       /* ERROR_PROTECTED */
-        case 0x06: return EACCES;       /* ERROR_NOT_EMPTY (no ENOTEMPTY in our errno.h) */
-        case 0x07: return EFAULT;       /* ERROR_FAULT */
+        case 0x03: return EFAULT;       /* ERROR_FAULT */
+        case 0x04: return EINTR;        /* ERROR_INTERRUPTED */
+        case 0x05: return EACCES;       /* ERROR_NOT_EMPTY (no ENOTEMPTY in our errno.h) */
+        case 0x06: return EACCES;       /* ERROR_NOT_EXECUTE */
+        case 0x07: return ENOENT;       /* ERROR_NOT_FOUND */
+        case 0x08: return EACCES;       /* ERROR_PROTECTED */
         default:   return EIO;
     }
 }

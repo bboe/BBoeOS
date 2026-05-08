@@ -140,6 +140,7 @@ asm("fdc_irq6_handler:\n"
     "    mov al, 0x20\n"           // PIC_EOI
     "    out 0x20, al\n"           // PIC1_CMD_PORT
     "    pop eax\n"
+    "    SIGINT_TAIL_CHECK\n"
     "    iretd");
 
 // Issue a READ or WRITE command with the 9-byte parameter sequence.

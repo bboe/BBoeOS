@@ -48,3 +48,19 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 
 Wire format on `/dev/midi` is 6-byte commands: `(delay_lo, delay_hi,
 bank, reg, value, reserved)`.
+
+## Error codes
+
+When a syscall sets CF on return, AL holds one of these codes (symbolic
+names in `src/include/constants.asm`):
+
+| AL  | Name                  | Meaning                                                      |
+|-----|-----------------------|--------------------------------------------------------------|
+| 01h | ERROR_DIRECTORY_FULL  | No free directory entries (copy/create)                      |
+| 02h | ERROR_EXISTS          | Destination name already exists (rename/copy)                |
+| 03h | ERROR_FAULT           | Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH |
+| 04h | ERROR_INTERRUPTED     | Cooperative-interrupt return (SIGINT pending during blocking syscall) — maps to `EINTR` in libc |
+| 05h | ERROR_NOT_EMPTY       | Directory is not empty (rmdir)                               |
+| 06h | ERROR_NOT_EXECUTE     | File exists but is not executable (exec)                     |
+| 07h | ERROR_NOT_FOUND       | File not found                                               |
+| 08h | ERROR_PROTECTED       | File is protected (rename/chmod)                             |
