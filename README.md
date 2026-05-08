@@ -11,7 +11,7 @@ assembly on the host.
 
 It also runs Doom:
 
-<video src="docs/gifs/doom.mp4" autoplay controls loop muted playsinline width="720"></video>
+<video src="https://github.com/user-attachments/assets/5efa60a4-c948-4552-9903-23a4c69a0282" autoplay controls loop muted playsinline width="720"></video>
 
 The Doom port lives in `tools/doom/` and links against a hand-rolled
 freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
