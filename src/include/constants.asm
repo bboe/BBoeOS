@@ -10,13 +10,14 @@
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
         %assign DIRECTORY_SECTORS 3
-        %assign ERROR_DIRECTORY_FULL  01h     ; Copy error: no free directory entries
-        %assign ERROR_EXISTS    02h     ; Rename/copy error: destination name already exists
-        %assign ERROR_FAULT     07h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
-        %assign ERROR_NOT_EMPTY 06h     ; Rmdir error: directory is not empty
-        %assign ERROR_NOT_EXECUTE  03h     ; Exec error: file exists but is not executable
-        %assign ERROR_NOT_FOUND 04h     ; File not found
-        %assign ERROR_PROTECTED 05h     ; Rename/chmod error: file is protected
+        %assign ERROR_DIRECTORY_FULL 01h     ; Copy error: no free directory entries
+        %assign ERROR_EXISTS         02h     ; Rename/copy error: destination name already exists
+        %assign ERROR_FAULT          03h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
+        %assign ERROR_INTERRUPTED    04h     ; Cooperative-interrupt return (SIGINT) — maps to EINTR in libc
+        %assign ERROR_NOT_EMPTY      05h     ; Rmdir error: directory is not empty
+        %assign ERROR_NOT_EXECUTE    06h     ; Exec error: file exists but is not executable
+        %assign ERROR_NOT_FOUND      07h     ; File not found
+        %assign ERROR_PROTECTED      08h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 14FCh          ; 4 bytes (dword pointer under --bits 32); before BUFFER; = USER_DATA_BASE + 0x4FC
         %assign FD_ENTRY_SIZE 64
         ;; Per-fd PS/2 event ring (FD_TYPE_CONSOLE only).  Events are

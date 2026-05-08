@@ -38,6 +38,7 @@
         org 0FF820000h
         bits 32
         %include "constants.asm"
+        %include "irq_tail.inc"
 
         ;; Trampoline + boot stash at the very top of kernel.bin.
         ;; boot.asm's far-jump targets virt 0xC0020000 = the first byte
@@ -411,6 +412,7 @@ high_entry:
 %include "fs/sector_cache.kasm"
 %include "fs/vfs.kasm"
 %include "net/net.asm"
+%include "signal.kasm"
 %include "syscall.asm"
 %include "idt.asm"
 %include "system.kasm"

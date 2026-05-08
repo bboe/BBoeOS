@@ -58,6 +58,8 @@
         STACK_VIRT_END          equ USER_STACK_TOP                      ; one past last page; user/kernel boundary (= KERNEL_VIRT_BASE)
         VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
+%include "irq_tail.inc"
+
 pmode_irq0_handler:
         ;; PIT tick.  Increment system_ticks, drain due midi events,
         ;; EOI the master PIC, iretd.  Interrupt gate entry leaves IF=0
@@ -70,6 +72,7 @@ pmode_irq0_handler:
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
         popad
+        SIGINT_TAIL_CHECK
         iretd
 
 pmode_irq5_handler:
@@ -102,6 +105,7 @@ pmode_irq5_handler:
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
         popad
+        SIGINT_TAIL_CHECK
         iretd
 
 pmode_irq6_handler:
@@ -110,6 +114,7 @@ pmode_irq6_handler:
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
         pop eax
+        SIGINT_TAIL_CHECK
         iretd
 
 ;;; -----------------------------------------------------------------------
@@ -364,6 +369,9 @@ program_enter:
         ;; every program load (boot shell, sys_exec, sys_exit reload).
         mov [current_program_break],     eax
         mov [current_program_break_min], eax
+
+        ;; Reset SIGINT state.
+        mov byte [pending_sigint], 0
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -740,6 +748,13 @@ last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trai
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+
+        ;; SIGINT delivery state.  Set in IRQ context (PS/2 / serial), consumed
+        ;; at the next kernel-to-user iret epilogue by SIGINT_TAIL_CHECK.
+        ;; program_enter zeroes it on every program load so a stale flag from
+        ;; the dying program can't kill its successor.
+pending_sigint  db 0
+align 4
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via
