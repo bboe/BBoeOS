@@ -75,6 +75,15 @@ int main(int argc, char *argv[]) {
     if (argc != 1) {
         die("Usage: edit <filename>\n");
     }
+    /* Ignore SIGINT — Ctrl+C while editing would otherwise SIG_DFL-kill
+       the editor and leave the screen in a half-redrawn state (status
+       bar lingers in the reloaded shell, gap buffer dropped without
+       writeback).  The shell does the same; child programs default to
+       SIG_DFL via program_enter, so this opt-out is per-program. */
+    asm("mov ebx, SIGINT\n"
+        "mov ecx, SIG_IGN\n"
+        "mov ah, SYS_SYS_SIGNAL\n"
+        "int 30h\n");
     char *filename = argv[0];
     gap_end = EDIT_BUFFER_SIZE;
     char sector[512];

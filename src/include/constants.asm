@@ -14,10 +14,11 @@
         %assign ERROR_EXISTS         02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT          03h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
         %assign ERROR_INTERRUPTED    04h     ; Cooperative-interrupt return (SIGINT) — maps to EINTR in libc
-        %assign ERROR_NOT_EMPTY      05h     ; Rmdir error: directory is not empty
-        %assign ERROR_NOT_EXECUTE    06h     ; Exec error: file exists but is not executable
-        %assign ERROR_NOT_FOUND      07h     ; File not found
-        %assign ERROR_PROTECTED      08h     ; Rename/chmod error: file is protected
+        %assign ERROR_INVALID        05h     ; Bad syscall argument (e.g. signal() with bad signum or out-of-range handler)
+        %assign ERROR_NOT_EMPTY      06h     ; Rmdir error: directory is not empty
+        %assign ERROR_NOT_EXECUTE    07h     ; Exec error: file exists but is not executable
+        %assign ERROR_NOT_FOUND      08h     ; File not found
+        %assign ERROR_PROTECTED      09h     ; Rename/chmod error: file is protected
         %assign EXEC_ARG 14FCh          ; 4 bytes (dword pointer under --bits 32); before BUFFER; = USER_DATA_BASE + 0x4FC
         %assign FD_ENTRY_SIZE 64
         ;; Per-fd PS/2 event ring (FD_TYPE_CONSOLE only).  Events are
@@ -155,6 +156,14 @@
         %assign SYS_SYS_EXIT 0F2h
         %assign SYS_SYS_REBOOT 0F3h
         %assign SYS_SYS_SHUTDOWN 0F4h
+        %assign SYS_SYS_SIGNAL 0F5h   ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL=0, SIG_IGN=1; user-virt rejected as EINVAL in this PR — PR 3 accepts it). EAX = previous handler. CF + AL=ERROR_INVALID on bad signum/addr.
+
+        ;; Signal numbers (POSIX-numbered).  Currently only SIGINT is delivered.
+        %assign SIGINT 2
+
+        ;; signal() handler sentinels (POSIX-valued).
+        %assign SIG_DFL 0
+        %assign SIG_IGN 1
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
