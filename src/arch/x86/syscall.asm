@@ -78,7 +78,7 @@ syscall_handler:
         and dword [esp + SYSCALL_SAVED_EFLAGS], ~1
         .iret_cf_write:
         mov [esp + SYSCALL_SAVED_EAX], eax
-        SIGINT_TAIL_CHECK
+        SIGNAL_TAIL_CHECK
         iretd
 
         ;; Each SYS_ENTRY pads with .iret_invalid up to the requested slot,

@@ -829,7 +829,7 @@ TESTS: list[ProgramTest] = [
     # Registers an on_sigint handler, calls SYS_IO_READ, and sends a
     # Ctrl+C (0x03) byte so fd_read_console detects it, sets
     # pending_sigint, and returns the byte.  The syscall epilogue's
-    # SIGINT_TAIL_CHECK dispatches to on_sigint via signal_dispatch_user;
+    # SIGNAL_TAIL_CHECK dispatches to on_sigint via signal_dispatch_user;
     # the handler sets got_sigint and returns through the vDSO sigreturn
     # trampoline; signal_resume_after_handler restores the interrupted
     # state and iretds back to user code.  Main checks got_sigint and

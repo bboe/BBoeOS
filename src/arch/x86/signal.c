@@ -1,4 +1,4 @@
-// signal.c — SIGINT dispatch primitives.  Three entry points:
+// signal.c — Signal dispatch primitives.  Three entry points:
 //   signal_dispatch_kill          — reset to a known kernel ESP, tear
 //                                   down the dying program's PD, jump
 //                                   to shell_reload.  Reused by the
@@ -10,7 +10,7 @@
 //                                   stack, rewrite the CPU iret frame
 //                                   to enter the registered ring-3
 //                                   handler, and iretd.  Reached from
-//                                   the SIGINT_TAIL_CHECK macro with
+//                                   the SIGNAL_TAIL_CHECK macro with
 //                                   pushad slots still on the kernel
 //                                   stack.
 //   signal_resume_after_handler   — restore the interrupted register
@@ -38,7 +38,7 @@ extern uint32_t current_pd_phys;
 
 asm("_g_current_pd_phys equ current_pd_phys");
 
-// signal_dispatch_user references pending_sigint, in_sigint_handler, and
+// signal_dispatch_user references pending_sigint, in_signal_handler, and
 // sigint_handler directly by their entry.asm label names (no `_g_`
 // prefix) — those globals are %included in kernel.asm before this file
 // and ps2.c already publishes its own `_g_pending_sigint` alias, so
@@ -80,7 +80,7 @@ asm("signal_dispatch_kill:\n"
 
 // signal_dispatch_user — build a 52-byte sigcontext on the user stack,
 // rewrite the CPU iret frame to enter the registered ring-3 handler,
-// and iretd.  Reached from SIGINT_TAIL_CHECK when sigint_handler holds
+// and iretd.  Reached from SIGNAL_TAIL_CHECK when sigint_handler holds
 // a user-virt address (not SIG_DFL / SIG_IGN) and we just interrupted
 // CPL=3 with a pending SIGINT.
 //
@@ -115,7 +115,7 @@ asm("signal_dispatch_kill:\n"
 //
 // After building the sigcontext we rewrite [esp + 32] (iret EIP) to the
 // handler address and [esp + 44] (iret ESP) to the sigcontext base, set
-// in_sigint_handler = 1 and pending_sigint = 0, drop the pushad slots
+// in_signal_handler = 1 and pending_sigint = 0, drop the pushad slots
 // (their values now live in the sigcontext) by `add esp, 32`, and iretd.
 asm("signal_dispatch_user:\n"
     "        mov edi, [esp + 44]\n"                 // user ESP
@@ -141,7 +141,7 @@ asm("signal_dispatch_user:\n"
     "        mov eax, [sigint_handler]\n"
     "        mov [esp + 32], eax\n"                 // iret EIP <- handler
     "        mov [esp + 44], ebx\n"                 // iret ESP <- sigcontext base
-    "        mov byte [in_sigint_handler], 1\n"
+    "        mov byte [in_signal_handler], 1\n"
     "        mov byte [pending_sigint], 0\n"
     "        add esp, 32\n"                         // drop pushad slots
     "        iretd\n");
@@ -185,7 +185,7 @@ asm("signal_dispatch_user:\n"
 //      stack pushad slots so the syscall epilogue's popad sees the user's
 //      pre-signal regs.  rep movsd hits the layout exactly because the
 //      sigcontext block is laid out in pushad's natural order.
-//   5. Clear in_sigint_handler so SIGINT can deliver again.
+//   5. Clear in_signal_handler so SIGINT can deliver again.
 //   6. If pending_sigint was set during the handler, redeliver it now —
 //      either kill (SIG_DFL), drop it (SIG_IGN), or jump straight to
 //      signal_dispatch_user, which reads the just-rewritten [esp + 44]
@@ -231,7 +231,7 @@ asm("signal_resume_after_handler:\n"
     "        mov ecx, 8\n"
     "        cld\n"
     "        rep movsd\n"
-    "        mov byte [in_sigint_handler], 0\n"
+    "        mov byte [in_signal_handler], 0\n"
     "        cmp byte [pending_sigint], 0\n"
     "        je  .signal_resume_no_pending\n"
     "        mov eax, [sigint_handler]\n"

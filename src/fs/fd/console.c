@@ -140,7 +140,7 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
     while (1) {
         if (pending_sigint != 0) {
             // Cooperative interrupt: bail out so the syscall epilogue's
-            // SIGINT_TAIL_CHECK delivers the signal on iret.
+            // SIGNAL_TAIL_CHECK delivers the signal on iret.
             // ERROR_INTERRUPTED = 0x04 (constants.asm).
             *bytes_read = 0x04;
             return 0;

@@ -135,14 +135,14 @@ asm("fdc_install_irq:\n"
 // EOI to the master PIC, iretd.  Installed at FDC_IRQ6_VECTOR
 // (0x26) by fdc_install_irq.  Same shape as ps2_irq1_handler.
 // pushad/popad (rather than the minimal `push eax / pop eax`) so the
-// SIGINT_TAIL_CHECK macro sees a pushad-shape stack and can capture
+// SIGNAL_TAIL_CHECK macro sees a pushad-shape stack and can capture
 // full register state into a sigcontext if a user handler is registered.
 asm("fdc_irq6_handler:\n"
     "    pushad\n"
     "    mov byte [_g_fdc_irq_flag], 1\n"
     "    mov al, 0x20\n"           // PIC_EOI
     "    out 0x20, al\n"           // PIC1_CMD_PORT
-    "    SIGINT_TAIL_CHECK\n"
+    "    SIGNAL_TAIL_CHECK\n"
     "    iretd");
 
 // Issue a READ or WRITE command with the 9-byte parameter sequence.

@@ -2,7 +2,7 @@
    Registers on_sigint as the SIGINT handler, then calls SYS_IO_READ.
    The serial Ctrl+C (0x03) byte is already queued when the read fires:
    fd_read_console reads it, sets pending_sigint, and returns the byte
-   (AX = 1, CF clear).  The syscall epilogue's SIGINT_TAIL_CHECK sees
+   (AX = 1, CF clear).  The syscall epilogue's SIGNAL_TAIL_CHECK sees
    pending_sigint and calls signal_dispatch_user, which builds a
    sigcontext on the user stack and iretds into on_sigint.  on_sigint
    sets got_sigint = 1 and returns through the vDSO sigreturn
