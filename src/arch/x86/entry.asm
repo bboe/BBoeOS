@@ -71,7 +71,6 @@ pmode_irq0_handler:
         call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
@@ -104,16 +103,17 @@ pmode_irq5_handler:
         call sb16_refill
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
 pmode_irq6_handler:
-        ;; FDC command complete.  EOI.
-        push eax
+        ;; FDC command complete.  EOI.  pushad/popad (rather than the
+        ;; minimal `push eax / pop eax`) so the SIGINT_TAIL_CHECK macro
+        ;; sees a pushad-shape stack and can capture full register state
+        ;; into a sigcontext if a user handler is registered.
+        pushad
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        pop eax
         SIGINT_TAIL_CHECK
         iretd
 
@@ -370,9 +370,11 @@ program_enter:
         mov [current_program_break],     eax
         mov [current_program_break_min], eax
 
-        ;; Reset SIGINT state.
-        mov byte [pending_sigint], 0
-        mov dword [sigint_handler], SIG_DFL
+        ;; Reset SIGINT state — every new program starts in SIG_DFL with
+        ;; no pending signal and no handler frame on its stack.
+        mov dword [sigint_handler],  SIG_DFL
+        mov byte  [pending_sigint],    0
+        mov byte  [in_sigint_handler], 0
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -750,19 +752,15 @@ user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
 
-        ;; SIGINT delivery state.  Set in IRQ context (PS/2 / serial), consumed
-        ;; at the next kernel-to-user iret epilogue by SIGINT_TAIL_CHECK.
-        ;; program_enter zeroes it on every program load so a stale flag from
-        ;; the dying program can't kill its successor.
-pending_sigint  db 0
-align 4
-
-        ;; SIGINT handler slot — SIG_DFL (0), SIG_IGN (1), or user-virt
-        ;; address.  Handler addresses are user-virt and only valid in the
-        ;; active PD; program_enter zeroes (SIG_DFL) on every program load
-        ;; so each new program defaults to killable.  PR 2 only accepts
-        ;; SIG_DFL/SIG_IGN; PR 3 extends to user-virt addresses.
-sigint_handler  dd 0
+        ;; SIGINT delivery state.  One global slot suffices because only one
+        ;; user program runs at a time — program_enter zeroes the lot on every
+        ;; load so it behaves as if it were per-program.  sigint_handler is a
+        ;; user-virt address (or SIG_DFL=0 / SIG_IGN=1); the address is only
+        ;; valid in the active PD, hence the zero-on-transition rule.
+sigint_handler        dd 0
+pending_sigint        db 0
+in_sigint_handler     db 0
+        align 4
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via

@@ -156,7 +156,8 @@
         %assign SYS_SYS_EXIT 0F2h
         %assign SYS_SYS_REBOOT 0F3h
         %assign SYS_SYS_SHUTDOWN 0F4h
-        %assign SYS_SYS_SIGNAL 0F5h   ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL=0, SIG_IGN=1; user-virt rejected as EINVAL in this PR — PR 3 accepts it). EAX = previous handler. CF + AL=ERROR_INVALID on bad signum/addr.
+        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGRETURN 0F6h    ; restore from sigcontext on user stack; never returns to caller
 
         ;; Signal numbers (POSIX-numbered).  Currently only SIGINT is delivered.
         %assign SIGINT 2
@@ -165,11 +166,25 @@
         %assign SIG_DFL 0
         %assign SIG_IGN 1
 
+        ;; EFLAGS sanitization for SYS_SYS_SIGRETURN.  The saved EFLAGS
+        ;; in a sigcontext lives on the user stack and is fully under
+        ;; user control, so a malicious handler could otherwise return
+        ;; through the trampoline with IOPL=3 (ring-3 in/out) or VM=1
+        ;; (Virtual-8086 entry), etc.  We whitelist only the user-
+        ;; arithmetic flags + TF + DF + OF (forced IF separately) and
+        ;; discard IOPL (bits 12-13), NT (14), RF (16), VM (17), AC
+        ;; (18), VIF/VIP/ID (19-21).  Mirrors Linux's restore_sigcontext
+        ;; FIX_EFLAGS rationale.  Kept bits: CF=0, PF=2, AF=4, ZF=6,
+        ;; SF=7, TF=8, DF=10, OF=11 → 0xDD5.
+        %assign USER_EFLAGS_MASK 0xDD5
+        %assign EFLAGS_IF_BIT    0x200      ; IF (bit 9) — forced on after sanitize
+
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
+        %assign VDSO_SIGRETURN_OFFSET 0450h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every SIGINT handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with

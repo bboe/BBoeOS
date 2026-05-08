@@ -29,7 +29,7 @@
 ;;;   [esp+32]  eip / [esp+36] cs / [esp+40] eflags  (CPU iretd frame)
 ;;; ------------------------------------------------------------------------
 
-        SYSCALL_COUNT           equ SYS_SYS_SIGNAL + 1          ; one past the highest SYS_* — bound for the dispatcher range check
+        SYSCALL_COUNT           equ SYS_SYS_SIGRETURN + 1       ; one past the highest SYS_* — bound for the dispatcher range check
         SYSCALL_SAVED_EAX       equ 28
         SYSCALL_SAVED_EDX       equ 20
         SYSCALL_SAVED_EFLAGS    equ 40
@@ -78,7 +78,6 @@ syscall_handler:
         and dword [esp + SYSCALL_SAVED_EFLAGS], ~1
         .iret_cf_write:
         mov [esp + SYSCALL_SAVED_EAX], eax
-        popad
         SIGINT_TAIL_CHECK
         iretd
 
@@ -120,6 +119,7 @@ syscall_handler:
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
         SYS_ENTRY SYS_SYS_SHUTDOWN,  .sys_shutdown
         SYS_ENTRY SYS_SYS_SIGNAL,    .sys_signal
+        SYS_ENTRY SYS_SYS_SIGRETURN, .sys_sigreturn
 
         ;; Per-case handler bodies follow.  All but the four net_*
         ;; handlers are inlined here — each one is just a `call
@@ -668,27 +668,42 @@ syscall_handler:
         stc
         jmp .iret_cf
 
-        ;; SYS_SYS_SIGNAL: register SIGINT handler (PR 2 — DFL/IGN only).
+        ;; SYS_SYS_SIGNAL: register a signal handler.
         ;; In:  EBX = signum (must be SIGINT)
-        ;;      ECX = handler — SIG_DFL (0) or SIG_IGN (1).  User-virt
-        ;;            addresses are rejected with ERROR_INVALID in this
-        ;;            PR; the next PR adds user-handler delivery.
+        ;;      ECX = handler — SIG_DFL (0), SIG_IGN (1), or user-virt
+        ;;            address (PROGRAM_BASE <= ECX < KERNEL_VIRT_BASE).
         ;; Out: EAX = previous handler value, CF clear on success.
-        ;;      CF set + AL = ERROR_INVALID on bad signum or unsupported
-        ;;      handler.
+        ;;      CF set + AL = ERROR_INVALID on bad signum or out-of-range
+        ;;      handler address.
+        ;; The previous handler is returned so callers can restore the
+        ;; prior state on cleanup, mirroring POSIX signal().
         .sys_signal:
         cmp ebx, SIGINT
         jne .sys_signal_bad
         cmp ecx, SIG_IGN
-        ja  .sys_signal_bad             ; reject ECX > SIG_IGN (= 1)
+        jbe .sys_signal_ok              ; ECX in {0, 1}
+        cmp ecx, PROGRAM_BASE
+        jb  .sys_signal_bad
+        cmp ecx, KERNEL_VIRT_BASE
+        jae .sys_signal_bad
+        .sys_signal_ok:
         mov eax, [sigint_handler]       ; previous handler -> EAX
         mov [sigint_handler], ecx
         clc
-        jmp .iret_cf_eax                ; preserve full EAX through the exit
-.sys_signal_bad:
+        jmp .iret_cf_eax               ; full EAX preserved, CF=0
+        .sys_signal_bad:
         mov al, ERROR_INVALID
         stc
         jmp .iret_cf
+
+        ;; SYS_SYS_SIGRETURN: restore the interrupted register state
+        ;; from a sigcontext on the user stack and iretd back to user
+        ;; code.  signal_resume_after_handler owns the popad and iretd
+        ;; — it never returns through .iret_cf — so this entry is a
+        ;; bare jmp.  See signal.c for the full sigcontext layout and
+        ;; offset arithmetic.
+        .sys_sigreturn:
+        jmp signal_resume_after_handler
 
 ;;; ------------------------------------------------------------
 ;;; Per-program break state, reset on every program load by

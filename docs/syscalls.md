@@ -37,7 +37,8 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | F2h   | sys_exit     | Reload and return to shell                             |
 | F3h   | sys_reboot   | Reboot                                                |
 | F4h   | sys_shutdown | Shutdown                                              |
-| F5h   | sys_signal   | Register SIGINT handler. EBX = signum (SIGINT only), ECX = handler (SIG_DFL=0, SIG_IGN=1; user-virt rejected as EINVAL until follow-up PR); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/handler |
+| F5h   | sys_signal   | Register SIGINT handler. EBX = signum (SIGINT only), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |
+| F6h   | sys_sigreturn| Restore sigcontext from user stack at [user_esp + 4]; never returns through the regular path — resumes the saved EIP/EFLAGS/ESP/registers. Used only via the vDSO trampoline at the end of a SIGINT handler |
 
 ## `/dev/midi` ioctls (FD_TYPE_MIDI = 6)
 

@@ -826,6 +826,18 @@ TESTS: list[ProgramTest] = [
     # block 0, where the straddle_dir test still finds a usable
     # boundary at 512 — longer names push past 492 and break it.
     ProgramTest("seek", ["seek"], r"^seek: OK$"),
+    # Registers an on_sigint handler, calls SYS_IO_READ, and sends a
+    # Ctrl+C (0x03) byte so fd_read_console detects it, sets
+    # pending_sigint, and returns the byte.  The syscall epilogue's
+    # SIGINT_TAIL_CHECK dispatches to on_sigint via signal_dispatch_user;
+    # the handler sets got_sigint and returns through the vDSO sigreturn
+    # trampoline; signal_resume_after_handler restores the interrupted
+    # state and iretds back to user code.  Main checks got_sigint and
+    # prints CAUGHT, confirming the full delivery and sigreturn round-trip.
+    # The "\n" in the command terminates the shell input line; the
+    # following 0x03 byte arrives in the serial FIFO for the program's
+    # read call to consume.
+    ProgramTest("sigint_test", ["sigint_test\n\x03"], r"^CAUGHT$"),
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
     # Confirms the user stack lives at the user/kernel boundary
     # (USER_STACK_TOP = KERNEL_VIRT_BASE).  ESP at iretd equals
