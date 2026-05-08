@@ -372,6 +372,7 @@ program_enter:
 
         ;; Reset SIGINT state.
         mov byte [pending_sigint], 0
+        mov dword [sigint_handler], SIG_DFL
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -755,6 +756,13 @@ vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
         ;; the dying program can't kill its successor.
 pending_sigint  db 0
 align 4
+
+        ;; SIGINT handler slot — SIG_DFL (0), SIG_IGN (1), or user-virt
+        ;; address.  Handler addresses are user-virt and only valid in the
+        ;; active PD; program_enter zeroes (SIG_DFL) on every program load
+        ;; so each new program defaults to killable.  PR 2 only accepts
+        ;; SIG_DFL/SIG_IGN; PR 3 extends to user-virt addresses.
+sigint_handler  dd 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via

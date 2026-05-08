@@ -37,6 +37,7 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | F2h   | sys_exit     | Reload and return to shell                             |
 | F3h   | sys_reboot   | Reboot                                                |
 | F4h   | sys_shutdown | Shutdown                                              |
+| F5h   | sys_signal   | Register SIGINT handler. EBX = signum (SIGINT only), ECX = handler (SIG_DFL=0, SIG_IGN=1; user-virt rejected as EINVAL until follow-up PR); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/handler |
 
 ## `/dev/midi` ioctls (FD_TYPE_MIDI = 6)
 
@@ -60,7 +61,8 @@ names in `src/include/constants.asm`):
 | 02h | ERROR_EXISTS          | Destination name already exists (rename/copy)                |
 | 03h | ERROR_FAULT           | Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH |
 | 04h | ERROR_INTERRUPTED     | Cooperative-interrupt return (SIGINT pending during blocking syscall) — maps to `EINTR` in libc |
-| 05h | ERROR_NOT_EMPTY       | Directory is not empty (rmdir)                               |
-| 06h | ERROR_NOT_EXECUTE     | File exists but is not executable (exec)                     |
-| 07h | ERROR_NOT_FOUND       | File not found                                               |
-| 08h | ERROR_PROTECTED       | File is protected (rename/chmod)                             |
+| 05h | ERROR_INVALID         | Invalid argument (bad signum, out-of-range handler address, etc.) |
+| 06h | ERROR_NOT_EMPTY       | Directory is not empty (rmdir)                               |
+| 07h | ERROR_NOT_EXECUTE     | File exists but is not executable (exec)                     |
+| 08h | ERROR_NOT_FOUND       | File not found                                               |
+| 09h | ERROR_PROTECTED       | File is protected (rename/chmod)                             |

@@ -29,7 +29,7 @@
 ;;;   [esp+32]  eip / [esp+36] cs / [esp+40] eflags  (CPU iretd frame)
 ;;; ------------------------------------------------------------------------
 
-        SYSCALL_COUNT           equ SYS_SYS_SHUTDOWN + 1        ; one past the highest SYS_* — bound for the dispatcher range check
+        SYSCALL_COUNT           equ SYS_SYS_SIGNAL + 1          ; one past the highest SYS_* — bound for the dispatcher range check
         SYSCALL_SAVED_EAX       equ 28
         SYSCALL_SAVED_EDX       equ 20
         SYSCALL_SAVED_EFLAGS    equ 40
@@ -119,6 +119,7 @@ syscall_handler:
         SYS_ENTRY SYS_SYS_EXIT,      .sys_exit
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
         SYS_ENTRY SYS_SYS_SHUTDOWN,  .sys_shutdown
+        SYS_ENTRY SYS_SYS_SIGNAL,    .sys_signal
 
         ;; Per-case handler bodies follow.  All but the four net_*
         ;; handlers are inlined here — each one is just a `call
@@ -664,6 +665,28 @@ syscall_handler:
         ;; Returns only if the host ignores the shutdown port — surface
         ;; CF=1 so userspace can fall back.
         call shutdown
+        stc
+        jmp .iret_cf
+
+        ;; SYS_SYS_SIGNAL: register SIGINT handler (PR 2 — DFL/IGN only).
+        ;; In:  EBX = signum (must be SIGINT)
+        ;;      ECX = handler — SIG_DFL (0) or SIG_IGN (1).  User-virt
+        ;;            addresses are rejected with ERROR_INVALID in this
+        ;;            PR; the next PR adds user-handler delivery.
+        ;; Out: EAX = previous handler value, CF clear on success.
+        ;;      CF set + AL = ERROR_INVALID on bad signum or unsupported
+        ;;      handler.
+        .sys_signal:
+        cmp ebx, SIGINT
+        jne .sys_signal_bad
+        cmp ecx, SIG_IGN
+        ja  .sys_signal_bad             ; reject ECX > SIG_IGN (= 1)
+        mov eax, [sigint_handler]       ; previous handler -> EAX
+        mov [sigint_handler], ecx
+        clc
+        jmp .iret_cf_eax                ; preserve full EAX through the exit
+.sys_signal_bad:
+        mov al, ERROR_INVALID
         stc
         jmp .iret_cf
 
