@@ -11,9 +11,7 @@ assembly on the host.
 
 It also runs Doom:
 
-[![doom on bboeos](docs/gifs/doom.gif)](docs/gifs/doom.webm)
-
-(click the gif for the higher-quality WebM)
+https://github.com/user-attachments/assets/5efa60a4-c948-4552-9903-23a4c69a0282
 
 The Doom port lives in `tools/doom/` and links against a hand-rolled
 freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
