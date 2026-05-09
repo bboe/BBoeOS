@@ -199,11 +199,13 @@ class X86CodegenTarget(CodegenTarget):
         "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
         "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
         "REBOOT": ("mov ah, SYS_SYS_REBOOT", "int 30h"),
+        "RTC_ALARM": ("mov ah, SYS_RTC_ALARM", "int 30h"),
         "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),
         "RTC_MILLIS": ("mov ah, SYS_RTC_MILLIS", "int 30h"),
         "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
         "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
         "SHUTDOWN": ("mov ah, SYS_SYS_SHUTDOWN", "int 30h"),
+        "SYS_SIGNAL": ("mov ah, SYS_SYS_SIGNAL", "int 30h"),
     }
     syscall_sequences = SYSCALL_SEQUENCES
 

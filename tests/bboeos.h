@@ -55,6 +55,9 @@
 
 /* --- BBoeOS-specific function declarations --- */
 
+/* Arm/disarm the per-process interval timer.  delay_ms = 0 cancels;
+   interval_ms = 0 means one-shot.  Returns ms remaining on prior alarm. */
+unsigned int alarm_ms(unsigned int delay_ms, unsigned int interval_ms);
 /* POSIX fstat takes struct stat*; BBoeOS returns just the mode byte */
 int bboeos_fstat(int fd);
 /* POSIX mkdir takes mode_t; BBoeOS takes only a name */
@@ -105,6 +108,9 @@ int sendto(int fd, const char *buffer, int length, const char *ip, int src_port,
 void set_exec_arg(const char *arg);
 /* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
 void set_palette_color(int fd, int index, int r, int g, int b);
+/* Register handler for SIGINT or SIGALRM. */
+typedef void (*bboeos_sighandler_t)(int);
+bboeos_sighandler_t signal(int signum, bboeos_sighandler_t handler);
 /* Power off via APM. Returns only when APM is unavailable. */
 void shutdown(void);
 /* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);

@@ -27,17 +27,18 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
 | 23h   | net_sendto   | Send datagram via fd: BX=fd, SI=buf, CX=len, DI=IP; UDP also uses DX=src port, BP=dst port (ignored for ICMP); AX=bytes, CF err |
-| 30h   | rtc_datetime | Get wall-clock time, EAX = unsigned seconds since 1970-01-01 UTC |
-| 31h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |
-| 32h   | rtc_sleep    | Busy-wait for ECX milliseconds                                   |
-| 33h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
+| 30h   | rtc_alarm    | Arm/disarm interval timer. EBX = ms_until_first_fire (0 = cancel), ECX = ms_interval (0 = one-shot). EAX = ms remaining on prior alarm (0 if none). CF clear, no error path. Fires SIGALRM via SIGNAL_TAIL_CHECK. |
+| 31h   | rtc_datetime | Get wall-clock time, EAX = unsigned seconds since 1970-01-01 UTC |
+| 32h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |
+| 33h   | rtc_sleep    | Busy-wait for ECX milliseconds                                   |
+| 34h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
 | 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt; CF on OOM |
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
 | F1h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F2h   | sys_exit     | Reload and return to shell                             |
 | F3h   | sys_reboot   | Reboot                                                |
 | F4h   | sys_shutdown | Shutdown                                              |
-| F5h   | sys_signal   | Register SIGINT handler. EBX = signum (SIGINT only), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |
+| F5h   | sys_signal   | Register signal handler. EBX = signum (SIGINT or SIGALRM), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |
 | F6h   | sys_sigreturn| Restore sigcontext from user stack at [user_esp + 4]; never returns through the regular path — resumes the saved EIP/EFLAGS/ESP/registers. Used only via the vDSO trampoline at the end of a signal handler |
 
 ## `/dev/midi` ioctls (FD_TYPE_MIDI = 6)

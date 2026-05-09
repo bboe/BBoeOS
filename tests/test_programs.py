@@ -574,6 +574,7 @@ _EXT2_ONLY = frozenset({"ext2"})
 
 
 TESTS: list[ProgramTest] = [
+    ProgramTest("alarm_cancel", ["alarm_cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
     # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,341 of
