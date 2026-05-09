@@ -25,6 +25,10 @@
 // context (IRQ epilogue or syscall epilogue), so it can clobber every
 // register and reset ESP without consulting the caller's frame.
 //
+// signal_dispatch_kill input contract: EDX = signum (SIGINT, SIGALRM,
+// or 0 for "validation failure — print '^?\n'").  Caller must load
+// EDX before jumping here.  No other register inputs.
+//
 // signal_dispatch_user does not return to its caller either — it iretds
 // directly into the user handler.  It runs on the kernel stack with the
 // macro-call frame intact (pushad slots + iret frame), so it can read
@@ -38,12 +42,13 @@ extern uint32_t current_pd_phys;
 
 asm("_g_current_pd_phys equ current_pd_phys");
 
-// signal_dispatch_user references pending_sigint, in_signal_handler, and
-// sigint_handler directly by their entry.asm label names (no `_g_`
-// prefix) — those globals are %included in kernel.asm before this file
-// and ps2.c already publishes its own `_g_pending_sigint` alias, so
-// re-equ'ing here would collide.  This file's only C-mangled global
-// access is current_pd_phys (used by signal_dispatch_kill below).
+// signal_dispatch_user references pending_sigint, pending_sigalrm,
+// in_signal_handler, sigint_handler, and sigalrm_handler directly by their
+// entry.asm label names (no `_g_` prefix) — those globals are %included in
+// kernel.asm before this file and ps2.c already publishes its own
+// `_g_pending_sigint` alias, so re-equ'ing here would collide.  This file's
+// only C-mangled global access is current_pd_phys (used by
+// signal_dispatch_kill below).
 
 void address_space_destroy(uint32_t pd_phys);
 void put_character(char byte);
@@ -56,7 +61,18 @@ asm("signal_dispatch_kill:\n"
     "        mov esp, kernel_stack_top\n"
     "        mov al, '^'\n"
     "        call put_character\n"
+    "        cmp edx, SIGINT\n"
+    "        jne .signal_dispatch_kill_not_sigint\n"
     "        mov al, 'C'\n"
+    "        jmp .signal_dispatch_kill_emit\n"
+    ".signal_dispatch_kill_not_sigint:\n"
+    "        cmp edx, SIGALRM\n"
+    "        jne .signal_dispatch_kill_unknown\n"
+    "        mov al, 'A'\n"
+    "        jmp .signal_dispatch_kill_emit\n"
+    ".signal_dispatch_kill_unknown:\n"
+    "        mov al, '?'\n"
+    ".signal_dispatch_kill_emit:\n"
     "        call put_character\n"
     "        mov al, 0x0A\n"
     "        call put_character\n"
@@ -80,9 +96,12 @@ asm("signal_dispatch_kill:\n"
 
 // signal_dispatch_user — build a 52-byte sigcontext on the user stack,
 // rewrite the CPU iret frame to enter the registered ring-3 handler,
-// and iretd.  Reached from SIGNAL_TAIL_CHECK when sigint_handler holds
-// a user-virt address (not SIG_DFL / SIG_IGN) and we just interrupted
-// CPL=3 with a pending SIGINT.
+// and iretd.  Reached from SIGNAL_TAIL_CHECK with EAX = handler
+// (user-virt, validated to be neither SIG_DFL nor SIG_IGN by the
+// macro), EDX = signum (SIGINT or SIGALRM).
+//
+// EBP holds the stashed handler across the rep movsd / iret-frame reads
+// (EAX gets clobbered).
 //
 // Stack at entry (pushad slots live, cross-priv iret frame above):
 //   [esp +  0] saved EDI         [esp + 16] saved EBX
@@ -101,7 +120,7 @@ asm("signal_dispatch_kill:\n"
 // though popad ignores it on restore — keeping the bulk-copy contiguous
 // is worth one redundant dword on the user stack.
 //   +0   trampoline_addr (FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET = 0x10450)
-//   +4   signum (= SIGINT = 2)
+//   +4   signum (SIGINT=2 or SIGALRM=14, written from EDX)
 //   +8   saved EDI    +12 ESI  +16 EBP  +20 ESP_pushad
 //   +24  saved EBX    +28 EDX  +32 ECX  +36 EAX
 //   +40  saved EIP    (interrupted user EIP)
@@ -115,13 +134,15 @@ asm("signal_dispatch_kill:\n"
 //
 // After building the sigcontext we rewrite [esp + 32] (iret EIP) to the
 // handler address and [esp + 44] (iret ESP) to the sigcontext base, set
-// in_signal_handler = 1 and pending_sigint = 0, drop the pushad slots
-// (their values now live in the sigcontext) by `add esp, 32`, and iretd.
+// in_signal_handler = 1 and clear the pending bit corresponding to EDX
+// (pending_sigint or pending_sigalrm), drop the pushad slots (their
+// values now live in the sigcontext) by `add esp, 32`, and iretd.
 asm("signal_dispatch_user:\n"
+    "        mov ebp, eax\n"                        // stash handler — EAX gets clobbered below
     "        mov edi, [esp + 44]\n"                 // user ESP
     "        sub edi, 52\n"                         // sigcontext base
     "        mov dword [edi + 0], FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET\n"
-    "        mov dword [edi + 4], SIGINT\n"
+    "        mov [edi + 4], edx\n"                  // signum from caller (SIGINT or SIGALRM)
     // Bulk-copy the 8 pushad slots from kernel stack to sigcontext + 8.
     // EBX stashes the sigcontext base across rep movsd (which advances
     // edi past the destination); we restore it for the IRET-frame rewrite.
@@ -138,11 +159,19 @@ asm("signal_dispatch_user:\n"
     "        mov [edi + 4], eax\n"
     "        mov eax, [esp + 44]\n"                 // original user ESP
     "        mov [edi + 8], eax\n"
-    "        mov eax, [sigint_handler]\n"
-    "        mov [esp + 32], eax\n"                 // iret EIP <- handler
+    "        mov [esp + 32], ebp\n"                 // iret EIP <- handler (from EBP stash)
     "        mov [esp + 44], ebx\n"                 // iret ESP <- sigcontext base
     "        mov byte [in_signal_handler], 1\n"
+    // Clear the pending bit corresponding to EDX before iretd into the
+    // handler.  Without this, the same signal would re-dispatch on the
+    // next IRQ tail after SYS_SYS_SIGRETURN clears in_signal_handler.
+    "        cmp edx, SIGINT\n"
+    "        jne .signal_dispatch_user_clear_alarm\n"
     "        mov byte [pending_sigint], 0\n"
+    "        jmp .signal_dispatch_user_iret\n"
+    ".signal_dispatch_user_clear_alarm:\n"
+    "        mov byte [pending_sigalrm], 0\n"
+    ".signal_dispatch_user_iret:\n"
     "        add esp, 32\n"                         // drop pushad slots
     "        iretd\n");
 
@@ -150,7 +179,7 @@ asm("signal_dispatch_user:\n"
 // interrupted register state (saved by signal_dispatch_user into a
 // sigcontext on the user stack) into the syscall-entry kernel frame, so
 // the syscall epilogue's popad + iretd resumes user code at the point
-// the SIGINT preempted it.
+// the signal preempted it.
 //
 // Reach path: signal_dispatch_user iretds into the user handler with
 // ESP pointing at sigcontext base.  The handler runs as a plain C-style
@@ -185,9 +214,10 @@ asm("signal_dispatch_user:\n"
 //      stack pushad slots so the syscall epilogue's popad sees the user's
 //      pre-signal regs.  rep movsd hits the layout exactly because the
 //      sigcontext block is laid out in pushad's natural order.
-//   5. Clear in_signal_handler so SIGINT can deliver again.
-//   6. If pending_sigint was set during the handler, redeliver it now —
-//      either kill (SIG_DFL), drop it (SIG_IGN), or jump straight to
+//   5. Clear in_signal_handler so signals can deliver again.
+//   6. If pending_sigint OR pending_sigalrm was set during the handler,
+//      redeliver — SIGINT first (priority by signum) — either kill
+//      (SIG_DFL), drop it (SIG_IGN), or jump straight to
 //      signal_dispatch_user, which reads the just-rewritten [esp + 44]
 //      and builds a fresh sigcontext on the now-restored user stack.
 //   7. popad + iretd to user code at saved_eip.
@@ -198,14 +228,14 @@ asm("signal_resume_after_handler:\n"
     "        mov edi, [esp + 44]\n"                 // user ESP = sigcontext_base + 4
     "        mov eax, [edi + 36]\n"                 // saved_eip
     "        cmp eax, PROGRAM_BASE\n"
-    "        jb  signal_dispatch_kill\n"
+    "        jb  .signal_resume_corrupt\n"
     "        cmp eax, KERNEL_VIRT_BASE\n"
-    "        jae signal_dispatch_kill\n"
+    "        jae .signal_resume_corrupt\n"
     "        mov eax, [edi + 44]\n"                 // saved_esp
     "        cmp eax, PROGRAM_BASE\n"
-    "        jb  signal_dispatch_kill\n"
+    "        jb  .signal_resume_corrupt\n"
     "        cmp eax, KERNEL_VIRT_BASE\n"
-    "        ja  signal_dispatch_kill\n"
+    "        ja  .signal_resume_corrupt\n"
     "        mov eax, [edi + 36]\n"                 // saved_eip
     "        mov [esp + 32], eax\n"                 // iret EIP
     "        mov eax, [edi + 40]\n"                 // saved_eflags
@@ -232,14 +262,34 @@ asm("signal_resume_after_handler:\n"
     "        cld\n"
     "        rep movsd\n"
     "        mov byte [in_signal_handler], 0\n"
+    // Redelivery: a signal fired while we were in the handler.  Walk
+    // SIGINT first (priority by signum), then SIGALRM.
     "        cmp byte [pending_sigint], 0\n"
-    "        je  .signal_resume_no_pending\n"
+    "        je  .signal_resume_check_alarm\n"
     "        mov eax, [sigint_handler]\n"
+    "        mov edx, SIGINT\n"
+    "        jmp .signal_resume_dispatch\n"
+    ".signal_resume_check_alarm:\n"
+    "        cmp byte [pending_sigalrm], 0\n"
+    "        je  .signal_resume_no_pending\n"
+    "        mov eax, [sigalrm_handler]\n"
+    "        mov edx, SIGALRM\n"
+    ".signal_resume_dispatch:\n"
     "        cmp eax, SIG_DFL\n"
     "        je  signal_dispatch_kill\n"
     "        cmp eax, SIG_IGN\n"
     "        jne signal_dispatch_user\n"
+    "        cmp edx, SIGINT\n"
+    "        jne .signal_resume_clear_alarm\n"
     "        mov byte [pending_sigint], 0\n"
+    "        jmp .signal_resume_no_pending\n"
+    ".signal_resume_clear_alarm:\n"
+    "        mov byte [pending_sigalrm], 0\n"
     ".signal_resume_no_pending:\n"
     "        popad\n"
-    "        iretd\n");
+    "        iretd\n"
+    // EDX = 0 picks the "^?\n" banner — distinguishes a corrupt-
+    // sigcontext kill from a real signal kill.
+    ".signal_resume_corrupt:\n"
+    "        xor edx, edx\n"
+    "        jmp signal_dispatch_kill\n");

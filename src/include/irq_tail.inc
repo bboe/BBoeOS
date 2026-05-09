@@ -23,10 +23,11 @@
 ;; `signal_dispatch_kill`).  Each caller must therefore drop its own popad
 ;; line and end with `SIGNAL_TAIL_CHECK / iretd`.
 ;;
-;; The symbols pending_sigint, in_signal_handler, sigint_handler,
-;; signal_dispatch_kill, and signal_dispatch_user are defined elsewhere
-;; (entry.asm / signal.c) and resolved as forward references (NASM -f bin
-;; resolves forward label refs across the flat binary).
+;; The symbols pending_sigint, pending_sigalrm, in_signal_handler,
+;; sigint_handler, sigalrm_handler, signal_dispatch_kill, and
+;; signal_dispatch_user are defined elsewhere (entry.asm / signal.c) and
+;; resolved as forward references (NASM -f bin resolves forward label refs
+;; across the flat binary).
 
 %ifndef IRQ_TAIL_INC
 %define IRQ_TAIL_INC
@@ -37,28 +38,45 @@
 ;; captures the pushad slots into a sigcontext (user handler) or
 ;; doesn't need them (SIG_DFL kill).  Skips dispatch when:
 ;;   - interrupted CS is not user code (we'd kill kernel context),
-;;   - pending_sigint is clear (nothing to do),
+;;   - both pending_sigint and pending_sigalrm are clear (nothing to do),
 ;;   - in_signal_handler is set (already inside a handler — block re-entry
 ;;     until SYS_SYS_SIGRETURN clears the flag).
+;; Checks SIGINT first (lower signum = higher priority), then SIGALRM.
 ;; On dispatch:
 ;;   SIG_DFL  → signal_dispatch_kill (never returns; pushad slots discarded)
-;;   SIG_IGN  → clear pending_sigint, fall through to popad + iretd
+;;   SIG_IGN  → clear the pending bit for the dispatched signal, fall through
+;;              to popad + iretd
 ;;   user-virt → signal_dispatch_user (never returns to here; captures
 ;;               pushad slots into sigcontext, rewrites iret frame, iretds
 ;;               at the handler).
 %macro SIGNAL_TAIL_CHECK 0
         cmp word [esp + 36], USER_CODE_SELECTOR
         jne %%no_dispatch
-        cmp byte [pending_sigint], 0
-        je  %%no_dispatch
         cmp byte [in_signal_handler], 0
         jne %%no_dispatch
+        ;; Check SIGINT first (lower signum = higher priority).
+        cmp byte [pending_sigint], 0
+        je  %%check_sigalrm
+        mov edx, SIGINT
         mov eax, [sigint_handler]
+        jmp %%dispatch
+%%check_sigalrm:
+        cmp byte [pending_sigalrm], 0
+        je  %%no_dispatch
+        mov edx, SIGALRM
+        mov eax, [sigalrm_handler]
+%%dispatch:
         cmp eax, SIG_DFL
         je  signal_dispatch_kill           ; never returns; pushad slots discarded
         cmp eax, SIG_IGN
         jne signal_dispatch_user           ; never returns to here; rewrites IRET + iretd
+        ;; SIG_IGN: clear the pending bit corresponding to EDX, fall through.
+        cmp edx, SIGINT
+        jne %%clear_alarm
         mov byte [pending_sigint], 0
+        jmp %%no_dispatch
+%%clear_alarm:
+        mov byte [pending_sigalrm], 0
 %%no_dispatch:
         popad
 %endmacro
