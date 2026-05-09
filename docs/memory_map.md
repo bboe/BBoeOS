@@ -7,30 +7,29 @@ nav_order: 70
 
 ## Kernel-side static memory map
 
-Kernel-side fixed-physical regions, all reached through the kernel direct map
-at virt `DIRECT_MAP_BASE + phys` (= `0xFF800000 + phys` at the current base;
-or via the kmap window for frames above the direct-map ceiling). The "in
-kernel.bin?" column flags whether the bytes occupy the on-disk image (`yes`)
-or live as bare frames reserved by `frame_reserve_range` (`no`). Addresses
-from `kernel_stack` onward are derived from
-`KERNEL_RESERVED_BASE = page_align(0x20000 + sizeof(kernel.bin))`; example
-values shown are for the current build (~29 KB kernel).
+Kernel-side fixed-physical regions, all reached through the kernel direct map at
+virt `DIRECT_MAP_BASE + phys` (= `0xFF800000 + phys` at the current base; or via
+the kmap window for frames above the direct-map ceiling). The "in kernel.bin?"
+column flags whether the bytes occupy the on-disk image (`yes`) or live as bare
+frames reserved by `frame_reserve_range` (`no`). Addresses from `kernel_stack`
+onward are derived from `KERNEL_RESERVED_BASE = page_align(0x20000 +
+sizeof(kernel.bin))`; example values shown are for the current build (~29 KB
+kernel).
 
 Two narrow `frame_reserve_range` calls at boot pin only the regions the kernel
 still owns: the vDSO target frame at `0x10000` (one 4 KB page) and
 `0x20000..(FRAME_BITMAP_PHYS + frame_bitmap_bytes)` (kernel image +
 KERNEL_RESERVED_BASE region; the bitmap end is runtime, sized by `frame_init`
-from E820). Everything else in conventional low memory — IVT/BDA at
-`0..0x4FF`, `0x600..0x7BFF` gap, MBR landing zone at `0x7C00..0x7DFF`, dead
-post-MBR boot code at `0x7E00..0xDFFF`, the unused page-`0xE` region, and the
-boot stack at `0x9F000` — stays in the bitmap allocator's free pool. The
-build script asserts that `KERNEL_RESERVED_BASE + 0x23000 < 0xA0000`
-(worst-case stack + boot PD + first kernel PT + 128 KB bitmap at the
-FRAME_PHYSICAL_LIMIT cap) so the kernel-side regions never cross the VGA
-aperture under any RAM size.
+from E820). Everything else in conventional low memory — IVT/BDA at `0..0x4FF`,
+`0x600..0x7BFF` gap, MBR landing zone at `0x7C00..0x7DFF`, dead post-MBR boot
+code at `0x7E00..0xDFFF`, the unused page-`0xE` region, and the boot stack at
+`0x9F000` — stays in the bitmap allocator's free pool. The build script asserts
+that `KERNEL_RESERVED_BASE + 0x23000 < 0xA0000` (worst-case stack + boot PD +
+first kernel PT + 128 KB bitmap at the FRAME_PHYSICAL_LIMIT cap) so the
+kernel-side regions never cross the VGA aperture under any RAM size.
 
-**Update this table when adding a new fixed-phys region** so newcomers can
-find every slot in one place.
+**Update this table when adding a new fixed-phys region** so newcomers can find
+every slot in one place.
 
 | Phys range | Kernel-virt | Size | Symbol / purpose | In kernel.bin? |
 |---|---|---|---|---|
@@ -51,8 +50,8 @@ find every slot in one place.
 
 ## User-side virtual layout
 
-Per per-program PD; same shape for every program PD that
-`address_space_create` builds.
+Per per-program PD; same shape for every program PD that `address_space_create`
+builds.
 
 | User-virt range | Size | Purpose |
 |---|---|---|
