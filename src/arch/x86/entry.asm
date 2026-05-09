@@ -61,17 +61,44 @@
 %include "irq_tail.inc"
 
 pmode_irq0_handler:
-        ;; PIT tick.  Increment system_ticks, drain due midi events,
-        ;; EOI the master PIC, iretd.  Interrupt gate entry leaves IF=0
-        ;; for the body; on a single CPU we don't need LOCK on the inc.
-        ;; midi_drain_due is bounded to MIDI_DRAIN_PER_TICK iterations
-        ;; so the ISR latency stays O(1).
+        ;; PIT tick.  Increment system_ticks, fire any due interval
+        ;; timer (set pending_sigalrm + re-arm or clear), drain due
+        ;; midi events, EOI the master PIC, iretd.  Interrupt gate
+        ;; entry leaves IF=0 for the body; on a single CPU we don't
+        ;; need LOCK on the inc.  midi_drain_due is bounded to
+        ;; MIDI_DRAIN_PER_TICK iterations so the ISR latency stays
+        ;; O(1) (the alarm check is constant-time).
         pushad
         inc dword [system_ticks]
+        ;; Alarm check: if alarm_deadline is non-zero and we've hit it,
+        ;; set pending_sigalrm and either re-arm (interval mode) or
+        ;; clear the deadline (one-shot).  Coalescing: if pending_sigalrm
+        ;; is already 1, the second set is a no-op (handler hasn't run
+        ;; yet, the second fire collapses into the first — same model
+        ;; as SIGINT, same as POSIX standard signals).
+        mov eax, [alarm_deadline]
+        test eax, eax
+        jz .pmode_irq0_no_alarm
+        cmp [system_ticks], eax
+        jb  .pmode_irq0_no_alarm
+        mov byte [pending_sigalrm], 1
+        mov ecx, [alarm_interval]
+        test ecx, ecx
+        jz  .pmode_irq0_alarm_oneshot
+        ;; Re-arm: deadline = current + interval.  system_ticks wraps at
+        ;; 2^32 ms (~49.7 days); an alarm armed near that wrap edge could
+        ;; fire at an unexpected time when system_ticks rolls past the
+        ;; deadline early.  Not worth fixing for a hobby OS uptime.
+        add eax, ecx
+        mov [alarm_deadline], eax
+        jmp .pmode_irq0_no_alarm
+        .pmode_irq0_alarm_oneshot:
+        mov dword [alarm_deadline], 0
+        .pmode_irq0_no_alarm:
         call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        SIGINT_TAIL_CHECK
+        SIGNAL_TAIL_CHECK
         iretd
 
 pmode_irq5_handler:
@@ -103,18 +130,18 @@ pmode_irq5_handler:
         call sb16_refill
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        SIGINT_TAIL_CHECK
+        SIGNAL_TAIL_CHECK
         iretd
 
 pmode_irq6_handler:
         ;; FDC command complete.  EOI.  pushad/popad (rather than the
-        ;; minimal `push eax / pop eax`) so the SIGINT_TAIL_CHECK macro
+        ;; minimal `push eax / pop eax`) so the SIGNAL_TAIL_CHECK macro
         ;; sees a pushad-shape stack and can capture full register state
         ;; into a sigcontext if a user handler is registered.
         pushad
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
-        SIGINT_TAIL_CHECK
+        SIGNAL_TAIL_CHECK
         iretd
 
 ;;; -----------------------------------------------------------------------
@@ -370,11 +397,16 @@ program_enter:
         mov [current_program_break],     eax
         mov [current_program_break_min], eax
 
-        ;; Reset SIGINT state — every new program starts in SIG_DFL with
-        ;; no pending signal and no handler frame on its stack.
-        mov dword [sigint_handler],  SIG_DFL
+        ;; Reset signal state — every new program starts in SIG_DFL
+        ;; for both signals, with no pending bits, no nesting flag,
+        ;; and no armed alarm.  Alarms do not survive exec (POSIX).
+        mov dword [alarm_deadline],    0
+        mov dword [alarm_interval],    0
+        mov byte  [in_signal_handler], 0
+        mov byte  [pending_sigalrm],   0
         mov byte  [pending_sigint],    0
-        mov byte  [in_sigint_handler], 0
+        mov dword [sigalrm_handler],   SIG_DFL
+        mov dword [sigint_handler],    SIG_DFL
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -749,18 +781,26 @@ kernel_idle_pd_phys dd 0
 current_pd_phys         dd 0    ; new PD being built
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
-virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+virt_cursor             dd 0    ; current user-virt during page-walk loops
 
-        ;; SIGINT delivery state.  One global slot suffices because only one
-        ;; user program runs at a time — program_enter zeroes the lot on every
-        ;; load so it behaves as if it were per-program.  sigint_handler is a
-        ;; user-virt address (or SIG_DFL=0 / SIG_IGN=1); the address is only
-        ;; valid in the active PD, hence the zero-on-transition rule.
-sigint_handler        dd 0
+        ;; Signal delivery state.  One global slot per signal suffices
+        ;; because only one user program runs at a time — program_enter
+        ;; zeroes the lot on every load so it behaves as if it were
+        ;; per-program.  Handler fields are user-virt addresses (or
+        ;; SIG_DFL=0 / SIG_IGN=1); the address is only valid in the
+        ;; active PD, hence the zero-on-transition rule.  alarm_deadline
+        ;; is a system_ticks value at which IRQ 0 should set
+        ;; pending_sigalrm (0 means disarmed); alarm_interval is the
+        ;; auto-rearm period in ticks (0 means one-shot).
+alarm_deadline        dd 0
+alarm_interval        dd 0
+in_signal_handler     db 0
+pending_sigalrm       db 0
 pending_sigint        db 0
-in_sigint_handler     db 0
         align 4
+sigalrm_handler       dd 0
+sigint_handler        dd 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via

@@ -40,32 +40,33 @@ disk:
 
 - Kernel sector count and reserved-region base are both derived at build time: `make_os.sh` measures `kernel.bin`, passes the sector count to `boot.asm` as `-DKERNEL_SECTORS=N`, computes `KERNEL_RESERVED_BASE = page_align(0x20000 + sizeof(kernel.bin))`, then re-assembles `kernel.asm` and `boot.asm` with `-DKERNEL_RESERVED_BASE=N`. A size-invariant check between the two `kernel.asm` passes confirms the change cannot shift the binary. A separate VGA-hole assert verifies that `KERNEL_RESERVED_BASE + reserved-region-size < 0xA0000` so the kernel-side fixed-phys regions never cross the VGA aperture (which is what lets the OS boot under QEMU `-m 1`). The boot-time `kernel_bytes` word at MBR offset 508 holds `(BOOT_SECTORS + KERNEL_SECTORS) * 512` so `add_file.py`'s host-side `compute_directory_sector` arithmetic still works.
 
-## SIGINT handling
+## Signal delivery
 
-SIGINT delivery is split into two independent axes — detection and delivery — and three dispatch modes depending on the handler registered by the program.
+Signal delivery is split into two independent axes — detection and delivery — and three dispatch modes depending on the handler registered by the program.  Two signals share this path: SIGINT (Ctrl+C) and SIGALRM (interval-timer expiry, see [SIGALRM and interval timers](#sigalrm-and-interval-timers) below).
 
 ### Detection
 
-Two paths set the kernel global `pending_sigint` (a single byte in kernel BSS):
+Three paths set per-signal pending bits (single bytes in kernel BSS — `pending_sigint` and `pending_sigalrm`):
 
 - **PS/2 IRQ 1** (`src/drivers/ps2.c`): the cooked-byte path recognises the Ctrl+C scancode sequence and sets `pending_sigint` before returning from the IRQ handler. Because IRQ 1 fires for every keypress regardless of what the CPU is executing, this path works unconditionally — even a tight compute loop in user code is interrupted.
 - **Serial 0x03 read** (`src/fs/fd/console.c`, `fd_read_console`): the serial poll branch checks each received byte; if it equals `0x03` (ASCII ETX, the byte a terminal sends for Ctrl+C) it sets `pending_sigint` and does not enqueue the byte into the line buffer.
+- **PIT IRQ 0** (`src/arch/x86/entry.asm`, `pmode_irq0_handler`): when an alarm is armed (`alarm_deadline != 0`) and `system_ticks` reaches the deadline, the handler sets `pending_sigalrm` and either re-arms (`alarm_interval != 0`) or clears the deadline (one-shot).  IRQ 0 fires every ms so latency is sub-tick.
 
 ### Delivery
 
-Every interrupt and syscall return path passes through the `SIGINT_TAIL_CHECK` macro (defined in `src/include/irq_tail.inc`, inlined into the IRQ 0/5/6 handlers in `src/arch/x86/entry.asm`, the IRQ 1 handler `ps2_irq1_handler` in `src/drivers/ps2.c`, the IRQ 6 handler `fdc_irq6_handler` in `src/drivers/fdc.c`, and the INT 30h handler in `src/arch/x86/syscall.asm`). The macro:
+Every interrupt and syscall return path passes through the `SIGNAL_TAIL_CHECK` macro (defined in `src/include/irq_tail.inc`, inlined into the IRQ 0/5/6 handlers in `src/arch/x86/entry.asm`, the IRQ 1 handler `ps2_irq1_handler` in `src/drivers/ps2.c`, the IRQ 6 handler `fdc_irq6_handler` in `src/drivers/fdc.c`, and the INT 30h handler in `src/arch/x86/syscall.asm`). The macro:
 
-1. Checks the IRET frame's CS: if `RPL != 3` the signal is suppressed (the kernel itself does not receive SIGINT — only user programs do).
-2. Tests `pending_sigint`; if clear, falls through to popad + IRET.
-3. Tests `in_sigint_handler`; if set, falls through to popad + IRET (block re-entry until SYS_SYS_SIGRETURN clears the flag).
-4. Reads `sigint_handler` (entry.asm BSS, one dword per program, reset to `SIG_DFL` on each `shell_reload`).
-5. Branches: SIG_DFL → `signal_dispatch_kill` (does NOT clear `pending_sigint` — the program is dying anyway); SIG_IGN → clear `pending_sigint`, fall through; user-virt → `signal_dispatch_user` (which clears `pending_sigint` itself).
+1. Checks the IRET frame's CS: if `RPL != 3` the signal is suppressed (the kernel itself does not receive signals — only user programs do).
+2. Tests `in_signal_handler`; if set, falls through to popad + IRET (block re-entry until SYS_SYS_SIGRETURN clears the flag — POSIX-default same-mask behavior, single flag covers both signals).
+3. Tests `pending_sigint` first (lower signum = higher priority); if set, picks SIGINT.  Otherwise tests `pending_sigalrm`; if set, picks SIGALRM.  If both clear, falls through to popad + IRET.
+4. Loads `EAX` with the picked signal's handler (`sigint_handler` or `sigalrm_handler` — both in entry.asm BSS, one dword per program, reset to `SIG_DFL` on each `shell_reload`) and `EDX` with the signum (2 or 14).
+5. Branches on EAX: SIG_DFL → `signal_dispatch_kill` (does NOT clear the pending bit — the program is dying anyway); SIG_IGN → clear the pending bit corresponding to EDX, fall through; user-virt → `signal_dispatch_user` (which clears the pending bit itself and writes EDX into sigcontext+4 so the user handler signature is `void h(int signum)`).
 
 ### Dispatch modes
 
-- **`SIG_DFL` (0)** — `signal_dispatch_kill`: calls `address_space_destroy` on the current program's PD, prints `^C` to the console, and falls into `shell_reload`. This is the out-of-the-box Ctrl+C behaviour: a runaway program is terminated and the shell prompt reappears.
-- **`SIG_IGN` (1)** — clear `pending_sigint` (already done by `SIGINT_TAIL_CHECK`), resume the IRET path unchanged. The signal is silently discarded; the program continues as if nothing happened.
-- **User handler (virt addr ≥ `PROGRAM_BASE`)** — `signal_dispatch_user`: builds a 52-byte `sigcontext` record on the user stack (pushed below the current user ESP), rewrites the IRET frame so the CPU returns to the handler address at ring 3, and leaves `[user_esp]` pointing at the `sigcontext`. The saved context captures EIP, EFLAGS, ESP (pre-signal), and the 8-dword pushad register block (EDI, ESI, EBP, ESP_pushad, EBX, EDX, ECX, EAX in pushad's natural order so build/restore can use a single `rep movsd` each) — transparent to the interrupted code.
+- **`SIG_DFL` (0)** — `signal_dispatch_kill`: calls `address_space_destroy` on the current program's PD, prints a signum-specific banner to the console (`^C` for SIGINT, `^A` for SIGALRM, `^?` for the corrupt-sigcontext kill from `signal_resume_after_handler`'s validation failure), and falls into `shell_reload`. This is the out-of-the-box terminate behaviour: a runaway program is killed and the shell prompt reappears.
+- **`SIG_IGN` (1)** — clear the corresponding pending bit (already done by `SIGNAL_TAIL_CHECK`), resume the IRET path unchanged. The signal is silently discarded; the program continues as if nothing happened.
+- **User handler (virt addr ≥ `PROGRAM_BASE`)** — `signal_dispatch_user`: builds a 52-byte `sigcontext` record on the user stack (pushed below the current user ESP), rewrites the IRET frame so the CPU returns to the handler address at ring 3, and leaves `[user_esp]` pointing at the `sigcontext`. The saved context captures EIP, EFLAGS, ESP (pre-signal), the signum at offset +4 (so the handler reads it as its int argument after the trampoline `ret`), and the 8-dword pushad register block (EDI, ESI, EBP, ESP_pushad, EBX, EDX, ECX, EAX in pushad's natural order so build/restore can use a single `rep movsd` each) — transparent to the interrupted code.
 
 ### Handler resume via vDSO trampoline
 
@@ -80,17 +81,47 @@ int 30h
 
 1. Validates that the sigcontext's saved_eip and saved_esp are both within the user address space (`PROGRAM_BASE..KERNEL_VIRT_BASE`); failure routes to `signal_dispatch_kill`.
 2. Restores EIP, ESP, and a sanitized subset of EFLAGS (arithmetic flags + DF + TF; IF forced on, IOPL/VM/NT/RF cleared per `USER_EFLAGS_MASK` in `src/include/constants.asm`), plus the general-purpose registers from the sigcontext.
-3. Clears `in_sigint_handler` and (if a SIGINT arrived during the handler) re-dispatches it before the final `iretd` so back-to-back Ctrl+Cs are not lost.
+3. Clears `in_signal_handler` and (if either `pending_sigint` or `pending_sigalrm` is set — a signal arrived while the handler was running) re-dispatches in priority order (SIGINT first) before the final `iretd`, so back-to-back signals are not lost.
 
 ### Cooperative interruption of blocking syscalls
 
-Long-blocking syscalls poll `pending_sigint` between iterations and bail out early rather than forcing a delivery through the IRET path:
+Long-blocking syscalls poll both pending bits between iterations and bail out early rather than forcing a delivery through the IRET path:
 
-- **`fd_read_console`** (the console read loop in `src/fs/fd/console.c`): checks `pending_sigint` after each character poll cycle. If set, it returns immediately with `CF=1, AL=ERROR_INTERRUPTED` without consuming the flag (the `SIGINT_TAIL_CHECK` epilogue handles final delivery).
-- **`MIDI_IOCTL_DRAIN`** (the `sti`/`hlt` drain loop in `src/fs/fd/midi.c`): checks `pending_sigint` after each `hlt` wakeup. Same early-exit convention: `CF=1, AL=ERROR_INTERRUPTED`.
+- **`fd_read_console`** (the console read loop in `src/fs/fd/console.c`): checks `pending_sigint || pending_sigalrm` after each character poll cycle. If either is set, returns immediately with `CF=1, AL=ERROR_INTERRUPTED` without consuming the flag (the `SIGNAL_TAIL_CHECK` epilogue handles final delivery).
+- **`rtc_sleep_ms`** (the busy-wait loop in `src/drivers/rtc.c`, called from `SYS_RTC_SLEEP`): checks both pending bits each tick. Same early-exit convention; `SYS_RTC_SLEEP` propagates as `CF=1, AL=ERROR_INTERRUPTED` so libc's `sleep()` wrapper can surface `EINTR`.
+- **`MIDI_IOCTL_DRAIN`** (the `sti`/`hlt` drain loop in `src/fs/fd/midi.c`): checks both pending bits after each `hlt` wakeup. Same early-exit convention.
 
-The libc `errno` layer in `tools/libc/syscall.c` maps `ERROR_INTERRUPTED` to `EINTR`, so portable C programs using `read()` get the standard POSIX interrupted-call semantics.
+The libc `errno` layer in `tools/libc/syscall.c` maps `ERROR_INTERRUPTED` to `EINTR`, so portable C programs using `read()` / `sleep()` get the standard POSIX interrupted-call semantics.
 
 ### Known limitation (v1)
 
 Serial Ctrl+C is detected only while `fd_read_console` is actively polling the serial port — a program that never calls `read(0, ...)` over serial cannot be killed via serial Ctrl+C. PS/2 Ctrl+C has no such restriction because IRQ 1 fires unconditionally from hardware.
+
+## SIGALRM and interval timers
+
+SIGALRM (signum 14) is armed by user programs via `SYS_RTC_ALARM` (30h):
+`EBX = ms_until_first_fire` (0 = cancel any pending alarm),
+`ECX = ms_interval` (0 = one-shot; non-zero = repeating).  The
+syscall stores `system_ticks + EBX` into `alarm_deadline` and `ECX`
+into `alarm_interval`; both reset to zero on `program_enter` so
+alarms do not survive `exec` (matching POSIX `setitimer` semantics).
+The return value is the ms remaining on the previously-armed alarm
+(0 if none was armed).
+
+PIT IRQ 0 fires SIGALRM by setting `pending_sigalrm` when
+`system_ticks` reaches `alarm_deadline`, then either re-arms
+(`alarm_interval != 0`) or clears the deadline (one-shot).
+Coalescing is automatic: if `pending_sigalrm` is already 1 when the
+deadline hits again (handler hasn't run yet), the second fire is
+dropped — same single-bit POSIX standard-signal contract as SIGINT.
+
+Delivery is identical to SIGINT — `SIGNAL_TAIL_CHECK` picks SIGINT
+first then SIGALRM (see the Delivery section above).  Default
+action is terminate (matches Linux `signal(7)`); the `^A` kill
+banner distinguishes it from SIGINT's `^C`.
+
+Userland surface: `unsigned int alarm_ms(unsigned int delay_ms,
+unsigned int interval_ms)` (BBoeOS extension) and the POSIX
+`unsigned int alarm(unsigned int seconds)` wrapper, both in
+`tools/libc/signal.c`.  cc.py-compiled programs call `alarm_ms()`
+directly via the matching builtin.

@@ -17,8 +17,10 @@
 #define SEEK_END 2
 #define SEEK_SET 0
 
-void    _exit(int status) __attribute__((noreturn));
-int     brk(void *addr);
+void         _exit(int status) __attribute__((noreturn));
+unsigned int alarm(unsigned int seconds);
+unsigned int alarm_ms(unsigned int delay_ms, unsigned int interval_ms);
+int          brk(void *addr);
 int     close(int fd);
 int     ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg);
 off_t   lseek(int fd, off_t offset, int whence);    /* stub: returns -1, sets errno=ESPIPE */

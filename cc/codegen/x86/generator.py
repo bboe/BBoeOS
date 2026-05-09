@@ -79,6 +79,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     """
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "alarm_ms": frozenset({"ax", "bx", "cx"}),
         "asm": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "checksum": frozenset({"ax", "bx", "cx", "si"}),
         "chmod": frozenset({"ax", "si"}),
@@ -125,6 +126,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "set_exec_arg": frozenset({"ax"}),
         "set_palette_color": frozenset({"ax", "bx", "cx", "dx"}),
         "shutdown": frozenset({"ax"}),
+        "signal": frozenset({"ax", "bx", "cx"}),
         "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
         "unlink": frozenset({"ax", "si"}),

@@ -77,7 +77,7 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
     if (tv == 0) return 0;
     unsigned int total_ms;
     __asm__ volatile (
-        "mov $0x31, %%ah\n\t"           /* SYS_RTC_MILLIS */
+        "mov $0x32, %%ah\n\t"           /* SYS_RTC_MILLIS */
         "int $0x30\n\t"
         : "=a"(total_ms));
     tv->tv_sec  = total_ms / 1000;

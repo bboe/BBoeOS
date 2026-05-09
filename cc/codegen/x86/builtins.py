@@ -32,6 +32,24 @@ class BuiltinsMixin:
     memory/locals state initialized by ``CodeGeneratorBase.__init__``.
     """
 
+    def builtin_alarm_ms(self, arguments: list[Node], /) -> None:
+        """Generate code for the alarm_ms(delay_ms, interval_ms) builtin.
+
+        Arms the per-process interval timer via SYS_RTC_ALARM (30h).
+        ``delay_ms`` is the ms until first fire; ``interval_ms`` is the
+        ms repeat interval (0 = one-shot).  Passing delay_ms = 0 cancels
+        any pending alarm.  Returns the ms remaining on the previous alarm
+        (0 if none was armed) in EAX.
+
+        ABI: EBX = delay_ms, ECX = interval_ms.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="alarm_ms")
+        delay_argument, interval_argument = arguments
+        self.emit_register_from_argument(argument=delay_argument, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=interval_argument, register=self.target.count_register)
+        self._emit_syscall("RTC_ALARM")
+        self.ax_clear()
+
     def builtin_asm(self, arguments: list[Node], /) -> None:
         r"""Emit an inline-asm string literal verbatim.
 
@@ -898,6 +916,23 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=0, name="shutdown")
         self._emit_syscall("SHUTDOWN")
+
+    def builtin_signal(self, arguments: list[Node], /) -> None:
+        """Generate code for the signal(signum, handler) builtin.
+
+        Registers *handler* as the SIGINT or SIGALRM handler via
+        SYS_SYS_SIGNAL (0F5h).  *handler* must be a function name
+        (user-virt pointer), SIG_DFL (0), or SIG_IGN (1).  Returns the
+        previous handler value in EAX.
+
+        ABI: EBX = signum, ECX = handler.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="signal")
+        signum_argument, handler_argument = arguments
+        self.emit_register_from_argument(argument=signum_argument, register=self.target.bx_register)
+        self.emit_register_from_argument(argument=handler_argument, register=self.target.count_register)
+        self._emit_syscall("SYS_SIGNAL")
+        self.ax_clear()
 
     def builtin_sleep(self, arguments: list[Node], /) -> None:
         """Generate code for the sleep(milliseconds) builtin.

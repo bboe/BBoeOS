@@ -78,7 +78,7 @@ syscall_handler:
         and dword [esp + SYSCALL_SAVED_EFLAGS], ~1
         .iret_cf_write:
         mov [esp + SYSCALL_SAVED_EAX], eax
-        SIGINT_TAIL_CHECK
+        SIGNAL_TAIL_CHECK
         iretd
 
         ;; Each SYS_ENTRY pads with .iret_invalid up to the requested slot,
@@ -108,6 +108,7 @@ syscall_handler:
         SYS_ENTRY SYS_NET_OPEN,      .net_open
         SYS_ENTRY SYS_NET_RECVFROM,  .net_recvfrom
         SYS_ENTRY SYS_NET_SENDTO,    .net_sendto
+        SYS_ENTRY SYS_RTC_ALARM,     .rtc_alarm
         SYS_ENTRY SYS_RTC_DATETIME,  .rtc_datetime
         SYS_ENTRY SYS_RTC_MILLIS,    .rtc_millis
         SYS_ENTRY SYS_RTC_SLEEP,     .rtc_sleep
@@ -394,6 +395,43 @@ syscall_handler:
         ;; the user sees the same value after iretd.
         ;; ------------------------------------------------------------
 
+        .rtc_alarm:
+        ;; SYS_RTC_ALARM: arm/disarm the per-process interval timer.
+        ;; In:  EBX = ms_until_first_fire (0 = cancel any pending alarm)
+        ;;      ECX = ms_interval         (0 = one-shot; non-zero = repeating)
+        ;; Out: EAX = ms remaining until the next fire on the previously-
+        ;;            armed alarm (0 if no alarm was armed).  CF clear.
+        ;; The PIT runs at MS_PER_TICK = 1, so alarm_deadline / interval
+        ;; are stored in tick units (which equal ms units on this kernel).
+        ;; No error path — any EBX/ECX combination is legal.
+        ;; Compute previous remaining ms first (before clobbering state).
+        ;; If alarm_deadline is 0, previous is 0.
+        ;; Otherwise previous = max(0, alarm_deadline - system_ticks).
+        mov eax, [alarm_deadline]
+        test eax, eax
+        jz .rtc_alarm_have_prev
+        sub eax, [system_ticks]
+        jnc .rtc_alarm_have_prev        ; saved previous in EAX (positive)
+        xor eax, eax                    ; deadline already passed → 0
+        .rtc_alarm_have_prev:
+        mov edx, eax                    ; stash previous in EDX
+        ;; Now arm or disarm.
+        test ebx, ebx
+        jz .rtc_alarm_disarm            ; EBX = 0 → cancel (ECX ignored)
+        ;; Arm: alarm_deadline = system_ticks + ebx; alarm_interval = ecx.
+        mov eax, [system_ticks]
+        add eax, ebx
+        mov [alarm_deadline], eax
+        mov [alarm_interval], ecx
+        jmp .rtc_alarm_done
+        .rtc_alarm_disarm:
+        mov dword [alarm_deadline], 0
+        mov dword [alarm_interval], 0
+        .rtc_alarm_done:
+        mov eax, edx                    ; previous remaining ms -> EAX
+        clc
+        jmp .iret_cf_eax
+
         .rtc_datetime:
         ;; Returns EAX = unsigned epoch seconds (UTC), valid through
         ;; 2106-02-07.  CF clear (never errors).
@@ -410,9 +448,16 @@ syscall_handler:
         jmp .iret_cf_eax
 
         .rtc_sleep:
-        ;; ECX = milliseconds.  rtc_sleep_ms preserves all registers; CF clear.
+        ;; ECX = milliseconds.  rtc_sleep_ms returns CF=0 on completion,
+        ;; CF=1 if interrupted by a pending signal.  Propagate as
+        ;; ERROR_INTERRUPTED so the libc wrapper can surface EINTR.
         call rtc_sleep_ms
+        jc  .rtc_sleep_eintr
         clc
+        jmp .iret_cf
+        .rtc_sleep_eintr:
+        mov al, ERROR_INTERRUPTED
+        stc
         jmp .iret_cf
 
         .rtc_uptime:
@@ -669,7 +714,7 @@ syscall_handler:
         jmp .iret_cf
 
         ;; SYS_SYS_SIGNAL: register a signal handler.
-        ;; In:  EBX = signum (must be SIGINT)
+        ;; In:  EBX = signum (SIGINT or SIGALRM)
         ;;      ECX = handler — SIG_DFL (0), SIG_IGN (1), or user-virt
         ;;            address (PROGRAM_BASE <= ECX < KERNEL_VIRT_BASE).
         ;; Out: EAX = previous handler value, CF clear on success.
@@ -678,17 +723,30 @@ syscall_handler:
         ;; The previous handler is returned so callers can restore the
         ;; prior state on cleanup, mirroring POSIX signal().
         .sys_signal:
+        ;; EBX = signum (SIGINT or SIGALRM); ECX = handler
+        ;; (SIG_DFL/SIG_IGN/user-virt).
         cmp ebx, SIGINT
+        je  .sys_signal_signum_ok
+        cmp ebx, SIGALRM
         jne .sys_signal_bad
+        .sys_signal_signum_ok:
         cmp ecx, SIG_IGN
-        jbe .sys_signal_ok              ; ECX in {0, 1}
+        jbe .sys_signal_handler_ok      ; ECX in {0, 1}
         cmp ecx, PROGRAM_BASE
         jb  .sys_signal_bad
         cmp ecx, KERNEL_VIRT_BASE
         jae .sys_signal_bad
-        .sys_signal_ok:
+        .sys_signal_handler_ok:
+        ;; Route to the right handler slot based on EBX.
+        cmp ebx, SIGINT
+        jne .sys_signal_alarm_slot
         mov eax, [sigint_handler]       ; previous handler -> EAX
         mov [sigint_handler], ecx
+        jmp .sys_signal_done
+        .sys_signal_alarm_slot:
+        mov eax, [sigalrm_handler]
+        mov [sigalrm_handler], ecx
+        .sys_signal_done:
         clc
         jmp .iret_cf_eax               ; full EAX preserved, CF=0
         .sys_signal_bad:

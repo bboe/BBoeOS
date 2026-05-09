@@ -114,6 +114,11 @@ void put_character(char byte __attribute__((in_register("ax"))))
 // user buffer pointer here before jumping to this handler.
 extern uint8_t *fd_write_buffer;
 
+// drivers/rtc.c — set to 1 when a SIGALRM is pending delivery.  The
+// equ alias (_g_pending_sigalrm equ pending_sigalrm) is published by
+// rtc.c; only the C extern is needed here to avoid a duplicate
+// definition.
+extern uint8_t pending_sigalrm;
 // drivers/ps2.c — set to 1 when a SIGINT is pending delivery.  The
 // equ alias (_g_pending_sigint equ pending_sigint) is published by
 // ps2.c; only the C extern is needed here to avoid a duplicate
@@ -123,10 +128,11 @@ extern uint8_t pending_sigint;
 // Read one byte from PS/2 ring or COM1 into *destination.  Returns CF
 // clear (return 1) with AX = 1 on success, or CF clear (return 1) with
 // AX = 0 if max_bytes was 0.  Returns CF set (return 0) with AX =
-// 0x04 (ERROR_INTERRUPTED) if pending_sigint is detected before a byte
-// arrives.  Polls continuously — the syscall handler entered with IF=0
-// (the INT 30h gate clears it) so we sti once before the polling loop
-// to let IRQ 1 fire and the keyboard ring populate.
+// 0x04 (ERROR_INTERRUPTED) if either pending_sigint or pending_sigalrm
+// is detected before a byte arrives.  Polls continuously — the syscall
+// handler entered with IF=0 (the INT 30h gate clears it) so we sti once
+// before the polling loop to let IRQ 1 fire and the keyboard ring
+// populate.
 __attribute__((carry_return))
 int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                     uint8_t *destination __attribute__((in_register("edi"))),
@@ -138,9 +144,9 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
     }
     asm("sti");
     while (1) {
-        if (pending_sigint != 0) {
+        if (pending_sigint != 0 || pending_sigalrm != 0) {
             // Cooperative interrupt: bail out so the syscall epilogue's
-            // SIGINT_TAIL_CHECK delivers the signal on iret.
+            // SIGNAL_TAIL_CHECK delivers the signal on iret.
             // ERROR_INTERRUPTED = 0x04 (constants.asm).
             *bytes_read = 0x04;
             return 0;

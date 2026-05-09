@@ -144,10 +144,11 @@
         %assign SYS_NET_OPEN 21h
         %assign SYS_NET_RECVFROM 22h
         %assign SYS_NET_SENDTO 23h
-        %assign SYS_RTC_DATETIME 30h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
-        %assign SYS_RTC_MILLIS 31h      ; returns EAX = milliseconds since boot
-        %assign SYS_RTC_SLEEP 32h       ; ECX=milliseconds: busy-wait via the PIT tick counter
-        %assign SYS_RTC_UPTIME 33h      ; returns EAX = seconds since boot
+        %assign SYS_RTC_ALARM 30h       ; EBX=ms_until_first (0=cancel), ECX=ms_interval (0=one-shot); returns EAX=ms remaining on prior alarm
+        %assign SYS_RTC_DATETIME 31h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
+        %assign SYS_RTC_MILLIS 32h      ; returns EAX = milliseconds since boot
+        %assign SYS_RTC_SLEEP 33h       ; ECX=milliseconds: busy-wait via the PIT tick counter
+        %assign SYS_RTC_UPTIME 34h      ; returns EAX = seconds since boot
 
         %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
 
@@ -156,10 +157,11 @@
         %assign SYS_SYS_EXIT 0F2h
         %assign SYS_SYS_REBOOT 0F3h
         %assign SYS_SYS_SHUTDOWN 0F4h
-        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
         %assign SYS_SYS_SIGRETURN 0F6h    ; restore from sigcontext on user stack; never returns to caller
 
-        ;; Signal numbers (POSIX-numbered).  Currently only SIGINT is delivered.
+        ;; Signal numbers (POSIX-numbered).
+        %assign SIGALRM 14
         %assign SIGINT 2
 
         ;; signal() handler sentinels (POSIX-valued).
@@ -184,7 +186,7 @@
         %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
-        %assign VDSO_SIGRETURN_OFFSET 0450h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every SIGINT handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`
+        %assign VDSO_SIGRETURN_OFFSET 0450h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with
