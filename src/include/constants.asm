@@ -144,10 +144,11 @@
         %assign SYS_NET_OPEN 21h
         %assign SYS_NET_RECVFROM 22h
         %assign SYS_NET_SENDTO 23h
-        %assign SYS_RTC_DATETIME 30h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
-        %assign SYS_RTC_MILLIS 31h      ; returns EAX = milliseconds since boot
-        %assign SYS_RTC_SLEEP 32h       ; ECX=milliseconds: busy-wait via the PIT tick counter
-        %assign SYS_RTC_UPTIME 33h      ; returns EAX = seconds since boot
+        %assign SYS_RTC_ALARM 30h       ; EBX=ms_until_first (0=cancel), ECX=ms_interval (0=one-shot); returns EAX=ms remaining on prior alarm
+        %assign SYS_RTC_DATETIME 31h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
+        %assign SYS_RTC_MILLIS 32h      ; returns EAX = milliseconds since boot
+        %assign SYS_RTC_SLEEP 33h       ; ECX=milliseconds: busy-wait via the PIT tick counter
+        %assign SYS_RTC_UPTIME 34h      ; returns EAX = seconds since boot
 
         %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
 
@@ -156,10 +157,11 @@
         %assign SYS_SYS_EXIT 0F2h
         %assign SYS_SYS_REBOOT 0F3h
         %assign SYS_SYS_SHUTDOWN 0F4h
-        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT only); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
         %assign SYS_SYS_SIGRETURN 0F6h    ; restore from sigcontext on user stack; never returns to caller
 
-        ;; Signal numbers (POSIX-numbered).  Currently only SIGINT is delivered.
+        ;; Signal numbers (POSIX-numbered).
+        %assign SIGALRM 14
         %assign SIGINT 2
 
         ;; signal() handler sentinels (POSIX-valued).

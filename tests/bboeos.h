@@ -41,6 +41,10 @@
 #define IPPROTO_UDP 17
 #define MAX_INPUT 256
 #define SECTOR_BUFFER ((char *)0xF000)
+#define SIG_DFL 0
+#define SIG_IGN 1
+#define SIGALRM 14
+#define SIGINT 2
 #define SOCK_DGRAM 1
 #define SOCK_RAW 0
 #define STDERR STDERR_FILENO

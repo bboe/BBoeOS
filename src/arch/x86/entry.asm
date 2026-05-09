@@ -370,11 +370,16 @@ program_enter:
         mov [current_program_break],     eax
         mov [current_program_break_min], eax
 
-        ;; Reset SIGINT state — every new program starts in SIG_DFL with
-        ;; no pending signal and no handler frame on its stack.
-        mov dword [sigint_handler],  SIG_DFL
-        mov byte  [pending_sigint],    0
+        ;; Reset signal state — every new program starts in SIG_DFL
+        ;; for both signals, with no pending bits, no nesting flag,
+        ;; and no armed alarm.  Alarms do not survive exec (POSIX).
+        mov dword [alarm_deadline],    0
+        mov dword [alarm_interval],    0
         mov byte  [in_signal_handler], 0
+        mov byte  [pending_sigalrm],   0
+        mov byte  [pending_sigint],    0
+        mov dword [sigalrm_handler],   SIG_DFL
+        mov dword [sigint_handler],    SIG_DFL
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -749,18 +754,26 @@ kernel_idle_pd_phys dd 0
 current_pd_phys         dd 0    ; new PD being built
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
-virt_cursor             dd 0    ; current user-virt during page-walk loops
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
+virt_cursor             dd 0    ; current user-virt during page-walk loops
 
-        ;; SIGINT delivery state.  One global slot suffices because only one
-        ;; user program runs at a time — program_enter zeroes the lot on every
-        ;; load so it behaves as if it were per-program.  sigint_handler is a
-        ;; user-virt address (or SIG_DFL=0 / SIG_IGN=1); the address is only
-        ;; valid in the active PD, hence the zero-on-transition rule.
-sigint_handler        dd 0
-pending_sigint        db 0
+        ;; Signal delivery state.  One global slot per signal suffices
+        ;; because only one user program runs at a time — program_enter
+        ;; zeroes the lot on every load so it behaves as if it were
+        ;; per-program.  Handler fields are user-virt addresses (or
+        ;; SIG_DFL=0 / SIG_IGN=1); the address is only valid in the
+        ;; active PD, hence the zero-on-transition rule.  alarm_deadline
+        ;; is a system_ticks value at which IRQ 0 should set
+        ;; pending_sigalrm (0 means disarmed); alarm_interval is the
+        ;; auto-rearm period in ticks (0 means one-shot).
+alarm_deadline        dd 0
+alarm_interval        dd 0
 in_signal_handler     db 0
+pending_sigalrm       db 0
+pending_sigint        db 0
         align 4
+sigalrm_handler       dd 0
+sigint_handler        dd 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via
