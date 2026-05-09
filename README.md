@@ -2,12 +2,11 @@
 
 ![bboeos demo](docs/gifs/demo.gif)
 
-A minimal x86 operating system: a real-mode bootloader hands off to a
-paged 32-bit protected-mode kernel that runs userland programs at
-ring 3.  Includes a shell, VFS with bbfs and ext2 backends, NE2000
-networking (ARP / IP / ICMP / UDP), a self-hosted assembler, and a
-custom C subset compiler that translates `src/c/*.c` to NASM-compatible
-assembly on the host.
+A minimal x86 operating system: a real-mode bootloader hands off to a paged
+32-bit protected-mode kernel that runs userland programs at ring 3.  Includes a
+shell, VFS with bbfs and ext2 backends, NE2000 networking (ARP / IP / ICMP /
+UDP), a self-hosted assembler, and a custom C subset compiler that translates
+`src/c/*.c` to NASM-compatible assembly on the host.
 
 It also runs Doom:
 
@@ -15,44 +14,43 @@ https://github.com/user-attachments/assets/5efa60a4-c948-4552-9903-23a4c69a0282
 
 The Doom port lives in `tools/doom/` and links against a hand-rolled
 freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
-[`tools/build_doom.py`](tools/build_doom.py); shareware-WAD
-provisioning: [`tools/fetch_wad.sh`](tools/fetch_wad.sh); one-shot
-"build + install on a fresh disk image":
-[`tools/install_doom.sh`](tools/install_doom.sh).
+[`tools/build_doom.py`](tools/build_doom.py); shareware-WAD provisioning:
+[`tools/fetch_wad.sh`](tools/fetch_wad.sh); one-shot "build + install on a fresh
+disk image": [`tools/install_doom.sh`](tools/install_doom.sh).
 
-The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`)
-concatenated on disk.  `boot.bin` is the MBR + post-MBR real-mode
-bootstrap + 32-bit paging bring-up; `kernel.bin` is the high-half
-kernel (`org 0xC0020000`) that owns drivers, filesystems, the network
-stack, and the INT 30h syscall surface.  Each user program runs in its
-own page directory built by `address_space_create`; the kernel half
-(PDEs 768..1023) is copy-imaged from a single `kernel_idle_pd`, and
-the user half holds the program's text, BSS, stack, and a shared
-vDSO page.
+The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`) concatenated
+on disk.  `boot.bin` is the MBR + post-MBR real-mode bootstrap + 32-bit paging
+bring-up; `kernel.bin` is the high-half kernel (`org 0xC0020000`) that owns
+drivers, filesystems, the network stack, and the INT 30h syscall surface.  Each
+user program runs in its own page directory built by `address_space_create`; the
+kernel half (PDEs 768..1023) is copy-imaged from a single `kernel_idle_pd`, and
+the user half holds the program's text, BSS, stack, and a shared vDSO page.
 
 ## Dependencies
 
 * `e2fsprogs` — only when building with `--ext2`
 * `nasm` — assembler
-* `python3` — runs `add_file.py`, `cc.py`, and the `tests/` harness (stdlib only)
+* `python3` — runs `add_file.py`, `cc.py`, and the `tests/` harness (stdlib
+  only)
 * `qemu-system-i386` — to boot the OS
 
-macOS: `brew install e2fsprogs nasm qemu`.  Ubuntu: `sudo apt-get install -y e2fsprogs nasm qemu-system-x86`.  See [`docs/requirements.md`](docs/requirements.md) for the full list, including the macOS keg-only `PATH` gotcha for `e2fsprogs`.
+macOS: `brew install e2fsprogs nasm qemu`.  Ubuntu: `sudo apt-get install -y
+e2fsprogs nasm qemu-system-x86`.  See
+[`docs/requirements.md`](docs/requirements.md) for the full list, including the
+macOS keg-only `PATH` gotcha for `e2fsprogs`.
 
 ## Minimum runtime requirements
 
-* **1 MB RAM** boots the shell and runs every program in `bin/`,
-  including the self-hosted assembler (`asm`), the BSS-stress test
-  (`bigbss`, 256 KB BSS), and the 448 KB-BSS editor (`edit`).  The
-  kernel-side fixed-physical region — `kernel.bin` (~29 KB) + 4 KB
-  kernel stack + first kernel PT + 8 KB frame bitmap — sits in
-  conventional RAM below the VGA aperture at `0xA0000`.  Filesystem
-  and NIC scratch frames are allocated dynamically from the bitmap
-  allocator only when their subsystems initialize, so a no-NIC boot
-  never spends those frames.  Default for the `tests/` harness is
-  `qemu-system-i386 -m 1`.
-* `qemu-system-i386` defaults to 128 MB, well above the 1 MB floor.
-  Pass `-m 1` to exercise the minimum-RAM contract.
+* **1 MB RAM** boots the shell and runs every program in `bin/`, including the
+  self-hosted assembler (`asm`), the BSS-stress test (`bigbss`, 256 KB BSS), and
+  the 448 KB-BSS editor (`edit`).  The kernel-side fixed-physical region —
+  `kernel.bin` (~29 KB) + 4 KB kernel stack + first kernel PT + 8 KB frame
+  bitmap — sits in conventional RAM below the VGA aperture at `0xA0000`.
+  Filesystem and NIC scratch frames are allocated dynamically from the bitmap
+  allocator only when their subsystems initialize, so a no-NIC boot never spends
+  those frames.  Default for the `tests/` harness is `qemu-system-i386 -m 1`.
+* `qemu-system-i386` defaults to 128 MB, well above the 1 MB floor. Pass `-m 1`
+  to exercise the minimum-RAM contract.
 
 ## Building and running BBoeOS
 
@@ -105,7 +103,8 @@ make_os.sh            Build script
 
 ## Changelog
 
-See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for a detailed history of changes by version and date.
+See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for a detailed history of changes
+by version and date.
 
 ## Resources
 

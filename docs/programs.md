@@ -5,13 +5,18 @@ nav_order: 40
 
 # Programs
 
-Every executable that ships with BBoeOS lives as a single C file under `src/c/`, gets compiled by `cc.py`, assembled by NASM, and added to the disk image inside `bin/`. The shell first looks in the root directory, then retries with a `bin/` prefix — so `cat foo` finds `bin/cat`.
+Every executable that ships with BBoeOS lives as a single C file under `src/c/`,
+gets compiled by `cc.py`, assembled by NASM, and added to the disk image inside
+`bin/`. The shell first looks in the root directory, then retries with a `bin/`
+prefix — so `cat foo` finds `bin/cat`.
 
-`shell.c` is the only program loaded directly by the kernel; everything else is launched via `SYS_SYS_EXEC` (which the shell invokes for any unknown command).
+`shell.c` is the only program loaded directly by the kernel; everything else is
+launched via `SYS_SYS_EXEC` (which the shell invokes for any unknown command).
 
 ## Shell built-ins
 
-These three commands are dispatched inside `shell.c` itself, not by execing a separate program:
+These three commands are dispatched inside `shell.c` itself, not by execing a
+separate program:
 
 | Command | Effect |
 |---------|--------|
@@ -50,7 +55,8 @@ These three commands are dispatched inside `shell.c` itself, not by execing a se
 
 ## Networking
 
-All four NIC programs require QEMU to be launched with `-netdev user,id=net0 -device ne2k_isa,netdev=net0,irq=3,iobase=0x300`.
+All four NIC programs require QEMU to be launched with `-netdev user,id=net0
+-device ne2k_isa,netdev=net0,irq=3,iobase=0x300`.
 
 | Program | Usage | Notes |
 |---------|-------|-------|
@@ -60,8 +66,13 @@ All four NIC programs require QEMU to be launched with `-netdev user,id=net0 -de
 
 ## Adding a new program
 
-1. Drop a C file in `src/c/` (see [C subset reference](c_subset.html) for what `cc.py` accepts).
+1. Drop a C file in `src/c/` (see [C subset reference](c_subset.html) for what
+   `cc.py` accepts).
 2. `./make_os.sh` — the build script auto-discovers every `*.c` under `src/c/`.
-3. Boot, type the program name at the shell. Unknown names fall through to `bin/<name>`.
+3. Boot, type the program name at the shell. Unknown names fall through to
+   `bin/<name>`.
 
-The shell's three built-ins (`help`, `reboot`, `shutdown`) are dispatched inside `shell.c`'s `else if (strcmp(buf, "name") == 0)` chain — adding a built-in means a new branch and an updated `help` string. Adding a regular external command means just a new `src/c/*.c` file.
+The shell's three built-ins (`help`, `reboot`, `shutdown`) are dispatched inside
+`shell.c`'s `else if (strcmp(buf, "name") == 0)` chain — adding a built-in means
+a new branch and an updated `help` string. Adding a regular external command
+means just a new `src/c/*.c` file.

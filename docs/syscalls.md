@@ -5,9 +5,10 @@ nav_order: 80
 
 # Syscall interface (`INT 30h`)
 
-Programs loaded from the filesystem can use `INT 30h` for OS services.
-Syscall numbers are defined symbolically as `SYS_*` constants in
-[`src/include/constants.asm`](https://github.com/bboe/BBoeOS/blob/main/src/include/constants.asm) — programs reference the names, not the numbers.
+Programs loaded from the filesystem can use `INT 30h` for OS services. Syscall
+numbers are defined symbolically as `SYS_*` constants in
+[`src/include/constants.asm`](https://github.com/bboe/BBoeOS/blob/main/src/include/constants.asm)
+— programs reference the names, not the numbers.
 
 | AH    | Name         | Description                                          |
 |-------|--------------|------------------------------------------------------|
@@ -49,13 +50,13 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 01h | MIDI_IOCTL_FLUSH  | drop queued events, KEY_OFF all 18 voices, AX = 0, CF clear |
 | 02h | MIDI_IOCTL_QUERY  | AX = `g_opl3_present` (0 or 1), CF clear                    |
 
-Wire format on `/dev/midi` is 6-byte commands: `(delay_lo, delay_hi,
-bank, reg, value, reserved)`.
+Wire format on `/dev/midi` is 6-byte commands: `(delay_lo, delay_hi, bank, reg,
+value, reserved)`.
 
 ## Error codes
 
-When a syscall sets CF on return, AL holds one of these codes (symbolic
-names in `src/include/constants.asm`):
+When a syscall sets CF on return, AL holds one of these codes (symbolic names in
+`src/include/constants.asm`):
 
 | AL  | Name                  | Meaning                                                      |
 |-----|-----------------------|--------------------------------------------------------------|
