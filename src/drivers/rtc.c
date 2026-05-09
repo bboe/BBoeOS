@@ -40,6 +40,13 @@ uint32_t system_ticks;
 // the asm consumer doesn't need to know about that.
 asm("system_ticks equ _g_system_ticks");
 
+// pending_sigalrm is defined as a NASM label (db 0) in entry.asm.
+// cc.py mangles global accesses to the _g_ prefix; the equ below
+// makes _g_pending_sigalrm resolve to the entry.asm label so that
+// plain C assignments compile and link correctly.
+extern uint8_t pending_sigalrm;
+asm("_g_pending_sigalrm equ pending_sigalrm");
+
 // Forward declaration: rtc_read_time_internal sorts after
 // rtc_read_epoch alphabetically and is called from its body.
 void rtc_read_time_internal(int *cx __attribute__((out_register("cx"))),
@@ -174,6 +181,10 @@ asm("rtc_read_time_internal:\n"
 // Syscall handlers enter with IF=0 (INT clears it), so we sti
 // inside — IRQ 0 must fire for the tick counter to advance.
 // pushf/popf around the body keeps the caller's IF intact.
+// Returns CF=0 on success (full sleep completed).
+// Returns CF=1 (any AL) when interrupted by a pending signal
+// (pending_sigint or pending_sigalrm); the caller decides whether
+// to retry or surface as EINTR.
 void rtc_sleep_ms(int ms __attribute__((in_register("ecx"))));
 
 asm("rtc_sleep_ms:\n"
@@ -183,9 +194,9 @@ asm("rtc_sleep_ms:\n"
     "    push ecx\n"
     "    push edx\n"
     "    mov eax, ecx\n"
-    "    add eax, MS_PER_TICK - 1\n"           // round up to whole ticks (MS_PER_TICK - 1)
+    "    add eax, MS_PER_TICK - 1\n"           // round up to whole ticks
     "    xor edx, edx\n"
-    "    mov ebx, MS_PER_TICK\n"          // MS_PER_TICK
+    "    mov ebx, MS_PER_TICK\n"
     "    div ebx\n"
     "    test eax, eax\n"
     "    jnz .rsm_have_ticks\n"
@@ -196,6 +207,12 @@ asm("rtc_sleep_ms:\n"
     "    call rtc_tick_read\n"
     "    add ebx, eax\n"
     ".rsm_wait:\n"
+    // Cooperative interruption: bail out early if either signal is
+    // pending so the caller can deliver it via SIGNAL_TAIL_CHECK.
+    "    cmp byte [_g_pending_sigint], 0\n"
+    "    jne .rsm_eintr\n"
+    "    cmp byte [_g_pending_sigalrm], 0\n"
+    "    jne .rsm_eintr\n"
     "    call rtc_tick_read\n"
     "    cmp eax, ebx\n"
     "    jb .rsm_wait\n"
@@ -204,6 +221,15 @@ asm("rtc_sleep_ms:\n"
     "    pop ebx\n"
     "    pop eax\n"
     "    popf\n"
+    "    clc\n"
+    "    ret\n"
+    ".rsm_eintr:\n"
+    "    pop edx\n"
+    "    pop ecx\n"
+    "    pop ebx\n"
+    "    pop eax\n"
+    "    popf\n"
+    "    stc\n"
     "    ret");
 
 // rtc_tick_read: returns EAX = monotonic tick counter (32-bit).

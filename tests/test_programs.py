@@ -575,6 +575,16 @@ _EXT2_ONLY = frozenset({"ext2"})
 
 TESTS: list[ProgramTest] = [
     ProgramTest("alarm_cancel", ["alarm_cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
+    ProgramTest("alarm_coalesce", ["alarm_coalesce"], r"^COALESCE_OK count=(\d|1[0-2])$"),
+    ProgramTest("alarm_during_sleep", ["alarm_during_sleep"], r"^EINTR_OK elapsed=(4[0-9]|[5-9][0-9]|100)$"),
+    ProgramTest(
+        "alarm_default_kill",
+        ["alarm_default_kill", "echo recovered"],
+        r"ARMING[\s\S]*\^A[\s\S]*recovered",
+    ),
+    ProgramTest("alarm_nesting", ["alarm_nesting\n\x03"], r"^NESTED_OK$"),
+    ProgramTest("alarm_oneshot", ["alarm_oneshot"], r"^ALARM_OK$"),
+    ProgramTest("alarm_repeat", ["alarm_repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
     # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,341 of

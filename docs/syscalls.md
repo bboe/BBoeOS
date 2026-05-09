@@ -30,7 +30,7 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 30h   | rtc_alarm    | Arm/disarm interval timer. EBX = ms_until_first_fire (0 = cancel), ECX = ms_interval (0 = one-shot). EAX = ms remaining on prior alarm (0 if none). CF clear, no error path. Fires SIGALRM via SIGNAL_TAIL_CHECK. |
 | 31h   | rtc_datetime | Get wall-clock time, EAX = unsigned seconds since 1970-01-01 UTC |
 | 32h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |
-| 33h   | rtc_sleep    | Busy-wait for ECX milliseconds                                   |
+| 33h   | rtc_sleep    | Busy-wait for ECX milliseconds; returns CF=1 + AL=ERROR_INTERRUPTED if a signal (SIGINT or SIGALRM) is pending |
 | 34h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
 | 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt; CF on OOM |
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
@@ -62,7 +62,7 @@ names in `src/include/constants.asm`):
 | 01h | ERROR_DIRECTORY_FULL  | No free directory entries (copy/create)                      |
 | 02h | ERROR_EXISTS          | Destination name already exists (rename/copy)                |
 | 03h | ERROR_FAULT           | Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH |
-| 04h | ERROR_INTERRUPTED     | Cooperative-interrupt return (SIGINT pending during blocking syscall) — maps to `EINTR` in libc |
+| 04h | ERROR_INTERRUPTED     | Cooperative-interrupt return (SIGINT or SIGALRM pending during blocking syscall) — maps to `EINTR` in libc |
 | 05h | ERROR_INVALID         | Invalid argument (bad signum, out-of-range handler address, etc.) |
 | 06h | ERROR_NOT_EMPTY       | Directory is not empty (rmdir)                               |
 | 07h | ERROR_NOT_EXECUTE     | File exists but is not executable (exec)                     |

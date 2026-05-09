@@ -61,13 +61,40 @@
 %include "irq_tail.inc"
 
 pmode_irq0_handler:
-        ;; PIT tick.  Increment system_ticks, drain due midi events,
-        ;; EOI the master PIC, iretd.  Interrupt gate entry leaves IF=0
-        ;; for the body; on a single CPU we don't need LOCK on the inc.
-        ;; midi_drain_due is bounded to MIDI_DRAIN_PER_TICK iterations
-        ;; so the ISR latency stays O(1).
+        ;; PIT tick.  Increment system_ticks, fire any due interval
+        ;; timer (set pending_sigalrm + re-arm or clear), drain due
+        ;; midi events, EOI the master PIC, iretd.  Interrupt gate
+        ;; entry leaves IF=0 for the body; on a single CPU we don't
+        ;; need LOCK on the inc.  midi_drain_due is bounded to
+        ;; MIDI_DRAIN_PER_TICK iterations so the ISR latency stays
+        ;; O(1) (the alarm check is constant-time).
         pushad
         inc dword [system_ticks]
+        ;; Alarm check: if alarm_deadline is non-zero and we've hit it,
+        ;; set pending_sigalrm and either re-arm (interval mode) or
+        ;; clear the deadline (one-shot).  Coalescing: if pending_sigalrm
+        ;; is already 1, the second set is a no-op (handler hasn't run
+        ;; yet, the second fire collapses into the first — same model
+        ;; as SIGINT, same as POSIX standard signals).
+        mov eax, [alarm_deadline]
+        test eax, eax
+        jz .pmode_irq0_no_alarm
+        cmp [system_ticks], eax
+        jb  .pmode_irq0_no_alarm
+        mov byte [pending_sigalrm], 1
+        mov ecx, [alarm_interval]
+        test ecx, ecx
+        jz  .pmode_irq0_alarm_oneshot
+        ;; Re-arm: deadline = current + interval.  system_ticks wraps at
+        ;; 2^32 ms (~49.7 days); an alarm armed near that wrap edge could
+        ;; fire at an unexpected time when system_ticks rolls past the
+        ;; deadline early.  Not worth fixing for a hobby OS uptime.
+        add eax, ecx
+        mov [alarm_deadline], eax
+        jmp .pmode_irq0_no_alarm
+        .pmode_irq0_alarm_oneshot:
+        mov dword [alarm_deadline], 0
+        .pmode_irq0_no_alarm:
         call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al

@@ -448,9 +448,16 @@ syscall_handler:
         jmp .iret_cf_eax
 
         .rtc_sleep:
-        ;; ECX = milliseconds.  rtc_sleep_ms preserves all registers; CF clear.
+        ;; ECX = milliseconds.  rtc_sleep_ms returns CF=0 on completion,
+        ;; CF=1 if interrupted by a pending signal.  Propagate as
+        ;; ERROR_INTERRUPTED so the libc wrapper can surface EINTR.
         call rtc_sleep_ms
+        jc  .rtc_sleep_eintr
         clc
+        jmp .iret_cf
+        .rtc_sleep_eintr:
+        mov al, ERROR_INTERRUPTED
+        stc
         jmp .iret_cf
 
         .rtc_uptime:
