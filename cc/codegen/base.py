@@ -78,6 +78,7 @@ class CodeGeneratorBase:
         "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
+        "ERROR_FAULT",
         "ERROR_NOT_EMPTY",
         "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",

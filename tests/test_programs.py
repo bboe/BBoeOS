@@ -660,6 +660,18 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         timeout=_LARGE_FILE_TIMEOUT,
     ),
+    # sleep_forever calls read(STDIN, buffer, 1) which blocks until a byte
+    # arrives.  The embedded \x03 (Ctrl+C) is detected by fd_read_console,
+    # which sets pending_sigint and returns.  The syscall epilogue's
+    # SIGNAL_TAIL_CHECK dispatches SIGINT and routes through child_terminate
+    # with EAX = SIGINT (2).  expand_dollar_question maps wait-status 0x0002
+    # to bash_status = 128 + 2 = 130, which echo $? then prints.
+    ProgramTest(
+        "ctrl_c_into_sleep",
+        ["sleep_forever\n\x03", "echo $?"],
+        r"\^C[\s\S]*\b130\b",
+        timeout=3.0,
+    ),
     # Three calls in a row must agree on the date — catches DX-clobber-style
     # bugs where consecutive RTC reads return drifting / mismatched values.
     ProgramTest(
@@ -739,6 +751,11 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         setup=_ext2_pad_bin_to_full_directory,
     ),
+    # exit_status runs _exit(N) and the shell encodes N into bits 15..8 of
+    # the wait status.  expand_dollar_question extracts WEXITSTATUS and
+    # echo $? prints the original value.
+    ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
+    ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
@@ -791,6 +808,11 @@ TESTS: list[ProgramTest] = [
         extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
         timeout=3.0,
     ),
+    # recursive_exec_test calls exec("cat") from inside a running child.
+    # The kernel rejects recursive exec because parent_program_state is
+    # already set (the shell is the parent); sys_exec returns CF=1 with
+    # AL = ERROR_INVALID (5), and the builtin wraps that as -(5) = -5.
+    ProgramTest("recursive_exec_test", ["recursive_exec_test"], r"rc=-5"),
     ProgramTest(
         "rename",
         ["cp src/parse_ip.asm out.asm", "mv out.asm renamed.asm", "cat renamed.asm"],
@@ -846,6 +868,18 @@ TESTS: list[ProgramTest] = [
     # block 0, where the straddle_dir test still finds a usable
     # boundary at 512 — longer names push past 492 and break it.
     ProgramTest("seek", ["seek"], r"^seek: OK$"),
+    # [shell:start] is printed exactly once per shell-load at the top of
+    # main().  Three successive echo commands must all run inside the same
+    # shell instance — confirming shell-survives-child — so the marker
+    # appears exactly once before all three outputs.  The negative
+    # lookahead after the marker asserts it does not appear a second
+    # time; a regression where the shell reloads between commands would
+    # print [shell:start] again and trip the lookahead.
+    ProgramTest(
+        "shell_state_survives",
+        ["echo a", "echo b", "echo c"],
+        r"^\[shell:start\](?![\s\S]*\[shell:start\])[\s\S]*\ba\b[\s\S]*\bb\b[\s\S]*\bc\b",
+    ),
     # Registers an on_sigint handler, calls SYS_IO_READ, and sends a
     # Ctrl+C (0x03) byte so fd_read_console detects it, sets
     # pending_sigint, and returns the byte.  The syscall epilogue's

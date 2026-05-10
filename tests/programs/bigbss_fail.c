@@ -15,7 +15,7 @@
 int big_array[BIG_SIZE_INTS];
 
 int main() {
-    /* Unreachable: program_enter OOMs during phase-2 BSS allocation. */
+    /* Unreachable: program_enter OOMs during BSS allocation. */
     printf("bigbss_fail: unreachable — should have OOMed\n");
     return 0;
 }

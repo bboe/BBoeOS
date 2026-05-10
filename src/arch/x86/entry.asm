@@ -504,9 +504,6 @@ program_enter:
         jmp .stack_page_loop
 .stack_pages_done:
 
-        ;; --- Snapshot kernel ESP for sys_exit ---
-        mov [shell_esp], esp
-
         ;; --- Switch to the new PD ---
         mov eax, [current_program_state]
         mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
@@ -602,11 +599,20 @@ program_enter:
         mov dword [ebx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
 .oom_no_pd:
 
-        ;; Reset kernel ESP and surface the failure.  The kernel stack
-        ;; may have transient pushes from inner alloc+map pairs; reset
-        ;; to a known top before the put_character loop and the jmp
-        ;; into shell_reload.
+        ;; Reset kernel ESP.  The kernel stack may have transient pushes
+        ;; from inner alloc+map pairs; reset to a known top before any
+        ;; further work.
         mov esp, kernel_stack_top
+
+        ;; If a parent is suspended, this is a failed child load — return
+        ;; ERROR_FAULT to the parent via spawn_failed_unwind.  No console
+        ;; print: surfacing the error in EAX is sufficient.  Otherwise
+        ;; (boot path / shell load OOM) print the OOM message, then fall
+        ;; back to shell_reload or the .panic path — loading_shell_flag
+        ;; distinguishes those.
+        cmp dword [parent_program_state], 0
+        jne spawn_failed_unwind
+        ;; No parent: print the OOM message before fallback / panic.
         mov esi, oom_msg
 .oom_print:
         mov al, [esi]
@@ -616,13 +622,6 @@ program_enter:
         inc esi
         jmp .oom_print
 .oom_done:
-
-        ;; If a parent is suspended, this is a failed child load — return
-        ;; ERROR_FAULT to the parent via spawn_failed_unwind.  Otherwise
-        ;; (boot path / shell load OOM) fall back to shell_reload or the
-        ;; .panic path — loading_shell_flag distinguishes those.
-        cmp dword [parent_program_state], 0
-        jne spawn_failed_unwind
         cmp dword [loading_shell_flag], 0
         jne .panic
         jmp shell_reload
@@ -1022,7 +1021,6 @@ pending_frame_phys      dd 0
         align 4
 program_fd              times FD_ENTRY_SIZE db 0
 
-shell_esp       dd 0            ; kernel ESP snapshot, restored by sys_exit
 shell_path      db "bin/shell", 0
 
         ;; sys_exec pre-allocates the new program's USER_DATA handoff
@@ -1043,6 +1041,6 @@ next_handoff_frame_phys dd 0
 tss_data:
         times 104 db 0
 
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.10.0 (2026/05/04)", 13, 10, 0
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.11.0 (2026/05/10)", 13, 10, 0
 
 ;;; -----------------------------------------------------------------------

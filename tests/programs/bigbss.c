@@ -4,7 +4,7 @@
 
      * `bigbss`     — boots -m 1024, succeeds.
      * `bigbss_oom` — boots -m 1023 (one MB less RAM), expects OOM
-       partway through phase 2 and graceful recovery via the
+       partway through BSS allocation and graceful recovery via the
        respawned shell.  Tripwire if BIGBSS_PAGES is set too low.
 
    `bigbss_fail` (separate program) declares BIGBSS_PAGES + 1 and

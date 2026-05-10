@@ -1,27 +1,12 @@
 /* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
-   pre-Phase-4 the shell stashed it inside SECTOR_BUFFER (phys 0xF000)
-   reachable through the shim's identity user mapping, but per-program
-   PDs no longer alias the low 1 MB so a stale fixed-address access
-   would page-fault. */
+   per-program PDs do not alias the low 1 MB so a fixed-address scratch
+   like SECTOR_BUFFER would page-fault. */
 char kill_buf[MAX_INPUT];
 
 /* Wait status of the most recently exec()'d child.  Written by
-   try_exec() on a successful exec; read by the dispatch loop.
-   B11 will expose this as $? to the user. */
+   try_exec() on a successful exec; read by the dispatch loop and
+   expand_dollar_question() to expose $? to the user. */
 int last_exec_status;
-
-int strcmp(const char *a, const char *b) {
-    int index = 0;
-    while (1) {
-        if (a[index] != b[index]) {
-            return a[index] - b[index];
-        }
-        if (a[index] == '\0') {
-            return 0;
-        }
-        index += 1;
-    }
-}
 
 int cursor_back(int count) {
     if (count > 0) {
@@ -30,11 +15,95 @@ int cursor_back(int count) {
     return 0;
 }
 
-int visual_bell() {
-    printf("\e[48;5;4m");
-    sleep(50);
-    printf("\e[48;5;0m");
-    return 0;
+int delete_at_cursor(char *buf, int cursor, int end) {
+    /* Shift buf[cursor+1..end) left one slot, redraw, erase the stale
+       trailing character, reposition cursor.  Returns the new end. */
+    int shift = cursor;
+    while (shift < end - 1) {
+        buf[shift] = buf[shift + 1];
+        shift += 1;
+    }
+    end -= 1;
+    write(STDOUT, buf + cursor, end - cursor);
+    putchar(' ');
+    cursor_back(end - cursor + 1);
+    return end;
+}
+
+int expand_dollar_question(char *buffer, int max_len) {
+    /* In-place replace every "$?" in buffer with the decimal representation
+       of the bash-shaped last status:
+         normal exit  -> WEXITSTATUS  (bits 15..8 of last_exec_status)
+         signal kill  -> 128 + WTERMSIG (low 7 bits)
+       Returns the new length, or -1 if the expansion would exceed max_len. */
+    int bash_status;
+    int signum = last_exec_status & 0x7F;
+    if (signum == 0) {
+        bash_status = (last_exec_status >> 8) & 0xFF;
+    } else {
+        bash_status = 128 + signum;
+    }
+    char digits[4];
+    int digit_count = 0;
+    int n = bash_status;
+    if (n == 0) {
+        digits[0] = '0';
+        digit_count = 1;
+    } else {
+        while (n > 0) {
+            digits[digit_count] = '0' + (n % 10);
+            digit_count = digit_count + 1;
+            n = n / 10;
+        }
+    }
+    /* Reverse digits in place. */
+    int i = 0;
+    int j = digit_count - 1;
+    while (i < j) {
+        char tmp = digits[i];
+        digits[i] = digits[j];
+        digits[j] = tmp;
+        i = i + 1;
+        j = j - 1;
+    }
+    /* Walk buffer, replace each $? with digits[0..digit_count). */
+    int read_index = 0;
+    int len = strlen(buffer);
+    while (read_index < len - 1) {
+        if (buffer[read_index] == '$' && buffer[read_index + 1] == '?') {
+            int growth = digit_count - 2;
+            if (len + growth >= max_len) {
+                return -1;
+            }
+            /* Shift tail right by growth (could be -1, 0, 1, 2). */
+            if (growth > 0) {
+                int tail_index = len;
+                while (tail_index > read_index + 2) {
+                    buffer[tail_index + growth] = buffer[tail_index];
+                    tail_index = tail_index - 1;
+                }
+                buffer[read_index + 2 + growth] = buffer[read_index + 2];
+            } else if (growth < 0) {
+                /* Shift tail left. */
+                int tail_index = read_index + 2;
+                while (tail_index <= len) {
+                    buffer[tail_index + growth] = buffer[tail_index];
+                    tail_index = tail_index + 1;
+                }
+            }
+            int digit_index = 0;
+            while (digit_index < digit_count) {
+                buffer[read_index + digit_index] = digits[digit_index];
+                digit_index = digit_index + 1;
+            }
+            len = len + growth;
+            read_index = read_index + digit_count;
+        } else {
+            read_index = read_index + 1;
+        }
+    }
+    buffer[len] = '\0';
+    return len;
 }
 
 int insert_char(char *buf, int cursor, int end, char ch) {
@@ -53,26 +122,25 @@ int insert_char(char *buf, int cursor, int end, char ch) {
     return end;
 }
 
-int delete_at_cursor(char *buf, int cursor, int end) {
-    /* Shift buf[cursor+1..end) left one slot, redraw, erase the stale
-       trailing character, reposition cursor.  Returns the new end. */
-    int shift = cursor;
-    while (shift < end - 1) {
-        buf[shift] = buf[shift + 1];
-        shift += 1;
+int strcmp(const char *a, const char *b) {
+    int index = 0;
+    while (1) {
+        if (a[index] != b[index]) {
+            return a[index] - b[index];
+        }
+        if (a[index] == '\0') {
+            return 0;
+        }
+        index += 1;
     }
-    end -= 1;
-    write(STDOUT, buf + cursor, end - cursor);
-    putchar(' ');
-    cursor_back(end - cursor + 1);
-    return end;
 }
 
 int try_exec(char *name) {
     /* Returns:
-         0 — file not found (or other error); last_exec_status unchanged.
+         0 — file not found; last_exec_status unchanged.
          1 — file exists but is not executable; last_exec_status unchanged.
-         2 — exec succeeded; last_exec_status holds the wait status. */
+         2 — exec succeeded; last_exec_status holds the wait status.
+         3 — exec failed with OOM; message printed, last_exec_status set. */
     int rc = exec(name);
     if (rc >= 0) {
         last_exec_status = rc;
@@ -81,6 +149,18 @@ int try_exec(char *name) {
     if (-rc == ERROR_NOT_EXECUTE) {
         return 1;
     }
+    if (-rc == ERROR_FAULT) {
+        printf("exec: out of memory\n");
+        last_exec_status = 1 << 8;
+        return 3;
+    }
+    return 0;
+}
+
+int visual_bell() {
+    printf("\e[48;5;4m");
+    sleep(50);
+    printf("\e[48;5;0m");
     return 0;
 }
 
@@ -94,6 +174,9 @@ int main() {
         "mov ecx, SIG_IGN\n"
         "mov ah, SYS_SYS_SIGNAL\n"
         "int 30h\n");
+    /* Marker print exactly once per shell-load.  Tests assert this line
+       appears once across N commands, verifying shell-survives-child. */
+    write(STDOUT, "[shell:start]\n", 14);
     char *buf = BUFFER;
     /* exec_path assembles "bin/<name>" for the fallback lookup.  ARGV
        (32 bytes) is unused by the shell since main() takes no args. */
@@ -210,6 +293,10 @@ int main() {
         if (buf[scan] == ' ') {
             buf[scan] = '\0';
             set_exec_arg(buf + scan + 1);
+            if (expand_dollar_question(buf + scan + 1, MAX_INPUT - (scan + 1)) < 0) {
+                printf("$? expansion exceeded MAX_INPUT\n");
+                continue;
+            }
         }
         if (strcmp(buf, "help") == 0) {
             printf("Commands: help reboot shutdown\n");
@@ -221,6 +308,7 @@ int main() {
         } else {
             int result = try_exec(buf);
             if (result == 1) {
+                last_exec_status = 126 << 8;   /* bash: not executable */
                 printf("not executable\n");
             } else if (result == 0) {
                 /* Not found in root — retry inside bin/ */
@@ -236,8 +324,10 @@ int main() {
                 exec_path[4 + copy_index] = '\0';
                 int bin_result = try_exec(exec_path);
                 if (bin_result == 1) {
+                    last_exec_status = 126 << 8;   /* bash: not executable */
                     printf("not executable\n");
                 } else if (bin_result == 0) {
+                    last_exec_status = 127 << 8;   /* bash: command not found */
                     printf("unknown command\n");
                 }
             }
