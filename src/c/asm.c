@@ -1685,12 +1685,12 @@ void handle_movsw() {
     emit_byte(0xA5);
 }
 
-/* ``movzx r16, byte [reg+disp]`` — the only form the self-host uses.
-   Emits the 0F B6 prefix, then dispatches on op2 type: register
-   (modrm 11 dst src) or register+disp memory (mod=00 or 01 disp8,
-   rm picked by reg_to_rm).  The direct ``[disp16]`` memory form
-   isn't needed and isn't emitted by cc.py, so it's omitted here
-   too. */
+/* ``movzx dst, src`` — zero-extend src into dst.  Source may be an
+   8-bit register/memory (emits 0F B6) or a 16-bit register/memory
+   (emits 0F B7).  Dispatches on op2 type: register (modrm 11 dst
+   src) or register+disp memory (mod=00 or 01 disp8, rm picked by
+   reg_to_rm).  The direct ``[disp16]`` memory form isn't needed and
+   isn't emitted by cc.py, so it's omitted here too. */
 void handle_movzx() {
     skip_ws();
     int packed_register = parse_register();
@@ -1703,7 +1703,11 @@ void handle_movzx() {
     if (type2 != 0) {
         emit_address_size_prefix(parse_operand_address_size);
     }
-    emit_word(0xB60F);
+    if (op1_size == 16) {
+        emit_word(0xB70F);
+    } else {
+        emit_word(0xB60F);
+    }
     if (type2 == 0) {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else if (type2 == 2) {

@@ -59,6 +59,7 @@ def preprocess(
     *,
     include_base: Path | None = None,
     include_stack: frozenset[Path] = frozenset(),
+    search_paths: tuple[Path, ...] = (),
 ) -> tuple[str, dict[str, str]]:
     """Expand ``#include "..."`` directives and collect ``#define`` macros.
 
@@ -66,9 +67,10 @@ def preprocess(
     ``#define`` line is replaced with a blank line so downstream line
     numbers stay correct.
 
-    ``#include`` accepts only the double-quoted form and resolves the
-    path relative to *include_base* (the directory of the source
-    currently being preprocessed) — matching NASM's ``%include``.
+    ``#include`` accepts only the double-quoted form.  The path is
+    resolved against *include_base* first (the directory of the source
+    currently being preprocessed — matching NASM's ``%include``); if
+    not found, each entry in *search_paths* is tried in order.
     Included files are preprocessed recursively; their ``#define``
     entries merge into the outer pool so later definitions override.
     ``include_stack`` carries the set of files currently being
@@ -94,19 +96,30 @@ def preprocess(
             if match is None:
                 message = f"malformed #include: {line.rstrip()!r}"
                 raise CompileError(message, line=line_number)
-            include_path = (include_base / match.group(1)).resolve()
+            include_name = match.group(1)
+            candidates = [include_base, *search_paths]
+            include_path = None
+            for candidate_base in candidates:
+                candidate = (candidate_base / include_name).resolve()
+                if candidate.is_file():
+                    include_path = candidate
+                    break
+            if include_path is None:
+                message = f"cannot open #include file {include_name!r}: not found in {[str(c) for c in candidates]}"
+                raise CompileError(message, line=line_number)
             if include_path in include_stack:
                 message = f"circular #include of {include_path}"
                 raise CompileError(message, line=line_number)
             try:
                 included_source = include_path.read_text(encoding="utf-8")
             except OSError as error:
-                message = f"cannot open #include file {match.group(1)!r}: {error}"
+                message = f"cannot open #include file {include_name!r}: {error}"
                 raise CompileError(message, line=line_number) from error
             included_text, included_defines = preprocess(
                 included_source,
                 include_base=include_path.parent,
                 include_stack=include_stack | {include_path},
+                search_paths=search_paths,
             )
             defines.update(included_defines)
             output_lines.append(included_text)

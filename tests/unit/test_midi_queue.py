@@ -85,6 +85,8 @@ def _build_shared_library() -> tuple[ctypes.CDLL, Path]:
         # `-Wstrict-prototypes` on -Wpedantic, but at -Wall -Werror it
         # passes.  Suppress unused-parameter to keep the harness lean.
         "-Wno-unused-parameter",
+        # midi.c #include "program_state.h" lives in src/include/.
+        f"-I{REPO_ROOT / 'src' / 'include'}",
         "-shared",
         "-fPIC",
         str(HARNESS),

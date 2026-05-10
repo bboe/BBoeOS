@@ -78,6 +78,7 @@ class CodeGeneratorBase:
         "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
         "ERROR_EXISTS",
+        "ERROR_FAULT",
         "ERROR_NOT_EMPTY",
         "ERROR_NOT_EXECUTE",
         "ERROR_NOT_FOUND",
@@ -753,7 +754,7 @@ class CodeGeneratorBase:
             return True
         if isinstance(last, Return):
             return True
-        if isinstance(last, Call) and last.name in {"die", "exit"}:
+        if isinstance(last, Call) and last.name in {"_exit", "die", "exit"}:
             return True
         if isinstance(last, TailCall):
             return True

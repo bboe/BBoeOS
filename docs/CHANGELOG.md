@@ -9,7 +9,9 @@ All notable changes to BBoeOS are documented in this file. Dates reflect when
 changes landed, grouped under the version that was (or will be) current at the
 time.
 
-## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.10.0...main)
+## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
+
+## [0.11.0](https://github.com/bboe/BBoeOS/compare/0.10.0...0.11.0) (2026-05-10)
 
 - **Documentation reflowed to 80 columns.**  All markdown files (`README.md`,
   `CLAUDE.md`, `CHANGELOG.md`, `docs/*.md`, `archive/*/README.md`) wrap prose at
@@ -128,6 +130,26 @@ time.
   `BBoe_MusicInit` logs `OPL music enabled` / `OPL music unavailable` to the
   serial console; the integration test (`tests/test_doom_music_qemu.py`) keys
   off that marker.
+- **Per-program kernel state migrated to ProgramState struct.**  Every
+  per-program global (`current_pd_phys`, `sigint_handler`, alarm fields,
+  `current_program_break`, `fd_table`, etc.) now lives in a `ProgramState`
+  struct addressed via `current_program_state`.  No behavior change in this
+  commit — the change is foundational for the shell-survives-child work that
+  follows.
+- **Shell survives child kills (synchronous spawn-and-wait).**  `sys_exec` no
+  longer destroys the parent's PD; the parent is suspended in-kernel while the
+  child runs.  When the child exits, is killed by a signal, or hits a CPU
+  exception, the kernel restores the parent's PD and resumes the parent's `int
+  30h` with EAX = POSIX-shaped wait status.  The shell no longer reloads from
+  disk between commands; its state (open file descriptors, line history, etc.)
+  survives across child runs.  New libc surface: `exec()` returns wait status
+  (>=0) or `-errno`; `_exit()` takes an int status argument; `wait.h` provides
+  `WIFEXITED` / `WIFSIGNALED` / `WIFCRASHED` / `WEXITSTATUS` / `WTERMSIG`.
+  Shell surface: `$?` argument-expansion (bash-shaped: `0..255` clean exits,
+  `128+signum` for kills, `255` for crashes), `[shell:start]` boot marker.
+  Recursive `exec()` from a child returns `-ERROR_INVALID`. PIT IRQ iterates
+  both alive slots so a parent's alarm fires at wall-clock time even while a
+  child is running.
 
 ### Known limitations
 

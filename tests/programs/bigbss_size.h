@@ -1,15 +1,15 @@
 /* Empirically-measured page-precise ceiling on BSS — the largest
    array `bigbss` can declare and still complete program_enter's
-   phase-2 BSS allocation at -m 2048.
+   BSS-page allocation at -m 2048.
 
    Anchored at -m 2048 to exercise the kmap window
    (memory_management/kmap.asm) end-to-end.  At this size the user
    pool spans ~2 GB of physical RAM but the kernel direct map only
    covers 4 MB (PDE 1022 = FIRST_KERNEL_PDE); every frame above
    that handed out by the bitmap allocator is reached through a
-   kmap_map slot in PDE 1023's window.  With BIGBSS_PAGES = 523,595,
-   nearly all of program_enter's phase-2 zero-fills go through the
-   slow path, proving the kmap helpers correctly alias high-physical
+   kmap_map slot in PDE 1023's window.  With BIGBSS_PAGES = 523,570,
+   nearly all of program_enter's BSS zero-fills go through the slow
+   path, proving the kmap helpers correctly alias high-physical
    frames.
 
    Below -m 2048 the user pool shrinks and BIGBSS_PAGES no longer
@@ -27,7 +27,7 @@
                      Nearly every BSS frame (>1024 frames sit
                      within the 4 MB direct map; the rest go
                      through kmap) exercises the slow path during
-                     program_enter's phase 2 zero fill — direct
+                     program_enter's BSS zero-fill — direct
                      end-to-end kmap coverage.
      * bigbss_oom  — BSS_PAGES = BIGBSS_PAGES.  Must OOM at -m 2047
                      (one MB less RAM = ~256 fewer frames; the
@@ -45,4 +45,4 @@
    probe at -m 2048 and update this constant.  The two tripwire
    tests will go red (one or both) when it drifts. */
 
-#define BIGBSS_PAGES 523592
+#define BIGBSS_PAGES 523570

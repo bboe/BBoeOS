@@ -98,6 +98,23 @@
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
+        ;; ProgramState layout — per-program kernel state. Two BSS-resident
+        ;; slots (program_state_a, program_state_b) hold one struct each;
+        ;; current_program_state pointer indicates which slot the running
+        ;; program owns.  Field order is strict-alphabetical; padding bytes
+        ;; absorb the byte fields so dword fields stay 4-byte-aligned.
+        %assign PROGRAM_STATE_OFFSET_ALARM_DEADLINE     0x000
+        %assign PROGRAM_STATE_OFFSET_ALARM_INTERVAL     0x004
+        %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x008
+        %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x208
+        %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x20C
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x210
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x211
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x214
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x218
+        %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x21C
+        %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x220
+        %assign PROGRAM_STATE_SIZE                      0x224
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches
         ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
