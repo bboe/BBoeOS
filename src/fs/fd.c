@@ -14,6 +14,8 @@
 // the original asm so external callers (syscall.asm and the
 // per-fd-type handlers) link unchanged.
 
+#include "program_state.h"
+
 // Layout used by the helpers and the asm dispatchers; matches the
 // FD_OFFSET_* / FD_ENTRY_SIZE constants in include/constants.asm.
 //
@@ -169,13 +171,17 @@ struct fd_ioctl_op fd_ioctl_ops[10] = {
     { fd_ioctl_vga },       // FD_TYPE_VGA (9)
 };
 
-// fd_table — kernel BSS, FD_MAX entries × FD_ENTRY_SIZE bytes.  The asm
-// dispatchers below (and the per-fd-type handlers in fs/fd/*.kasm)
-// reach into entries via ``[esi+FD_OFFSET_*]``; they reference the
-// bare ``fd_table`` symbol via the equ shim so they don't need to
-// know cc.py's _g_ prefix.
-struct fd fd_table[FD_MAX];
-asm("fd_table equ _g_fd_table");
+// fd_table_base: return a pointer to the fd table inside the running
+// program's program_state slot.  Every consumer reaches the table
+// through this accessor so the right slot is used as the running
+// program changes.  current_program_state is published as an asm
+// label by entry.asm; the _g_current_program_state equ alias is
+// emitted by signal.c.  program_state.h types fd_table as opaque
+// bytes (struct fd is defined locally above and not visible to other
+// includers); we cast back to ``struct fd *`` here.
+struct fd *fd_table_base() {
+    return (struct fd *)current_program_state->fd_table;
+}
 
 // fd_write_buffer — the dispatcher (fd_write below) stashes the
 // caller-supplied user buffer pointer here before tail-jumping to the
@@ -191,7 +197,7 @@ int fd_alloc(int *fd_num __attribute__((out_register("ax"))),
              struct fd *entry __attribute__((out_register("esi")))) {
     int i;
     struct fd *cursor;
-    cursor = fd_table;
+    cursor = fd_table_base();
     i = 0;
     while (i < FD_MAX) {
         if (cursor->type == FD_TYPE_FREE) {
@@ -262,8 +268,8 @@ int fd_fstat(int *mode __attribute__((out_register("ax"))),
 // fd_init: zero the fd table, then pre-open fds 0/1/2 as console.
 void fd_init() {
     struct fd *cursor;
-    memset(fd_table, 0, FD_MAX * FD_ENTRY_SIZE);
-    cursor = fd_table;
+    memset(fd_table_base(), 0, FD_MAX * FD_ENTRY_SIZE);
+    cursor = fd_table_base();
     cursor->type = FD_TYPE_CONSOLE;
     cursor->flags = O_RDONLY;
     cursor = cursor + 1;
@@ -322,7 +328,8 @@ int fd_lookup(int fd_num __attribute__((in_register("bx"))),
     if (fd_num >= FD_MAX) {
         return 0;
     }
-    cursor = fd_table + fd_num;
+    cursor = fd_table_base();
+    cursor = cursor + fd_num;
     if (cursor->type == FD_TYPE_FREE) {
         return 0;
     }
@@ -364,7 +371,7 @@ int fd_open(int *result __attribute__((out_register("ax"))),
             *result = -1;
             return 0;
         }
-        cursor = fd_table;
+        cursor = fd_table_base();
         i = 0;
         while (i < FD_MAX) {
             if (cursor->type == FD_TYPE_AUDIO) {
@@ -401,7 +408,7 @@ int fd_open(int *result __attribute__((out_register("ax"))),
             *result = -1;
             return 0;
         }
-        cursor = fd_table;
+        cursor = fd_table_base();
         i = 0;
         while (i < FD_MAX) {
             if (cursor->type == FD_TYPE_MIDI) {

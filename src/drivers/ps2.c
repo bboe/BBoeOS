@@ -23,6 +23,8 @@
 //     Extended keys beyond arrows (Home/End/PgUp/PgDn/Insert/Delete) —
 //                 discarded.
 
+#include "program_state.h"
+
 #define KB_BUFFER_SIZE  16      // power of 2; mask = KB_BUFFER_SIZE - 1
 #define PS2_DATA        0x60
 #define PS2_IRQ1_MASK   0xFD    // ~(1 << 1): clear bit 1 to unmask IRQ 1
@@ -103,13 +105,6 @@
 #define BBKEY_PERIOD        62
 #define BBKEY_SLASH         63
 #define BBKEY_KP_STAR       64
-
-// pending_sigint is defined as a NASM label (db 0) in entry.asm.
-// cc.py mangles global accesses to the _g_ prefix; the equ below
-// makes _g_pending_sigint resolve to the entry.asm label so that
-// plain C assignments compile and link correctly.
-extern uint8_t pending_sigint;
-asm("_g_pending_sigint equ pending_sigint");
 
 // Ring buffer: single-producer (IRQ context, IF=0) /
 // single-consumer (main loop) so head and tail don't need atomics.
@@ -354,7 +349,8 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
             }
         }
         if (ascii == '\x03') {
-            pending_sigint = 1;
+            asm("mov ecx, [_g_current_program_state]\n"
+                "mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 1");
         }
         if (ascii != '\0') {
             ps2_putc(ascii);
@@ -386,7 +382,7 @@ void ps2_init() {
 // NASM resolves the label across the asm() block), EOIs the master
 // PIC, and iretds.  Must end with iretd, not ret.
 //
-// ps2_broadcast_event: walk fd_table; for each FD_TYPE_CONSOLE
+// ps2_broadcast_event: walk the fd table in current_program_state; for each FD_TYPE_CONSOLE
 // entry whose flags clear O_WRONLY (i.e. readable — events go to
 // the cooked-input side, mirroring Linux's evdev model), push EAX
 // into that fd's inline event ring at FD_OFFSET_EVENT_BUF, indexed
@@ -432,7 +428,8 @@ ps2_broadcast_event:
         push esi
         push edi
         mov edi, eax                            ; EDI = event (preserved across loop)
-        mov esi, fd_table                       ; ESI walks fd entries
+        mov esi, [_g_current_program_state]    ; ESI = base of running program's state
+        add esi, PROGRAM_STATE_OFFSET_FD_TABLE ; ESI walks fd entries
         xor ecx, ecx                            ; ECX = fd index
 .ps2_broadcast_event_loop:
         cmp ecx, FD_MAX
@@ -480,9 +477,11 @@ void ps2_putc(char byte __attribute__((in_register("ax")))) {
 // silently on per-queue overflow (same IRQ-only contract as ps2_putc).
 //
 // Implemented as inline asm in the trailing asm() block — the loop
-// touches fd_table entries by FD_OFFSET_* offset and stores 32-bit
+// touches the fd table entries by FD_OFFSET_* offset and stores 32-bit
 // event slots into the inline event_buf, which cc.py can't easily
 // express against the byte-array struct field.  The asm version
-// also avoids tripping cc.py's "extern array of struct" path
-// (fd_table is owned by fs/fd.c).
+// also avoids tripping cc.py's "extern array of struct" path.  The
+// table base is reached via current_program_state +
+// PROGRAM_STATE_OFFSET_FD_TABLE so it reads from the running
+// program's slot (owned by entry.asm / fs/fd.c).
 void ps2_broadcast_event(int entry __attribute__((in_register("ax"))));

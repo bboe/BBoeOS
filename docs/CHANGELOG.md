@@ -128,6 +128,12 @@ time.
   `BBoe_MusicInit` logs `OPL music enabled` / `OPL music unavailable` to the
   serial console; the integration test (`tests/test_doom_music_qemu.py`) keys
   off that marker.
+- **Per-program kernel state migrated to ProgramState struct.**  Every
+  per-program global (`current_pd_phys`, `sigint_handler`, alarm fields,
+  `current_program_break`, `fd_table`, etc.) now lives in a `ProgramState`
+  struct addressed via `current_program_state`.  No behavior change in this
+  commit — the change is foundational for the shell-survives-child work that
+  follows.
 
 ### Known limitations
 

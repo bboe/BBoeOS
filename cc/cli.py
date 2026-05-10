@@ -45,15 +45,32 @@ def main() -> int:
     try:
         input_path = Path(arguments.input)
         source = input_path.read_text(encoding="utf-8")
-        source, defines = preprocess(source, include_base=input_path.parent)
+        # Walk up from the source's directory looking for a sibling ``include/``
+        # directory (the canonical home of constants.asm and shared C headers).
+        # Found path is added to the preprocessor search list so any source in
+        # the tree can ``#include "program_state.h"`` etc. without a relative
+        # path; constants.asm lookup uses the same discovery logic.
+        include_dir = None
+        cursor = input_path.parent.resolve()
+        while True:
+            candidate = cursor / "include"
+            if candidate.is_dir():
+                include_dir = candidate
+                break
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        search_paths: tuple[Path, ...] = (include_dir,) if include_dir is not None else ()
+        source, defines = preprocess(
+            source,
+            include_base=input_path.parent,
+            search_paths=search_paths,
+        )
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        # Discover constants.asm alongside the source's include sibling directory
-        # (src/c/foo.c → src/include/constants.asm) and parse %assign values so
-        # the generator can evaluate local array sizes at compile time.
-        constants_asm = input_path.parent.parent / "include" / "constants.asm"
-        constant_values = parse_asm_constants(constants_asm) if constants_asm.is_file() else {}
+        constants_asm = include_dir / "constants.asm" if include_dir is not None else None
+        constant_values = parse_asm_constants(constants_asm) if constants_asm is not None and constants_asm.is_file() else {}
         output = X86CodeGenerator(
             bits=arguments.bits,
             constant_values=constant_values,

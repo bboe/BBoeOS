@@ -407,7 +407,8 @@ syscall_handler:
         ;; Compute previous remaining ms first (before clobbering state).
         ;; If alarm_deadline is 0, previous is 0.
         ;; Otherwise previous = max(0, alarm_deadline - system_ticks).
-        mov eax, [alarm_deadline]
+        mov edi, [current_program_state]
+        mov eax, [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
         test eax, eax
         jz .rtc_alarm_have_prev
         sub eax, [system_ticks]
@@ -421,12 +422,12 @@ syscall_handler:
         ;; Arm: alarm_deadline = system_ticks + ebx; alarm_interval = ecx.
         mov eax, [system_ticks]
         add eax, ebx
-        mov [alarm_deadline], eax
-        mov [alarm_interval], ecx
+        mov [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
+        mov [edi + PROGRAM_STATE_OFFSET_ALARM_INTERVAL], ecx
         jmp .rtc_alarm_done
         .rtc_alarm_disarm:
-        mov dword [alarm_deadline], 0
-        mov dword [alarm_interval], 0
+        mov dword [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
+        mov dword [edi + PROGRAM_STATE_OFFSET_ALARM_INTERVAL], 0
         .rtc_alarm_done:
         mov eax, edx                    ; previous remaining ms -> EAX
         clc
@@ -508,7 +509,8 @@ syscall_handler:
 .video_map_loop:
         push ecx
         push edi
-        mov  eax, [current_pd_phys]
+        mov  eax, [current_program_state]
+        mov  eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov  ebx, esi                   ; vaddr
         mov  ecx, edi                   ; phys
         ;; PTE_USER_RW_SHARED: the AVL[0] PTE_SHARED bit makes
@@ -553,13 +555,14 @@ syscall_handler:
         ;; the resulting break (caller compares to requested to detect
         ;; failure).  CF=0 always.
         ;;
-        ;; current_program_break and current_program_break_min are initialised
-        ;; in program_enter (entry.asm) at program load: both start at the
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK and
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN are initialised in
+        ;; program_enter (entry.asm) at program load: both start at the
         ;; page-aligned end of the program's loaded image (text + BSS).
         ;;
-        ;; Phase A simplification: grow-only.  Requests at or below the
-        ;; current break leave it unchanged — userland malloc keeps the
-        ;; freed range in its free-list and reuses it.
+        ;; Grow-only: requests at or below the current break leave it
+        ;; unchanged — userland malloc keeps the freed range in its
+        ;; free-list and reuses it.
         ;;
         ;; In:   EBX = new break (0 = query)
         ;; Out:  EAX = resulting break, CF = 0.  Caller compares EAX to
@@ -577,17 +580,19 @@ syscall_handler:
         jz   .sys_break_done
         ;; Below floor?  (Includes the case where caller passes a value
         ;; in the kernel half or otherwise nonsensical.)
-        cmp  ebx, [current_program_break_min]
+        mov  eax, [current_program_state]
+        cmp  ebx, [eax + PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN]
         jb   .sys_break_done
         ;; Above stack guard?
         cmp  ebx, STACK_VIRT_BASE - 0x10000
         jae  .sys_break_done
-        ;; Shrink or no-op?  Phase A returns the unchanged break.
-        cmp  ebx, [current_program_break]
+        ;; Shrink or no-op?  Returns the unchanged break.
+        mov  eax, [current_program_state]
+        cmp  ebx, [eax + PROGRAM_STATE_OFFSET_PROGRAM_BREAK]
         jbe  .sys_break_done
         ;; --- Grow loop ---
         ;; ESI walks page-by-page from page_align_up(old_break) to ebx.
-        mov  esi, [current_program_break]
+        mov  esi, [eax + PROGRAM_STATE_OFFSET_PROGRAM_BREAK]
         add  esi, 0xFFF
         and  esi, 0xFFFFF000
 .sys_break_grow:
@@ -597,17 +602,20 @@ syscall_handler:
         jc   .sys_break_done                      ; OOM — leave break unchanged
         mov  ecx, eax                           ; phys
         mov  ebx, esi                           ; vaddr
-        mov  eax, [current_pd_phys]
+        mov  eax, [current_program_state]
+        mov  eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov  edx, PTE_USER_RW
         call address_space_map_page
-        jc   .sys_break_done                      ; map fail — small frame leak ok for Phase A
+        jc   .sys_break_done                      ; map fail — small frame leak acceptable
         add  esi, 0x1000
         jmp  .sys_break_grow
 .sys_break_commit:
         mov  ebx, [esp]                         ; requested
-        mov  [current_program_break], ebx
+        mov  eax, [current_program_state]
+        mov  [eax + PROGRAM_STATE_OFFSET_PROGRAM_BREAK], ebx
 .sys_break_done:
-        mov  eax, [current_program_break]
+        mov  eax, [current_program_state]
+        mov  eax, [eax + PROGRAM_STATE_OFFSET_PROGRAM_BREAK]
         pop  ebx                                ; balance the stack (discards saved requested)
         pop  edi
         pop  esi
@@ -745,14 +753,15 @@ syscall_handler:
         jae .sys_signal_bad
         .sys_signal_handler_ok:
         ;; Route to the right handler slot based on EBX.
+        mov edx, [current_program_state]
         cmp ebx, SIGINT
         jne .sys_signal_alarm_slot
-        mov eax, [sigint_handler]       ; previous handler -> EAX
-        mov [sigint_handler], ecx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]   ; previous handler -> EAX
+        mov [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER], ecx
         jmp .sys_signal_done
         .sys_signal_alarm_slot:
-        mov eax, [sigalrm_handler]
-        mov [sigalrm_handler], ecx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]
+        mov [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], ecx
         .sys_signal_done:
         clc
         jmp .iret_cf_eax               ; full EAX preserved, CF=0
@@ -769,17 +778,6 @@ syscall_handler:
         ;; offset arithmetic.
         .sys_sigreturn:
         jmp signal_resume_after_handler
-
-;;; ------------------------------------------------------------
-;;; Per-program break state, reset on every program load by
-;;; program_enter (entry.asm) to user_image_end (page-aligned end
-;;; of text + BSS).  current_program_break_min is the floor —
-;;; sys_break refuses to shrink below it.  Phase A is grow-only so
-;;; the floor is also the only lower bound the handler ever sees.
-;;; ------------------------------------------------------------
-        align 4
-current_program_break     dd 0
-current_program_break_min dd 0
 
 ;;; The four net_* C handlers and their `extern` declarations of
 ;;; fd_alloc / fd_lookup / udp_send / udp_receive / icmp_receive /

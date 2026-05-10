@@ -62,7 +62,7 @@
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment system_ticks, fire any due interval
-        ;; timer (set pending_sigalrm + re-arm or clear), drain due
+        ;; timer (set PENDING_SIGALRM + re-arm or clear), drain due
         ;; midi events, EOI the master PIC, iretd.  Interrupt gate
         ;; entry leaves IF=0 for the body; on a single CPU we don't
         ;; need LOCK on the inc.  midi_drain_due is bounded to
@@ -71,29 +71,30 @@ pmode_irq0_handler:
         pushad
         inc dword [system_ticks]
         ;; Alarm check: if alarm_deadline is non-zero and we've hit it,
-        ;; set pending_sigalrm and either re-arm (interval mode) or
-        ;; clear the deadline (one-shot).  Coalescing: if pending_sigalrm
-        ;; is already 1, the second set is a no-op (handler hasn't run
-        ;; yet, the second fire collapses into the first — same model
-        ;; as SIGINT, same as POSIX standard signals).
-        mov eax, [alarm_deadline]
+        ;; set PENDING_SIGALRM in current_program_state and either re-arm
+        ;; (interval mode) or clear the deadline (one-shot).  Coalescing:
+        ;; if PENDING_SIGALRM is already 1, the second set is a no-op
+        ;; (handler hasn't run yet, the second fire collapses into the
+        ;; first — same model as SIGINT, same as POSIX standard signals).
+        mov ecx, [current_program_state]
+        mov eax, [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
         test eax, eax
         jz .pmode_irq0_no_alarm
         cmp [system_ticks], eax
         jb  .pmode_irq0_no_alarm
-        mov byte [pending_sigalrm], 1
-        mov ecx, [alarm_interval]
-        test ecx, ecx
+        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 1
+        mov ebx, [ecx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL]
+        test ebx, ebx
         jz  .pmode_irq0_alarm_oneshot
         ;; Re-arm: deadline = current + interval.  system_ticks wraps at
         ;; 2^32 ms (~49.7 days); an alarm armed near that wrap edge could
         ;; fire at an unexpected time when system_ticks rolls past the
         ;; deadline early.  Not worth fixing for a hobby OS uptime.
-        add eax, ecx
-        mov [alarm_deadline], eax
+        add eax, ebx
+        mov [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
         jmp .pmode_irq0_no_alarm
         .pmode_irq0_alarm_oneshot:
-        mov dword [alarm_deadline], 0
+        mov dword [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
         .pmode_irq0_no_alarm:
         call midi_drain_due
         mov al, PIC_EOI
@@ -162,8 +163,8 @@ pmode_irq6_handler:
 ;;; frames — sector-by-sector via `vfs_read_sec` and a private
 ;;; `program_fd` struct — instead of staging through a scratch
 ;;; buffer.  The trailer (BSS size) is read from the last loaded
-;;; user frame after Phase 1, then BSS-only frames are mapped in
-;;; Phase 2.
+;;; user frame after the binary stream finishes; BSS-only frames
+;;; are then mapped + zero-filled in a follow-up loop.
 ;;;
 ;;; Never returns.  On panic (allocator OOM or disk error during
 ;;; PD build) the kernel halts — there's no graceful recovery for
@@ -175,12 +176,14 @@ program_enter:
         ;; --- Allocate fresh PD ---
         call address_space_create
         jc .oom
-        mov [current_pd_phys], eax
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_PD_PHYS], eax
 
         ;; --- Set up kernel-side fd struct from vfs_found_* ---
-        ;; Used by Phase 1's vfs_read_sec calls to walk the binary
-        ;; sector-by-sector without going through fd_alloc / the user
-        ;; fd table.  Lives in BSS; only one program loads at a time.
+        ;; Used by the binary-stream loop's vfs_read_sec calls to walk
+        ;; the binary sector-by-sector without going through fd_alloc
+        ;; or the user fd table.  Lives in BSS; only one program loads
+        ;; at a time.
         mov edi, program_fd
         xor eax, eax
         mov ecx, FD_ENTRY_SIZE / 4
@@ -238,25 +241,26 @@ program_enter:
         mov [pending_frame_phys], eax
         .handoff_map:
         mov ecx, eax                        ; handoff frame phys
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, USER_DATA_BASE
         mov edx, PTE_USER_RW
         call address_space_map_page
         jc .oom
         mov dword [pending_frame_phys], 0
 
-        ;; --- Phase 1: stream binary pages directly from disk ---
+        ;; --- Stream binary pages directly from disk ---
         ;; Each loaded user frame is zero-filled then populated sector-
         ;; by-sector via vfs_read_sec into sector_buffer + a memcpy into
         ;; the frame's direct-map alias.  Last binary frame's phys is
         ;; stashed so the trailer can be peeked after the loop.
         mov dword [last_binary_frame_phys], 0
         mov dword [virt_cursor], PROGRAM_BASE
-.phase1_page_loop:
+.binary_page_loop:
         mov eax, [virt_cursor]
         sub eax, PROGRAM_BASE               ; EAX = file byte offset for this page
         cmp eax, [vfs_found_size]
-        jae .phase1_done                    ; past binary end
+        jae .binary_done                    ; past binary end
 
         call frame_alloc
         jc .oom
@@ -276,9 +280,9 @@ program_enter:
 
         ;; Inner loop: 8 sectors per page (or fewer at end of file).
         xor edx, edx                        ; sector_in_page index
-.phase1_sector_loop:
+.binary_sector_loop:
         cmp edx, 8
-        jae .phase1_page_done
+        jae .binary_page_done
 
         ;; file_offset = (virt_cursor - PROGRAM_BASE) + sector_in_page * 512
         mov eax, [virt_cursor]
@@ -287,15 +291,15 @@ program_enter:
         shl ebx, 9
         add eax, ebx                        ; EAX = file offset for this sector
         cmp eax, [vfs_found_size]
-        jae .phase1_page_done               ; past end of binary
+        jae .binary_page_done               ; past end of binary
 
         ;; bytes_remaining = binsize - file_offset (bytes still to copy)
         mov ebx, [vfs_found_size]
         sub ebx, eax                        ; EBX = remaining
         cmp ebx, 512
-        jbe .phase1_chunk_set
+        jbe .binary_chunk_set
         mov ebx, 512
-.phase1_chunk_set:
+.binary_chunk_set:
 
         mov [program_fd + FD_OFFSET_POSITION], eax
 
@@ -328,8 +332,8 @@ program_enter:
         pop esi
 
         inc edx
-        jmp .phase1_sector_loop
-.phase1_page_done:
+        jmp .binary_sector_loop
+.binary_page_done:
         ;; Release the kmap before installing the user-side mapping.
         ;; The frame keeps its data — we just don't need its kernel
         ;; alias anymore.  EDI holds the kvirt from the page setup.
@@ -337,22 +341,23 @@ program_enter:
         call kmap_unmap
         ;; Map the frame into the per-program PD at virt_cursor.
         mov ecx, [pending_frame_phys]       ; frame phys
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
         jc .oom
         mov dword [pending_frame_phys], 0
         add dword [virt_cursor], 0x1000
-        jmp .phase1_page_loop
-.phase1_done:
+        jmp .binary_page_loop
+.binary_done:
 
         ;; --- Read BSS trailer from the last binary frame ---
         ;; binsize is vfs_found_size; the trailer (6-byte BSS_MAGIC32 or
         ;; legacy 4-byte BSS_MAGIC) sits at offset (binsize - N) within
         ;; the file, which lands inside the last loaded frame at offset
         ;; ((binsize - 1) & 0xFFF) + 1 - N.  The frame was kmap_unmap'd
-        ;; at the end of phase 1 — re-map it briefly for the peek.
+        ;; at the end of the binary stream — re-map it briefly for the peek.
         xor ebx, ebx                        ; default bss_size = 0
         mov eax, [last_binary_frame_phys]
         test eax, eax
@@ -390,28 +395,31 @@ program_enter:
         mov [user_image_end], eax
 
         ;; --- Initialise the program break to top of loaded image ---
-        ;; current_program_break starts at user_image_end (page-aligned end
-        ;; of the program's text + BSS).  current_program_break_min is the
-        ;; floor — sys_break refuses to shrink below it.  Both reset on
-        ;; every program load (boot shell, sys_exec, sys_exit reload).
-        mov [current_program_break],     eax
-        mov [current_program_break_min], eax
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK starts at user_image_end
+        ;; (page-aligned end of the program's text + BSS).
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN is the floor — sys_break
+        ;; refuses to shrink below it.  Both reset on every program load
+        ;; (boot shell, sys_exec, sys_exit reload).
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_PROGRAM_BREAK],     eax
+        mov [edx + PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN], eax
 
         ;; Reset signal state — every new program starts in SIG_DFL
         ;; for both signals, with no pending bits, no nesting flag,
         ;; and no armed alarm.  Alarms do not survive exec (POSIX).
-        mov dword [alarm_deadline],    0
-        mov dword [alarm_interval],    0
-        mov byte  [in_signal_handler], 0
-        mov byte  [pending_sigalrm],   0
-        mov byte  [pending_sigint],    0
-        mov dword [sigalrm_handler],   SIG_DFL
-        mov dword [sigint_handler],    SIG_DFL
+        ;; EDX already holds [current_program_state] from above.
+        mov dword [edx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE],    0
+        mov dword [edx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL],    0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM],   0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGINT],    0
+        mov dword [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], SIG_DFL
+        mov dword [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER],  SIG_DFL
 
-        ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
+        ;; --- BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
-        ;; by Phase 1; loop until user_image_end.
-.phase2_page_loop:
+        ;; by the binary stream above; loop until user_image_end.
+.bss_page_loop:
         mov eax, [virt_cursor]
         cmp eax, [user_image_end]
         jae .prog_pages_done
@@ -428,18 +436,20 @@ program_enter:
         pop eax                             ; kvirt
         call kmap_unmap
         mov ecx, [pending_frame_phys]
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
         jc .oom
         mov dword [pending_frame_phys], 0
         add dword [virt_cursor], 0x1000
-        jmp .phase2_page_loop
+        jmp .bss_page_loop
 .prog_pages_done:
 
         ;; --- Map vDSO code page (shared, R-X user) ---
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, VDSO_VIRT
         mov ecx, [vdso_code_phys]
         mov edx, PTE_USER_RX_SHARED
@@ -465,7 +475,8 @@ program_enter:
         pop eax                             ; kvirt
         call kmap_unmap
         mov ecx, [pending_frame_phys]
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
@@ -479,7 +490,8 @@ program_enter:
         mov [shell_esp], esp
 
         ;; --- Switch to the new PD ---
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov cr3, eax
 
         ;; --- Enable x87 FPU for ring-3 ---
@@ -506,7 +518,7 @@ program_enter:
         ;; game — would otherwise leave up to KB_BUFFER_SIZE gameplay
         ;; keys stale in ps2_buf when they exit).  The per-fd event
         ;; queues for TRY_GET_EVENT don't need draining here — fd_init
-        ;; above already memset the entire fd_table to zero, which
+        ;; above already memset the entire fd table to zero, which
         ;; clears head / tail / buffer for every console fd in one shot.
         call ps2_drain
 
@@ -563,11 +575,12 @@ program_enter:
         ;; half-built PD.  CR3 is kernel_idle_pd at this point — the
         ;; caller (boot, sys_exit, sys_exec) switched to it before
         ;; entering program_enter — so we don't need to switch CR3.
-        mov eax, [current_pd_phys]
+        mov ebx, [current_program_state]
+        mov eax, [ebx + PROGRAM_STATE_OFFSET_PD_PHYS]
         test eax, eax
         jz .oom_no_pd
         call address_space_destroy
-        mov dword [current_pd_phys], 0
+        mov dword [ebx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
 .oom_no_pd:
 
         ;; Reset kernel ESP and surface the failure.  The kernel stack
@@ -708,6 +721,10 @@ shell_reload:
         ;; clears it back to 0 immediately before iretd so the
         ;; subsequent sys_exec from the running shell gets graceful
         ;; recovery again.
+        ;; The running shell always uses program_state_a; current_program_state
+        ;; is initialised at definition time but re-set here so a kill path
+        ;; that landed us back in shell_reload starts from a clean pointer.
+        mov dword [current_program_state], program_state_a
         mov dword [loading_shell_flag], 1
         mov esi, shell_path
         call vfs_find
@@ -778,29 +795,23 @@ vdso_install:
 kernel_idle_pd_phys dd 0
 
         ;; Per-program-load state used by program_enter.
-current_pd_phys         dd 0    ; new PD being built
+current_program_state   dd program_state_a  ; pointer to the running program's PROGRAM_STATE slot
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 
-        ;; Signal delivery state.  One global slot per signal suffices
-        ;; because only one user program runs at a time — program_enter
-        ;; zeroes the lot on every load so it behaves as if it were
-        ;; per-program.  Handler fields are user-virt addresses (or
-        ;; SIG_DFL=0 / SIG_IGN=1); the address is only valid in the
-        ;; active PD, hence the zero-on-transition rule.  alarm_deadline
-        ;; is a system_ticks value at which IRQ 0 should set
-        ;; pending_sigalrm (0 means disarmed); alarm_interval is the
-        ;; auto-rearm period in ticks (0 means one-shot).
-alarm_deadline        dd 0
-alarm_interval        dd 0
-in_signal_handler     db 0
-pending_sigalrm       db 0
-pending_sigint        db 0
+        ;; Signal delivery state.  The pending bits (PENDING_SIGINT,
+        ;; PENDING_SIGALRM), the re-entry guard (IN_SIGNAL_HANDLER), and the
+        ;; alarm deadline / interval all live inside current_program_state at
+        ;; their PROGRAM_STATE_OFFSET_* offsets; program_enter resets them on
+        ;; every load.
         align 4
-sigalrm_handler       dd 0
-sigint_handler        dd 0
+        ;; program_state_a holds the running program's PROGRAM_STATE slot.
+        ;; current_program_state is pre-initialised to it so the PIT handler
+        ;; is safe before shell_reload runs; shell_reload also sets it
+        ;; (redundant but harmless).
+program_state_a       times PROGRAM_STATE_SIZE db 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via
