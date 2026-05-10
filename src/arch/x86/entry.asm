@@ -175,7 +175,8 @@ program_enter:
         ;; --- Allocate fresh PD ---
         call address_space_create
         jc .oom
-        mov [current_pd_phys], eax
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_PD_PHYS], eax
 
         ;; --- Set up kernel-side fd struct from vfs_found_* ---
         ;; Used by Phase 1's vfs_read_sec calls to walk the binary
@@ -238,7 +239,8 @@ program_enter:
         mov [pending_frame_phys], eax
         .handoff_map:
         mov ecx, eax                        ; handoff frame phys
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, USER_DATA_BASE
         mov edx, PTE_USER_RW
         call address_space_map_page
@@ -337,7 +339,8 @@ program_enter:
         call kmap_unmap
         ;; Map the frame into the per-program PD at virt_cursor.
         mov ecx, [pending_frame_phys]       ; frame phys
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
@@ -428,7 +431,8 @@ program_enter:
         pop eax                             ; kvirt
         call kmap_unmap
         mov ecx, [pending_frame_phys]
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
@@ -439,7 +443,8 @@ program_enter:
 .prog_pages_done:
 
         ;; --- Map vDSO code page (shared, R-X user) ---
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, VDSO_VIRT
         mov ecx, [vdso_code_phys]
         mov edx, PTE_USER_RX_SHARED
@@ -465,7 +470,8 @@ program_enter:
         pop eax                             ; kvirt
         call kmap_unmap
         mov ecx, [pending_frame_phys]
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov ebx, [virt_cursor]
         mov edx, PTE_USER_RW
         call address_space_map_page
@@ -479,7 +485,8 @@ program_enter:
         mov [shell_esp], esp
 
         ;; --- Switch to the new PD ---
-        mov eax, [current_pd_phys]
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov cr3, eax
 
         ;; --- Enable x87 FPU for ring-3 ---
@@ -563,11 +570,12 @@ program_enter:
         ;; half-built PD.  CR3 is kernel_idle_pd at this point — the
         ;; caller (boot, sys_exit, sys_exec) switched to it before
         ;; entering program_enter — so we don't need to switch CR3.
-        mov eax, [current_pd_phys]
+        mov ebx, [current_program_state]
+        mov eax, [ebx + PROGRAM_STATE_OFFSET_PD_PHYS]
         test eax, eax
         jz .oom_no_pd
         call address_space_destroy
-        mov dword [current_pd_phys], 0
+        mov dword [ebx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
 .oom_no_pd:
 
         ;; Reset kernel ESP and surface the failure.  The kernel stack
@@ -781,7 +789,6 @@ vdso_install:
 kernel_idle_pd_phys dd 0
 
         ;; Per-program-load state used by program_enter.
-current_pd_phys         dd 0    ; new PD being built
 current_program_state   dd 0    ; pointer to the running program's PROGRAM_STATE slot (program_state_a in Phase A)
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up

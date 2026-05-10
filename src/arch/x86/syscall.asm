@@ -508,7 +508,8 @@ syscall_handler:
 .video_map_loop:
         push ecx
         push edi
-        mov  eax, [current_pd_phys]
+        mov  eax, [current_program_state]
+        mov  eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov  ebx, esi                   ; vaddr
         mov  ecx, edi                   ; phys
         ;; PTE_USER_RW_SHARED: the AVL[0] PTE_SHARED bit makes
@@ -597,7 +598,8 @@ syscall_handler:
         jc   .sys_break_done                      ; OOM — leave break unchanged
         mov  ecx, eax                           ; phys
         mov  ebx, esi                           ; vaddr
-        mov  eax, [current_pd_phys]
+        mov  eax, [current_program_state]
+        mov  eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov  edx, PTE_USER_RW
         call address_space_map_page
         jc   .sys_break_done                      ; map fail — small frame leak ok for Phase A

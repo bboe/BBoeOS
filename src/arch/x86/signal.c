@@ -38,16 +38,16 @@
 // Functions are defined in alphabetical order by visible name, per
 // CLAUDE.md.
 
-extern uint32_t current_pd_phys;
+extern uint8_t *current_program_state;
 
-asm("_g_current_pd_phys equ current_pd_phys");
+asm("_g_current_program_state equ current_program_state");
 
 // signal_dispatch_user references pending_sigint, pending_sigalrm,
 // in_signal_handler, sigint_handler, and sigalrm_handler directly by their
 // entry.asm label names (no `_g_` prefix) — those globals are %included in
 // kernel.asm before this file and ps2.c already publishes its own
 // `_g_pending_sigint` alias, so re-equ'ing here would collide.  This file's
-// only C-mangled global access is current_pd_phys (used by
+// only C-mangled global access is current_program_state (used by
 // signal_dispatch_kill below).
 
 void address_space_destroy(uint32_t pd_phys);
@@ -76,7 +76,8 @@ asm("signal_dispatch_kill:\n"
     "        call put_character\n"
     "        mov al, 0x0A\n"
     "        call put_character\n"
-    "        mov eax, [_g_current_pd_phys]\n"
+    "        mov eax, [_g_current_program_state]\n"
+    "        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]\n"
     "        test eax, eax\n"
     "        jz .signal_dispatch_kill_no_pd\n"
     // Switch CR3 to kernel_idle_pd before address_space_destroy frees
@@ -90,7 +91,8 @@ asm("signal_dispatch_kill:\n"
     "        push eax\n"
     "        call address_space_destroy\n"
     "        add esp, 4\n"
-    "        mov dword [_g_current_pd_phys], 0\n"
+    "        mov edx, [_g_current_program_state]\n"
+    "        mov dword [edx + PROGRAM_STATE_OFFSET_PD_PHYS], 0\n"
     ".signal_dispatch_kill_no_pd:\n"
     "        jmp shell_reload\n");
 
