@@ -104,12 +104,12 @@
 #define BBKEY_SLASH         63
 #define BBKEY_KP_STAR       64
 
-// pending_sigint is defined as a NASM label (db 0) in entry.asm.
-// cc.py mangles global accesses to the _g_ prefix; the equ below
-// makes _g_pending_sigint resolve to the entry.asm label so that
-// plain C assignments compile and link correctly.
-extern uint8_t pending_sigint;
-asm("_g_pending_sigint equ pending_sigint");
+// current_program_state is a pointer to the running program's
+// PROGRAM_STATE block; PENDING_SIGINT lives at offset
+// PROGRAM_STATE_OFFSET_PENDING_SIGINT within that block.
+// The equ alias (_g_current_program_state equ current_program_state) is
+// published by signal.c; only the C extern is needed here.
+extern uint8_t *current_program_state;
 
 // Ring buffer: single-producer (IRQ context, IF=0) /
 // single-consumer (main loop) so head and tail don't need atomics.
@@ -354,7 +354,8 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
             }
         }
         if (ascii == '\x03') {
-            pending_sigint = 1;
+            asm("mov ecx, [_g_current_program_state]\n"
+                "mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 1");
         }
         if (ascii != '\0') {
             ps2_putc(ascii);

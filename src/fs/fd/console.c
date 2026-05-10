@@ -114,25 +114,25 @@ void put_character(char byte __attribute__((in_register("ax"))))
 // user buffer pointer here before jumping to this handler.
 extern uint8_t *fd_write_buffer;
 
-// drivers/rtc.c — set to 1 when a SIGALRM is pending delivery.  The
-// equ alias (_g_pending_sigalrm equ pending_sigalrm) is published by
-// rtc.c; only the C extern is needed here to avoid a duplicate
-// definition.
-extern uint8_t pending_sigalrm;
-// drivers/ps2.c — set to 1 when a SIGINT is pending delivery.  The
-// equ alias (_g_pending_sigint equ pending_sigint) is published by
-// ps2.c; only the C extern is needed here to avoid a duplicate
-// definition.
-extern uint8_t pending_sigint;
+// current_program_state is a pointer to the running program's
+// PROGRAM_STATE block.  PENDING_SIGINT and PENDING_SIGALRM live at
+// PROGRAM_STATE_OFFSET_PENDING_SIGINT and PROGRAM_STATE_OFFSET_PENDING_SIGALRM
+// within that block.  The equ alias is published by signal.c; only the
+// C extern is needed here to avoid a duplicate definition.
+extern uint8_t *current_program_state;
+
+// Forward declaration for signal_any_pending (defined after fd_write_console
+// in alphabetical order); called from fd_read_console's poll loop.
+int signal_any_pending();
 
 // Read one byte from PS/2 ring or COM1 into *destination.  Returns CF
 // clear (return 1) with AX = 1 on success, or CF clear (return 1) with
 // AX = 0 if max_bytes was 0.  Returns CF set (return 0) with AX =
-// 0x04 (ERROR_INTERRUPTED) if either pending_sigint or pending_sigalrm
-// is detected before a byte arrives.  Polls continuously — the syscall
-// handler entered with IF=0 (the INT 30h gate clears it) so we sti once
-// before the polling loop to let IRQ 1 fire and the keyboard ring
-// populate.
+// 0x04 (ERROR_INTERRUPTED) if either PENDING_SIGINT or PENDING_SIGALRM
+// in current_program_state is set before a byte arrives.  Polls
+// continuously — the syscall handler entered with IF=0 (the INT 30h gate
+// clears it) so we sti once before the polling loop to let IRQ 1 fire
+// and the keyboard ring populate.
 __attribute__((carry_return))
 int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                     uint8_t *destination __attribute__((in_register("edi"))),
@@ -144,10 +144,10 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
     }
     asm("sti");
     while (1) {
-        if (pending_sigint != 0 || pending_sigalrm != 0) {
-            // Cooperative interrupt: bail out so the syscall epilogue's
-            // SIGNAL_TAIL_CHECK delivers the signal on iret.
-            // ERROR_INTERRUPTED = 0x04 (constants.asm).
+        // Cooperative interrupt: bail out so the syscall epilogue's
+        // SIGNAL_TAIL_CHECK delivers the signal on iret.
+        // ERROR_INTERRUPTED = 0x04 (constants.asm).
+        if (signal_any_pending() != 0) {
             *bytes_read = 0x04;
             return 0;
         }
@@ -162,7 +162,8 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                 // (or this same syscall's epilogue, after we return)
                 // delivers.  The byte is also returned in the buffer
                 // so SIG_IGN'd programs see it as normal input.
-                pending_sigint = 1;
+                asm("mov ecx, [current_program_state]\n"
+                    "mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 1");
             }
             break;
         }
@@ -190,3 +191,13 @@ int fd_write_console(int *bytes_written __attribute__((out_register("ax"))),
     *bytes_written = count;
     return 1;
 }
+
+// signal_any_pending: return non-zero (in AX) if either PENDING_SIGINT or
+// PENDING_SIGALRM is set in current_program_state.  Called from the poll
+// loop in fd_read_console as a cooperative-interrupt check.
+asm("signal_any_pending:\n"
+    "    mov ecx, [current_program_state]\n"
+    "    xor eax, eax\n"
+    "    mov al, [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT]\n"
+    "    or  al, [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM]\n"
+    "    ret");

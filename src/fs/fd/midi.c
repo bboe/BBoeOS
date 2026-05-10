@@ -21,7 +21,7 @@
 
 extern uint8_t *fd_write_buffer;
 extern uint8_t opl3_present;
-extern uint8_t pending_sigint;
+extern uint8_t *current_program_state;
 extern uint32_t system_ticks;
 
 // drivers/opl3.c
@@ -87,9 +87,10 @@ asm("fd_ioctl_midi:\n"
     // or more due events, and we re-check on the loop body.
     ".fd_ioctl_midi_drain_wait:\n"
     "        cli\n"
-    "        cmp byte [_g_pending_sigint], 0\n"
+    "        mov ecx, [_g_current_program_state]\n"
+    "        cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0\n"
     "        jne .fd_ioctl_midi_drain_eintr\n"
-    "        cmp byte [_g_pending_sigalrm], 0\n"
+    "        cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     "        jne .fd_ioctl_midi_drain_eintr\n"
     "        mov al, [_g_midi_head]\n"
     "        cmp al, [_g_midi_tail]\n"

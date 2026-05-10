@@ -62,7 +62,7 @@
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment system_ticks, fire any due interval
-        ;; timer (set pending_sigalrm + re-arm or clear), drain due
+        ;; timer (set PENDING_SIGALRM + re-arm or clear), drain due
         ;; midi events, EOI the master PIC, iretd.  Interrupt gate
         ;; entry leaves IF=0 for the body; on a single CPU we don't
         ;; need LOCK on the inc.  midi_drain_due is bounded to
@@ -71,17 +71,18 @@ pmode_irq0_handler:
         pushad
         inc dword [system_ticks]
         ;; Alarm check: if alarm_deadline is non-zero and we've hit it,
-        ;; set pending_sigalrm and either re-arm (interval mode) or
-        ;; clear the deadline (one-shot).  Coalescing: if pending_sigalrm
-        ;; is already 1, the second set is a no-op (handler hasn't run
-        ;; yet, the second fire collapses into the first — same model
-        ;; as SIGINT, same as POSIX standard signals).
+        ;; set PENDING_SIGALRM in current_program_state and either re-arm
+        ;; (interval mode) or clear the deadline (one-shot).  Coalescing:
+        ;; if PENDING_SIGALRM is already 1, the second set is a no-op
+        ;; (handler hasn't run yet, the second fire collapses into the
+        ;; first — same model as SIGINT, same as POSIX standard signals).
         mov eax, [alarm_deadline]
         test eax, eax
         jz .pmode_irq0_no_alarm
         cmp [system_ticks], eax
         jb  .pmode_irq0_no_alarm
-        mov byte [pending_sigalrm], 1
+        mov ecx, [current_program_state]
+        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 1
         mov ecx, [alarm_interval]
         test ecx, ecx
         jz  .pmode_irq0_alarm_oneshot
@@ -405,14 +406,14 @@ program_enter:
         ;; Reset signal state — every new program starts in SIG_DFL
         ;; for both signals, with no pending bits, no nesting flag,
         ;; and no armed alarm.  Alarms do not survive exec (POSIX).
+        ;; EDX already holds [current_program_state] from above.
         mov dword [alarm_deadline],    0
         mov dword [alarm_interval],    0
-        mov byte  [in_signal_handler], 0
-        mov byte  [pending_sigalrm],   0
-        mov byte  [pending_sigint],    0
-        mov eax, [current_program_state]
-        mov dword [eax + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], SIG_DFL
-        mov dword [eax + PROGRAM_STATE_OFFSET_SIGINT_HANDLER],  SIG_DFL
+        mov byte  [edx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM],   0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGINT],    0
+        mov dword [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], SIG_DFL
+        mov dword [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER],  SIG_DFL
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -798,20 +799,16 @@ user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 
-        ;; Signal delivery state.  One global slot per signal suffices
-        ;; because only one user program runs at a time — program_enter
-        ;; zeroes the lot on every load so it behaves as if it were
-        ;; per-program.  Handler fields are user-virt addresses (or
-        ;; SIG_DFL=0 / SIG_IGN=1); the address is only valid in the
-        ;; active PD, hence the zero-on-transition rule.  alarm_deadline
-        ;; is a system_ticks value at which IRQ 0 should set
-        ;; pending_sigalrm (0 means disarmed); alarm_interval is the
+        ;; Signal delivery state.  The pending bits (PENDING_SIGINT,
+        ;; PENDING_SIGALRM) and the re-entry guard (IN_SIGNAL_HANDLER) all
+        ;; live inside current_program_state at their PROGRAM_STATE_OFFSET_*
+        ;; offsets; program_enter resets them on every load.  Only the
+        ;; alarm deadline globals remain here: alarm_deadline is a
+        ;; system_ticks value at which IRQ 0 sets PENDING_SIGALRM in
+        ;; current_program_state (0 means disarmed); alarm_interval is the
         ;; auto-rearm period in ticks (0 means one-shot).
 alarm_deadline        dd 0
 alarm_interval        dd 0
-in_signal_handler     db 0
-pending_sigalrm       db 0
-pending_sigint        db 0
         align 4
         ;; program_state_a is the only slot allocated in Phase A — Phase B adds
         ;; program_state_b alongside it.  current_program_state always points at

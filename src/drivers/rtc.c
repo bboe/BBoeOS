@@ -40,12 +40,13 @@ uint32_t system_ticks;
 // the asm consumer doesn't need to know about that.
 asm("system_ticks equ _g_system_ticks");
 
-// pending_sigalrm is defined as a NASM label (db 0) in entry.asm.
-// cc.py mangles global accesses to the _g_ prefix; the equ below
-// makes _g_pending_sigalrm resolve to the entry.asm label so that
-// plain C assignments compile and link correctly.
-extern uint8_t pending_sigalrm;
-asm("_g_pending_sigalrm equ pending_sigalrm");
+// current_program_state is a pointer to the running program's
+// PROGRAM_STATE block; PENDING_SIGALRM and PENDING_SIGINT live at offsets
+// PROGRAM_STATE_OFFSET_PENDING_SIGALRM and PROGRAM_STATE_OFFSET_PENDING_SIGINT
+// within that block.  The equ alias (_g_current_program_state equ
+// current_program_state) is published by signal.c; only the C extern
+// is needed here to avoid a duplicate definition.
+extern uint8_t *current_program_state;
 
 // Forward declaration: rtc_read_time_internal sorts after
 // rtc_read_epoch alphabetically and is called from its body.
@@ -183,8 +184,8 @@ asm("rtc_read_time_internal:\n"
 // pushf/popf around the body keeps the caller's IF intact.
 // Returns CF=0 on success (full sleep completed).
 // Returns CF=1 (any AL) when interrupted by a pending signal
-// (pending_sigint or pending_sigalrm); the caller decides whether
-// to retry or surface as EINTR.
+// (PENDING_SIGINT or PENDING_SIGALRM in current_program_state); the
+// caller decides whether to retry or surface as EINTR.
 void rtc_sleep_ms(int ms __attribute__((in_register("ecx"))));
 
 asm("rtc_sleep_ms:\n"
@@ -209,9 +210,10 @@ asm("rtc_sleep_ms:\n"
     ".rsm_wait:\n"
     // Cooperative interruption: bail out early if either signal is
     // pending so the caller can deliver it via SIGNAL_TAIL_CHECK.
-    "    cmp byte [_g_pending_sigint], 0\n"
+    "    mov ecx, [_g_current_program_state]\n"
+    "    cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0\n"
     "    jne .rsm_eintr\n"
-    "    cmp byte [_g_pending_sigalrm], 0\n"
+    "    cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     "    jne .rsm_eintr\n"
     "    call rtc_tick_read\n"
     "    cmp eax, ebx\n"

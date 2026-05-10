@@ -42,15 +42,11 @@ extern uint8_t *current_program_state;
 
 asm("_g_current_program_state equ current_program_state");
 
-// signal_dispatch_user and signal_resume_after_handler reference
-// pending_sigint, pending_sigalrm, in_signal_handler, and
-// current_program_state directly by their entry.asm label names (no `_g_`
-// prefix) — those globals are %included in kernel.asm before this file and
-// ps2.c already publishes its own `_g_pending_sigint` alias, so re-equ'ing
-// here would collide.  Handler addresses are accessed via
-// current_program_state + PROGRAM_STATE_OFFSET_SIG{INT,ALRM}_HANDLER.
-// This file's only C-mangled global access is current_program_state (used
-// by signal_dispatch_kill below).
+// signal_dispatch_user and signal_resume_after_handler access all signal
+// state through current_program_state using PROGRAM_STATE_OFFSET_* offsets.
+// current_program_state is referenced by its entry.asm label name (no `_g_`
+// prefix) in asm strings, and also as a C-mangled extern below (for
+// signal_dispatch_kill which reads it via C).
 
 void address_space_destroy(uint32_t pd_phys);
 void put_character(char byte);
@@ -138,9 +134,10 @@ asm("signal_dispatch_kill:\n"
 //
 // After building the sigcontext we rewrite [esp + 32] (iret EIP) to the
 // handler address and [esp + 44] (iret ESP) to the sigcontext base, set
-// in_signal_handler = 1 and clear the pending bit corresponding to EDX
-// (pending_sigint or pending_sigalrm), drop the pushad slots (their
-// values now live in the sigcontext) by `add esp, 32`, and iretd.
+// set IN_SIGNAL_HANDLER = 1 and clear the pending bit corresponding to EDX
+// (PENDING_SIGINT or PENDING_SIGALRM) via current_program_state, drop the
+// pushad slots (their values now live in the sigcontext) by `add esp, 32`,
+// and iretd.
 asm("signal_dispatch_user:\n"
     "        mov ebp, eax\n"                        // stash handler — EAX gets clobbered below
     "        mov edi, [esp + 44]\n"                 // user ESP
@@ -165,16 +162,18 @@ asm("signal_dispatch_user:\n"
     "        mov [edi + 8], eax\n"
     "        mov [esp + 32], ebp\n"                 // iret EIP <- handler (from EBP stash)
     "        mov [esp + 44], ebx\n"                 // iret ESP <- sigcontext base
-    "        mov byte [in_signal_handler], 1\n"
+    // Load current_program_state once (ECX was clobbered by rep movsd above).
+    "        mov ecx, [current_program_state]\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 1\n"
     // Clear the pending bit corresponding to EDX before iretd into the
     // handler.  Without this, the same signal would re-dispatch on the
-    // next IRQ tail after SYS_SYS_SIGRETURN clears in_signal_handler.
+    // next IRQ tail after SYS_SYS_SIGRETURN clears IN_SIGNAL_HANDLER.
     "        cmp edx, SIGINT\n"
     "        jne .signal_dispatch_user_clear_alarm\n"
-    "        mov byte [pending_sigint], 0\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0\n"
     "        jmp .signal_dispatch_user_iret\n"
     ".signal_dispatch_user_clear_alarm:\n"
-    "        mov byte [pending_sigalrm], 0\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     ".signal_dispatch_user_iret:\n"
     "        add esp, 32\n"                         // drop pushad slots
     "        iretd\n");
@@ -218,10 +217,11 @@ asm("signal_dispatch_user:\n"
 //      stack pushad slots so the syscall epilogue's popad sees the user's
 //      pre-signal regs.  rep movsd hits the layout exactly because the
 //      sigcontext block is laid out in pushad's natural order.
-//   5. Clear in_signal_handler so signals can deliver again.
-//   6. If pending_sigint OR pending_sigalrm was set during the handler,
-//      redeliver — SIGINT first (priority by signum) — either kill
-//      (SIG_DFL), drop it (SIG_IGN), or jump straight to
+//   5. Clear IN_SIGNAL_HANDLER in current_program_state so signals can
+//      deliver again.
+//   6. If PENDING_SIGINT OR PENDING_SIGALRM was set in current_program_state
+//      during the handler, redeliver — SIGINT first (priority by signum) —
+//      either kill (SIG_DFL), drop it (SIG_IGN), or jump straight to
 //      signal_dispatch_user, which reads the just-rewritten [esp + 44]
 //      and builds a fresh sigcontext on the now-restored user stack.
 //   7. popad + iretd to user code at saved_eip.
@@ -265,18 +265,18 @@ asm("signal_resume_after_handler:\n"
     "        mov ecx, 8\n"
     "        cld\n"
     "        rep movsd\n"
-    "        mov byte [in_signal_handler], 0\n"
+    // Load current_program_state once (ECX was clobbered by rep movsd above).
+    "        mov ecx, [current_program_state]\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0\n"
     // Redelivery: a signal fired while we were in the handler.  Walk
     // SIGINT first (priority by signum), then SIGALRM.
-    // Load current_program_state once (ECX was zeroed by rep movsd above).
-    "        mov ecx, [current_program_state]\n"
-    "        cmp byte [pending_sigint], 0\n"
+    "        cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0\n"
     "        je  .signal_resume_check_alarm\n"
     "        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]\n"
     "        mov edx, SIGINT\n"
     "        jmp .signal_resume_dispatch\n"
     ".signal_resume_check_alarm:\n"
-    "        cmp byte [pending_sigalrm], 0\n"
+    "        cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     "        je  .signal_resume_no_pending\n"
     "        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]\n"
     "        mov edx, SIGALRM\n"
@@ -287,10 +287,10 @@ asm("signal_resume_after_handler:\n"
     "        jne signal_dispatch_user\n"
     "        cmp edx, SIGINT\n"
     "        jne .signal_resume_clear_alarm\n"
-    "        mov byte [pending_sigint], 0\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0\n"
     "        jmp .signal_resume_no_pending\n"
     ".signal_resume_clear_alarm:\n"
-    "        mov byte [pending_sigalrm], 0\n"
+    "        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     ".signal_resume_no_pending:\n"
     "        popad\n"
     "        iretd\n"
