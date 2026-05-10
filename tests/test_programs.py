@@ -660,14 +660,12 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         timeout=_LARGE_FILE_TIMEOUT,
     ),
-    # sleep_forever loops on sleep(1000).  The embedded \x03 arrives in
-    # the serial FIFO while the program is sleeping; the PIT IRQ epilogue's
-    # SIGNAL_TAIL_CHECK sees pending_sigint, calls signal_dispatch_kill
-    # (prints "^C\n"), and routes through child_terminate with EAX =
-    # SIGINT (2).  expand_dollar_question maps wait-status 0x0002 to
-    # bash_status = 128 + 2 = 130, which echo $? then prints.  The
-    # embedded \n terminates the shell command line so the shell starts
-    # sleep_forever before \x03 arrives in the serial FIFO.
+    # sleep_forever calls read(STDIN, buffer, 1) which blocks until a byte
+    # arrives.  The embedded \x03 (Ctrl+C) is detected by fd_read_console,
+    # which sets pending_sigint and returns.  The syscall epilogue's
+    # SIGNAL_TAIL_CHECK dispatches SIGINT and routes through child_terminate
+    # with EAX = SIGINT (2).  expand_dollar_question maps wait-status 0x0002
+    # to bash_status = 128 + 2 = 130, which echo $? then prints.
     ProgramTest(
         "ctrl_c_into_sleep",
         ["sleep_forever\n\x03", "echo $?"],
@@ -756,8 +754,8 @@ TESTS: list[ProgramTest] = [
     # exit_status runs _exit(N) and the shell encodes N into bits 15..8 of
     # the wait status.  expand_dollar_question extracts WEXITSTATUS and
     # echo $? prints the original value.
-    ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"\b0\b"),
-    ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"\b42\b"),
+    ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
+    ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
