@@ -91,13 +91,13 @@ def _measure_wav(*, wav_path: Path) -> dict:
     raw = wav_path.read_bytes()
     if len(raw) < 44 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
         message = f"{wav_path}: missing RIFF/WAVE header"
-        raise SystemExit(message)
+        sys.exit(message)
     channels = struct.unpack("<H", raw[22:24])[0]
     rate = struct.unpack("<I", raw[24:28])[0]
     bits_per_sample = struct.unpack("<H", raw[34:36])[0]
     if bits_per_sample != 16:
         message = f"unexpected sample width: {bits_per_sample} bits"
-        raise SystemExit(message)
+        sys.exit(message)
     bytes_per_frame = channels * 2
     sample_bytes = raw[44:]
     frame_count = len(sample_bytes) // bytes_per_frame

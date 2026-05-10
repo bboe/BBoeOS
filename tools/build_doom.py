@@ -26,6 +26,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -199,7 +200,7 @@ def _find_tool(*, candidates: tuple[str, ...], purpose: str) -> str:
         f"or `brew install lld llvm` (gives ld.lld + llvm-objcopy).  "
         f"On Linux: `apt install binutils` (default) or `apt install lld llvm`."
     )
-    raise SystemExit(message)
+    sys.exit(message)
 
 
 def _link(*, objects: list[Path]) -> None:
