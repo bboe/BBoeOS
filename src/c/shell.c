@@ -5,6 +5,11 @@
    would page-fault. */
 char kill_buf[MAX_INPUT];
 
+/* Wait status of the most recently exec()'d child.  Written by
+   try_exec() on a successful exec; read by the dispatch loop.
+   B11 will expose this as $? to the user. */
+int last_exec_status;
+
 int strcmp(const char *a, const char *b) {
     int index = 0;
     while (1) {
@@ -64,11 +69,16 @@ int delete_at_cursor(char *buf, int cursor, int end) {
 }
 
 int try_exec(char *name) {
-    /* Returns 1 if the target exists but is not executable, 0 if it
-       was not found at all.  On success SYS_EXEC transfers control and
-       never returns. */
-    int err = exec(name);
-    if (err == ERROR_NOT_EXECUTE) {
+    /* Returns:
+         0 — file not found (or other error); last_exec_status unchanged.
+         1 — file exists but is not executable; last_exec_status unchanged.
+         2 — exec succeeded; last_exec_status holds the wait status. */
+    int rc = exec(name);
+    if (rc >= 0) {
+        last_exec_status = rc;
+        return 2;
+    }
+    if (-rc == ERROR_NOT_EXECUTE) {
         return 1;
     }
     return 0;
@@ -208,24 +218,28 @@ int main() {
         } else if (strcmp(buf, "shutdown") == 0) {
             shutdown();
             printf("APM shutdown failed\n");
-        } else if (try_exec(buf)) {
-            printf("not executable\n");
         } else {
-            /* Not found in root — retry inside bin/ */
-            exec_path[0] = 'b';
-            exec_path[1] = 'i';
-            exec_path[2] = 'n';
-            exec_path[3] = '/';
-            int copy_index = 0;
-            while (buf[copy_index] != '\0') {
-                exec_path[4 + copy_index] = buf[copy_index];
-                copy_index += 1;
-            }
-            exec_path[4 + copy_index] = '\0';
-            if (try_exec(exec_path)) {
+            int result = try_exec(buf);
+            if (result == 1) {
                 printf("not executable\n");
-            } else {
-                printf("unknown command\n");
+            } else if (result == 0) {
+                /* Not found in root — retry inside bin/ */
+                exec_path[0] = 'b';
+                exec_path[1] = 'i';
+                exec_path[2] = 'n';
+                exec_path[3] = '/';
+                int copy_index = 0;
+                while (buf[copy_index] != '\0') {
+                    exec_path[4 + copy_index] = buf[copy_index];
+                    copy_index += 1;
+                }
+                exec_path[4 + copy_index] = '\0';
+                int bin_result = try_exec(exec_path);
+                if (bin_result == 1) {
+                    printf("not executable\n");
+                } else if (bin_result == 0) {
+                    printf("unknown command\n");
+                }
             }
         }
     }

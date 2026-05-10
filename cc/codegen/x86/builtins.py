@@ -179,16 +179,35 @@ class BuiltinsMixin:
     def builtin_exec(self, arguments: list[Node], /) -> None:
         """Generate code for the exec(name) builtin.
 
-        Emits ``mov si, <name> / mov ah, SYS_EXEC / int 30h``.  On
-        success, control is transferred to the loaded program and never
-        returns here.  On failure (CF set), AL contains an ``ERROR_*``
-        code; ``xor ah, ah`` zero-extends it for comparison against
-        ``ERROR_NOT_EXECUTE`` etc.
+        Emits ``mov si, <name> / mov ah, SYS_EXEC / int 30h``.
+
+        After Phase B's kernel changes exec() returns to the caller on
+        success: the kernel runs the child in the same page directory,
+        waits for it, and delivers the wait status (16-bit) in AX with
+        CF clear.  On failure (CF set), AL holds an ``ERROR_*`` code.
+
+        Return value (full accumulator-width int):
+        - success: zero-extended 16-bit wait status (>= 0).
+        - failure: -errno (negative; AL zero-extended then negated).
         """
         self._check_argument_count(arguments=arguments, expected=1, name="exec")
         self.emit_si_from_argument(arguments[0])
         self._emit_syscall("EXEC")
+        label_index = self.new_label()
+        self.emit(f"        jc .exec_failed_{label_index}")
+        # Success path: AX holds the 16-bit wait status; zero-extend to
+        # the full accumulator width so the caller gets a non-negative int.
+        if self.target.int_size == 2:
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, ax")
+        self.emit(f"        jmp .exec_done_{label_index}")
+        self.emit(f".exec_failed_{label_index}:")
+        # Failure path: AL holds the ERROR_* code; zero-extend then negate
+        # so callers test ``rc < 0`` and recover ``-rc`` as the error code.
         self.emit_accumulator_zx_from_al()
+        self.emit(f"        neg {self.target.acc}")
+        self.emit(f".exec_done_{label_index}:")
         self.ax_clear()
 
     def builtin_exit(self, arguments: list[Node], /) -> None:
