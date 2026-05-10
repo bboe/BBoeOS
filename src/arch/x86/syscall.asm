@@ -746,17 +746,13 @@ syscall_handler:
         jmp .iret_cf
 
         .sys_exit:
-        ;; Tear down the dying program's PD, restore kernel ESP, and
-        ;; re-enter shell_reload to respawn.
-        mov eax, cr3
-        push eax
-        mov eax, [kernel_idle_pd_phys]
-        mov cr3, eax
-        pop eax
-        call address_space_destroy
-        mov esp, [shell_esp]
-        sti
-        jmp shell_reload
+        ;; Phase B: encode exit code into the high byte of the wait
+        ;; status; jump to child_terminate which destroys the child PD,
+        ;; restores parent state, and iretds back into the parent's
+        ;; sys_exec syscall return point.  AL = exit code (0..255).
+        movzx eax, al
+        shl eax, 8
+        jmp child_terminate
 
         .sys_reboot:
         ;; Does not return.
