@@ -136,8 +136,8 @@ nav_order: 90
   256-slot ring of 6-byte `(delay_lo, delay_hi, bank, reg, value, reserved)`
   commands; the IRQ 0 drainer pops up to 16 events per 1 ms tick and forwards
   register writes through `src/drivers/opl3.c`.  Implements `fd_read_midi`,
-  `fd_write_midi`, `fd_close_midi`, and `fd_ioctl_midi` (`MIDI_IOCTL_DRAIN` /
-  `MIDI_IOCTL_FLUSH` / `MIDI_IOCTL_QUERY`).  Single-opener.
+  `fd_write_midi`, `fd_close_midi`, and `fd_ioctl_midi`
+  (`MIDI_IOCTL_DRAIN`).  Single-opener.
 - `src/fs/block.asm` — Block I/O dispatcher: `read_sector`, `write_sector`
   (dispatches to fdc/ata based on `boot_disk`).
 - `src/fs/bbfs.asm` — BBoeOS filesystem (VFS backend): `bbfs_chmod`,

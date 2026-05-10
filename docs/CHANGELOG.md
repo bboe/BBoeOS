@@ -100,10 +100,20 @@ time.
   bank, reg, value, reserved)` with per-command delay; the kernel drains a
   256-slot event ring from the IRQ 0 ISR (bounded at 16 events per tick) so
   writes get 1 ms timing precision.  Single-opener semantics; `MIDI_IOCTL_DRAIN`
-  (AL=0) blocks via `sti`/`hlt` until the kernel ring drains, `MIDI_IOCTL_FLUSH`
-  (AL=1) drops queued events and KEY_OFFs all 18 voices, and `MIDI_IOCTL_QUERY`
-  (AL=2) reports `g_opl3_present`.  New driver `src/drivers/opl3.c` (outb-based
+  (AL=0) blocks via `sti`/`hlt` until the kernel ring drains.  Userland probes
+  for the chip via `open("/dev/midi")` itself — `fd_open_midi` rejects the open
+  if `g_opl3_present == 0`.  New driver `src/drivers/opl3.c` (outb-based
   register writes + chip probe) and dispatch in `src/fs/fd/midi.c`.
+- **Doom music continues during level loads**: `tools/doom/opl_bboeos.c`
+  installs a SIGALRM handler at `OPL_Init` and arms a 28 ms repeating alarm via
+  `alarm_ms`, so `opl_bboeos_poll` keeps draining the OPL queue even when the
+  main game loop is blocked on `W_LoadLumpName` / WAD I/O during level
+  transitions.  Reentrancy with the per-frame `BBoe_MusicPoll` call is handled
+  by an `in_poll` byte inside `opl_bboeos_poll` — single-threaded with iret-only
+  signal delivery, whichever caller arrives first runs and the other returns
+  immediately (a skipped tick is harmless because `music_clock_us` tracks wall
+  time, not poll count).  `OPL_Shutdown` disarms the alarm and restores the
+  prior SIGALRM disposition.
 - **Doom music**: Doom now plays its background tracks through OPL3.
   Pinned-commit fetch of Chocolate Doom's OPL music stack (`i_oplmusic.c`,
   `mus2mid.c`, `memio.c`, `opl_queue.c`, `midifile.c`, `opl.h`) into

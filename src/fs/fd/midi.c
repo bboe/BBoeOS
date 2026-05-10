@@ -70,18 +70,12 @@ void fd_close_midi() {
 //   MIDI_IOCTL_DRAIN (0x00) — block via sti/hlt until head == tail
 //                              (i.e. every queued event has been
 //                              emitted to the chip); AX = 0, CF clear
-//   MIDI_IOCTL_FLUSH (0x01) — drop queued events + KEY_OFF, CF clear
-//   MIDI_IOCTL_QUERY (0x02) — AX = opl3_present, CF clear
 //   anything else           — CF set
 void fd_ioctl_midi();
 
 asm("fd_ioctl_midi:\n"
     "        cmp al, MIDI_IOCTL_DRAIN\n"
     "        je .fd_ioctl_midi_drain\n"
-    "        cmp al, MIDI_IOCTL_FLUSH\n"
-    "        je .fd_ioctl_midi_flush\n"
-    "        cmp al, MIDI_IOCTL_QUERY\n"
-    "        je .fd_ioctl_midi_query\n"
     "        stc\n"
     "        ret\n"
     ".fd_ioctl_midi_drain:\n"
@@ -112,21 +106,6 @@ asm("fd_ioctl_midi:\n"
     "        sti\n"
     "        mov al, ERROR_INTERRUPTED\n"
     "        stc\n"
-    "        ret\n"
-    ".fd_ioctl_midi_flush:\n"
-    "        push ecx\n"
-    "        push edx\n"
-    "        mov byte [_g_midi_head], 0\n"
-    "        mov byte [_g_midi_tail], 0\n"
-    "        call opl_silence_all\n"
-    "        pop edx\n"
-    "        pop ecx\n"
-    "        xor eax, eax\n"
-    "        clc\n"
-    "        ret\n"
-    ".fd_ioctl_midi_query:\n"
-    "        movzx eax, byte [_g_opl3_present]\n"
-    "        clc\n"
     "        ret\n");
 
 // fd_write_midi: parse 6-byte commands from fd_write_buffer.  For each
