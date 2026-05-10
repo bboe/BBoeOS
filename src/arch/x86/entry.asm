@@ -812,6 +812,10 @@ virt_cursor             dd 0    ; current user-virt during page-walk loops
         ;; sets it to program_state_a (redundant but harmless).
 program_state_a       times PROGRAM_STATE_SIZE db 0
 
+        ;; Phase B additions: second slot for the child while a parent is
+        ;; suspended; program_state_b completes the pair alongside program_state_a.
+program_state_b       times PROGRAM_STATE_SIZE db 0
+
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via
         ;; address_space_map_page; the .oom handler frees it before
@@ -821,6 +825,13 @@ program_state_a       times PROGRAM_STATE_SIZE db 0
         ;; user-program loads run with the flag clear and recover by
         ;; printing a message and re-entering shell_reload.
 loading_shell_flag      dd 0
+
+        ;; Phase B additions: parent_iret_frame snapshots the parent's
+        ;; pushad+iret kernel-stack frame (52 bytes = 13 dwords) at sys_exec
+        ;; entry; parent_program_state is non-null while a child is live.
+parent_iret_frame       times 13 dd 0
+parent_program_state    dd 0
+
 pending_frame_phys      dd 0
 
         ;; Kernel-side fd struct used by program_enter to stream the
