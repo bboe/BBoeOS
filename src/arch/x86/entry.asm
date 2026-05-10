@@ -708,6 +708,9 @@ shell_reload:
         ;; clears it back to 0 immediately before iretd so the
         ;; subsequent sys_exec from the running shell gets graceful
         ;; recovery again.
+        ;; Phase A: only program_state_a exists; the running program
+        ;; always uses it.  Phase B will pick a free slot from the pair.
+        mov dword [current_program_state], program_state_a
         mov dword [loading_shell_flag], 1
         mov esi, shell_path
         call vfs_find
@@ -779,6 +782,7 @@ kernel_idle_pd_phys dd 0
 
         ;; Per-program-load state used by program_enter.
 current_pd_phys         dd 0    ; new PD being built
+current_program_state   dd 0    ; pointer to the running program's PROGRAM_STATE slot (program_state_a in Phase A)
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
@@ -799,6 +803,10 @@ in_signal_handler     db 0
 pending_sigalrm       db 0
 pending_sigint        db 0
         align 4
+        ;; program_state_a is the only slot allocated in Phase A — Phase B adds
+        ;; program_state_b alongside it.  current_program_state always points at
+        ;; the running program's slot.  Initialised at boot in shell_reload.
+program_state_a       times PROGRAM_STATE_SIZE db 0
 sigalrm_handler       dd 0
 sigint_handler        dd 0
 
