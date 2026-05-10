@@ -178,7 +178,7 @@ uint32_t DG_GetTicksMs(void) {
      * ~49.7 days (far past any realistic Doom session). */
     unsigned int ms;
     __asm__ volatile (
-        "mov $0x31, %%ah\n\t"               /* SYS_RTC_MILLIS */
+        "mov $0x32, %%ah\n\t"               /* SYS_RTC_MILLIS */
         "int $0x30\n\t"
         : "=a"(ms));
     return ms;
@@ -217,7 +217,7 @@ void DG_SleepMs(uint32_t ms) {
     if (ms == 0) return;
     __asm__ volatile (
         "mov %[ms], %%ecx\n\t"
-        "mov $0x32, %%ah\n\t"               /* SYS_RTC_SLEEP */
+        "mov $0x33, %%ah\n\t"               /* SYS_RTC_SLEEP */
         "int $0x30\n\t"
         : : [ms]"r"(ms) : "ax", "ecx");
 }
