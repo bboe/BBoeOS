@@ -6,8 +6,9 @@
 ;;; stack (pushes a fake error code when the CPU didn't), pushes the
 ;;; exception number, and jumps to exc_common which prints
 ;;; "EXCnn EIP=... CR2=... ERR=..." on COM1, then triages:
-;;;   * CPL=3 (any vector) → tear down the dying program's PD and
-;;;     re-enter shell_reload, mirroring sys_exit's teardown sequence.
+;;;   * CPL=3 (any vector) → dispatch through child_terminate (wait
+;;;     status 0x7F = WIFCRASHED), which tears down the dying PD and
+;;;     restores the parent, mirroring the Phase-B kill path.
 ;;;   * CPL=0 + #PF + CR2 < 0xC0000000 → also kill.  The kernel was
 ;;;     dereferencing a user pointer mid-syscall (e.g. read() into an
 ;;;     unmapped user buffer); the program is the bug, not the kernel.
@@ -185,24 +186,13 @@ exc_common:
         jae .halt_kernel
 
         .kill_program:
-        ;; Tear down the dying program's PD and re-enter shell_reload.
-        ;; CR3 still points at the dying program's PD (the CPU doesn't
-        ;; change CR3 on a fault).  Mirrors sys_exit (src/syscall/sys.asm).
-        ;; We never return through the iret frame — the program's death
-        ;; is final, including for the kernel-deref-of-user-pointer case
-        ;; (whatever kernel-side state the syscall built up is abandoned;
-        ;; fd_init in shell_reload re-zeroes the FD table for the next
-        ;; program, and the dying program's user pages go away with the
-        ;; PD).
-        mov eax, cr3
-        push eax
-        mov eax, [kernel_idle_pd_phys]
-        mov cr3, eax
-        pop eax
-        call address_space_destroy
-        mov esp, [shell_esp]
-        sti
-        jmp shell_reload
+        ;; Phase B: dispatch through child_terminate which tears down the
+        ;; dying program's PD, restores the parent (or falls back to
+        ;; shell_reload if there is no parent), and iretds.  CR3 swap and
+        ;; address_space_destroy are handled there.
+        ;; EAX = 0x7F is the WIFCRASHED sentinel wait status.
+        mov eax, 0x7F
+        jmp child_terminate
 
         .halt_kernel:
         cli

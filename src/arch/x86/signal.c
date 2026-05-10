@@ -1,10 +1,11 @@
 // signal.c — Signal dispatch primitives.  Three entry points:
-//   signal_dispatch_kill          — reset to a known kernel ESP, tear
-//                                   down the dying program's PD, jump
-//                                   to shell_reload.  Reused by the
-//                                   SIG_DFL path and by handler-
-//                                   validation failures in
-//                                   SYS_SYS_SIGRETURN.
+//   signal_dispatch_kill          — reset to a known kernel ESP, print
+//                                   the signal banner ("^C\n" etc.), and
+//                                   dispatch through child_terminate which
+//                                   tears down the dying program's PD and
+//                                   restores the parent.  Reused by the
+//                                   SIG_DFL path and by handler-validation
+//                                   failures in SYS_SYS_SIGRETURN.
 //   signal_dispatch_user          — capture interrupted register state
 //                                   into a sigcontext on the user
 //                                   stack, rewrite the CPU iret frame
@@ -48,7 +49,6 @@ asm("_g_current_program_state equ current_program_state");
 // prefix) in asm strings, and also as a C-mangled extern below (for
 // signal_dispatch_kill which reads it via C).
 
-void address_space_destroy(uint32_t pd_phys);
 void put_character(char byte);
 
 void signal_dispatch_kill();
@@ -74,25 +74,14 @@ asm("signal_dispatch_kill:\n"
     "        call put_character\n"
     "        mov al, 0x0A\n"
     "        call put_character\n"
-    "        mov eax, [_g_current_program_state]\n"
-    "        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]\n"
-    "        test eax, eax\n"
-    "        jz .signal_dispatch_kill_no_pd\n"
-    // Switch CR3 to kernel_idle_pd before address_space_destroy frees
-    // the dying PD's frame; mirrors .sys_exit (syscall.asm).  Without
-    // this, CR3 is left dangling at a freed-then-reallocated frame and
-    // the next kernel-virt access through it page-faults (EXC0E).
-    "        push eax\n"
-    "        mov eax, [kernel_idle_pd_phys]\n"
-    "        mov cr3, eax\n"
-    "        pop eax\n"
-    "        push eax\n"
-    "        call address_space_destroy\n"
-    "        add esp, 4\n"
-    "        mov edx, [_g_current_program_state]\n"
-    "        mov dword [edx + PROGRAM_STATE_OFFSET_PD_PHYS], 0\n"
-    ".signal_dispatch_kill_no_pd:\n"
-    "        jmp shell_reload\n");
+    // Phase B: load wait status = signum (EDX still holds the signum the
+    // caller loaded before jumping here) and dispatch through
+    // child_terminate, which does the CR3 swap, address_space_destroy,
+    // parent restore, and iretd back to the parent.  The kernel print of
+    // "^C\n", "^A\n", or "^?\n" already happened above.
+    "        mov eax, edx\n"
+    "        and eax, 0x7F\n"
+    "        jmp child_terminate\n");
 
 // signal_dispatch_user — build a 52-byte sigcontext on the user stack,
 // rewrite the CPU iret frame to enter the registered ring-3 handler,

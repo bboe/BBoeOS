@@ -541,9 +541,10 @@ program_enter:
 .oom:
         ;; Allocator OOM (or disk error) during program load.  If we
         ;; were loading the shell itself, halt the kernel — there is
-        ;; nothing to fall back to.  Otherwise tear down the partial
-        ;; PD, surface a message, and bring up a fresh shell so the
-        ;; user can recover and retry.
+        ;; nothing to fall back to.  Otherwise tear down the partial PD,
+        ;; surface a message, and either return ERROR_FAULT to the parent
+        ;; (via spawn_failed_unwind when parent_program_state != 0) or
+        ;; bring up a fresh shell so the user can recover and retry.
         cmp dword [loading_shell_flag], 0
         jne .panic
 
@@ -597,9 +598,14 @@ program_enter:
         jmp .oom_print
 .oom_done:
 
-        ;; Bring up a fresh shell.  shell_reload sets
-        ;; loading_shell_flag = 1 before re-entering program_enter, so
-        ;; an OOM during the shell load truly panics.
+        ;; Phase B: if a parent is suspended, this is a failed child load
+        ;; — return ERROR_FAULT to the parent via spawn_failed_unwind.
+        ;; Otherwise (boot path / shell load OOM) fall back to shell_reload
+        ;; or the .panic path — loading_shell_flag distinguishes those.
+        cmp dword [parent_program_state], 0
+        jne spawn_failed_unwind
+        cmp dword [loading_shell_flag], 0
+        jne .panic
         jmp shell_reload
 
 .panic:
