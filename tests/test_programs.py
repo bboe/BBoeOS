@@ -708,7 +708,16 @@ TESTS: list[ProgramTest] = [
     # functional again — catches PD teardown / VGA mode reset bugs that
     # would otherwise leave the shell wedged.  Doubles as a regression
     # for the 448 KB BSS allocation in the per-program PD.
-    ProgramTest("edit", ["edit hello\n\x11", "echo hello"], r"^hello  line 1  col 1[\s\S]+^hello$"),
+    # 4 MB: B5 keeps the parent shell's PD alive while the child PD is
+    # being built, so both are resident simultaneously.  At 1 MB the
+    # ~80 KB shell PD + 448 KB edit BSS exhausts the bitmap allocator
+    # and program_enter returns OOM.
+    ProgramTest(
+        "edit",
+        ["edit hello\n\x11", "echo hello"],
+        r"^hello  line 1  col 1[\s\S]+^hello$",
+        memory="4",
+    ),
     # Pad bin/ with empty fillers until BBfs's 48-entry cap is hit,
     # ending with an executable probe so the final directory entry
     # is something we can exec.  Asserts arp (slot 0), a runtime-picked
