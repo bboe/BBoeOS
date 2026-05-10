@@ -407,7 +407,8 @@ syscall_handler:
         ;; Compute previous remaining ms first (before clobbering state).
         ;; If alarm_deadline is 0, previous is 0.
         ;; Otherwise previous = max(0, alarm_deadline - system_ticks).
-        mov eax, [alarm_deadline]
+        mov edi, [current_program_state]
+        mov eax, [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
         test eax, eax
         jz .rtc_alarm_have_prev
         sub eax, [system_ticks]
@@ -421,12 +422,12 @@ syscall_handler:
         ;; Arm: alarm_deadline = system_ticks + ebx; alarm_interval = ecx.
         mov eax, [system_ticks]
         add eax, ebx
-        mov [alarm_deadline], eax
-        mov [alarm_interval], ecx
+        mov [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
+        mov [edi + PROGRAM_STATE_OFFSET_ALARM_INTERVAL], ecx
         jmp .rtc_alarm_done
         .rtc_alarm_disarm:
-        mov dword [alarm_deadline], 0
-        mov dword [alarm_interval], 0
+        mov dword [edi + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
+        mov dword [edi + PROGRAM_STATE_OFFSET_ALARM_INTERVAL], 0
         .rtc_alarm_done:
         mov eax, edx                    ; previous remaining ms -> EAX
         clc

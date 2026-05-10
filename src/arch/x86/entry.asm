@@ -76,25 +76,25 @@ pmode_irq0_handler:
         ;; if PENDING_SIGALRM is already 1, the second set is a no-op
         ;; (handler hasn't run yet, the second fire collapses into the
         ;; first — same model as SIGINT, same as POSIX standard signals).
-        mov eax, [alarm_deadline]
+        mov ecx, [current_program_state]
+        mov eax, [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
         test eax, eax
         jz .pmode_irq0_no_alarm
         cmp [system_ticks], eax
         jb  .pmode_irq0_no_alarm
-        mov ecx, [current_program_state]
         mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 1
-        mov ecx, [alarm_interval]
-        test ecx, ecx
+        mov ebx, [ecx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL]
+        test ebx, ebx
         jz  .pmode_irq0_alarm_oneshot
         ;; Re-arm: deadline = current + interval.  system_ticks wraps at
         ;; 2^32 ms (~49.7 days); an alarm armed near that wrap edge could
         ;; fire at an unexpected time when system_ticks rolls past the
         ;; deadline early.  Not worth fixing for a hobby OS uptime.
-        add eax, ecx
-        mov [alarm_deadline], eax
+        add eax, ebx
+        mov [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
         jmp .pmode_irq0_no_alarm
         .pmode_irq0_alarm_oneshot:
-        mov dword [alarm_deadline], 0
+        mov dword [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
         .pmode_irq0_no_alarm:
         call midi_drain_due
         mov al, PIC_EOI
@@ -407,8 +407,8 @@ program_enter:
         ;; for both signals, with no pending bits, no nesting flag,
         ;; and no armed alarm.  Alarms do not survive exec (POSIX).
         ;; EDX already holds [current_program_state] from above.
-        mov dword [alarm_deadline],    0
-        mov dword [alarm_interval],    0
+        mov dword [edx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE],    0
+        mov dword [edx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL],    0
         mov byte  [edx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0
         mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM],   0
         mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGINT],    0
@@ -793,26 +793,23 @@ vdso_install:
 kernel_idle_pd_phys dd 0
 
         ;; Per-program-load state used by program_enter.
-current_program_state   dd 0    ; pointer to the running program's PROGRAM_STATE slot (program_state_a in Phase A)
+current_program_state   dd program_state_a  ; pointer to the running program's PROGRAM_STATE slot (program_state_a in Phase A)
 last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
 user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
 vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 
         ;; Signal delivery state.  The pending bits (PENDING_SIGINT,
-        ;; PENDING_SIGALRM) and the re-entry guard (IN_SIGNAL_HANDLER) all
-        ;; live inside current_program_state at their PROGRAM_STATE_OFFSET_*
-        ;; offsets; program_enter resets them on every load.  Only the
-        ;; alarm deadline globals remain here: alarm_deadline is a
-        ;; system_ticks value at which IRQ 0 sets PENDING_SIGALRM in
-        ;; current_program_state (0 means disarmed); alarm_interval is the
-        ;; auto-rearm period in ticks (0 means one-shot).
-alarm_deadline        dd 0
-alarm_interval        dd 0
+        ;; PENDING_SIGALRM), the re-entry guard (IN_SIGNAL_HANDLER), and the
+        ;; alarm deadline / interval all live inside current_program_state at
+        ;; their PROGRAM_STATE_OFFSET_* offsets; program_enter resets them on
+        ;; every load.
         align 4
         ;; program_state_a is the only slot allocated in Phase A — Phase B adds
         ;; program_state_b alongside it.  current_program_state always points at
-        ;; the running program's slot.  Initialised at boot in shell_reload.
+        ;; the running program's slot.  Pre-initialised to program_state_a so
+        ;; the PIT handler is safe before shell_reload runs; shell_reload also
+        ;; sets it to program_state_a (redundant but harmless).
 program_state_a       times PROGRAM_STATE_SIZE db 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
