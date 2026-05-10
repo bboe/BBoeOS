@@ -517,7 +517,7 @@ program_enter:
         ;; game — would otherwise leave up to KB_BUFFER_SIZE gameplay
         ;; keys stale in ps2_buf when they exit).  The per-fd event
         ;; queues for TRY_GET_EVENT don't need draining here — fd_init
-        ;; above already memset the entire fd_table to zero, which
+        ;; above already memset the entire fd table to zero, which
         ;; clears head / tail / buffer for every console fd in one shot.
         call ps2_drain
 
