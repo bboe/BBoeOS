@@ -736,6 +736,92 @@ shell_reload:
         hlt
         jmp $-1
 
+;;; -----------------------------------------------------------------------
+;;; child_terminate — single shared exit point for "child went away,
+;;; return wait status to parent."  Called from sys_exit, signal_dispatch_kill,
+;;; and exc_common (after they've each done their kill-specific prelude).
+;;;
+;;; In:  EAX = wait-status word (POSIX-shaped, 16-bit).  All other regs free.
+;;; Out: never returns; iretds back into the parent's user code at the
+;;;      instruction after `int 30h`, with the parent's saved registers
+;;;      restored from parent_iret_frame and EAX overwritten with the wait
+;;;      status.
+;;;
+;;; If parent_program_state is null (the shell itself died — only happens
+;;; if it removed its SIG_IGN, or a CPU exception fires inside the shell)
+;;; this falls back to shell_reload, mirroring the pre-Phase-B kill path.
+;;; -----------------------------------------------------------------------
+child_terminate:
+        cli
+        ;; If no parent → fall back to shell_reload (shell-itself-died).
+        cmp dword [parent_program_state], 0
+        je shell_reload
+
+        ;; Stash wait status — register pressure during the destroy/restore
+        ;; below would otherwise clobber it.  Use EBX (callee-saved by our
+        ;; convention; nothing here calls into C with EBX live).
+        mov ebx, eax
+
+        ;; Switch to kernel_idle_pd so address_space_destroy can free the
+        ;; child's PD frame (mirrors signal_dispatch_kill / .sys_exit).
+        mov eax, [kernel_idle_pd_phys]
+        mov cr3, eax
+
+        ;; Destroy the child's PD.
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        push eax
+        call address_space_destroy
+        add esp, 4
+
+        ;; Zero the child's slot (clears its fd_table, pending bits, etc.).
+        mov edi, [current_program_state]
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        cld
+        rep stosd
+
+        ;; Swap back to parent.
+        mov eax, [parent_program_state]
+        mov [current_program_state], eax
+        mov dword [parent_program_state], 0
+
+        ;; Switch CR3 to parent PD.
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+
+        ;; Restore parent kernel-stack frame.  parent_iret_frame holds 13
+        ;; dwords (8 pushad slots + 5 cross-priv iret slots).  Place them
+        ;; at kernel_stack_top - 52 so popad+iretd consume exactly that.
+        mov esp, kernel_stack_top
+        sub esp, 52
+        mov edi, esp
+        mov esi, parent_iret_frame
+        mov ecx, 13
+        cld
+        rep movsd
+
+        ;; Poke wait status into the saved-EAX slot in pushad area.
+        ;; pushad layout: [esp + 0] EDI, [esp + 4] ESI, [esp + 8] EBP,
+        ;; [esp + 12] ESP_pushad, [esp + 16] EBX, [esp + 20] EDX,
+        ;; [esp + 24] ECX, [esp + 28] EAX.
+        mov [esp + 28], ebx
+
+        ;; Clear CF in saved EFLAGS.  Saved EFLAGS lives at [esp + 40]
+        ;; (cross-priv iret frame: EIP, CS, EFLAGS, ESP, SS at offsets
+        ;; 32..48).
+        and dword [esp + 40], ~1
+
+        ;; Deliver any signal that fired in the parent's slot during the
+        ;; child's run.  SIGNAL_TAIL_CHECK reads pending bits + handlers
+        ;; from current_program_state (now the parent), dispatches if
+        ;; pending — same path as the IRQ-tail check.
+        SIGNAL_TAIL_CHECK
+
+        popad
+        iretd
+
 vdso_install:
         ;; Allocate one frame for the vDSO code page and copy
         ;; `vdso_image` (the embedded blob from kernel.asm) into it
