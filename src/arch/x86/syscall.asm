@@ -752,14 +752,15 @@ syscall_handler:
         jae .sys_signal_bad
         .sys_signal_handler_ok:
         ;; Route to the right handler slot based on EBX.
+        mov edx, [current_program_state]
         cmp ebx, SIGINT
         jne .sys_signal_alarm_slot
-        mov eax, [sigint_handler]       ; previous handler -> EAX
-        mov [sigint_handler], ecx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]   ; previous handler -> EAX
+        mov [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER], ecx
         jmp .sys_signal_done
         .sys_signal_alarm_slot:
-        mov eax, [sigalrm_handler]
-        mov [sigalrm_handler], ecx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]
+        mov [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], ecx
         .sys_signal_done:
         clc
         jmp .iret_cf_eax               ; full EAX preserved, CF=0

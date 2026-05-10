@@ -410,8 +410,9 @@ program_enter:
         mov byte  [in_signal_handler], 0
         mov byte  [pending_sigalrm],   0
         mov byte  [pending_sigint],    0
-        mov dword [sigalrm_handler],   SIG_DFL
-        mov dword [sigint_handler],    SIG_DFL
+        mov eax, [current_program_state]
+        mov dword [eax + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], SIG_DFL
+        mov dword [eax + PROGRAM_STATE_OFFSET_SIGINT_HANDLER],  SIG_DFL
 
         ;; --- Phase 2: BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -816,8 +817,6 @@ pending_sigint        db 0
         ;; program_state_b alongside it.  current_program_state always points at
         ;; the running program's slot.  Initialised at boot in shell_reload.
 program_state_a       times PROGRAM_STATE_SIZE db 0
-sigalrm_handler       dd 0
-sigint_handler        dd 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via

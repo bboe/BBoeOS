@@ -24,10 +24,10 @@
 ;; line and end with `SIGNAL_TAIL_CHECK / iretd`.
 ;;
 ;; The symbols pending_sigint, pending_sigalrm, in_signal_handler,
-;; sigint_handler, sigalrm_handler, signal_dispatch_kill, and
-;; signal_dispatch_user are defined elsewhere (entry.asm / signal.c) and
-;; resolved as forward references (NASM -f bin resolves forward label refs
-;; across the flat binary).
+;; current_program_state, signal_dispatch_kill, and signal_dispatch_user
+;; are defined elsewhere (entry.asm / signal.c) and resolved as forward
+;; references (NASM -f bin resolves forward label refs across the flat
+;; binary).
 
 %ifndef IRQ_TAIL_INC
 %define IRQ_TAIL_INC
@@ -54,17 +54,19 @@
         jne %%no_dispatch
         cmp byte [in_signal_handler], 0
         jne %%no_dispatch
+        ;; Load current_program_state once; reuse ECX for both handler reads.
+        mov ecx, [current_program_state]
         ;; Check SIGINT first (lower signum = higher priority).
         cmp byte [pending_sigint], 0
         je  %%check_sigalrm
         mov edx, SIGINT
-        mov eax, [sigint_handler]
+        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]
         jmp %%dispatch
 %%check_sigalrm:
         cmp byte [pending_sigalrm], 0
         je  %%no_dispatch
         mov edx, SIGALRM
-        mov eax, [sigalrm_handler]
+        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]
 %%dispatch:
         cmp eax, SIG_DFL
         je  signal_dispatch_kill           ; never returns; pushad slots discarded

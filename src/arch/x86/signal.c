@@ -42,13 +42,15 @@ extern uint8_t *current_program_state;
 
 asm("_g_current_program_state equ current_program_state");
 
-// signal_dispatch_user references pending_sigint, pending_sigalrm,
-// in_signal_handler, sigint_handler, and sigalrm_handler directly by their
-// entry.asm label names (no `_g_` prefix) — those globals are %included in
-// kernel.asm before this file and ps2.c already publishes its own
-// `_g_pending_sigint` alias, so re-equ'ing here would collide.  This file's
-// only C-mangled global access is current_program_state (used by
-// signal_dispatch_kill below).
+// signal_dispatch_user and signal_resume_after_handler reference
+// pending_sigint, pending_sigalrm, in_signal_handler, and
+// current_program_state directly by their entry.asm label names (no `_g_`
+// prefix) — those globals are %included in kernel.asm before this file and
+// ps2.c already publishes its own `_g_pending_sigint` alias, so re-equ'ing
+// here would collide.  Handler addresses are accessed via
+// current_program_state + PROGRAM_STATE_OFFSET_SIG{INT,ALRM}_HANDLER.
+// This file's only C-mangled global access is current_program_state (used
+// by signal_dispatch_kill below).
 
 void address_space_destroy(uint32_t pd_phys);
 void put_character(char byte);
@@ -266,15 +268,17 @@ asm("signal_resume_after_handler:\n"
     "        mov byte [in_signal_handler], 0\n"
     // Redelivery: a signal fired while we were in the handler.  Walk
     // SIGINT first (priority by signum), then SIGALRM.
+    // Load current_program_state once (ECX was zeroed by rep movsd above).
+    "        mov ecx, [current_program_state]\n"
     "        cmp byte [pending_sigint], 0\n"
     "        je  .signal_resume_check_alarm\n"
-    "        mov eax, [sigint_handler]\n"
+    "        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]\n"
     "        mov edx, SIGINT\n"
     "        jmp .signal_resume_dispatch\n"
     ".signal_resume_check_alarm:\n"
     "        cmp byte [pending_sigalrm], 0\n"
     "        je  .signal_resume_no_pending\n"
-    "        mov eax, [sigalrm_handler]\n"
+    "        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]\n"
     "        mov edx, SIGALRM\n"
     ".signal_resume_dispatch:\n"
     "        cmp eax, SIG_DFL\n"
