@@ -38,8 +38,13 @@ static int _errno_from_al(int al) {
 }
 
 void _exit(int status) {
-    (void)status;
-    __asm__ volatile ("mov $" SYSNUM_STR(SYS_SYS_EXIT) ", %ah; int $0x30");
+    __asm__ volatile (
+        "mov %[s], %%al\n\t"
+        "mov $" SYSNUM_STR(SYS_SYS_EXIT) ", %%ah\n\t"
+        "int $0x30\n\t"
+        :
+        : [s]"g"((unsigned char)status)
+        : "ax");
     while (1) {}    /* unreachable */
 }
 

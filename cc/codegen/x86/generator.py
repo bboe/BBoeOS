@@ -79,6 +79,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     """
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "_exit": frozenset({"ax"}),
         "alarm_ms": frozenset({"ax", "bx", "cx"}),
         "asm": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
         "checksum": frozenset({"ax", "bx", "cx", "si"}),

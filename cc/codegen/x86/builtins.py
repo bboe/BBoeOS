@@ -32,6 +32,23 @@ class BuiltinsMixin:
     memory/locals state initialized by ``CodeGeneratorBase.__init__``.
     """
 
+    def builtin__exit(self, arguments: list[Node], /) -> None:
+        """Generate code for the _exit(status) builtin.
+
+        Loads *status* (low 8 bits) into AL, then fires SYS_SYS_EXIT
+        via ``mov ah, SYS_SYS_EXIT / int 30h``.  The kernel reads AL
+        as the exit code (0..255) and encodes it into the high byte of
+        the wait status returned to the parent's exec() call.
+
+        ABI: AL = status (low byte of the argument); never returns.
+        """
+        if self.target_mode == "kernel":
+            message = "_exit() not available in --target kernel"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=1, name="_exit")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.acc)
+        self._emit_syscall("SYS_EXIT")
+
     def builtin_alarm_ms(self, arguments: list[Node], /) -> None:
         """Generate code for the alarm_ms(delay_ms, interval_ms) builtin.
 
