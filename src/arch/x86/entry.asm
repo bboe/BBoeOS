@@ -818,8 +818,6 @@ child_terminate:
         ;; from current_program_state (now the parent), dispatches if
         ;; pending — same path as the IRQ-tail check.
         SIGNAL_TAIL_CHECK
-
-        popad
         iretd
 
 vdso_install:
