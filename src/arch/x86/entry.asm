@@ -62,40 +62,58 @@
 
 pmode_irq0_handler:
         ;; PIT tick.  Increment system_ticks, fire any due interval
-        ;; timer (set PENDING_SIGALRM + re-arm or clear), drain due
-        ;; midi events, EOI the master PIC, iretd.  Interrupt gate
-        ;; entry leaves IF=0 for the body; on a single CPU we don't
-        ;; need LOCK on the inc.  midi_drain_due is bounded to
-        ;; MIDI_DRAIN_PER_TICK iterations so the ISR latency stays
-        ;; O(1) (the alarm check is constant-time).
+        ;; timer (set PENDING_SIGALRM + re-arm or clear) for each live
+        ;; program slot, drain due midi events, EOI the master PIC,
+        ;; iretd.  Interrupt gate entry leaves IF=0 for the body; on a
+        ;; single CPU we don't need LOCK on the inc.  midi_drain_due is
+        ;; bounded to MIDI_DRAIN_PER_TICK iterations so the ISR latency
+        ;; stays O(1) (the alarm check is constant-time per slot).
         pushad
         inc dword [system_ticks]
-        ;; Alarm check: if alarm_deadline is non-zero and we've hit it,
-        ;; set PENDING_SIGALRM in current_program_state and either re-arm
-        ;; (interval mode) or clear the deadline (one-shot).  Coalescing:
-        ;; if PENDING_SIGALRM is already 1, the second set is a no-op
-        ;; (handler hasn't run yet, the second fire collapses into the
+        ;; Per-slot alarm check.  Iterate (program_state_a, program_state_b);
+        ;; each slot is independently armed.  pd_phys == 0 means the slot
+        ;; is unused (no program loaded — e.g., when only the parent is
+        ;; live and program_state_b is empty).  Coalescing: if
+        ;; PENDING_SIGALRM is already 1 the second set is a no-op
+        ;; (handler hasn't run yet; the second fire collapses into the
         ;; first — same model as SIGINT, same as POSIX standard signals).
-        mov ecx, [current_program_state]
-        mov eax, [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
+        push ebx
+        mov ebx, program_state_a
+        call .pmode_irq0_check_slot
+        mov ebx, program_state_b
+        call .pmode_irq0_check_slot
+        pop ebx
+        jmp .pmode_irq0_after_alarm
+
+.pmode_irq0_check_slot:
+        ;; In: EBX = pointer to program_state slot.
+        ;; Out: returns via ret; EAX and ECX clobbered.
+        mov eax, [ebx + PROGRAM_STATE_OFFSET_PD_PHYS]
         test eax, eax
-        jz .pmode_irq0_no_alarm
+        jz .pmode_irq0_check_slot_done
+        mov eax, [ebx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE]
+        test eax, eax
+        jz .pmode_irq0_check_slot_done
         cmp [system_ticks], eax
-        jb  .pmode_irq0_no_alarm
-        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 1
-        mov ebx, [ecx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL]
-        test ebx, ebx
-        jz  .pmode_irq0_alarm_oneshot
+        jb  .pmode_irq0_check_slot_done
+        ;; Fire: set this slot's pending_sigalrm; re-arm or clear deadline.
+        mov byte [ebx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 1
+        mov ecx, [ebx + PROGRAM_STATE_OFFSET_ALARM_INTERVAL]
+        test ecx, ecx
+        jz .pmode_irq0_slot_oneshot
         ;; Re-arm: deadline = current + interval.  system_ticks wraps at
         ;; 2^32 ms (~49.7 days); an alarm armed near that wrap edge could
         ;; fire at an unexpected time when system_ticks rolls past the
         ;; deadline early.  Not worth fixing for a hobby OS uptime.
-        add eax, ebx
-        mov [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
-        jmp .pmode_irq0_no_alarm
-        .pmode_irq0_alarm_oneshot:
-        mov dword [ecx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
-        .pmode_irq0_no_alarm:
+        add eax, ecx
+        mov [ebx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], eax
+        ret
+.pmode_irq0_slot_oneshot:
+        mov dword [ebx + PROGRAM_STATE_OFFSET_ALARM_DEADLINE], 0
+.pmode_irq0_check_slot_done:
+        ret
+
+.pmode_irq0_after_alarm:
         call midi_drain_due
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
@@ -708,9 +726,23 @@ protected_mode_entry:
         ;; Fall through into shell_reload.
 
 shell_reload:
-        ;; B5 transitional: clear parent state on shell reload so a fresh
-        ;; shell can sys_exec.  B8 expands this into a full slot reset.
+        ;; Boot path / shell-itself-died fallback — re-establish the
+        ;; canonical "shell is the sole live program" state.
         mov dword [parent_program_state], 0
+        mov edi, parent_iret_frame
+        mov ecx, 13
+        xor eax, eax
+        cld
+        rep stosd
+        mov edi, program_state_a
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        rep stosd
+        mov edi, program_state_b
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        rep stosd
+        mov dword [current_program_state], program_state_a
         ;; Restore 80x25 text mode if a dying program left the VGA card
         ;; in a graphics mode (e.g. Doom in mode 13h).  No-op on the
         ;; first-boot fall-through (vga_current_mode starts at 0x03), so
@@ -729,9 +761,6 @@ shell_reload:
         ;; clears it back to 0 immediately before iretd so the
         ;; subsequent sys_exec from the running shell gets graceful
         ;; recovery again.
-        ;; Phase A: only program_state_a exists; the running program
-        ;; always uses it.  Phase B will pick a free slot from the pair.
-        mov dword [current_program_state], program_state_a
         mov dword [loading_shell_flag], 1
         mov esi, shell_path
         call vfs_find
