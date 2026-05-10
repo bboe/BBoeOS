@@ -572,4 +572,4 @@ def main() -> int:  # noqa: PLR0915
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
