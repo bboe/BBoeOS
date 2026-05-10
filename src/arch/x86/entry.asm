@@ -820,6 +820,63 @@ child_terminate:
         SIGNAL_TAIL_CHECK
         iretd
 
+;;; -----------------------------------------------------------------------
+;;; spawn_failed_unwind — sys_exec succeeded vfs_find but the child PD
+;;; build failed (OOM in program_enter, disk read error mid-load).  The
+;;; child never iretd'd into ring 3, so there is no "wait status"
+;;; semantic; the parent's exec() syscall must return with
+;;; CF=1, AL=ERROR_FAULT.
+;;;
+;;; Reach path: program_enter's .oom branch (entry.asm) replaces
+;;; "jmp shell_reload" with "jmp spawn_failed_unwind" when
+;;; parent_program_state != 0 (set up in Task B7).
+;;; -----------------------------------------------------------------------
+spawn_failed_unwind:
+        cli
+        ;; Tear down the partial child PD if any.  The child's pd_phys may
+        ;; be non-zero (PD was allocated) or zero (allocator failed
+        ;; before address_space_create returned) depending on how far
+        ;; program_enter got.
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        test eax, eax
+        jz .spawn_failed_no_pd
+        push eax
+        call address_space_destroy
+        add esp, 4
+        .spawn_failed_no_pd:
+
+        ;; Zero the child's slot.
+        mov edi, [current_program_state]
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        cld
+        rep stosd
+
+        ;; Swap back to parent.
+        mov eax, [parent_program_state]
+        mov [current_program_state], eax
+        mov dword [parent_program_state], 0
+
+        ;; Switch CR3 to parent PD.
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+
+        ;; Restore parent kernel-stack frame, set EAX=ERROR_FAULT, set CF.
+        mov esp, kernel_stack_top
+        sub esp, 52
+        mov edi, esp
+        mov esi, parent_iret_frame
+        mov ecx, 13
+        cld
+        rep movsd
+        mov dword [esp + 28], ERROR_FAULT
+        or dword [esp + 40], 1
+
+        SIGNAL_TAIL_CHECK
+        iretd
+
 vdso_install:
         ;; Allocate one frame for the vDSO code page and copy
         ;; `vdso_image` (the embedded blob from kernel.asm) into it
