@@ -63,12 +63,12 @@ jobs:
       - uses: actions/checkout@v4
         if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/cache@v4
-        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
       - name: Install build dependencies
-        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
@@ -116,3 +116,19 @@ jobs:
             command: python3 tests/test_ps2.py
           - suite: test_unit
             command: python3 -m pytest tests/unit/
+          - suite: lint_no_raw_syscalls
+            # Bare `int $0x30` outside tools/libc/ means a clang-compiled
+            # caller is hardcoding a syscall number and will silently break
+            # the next time the asm-side numbers in src/include/constants.asm
+            # are renumbered (see PR #340 — Doom's hand-rolled DG_GetTicksMs
+            # / DG_SleepMs invoked the wrong syscall for two months because
+            # nobody updated the hex literal after PR #337's renumber).
+            # Userland should call libc wrappers, which use the symbolic
+            # SYS_* macros from the auto-generated tools/libc/include/syscalls.h.
+            command: |
+              matches=$(git grep -n 'int \$0x30' -- 'tools/' ':!tools/libc/syscall.c' ':!tools/libc/signal.c' || true)
+              if [ -n "$matches" ]; then
+                  echo "Bare INT 30h found outside tools/libc/{syscall,signal}.c — call a libc wrapper instead:"
+                  echo "$matches"
+                  exit 1
+              fi

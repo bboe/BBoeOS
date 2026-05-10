@@ -127,7 +127,15 @@ def _build_libbboeos() -> None:
     produces a ``__.SYMDEF`` index that the cross-linker can read but
     sometimes silently mis-indexes for objects with our --target,
     surfacing as undefined-reference errors at link time.
+
+    Generates tools/libc/include/syscalls.h first so both libc itself
+    and Doom (which inherits the same -Itools/libc/include) compile
+    against fresh syscall numbers.  Idempotent — the generator only
+    rewrites the header when the asm side actually changed.
     """
+    subprocess.check_call(
+        ["python3", str(REPO / "tools" / "generate_syscalls_h.py")],
+    )
     archiver = _find_tool(
         candidates=("x86_64-elf-ar", "i686-elf-ar", "llvm-ar", "ar"),
         purpose="GNU-compatible ar",

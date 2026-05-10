@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <syscalls.h>
 #include <unistd.h>
 
 /* All syscalls follow the BBoeOS convention: AH = syscall number,
@@ -23,22 +24,22 @@ static unsigned int _current_break = 0;
 
 static int _errno_from_al(int al) {
     switch (al) {
-        case 0x01: return ENOSPC;       /* ERROR_DIRECTORY_FULL */
-        case 0x02: return EEXIST;       /* ERROR_EXISTS */
-        case 0x03: return EFAULT;       /* ERROR_FAULT */
-        case 0x04: return EINTR;        /* ERROR_INTERRUPTED */
-        case 0x05: return EINVAL;       /* ERROR_INVALID */
-        case 0x06: return EACCES;       /* ERROR_NOT_EMPTY (no ENOTEMPTY in our errno.h) */
-        case 0x07: return EACCES;       /* ERROR_NOT_EXECUTE */
-        case 0x08: return ENOENT;       /* ERROR_NOT_FOUND */
-        case 0x09: return EACCES;       /* ERROR_PROTECTED */
-        default:   return EIO;
+        case ERROR_DIRECTORY_FULL: return ENOSPC;
+        case ERROR_EXISTS:         return EEXIST;
+        case ERROR_FAULT:          return EFAULT;
+        case ERROR_INTERRUPTED:    return EINTR;
+        case ERROR_INVALID:        return EINVAL;
+        case ERROR_NOT_EMPTY:      return EACCES;  /* no ENOTEMPTY in our errno.h */
+        case ERROR_NOT_EXECUTE:    return EACCES;
+        case ERROR_NOT_FOUND:      return ENOENT;
+        case ERROR_PROTECTED:      return EACCES;
+        default:                   return EIO;
     }
 }
 
 void _exit(int status) {
     (void)status;
-    __asm__ volatile ("mov $0xF2, %ah; int $0x30");        /* SYS_SYS_EXIT */
+    __asm__ volatile ("mov $" SYSNUM_STR(SYS_SYS_EXIT) ", %ah; int $0x30");
     while (1) {}    /* unreachable */
 }
 
@@ -46,7 +47,7 @@ int brk(void *addr) {
     unsigned int eax_out;
     __asm__ volatile (
         "mov %[a], %%ebx\n\t"
-        "mov $0xF0, %%ah\n\t"           /* SYS_SYS_BREAK */
+        "mov $" SYSNUM_STR(SYS_SYS_BREAK) ", %%ah\n\t"
         "int $0x30\n\t"
         : "=a"(eax_out)
         : [a]"g"((unsigned int)addr)
@@ -59,7 +60,7 @@ int close(int fd) {
     unsigned int eax_out, cf;
     __asm__ volatile (
         "mov %[fd], %%bx\n\t"
-        "mov $0x10, %%ah\n\t"           /* SYS_IO_CLOSE */
+        "mov $" SYSNUM_STR(SYS_IO_CLOSE) ", %%ah\n\t"
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)
@@ -77,7 +78,7 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
     if (tv == 0) return 0;
     unsigned int total_ms;
     __asm__ volatile (
-        "mov $0x32, %%ah\n\t"           /* SYS_RTC_MILLIS */
+        "mov $" SYSNUM_STR(SYS_RTC_MILLIS) ", %%ah\n\t"
         "int $0x30\n\t"
         : "=a"(total_ms));
     tv->tv_sec  = total_ms / 1000;
@@ -92,7 +93,9 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
  * than available" under -O2 because EAX/EBX/ECX/EDX are all spoken
  * for as both inputs and outputs/clobbers. */
 int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg) {
-    unsigned int eax_in_out = (unsigned int)(0x1200 | (cmd & 0xFF));    /* AH=12h, AL=cmd */
+    /* Pack AH=SYS_IO_IOCTL, AL=cmd into the EAX seed.  cmd is masked
+     * to 8 bits so the low byte ends up in AL after the int. */
+    unsigned int eax_in_out = (unsigned int)((SYS_IO_IOCTL << 8) | (cmd & 0xFF));
     unsigned char cf;
     __asm__ volatile (
         "int $0x30\n\t"
@@ -119,7 +122,7 @@ off_t lseek(int fd, off_t offset, int whence) {
         "mov %[fd], %%bx\n\t"
         "mov %[offset], %%ecx\n\t"
         "mov %[whence], %%al\n\t"
-        "mov $0x15, %%ah\n\t"           /* SYS_IO_SEEK */
+        "mov $" SYSNUM_STR(SYS_IO_SEEK) ", %%ah\n\t"
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)
@@ -145,7 +148,7 @@ int open(const char *path, int flags, ...) {
         "mov %[path], %%esi\n\t"
         "mov %[flags], %%al\n\t"
         "xor %%dl, %%dl\n\t"
-        "mov $0x13, %%ah\n\t"           /* SYS_IO_OPEN */
+        "mov $" SYSNUM_STR(SYS_IO_OPEN) ", %%ah\n\t"
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)
@@ -166,7 +169,7 @@ ssize_t read(int fd, void *buf, size_t count) {
         "mov %[buf], %%edi\n\t"
         "mov %[len], %%ecx\n\t"
         "mov %[fd], %%bx\n\t"
-        "mov $0x14, %%ah\n\t"           /* SYS_IO_READ */
+        "mov $" SYSNUM_STR(SYS_IO_READ) ", %%ah\n\t"
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)
@@ -183,7 +186,7 @@ void *sbrk(ptrdiff_t increment) {
         unsigned int eax_out;
         __asm__ volatile (
             "xor %%ebx, %%ebx\n\t"
-            "mov $0xF0, %%ah\n\t"           /* SYS_SYS_BREAK */
+            "mov $" SYSNUM_STR(SYS_SYS_BREAK) ", %%ah\n\t"
             "int $0x30\n\t"
             : "=a"(eax_out) : : "ebx");
         _current_break = eax_out;
@@ -195,12 +198,53 @@ void *sbrk(ptrdiff_t increment) {
     return old;
 }
 
+void sleep_ms(unsigned int ms) {
+    /* SYS_RTC_SLEEP busy-waits ms milliseconds in the kernel.  Returns
+     * early with CF=1 if interrupted by a pending signal — we discard
+     * that here; callers needing EINTR semantics should use the raw
+     * syscall or check the clock themselves. */
+    if (ms == 0) return;
+    __asm__ volatile (
+        "mov %[ms], %%ecx\n\t"
+        "mov $" SYSNUM_STR(SYS_RTC_SLEEP) ", %%ah\n\t"
+        "int $0x30\n\t"
+        : : [ms]"g"(ms) : "ax", "ecx", "cc");
+}
+
 int stat(const char *path, struct stat *buf) {
     /* Stub: Doom uses stat() only for IWAD-search heuristics (probe a
      * few candidate paths).  Returning failure makes Doom fall through
      * to the explicit -iwad command-line path we hand it. */
     (void)path; (void)buf;
     return -1;
+}
+
+unsigned int uptime_ms(void) {
+    unsigned int ms;
+    __asm__ volatile (
+        "mov $" SYSNUM_STR(SYS_RTC_MILLIS) ", %%ah\n\t"
+        "int $0x30\n\t"
+        : "=a"(ms));
+    return ms;
+}
+
+void *video_map(void) {
+    /* SYS_VIDEO_MAP returns CF=0 with EAX = MODE13H_USER_VIRT (the
+     * fixed 0xB8000000) on success; CF=1 with EAX = 0 on PT-allocation
+     * failure.  NULL is unambiguous as a failure sentinel because the
+     * success address is never 0; callers can `if (va == NULL)`. */
+    unsigned int va;
+    unsigned char cf;
+    __asm__ volatile (
+        "mov $" SYSNUM_STR(SYS_VIDEO_MAP) ", %%ah\n\t"
+        "int $0x30\n\t"
+        "setc %[cf]\n\t"
+        : "=a"(va), [cf]"=&qm"(cf));
+    if (cf & 1) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    return (void *)va;
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
@@ -211,7 +255,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
         "mov %[buf], %%esi\n\t"
         "mov %[len], %%ecx\n\t"
         "mov %[fd], %%bx\n\t"
-        "mov $0x16, %%ah\n\t"           /* SYS_IO_WRITE */
+        "mov $" SYSNUM_STR(SYS_IO_WRITE) ", %%ah\n\t"
         "int $0x30\n\t"
         "setc %b[cf]\n\t"
         : "=a"(eax_out), [cf]"=&q"(cf)

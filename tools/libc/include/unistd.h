@@ -27,6 +27,20 @@ off_t   lseek(int fd, off_t offset, int whence);    /* stub: returns -1, sets er
 int     open(const char *path, int flags, ...);
 ssize_t read(int fd, void *buf, size_t count);
 void   *sbrk(ptrdiff_t increment);
+/* sleep_ms: BBoeOS extension wrapping SYS_RTC_SLEEP.  Busy-waits at
+ * least *ms* milliseconds.  Returns early (without setting errno) if
+ * a pending signal short-circuited the kernel sleep — callers that
+ * care should check the wall clock via uptime_ms or treat as a
+ * cooperative-interrupt point. */
+void    sleep_ms(unsigned int ms);
+/* uptime_ms: BBoeOS extension wrapping SYS_RTC_MILLIS.  Returns
+ * monotonic milliseconds since boot; wraps at 2^32 ms (~49.7 days). */
+unsigned int uptime_ms(void);
+/* video_map: BBoeOS extension wrapping SYS_VIDEO_MAP.  Maps the
+ * mode-13h framebuffer into the program's PD and returns its user-
+ * virt address (the fixed 0xB8000000), or NULL on PT-allocation
+ * failure (errno = ENOMEM). */
+void   *video_map(void);
 ssize_t write(int fd, const void *buf, size_t count);
 
 #endif

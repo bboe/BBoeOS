@@ -32,7 +32,7 @@ Syscall numbers are defined symbolically as `SYS_*` constants in
 | 32h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |
 | 33h   | rtc_sleep    | Busy-wait for ECX milliseconds; returns CF=1 + AL=ERROR_INTERRUPTED if a signal (SIGINT or SIGALRM) is pending |
 | 34h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
-| 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt; CF on OOM |
+| 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt (0xB8000000) on success, EAX = 0 + CF on PT-allocation failure |
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
 | F1h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F2h   | sys_exit     | Reload and return to shell                             |

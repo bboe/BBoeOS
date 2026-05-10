@@ -481,7 +481,14 @@ syscall_handler:
         ;;
         ;; In:   (none)
         ;; Out:  EAX = MODE13H_USER_VIRT, CF=0 on success.
-        ;;       CF=1 with AX = -1 on PT-allocation failure.
+        ;;       CF=1 with EAX = 0 (NULL) on PT-allocation failure.
+        ;;       Setting the FULL 32-bit EAX in the failure path matters
+        ;;       because .iret_cf_eax skips the AX→EAX sign-extend that
+        ;;       .iret_cf does — a partial `mov ax, 0` would leave the
+        ;;       high 16 bits as garbage from the prior register state,
+        ;;       so callers that check EAX (rather than CF) would see
+        ;;       inconsistent values per call.  NULL is the natural
+        ;;       sentinel: success is always the fixed 0xB8000000, never 0.
         ;;
         ;; Uses .iret_cf_eax to preserve the full 32-bit user-virt address.
         ;;
@@ -524,7 +531,7 @@ syscall_handler:
         clc
         jmp  .video_map_done
 .video_map_oom:
-        mov  ax, -1
+        xor  eax, eax                   ; EAX = 0 (NULL) on failure; full 32 bits, not just AX
         stc
 .video_map_done:
         pop  edx

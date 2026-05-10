@@ -108,16 +108,6 @@ static unsigned char keycode_to_doom(int code) {
     }
 }
 
-static uint32_t sys_video_map(void) {
-    /* SYS_VIDEO_MAP: maps the mode-13h FB into our PD at MODE13H_USER_VIRT.
-     * Returns EAX = the virt address, CF=1 / EAX=-1 on PT-allocation failure. */
-    uint32_t va;
-    __asm__ volatile (
-        "mov $0x40, %%ah\n\t"           /* SYS_VIDEO_MAP */
-        "int $0x30\n\t"
-        : "=a"(va));
-    return va;
-}
 
 void DG_DrawFrame(void) {
     /* DG_ScreenBuffer is 320x200 palette indices (because we built with
@@ -174,14 +164,9 @@ int DG_GetKey(int *pressed, unsigned char *key) {
 }
 
 uint32_t DG_GetTicksMs(void) {
-    /* SYS_RTC_MILLIS returns EAX = ms since boot, monotonic, wraps at
-     * ~49.7 days (far past any realistic Doom session). */
-    unsigned int ms;
-    __asm__ volatile (
-        "mov $0x31, %%ah\n\t"               /* SYS_RTC_MILLIS */
-        "int $0x30\n\t"
-        : "=a"(ms));
-    return ms;
+    /* uptime_ms (libc) wraps SYS_RTC_MILLIS — monotonic ms since boot,
+     * wraps at 2^32 ms (~49.7 days, far past any realistic Doom run). */
+    return uptime_ms();
 }
 
 void DG_Init(void) {
@@ -199,8 +184,8 @@ void DG_Init(void) {
         return;
     }
     ioctl(vga_fd, VGA_IOCTL_MODE, 0, VIDEO_MODE_VGA_320x200_256);
-    uint32_t va = sys_video_map();
-    if (va == 0xFFFFFFFFu) {
+    void *va = video_map();
+    if (va == NULL) {
         printf("[bboeos doom] SYS_VIDEO_MAP failed\n");
         return;
     }
@@ -213,13 +198,10 @@ void DG_SetWindowTitle(const char *title) {
 }
 
 void DG_SleepMs(uint32_t ms) {
-    /* SYS_RTC_SLEEP takes ECX (full 32-bit ms count). */
-    if (ms == 0) return;
-    __asm__ volatile (
-        "mov %[ms], %%ecx\n\t"
-        "mov $0x32, %%ah\n\t"               /* SYS_RTC_SLEEP */
-        "int $0x30\n\t"
-        : : [ms]"r"(ms) : "ax", "ecx");
+    /* sleep_ms (libc) wraps SYS_RTC_SLEEP — busy-waits ms milliseconds,
+     * may return early on a pending signal (which is fine here: doomgeneric
+     * tolerates short sleeps and re-checks the clock on every tick). */
+    sleep_ms(ms);
 }
 
 extern void doomgeneric_Create(int argc, char **argv);
