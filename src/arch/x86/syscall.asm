@@ -623,9 +623,34 @@ syscall_handler:
         jmp  .iret_cf_eax
 
         .sys_exec:
+        ;; Phase B: reject recursive exec from a child.  The kernel only
+        ;; tracks one suspended parent.
+        cmp dword [parent_program_state], 0
+        je .sys_exec_no_parent_yet
+        mov al, ERROR_INVALID
+        stc
+        jmp .iret_cf
+        .sys_exec_no_parent_yet:
+        ;; Snapshot the parent's pushad+iret kernel-stack frame (13 dwords)
+        ;; before any internal pushes so [esp .. esp+52) is exactly the
+        ;; frame layout child_terminate will restore.  .check_path is a
+        ;; net ESP-neutral call (push/pop ECX inside; access_ok_string also
+        ;; balances its pushes), so this snapshot is still valid on the
+        ;; success path.  If .check_path returns CF=1 the snapshot is
+        ;; wasted work but benign — no other path reads parent_iret_frame
+        ;; on a failure return.
+        mov esi, esp
+        mov edi, parent_iret_frame
+        mov ecx, 13
+        cld
+        rep movsd
         ;; ESI = filename in the calling shell's user-virt.  Active PD
         ;; is the shell's; we can read user pages directly until the
         ;; switch-to-template + destroy below.
+        ;; Restore ESI (rep movsd advanced it past the frame) before
+        ;; .check_path validates the user path pointer.  pushad layout:
+        ;; [esp+0]=EDI [esp+4]=ESI so the saved user path is at offset 4.
+        mov esi, [esp + 4]
         call .check_path
         jc .exec_bad_pointer
         call vfs_find
@@ -655,9 +680,8 @@ syscall_handler:
         ;; Reads from BUFFER (user-virt 0x1500) and EXEC_ARG (user-virt
         ;; 0x14FC) below resolve through the shell's PD because we
         ;; haven't switched CR3 yet.  Once the new frame is populated,
-        ;; we tear down the shell PD; the new frame survives because
-        ;; address_space_destroy only iterates user-half PTEs of the
-        ;; PD it's destroying, and this frame isn't mapped there.
+        ;; we switch CR3 to kernel_idle_pd; the parent's PD is preserved
+        ;; (not destroyed) so child_terminate can restore it later.
         call frame_alloc
         jc .exec_oom
         mov [next_handoff_frame_phys], eax
@@ -685,14 +709,31 @@ syscall_handler:
         call kmap_unmap
         pop edi
         pop esi
-        mov esp, [shell_esp]
-        ;; Switch CR3 to kernel_idle_pd, then destroy the dying shell's PD.
-        mov eax, cr3
-        push eax
+        ;; Phase B: do NOT destroy the parent's PD.  Save it, switch slots,
+        ;; switch CR3 to kernel_idle_pd, build the child via program_enter.
+        mov eax, [current_program_state]
+        mov [parent_program_state], eax
+
+        ;; Pick the unused slot for the child.
+        cmp eax, program_state_a
+        jne .exec_use_slot_a
+        mov dword [current_program_state], program_state_b
+        jmp .exec_slot_chosen
+        .exec_use_slot_a:
+        mov dword [current_program_state], program_state_a
+        .exec_slot_chosen:
+
+        ;; Zero the child's slot (clears fd_table; defaults are 0 = SIG_DFL,
+        ;; no alarm armed, etc.).
+        mov edi, [current_program_state]
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        cld
+        rep stosd
+
+        ;; Switch CR3 to kernel_idle_pd; do NOT destroy parent's PD.
         mov eax, [kernel_idle_pd_phys]
         mov cr3, eax
-        pop eax
-        call address_space_destroy
         sti
         jmp program_enter
         .exec_oom:

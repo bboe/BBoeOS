@@ -702,6 +702,9 @@ protected_mode_entry:
         ;; Fall through into shell_reload.
 
 shell_reload:
+        ;; B5 transitional: clear parent state on shell reload so a fresh
+        ;; shell can sys_exec.  B8 expands this into a full slot reset.
+        mov dword [parent_program_state], 0
         ;; Restore 80x25 text mode if a dying program left the VGA card
         ;; in a graphics mode (e.g. Doom in mode 13h).  No-op on the
         ;; first-boot fall-through (vga_current_mode starts at 0x03), so
