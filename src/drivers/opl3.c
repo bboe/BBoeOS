@@ -5,8 +5,8 @@
 //     opl3_present (uint8_t) — set to 1 by sb16_init when the SB16 DSP
 //                              probe succeeded (real SB16 cards always
 //                              include OPL3, so the SB16 probe doubles
-//                              as the OPL3 probe); read from fd_open's
-//                              /dev/midi branch and MIDI_IOCTL_QUERY.
+//                              as the OPL3 probe); gates the
+//                              `/dev/midi` open() in fd_open_midi.
 //                              See sb16_init's comment block for the
 //                              detection-sequence rationale.
 //     opl_write (bank, reg, value) — outb status, iodelay, outb data.

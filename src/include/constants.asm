@@ -220,8 +220,6 @@
 
         ;; MIDI ioctl commands (SYS_IO_IOCTL AL on fd of type FD_TYPE_MIDI).
         %assign MIDI_IOCTL_DRAIN 0x00   ; block via sti/hlt until head == tail; AX = 0, CF clear
-        %assign MIDI_IOCTL_FLUSH 0x01   ; drop queued events, KEY_OFF all voices, CF clear
-        %assign MIDI_IOCTL_QUERY 0x02   ; AX = g_opl3_present, CF clear
 
         ;; Video modes (DL argument to VGA_IOCTL_MODE; INT 10h AH=00h AL).
         ;; Only the two modes that programs actually switch between are

@@ -37,6 +37,7 @@
 
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,16 +46,19 @@
 #include "opl.h"
 #include "doomgeneric.h"     /* DG_GetTicksMs — wall-clock anchor for music_clock_us */
 
-/* /dev/midi wire-format constants (mirror src/include/constants.asm
- * MIDI_IOCTL_QUERY / MIDI_IOCTL_FLUSH).  Stored locally so this file
- * doesn't need to reach into kernel includes.  FREEZE_GAP_MS guards
- * against long stalls in the main loop (see clock_anchor_ms below). */
+/* /dev/midi wire-format constants.  FREEZE_GAP_MS guards against long
+ * stalls in the main loop (see clock_anchor_ms below).
+ *
+ * ALARM_INTERVAL_MS is the period of the SIGALRM-driven background
+ * poll installed by OPL_Init: 28 ms ≈ 35 Hz, matching Doom's tic
+ * rate.  Keeps music draining through W_LoadLumpName / level-load
+ * stalls when the main loop isn't calling BBoe_MusicPoll. */
+#define ALARM_INTERVAL_MS 28
 #define COALESCE_BYTES    (COALESCE_SLOTS * COMMAND_BYTES)
 #define COALESCE_SLOTS    64
 #define COMMAND_BYTES     6
 #define FREEZE_GAP_MS     100
 #define MAX_CALLBACKS     32
-#define MIDI_IOCTL_FLUSH  0x01
 
 struct callback_entry {
     opl_callback_t callback;
@@ -85,6 +89,14 @@ static struct callback_entry callbacks[MAX_CALLBACKS];
 static uint32_t clock_anchor_ms = 0;
 static uint8_t  coalesce_buffer[COALESCE_BYTES];
 static int      coalesce_length = 0;
+/* in_poll is set while opl_bboeos_poll is running so the SIGALRM
+ * handler (which itself calls opl_bboeos_poll) can detect main-thread
+ * reentry and bail out.  Single-threaded with signal delivery on iret,
+ * so a plain volatile byte is enough — handler can't preempt main
+ * mid-instruction, only between syscalls.  A skipped tick is harmless
+ * because music_clock_us advances against wall time, not poll count;
+ * the next poll picks up exactly where the missed one would have. */
+static volatile uint8_t in_poll = 0;
 /* last_emitted_ms is the music-clock value (in milliseconds, the
  * unit /dev/midi uses for its `delay` field) at the moment of the
  * most recently emitted command.  Each new command's delay is
@@ -94,6 +106,10 @@ static uint32_t last_poll_ms = 0;
 static int      midi_fd = -1;
 static uint64_t music_clock_us = 0;
 static int      paused = 0;
+/* Saved SIGALRM disposition from before OPL_Init installed our
+ * handler.  Restored by OPL_Shutdown so the program goes back to
+ * whatever the parent had registered (typically SIG_DFL). */
+static sighandler_t prior_sigalrm_handler = SIG_DFL;
 
 /* Append one 6-byte command into the coalescing buffer; flush
  * first if it would overflow.  Bytes are little-endian per the
@@ -113,6 +129,18 @@ static int find_next_due_callback(uint64_t now_us);
  * temporarily exceed ring capacity).  No-op when fd is closed or
  * the buffer is empty. */
 static void flush_coalesce(void);
+
+/* opl_bboeos_poll is the BBoeOS extension's main entry point (defined
+ * at the bottom of this file).  Forward-declared here so the SIGALRM
+ * helper poll_signal_handler — which sorts alphabetically before it
+ * — can call it. */
+void opl_bboeos_poll(void);
+
+/* SIGALRM handler installed by OPL_Init.  Drives opl_bboeos_poll at
+ * ALARM_INTERVAL_MS regardless of main-loop state — so music keeps
+ * draining through level loads / blocking WAD reads.  Reentrancy is
+ * handled inside opl_bboeos_poll via the in_poll guard. */
+static void poll_signal_handler(int signum);
 
 void OPL_AdjustCallbacks(float factor) {
     /* Match chocolate-doom's OPL_Queue_AdjustCallbacks
@@ -141,26 +169,19 @@ void OPL_AdjustCallbacks(float factor) {
 }
 
 void OPL_ClearCallbacks(void) {
+    /* I_OPL_StopSong calls this and then AllNotesOff, which queues
+     * KEY_OFF events for every held voice into the coalesce buffer.
+     * Those KEY_OFFs reach the chip on the next opl_bboeos_poll; the
+     * SIGALRM handler installed by OPL_Init guarantees a poll within
+     * ALARM_INTERVAL_MS even when the main loop is stalled in
+     * W_LoadLumpName, so the silence happens promptly without any
+     * synchronous chip-side intervention here.  This matches DOS
+     * Doom's behaviour: S_Start stops the music before P_SetupLevel
+     * reads the WAD, the load itself is silent, and the new level's
+     * first S_ChangeMusic starts fresh. */
     int i;
     for (i = 0; i < MAX_CALLBACKS; i = i + 1) {
         callbacks[i].in_use = 0;
-    }
-    /* Silence the chip *now*, not at the next opl_bboeos_poll.
-     * I_OPL_StopSong calls this right before AllNotesOff queues
-     * KEY_OFF events into the userland coalesce buffer; without an
-     * explicit chip silence here, any voices the OLD song had
-     * KEY_ON when the upstream level-load freeze began keep ringing
-     * for ~ freeze + RegisterSong I/O ≈ 1-2 s while their KEY_OFFs
-     * sit in coalesce_buffer waiting for the next poll.  The kernel
-     * MIDI_IOCTL_FLUSH handler zeroes the ring and calls
-     * opl_silence_all, which writes KEY_OFF to all 18 voices
-     * synchronously inside the ioctl.  AllNotesOff's later KEY_OFFs
-     * become redundant on the chip but keep the engine's
-     * voice-tracking state in sync; the new song's setup writes
-     * (instrument programming + KEY_ONs) overwrite whatever stale
-     * register state the silence-and-flush left behind. */
-    if (midi_fd >= 0) {
-        ioctl(midi_fd, MIDI_IOCTL_FLUSH, 0, 0);
     }
 }
 
@@ -193,10 +214,18 @@ opl_init_result_t OPL_Init(unsigned int port_base) {
     last_poll_ms = 0;
     last_emitted_ms = 0;
     coalesce_length = 0;
+    in_poll = 0;
     paused = 0;
     for (i = 0; i < MAX_CALLBACKS; i = i + 1) {
         callbacks[i].in_use = 0;
     }
+    /* Install the SIGALRM-driven background poll: 28 ms ≈ 35 Hz, so
+     * music continues even when the main game loop blocks on level
+     * loads or WAD I/O.  Save the prior handler so OPL_Shutdown can
+     * restore it.  alarm_ms(delay, interval) with delay==interval
+     * fires the first tick one period out, then repeats. */
+    prior_sigalrm_handler = signal(SIGALRM, poll_signal_handler);
+    alarm_ms(ALARM_INTERVAL_MS, ALARM_INTERVAL_MS);
     return OPL_INIT_OPL3;
 }
 
@@ -316,6 +345,12 @@ void OPL_SetSampleRate(unsigned int rate) {
 }
 
 void OPL_Shutdown(void) {
+    /* Disarm the background poll FIRST so the handler can't fire
+     * partway through this teardown and try to write() to a closed
+     * fd.  Then restore whatever SIGALRM handler the caller had
+     * before OPL_Init swapped ours in. */
+    alarm_ms(0, 0);
+    signal(SIGALRM, prior_sigalrm_handler);
     flush_coalesce();
     if (midi_fd >= 0) {
         close(midi_fd);
@@ -430,6 +465,14 @@ static void flush_coalesce(void) {
     coalesce_length = 0;
 }
 
+static void poll_signal_handler(int signum) {
+    (void)signum;
+    /* Defer all reentrancy bookkeeping to opl_bboeos_poll's in_poll
+     * guard — handler-during-main-poll and main-during-handler are
+     * both protected by the same byte. */
+    opl_bboeos_poll();
+}
+
 /* opl_bboeos_poll — BBoeOS-specific backend pulse, NOT part of
  * opl.h.  Called once per frame from BBoe_MusicPoll (via doomgeneric's
  * S_UpdateSounds → I_UpdateSound → music_module->Poll path).
@@ -462,6 +505,19 @@ void opl_bboeos_poll(void) {
     if (midi_fd < 0) {
         return;
     }
+    /* Reentrancy guard.  Two callers race for this body: the
+     * per-frame BBoe_MusicPoll path (main thread) and the SIGALRM
+     * handler (poll_signal_handler).  Single-threaded with signals
+     * delivered on iret, so a plain volatile byte suffices: handler
+     * can only fire BETWEEN main-thread instructions, never within
+     * one.  Whichever caller arrives first sets the flag and runs;
+     * the other observes it and returns immediately.  A skipped
+     * tick is harmless because music_clock_us tracks wall time
+     * independently — the next poll catches up. */
+    if (in_poll) {
+        return;
+    }
+    in_poll = 1;
     now_ms = DG_GetTicksMs();
     if (!paused) {
         if (!anchor_set) {
@@ -511,4 +567,5 @@ void opl_bboeos_poll(void) {
      * paused.") */
     last_poll_ms = now_ms;
     flush_coalesce();
+    in_poll = 0;
 }
