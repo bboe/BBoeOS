@@ -393,12 +393,14 @@ program_enter:
         mov [user_image_end], eax
 
         ;; --- Initialise the program break to top of loaded image ---
-        ;; current_program_break starts at user_image_end (page-aligned end
-        ;; of the program's text + BSS).  current_program_break_min is the
-        ;; floor — sys_break refuses to shrink below it.  Both reset on
-        ;; every program load (boot shell, sys_exec, sys_exit reload).
-        mov [current_program_break],     eax
-        mov [current_program_break_min], eax
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK starts at user_image_end
+        ;; (page-aligned end of the program's text + BSS).
+        ;; PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN is the floor — sys_break
+        ;; refuses to shrink below it.  Both reset on every program load
+        ;; (boot shell, sys_exec, sys_exit reload).
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_PROGRAM_BREAK],     eax
+        mov [edx + PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN], eax
 
         ;; Reset signal state — every new program starts in SIG_DFL
         ;; for both signals, with no pending bits, no nesting flag,
