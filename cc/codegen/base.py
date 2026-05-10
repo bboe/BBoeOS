@@ -753,7 +753,7 @@ class CodeGeneratorBase:
             return True
         if isinstance(last, Return):
             return True
-        if isinstance(last, Call) and last.name in {"die", "exit"}:
+        if isinstance(last, Call) and last.name in {"_exit", "die", "exit"}:
             return True
         if isinstance(last, TailCall):
             return True
