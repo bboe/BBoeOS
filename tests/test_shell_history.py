@@ -84,6 +84,18 @@ def test_down_restores_partial_line() -> None:
     print("PASS: test_down_restores_partial_line")
 
 
+def test_ctrl_p_recalls_previous_command() -> None:
+    """Ctrl-P after a command recalls it, confirming Ctrl-P aliases Up arrow."""
+    with qemu_session(monitor=False, snapshot=True) as session:
+        session.send_command("echo via_ctrl_p")
+        pre_length = len(session.buffer)
+        session.write_serial("\x10\r")  # Ctrl-P + Enter
+        session.wait_for_prompt()
+        between = bytes(session.buffer[pre_length:])
+        assert_in(expected=b"via_ctrl_p\r\n", haystack=between, label="Ctrl-P should alias Up")
+    print("PASS: test_ctrl_p_recalls_previous_command")
+
+
 def main() -> int:
     """Build the OS image and run all history smoke tests."""
     subprocess.run(
@@ -96,7 +108,8 @@ def main() -> int:
     test_up_recalls_previous_command()
     test_down_at_live_line_is_noop()
     test_down_restores_partial_line()
-    print("3 passed, 0 failed")
+    test_ctrl_p_recalls_previous_command()
+    print("4 passed, 0 failed")
     return 0
 
 

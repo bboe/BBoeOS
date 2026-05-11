@@ -282,6 +282,7 @@ int main() {
                 /* Ctrl-C: cancel line */
                 putchar('\n');
                 end = 0;
+                history_view = 0;
                 break;
             } else if (ch == '\x04') {
                 /* Ctrl-D: shutdown (returns here only on APM failure) */
@@ -328,7 +329,16 @@ int main() {
                 /* Ctrl-L: clear screen and reprompt */
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
+                history_view = 0;
                 break;
+            } else if (ch == '\x0E') {
+                /* Ctrl-N: history down (alias of Down arrow). */
+                end = history_down(buf, cursor, end);
+                cursor = end;
+            } else if (ch == '\x10') {
+                /* Ctrl-P: history up (alias of Up arrow). */
+                end = history_up(buf, cursor, end);
+                cursor = end;
             } else if (ch == '\n') {
                 /* Enter — fd_read_console normalises CR → LF on input
                  * (PS/2 Enter scancode and serial-terminal CR both
