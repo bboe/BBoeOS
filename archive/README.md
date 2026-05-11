@@ -30,7 +30,6 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 253         | 280       | +27   |
 | ping    | 1034           | 1238        | 1554      | +316  |
-| shell   | 950            | 1189        | 2520      | +1331 |
 | uptime  | 50             | 67          | 100       | +33   |
 
 **arp (+44):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
@@ -123,35 +122,6 @@ for every helper using register calling conventions. Fixed-byte header layouts
 (DNS query header, QTYPE/QCLASS tail, ICMP echo template) use ``memcpy`` from
 short string-literal constants instead of per-byte assignments, which collapses
 each ~8 × ``mov byte [...], imm`` burst into a single ``rep movsb``.
-
-**shell (+1331):** The archived ``shell.asm`` reuses ``SECTOR_BUFFER
-+ 4`` (private ``%assign``) for the kill buffer and ``ARGV`` for the
-  ``bin/<name>`` exec path so it can avoid carrying ~290 bytes of
-  zero-initialized trailing data inside the binary.  The C version keeps
-  ``kill_buf[MAX_INPUT]`` in BSS (the live live SECTOR_BUFFER fixed-address slot
-  is no longer mapped in per-program PDs).  With the storage difference
-  accounted for, the rest of the delta is pure code overhead.  Helper call
-  overhead (push bp / mov bp,sp / pop bp / ret, plus stack argument passing on
-  the cdecl-convention helpers ``cursor_back``, ``visual_bell``,
-  ``insert_char``) is the bulk of it; the asm version uses register-convention
-  subroutines with local-label jumps and inlines insert/delete.  cc.py does now
-  route args into registers for ``strcmp``, ``delete_at_cursor``, and
-  ``try_exec``, which matches the asm style for those three.  ``printf`` for the
-  ``ESC[nD`` cursor-back sequence routes each emission through the full printf
-  machinery (varargs push, format scan, specifier dispatch) where the asm
-  version emits bytes one at a time via ``putc``.  The ``if/else strcmp``
-  dispatch chain also runs longer per comparison than the asm's ``dw string,
-  handler`` table, and char locals spill to word slots so every byte load comes
-  with ``xor ah, ah`` zero-extension.
-
-  The +854 jump from the previous +477 baseline tracks the shell-survives-child
-  feature added in 0.11.0: ``expand_dollar_question`` (in-place ``$?``
-  substitution with a digit-reverse + bounds-checked shift loop), the
-  ``last_exec_status`` global with bash-shaped sentinels for not-found /
-  not-executable, the ``[shell:start]`` marker print, the 4-way return-value
-  handling in ``try_exec`` callers, and the ``ERROR_FAULT`` "exec: out of
-  memory" branch in ``try_exec`` itself.  The archived ``shell.asm`` predates
-  these features and would grow by a comparable amount if backported.
 
 **uptime (+33):** Uses `printf("%02d:%02d:%02d\n", ...)` which pushes 3 args and
 a format string onto the stack, calls `FUNCTION_PRINTF`, and cleans up. The

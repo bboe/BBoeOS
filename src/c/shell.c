@@ -3,6 +3,23 @@
    like SECTOR_BUFFER would page-fault. */
 char kill_buf[MAX_INPUT];
 
+#define HISTORY_SIZE 16
+
+/* Command history ring.  history is a flat array of HISTORY_SIZE slots,
+   each MAX_INPUT bytes.  Access slot i as history + (i * MAX_INPUT).
+   history_count is the lifetime push count, clipped to HISTORY_SIZE
+   for browsing range.  history_view = 0 means the live edit line;
+   1..min(history_count, HISTORY_SIZE) walks backward. */
+char history[HISTORY_SIZE * MAX_INPUT];
+int history_count;
+int history_view;
+
+/* Snapshot of the live edit line taken on the first Up keypress.
+   Restored when Down walks back past the newest history entry to
+   history_view == 0, matching bash's partial-line restore behaviour. */
+char saved_line[MAX_INPUT];
+int saved_line_length;
+
 /* Wait status of the most recently exec()'d child.  Written by
    try_exec() on a successful exec; read by the dispatch loop and
    expand_dollar_question() to expose $? to the user. */
@@ -106,6 +123,54 @@ int expand_dollar_question(char *buffer, int max_len) {
     return len;
 }
 
+/* Forward declarations: history_down / history_up are defined here in
+   alphabetical order but call replace_line and visual_bell, which sort
+   after them.  cc.py resolves these forward references silently; clang
+   under -std=c99 (test_cc_compatibility's reference build) requires
+   explicit declarations. */
+int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
+int visual_bell();
+
+int history_down(char *buf, int cursor, int end) {
+    /* Walk history one entry forward (toward the live line).  Returns
+       the new end; cursor follows.  Silent no-op when already at the
+       live line — matches bash.  On reaching the live line, restores
+       the partial line that was being edited before the first Up. */
+    if (history_view == 0) {
+        return end;
+    }
+    history_view = history_view - 1;
+    if (history_view == 0) {
+        return replace_line(buf, cursor, end, saved_line, saved_line_length);
+    }
+    int slot = (history_count - history_view) % HISTORY_SIZE;
+    char *entry = history + (slot * MAX_INPUT);
+    return replace_line(buf, cursor, end, entry, strlen(entry));
+}
+
+int history_up(char *buf, int cursor, int end) {
+    /* Walk history one entry back (toward older commands).  Returns
+       the new end; cursor follows.  Visual-bell at the oldest entry.
+       On the first Up (history_view == 0), snapshot the live edit line
+       into saved_line so history_down can restore it. */
+    int max_view = history_count;
+    if (max_view > HISTORY_SIZE) {
+        max_view = HISTORY_SIZE;
+    }
+    if (history_view >= max_view) {
+        visual_bell();
+        return end;
+    }
+    if (history_view == 0) {
+        memcpy(saved_line, buf, end);
+        saved_line_length = end;
+    }
+    history_view = history_view + 1;
+    int slot = (history_count - history_view) % HISTORY_SIZE;
+    char *entry = history + (slot * MAX_INPUT);
+    return replace_line(buf, cursor, end, entry, strlen(entry));
+}
+
 int insert_char(char *buf, int cursor, int end, char ch) {
     /* Shift buf[cursor..end) right one slot, write ch at cursor, redraw
        tail, and reposition cursor.  Returns the new end index. Caller
@@ -120,6 +185,26 @@ int insert_char(char *buf, int cursor, int end, char ch) {
     write(STDOUT, buf + cursor, end - cursor);
     cursor_back(end - cursor - 1);
     return end;
+}
+
+int replace_line(char *buf, int cursor, int end, char *new_content, int new_length) {
+    /* Erase the current input area on screen by stepping cursor back
+       to col 0 of input, overprinting end with spaces, stepping back,
+       then writing new_content.  Returns new_length so the caller can
+       update both cursor and end to the returned value.
+       Caller guarantees new_length <= MAX_INPUT - 1. */
+    cursor_back(cursor);
+    int erase_index = 0;
+    while (erase_index < end) {
+        putchar(' ');
+        erase_index = erase_index + 1;
+    }
+    cursor_back(end);
+    memcpy(buf, new_content, new_length);
+    if (new_length > 0) {
+        write(STDOUT, buf, new_length);
+    }
+    return new_length;
 }
 
 int strcmp(const char *a, const char *b) {
@@ -205,6 +290,7 @@ int main() {
                 /* Ctrl-C: cancel line */
                 putchar('\n');
                 end = 0;
+                history_view = 0;
                 break;
             } else if (ch == '\x04') {
                 /* Ctrl-D: shutdown (returns here only on APM failure) */
@@ -251,7 +337,16 @@ int main() {
                 /* Ctrl-L: clear screen and reprompt */
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
+                history_view = 0;
                 break;
+            } else if (ch == '\x0E') {
+                /* Ctrl-N: history down (alias of Down arrow). */
+                end = history_down(buf, cursor, end);
+                cursor = end;
+            } else if (ch == '\x10') {
+                /* Ctrl-P: history up (alias of Up arrow). */
+                end = history_up(buf, cursor, end);
+                cursor = end;
             } else if (ch == '\n') {
                 /* Enter — fd_read_console normalises CR → LF on input
                  * (PS/2 Enter scancode and serial-terminal CR both
@@ -270,6 +365,26 @@ int main() {
                     cursor += 1;
                     yank_index += 1;
                 }
+            } else if (ch == '\x1B') {
+                /* CSI escape — consume "[" + parameter bytes + final.
+                   Recognised: [A (Up) and [B (Down) for history recall.
+                   Other CSI codes (including xterm modified arrows
+                   like [1;2A from Shift+Up on serial) are silently
+                   discarded so the line editor stays untouched. */
+                char escape_next = getchar();
+                if (escape_next == '[') {
+                    char final_byte = getchar();
+                    while (final_byte >= '0' && final_byte <= '?') {
+                        final_byte = getchar();
+                    }
+                    if (final_byte == 'A') {
+                        end = history_up(buf, cursor, end);
+                        cursor = end;
+                    } else if (final_byte == 'B') {
+                        end = history_down(buf, cursor, end);
+                        cursor = end;
+                    }
+                }
             } else if (ch >= ' ') {
                 /* Printable char — insert at cursor */
                 if (end >= MAX_INPUT) {
@@ -281,6 +396,24 @@ int main() {
             }
         }
         buf[end] = 0;
+        /* Push to history before dispatch.  Skip empty lines and
+           consecutive duplicates (bash default).  Reset history_view
+           for the next prompt. */
+        if (end > 0) {
+            int previous_slot = (history_count - 1) % HISTORY_SIZE;
+            int is_duplicate = 0;
+            if (history_count > 0 && strcmp(buf, history + (previous_slot * MAX_INPUT)) == 0) {
+                is_duplicate = 1;
+            }
+            if (is_duplicate == 0) {
+                int slot = history_count % HISTORY_SIZE;
+                char *entry = history + (slot * MAX_INPUT);
+                memcpy(entry, buf, end);
+                entry[end] = '\0';
+                history_count = history_count + 1;
+            }
+        }
+        history_view = 0;
         if (end == 0) {
             continue;
         }
