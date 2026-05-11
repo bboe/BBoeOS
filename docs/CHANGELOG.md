@@ -11,6 +11,13 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Shell command history.** Up / Down (and Ctrl-P / Ctrl-N) at the prompt
+  recall the last 16 commands.  Mid-typed lines are saved on the first Up and
+  restored when Down walks past the newest entry (bash semantics). Empty lines
+  are not pushed; consecutive duplicates are deduped.  Also serves as a
+  user-visible signal that the shell process survives across child exits (see
+  commit 5090b102).
+
 ## [0.11.0](https://github.com/bboe/BBoeOS/compare/0.10.0...0.11.0) (2026-05-10)
 
 - **Documentation reflowed to 80 columns.**  All markdown files (`README.md`,
@@ -144,8 +151,8 @@ time.
   disk between commands; its state (open file descriptors, line history, etc.)
   survives across child runs.  New libc surface: `exec()` returns wait status
   (>=0) or `-errno`; `_exit()` takes an int status argument; `wait.h` provides
-  `WIFEXITED` / `WIFSIGNALED` / `WIFCRASHED` / `WEXITSTATUS` / `WTERMSIG`.
-  Shell surface: `$?` argument-expansion (bash-shaped: `0..255` clean exits,
+  `WIFEXITED` / `WIFSIGNALED` / `WIFCRASHED` / `WEXITSTATUS` / `WTERMSIG`. Shell
+  surface: `$?` argument-expansion (bash-shaped: `0..255` clean exits,
   `128+signum` for kills, `255` for crashes), `[shell:start]` boot marker.
   Recursive `exec()` from a child returns `-ERROR_INVALID`. PIT IRQ iterates
   both alive slots so a parent's alarm fires at wall-clock time even while a
