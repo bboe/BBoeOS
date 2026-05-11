@@ -28,6 +28,20 @@ def _run(*, command: str) -> bytes:
         return full[crlf + 2 :] if crlf >= 0 else full
 
 
+def test_dup2_closes_target_first() -> None:
+    """dup2 over an existing fd closes the old contents and reuses the slot."""
+    out = _run(command="fd_helpers dup2_close_target")
+    assert b"dup2_close_ok" in out, f"got {out!r}"
+    print("PASS: test_dup2_closes_target_first")
+
+
+def test_dup2_self_is_noop() -> None:
+    """dup2(N, N) returns N without side effects (Linux semantics)."""
+    out = _run(command="fd_helpers dup2_self")
+    assert b"dup2_self_ok" in out, f"got {out!r}"
+    print("PASS: test_dup2_self_is_noop")
+
+
 def test_dup_console_writes() -> None:
     """Verify dup(1) returns a usable fd and writes to the same console."""
     out = _run(command="fd_helpers dup_console")
@@ -35,11 +49,21 @@ def test_dup_console_writes() -> None:
     print("PASS: test_dup_console_writes")
 
 
+def test_dup_refuses_vga() -> None:
+    """Dup of /dev/vga must fail with ERROR_INVALID (singleton-opener)."""
+    out = _run(command="fd_helpers dup_vga")
+    assert b"dup_vga_refused" in out, f"got {out!r}"
+    print("PASS: test_dup_refuses_vga")
+
+
 def main() -> int:
     """Build the OS image and run all dup smoke tests."""
     subprocess.run(["./make_os.sh"], check=True, cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    test_dup2_closes_target_first()
+    test_dup2_self_is_noop()
     test_dup_console_writes()
-    print("1 passed, 0 failed")
+    test_dup_refuses_vga()
+    print("4 passed, 0 failed")
     return 0
 
 

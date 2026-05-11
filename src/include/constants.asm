@@ -146,6 +146,7 @@
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
         %assign SYS_IO_DUP   11h    ; BX=old_fd; returns AX=new_fd, CF on error
+        %assign SYS_IO_DUP2  12h    ; BX=old_fd, DX=target_fd; returns AX=target, CF on error
         %assign SYS_IO_FSTAT 13h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
         %assign SYS_IO_IOCTL 14h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
         %assign SYS_IO_OPEN  15h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error

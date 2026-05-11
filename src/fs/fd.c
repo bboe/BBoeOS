@@ -277,6 +277,44 @@ int fd_dup(int *result __attribute__((out_register("ax"))),
     return 1;
 }
 
+// fd_dup2: copy old_fd's entry over target_fd's slot.  Closes whatever
+// was at target first (respecting dirty).  If old == target, returns
+// target unchanged (Linux semantics).  AX = target on success; CF set
+// on error (bad old_fd, singleton-opener type, or out-of-range target).
+__attribute__((carry_return))
+int fd_dup2(int *result __attribute__((out_register("ax"))),
+            int old_fd __attribute__((in_register("bx"))),
+            int target_fd __attribute__((in_register("dx")))) {
+    struct fd *source;
+    struct fd *destination;
+    if (!fd_lookup(old_fd, &source)) {
+        *result = -1;
+        return 0;
+    }
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+        *result = -1;
+        return 0;
+    }
+    if (target_fd < 0 || target_fd >= FD_MAX) {
+        *result = -1;
+        return 0;
+    }
+    if (old_fd == target_fd) {
+        *result = target_fd;
+        return 1;
+    }
+    // Close whatever was at target (no-op if free; flushes if needed).
+    fd_close(target_fd);
+    // fd_lookup the destination slot fresh — fd_close may have touched
+    // it; we need a pointer to the now-free slot.
+    destination = fd_table_base();
+    destination = destination + target_fd;
+    memcpy(destination, source, FD_ENTRY_SIZE);
+    destination->dirty = 0;
+    *result = target_fd;
+    return 1;
+}
+
 // fd_fstat: AL = mode (file permission flags), CX:DX = 32-bit size
 // split (CX = high 16 bits, DX = low 16 bits).  CF set if the fd is
 // invalid.  ``mode`` uses ``out_register("ax")`` rather than

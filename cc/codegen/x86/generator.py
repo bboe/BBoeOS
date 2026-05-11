@@ -88,6 +88,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "datetime": frozenset({"ax"}),
         "die": frozenset(),
         "dup": frozenset({"ax", "bx"}),
+        "dup2": frozenset({"ax", "bx", "dx"}),
         "exec": frozenset({"ax", "si"}),
         "exit": frozenset(),
         "far_read16": frozenset({"ax", "bx"}),

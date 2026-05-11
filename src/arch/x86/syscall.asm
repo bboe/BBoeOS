@@ -99,6 +99,7 @@ syscall_handler:
         SYS_ENTRY SYS_FS_UNLINK,     .fs_unlink
         SYS_ENTRY SYS_IO_CLOSE,      .io_close
         SYS_ENTRY SYS_IO_DUP,        .io_dup
+        SYS_ENTRY SYS_IO_DUP2,       .io_dup2
         SYS_ENTRY SYS_IO_FSTAT,      .io_fstat
         SYS_ENTRY SYS_IO_IOCTL,      .io_ioctl
         SYS_ENTRY SYS_IO_OPEN,       .io_open
@@ -259,6 +260,10 @@ syscall_handler:
 
         .io_dup:
         call fd_dup
+        jmp .iret_cf_eax
+
+        .io_dup2:
+        call fd_dup2
         jmp .iret_cf_eax
 
         .io_fstat:

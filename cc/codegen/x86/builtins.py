@@ -187,6 +187,19 @@ class BuiltinsMixin:
         self._emit_syscall("IO_DUP")
         self.ax_clear()
 
+    def builtin_dup2(self, arguments: list[Node], /) -> None:
+        """Generate code for the dup2() builtin.
+
+        ``dup2(old_fd, target_fd)`` emits ``mov bx, <old> / mov dx, <target> /
+        mov ah, SYS_IO_DUP2 / int 30h``.  Returns target on success or
+        -1 on error (CF set).
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="dup2")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self.emit_register_from_argument(argument=arguments[1], register=self.target.dx_register)
+        self._emit_syscall("IO_DUP2")
+        self.ax_clear()
+
     def builtin_exec(self, arguments: list[Node], /) -> None:
         """Generate code for the exec(name) builtin.
 
