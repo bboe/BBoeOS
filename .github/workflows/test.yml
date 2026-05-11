@@ -114,6 +114,12 @@ jobs:
             command: python3 tests/test_programs.py --floppy
           - suite: test_ps2
             command: python3 tests/test_ps2.py
+          - suite: test_scrollback
+            command: python3 tests/test_scrollback.py
+          - suite: test_shell_chain
+            command: python3 tests/test_shell_chain.py
+          - suite: test_shell_history
+            command: python3 tests/test_shell_history.py
           - suite: test_unit
             command: python3 -m pytest tests/unit/
           - suite: lint_no_raw_syscalls

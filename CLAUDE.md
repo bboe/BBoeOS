@@ -129,13 +129,22 @@ smoke tests.
 
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
-- Shell command dispatch is a chain of `else if (streq(buf, "name"))` checks in
-  `src/c/shell.c`. Adding a built-in requires a new branch (and a matching entry
-  in the `help` string).
+- Shell command dispatch lives in `dispatch_buffer()` in `src/c/shell.c` — a
+  chain of `else if (strcmp(buf, "name") == 0)` checks.  Adding a built-in
+  requires a new branch (and a matching entry in the `help` string); builtins
+  must set `last_exec_status` so `$?` and `&&`/`||` see a defined value.
 - The shell splits input at the first space: the command name is null-terminated
   in `BUFFER`, and `[EXEC_ARG]` points to the argument string (or 0 if none; use
   `set_exec_arg()`). Unknown commands are tried as external programs via
   `SYS_SYS_EXEC`; `SYS_SYS_EXIT` reloads the shell.
+- A single line may chain commands with `;`, `&&`, or `||` (bash semantics,
+  equal precedence, left-associative).  `parse_chain()` tokenizes the line in
+  place into segments (up to 32) by null-terminating operator bytes;  `main`
+  then memcpys each segment into BUFFER one-at-a-time and calls
+  `dispatch_buffer`.  The `EXEC_ARG` pointer must always point inside BUFFER
+  (user-virt 0x1500–0x15FF) because that's the 256-byte window the kernel copies
+  into the child PD — segments are NOT dispatched from `chain_buf` directly for
+  this reason.
 - Programs are loaded at `PROGRAM_BASE` (`0x08048000`). The shell is the first
   program loaded at boot. Programs call kernel-provided helpers via the vDSO at
   user-virt `0x10000` (e.g. `FUNCTION_PRINT_STRING`, `FUNCTION_PRINT_CHARACTER`,

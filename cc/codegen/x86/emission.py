@@ -1527,6 +1527,12 @@ class EmissionMixin:
                 self.generate_body(body)
 
         if name == "main":
+            # Implicit fall-off end of main: default the exit code to 0
+            # so chained shells (`cmd && next`) behave as expected.
+            # An explicit `return N;` earlier in the body has already
+            # set EAX via generate_return; reaching this point means
+            # control fell off without one, hence the zero default.
+            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
             self.emit("        jmp FUNCTION_EXIT")
             if self.elide_frame:
                 # Plain int / pointer locals get the target's native
@@ -1793,9 +1799,15 @@ class EmissionMixin:
         rejected at codegen time.
         """
         if self.current_function_is_main:
-            # main: return [expr]; → exit() (discard return value).
-            # SYS_EXIT discards the program's stack entirely, so any
-            # bp frame can be left in place — no teardown needed.
+            # main: return [expr]; → SYS_SYS_EXIT.  Evaluate the return
+            # expression into AL so the kernel sees the requested exit
+            # code (the syscall reads AL).  Bare `return;` defaults to
+            # 0 so chains (`cmd && next`) work.  SYS_EXIT discards the
+            # program's stack entirely, so the bp frame is left as-is.
+            if statement.value is not None:
+                self.generate_expression(statement.value)
+            else:
+                self.emit(f"        xor {self.target.acc}, {self.target.acc}")
             self.emit("        jmp FUNCTION_EXIT")
             return
         if self.current_carry_return:

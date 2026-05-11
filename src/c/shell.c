@@ -1,9 +1,20 @@
-/* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
-   per-program PDs do not alias the low 1 MB so a fixed-address scratch
-   like SECTOR_BUFFER would page-fault. */
-char kill_buf[MAX_INPUT];
-
 #define HISTORY_SIZE 16
+#define MAX_SEGMENTS 32
+#define OP_AND  2
+#define OP_END  0
+#define OP_OR   3
+#define OP_SEMI 1
+
+/* Tokenized command chain: a single line may contain multiple commands
+   joined by `;`, `&&`, or `||`.  parse_chain() splits chain_buf in
+   place by replacing operator chars with NUL, fills segment_offsets[]
+   with byte offsets into chain_buf, and writes the operator type
+   *following* each segment into segment_ops[] (the last entry is
+   OP_END).  Each segment is then memcpy'd into BUFFER one-at-a-time
+   and dispatched, so the EXEC_ARG pointer stays inside the
+   kernel-copied 256-byte handoff window.  cc.py global arrays only
+   support char/int/uint8_t/struct elements, hence offsets-not-pointers. */
+char chain_buf[MAX_INPUT];
 
 /* Command history ring.  history is a flat array of HISTORY_SIZE slots,
    each MAX_INPUT bytes.  Access slot i as history + (i * MAX_INPUT).
@@ -14,16 +25,24 @@ char history[HISTORY_SIZE * MAX_INPUT];
 int history_count;
 int history_view;
 
+/* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
+   per-program PDs do not alias the low 1 MB so a fixed-address scratch
+   like SECTOR_BUFFER would page-fault. */
+char kill_buf[MAX_INPUT];
+
+/* Wait status of the most recently exec()'d child.  Written by
+   try_exec() on a successful exec; read by the dispatch loop and
+   expand_dollar_question() to expose $? to the user. */
+int last_exec_status;
+
 /* Snapshot of the live edit line taken on the first Up keypress.
    Restored when Down walks back past the newest history entry to
    history_view == 0, matching bash's partial-line restore behaviour. */
 char saved_line[MAX_INPUT];
 int saved_line_length;
 
-/* Wait status of the most recently exec()'d child.  Written by
-   try_exec() on a successful exec; read by the dispatch loop and
-   expand_dollar_question() to expose $? to the user. */
-int last_exec_status;
+int segment_offsets[MAX_SEGMENTS];
+char segment_ops[MAX_SEGMENTS];
 
 int cursor_back(int count) {
     if (count > 0) {
@@ -45,6 +64,69 @@ int delete_at_cursor(char *buf, int cursor, int end) {
     putchar(' ');
     cursor_back(end - cursor + 1);
     return end;
+}
+
+/* Forward decls: dispatch_buffer calls expand_dollar_question and
+   try_exec, both of which sort later in this file.  cc.py resolves
+   forward refs silently; clang under -std=c99 needs them up front. */
+int expand_dollar_question(char *buffer, int max_len);
+int try_exec(char *name);
+
+void dispatch_buffer(char *buf, char *exec_path) {
+    /* Run a single command sitting in BUFFER.  Splits at the first
+       space, expands $? in the argument tail, and routes to a builtin
+       or external executable.  Updates last_exec_status so that chain
+       operators (&&, ||) and subsequent $? expansions see the result. */
+    set_exec_arg(NULL);
+    int scan = 0;
+    while (buf[scan] != '\0' && buf[scan] != ' ') {
+        scan += 1;
+    }
+    if (buf[scan] == ' ') {
+        buf[scan] = '\0';
+        set_exec_arg(buf + scan + 1);
+        if (expand_dollar_question(buf + scan + 1, MAX_INPUT - (scan + 1)) < 0) {
+            printf("$? expansion exceeded MAX_INPUT\n");
+            last_exec_status = 1 << 8;
+            return;
+        }
+    }
+    if (strcmp(buf, "help") == 0) {
+        printf("Commands: help reboot shutdown\n");
+        last_exec_status = 0;
+    } else if (strcmp(buf, "reboot") == 0) {
+        reboot();
+    } else if (strcmp(buf, "shutdown") == 0) {
+        shutdown();
+        printf("APM shutdown failed\n");
+        last_exec_status = 1 << 8;
+    } else {
+        int result = try_exec(buf);
+        if (result == 1) {
+            last_exec_status = 126 << 8;   /* bash: not executable */
+            printf("not executable\n");
+        } else if (result == 0) {
+            /* Not found in root — retry inside bin/ */
+            exec_path[0] = 'b';
+            exec_path[1] = 'i';
+            exec_path[2] = 'n';
+            exec_path[3] = '/';
+            int copy_index = 0;
+            while (buf[copy_index] != '\0') {
+                exec_path[4 + copy_index] = buf[copy_index];
+                copy_index += 1;
+            }
+            exec_path[4 + copy_index] = '\0';
+            int bin_result = try_exec(exec_path);
+            if (bin_result == 1) {
+                last_exec_status = 126 << 8;
+                printf("not executable\n");
+            } else if (bin_result == 0) {
+                last_exec_status = 127 << 8;
+                printf("unknown command\n");
+            }
+        }
+    }
 }
 
 int expand_dollar_question(char *buffer, int max_len) {
@@ -185,6 +267,66 @@ int insert_char(char *buf, int cursor, int end, char ch) {
     write(STDOUT, buf + cursor, end - cursor);
     cursor_back(end - cursor - 1);
     return end;
+}
+
+int parse_chain(char *line) {
+    /* Tokenize `line` in place: replace operator chars with NUL, fill
+       segments[]/segment_ops[].  Returns segment count, or -1 if the
+       line has more than MAX_SEGMENTS segments.  Leading whitespace
+       between operators is trimmed; trailing whitespace within a
+       segment is left to the existing first-space split. */
+    int count = 0;
+    int i = 0;
+    int len = strlen(line);
+    while (line[i] == ' ') {
+        i += 1;
+    }
+    segment_offsets[count] = i;
+    while (i < len) {
+        if (line[i] == ';') {
+            line[i] = '\0';
+            segment_ops[count] = OP_SEMI;
+            count += 1;
+            if (count >= MAX_SEGMENTS) {
+                return -1;
+            }
+            i += 1;
+            while (line[i] == ' ') {
+                i += 1;
+            }
+            segment_offsets[count] = i;
+        } else if (line[i] == '&' && line[i + 1] == '&') {
+            line[i] = '\0';
+            line[i + 1] = '\0';
+            segment_ops[count] = OP_AND;
+            count += 1;
+            if (count >= MAX_SEGMENTS) {
+                return -1;
+            }
+            i += 2;
+            while (line[i] == ' ') {
+                i += 1;
+            }
+            segment_offsets[count] = i;
+        } else if (line[i] == '|' && line[i + 1] == '|') {
+            line[i] = '\0';
+            line[i + 1] = '\0';
+            segment_ops[count] = OP_OR;
+            count += 1;
+            if (count >= MAX_SEGMENTS) {
+                return -1;
+            }
+            i += 2;
+            while (line[i] == ' ') {
+                i += 1;
+            }
+            segment_offsets[count] = i;
+        } else {
+            i += 1;
+        }
+    }
+    segment_ops[count] = OP_END;
+    return count + 1;
 }
 
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length) {
@@ -417,53 +559,34 @@ int main() {
         if (end == 0) {
             continue;
         }
-        /* Split command name and argument at the first space */
-        set_exec_arg(NULL);
-        int scan = 0;
-        while (buf[scan] != '\0' && buf[scan] != ' ') {
-            scan += 1;
+        /* Tokenize the line into chained segments (`;`, `&&`, `||`),
+           then dispatch each in BUFFER one-at-a-time.  chain_buf holds
+           the parsed copy so per-segment $? expansion in BUFFER does
+           not corrupt segments not yet processed. */
+        memcpy(chain_buf, buf, end + 1);
+        int n_segments = parse_chain(chain_buf);
+        if (n_segments < 0) {
+            printf("too many commands in chain\n");
+            continue;
         }
-        if (buf[scan] == ' ') {
-            buf[scan] = '\0';
-            set_exec_arg(buf + scan + 1);
-            if (expand_dollar_question(buf + scan + 1, MAX_INPUT - (scan + 1)) < 0) {
-                printf("$? expansion exceeded MAX_INPUT\n");
-                continue;
-            }
-        }
-        if (strcmp(buf, "help") == 0) {
-            printf("Commands: help reboot shutdown\n");
-        } else if (strcmp(buf, "reboot") == 0) {
-            reboot();
-        } else if (strcmp(buf, "shutdown") == 0) {
-            shutdown();
-            printf("APM shutdown failed\n");
-        } else {
-            int result = try_exec(buf);
-            if (result == 1) {
-                last_exec_status = 126 << 8;   /* bash: not executable */
-                printf("not executable\n");
-            } else if (result == 0) {
-                /* Not found in root — retry inside bin/ */
-                exec_path[0] = 'b';
-                exec_path[1] = 'i';
-                exec_path[2] = 'n';
-                exec_path[3] = '/';
-                int copy_index = 0;
-                while (buf[copy_index] != '\0') {
-                    exec_path[4 + copy_index] = buf[copy_index];
-                    copy_index += 1;
-                }
-                exec_path[4 + copy_index] = '\0';
-                int bin_result = try_exec(exec_path);
-                if (bin_result == 1) {
-                    last_exec_status = 126 << 8;   /* bash: not executable */
-                    printf("not executable\n");
-                } else if (bin_result == 0) {
-                    last_exec_status = 127 << 8;   /* bash: command not found */
-                    printf("unknown command\n");
+        int seg_index = 0;
+        while (seg_index < n_segments) {
+            int run = 1;
+            if (seg_index > 0) {
+                int prev_op = segment_ops[seg_index - 1];
+                if (prev_op == OP_AND) {
+                    run = (last_exec_status == 0);
+                } else if (prev_op == OP_OR) {
+                    run = (last_exec_status != 0);
                 }
             }
+            char *segment = chain_buf + segment_offsets[seg_index];
+            if (run && segment[0] != '\0') {
+                int seg_len = strlen(segment);
+                memcpy(buf, segment, seg_len + 1);
+                dispatch_buffer(buf, exec_path);
+            }
+            seg_index += 1;
         }
     }
 }

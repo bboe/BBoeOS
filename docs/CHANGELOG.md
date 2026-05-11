@@ -11,6 +11,39 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Shell command chaining (`;`, `&&`, `||`).**  The shell now tokenizes each
+  input line into segments separated by `;`, `&&`, or `||` and dispatches them
+  left-to-right, evaluating chain operators against the previous segment's exit
+  status (matching bash's equal-precedence, left-associative semantics). `$?`
+  between chained segments sees the freshly-updated status (e.g. `exit_status 1;
+  echo $?` prints `1`).  Up to 32 segments per line; the parsed line is held in
+  a 256-byte scratch (`chain_buf`) so each segment copies into BUFFER
+  one-at-a-time, keeping the EXEC_ARG pointer inside the kernel-copied 256-byte
+  handoff window.  Tests: `tests/test_shell_chain.py` (7 cases: `;`, `&&` / `||`
+  skip-vs-run for both exit polarities, `$?` between segments, mixed
+  left-associative chain).
+- **cc.py: main returns now set the exit code.**  Previously `int main() {
+  return 5; }` and any program that fell off main implicitly emitted bare `jmp
+  FUNCTION_EXIT` without touching EAX, so the kernel saw whatever junk the last
+  operation left in the accumulator (e.g. `echo` exited with 10 — the `'\n'` it
+  just printed).  cc.py now evaluates the return expression into AL before the
+  jmp, and an implicit fall-off defaults to 0.  Pre-existing bug, exposed by
+  chains in this release: `cmd && next` only works correctly when `cmd` has a
+  defined exit code.  Side effect: every cc.py-compiled program grew by 2 bytes
+  per main return path (`xor eax, eax` / expression load), shifting the
+  page-precise `BIGBSS_PAGES` ceiling down by one page (523,560 → 523,559) — the
+  bigbss_size.h tripwire caught this on the first CI run and was retuned.
+- **cc.py peephole: don't drop `mov reg, ax` before `ret`.**
+  `peephole_register_arithmetic` rewrites `mov ax, R / inc ax / mov reg, ax`
+  into `mov reg, R / inc reg`, saving 2 bytes by deleting the pipe-back through
+  AX.  It only checked the immediately following instruction for an AX read, so
+  sequences like `count = count + 1; return count;` at function end (where
+  `count` is a pinned register and the frame teardown — `mov esp, ebp; pop ebp`
+  — sits between the arithmetic and `ret`) silently lost the new value: `ret`
+  returned whatever AX held before the increment, not the post-increment count.
+  The peephole now scans forward past frame teardown and treats `ret` as an AX
+  read (System V calling convention), keeping the unfolded triple intact when a
+  return follows.
 - **Shell command history.** Up / Down (and Ctrl-P / Ctrl-N) at the prompt
   recall the last 16 commands.  Mid-typed lines are saved on the first Up and
   restored when Down walks past the newest entry (bash semantics). Empty lines

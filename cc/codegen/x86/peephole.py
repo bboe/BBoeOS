@@ -1127,12 +1127,30 @@ class Peepholer:
                 if target in operand.split():
                     i += 1
                     continue
-            # Skip when the instruction after the sequence reads AX —
-            # cc.py occasionally pipes the result both into a pinned
-            # register and through AX (e.g., ``mov dx, ax ; cmp ax, bx``).
-            # Dropping the trailing ``mov reg, ax`` would leave AX
-            # holding its pre-sequence value, breaking that read.
-            if i + 3 < len(self.lines) and self._reads_acc(self.lines[i + 3].strip()):
+            # Skip when AX is consumed downstream — either by an
+            # explicit read (e.g., ``mov dx, ax ; cmp ax, bx``) or by
+            # ``ret`` (System V calling convention: EAX is the return-
+            # value register).  Scan forward past AX-preserving frame
+            # teardown (``mov esp, ebp`` / ``pop`` of a non-AX register)
+            # so a ``ret`` after the teardown is still detected.  If the
+            # peephole fires past a consumer, AX retains its pre-sequence
+            # value and the consumer sees the wrong number — for ``ret``
+            # this manifests as the function returning whatever happened
+            # to be in AX before the increment instead of the new value.
+            ax_consumed = False
+            j = i + 3
+            while j < len(self.lines):
+                next_line = self.lines[j].strip()
+                if next_line == "ret" or self._reads_acc(next_line):
+                    ax_consumed = True
+                    break
+                if next_line.startswith(f"mov {self.target.stack_register}, {self.target.base_register}") or (
+                    next_line.startswith("pop ") and not next_line.endswith(f" {self.target.acc}")
+                ):
+                    j += 1
+                    continue
+                break
+            if ax_consumed:
                 i += 1
                 continue
             source = a[len(mov_acc_prefix) :]
