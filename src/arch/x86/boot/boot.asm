@@ -157,12 +157,14 @@ start:
         ;; load completes.  The kernel reads them through PDE[768]'s
         ;; direct map; no permanent low-physical reservation needed.
 
-        times 508-($-$$) db 0
-        ;; kernel_bytes (offset 508): total post-MBR bytes (boot's
-        ;; post-MBR portion + kernel.bin).  Host-side add_file.py
-        ;; reads this to compute where the directory begins on disk —
-        ;; the same arithmetic the boot path runs at startup.
-kernel_bytes dw (BOOT_SECTORS + KERNEL_SECTORS) * 512
+        times 506-($-$$) db 0
+        ;; kernel_bytes (offset 506): total post-MBR bytes (boot's
+        ;; post-MBR portion + kernel.bin).  Widened to a dword so the
+        ;; kernel can exceed 64 KB without truncating the field.
+        ;; Host-side add_file.py reads this to compute where the
+        ;; directory begins on disk — the same arithmetic the boot path
+        ;; runs at startup.
+kernel_bytes dd (BOOT_SECTORS + KERNEL_SECTORS) * 512
         dw 0AA55h
 
 ;;; ----- Post-MBR boot region (0x7E00 onwards) -----
@@ -173,33 +175,203 @@ post_mbr_continue:
         ;; image.  Cached in SI for the post-load stash write below;
         ;; can't be written into kernel.bin's embedded slot yet because
         ;; the INT 13h that loads kernel.bin would clobber it.
-        mov ax, [kernel_bytes]
-        add ax, 511
-        shr ax, 9
-        inc ax
-        mov si, ax                      ; SI = directory_sector
+        ;; kernel_bytes is a dword (widened from word to support kernels
+        ;; larger than 64 KB); the directory sector fits in 16 bits.
+        mov eax, [kernel_bytes]
+        add eax, 511
+        shr eax, 9
+        inc eax
+        mov si, ax                      ; SI = directory_sector (fits in 16 bits)
 
         ;; Load kernel.bin from disk into physical KERNEL_LOAD_PHYS
-        ;; (= 0x2000:0x0000 in real mode = 0x20000 linear).  The
-        ;; sector count is passed by the build script; the start CHS
-        ;; sector is the first sector after boot.bin (1 MBR + BOOT_SECTORS
-        ;; post-MBR ⇒ sector BOOT_SECTORS + 2 in 1-based CHS).
-        mov ax, 2000h
-        mov es, ax
+        ;; (= 0x2000:0x0000 in real mode = 0x20000 linear).
+        ;;
+        ;; INT 13h-42h (extended LBA / EDD) is NOT supported by SeaBIOS
+        ;; on emulated floppy drives — the call fails (CF=1) and halts
+        ;; the boot.  Use INT 13h-02h (CHS read) instead, which works on
+        ;; both floppy and HDD.
+        ;;
+        ;; Two constraints require chunking:
+        ;;   1. ISA DMA 64 KB boundary: a read whose buffer spans a 64 KB
+        ;;      linear boundary silently corrupts or returns an error.
+        ;;      The buffer starts at phys 0x20000; each chunk must end
+        ;;      before the next 64 KB boundary.
+        ;;   2. Track boundary: INT 13h-02h cannot read past the end of a
+        ;;      track in a single call; the sector count must not exceed
+        ;;      the sectors remaining on the current track.
+        ;;
+        ;; Geometry is fetched at runtime via INT 13h-08h (Get Drive
+        ;; Parameters) so this code works on any BIOS-supported drive
+        ;; rather than only the two QEMU defaults.  Function 08h
+        ;; returns CL[5:0] = max sector (1-based) → sectors_per_track,
+        ;; DH = max head (0-based) → num_heads = DH + 1, and ES:DI =
+        ;; floppy DPT pointer (clobbered, unused).
+        ;;
+        ;; Buffer management: the buffer segment (ES) is advanced by
+        ;; N*32 paragraphs after each read of N sectors (N*512/16 = N*32).
+        ;; This way ES:0 always points to the next write position without
+        ;; needing a non-zero BX offset.
+        ;;
+        ;; DMA constraint: track [0x7B0A] = sectors already loaded in the
+        ;; current 64 KB window.  limit_dma = 128 - [0x7B0A].  After
+        ;; advancing ES by N*32, if the window is full (window_used = 128)
+        ;; reset window_used to 0 (the segment already advanced past the
+        ;; boundary).
+        ;;
+        ;; Scratch layout at 0x7B00:
+        ;;   [0x7B00] byte  sectors_per_track
+        ;;   [0x7B01] byte  num_heads
+        ;;   [0x7B02] word  current CHS word (CH=cyl[7:0], CL=sec|cyl_hi)
+        ;;   [0x7B04] byte  current head (DH for INT 13h-02h)
+        ;;   [0x7B05] byte  sectors left on current track
+        ;;   [0x7B06] word  total sectors remaining
+        ;;   [0x7B08] word  buffer segment (advanced after each read)
+        ;;   [0x7B0A] word  sectors loaded in current 64 KB DMA window
+
+        push si                                ; save directory_sector
+        push es                                ; INT 13h-08h clobbers ES:DI
+
+        ;; Fetch drive geometry via INT 13h-08h (Get Drive Parameters).
+        ;; CF=1 with AH=01h on drives that don't support function 08h
+        ;; (rare on PCs post-1991); halt the boot on failure.
+        mov dx, bp                             ; DL = drive number
+        mov ah, 08h
+        int 13h
+        pop es
+        jc .error_post
+        and cl, 0x3F
+        mov [0x7B00], cl                       ; sectors_per_track
+        inc dh
+        mov [0x7B01], dh                       ; num_heads
+
+
+        ;; Convert starting LBA = 1 + BOOT_SECTORS to CHS.
+        ;; track  = LBA / spt       cylinder = track / num_heads
+        ;; sector = LBA mod spt + 1  head    = track mod num_heads
+        mov ax, 1 + BOOT_SECTORS
+        xor dx, dx
+        xor ch, ch
+        mov cl, [0x7B00]                      ; CX = spt (zero-extended)
+        div cx                                 ; AX=track, DX=sector-1
+        inc dl                                 ; DL = sector (1-based)
+        push dx                               ; save sector
+        xor dx, dx
+        mov cl, [0x7B01]                      ; CX = num_heads
+        div cx                                 ; AX=cylinder, DX=head
+        pop cx                                ; CX = sector (low byte)
+        ;; Encode CHS word: CH=cyl[7:0], CL=sector[5:0]|cyl[9:8]<<6
+        push dx                               ; save head
+        mov bx, ax
+        shr bx, 2
+        and bx, 0xC0                          ; BL = cyl[9:8] << 6
+        or cl, bl
+        mov ch, al                            ; CH = cyl[7:0]
+        mov [0x7B02], cx
+        pop dx
+        mov [0x7B04], dl                      ; store head
+        ;; sectors_left_on_track = spt - sector + 1
+        mov al, cl
+        and al, 0x3F                          ; AL = sector
+        mov bl, [0x7B00]
+        sub bl, al
+        inc bl
+        mov [0x7B05], bl
+        mov word [0x7B06], KERNEL_SECTORS
+        mov word [0x7B08], 0x2000             ; buffer segment
+        mov word [0x7B0A], 0                  ; DMA window sectors used
+
+.kernel_read_loop:
+        ;; count = min(track_left, dma_left, remaining, 64)
+        xor bh, bh
+        mov bl, [0x7B05]                      ; BX = track_left
+        mov ax, 128
+        sub ax, [0x7B0A]                      ; AX = dma_left
+        cmp ax, bx
+        jbe .krl_have_min
+        mov ax, bx
+.krl_have_min:
+        cmp ax, [0x7B06]
+        jbe .krl_cap_remain
+        mov ax, [0x7B06]
+.krl_cap_remain:
+        cmp ax, 64
+        jbe .krl_do_read
+        mov ax, 64
+.krl_do_read:
+        ;; Issue INT 13h-02h.
+        mov cx, [0x7B02]
+        mov bx, [0x7B08]
+        mov es, bx
         xor bx, bx
         mov ah, 02h
-        mov al, KERNEL_SECTORS
-        mov ch, 0
-        mov cl, BOOT_SECTORS + 2
-        mov dx, bp                      ; DL=drive (DH cleared next)
-        xor dh, dh                      ; head 0
+        mov dx, bp                            ; DL = drive
+        mov dh, [0x7B04]                      ; DH = head
         int 13h
         jc .error_post
 
+        ;; AL = sectors actually read (set by BIOS).
+        xor ah, ah
+        sub [0x7B06], ax                      ; remaining -= read
+        sub [0x7B05], al                      ; track_left -= read
+        add [0x7B0A], ax                      ; window_used += read
+        ;; Advance buffer segment: N sectors = N*32 paragraphs.
+        mov bx, ax
+        shl bx, 5                             ; BX = N * 32
+        add [0x7B08], bx
+
+        ;; If DMA window full, reset counter (segment already advanced).
+        cmp word [0x7B0A], 128
+        jb .krl_window_ok
+        mov word [0x7B0A], 0
+.krl_window_ok:
+
+        ;; Advance sector in CHS word: CL[5:0] += sectors_read.
+        ;; This is needed when the track is not fully exhausted so
+        ;; the next read starts at the correct sector.
+        mov cx, [0x7B02]                      ; CX = current CHS
+        mov bx, ax                            ; BX = sectors read (AX, AH=0)
+        add cl, bl                            ; CL += sectors_read (within track)
+
+        ;; If track exhausted, advance to next track.
+        cmp byte [0x7B05], 0
+        jne .krl_store_chs
+        mov cl, 1                             ; sector = 1 for next track
+        mov al, [0x7B04]
+        inc al
+        cmp al, [0x7B01]
+        jb .krl_new_head                      ; still on same cylinder
+        ;; Wrap head, increment cylinder.
+        xor al, al
+        mov bl, ch
+        mov bh, cl
+        shr bh, 6                             ; BH = cyl[9:8]
+        inc bx                                ; cylinder++
+        mov ch, bl
+        and cl, 0x3F
+        mov bl, bh
+        shl bl, 6
+        or cl, bl
+.krl_new_head:
+        mov [0x7B04], al
+        mov al, [0x7B00]
+        mov [0x7B05], al                      ; track_left = spt
+.krl_store_chs:
+        mov [0x7B02], cx                      ; update CHS word
+.krl_same_track:
+        cmp word [0x7B06], 0
+        jne .kernel_read_loop
+
+.kernel_read_done:
+        xor ax, ax
+        mov es, ax
+        pop si                                 ; restore directory_sector
+
         ;; Stash boot_disk and directory_sector into kernel.bin's
-        ;; embedded slot (BOOT_STASH_OFFSET).  ES = 0x2000 so
+        ;; embedded slot (BOOT_STASH_OFFSET).  Reload ES = 0x2000.
         ;; ES:BOOT_STASH_OFFSET = phys 0x20000 + offset = the
         ;; boot_disk byte (followed by directory_sector dw).
+        mov ax, 2000h
+        mov es, ax
         mov ax, bp                               ; AL = drive number
         mov [es:BOOT_STASH_OFFSET], al           ; boot_disk (1 byte)
         mov [es:BOOT_STASH_OFFSET + 1], si       ; directory_sector (2 bytes)
@@ -435,15 +607,10 @@ boot_end:
         ;; without changing any instruction's encoded width.
         BOOT_SECTORS    equ (boot_end - post_mbr_continue) / 512
 
-        ;; Build-time guard: `kernel_bytes` (above, MBR offset 508) is
-        ;; a 16-bit dw, so total post-MBR bytes must fit in 0xFFFF.
-        ;; If the kernel grows past that, the dw silently truncates
-        ;; and add_file.py's directory-sector arithmetic wraps.  The
-        ;; expression below evaluates to 1 on overflow, so `times -1
-        ;; db 0` fails with "TIMES value is negative" and points the
-        ;; next reader here.  When it trips: widen `kernel_bytes` to
-        ;; a dword (and the matching reader in add_file.py +
-        ;; post_mbr_continue's directory_sector compute).  Placed
-        ;; after BOOT_SECTORS' equ so the times argument is a critical
-        ;; expression by NASM's pass rules.
-        times -(((BOOT_SECTORS + KERNEL_SECTORS) * 512) > 0xFFFF) db 0
+        ;; Build-time guard: `kernel_bytes` (MBR offset 506) is a 32-bit
+        ;; dword; total post-MBR bytes must fit in 0xFFFFFFFF and the
+        ;; resulting directory_sector must fit in a 16-bit SI register.
+        ;; (KERNEL_SECTORS * 512 < 512 * 65535 ~= 32 MB easily fits.)
+        ;; Placed after BOOT_SECTORS' equ so the times argument is a
+        ;; critical expression by NASM's pass rules.
+        times -(((BOOT_SECTORS + KERNEL_SECTORS) * 512) > 0xFFFFFFFF) db 0
