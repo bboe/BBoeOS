@@ -19,18 +19,18 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
 |---------|----------------|-------------|-----------|-------|
-| arp     | 466            | 567         | 613       | +46   |
-| cat     | 145            | 175         | 181       | +6    |
+| arp     | 466            | 567         | 615       | +48   |
+| cat     | 145            | 175         | 183       | +8    |
 | chmod   | 149            | 175         | 228       | +53   |
-| cp      | 268            | 338         | 302       | -36   |
-| date    | 15             | 21          | 21        |  0    |
-| dns     | 724            | 935         | 1437      | +502  |
-| edit    | 2018           | 2668        | 3354      | +686  |
-| ls      | 135            | 179         | 198       | +19   |
+| cp      | 268            | 338         | 304       | -34   |
+| date    | 15             | 21          | 23        | +2    |
+| dns     | 724            | 935         | 1440      | +505  |
+| edit    | 2018           | 2668        | 3365      | +697  |
+| ls      | 135            | 179         | 200       | +21   |
 | mkdir   | 123            | 151         | 171       | +20   |
 | mv      | 217            | 253         | 280       | +27   |
-| ping    | 1034           | 1238        | 1554      | +316  |
-| uptime  | 50             | 67          | 100       | +33   |
+| ping    | 1034           | 1238        | 1556      | +318  |
+| uptime  | 50             | 67          | 102       | +35   |
 
 **arp (+44):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
 `target_ip[4]`) are file-scope BSS globals; the assembly version uses inline
