@@ -86,11 +86,16 @@ disk:
   paths.
 - **FD table** is allocated as kernel BSS (`struct fd fd_table[FD_MAX]` in
   `src/fs/fd.c`), so it lives inside `kernel.bin` like any other kernel global;
-  no fixed-phys reservation needed. A per-fd `dirty` bit (set by `fd_write` and
-  `O_TRUNC` open) gates the size-flush in `fd_close`, so an unwritten writable
-  open doesn't clobber the file's directory entry on close.  `SYS_IO_DUP` (11h)
-  and `SYS_IO_DUP2` (12h) expose the fd table to userland for the bash save /
-  dup2 / restore redirection pattern.
+  no fixed-phys reservation needed.  `sys_exec` inherits the parent's `fd_table`
+  into the child's `program_state` slot rather than re-running `fd_init`, so
+  open file descriptors cross exec boundaries; `child_terminate` walks the
+  outgoing `fd_table` and calls `fd_close` on each non-free slot so per-type
+  teardown (file size flush, audio/MIDI close) runs regardless of how the
+  program exits.  A per-fd `dirty` bit (set by `fd_write` and `O_TRUNC` open)
+  gates the size-flush in `fd_close`, so an unwritten writable open doesn't
+  clobber the file's directory entry on close.  `SYS_IO_DUP` (11h) and
+  `SYS_IO_DUP2` (12h) expose the fd table to userland for the bash save / dup2 /
+  restore redirection pattern.
 - **Boot-time stash** is embedded inside `kernel.bin` at offset
   `BOOT_STASH_OFFSET` (= 2): `boot_disk` (1 byte) and `directory_sector` (2
   bytes). The kernel binary's first instruction is `jmp short high_entry`, which

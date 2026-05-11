@@ -189,7 +189,13 @@ pmode_irq6_handler:
 ;;; "ran out of frames / lost a sector mid-program-load" yet.
 ;;; -----------------------------------------------------------------------
 program_enter:
+        ;; Boot / shell_reload: initialize fresh fd_table.  sys_exec:
+        ;; .exec_load already copied parent's fd_table into the child's
+        ;; slot; skip fd_init so the inheritance isn't clobbered.
+        cmp dword [next_handoff_frame_phys], 0
+        jne .skip_fd_init
         call fd_init
+.skip_fd_init:
 
         ;; --- Allocate fresh PD ---
         call address_space_create
@@ -812,7 +818,29 @@ child_terminate:
         call address_space_destroy
         add esp, 4
 
-        ;; Zero the child's slot (clears its fd_table, pending bits, etc.).
+        ;; Close every non-free fd in the child's fd_table before zeroing
+        ;; the slot.  This drives the per-type teardown — vfs_update_size
+        ;; flush for writable file fds, sb16_close, midi reset — that the
+        ;; child would have run if it had called close() itself.
+        ;; fd_close needs current_program_state pointing at the child;
+        ;; we haven't swapped to the parent yet (see the swap below), so
+        ;; that's still correct here.
+        ;; EBX currently holds the stashed wait status; save it so the loop
+        ;; can use EBX as the fd counter, then restore it afterwards.
+        push ebx                        ; stash wait status across close loop
+        mov ebx, 0
+.child_term_close_loop:
+        cmp ebx, FD_MAX
+        jge .child_term_close_done
+        push ebx
+        call fd_close                   ; BX = fd; no return-value use
+        pop ebx
+        inc ebx
+        jmp .child_term_close_loop
+.child_term_close_done:
+        pop ebx                         ; restore wait status
+
+        ;; Zero the child's slot (clears fd_table, pending bits, etc.).
         mov edi, [current_program_state]
         mov ecx, PROGRAM_STATE_SIZE / 4
         xor eax, eax
@@ -883,6 +911,24 @@ spawn_failed_unwind:
         call address_space_destroy
         add esp, 4
         .spawn_failed_no_pd:
+
+        ;; Close every non-free fd in the child's fd_table before zeroing
+        ;; the slot.  sys_exec inherits the parent's fd_table into the
+        ;; child slot before program_enter runs (syscall.asm .exec_load);
+        ;; if program_enter then fails (OOM during PD build, disk error
+        ;; mid-load), those inherited fds need the same per-type teardown
+        ;; child_terminate runs — file size flush, sb16_close, midi reset.
+        ;; current_program_state still points at the child here.
+        mov ebx, 0
+.spawn_failed_close_loop:
+        cmp ebx, FD_MAX
+        jge .spawn_failed_close_done
+        push ebx
+        call fd_close
+        pop ebx
+        inc ebx
+        jmp .spawn_failed_close_loop
+.spawn_failed_close_done:
 
         ;; Zero the child's slot.
         mov edi, [current_program_state]
