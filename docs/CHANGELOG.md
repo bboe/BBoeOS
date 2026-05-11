@@ -11,6 +11,33 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Shell command history.** Up / Down (and Ctrl-P / Ctrl-N) at the prompt
+  recall the last 16 commands.  Mid-typed lines are saved on the first Up and
+  restored when Down walks past the newest entry (bash semantics). Empty lines
+  are not pushed; consecutive duplicates are deduped.  Also serves as a
+  user-visible signal that the shell process survives across child exits (see
+  commit 5090b102).
+
+- **Console scrollback.** Shift+PgUp / Shift+PgDn page back through 200 rows of
+  off-screen output.  Implemented in the VGA driver (32 KB ring, fed by
+  `vga_scroll_up`'s about-to-be-discarded top row) and intercepted in the PS/2
+  keyboard driver before reaching the cooked byte stream — works for any
+  program's output, not just the shell.  Any cooked-emit key collapses
+  scrollback back to live.  Text-mode only; graphics-mode programs (Doom, draw)
+  still receive Shift+PgUp / Shift+PgDn as positional events.
+
+- **Bootloader: chunked CHS kernel read; runtime drive geometry; widened
+  `kernel_bytes`.**  The MBR now reads `kernel.bin` via chunked INT 13h-02h
+  (CHS) so kernels larger than 64 KB don't trip the ISA DMA boundary error
+  (SeaBIOS AH=0x0E).  Each chunk is bounded by the smaller of:
+  sectors-remaining-on-track, sectors-left-in-64KB-window, or 64.  Drive
+  geometry comes from INT 13h-08h (Get Drive Parameters) so the chunked read
+  works on any BIOS-supported drive rather than only QEMU's two defaults.
+  `kernel_bytes` at MBR offset 506 is widened from `dw` to `dd` so the field can
+  describe images >64 KB; `add_file.py` reads the new dword.  Surfaced by the
+  +36 KB scrollback buffers that cc.py emits as zero-initialised data into the
+  kernel image.
+
 ## [0.11.0](https://github.com/bboe/BBoeOS/compare/0.10.0...0.11.0) (2026-05-10)
 
 - **Documentation reflowed to 80 columns.**  All markdown files (`README.md`,
@@ -144,8 +171,8 @@ time.
   disk between commands; its state (open file descriptors, line history, etc.)
   survives across child runs.  New libc surface: `exec()` returns wait status
   (>=0) or `-errno`; `_exit()` takes an int status argument; `wait.h` provides
-  `WIFEXITED` / `WIFSIGNALED` / `WIFCRASHED` / `WEXITSTATUS` / `WTERMSIG`.
-  Shell surface: `$?` argument-expansion (bash-shaped: `0..255` clean exits,
+  `WIFEXITED` / `WIFSIGNALED` / `WIFCRASHED` / `WEXITSTATUS` / `WTERMSIG`. Shell
+  surface: `$?` argument-expansion (bash-shaped: `0..255` clean exits,
   `128+signum` for kills, `255` for crashes), `[shell:start]` boot marker.
   Recursive `exec()` from a child returns `-ERROR_INVALID`. PIT IRQ iterates
   both alive slots so a parent's alarm fires at wall-clock time even while a
