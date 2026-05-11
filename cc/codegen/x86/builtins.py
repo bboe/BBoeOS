@@ -176,6 +176,17 @@ class BuiltinsMixin:
         self.emit(f"        mov {self.target.count_register}, {length}")
         self.emit("        jmp FUNCTION_DIE")
 
+    def builtin_dup(self, arguments: list[Node], /) -> None:
+        """Generate code for the dup() builtin.
+
+        ``dup(fd)`` emits ``mov bx, <fd> / mov ah, SYS_IO_DUP / int 30h``.
+        Returns the new fd number in AX, or -1 on error (CF set).
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="dup")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self._emit_syscall("IO_DUP")
+        self.ax_clear()
+
     def builtin_exec(self, arguments: list[Node], /) -> None:
         """Generate code for the exec(name) builtin.
 

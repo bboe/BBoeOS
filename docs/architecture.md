@@ -88,7 +88,9 @@ disk:
   `src/fs/fd.c`), so it lives inside `kernel.bin` like any other kernel global;
   no fixed-phys reservation needed. A per-fd `dirty` bit (set by `fd_write` and
   `O_TRUNC` open) gates the size-flush in `fd_close`, so an unwritten writable
-  open doesn't clobber the file's directory entry on close.
+  open doesn't clobber the file's directory entry on close.  `SYS_IO_DUP` (11h)
+  exposes the fd table to userland for the bash save / restore redirection
+  pattern.
 - **Boot-time stash** is embedded inside `kernel.bin` at offset
   `BOOT_STASH_OFFSET` (= 2): `boot_disk` (1 byte) and `directory_sector` (2
   bytes). The kernel binary's first instruction is `jmp short high_entry`, which

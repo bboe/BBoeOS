@@ -75,7 +75,7 @@ def test_open_wronly_no_write_preserves_size() -> None:
     assert pre_size == len(_PROBE_BODY), f"setup: pre-size {pre_size} != {len(_PROBE_BODY)}"
 
     with qemu_session(monitor=False, snapshot=False) as session:
-        session.send_command(f"noop_writer {_PROBE_NAME}")
+        session.send_command(f"fd_helpers noop {_PROBE_NAME}")
 
     post_size = _read_size_from_image(image_path=image, name=_PROBE_NAME)
     assert post_size == pre_size, f"open-without-write must preserve size: pre={pre_size}, post={post_size}"

@@ -237,6 +237,46 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
     return 1;
 }
 
+// fd_dup: AX = new fd number (lowest free slot), CF set on error.
+// Copies the source fd's entry to the new slot and resets dirty=0 on
+// the destination.  Singleton-opener types (VGA/AUDIO/MIDI) refuse
+// dup with ERROR_INVALID — their per-open state is exclusive.
+__attribute__((carry_return))
+int fd_dup(int *result __attribute__((out_register("ax"))),
+           int old_fd __attribute__((in_register("bx")))) {
+    struct fd *source;
+    struct fd *destination;
+    int new_fd;
+    int i;
+    if (!fd_lookup(old_fd, &source)) {
+        *result = -1;
+        return 0;
+    }
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+        *result = -1;
+        return 0;
+    }
+    destination = fd_table_base();
+    i = 0;
+    while (i < FD_MAX) {
+        if (destination->type == FD_TYPE_FREE) {
+            new_fd = i;
+            break;
+        }
+        destination = destination + 1;
+        i = i + 1;
+    }
+    if (i == FD_MAX) {
+        *result = -1;
+        return 0;
+    }
+    // Byte-copy the entry, then reset dirty on the destination.
+    memcpy(destination, source, FD_ENTRY_SIZE);
+    destination->dirty = 0;
+    *result = new_fd;
+    return 1;
+}
+
 // fd_fstat: AL = mode (file permission flags), CX:DX = 32-bit size
 // split (CX = high 16 bits, DX = low 16 bits).  CF set if the fd is
 // invalid.  ``mode`` uses ``out_register("ax")`` rather than

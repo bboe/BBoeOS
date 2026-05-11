@@ -145,12 +145,13 @@
         %assign SYS_FS_UNLINK 04h
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
-        %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
-        %assign SYS_IO_IOCTL 12h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
-        %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
-        %assign SYS_IO_READ  14h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_SEEK  15h    ; BX=fd, ECX=offset, AL=whence (0/1/2); returns EAX=new position, CF on error
-        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_DUP   11h    ; BX=old_fd; returns AX=new_fd, CF on error
+        %assign SYS_IO_FSTAT 13h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
+        %assign SYS_IO_IOCTL 14h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
+        %assign SYS_IO_OPEN  15h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
+        %assign SYS_IO_READ  16h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_SEEK  17h    ; BX=fd, ECX=offset, AL=whence (0/1/2); returns EAX=new position, CF on error
+        %assign SYS_IO_WRITE 18h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         ;; SEEK_* whence values — passed in AL of SYS_IO_SEEK.  Match POSIX so
         ;; libc lseek can pass the user value through unchanged.
