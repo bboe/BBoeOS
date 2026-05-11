@@ -33,6 +33,7 @@
         %assign FD_MAX 8
         %assign FD_OFFSET_DIRECTORY_OFFSET 14    ; offset of dir_off field within FD entry
         %assign FD_OFFSET_DIRECTORY_SECTOR 12    ; offset of dir_sec field within FD entry
+        %assign FD_OFFSET_DIRTY 19      ; uint8: 1 iff fd_write has touched this fd; gates vfs_update_size in fd_close
         %assign FD_OFFSET_EVENT_BUF 20  ; FD_EVENT_QUEUE_LEN * 4 bytes; 4-aligned for dword loads
         %assign FD_OFFSET_EVENT_HEAD 17 ; ring read cursor (uint8); == TAIL means empty
         %assign FD_OFFSET_EVENT_TAIL 18 ; ring write cursor (uint8); (TAIL+1)&mask == HEAD means full

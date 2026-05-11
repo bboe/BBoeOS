@@ -39,7 +39,7 @@ struct fd {
     uint8_t mode;
     uint8_t event_head;
     uint8_t event_tail;
-    uint8_t _pad;
+    uint8_t dirty;
     uint8_t event_buf[32];
     uint8_t _rest[12];
 };
@@ -227,7 +227,7 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
     if (entry->type == FD_TYPE_AUDIO) {
         sb16_close();
     } else if (entry->type == FD_TYPE_FILE) {
-        if ((entry->flags & O_WRONLY) != 0) {
+        if ((entry->flags & O_WRONLY) != 0 && entry->dirty != 0) {
             vfs_update_size(entry);
         }
     } else if (entry->type == FD_TYPE_MIDI) {
@@ -452,6 +452,7 @@ int fd_open(int *result __attribute__((out_register("ax"))),
     entry->directory_offset = vfs_found_dir_off;
     if ((flags & O_TRUNC) != 0) {
         entry->size = 0;
+        entry->dirty = 1;  // truncate is a write that must flush size=0 on close
     }
     *result = fd_num;
     return 1;
@@ -554,6 +555,9 @@ int fd_write(int *result __attribute__((out_register("ax"))),
     if (handler == 0) {
         *result = -1;
         return 0;
+    }
+    if (entry->type == FD_TYPE_FILE) {
+        entry->dirty = 1;
     }
     __tail_call(handler, entry, count);
 }
