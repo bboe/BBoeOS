@@ -66,6 +66,24 @@ def test_down_at_live_line_is_noop() -> None:
     print("PASS: test_down_at_live_line_is_noop")
 
 
+def test_down_restores_partial_line() -> None:
+    """Down past newest entry restores the partial line typed before Up."""
+    with qemu_session(monitor=False, snapshot=True) as session:
+        session.send_command("echo committed")
+        # Type a partial line, browse Up, browse back Down to the live
+        # line, then complete it with " typed" + Enter.  Expect the
+        # full "echo partial typed" output.
+        pre_length = len(session.buffer)
+        session.write_serial("echo partial")
+        session.write_serial("\x1b[A")  # up — should snapshot "echo partial"
+        session.write_serial("\x1b[B")  # down — should restore "echo partial"
+        session.write_serial(" typed\r")
+        session.wait_for_prompt()
+        between = bytes(session.buffer[pre_length:])
+        assert_in(expected=b"partial typed\r\n", haystack=between, label="Down past newest should restore the saved partial line")
+    print("PASS: test_down_restores_partial_line")
+
+
 def main() -> int:
     """Build the OS image and run all history smoke tests."""
     subprocess.run(
@@ -77,7 +95,8 @@ def main() -> int:
     )
     test_up_recalls_previous_command()
     test_down_at_live_line_is_noop()
-    print("2 passed, 0 failed")
+    test_down_restores_partial_line()
+    print("3 passed, 0 failed")
     return 0
 
 

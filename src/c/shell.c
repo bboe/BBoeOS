@@ -14,6 +14,12 @@ char history[HISTORY_SIZE * MAX_INPUT];
 int history_count;
 int history_view;
 
+/* Snapshot of the live edit line taken on the first Up keypress.
+   Restored when Down walks back past the newest history entry to
+   history_view == 0, matching bash's partial-line restore behaviour. */
+char saved_line[MAX_INPUT];
+int saved_line_length;
+
 /* Wait status of the most recently exec()'d child.  Written by
    try_exec() on a successful exec; read by the dispatch loop and
    expand_dollar_question() to expose $? to the user. */
@@ -120,13 +126,14 @@ int expand_dollar_question(char *buffer, int max_len) {
 int history_down(char *buf, int cursor, int end) {
     /* Walk history one entry forward (toward the live line).  Returns
        the new end; cursor follows.  Silent no-op when already at the
-       live line — matches bash. */
+       live line — matches bash.  On reaching the live line, restores
+       the partial line that was being edited before the first Up. */
     if (history_view == 0) {
         return end;
     }
     history_view = history_view - 1;
     if (history_view == 0) {
-        return replace_line(buf, cursor, end, buf, 0);
+        return replace_line(buf, cursor, end, saved_line, saved_line_length);
     }
     int slot = (history_count - history_view) % HISTORY_SIZE;
     char *entry = history + (slot * MAX_INPUT);
@@ -135,7 +142,9 @@ int history_down(char *buf, int cursor, int end) {
 
 int history_up(char *buf, int cursor, int end) {
     /* Walk history one entry back (toward older commands).  Returns
-       the new end; cursor follows.  Visual-bell at the oldest entry. */
+       the new end; cursor follows.  Visual-bell at the oldest entry.
+       On the first Up (history_view == 0), snapshot the live edit line
+       into saved_line so history_down can restore it. */
     int max_view = history_count;
     if (max_view > HISTORY_SIZE) {
         max_view = HISTORY_SIZE;
@@ -143,6 +152,10 @@ int history_up(char *buf, int cursor, int end) {
     if (history_view >= max_view) {
         visual_bell();
         return end;
+    }
+    if (history_view == 0) {
+        memcpy(saved_line, buf, end);
+        saved_line_length = end;
     }
     history_view = history_view + 1;
     int slot = (history_count - history_view) % HISTORY_SIZE;
