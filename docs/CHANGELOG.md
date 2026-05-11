@@ -17,6 +17,13 @@ time.
   are not pushed; consecutive duplicates are deduped.  Also serves as a
   user-visible signal that the shell process survives across child exits (see
   commit 5090b102).
+- **Console scrollback.** Shift+PgUp / Shift+PgDn page back through 200 rows of
+  off-screen output.  Implemented in the VGA driver (32 KB ring, fed by
+  `vga_scroll_up`'s about-to-be-discarded top row) and intercepted in the PS/2
+  keyboard driver before reaching the cooked byte stream — works for any
+  program's output, not just the shell.  Any cooked-emit key collapses
+  scrollback back to live.  Text-mode only; graphics-mode programs (Doom, draw)
+  still receive Shift+PgUp / Shift+PgDn as positional events.
 
 ## [0.11.0](https://github.com/bboe/BBoeOS/compare/0.10.0...0.11.0) (2026-05-10)
 

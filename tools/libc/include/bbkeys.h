@@ -110,4 +110,8 @@
 #define BBKEY_SLASH         63  /* / */
 #define BBKEY_KP_STAR       64  /* numpad * (Set-1 0x37) */
 
+/* Page navigation keys */
+#define BBKEY_PGUP          65  /* Page Up   (extended 0x49) */
+#define BBKEY_PGDN          66  /* Page Down (extended 0x51) */
+
 #endif

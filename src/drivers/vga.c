@@ -48,6 +48,26 @@ asm("VGA_COLS equ 80");
 // runs against that state without our mode-table programming.
 uint8_t vga_current_mode = 0x03;
 
+// Scrollback ring: 200 rows × 80 cells.  vga_scroll_up pushes the
+// about-to-be-discarded row 0 here before scrolling the framebuffer.
+// Note: SCROLLBACK_ROWS is defined as a C macro below; inline-asm sites
+// use the literal 200 because cc.py does not pass C #define into NASM.
+//
+// cc.py global arrays support only char, int, uint8_t, or struct element
+// types; uint16_t is not supported.  Each VGA cell (char + attribute
+// byte) is split into two parallel uint8_t arrays to stay within cc.py's
+// constraints while keeping the total BSS small (two 16 KB arrays for
+// the ring = 32 KB; two 2 KB arrays for the snapshot = 4 KB).
+#define SCROLLBACK_ROWS 200
+
+uint8_t vga_scrollback_ring_char[SCROLLBACK_ROWS * 80];
+uint8_t vga_scrollback_ring_attr[SCROLLBACK_ROWS * 80];
+int vga_scrollback_head;
+int vga_scrollback_valid;
+int vga_scrollback_offset;
+uint8_t vga_scrollback_snapshot_char[80 * 25];
+uint8_t vga_scrollback_snapshot_attr[80 * 25];
+
 // 16-entry default DAC palette (6-bit R, G, B per entry).  Restored on
 // every mode switch so mode-13h programs can freely modify the DAC.
 uint8_t vga_default_palette[48] = {
@@ -300,12 +320,50 @@ void vga_scroll_up();
 
 asm("vga_scroll_up:\n"
     "        push eax\n"
+    "        push ebx\n"
     "        push ecx\n"
+    "        push edx\n"
     "        push esi\n"
     "        push edi\n"
 
-    "        mov esi, DIRECT_MAP_BASE + 0xB8000 + 80 * 2\n"          // source: row 1
-    "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"                   // dest:   row 0
+    /* Push current row 0 into the scrollback ring at head.
+       Each VGA cell is a 2-byte word [char, attr].  The ring stores chars
+       and attrs in separate uint8_t arrays.  EBX = ring row byte offset. */
+    "        mov eax, [_g_vga_scrollback_head]\n"
+    "        imul eax, eax, 80\n"
+    "        lea edi, [_g_vga_scrollback_ring_char + eax]\n"
+    "        mov ebx, eax\n"
+    "        lea edx, [_g_vga_scrollback_ring_attr + ebx]\n"
+    "        mov esi, DIRECT_MAP_BASE + 0xB8000\n"
+    "        mov ecx, 80\n"
+    ".vga_scroll_up_ring_push:\n"
+    "        mov ax, [esi]\n"        /* ax = char (al) | attr (ah) */
+    "        mov [edi], al\n"
+    "        mov [edx], ah\n"
+    "        add esi, 2\n"
+    "        inc edi\n"
+    "        inc edx\n"
+    "        dec ecx\n"
+    "        jnz .vga_scroll_up_ring_push\n"
+    /* head = (head + 1) mod SCROLLBACK_ROWS; literal 200 — see #define above */
+    "        mov eax, [_g_vga_scrollback_head]\n"
+    "        inc eax\n"
+    "        cmp eax, 200\n"
+    "        jb .vga_scroll_up_head_ok\n"
+    "        xor eax, eax\n"
+    ".vga_scroll_up_head_ok:\n"
+    "        mov [_g_vga_scrollback_head], eax\n"
+    /* valid = min(valid + 1, SCROLLBACK_ROWS) */
+    "        mov eax, [_g_vga_scrollback_valid]\n"
+    "        cmp eax, 200\n"
+    "        jae .vga_scroll_up_valid_ok\n"
+    "        inc eax\n"
+    "        mov [_g_vga_scrollback_valid], eax\n"
+    ".vga_scroll_up_valid_ok:\n"
+
+    /* Existing scroll body. */
+    "        mov esi, DIRECT_MAP_BASE + 0xB8000 + 80 * 2\n"
+    "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov ecx, (25 - 1) * 80\n"
     "        cld\n"
     "        rep movsw\n"
@@ -317,9 +375,136 @@ asm("vga_scroll_up:\n"
 
     "        pop edi\n"
     "        pop esi\n"
+    "        pop edx\n"
     "        pop ecx\n"
+    "        pop ebx\n"
     "        pop eax\n"
     "        ret");
+
+// Forward declaration so vga_scrollback_down (and vga_scrollback_up) can
+// call vga_scrollback_render which is defined alphabetically after them.
+void vga_scrollback_render(int offset);
+
+// vga_scrollback_down: scroll the view down by `rows` rows toward the live
+// display.  If new_offset reaches 0 the live framebuffer is restored from
+// the snapshot saved by vga_scrollback_up.
+void vga_scrollback_down(int rows) {
+    int new_offset;
+    int row;
+    int col;
+    if (vga_scrollback_offset == 0) {
+        return;
+    }
+    new_offset = vga_scrollback_offset - rows;
+    if (new_offset < 0) {
+        new_offset = 0;
+    }
+    vga_scrollback_offset = new_offset;
+    if (new_offset == 0) {
+        /* Restore live framebuffer from snapshot. */
+        row = 0;
+        while (row < 25) {
+            col = 0;
+            while (col < 80) {
+                far_write16(0xFF8B8000 + (row * 80 + col) * 2,
+                            vga_scrollback_snapshot_char[row * 80 + col]
+                            | (vga_scrollback_snapshot_attr[row * 80 + col] << 8));
+                col = col + 1;
+            }
+            row = row + 1;
+        }
+        return;
+    }
+    vga_scrollback_render(new_offset);
+}
+
+/* Public predicate so ps2.c can ask "are we currently in scrollback
+   mode?" without cracking the offset variable directly. */
+int vga_scrollback_is_active() {
+    if (vga_scrollback_offset > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Render 25 rows of scrollback view at the given offset directly to the
+   live VGA framebuffer.  offset == 0 must NOT be passed here — that's
+   the live-view restore path (caller copies vga_scrollback_snapshot
+   back to 0xB8000).  offset is the number of rows scrolled back from
+   the live tail; 1..valid is in-ring, valid+1..valid+24 dips into the
+   snapshot's earlier rows. */
+void vga_scrollback_render(int offset) {
+    int row;
+    int virtual_bottom;
+    int virtual_top;
+    int virtual_index;
+    int ring_index;
+    int snapshot_index;
+    int col;
+    int cell;
+    int total = vga_scrollback_valid + 25;
+    virtual_bottom = total - 1 - offset;
+    virtual_top = virtual_bottom - 24;
+    row = 0;
+    while (row < 25) {
+        virtual_index = virtual_top + row;
+        col = 0;
+        while (col < 80) {
+            if (virtual_index < 0) {
+                cell = 0x0720;          /* blank with default attribute */
+            } else if (virtual_index < vga_scrollback_valid) {
+                /* Ring entry: oldest-valid is at (head - valid) mod N,
+                   newest-valid is at (head - 1) mod N. */
+                ring_index = (vga_scrollback_head - vga_scrollback_valid + virtual_index)
+                             % SCROLLBACK_ROWS;
+                if (ring_index < 0) {
+                    ring_index = ring_index + SCROLLBACK_ROWS;
+                }
+                cell = vga_scrollback_ring_char[ring_index * 80 + col]
+                       | (vga_scrollback_ring_attr[ring_index * 80 + col] << 8);
+            } else {
+                snapshot_index = virtual_index - vga_scrollback_valid;
+                cell = vga_scrollback_snapshot_char[snapshot_index * 80 + col]
+                       | (vga_scrollback_snapshot_attr[snapshot_index * 80 + col] << 8);
+            }
+            far_write16(0xFF8B8000 + (row * 80 + col) * 2, cell);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+}
+
+// vga_scrollback_up: scroll the view up by `rows` rows into history.
+// On first entry saves the live framebuffer into vga_scrollback_snapshot.
+void vga_scrollback_up(int rows) {
+    int new_offset;
+    int row;
+    int col;
+    int cell;
+    if (vga_scrollback_offset == 0) {
+        /* First entry to scrollback — save the live framebuffer. */
+        row = 0;
+        while (row < 25) {
+            col = 0;
+            while (col < 80) {
+                cell = far_read16(0xFF8B8000 + (row * 80 + col) * 2);
+                vga_scrollback_snapshot_char[row * 80 + col] = cell & 0xFF;
+                vga_scrollback_snapshot_attr[row * 80 + col] = (cell >> 8) & 0xFF;
+                col = col + 1;
+            }
+            row = row + 1;
+        }
+    }
+    new_offset = vga_scrollback_offset + rows;
+    if (new_offset > vga_scrollback_valid) {
+        new_offset = vga_scrollback_valid;
+    }
+    if (new_offset == vga_scrollback_offset) {
+        return;     /* already at the top */
+    }
+    vga_scrollback_offset = new_offset;
+    vga_scrollback_render(new_offset);
+}
 
 // Reads VGA_INPUT_STATUS_1 first to reset the AC index/data flip-flop
 // to "index" state, then writes the (0x11 | 0x20) index byte (bit 5 =
