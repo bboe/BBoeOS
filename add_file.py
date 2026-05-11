@@ -25,7 +25,7 @@ EXT2_SB_PARTITION_OFFSET = 1024  # superblock offset within ext2 partition
 FILENAME_MAX = 24
 FLAG_DIRECTORY = 0x02
 FLAG_EXECUTE = 0x01
-KERNEL_BYTES_OFFSET = 508  # offset of kernel_bytes word within the MBR
+KERNEL_BYTES_OFFSET = 506  # offset of kernel_bytes dword within the MBR
 MAX_RESOLVE_DEPTH = 16
 NAME_FIELD = 25
 OFFSET_FLAGS = 25
@@ -242,7 +242,7 @@ def compute_directory_sector(*, image_path: str) -> int:
     """
     with pathlib.Path(image_path).open("rb") as file:
         file.seek(KERNEL_BYTES_OFFSET)
-        kernel_bytes = struct.unpack("<H", file.read(2))[0]
+        kernel_bytes = struct.unpack("<I", file.read(4))[0]
     return (kernel_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE + 1
 
 
