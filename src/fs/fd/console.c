@@ -17,6 +17,10 @@
 // keyboard ring buffer is empty.
 char ps2_getc();
 
+// drivers/vga.c — scrollback state and auto-exit helpers.
+int vga_scrollback_is_active();
+void vga_scrollback_down(int rows);
+
 // fd_ioctl_console: non-blocking peek/get of one byte (or one event)
 // for FD_TYPE_CONSOLE.  Cmd byte (AL) selects the operation:
 //   CONSOLE_IOCTL_TRY_GETC      (0) — AX = ASCII byte (0 if empty)
@@ -159,6 +163,9 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                 // so SIG_IGN'd programs see it as normal input.
                 asm("mov ecx, [current_program_state]\n"
                     "mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 1");
+            }
+            if (vga_scrollback_is_active() != 0) {
+                vga_scrollback_down(1000);
             }
             break;
         }

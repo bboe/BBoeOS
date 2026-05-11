@@ -105,6 +105,8 @@
 #define BBKEY_PERIOD        62
 #define BBKEY_SLASH         63
 #define BBKEY_KP_STAR       64
+#define BBKEY_PGUP          65
+#define BBKEY_PGDN          66
 
 // Ring buffer: single-producer (IRQ context, IF=0) /
 // single-consumer (main loop) so head and tail don't need atomics.
@@ -222,6 +224,14 @@ void ps2_broadcast_event(int entry __attribute__((in_register("ax"))));
 void ps2_install_irq();
 void ps2_putc(char byte __attribute__((in_register("ax"))));
 
+// drivers/vga.c — current display mode byte and scrollback API.
+// vga_current_mode is declared without the _g_ prefix; cc.py adds that
+// automatically when emitting [_g_vga_current_mode] in the assembly.
+extern uint8_t vga_current_mode;
+int vga_scrollback_is_active();
+void vga_scrollback_up(int rows);
+void vga_scrollback_down(int rows);
+
 // ps2_drain: discard buffered ASCII and reset modifier state.  Called
 // from program_enter so a freshly-loaded program doesn't see ps2_buf
 // bytes the previous program had buffered (e.g. gameplay keys still
@@ -302,7 +312,25 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
         else if (code == 0x4B) { bbkey = BBKEY_LEFT; }
         else if (code == 0x1D) { bbkey = BBKEY_RCTRL; ps2_ctrl = pressed; }
         else if (code == 0x38) { bbkey = BBKEY_RALT; }
+        else if (code == 0x49) { bbkey = BBKEY_PGUP; }
+        else if (code == 0x51) { bbkey = BBKEY_PGDN; }
         if (bbkey == 0) { return; }
+        /* Shift+PgUp / Shift+PgDn are scrollback hotkeys.  Handle them
+           in text mode only; in graphics mode, fall through to the
+           regular event-broadcast path so a fullscreen program can
+           still use them.  Press only (releases are noise).  We do
+           NOT emit any cooked byte for these. */
+        if (pressed != 0 && ps2_shift != 0
+            && vga_current_mode == 0x03
+            && (bbkey == BBKEY_PGUP || bbkey == BBKEY_PGDN)) {
+            if (bbkey == BBKEY_PGUP) {
+                vga_scrollback_up(24);
+            } else {
+                vga_scrollback_down(24);
+            }
+            ps2_broadcast_event((pressed << 16) | bbkey);
+            return;
+        }
         // Cooked path: emit ANSI CSI sequence on press only (arrows
         // only — RCtrl / RAlt aren't cooked-visible, same as on Linux).
         if (pressed != 0) {
@@ -462,9 +490,16 @@ ps2_broadcast_event:
 // ps2_putc: push one byte into the ring; drop silently when full.
 // Called only from the IRQ handler path (ps2_handle_scancode) where
 // IF=0, so head/tail concurrency is one-sided.
+//
+// Auto-exits scrollback: any cooked byte snaps the view back to live
+// before the byte is pushed.  vga_scrollback_down clamps internally
+// so over-shooting by 1000 is harmless.
 void ps2_putc(char byte __attribute__((in_register("ax")))) {
     uint8_t tail;
     uint8_t next;
+    if (vga_scrollback_is_active() != 0) {
+        vga_scrollback_down(1000);
+    }
     tail = ps2_tail;
     next = (tail + 1) & (KB_BUFFER_SIZE - 1);
     if (next == ps2_head) { return; }
