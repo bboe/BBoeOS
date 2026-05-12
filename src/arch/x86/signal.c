@@ -26,9 +26,9 @@
 // context (IRQ epilogue or syscall epilogue), so it can clobber every
 // register and reset ESP without consulting the caller's frame.
 //
-// signal_dispatch_kill input contract: EDX = signum (SIGINT, SIGALRM,
-// or 0 for "validation failure — print '^?\n'").  Caller must load
-// EDX before jumping here.  No other register inputs.
+// signal_dispatch_kill input contract: EDX = signum (SIGINT, SIGPIPE,
+// SIGALRM, or 0 for "validation failure — print '^?\n'").  Caller must
+// load EDX before jumping here.  No other register inputs.
 //
 // signal_dispatch_user does not return to its caller either — it iretds
 // directly into the user handler.  It runs on the kernel stack with the
@@ -56,7 +56,17 @@ void signal_dispatch_user();
 void signal_resume_after_handler();
 
 asm("signal_dispatch_kill:\n"
-    "        mov esp, kernel_stack_top\n"
+    // Use the current slot's per-slot kernel stack top, not the global
+    // (slot_a) one.  For pipeline children, slot_a's stack is alive
+    // and holds the saved frame that kernel_yield's slot_a-resume
+    // path will pop; reusing slot_a's stack here would trample those
+    // bytes and ret into garbage.  Loading from
+    // current_program_state.kernel_stack_top is a no-op reset for
+    // SIGINT/SIGALRM from the shell (slot_a's kernel_stack_top equals
+    // the global kernel_stack_top), and a correct switch to slot_b/c's
+    // own stack for pipeline children.
+    "        mov ebx, [current_program_state]\n"
+    "        mov esp, [ebx + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]\n"
     "        mov al, '^'\n"
     "        call put_character\n"
     "        cmp edx, SIGINT\n"
@@ -64,6 +74,11 @@ asm("signal_dispatch_kill:\n"
     "        mov al, 'C'\n"
     "        jmp .signal_dispatch_kill_emit\n"
     ".signal_dispatch_kill_not_sigint:\n"
+    "        cmp edx, SIGPIPE\n"
+    "        jne .signal_dispatch_kill_not_sigpipe\n"
+    "        mov al, 'P'\n"
+    "        jmp .signal_dispatch_kill_emit\n"
+    ".signal_dispatch_kill_not_sigpipe:\n"
     "        cmp edx, SIGALRM\n"
     "        jne .signal_dispatch_kill_unknown\n"
     "        mov al, 'A'\n"
@@ -77,8 +92,8 @@ asm("signal_dispatch_kill:\n"
     // Load wait status = signum (EDX still holds the signum the caller
     // loaded before jumping here) and dispatch through child_terminate,
     // which does the CR3 swap, address_space_destroy, parent restore,
-    // and iretd back to the parent.  The kernel print of "^C\n", "^A\n",
-    // or "^?\n" already happened above.
+    // and iretd back to the parent.  The kernel print of "^C\n", "^P\n",
+    // "^A\n", or "^?\n" already happened above.
     "        mov eax, edx\n"
     "        and eax, 0x7F\n"
     "        jmp child_terminate\n");

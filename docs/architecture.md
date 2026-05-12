@@ -185,14 +185,15 @@ disk:
 ## Signal delivery
 
 Signal delivery is split into two independent axes — detection and delivery —
-and three dispatch modes depending on the handler registered by the program. Two
-signals share this path: SIGINT (Ctrl+C) and SIGALRM (interval-timer expiry, see
-[SIGALRM and interval timers](#sigalrm-and-interval-timers) below).
+and three dispatch modes depending on the handler registered by the program.
+Three signals share this path: SIGINT (Ctrl+C), SIGPIPE (write to a pipe with no
+readers), and SIGALRM (interval-timer expiry, see [SIGALRM and interval
+timers](#sigalrm-and-interval-timers) below).
 
 ### Detection
 
-Three paths set per-signal pending bits (single bytes in kernel BSS —
-`pending_sigint` and `pending_sigalrm`):
+Four paths set per-signal pending bits (single bytes in the per-slot
+`program_state` — `pending_sigint`, `pending_sigpipe`, `pending_sigalrm`):
 
 - **PS/2 IRQ 1** (`src/drivers/ps2.c`): the cooked-byte path recognises the
   Ctrl+C scancode sequence and sets `pending_sigint` before returning from the
@@ -203,6 +204,12 @@ Three paths set per-signal pending bits (single bytes in kernel BSS —
   poll branch checks each received byte; if it equals `0x03` (ASCII ETX, the
   byte a terminal sends for Ctrl+C) it sets `pending_sigint` and does not
   enqueue the byte into the line buffer.
+- **`fd_write_pipe`** (`src/fs/fd.c`): when a writer resumes from
+  `kernel_yield_write` and observes `pipe_reader_open(p) == 0`, it sets
+  `pending_sigpipe` on the current slot before returning -1 to userspace.  The
+  syscall epilogue's `SIGNAL_TAIL_CHECK` then delivers SIGPIPE — `SIG_DFL` kills
+  the writer before the -1 surfaces; `SIG_IGN` clears the pending bit and lets
+  the caller see the -1 (`EPIPE`).
 - **PIT IRQ 0** (`src/arch/x86/entry.asm`, `pmode_irq0_handler`): when an alarm
   is armed (`alarm_deadline != 0`) and `system_ticks` reaches the deadline, the
   handler sets `pending_sigalrm` and either re-arms (`alarm_interval != 0`) or
@@ -222,12 +229,12 @@ macro:
 2. Tests `in_signal_handler`; if set, falls through to popad + IRET (block
    re-entry until SYS_SYS_SIGRETURN clears the flag — POSIX-default same-mask
    behavior, single flag covers both signals).
-3. Tests `pending_sigint` first (lower signum = higher priority); if set, picks
-   SIGINT.  Otherwise tests `pending_sigalrm`; if set, picks SIGALRM.  If both
-   clear, falls through to popad + IRET.
-4. Loads `EAX` with the picked signal's handler (`sigint_handler` or
-   `sigalrm_handler` — both in entry.asm BSS, one dword per program, reset to
-   `SIG_DFL` on each `shell_reload`) and `EDX` with the signum (2 or 14).
+3. Tests pending bits in signum order (lower = higher priority): `pending_sigint`
+   (SIGINT, 2), then `pending_sigpipe` (SIGPIPE, 13), then `pending_sigalrm`
+   (SIGALRM, 14).  If all clear, falls through to popad + IRET.
+4. Loads `EAX` with the picked signal's handler (`sigint_handler`,
+   `sigpipe_handler`, or `sigalrm_handler` — per-slot dwords in `program_state`,
+   reset to `SIG_DFL` by `program_enter`) and `EDX` with the signum.
 5. Branches on EAX: SIG_DFL → `signal_dispatch_kill` (does NOT clear the pending
    bit — the program is dying anyway); SIG_IGN → clear the pending bit
    corresponding to EDX, fall through; user-virt → `signal_dispatch_user` (which
@@ -236,11 +243,14 @@ macro:
 
 ### Dispatch modes
 
-- **`SIG_DFL` (0)** — `signal_dispatch_kill`: calls `address_space_destroy` on
-  the current program's PD, prints a signum-specific banner to the console (`^C`
-  for SIGINT, `^A` for SIGALRM, `^?` for the corrupt-sigcontext kill from
+- **`SIG_DFL` (0)** — `signal_dispatch_kill`: resets ESP to the current slot's
+  per-slot kernel stack top (so pipeline children don't trample slot_a's stack
+  while it's parked at `kernel_yield_to_pipeline_start`), calls
+  `address_space_destroy` on the current program's PD, prints a signum-specific
+  banner to the console (`^C` for SIGINT, `^P` for SIGPIPE, `^A` for SIGALRM,
+  `^?` for the corrupt-sigcontext kill from
   `signal_resume_after_handler`'s validation failure), and falls into
-  `shell_reload`. This is the out-of-the-box terminate behaviour: a runaway
+  `child_terminate`. This is the out-of-the-box terminate behaviour: a runaway
   program is killed and the shell prompt reappears.
 - **`SIG_IGN` (1)** — clear the corresponding pending bit (already done by
   `SIGNAL_TAIL_CHECK`), resume the IRET path unchanged. The signal is silently

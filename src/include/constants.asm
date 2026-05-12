@@ -133,16 +133,18 @@
         %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x214
         %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x218
         %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x219
-        ;; bytes 0x21A..0x21B are pad_after_pending[2]
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGPIPE    0x21A
+        ;; byte 0x21B is pad_after_pending[1]
         %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x21C
         %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x220
         %assign PROGRAM_STATE_OFFSET_SAVED_ESP          0x224  ; uint32_t parked kernel ESP while this slot is not current
         %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x228
         %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x22C
-        %assign PROGRAM_STATE_OFFSET_STATE              0x230  ; uint8_t STATE_*
-        ;; bytes 0x231..0x233 are pad_after_state[3]
-        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x234  ; uint32_t parked exit code while STATE_EXITED
-        %assign PROGRAM_STATE_SIZE                      0x238
+        %assign PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER    0x230
+        %assign PROGRAM_STATE_OFFSET_STATE              0x234  ; uint8_t STATE_*
+        ;; bytes 0x235..0x237 are pad_after_state[3]
+        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x238  ; uint32_t parked exit code while STATE_EXITED
+        %assign PROGRAM_STATE_SIZE                      0x23C
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches
         ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
@@ -214,12 +216,13 @@
         %assign SYS_SYS_PIPELINE2 0F3h    ; SI=argv1, DI=argv2; returns AX=wait_status (cmd2's), CF on error
         %assign SYS_SYS_REBOOT    0F4h
         %assign SYS_SYS_SHUTDOWN  0F5h
-        %assign SYS_SYS_SIGNAL    0F6h    ; EBX = signum (SIGINT or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGNAL    0F6h    ; EBX = signum (SIGINT, SIGPIPE, or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
         %assign SYS_SYS_SIGRETURN 0F7h    ; restore from sigcontext on user stack; never returns to caller
 
         ;; Signal numbers (POSIX-numbered).
         %assign SIGALRM 14
         %assign SIGINT 2
+        %assign SIGPIPE 13
 
         ;; signal() handler sentinels (POSIX-valued).
         %assign SIG_DFL 0

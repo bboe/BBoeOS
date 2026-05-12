@@ -37,10 +37,12 @@
 ;; captures the pushad slots into a sigcontext (user handler) or
 ;; doesn't need them (SIG_DFL kill).  Skips dispatch when:
 ;;   - interrupted CS is not user code (we'd kill kernel context),
-;;   - both PENDING_SIGINT and PENDING_SIGALRM fields are clear (nothing to do),
+;;   - PENDING_SIGINT, PENDING_SIGPIPE, and PENDING_SIGALRM are all clear
+;;     (nothing to do),
 ;;   - IN_SIGNAL_HANDLER field is set (already inside a handler — block
 ;;     re-entry until SYS_SYS_SIGRETURN clears the flag).
-;; Checks SIGINT first (lower signum = higher priority), then SIGALRM.
+;; Checks in signum order (lower = higher priority): SIGINT (2), then
+;; SIGPIPE (13), then SIGALRM (14).
 ;; On dispatch:
 ;;   SIG_DFL  → signal_dispatch_kill (never returns; pushad slots discarded)
 ;;   SIG_IGN  → clear the pending bit for the dispatched signal, fall through
@@ -55,11 +57,17 @@
         mov ecx, [current_program_state]
         cmp byte [ecx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0
         jne %%no_dispatch
-        ;; Check SIGINT first (lower signum = higher priority).
+        ;; Check in signum order: SIGINT (2), SIGPIPE (13), SIGALRM (14).
         cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0
-        je  %%check_sigalrm
+        je  %%check_sigpipe
         mov edx, SIGINT
         mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]
+        jmp %%dispatch
+%%check_sigpipe:
+        cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGPIPE], 0
+        je  %%check_sigalrm
+        mov edx, SIGPIPE
+        mov eax, [ecx + PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER]
         jmp %%dispatch
 %%check_sigalrm:
         cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0
@@ -73,11 +81,16 @@
         jne signal_dispatch_user           ; never returns to here; rewrites IRET + iretd
         ;; SIG_IGN: clear the pending bit corresponding to EDX, fall through.
         cmp edx, SIGINT
-        jne %%clear_alarm
+        je  %%clear_sigint
+        cmp edx, SIGPIPE
+        je  %%clear_sigpipe
+        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0
+        jmp %%no_dispatch
+%%clear_sigint:
         mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 0
         jmp %%no_dispatch
-%%clear_alarm:
-        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0
+%%clear_sigpipe:
+        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGPIPE], 0
 %%no_dispatch:
         popad
 %endmacro

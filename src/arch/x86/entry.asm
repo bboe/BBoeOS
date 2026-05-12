@@ -483,8 +483,10 @@ build_child_program_state:
         mov byte  [edx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 0
         mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM],   0
         mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGINT],    0
+        mov byte  [edx + PROGRAM_STATE_OFFSET_PENDING_SIGPIPE],   0
         mov dword [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], SIG_DFL
         mov dword [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER],  SIG_DFL
+        mov dword [edx + PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER], SIG_DFL
 
         ;; --- BSS-only pages (zero-filled, no disk reads) ---
         ;; virt_cursor was left at page_align_up(PROGRAM_BASE + binsize)
@@ -1409,10 +1411,10 @@ vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
 virt_cursor             dd 0    ; current user-virt during page-walk loops
 
         ;; Signal delivery state.  The pending bits (PENDING_SIGINT,
-        ;; PENDING_SIGALRM), the re-entry guard (IN_SIGNAL_HANDLER), and the
-        ;; alarm deadline / interval all live inside current_program_state at
-        ;; their PROGRAM_STATE_OFFSET_* offsets; program_enter resets them on
-        ;; every load.
+        ;; PENDING_SIGPIPE, PENDING_SIGALRM), the re-entry guard
+        ;; (IN_SIGNAL_HANDLER), and the alarm deadline / interval all live
+        ;; inside current_program_state at their PROGRAM_STATE_OFFSET_*
+        ;; offsets; program_enter resets them on every load.
         align 4
         ;; program_state_a holds the running program's PROGRAM_STATE slot.
         ;; current_program_state is pre-initialised to it so the PIT handler

@@ -47,6 +47,7 @@
 #define SIG_IGN 1
 #define SIGALRM 14
 #define SIGINT 2
+#define SIGPIPE 13
 #define SOCK_DGRAM 1
 #define SOCK_RAW 0
 #define STDERR STDERR_FILENO
@@ -114,7 +115,7 @@ int sendto(int fd, const char *buffer, int length, const char *ip, int src_port,
 void set_exec_arg(const char *arg);
 /* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
 void set_palette_color(int fd, int index, int r, int g, int b);
-/* Register handler for SIGINT or SIGALRM. */
+/* Register handler for SIGINT, SIGPIPE, or SIGALRM. */
 typedef void (*bboeos_sighandler_t)(int);
 bboeos_sighandler_t signal(int signum, bboeos_sighandler_t handler);
 /* Power off via APM. Returns only when APM is unavailable. */

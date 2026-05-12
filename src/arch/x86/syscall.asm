@@ -1176,9 +1176,11 @@ syscall_handler:
         ;; The previous handler is returned so callers can restore the
         ;; prior state on cleanup, mirroring POSIX signal().
         .sys_signal:
-        ;; EBX = signum (SIGINT or SIGALRM); ECX = handler
+        ;; EBX = signum (SIGINT, SIGPIPE, or SIGALRM); ECX = handler
         ;; (SIG_DFL/SIG_IGN/user-virt).
         cmp ebx, SIGINT
+        je  .sys_signal_signum_ok
+        cmp ebx, SIGPIPE
         je  .sys_signal_signum_ok
         cmp ebx, SIGALRM
         jne .sys_signal_bad
@@ -1193,13 +1195,19 @@ syscall_handler:
         ;; Route to the right handler slot based on EBX.
         mov edx, [current_program_state]
         cmp ebx, SIGINT
-        jne .sys_signal_alarm_slot
+        je  .sys_signal_int_slot
+        cmp ebx, SIGPIPE
+        je  .sys_signal_pipe_slot
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]
+        mov [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], ecx
+        jmp .sys_signal_done
+        .sys_signal_int_slot:
         mov eax, [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER]   ; previous handler -> EAX
         mov [edx + PROGRAM_STATE_OFFSET_SIGINT_HANDLER], ecx
         jmp .sys_signal_done
-        .sys_signal_alarm_slot:
-        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER]
-        mov [edx + PROGRAM_STATE_OFFSET_SIGALRM_HANDLER], ecx
+        .sys_signal_pipe_slot:
+        mov eax, [edx + PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER]
+        mov [edx + PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER], ecx
         .sys_signal_done:
         clc
         jmp .iret_cf_eax               ; full EAX preserved, CF=0

@@ -1011,7 +1011,7 @@ class BuiltinsMixin:
     def builtin_signal(self, arguments: list[Node], /) -> None:
         """Generate code for the signal(signum, handler) builtin.
 
-        Registers *handler* as the SIGINT or SIGALRM handler via
+        Registers *handler* as the SIGINT, SIGPIPE, or SIGALRM handler via
         SYS_SYS_SIGNAL (0F5h).  *handler* must be a function name
         (user-virt pointer), SIG_DFL (0), or SIG_IGN (1).  Returns the
         previous handler value in EAX.
