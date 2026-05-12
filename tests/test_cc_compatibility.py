@@ -20,6 +20,7 @@ from pathlib import Path
 
 HEADER = Path(__file__).resolve().parent / "bboeos.h"
 REPO_ROOT = HEADER.parent.parent
+INCLUDE_DIR = REPO_ROOT / "src" / "include"
 SOURCE_DIRS = (REPO_ROOT / "src" / "c", REPO_ROOT / "tests" / "programs")
 
 
@@ -31,6 +32,8 @@ def check_program(*, source: Path) -> tuple[bool, str]:
             "-fsyntax-only",
             "-include",
             str(HEADER),
+            "-I",
+            str(INCLUDE_DIR),
             str(source),
         ],
         capture_output=True,

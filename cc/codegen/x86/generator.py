@@ -23,6 +23,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Call,
     Char,
+    Conditional,
     DerefAssign,
     DoWhile,
     Function,
@@ -1948,6 +1949,78 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return True
         return False
 
+    def _try_emit_guarded_update(self, *, expression: Conditional, name: str) -> bool:
+        """Emit a tight ``cmp / Jcc / mov dest, other`` for ``dest = (...) ? dest : other``.
+
+        Returns True when the ternary matched the guarded-update
+        shape and the assignment was emitted; the caller (``emit_store_local``)
+        then skips its default ternary-via-AX lowering.  Returns False
+        for any ternary whose branches don't structurally mirror the
+        destination — those go through the standard path.
+
+        Recognised shapes (both produced verbatim by
+        ``MAX(dest, other)`` / ``MIN(dest, other)``):
+
+        * ``dest = C ? Var(dest) : other`` — the no-op then-branch is
+          elided.  The assignment fires when ``C`` is false, so we emit
+          a *true*-jump that skips it.
+        * ``dest = C ? other : Var(dest)`` — the no-op else-branch is
+          elided.  The assignment fires when ``C`` is true, so we emit
+          a *false*-jump that skips it.
+
+        The condition is normalised the same way ``parse_condition``
+        normalises ``if`` / ``while`` heads, so bare expressions (and
+        ``&&`` / ``||`` chains) work without special handling.
+        """
+        condition = expression.condition
+        then_expr = expression.then_expr
+        else_expr = expression.else_expr
+        # Case 1: then-branch is the no-op (dest stays).  Skip the
+        # assignment when the condition is true.
+        if isinstance(then_expr, Var) and then_expr.name == name:
+            other = else_expr
+            skip_on = "true"
+        # Case 2: else-branch is the no-op.  Skip the assignment when
+        # the condition is false.
+        elif isinstance(else_expr, Var) and else_expr.name == name:
+            other = then_expr
+            skip_on = "false"
+        else:
+            return False
+        # Avoid double-evaluation of side-effecting "other" branches —
+        # the standard ternary path would emit the call inside the
+        # taken branch, so the side effect fires exactly once.  Here
+        # ``other`` is emitted unguarded once if the assignment fires;
+        # for a Call we have to keep the original path so the side
+        # effect doesn't fire when the no-op branch was supposed to
+        # win.  Simple-value branches (Int, Var, Char, String, named
+        # constants, sizeof) are side-effect-free and safe.
+        if not isinstance(other, (Int, Char, String, Var)):
+            return False
+        # Refuse the optimization when the destination would need an
+        # ``unsigned long`` store, byte store, or any of the other
+        # non-trivial paths in ``emit_store_local`` — the recursive
+        # ``emit_store_local`` call below handles all of them, but
+        # only after the AX-tracking invariants are preserved.  In
+        # practice none of those cases produce a Conditional at this
+        # call site, so guarding here is mostly defensive.
+        if self.variable_types.get(name) == "unsigned long":
+            return False
+        normalised = self._normalise_ternary_condition(condition)
+        label_index = self.new_label()
+        skip_label = f".cond_skip_{label_index}"
+        if skip_on == "true":
+            self.emit_condition_true_jump(condition=normalised, context="ast", success_label=skip_label)
+        else:
+            self.emit_condition_false_jump(condition=normalised, context="ast", fail_label=skip_label)
+        self.emit_store_local(expression=other, name=name)
+        self.emit(f"{skip_label}:")
+        # Control reaches the merge label from two paths (skipped and
+        # not-skipped); AX-tracking accumulated by the assignment
+        # path can't be promised on the skip path, so clear it.
+        self.ax_clear()
+        return True
+
     def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
 
@@ -2697,6 +2770,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if name in self.global_arrays:
             message = f"cannot assign to array '{name}'"
             raise CompileError(message)
+        # ``dest = (cond) ? dest : other`` (and the mirror) is the
+        # ternary shape produced by ``MAX(dest, other)`` / ``MIN(dest,
+        # other)``.  Recognising it here lets us elide the no-op
+        # ``dest = dest`` branch and emit the same tight cmp + Jcc +
+        # ``mov dest, other`` sequence the hand-rolled ``if (...)``
+        # pattern produces — without it the ternary lowering would
+        # round-trip through AX and grow the code.
+        if isinstance(expression, Conditional) and self._try_emit_guarded_update(expression=expression, name=name):
+            return
         if self.variable_types.get(name) == "unsigned long":
             self.ax_clear()
             self.generate_long_expression(expression)

@@ -120,8 +120,10 @@ TOKEN_PATTERN = re.compile(
   | (?P<RBRACE>\})
   | (?P<RBRACKET>\])
   | (?P<RPAREN>\))
+  | (?P<COLON>:)
   | (?P<COMMA>,)
   | (?P<DOT>\.)
+  | (?P<QUESTION>\?)
   | (?P<SEMI>;)
 """,
     re.VERBOSE,
