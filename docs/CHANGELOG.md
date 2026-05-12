@@ -11,6 +11,15 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Shell I/O redirection: `>`, `>>`, `<`.**  The shell now supports bash-style
+  redirection at the tail of each command segment.  Builtins honor redirection
+  too (`help > out` works).  Under the hood: a per-fd `dirty` bit gates the
+  size-flush in `fd_close`; new `SYS_IO_DUP` (11h) and `SYS_IO_DUP2` (12h)
+  syscalls let userland save and restore fds around redirection; `sys_exec` now
+  inherits the parent's fd_table into the child's program_state slot, and
+  `child_terminate` walks the outgoing fd_table to drive per-type teardown.
+  Tests: `tests/test_shell_redirect.py` (8 cases), `tests/test_dup.py` (4
+  cases), `tests/test_dirty_bit.py` (open-WRONLY-no-write regression).
 - **Shell command chaining (`;`, `&&`, `||`).**  The shell now tokenizes each
   input line into segments separated by `;`, `&&`, or `||` and dispatches them
   left-to-right, evaluating chain operators against the previous segment's exit
