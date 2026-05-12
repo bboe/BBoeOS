@@ -1465,10 +1465,21 @@ void handle_lea() {
     int register1_id = packed_operand1 & 0xFF;
     skip_comma();
     int packed_operand2 = parse_operand();
+    int type2 = (packed_operand2 >> 8) & 0xFF;
     int register2_id = packed_operand2 & 0xFF;
     int value2 = parse_operand_value;
     emit_byte(0x8D);
-    emit_indexed_mem(register1_id, register2_id, value2);
+    /* ``lea reg, [disp]`` (type=2 direct memory) needs the
+       mod=00 rm=101 disp32 form so the encoding matches NASM —
+       falling through to emit_indexed_mem would treat the
+       zero-valued register_id as EAX and emit the longer
+       ``[eax+disp32]`` shape (semantically equivalent only when
+       EAX is zero, but a different byte stream). */
+    if (type2 == 2) {
+        emit_modrm_direct(register1_id, value2);
+    } else {
+        emit_indexed_mem(register1_id, register2_id, value2);
+    }
 }
 
 /* ``lgdt [mem]`` / ``lidt [mem]`` — load the GDT / IDT descriptor
