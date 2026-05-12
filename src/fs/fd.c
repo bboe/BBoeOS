@@ -14,6 +14,7 @@
 // the original asm so external callers (syscall.asm and the
 // per-fd-type handlers) link unchanged.
 
+#include "pipe.h"
 #include "program_state.h"
 
 // Layout used by the helpers and the asm dispatchers; matches the
@@ -88,6 +89,8 @@ uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 // struct types — the dispatchers below redeclare the local
 // function_pointer with the in_register annotations the handlers
 // expect.
+// Sized [12] after PIPE_R(8) and PIPE_W(9) were inserted, renumbering
+// UDP(8→10) and VGA(9→11).
 struct fd_ops_entry {
     int (*read)();
     int (*write)();
@@ -109,11 +112,13 @@ int fd_read_console();
 int fd_read_dir();
 int fd_read_file();
 int fd_read_net();
+int fd_read_pipe();
 int fd_write_audio();
 int fd_write_console();
 int fd_write_file();
 int fd_write_midi();
 int fd_write_net();
+int fd_write_pipe();
 void midi_reset_state();
 
 // Set by drivers/sb16.c on successful DSP probe.  Read by fd_open's
@@ -137,7 +142,7 @@ __attribute__((carry_return))
 int sb16_open();
 void sb16_close();
 
-struct fd_ops_entry fd_ops[10] = {
+struct fd_ops_entry fd_ops[12] = {
     { 0,               0 },                 // FD_TYPE_FREE (0)
     { 0,               fd_write_audio },    // FD_TYPE_AUDIO (1)
     { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (2)
@@ -146,19 +151,23 @@ struct fd_ops_entry fd_ops[10] = {
     { 0,               0 },                 // FD_TYPE_ICMP (5)
     { 0,               fd_write_midi },     // FD_TYPE_MIDI (6)
     { fd_read_net,     fd_write_net },      // FD_TYPE_NET (7)
-    { 0,               0 },                 // FD_TYPE_UDP (8)
-    { 0,               0 },                 // FD_TYPE_VGA (9)
+    { fd_read_pipe,    0 },                 // FD_TYPE_PIPE_R (8)
+    { 0,               fd_write_pipe },     // FD_TYPE_PIPE_W (9)
+    { 0,               0 },                 // FD_TYPE_UDP (10)
+    { 0,               0 },                 // FD_TYPE_VGA (11)
 };
 
 // fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
 // means "no ioctl support".  Wrapped in a one-field struct because
 // cc.py rejects ``int (*name[N])()`` array-of-function_pointer at
 // file scope; the struct workaround is identical at the byte level.
+// Sized [12] after PIPE_R(8) and PIPE_W(9) were inserted, renumbering
+// UDP(8→10) and VGA(9→11).
 struct fd_ioctl_op {
     int (*ioctl)();
 };
 
-struct fd_ioctl_op fd_ioctl_ops[10] = {
+struct fd_ioctl_op fd_ioctl_ops[12] = {
     { 0 },                  // FD_TYPE_FREE (0)
     { fd_ioctl_audio },     // FD_TYPE_AUDIO (1)
     { fd_ioctl_console },   // FD_TYPE_CONSOLE (2)
@@ -167,8 +176,10 @@ struct fd_ioctl_op fd_ioctl_ops[10] = {
     { 0 },                  // FD_TYPE_ICMP (5)
     { fd_ioctl_midi },      // FD_TYPE_MIDI (6)
     { 0 },                  // FD_TYPE_NET (7)
-    { 0 },                  // FD_TYPE_UDP (8)
-    { fd_ioctl_vga },       // FD_TYPE_VGA (9)
+    { 0 },                  // FD_TYPE_PIPE_R (8)
+    { 0 },                  // FD_TYPE_PIPE_W (9)
+    { 0 },                  // FD_TYPE_UDP (10)
+    { fd_ioctl_vga },       // FD_TYPE_VGA (11)
 };
 
 // fd_table_base: return a pointer to the fd table inside the running
@@ -232,9 +243,43 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
         }
     } else if (entry->type == FD_TYPE_MIDI) {
         fd_close_midi();
+    } else if (entry->type == FD_TYPE_PIPE_R || entry->type == FD_TYPE_PIPE_W) {
+        fd_close_pipe(entry);
     }
     memset(entry, 0, FD_ENTRY_SIZE);
     return 1;
+}
+
+// fd_close_pipe — decrement the per-end refcount on close.  Wake the
+// peer if its end fully closes so it can see EOF or EPIPE.  When both
+// ends have closed the pool slot is freed.
+void fd_close_pipe(struct fd *entry) {
+    struct pipe *p;
+    p = pipe_at(entry->start);
+    if (p == 0) {
+        // entry->start out of range — shouldn't happen if sys_pipeline2
+        // always installs a valid pool index; fd_close's memset still
+        // clears the slot after we return.
+        return;
+    }
+    if (entry->type == FD_TYPE_PIPE_R) {
+        pipe_decrement_reader(p);
+        if (pipe_reader_open(p) == 0) {
+            // No more readers — wake any writer parked on full buffer
+            // so it sees EPIPE on its next attempt.
+            pipe_wake_writer(p);
+        }
+    } else {
+        pipe_decrement_writer(p);
+        if (pipe_writer_open(p) == 0) {
+            // No more writers — wake any reader parked on empty so it
+            // drains the buffer and then sees EOF.
+            pipe_wake_reader(p);
+        }
+    }
+    if (pipe_both_ends_closed(p)) {
+        pipe_release(p);
+    }
 }
 
 // fd_dup: AX = new fd number (lowest free slot), CF set on error.
@@ -323,6 +368,8 @@ int fd_dup2(int *result __attribute__((out_register("ax"))),
 // uint8_t-to-int widening) keeps the cc.py codegen path uniform with
 // the CX/DX captures and avoids the byte-alias mismatch in the
 // DerefAssign emission.
+// CF set if the fd is invalid.  PIPE_R/PIPE_W also return CF set —
+// pipes have no file metadata; the fd is valid but unsupported here.
 __attribute__((carry_return))
 int fd_fstat(int *mode __attribute__((out_register("ax"))),
              int *size_high __attribute__((out_register("cx"))),
@@ -330,6 +377,9 @@ int fd_fstat(int *mode __attribute__((out_register("ax"))),
              int fd_num __attribute__((in_register("bx")))) {
     struct fd *entry;
     if (!fd_lookup(fd_num, &entry)) {
+        return 0;
+    }
+    if (entry->type == FD_TYPE_PIPE_R || entry->type == FD_TYPE_PIPE_W) {
         return 0;
     }
     // Order matters: *size_low / *size_high emit explicit ``mov dx,
@@ -565,6 +615,43 @@ int fd_read(int *result __attribute__((out_register("ax"))),
     __tail_call(handler, entry, buffer, count);
 }
 
+// fd_read_pipe — dequeue up to `count` bytes from the pipe's ring
+// into the user buffer at EDI.  Blocks (via kernel_yield_read) when
+// the buffer is empty and the write end is still open.  Returns 0
+// (EOF) when the writer end is fully closed and the buffer is drained.
+__attribute__((carry_return))
+int fd_read_pipe(int *result __attribute__((out_register("ax"))),
+                 struct fd *entry __attribute__((in_register("esi"))),
+                 uint8_t *buffer __attribute__((in_register("edi"))),
+                 int count __attribute__((in_register("ecx")))) {
+    struct pipe *p;
+    int bytes_read;
+    if (count == 0) {
+        *result = 0;
+        return 1;
+    }
+    p = pipe_at(entry->start);
+    if (p == 0) {
+        *result = -1;
+        return 0;
+    }
+    while (1) {
+        bytes_read = pipe_buffer_read(p, buffer, count);
+        if (bytes_read > 0) {
+            pipe_wake_writer(p);
+            *result = bytes_read;
+            return 1;
+        }
+        if (pipe_writer_open(p) == 0) {
+            *result = 0;
+            return 1;
+        }
+        kernel_yield_read(p);
+        /* When kernel_yield_read returns, the scheduler has decided
+           we're runnable again — try the read again. */
+    }
+}
+
 // fd_seek: reposition the read/write cursor for a regular file fd.
 // Inputs: BX = fd, ECX = signed offset, AL = whence (SEEK_SET=0,
 // SEEK_CUR=1, SEEK_END=2).  Returns EAX = new absolute position
@@ -638,6 +725,46 @@ int fd_write(int *result __attribute__((out_register("ax"))),
         entry->dirty = 1;
     }
     __tail_call(handler, entry, count);
+}
+
+// fd_write_pipe — enqueue up to `count` bytes from fd_write_buffer
+// into the pipe's ring.  Blocks (via kernel_yield_write) when the
+// buffer is full and the read end is still open.  Returns -1 (EPIPE)
+// when the reader end is fully closed and we still have bytes to
+// write.  Otherwise returns the full `count` once all bytes are in.
+__attribute__((carry_return))
+int fd_write_pipe(int *result __attribute__((out_register("ax"))),
+                  struct fd *entry __attribute__((in_register("esi"))),
+                  int count __attribute__((in_register("ecx")))) {
+    struct pipe *p;
+    int bytes_written;
+    int total;
+    uint8_t *cursor;
+    p = pipe_at(entry->start);
+    if (p == 0) {
+        *result = -1;
+        return 0;
+    }
+    cursor = fd_write_buffer;
+    total = 0;
+    while (total < count) {
+        if (pipe_reader_open(p) == 0) {
+            *result = -1;
+            return 0;
+        }
+        bytes_written = pipe_buffer_write(p, cursor, count - total);
+        if (bytes_written > 0) {
+            pipe_wake_reader(p);
+            total = total + bytes_written;
+            cursor = cursor + bytes_written;
+        } else {
+            kernel_yield_write(p);
+            /* When kernel_yield_write returns, the scheduler has
+               decided we're runnable — try the write again. */
+        }
+    }
+    *result = total;
+    return 1;
 }
 
 // All dispatchers are now C.  The remaining asm() block just brings

@@ -90,6 +90,10 @@ int mac(char *buffer);
 int net_open(int type, int protocol);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
+/* Atomically spawn two children connected by a pipe: cmd1's stdout
+   feeds cmd2's stdin.  Returns cmd2's wait status on success or a
+   negative ERROR_* code on error.  Caller must be the shell (slot_a). */
+int pipeline2(const char *cmd1_path, const char *cmd2_path);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
 void print_datetime(unsigned long epoch);
 /* Print 4-byte IP as A.B.C.D (no POSIX equivalent) */

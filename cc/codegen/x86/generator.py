@@ -115,6 +115,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "net_open": frozenset({"ax", "dx"}),
         "open": frozenset({"ax", "dx", "si"}),
         "parse_ip": frozenset({"ax", "di", "si"}),
+        "pipeline2": frozenset({"ax", "di", "si"}),
         "print_datetime": frozenset({"ax"}),
         "print_ip": frozenset({"ax", "cx", "si"}),
         "print_mac": frozenset({"ax", "cx", "si"}),

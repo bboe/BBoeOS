@@ -4,12 +4,12 @@
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 1500h            ; 256 bytes; = USER_DATA_BASE + 0x500
         %assign DIRECTORY_ENTRY_SIZE 32
-        %assign DIRECTORY_MAX_ENTRIES 48
+        %assign DIRECTORY_MAX_ENTRIES 64
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTORS 3
+        %assign DIRECTORY_SECTORS 4
         %assign ERROR_DIRECTORY_FULL 01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS         02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT          03h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH
@@ -51,8 +51,10 @@
         %assign FD_TYPE_ICMP 5
         %assign FD_TYPE_MIDI 6      ; OPL3 register-write stream (/dev/midi); see drivers/opl3.c
         %assign FD_TYPE_NET 7
-        %assign FD_TYPE_UDP 8
-        %assign FD_TYPE_VGA 9
+        %assign FD_TYPE_PIPE_R 8
+        %assign FD_TYPE_PIPE_W 9
+        %assign FD_TYPE_UDP 10
+        %assign FD_TYPE_VGA 11
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
@@ -80,6 +82,7 @@
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
         %assign MAX_INPUT 256
         %assign MAX_PATH 64             ; Hard cap on user-supplied filename byte count (incl. NUL); enough for "<24-char dir>/<24-char file>" plus headroom
+        %assign MAX_PIPES                    4
         %assign NE2K_BASE 300h
         %assign NULL 0
         %assign O_CREAT  10h
@@ -98,24 +101,48 @@
         %assign PIC2_CMD_PORT   0xA0
         %assign PIC2_DATA_PORT  0xA1
         %assign PIC_EOI         0x20
+        ;; struct pipe layout — fields strict-alphabetical; trailing _pad
+        ;; aligns the struct to exactly 4096 bytes for clean BSS reservation.
+        %assign PIPE_BUFFER_BYTES            4076
+        %assign PIPE_OFFSET_BLOCKED_READER   0x000  ; uint32_t* program_state or 0
+        %assign PIPE_OFFSET_BLOCKED_WRITER   0x004  ; uint32_t* program_state or 0
+        %assign PIPE_OFFSET_BUFFER           0x008  ; uint8_t[4076]; ends at 0xFF4
+        %assign PIPE_OFFSET_COUNT            0xFF4  ; uint16_t bytes in buffer
+        %assign PIPE_OFFSET_HEAD             0xFF6  ; uint16_t read cursor
+        %assign PIPE_OFFSET_IN_USE           0xFF8  ; uint8_t pool occupancy
+        %assign PIPE_OFFSET_READER_FD_OPEN   0xFF9  ; uint8_t refcount of read ends
+        %assign PIPE_OFFSET_TAIL             0xFFA  ; uint16_t write cursor
+        %assign PIPE_OFFSET_WRITER_FD_OPEN   0xFFC  ; uint8_t refcount of write ends
+        ;; PIPE_OFFSET 0xFFD..0xFFF are _pad[3]; total struct size = 0x1000.
+        %assign PIPE_SIZE                    0x1000
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
-        ;; ProgramState layout — per-program kernel state. Two BSS-resident
-        ;; slots (program_state_a, program_state_b) hold one struct each;
-        ;; current_program_state pointer indicates which slot the running
-        ;; program owns.  Field order is strict-alphabetical; padding bytes
-        ;; absorb the byte fields so dword fields stay 4-byte-aligned.
+        ;; ProgramState layout — per-program kernel state. Three BSS-resident
+        ;; slots (program_state_a, program_state_b, program_state_c) hold one
+        ;; struct each; current_program_state pointer indicates which slot the
+        ;; running program owns.  Slot_a is the shell; slot_b/slot_c are the
+        ;; cooperatively-scheduled pipeline children.  Field order is
+        ;; strict-alphabetical; padding bytes absorb the byte fields so dword
+        ;; fields stay 4-byte-aligned.
         %assign PROGRAM_STATE_OFFSET_ALARM_DEADLINE     0x000
         %assign PROGRAM_STATE_OFFSET_ALARM_INTERVAL     0x004
-        %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x008
-        %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x208
-        %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x20C
-        %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x210
-        %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x211
-        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x214
-        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x218
-        %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x21C
-        %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x220
-        %assign PROGRAM_STATE_SIZE                      0x224
+        %assign PROGRAM_STATE_OFFSET_CURRENT_PIPE       0x008  ; uint32_t struct pipe* or 0
+        %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x00C
+        %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x20C
+        ;; bytes 0x20D..0x20F are pad_after_handler[3]
+        %assign PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP   0x210  ; uint32_t pointer to this slot's kernel stack top
+        %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x214
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x218
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x219
+        ;; bytes 0x21A..0x21B are pad_after_pending[2]
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x21C
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x220
+        %assign PROGRAM_STATE_OFFSET_SAVED_ESP          0x224  ; uint32_t parked kernel ESP while this slot is not current
+        %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x228
+        %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x22C
+        %assign PROGRAM_STATE_OFFSET_STATE              0x230  ; uint8_t STATE_*
+        ;; bytes 0x231..0x233 are pad_after_state[3]
+        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x234  ; uint32_t parked exit code while STATE_EXITED
+        %assign PROGRAM_STATE_SIZE                      0x238
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches
         ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
@@ -133,6 +160,15 @@
         %assign SB16_DSP_READ_STATUS  0x22E   ; referenced from asm IRQ 5 handler
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
+        ;; Per-program scheduling state.  Sorted strict-alphabetical;
+        ;; STATE_RUNNING is intentionally last so BSS zero-init gives
+        ;; STATE_BLOCKED_READ — a "not runnable" default — for fresh slots.
+        ;; Once slot_c exists (Task 4), the scheduler walks slot_b and slot_c
+        ;; each yield and picks the first slot whose state == STATE_RUNNING.
+        %assign STATE_BLOCKED_READ  0
+        %assign STATE_BLOCKED_WRITE 1
+        %assign STATE_EXITED        2
+        %assign STATE_RUNNING       3
         %assign STDERR 2
         %assign STDIN 0
         %assign STDOUT 1
@@ -172,13 +208,14 @@
 
         %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
 
-        %assign SYS_SYS_BREAK 0F0h        ; EBX = new break (0 = query); returns EAX = resulting break, CF=0
-        %assign SYS_SYS_EXEC 0F1h
-        %assign SYS_SYS_EXIT 0F2h
-        %assign SYS_SYS_REBOOT 0F3h
-        %assign SYS_SYS_SHUTDOWN 0F4h
-        %assign SYS_SYS_SIGNAL    0F5h    ; EBX = signum (SIGINT or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
-        %assign SYS_SYS_SIGRETURN 0F6h    ; restore from sigcontext on user stack; never returns to caller
+        %assign SYS_SYS_BREAK     0F0h    ; EBX = new break (0 = query); returns EAX = resulting break, CF=0
+        %assign SYS_SYS_EXEC      0F1h
+        %assign SYS_SYS_EXIT      0F2h
+        %assign SYS_SYS_PIPELINE2 0F3h    ; SI=argv1, DI=argv2; returns AX=wait_status (cmd2's), CF on error
+        %assign SYS_SYS_REBOOT    0F4h
+        %assign SYS_SYS_SHUTDOWN  0F5h
+        %assign SYS_SYS_SIGNAL    0F6h    ; EBX = signum (SIGINT or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
+        %assign SYS_SYS_SIGRETURN 0F7h    ; restore from sigcontext on user stack; never returns to caller
 
         ;; Signal numbers (POSIX-numbered).
         %assign SIGALRM 14
@@ -258,3 +295,25 @@
         %assign MODE13H_BYTES     320 * 200   ; 64000 bytes (16 pages worth)
         %assign MODE13H_PHYS      0A0000h     ; physical address of the mode-13h framebuffer
         %assign MODE13H_USER_VIRT 0B8000000h  ; user-virt slot where SYS_VIDEO_MAP exposes the framebuffer
+
+;; WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+;;
+;; Zero a program_state slot (PROGRAM_STATE_SIZE bytes) but preserve
+;; the KERNEL_STACK_TOP field across the wipe.  Used by sys_exec,
+;; child_terminate, and spawn_failed_unwind when reclaiming a slot
+;; without losing its bound kernel-stack assignment.
+;;
+;; In:  EDI = slot pointer (program_state_X).
+;; Out: slot zeroed except KERNEL_STACK_TOP.  Clobbers: EAX, ECX, EDX.
+;;      EDI advanced past the slot (rep stosd post-condition).
+%macro WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP 0
+        mov edx, [edi + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        cld
+        rep stosd
+        ;; rep stosd advanced edi past the slot; back up to write the
+        ;; preserved kernel_stack_top.
+        sub edi, PROGRAM_STATE_SIZE
+        mov [edi + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP], edx
+%endmacro
