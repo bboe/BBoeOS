@@ -1,18 +1,24 @@
-"""Pytest unit tests for cc.preprocessor's function-like macro support.
+"""Pytest unit tests for cc.preprocessor's macro and conditional support.
 
 Drives :func:`cc.preprocessor.preprocess` + :func:`cc.lexer.tokenize` +
 :func:`cc.preprocessor.apply_defines` directly (no codegen) and asserts
 on the resulting token stream — sufficient to pin substitution
 behaviour without depending on parser/codegen details.
 
-Function-like macros are the new feature; object-like macros stay
-behaviourally identical to the prior implementation, so the tests
-cover both the new path and the coexistence guarantee.
+Covers three feature areas:
+
+* Object-like macros (``#define NAME VALUE`` and the bare-name
+  ``#define NAME`` header-guard form).
+* Function-like macros (``#define NAME(args) BODY``).
+* Header-guard conditionals (``#ifndef`` / ``#endif``), including
+  nesting and error paths.
 
 Limitations the tests deliberately encode:
 
 * Stringification (``#``) and token pasting (``##``) are not supported.
 * Variadic macros (``...`` / ``__VA_ARGS__``) are not supported.
+* ``#ifdef``, ``#if``, ``#else``, ``#elif``, ``#undef`` are not
+  supported.
 
 Run with: ``pytest tests/unit/test_preprocessor.py``
 """
@@ -62,6 +68,22 @@ def test_argument_with_nested_paren_commas() -> None:
     assert "y" in text_stream
     # ``z`` is the discarded second argument and must not leak through.
     assert "z" not in text_stream
+
+
+def test_bare_define_without_value_is_defined() -> None:
+    """``#define NAME`` with no value defines NAME (visible to a later ``#ifndef``).
+
+    The bare-name shape is the header-guard idiom: once ``#define
+    FOO_H`` runs, ``#ifndef FOO_H`` afterward must treat the name as
+    defined and skip its body.  Same source-file flow exercises this
+    without needing the include machinery.
+    """
+    source = "#define FOO\n#ifndef FOO\nint dropped = 1;\n#endif\nint kept = 2;\n"
+    tokens = _expand(source)
+    text_stream = [text for _kind, text in tokens]
+    # ``dropped`` should be absent; ``kept`` should remain.
+    assert "dropped" not in text_stream
+    assert "kept" in text_stream
 
 
 def test_duplicate_parameter_raises() -> None:
@@ -127,6 +149,97 @@ def test_function_like_name_without_paren_not_expanded() -> None:
     tokens = _expand(source)
     # ``FOO`` survives as an IDENT because no ``(`` follows.
     assert ("IDENT", "FOO") in tokens
+
+
+def test_header_guard_basic_includes_body() -> None:
+    """The canonical ``#ifndef``/``#define``/``#endif`` block keeps its body.
+
+    First-time encounter: the guard name is not yet defined, so the
+    block runs normally — the ``#define`` registers the guard and the
+    body tokens flow through.
+    """
+    source = "#ifndef FOO_H\n#define FOO_H\nint body_token;\n#endif\n"
+    processed, defines, _function_defines = preprocess(source)
+    assert "FOO_H" in defines
+    assert not defines["FOO_H"]  # bare-name #define -> empty value
+    tokens = tokenize(processed)
+    text_stream = [text for _kind, text, _line in tokens]
+    assert "body_token" in text_stream
+
+
+def test_header_guard_second_pass_skips_body() -> None:
+    """A second ``#ifndef`` for the same guard name in one source skips its body.
+
+    Once the guard's ``#define`` has fired, a follow-up ``#ifndef``
+    for the same name must drop everything up to its ``#endif`` —
+    this is the mechanic that makes header guards prevent double
+    inclusion (modelled here within one source file because each
+    ``#include`` in cc.py preprocesses independently).
+    """
+    source = "#ifndef FOO_H\n#define FOO_H\nint first_pass;\n#endif\n#ifndef FOO_H\nint second_pass;\n#endif\n"
+    tokens = _expand(source)
+    text_stream = [text for _kind, text in tokens]
+    assert "first_pass" in text_stream
+    assert "second_pass" not in text_stream
+
+
+def test_ifndef_function_like_macro_counts_as_defined() -> None:
+    """``#ifndef NAME`` treats a function-like macro NAME as defined.
+
+    Function-like and object-like macros live in separate dicts but
+    share a single namespace for the purposes of ``#ifndef`` — a name
+    defined either way must trip the guard.
+    """
+    source = "#define WEXITSTATUS(s) (((s) >> 8) & 0xFF)\n#ifndef WEXITSTATUS\nint dropped;\n#endif\nint kept;\n"
+    tokens = _expand(source)
+    text_stream = [text for _kind, text in tokens]
+    assert "dropped" not in text_stream
+    assert "kept" in text_stream
+
+
+def test_ifndef_mismatched_endif_raises() -> None:
+    """A stray ``#endif`` with no matching ``#ifndef`` is a hard error."""
+    source = "int x;\n#endif\n"
+    with pytest.raises(CompileError, match="#endif"):
+        preprocess(source)
+
+
+def test_ifndef_nested_blocks() -> None:
+    """Nested ``#ifndef`` blocks each track their own guard state.
+
+    The outer guard is undefined so its body runs; the inner guard is
+    also undefined so its body runs too.  After the inner ``#endif``
+    we're back in the outer block (still active).  A second top-level
+    ``#ifndef`` over the inner guard's name then skips, proving the
+    inner ``#define`` registered correctly even when nested.
+    """
+    source = (
+        "#ifndef OUTER\n"
+        "#define OUTER\n"
+        "int outer_body;\n"
+        "#ifndef INNER\n"
+        "#define INNER\n"
+        "int inner_body;\n"
+        "#endif\n"
+        "int after_inner;\n"
+        "#endif\n"
+        "#ifndef INNER\n"
+        "int should_be_dropped;\n"
+        "#endif\n"
+    )
+    tokens = _expand(source)
+    text_stream = [text for _kind, text in tokens]
+    assert "outer_body" in text_stream
+    assert "inner_body" in text_stream
+    assert "after_inner" in text_stream
+    assert "should_be_dropped" not in text_stream
+
+
+def test_ifndef_unterminated_raises() -> None:
+    """An ``#ifndef`` with no matching ``#endif`` before EOF is a hard error."""
+    source = "#ifndef FOO_H\nint body;\n"
+    with pytest.raises(CompileError, match="unterminated"):
+        preprocess(source)
 
 
 def test_nested_function_like_expansion() -> None:

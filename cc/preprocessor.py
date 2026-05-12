@@ -1,9 +1,14 @@
-"""C preprocessor: ``#define`` / ``#include`` handling.
+"""C preprocessor: ``#define`` / ``#include`` / ``#ifndef`` handling.
 
 Two ``#define`` shapes are supported:
 
 * **Object-like:** ``#define NAME VALUE`` — the IDENT ``NAME`` expands
-  to the token sequence produced by tokenizing ``VALUE``.
+  to the token sequence produced by tokenizing ``VALUE``.  The
+  bare-name form ``#define NAME`` (no value) is also accepted; it
+  defines ``NAME`` as an empty object-like macro that expands to no
+  tokens.  This shape exists primarily so the standard header-guard
+  pattern (``#ifndef FOO_H`` / ``#define FOO_H`` / ... / ``#endif``)
+  works without requiring a dummy value.
 * **Function-like:** ``#define NAME(p1, p2, ...) BODY`` — at each call
   site ``NAME(arg_tokens, ...)``, the BODY tokens are emitted with
   every IDENT matching a parameter name replaced by that argument's
@@ -15,12 +20,31 @@ Two ``#define`` shapes are supported:
   macros (``A(x)`` -> ``B(x)`` -> ``(x + 1)``) collapse in one
   ``apply_defines`` call.
 
+Conditional compilation is supported in a very limited form:
+
+* ``#ifndef NAME`` / ``#endif`` — if ``NAME`` is already defined as
+  either an object-like or function-like macro, every line up to the
+  matching ``#endif`` is dropped (including any ``#define`` /
+  ``#include`` inside the block).  Otherwise the block is processed
+  normally.  ``#ifndef`` blocks may nest; each ``#endif`` closes the
+  most recent open ``#ifndef``.  Unbalanced directives (a stray
+  ``#endif`` or an ``#ifndef`` with no matching ``#endif`` before EOF)
+  raise ``CompileError``.
+
+  This is enough to make the standard header-guard pattern work, so
+  the same header can be ``#include``d from multiple translation-unit
+  fragments without duplicate-definition fallout.
+
 Out of scope for this version:
 
 * Stringification (``#x``)
 * Token pasting (``a ## b``)
 * Variadic macros (``...`` / ``__VA_ARGS__``)
-* ``#undef``, ``#ifdef``, ``#if``, conditional compilation
+* ``#undef``
+* ``#ifdef`` (inverse of ``#ifndef``; trivial to add when needed)
+* ``#if <constant-expression>`` (would require expression evaluation
+  in the preprocessor — a much bigger lift)
+* ``#else`` / ``#elif``
 
 Only the double-quoted ``#include "..."`` form is recognised — the
 angle-bracket form (``<stdio.h>``) is not.
@@ -276,8 +300,47 @@ def preprocess(
     defines: dict[str, str] = {}
     function_defines: dict[str, tuple[tuple[str, ...], list[tuple[str, str, int]]]] = {}
     output_lines: list[str] = []
+    # Conditional-compilation stack.  Each entry is ``(name, skipping,
+    # opened_line)``: ``skipping`` is True if the ``#ifndef NAME`` block
+    # should drop its body (i.e. ``NAME`` was already defined at the
+    # directive's line), False otherwise.  Nested ``#ifndef`` adds a new
+    # frame; ``#endif`` pops the top frame.  ``opened_line`` is recorded
+    # so an unterminated-block diagnostic can point at the offending
+    # directive.  A line is emitted only if every frame on the stack
+    # has ``skipping=False``.
+    ifndef_stack: list[tuple[str, bool, int]] = []
     for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
         stripped = line.lstrip()
+        # ``#endif`` always pops, even from inside a skipping block.
+        # Handle this before the "currently skipping" gate so nested
+        # ``#ifndef`` / ``#endif`` pairs inside a skipped block still
+        # balance correctly.
+        if stripped.startswith("#endif"):
+            if not ifndef_stack:
+                message = "#endif without matching #ifndef"
+                raise CompileError(message, line=line_number)
+            ifndef_stack.pop()
+            output_lines.append("\n")  # Preserve line numbering.
+            continue
+        if stripped.startswith("#ifndef"):
+            name_text = stripped[len("#ifndef") :].strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name_text):
+                message = f"malformed #ifndef: {line.rstrip()!r}"
+                raise CompileError(message, line=line_number)
+            # An inner ``#ifndef`` nested inside a skipping block stays
+            # in "skipping" mode regardless of whether its own name is
+            # defined — the body never runs, so it makes no difference.
+            already_skipping = any(skipping for _name, skipping, _opened in ifndef_stack)
+            name_is_defined = name_text in defines or name_text in function_defines
+            ifndef_stack.append((name_text, already_skipping or name_is_defined, line_number))
+            output_lines.append("\n")  # Preserve line numbering.
+            continue
+        if any(skipping for _name, skipping, _opened in ifndef_stack):
+            # Currently inside an ``#ifndef`` block whose guard name was
+            # already defined: drop the line entirely (but keep newline
+            # accounting so post-block line numbers stay aligned).
+            output_lines.append("\n")
+            continue
         if stripped.startswith("#include"):
             match = INCLUDE_PATTERN.match(stripped[len("#include") :])
             if match is None:
@@ -336,14 +399,35 @@ def preprocess(
             output_lines.append("\n")  # Preserve line numbering.
             continue
         parts = stripped.split(None, 2)
+        # ``#define NAME`` (no value) is the header-guard shape: define
+        # NAME as an empty object-like macro so a subsequent
+        # ``#ifndef NAME`` sees it as defined and skips.  Substitution
+        # of the empty value emits no tokens (the empty string lexes
+        # to just ``EOF``, which apply_defines already drops).
+        if len(parts) == 2:
+            name = parts[1]
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+                message = f"malformed #define: {line.rstrip()!r}"
+                raise CompileError(message, line=line_number)
+            defines[name] = ""
+            output_lines.append("\n")  # Preserve line numbering.
+            continue
         if len(parts) < 3:
             message = f"malformed #define: {line.rstrip()!r}"
             raise CompileError(message, line=line_number)
         name = parts[1]
         value = parts[2].rstrip()
         if not value:
-            message = f"empty #define value for {name!r}"
-            raise CompileError(message, line=line_number)
+            # Whitespace-only value collapses to empty; treat exactly
+            # like the bare-name form rather than a hard error.  This
+            # keeps ``#define FOO   `` working as a header-guard token.
+            defines[name] = ""
+            output_lines.append("\n")  # Preserve line numbering.
+            continue
         defines[name] = value
         output_lines.append("\n")  # Preserve line numbering.
+    if ifndef_stack:
+        name, _skipping, opened_line = ifndef_stack[-1]
+        message = f"unterminated #ifndef {name!r} (no matching #endif)"
+        raise CompileError(message, line=opened_line)
     return "".join(output_lines), defines, function_defines

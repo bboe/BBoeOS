@@ -1,3 +1,5 @@
+#include "wait.h"
+
 #define HISTORY_SIZE 16
 #define MAX_SEGMENTS 32
 #define OP_AND  2
@@ -218,13 +220,13 @@ int expand_dollar_question(char *buffer, int max_len) {
        of the bash-shaped last status:
          normal exit  -> WEXITSTATUS  (bits 15..8 of last_exec_status)
          signal kill  -> 128 + WTERMSIG (low 7 bits)
-       Returns the new length, or -1 if the expansion would exceed max_len. */
+       Returns the new length, or -1 if the expansion would exceed max_len.
+       Decoding uses the POSIX-shaped macros from include/wait.h. */
     int bash_status;
-    int signum = last_exec_status & 0x7F;
-    if (signum == 0) {
-        bash_status = (last_exec_status >> 8) & 0xFF;
+    if (WIFEXITED(last_exec_status)) {
+        bash_status = WEXITSTATUS(last_exec_status);
     } else {
-        bash_status = 128 + signum;
+        bash_status = 128 + WTERMSIG(last_exec_status);
     }
     char digits[4];
     int digit_count = 0;
