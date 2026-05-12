@@ -39,7 +39,7 @@ struct fd {
     uint8_t mode;
     uint8_t event_head;
     uint8_t event_tail;
-    uint8_t _pad;
+    uint8_t dirty;
     uint8_t event_buf[32];
     uint8_t _rest[12];
 };
@@ -227,13 +227,91 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
     if (entry->type == FD_TYPE_AUDIO) {
         sb16_close();
     } else if (entry->type == FD_TYPE_FILE) {
-        if ((entry->flags & O_WRONLY) != 0) {
+        if ((entry->flags & O_WRONLY) != 0 && entry->dirty != 0) {
             vfs_update_size(entry);
         }
     } else if (entry->type == FD_TYPE_MIDI) {
         fd_close_midi();
     }
     memset(entry, 0, FD_ENTRY_SIZE);
+    return 1;
+}
+
+// fd_dup: AX = new fd number (lowest free slot), CF set on error.
+// Copies the source fd's entry to the new slot and resets dirty=0 on
+// the destination.  Singleton-opener types (VGA/AUDIO/MIDI) refuse
+// dup with ERROR_INVALID — their per-open state is exclusive.
+__attribute__((carry_return))
+int fd_dup(int *result __attribute__((out_register("ax"))),
+           int old_fd __attribute__((in_register("bx")))) {
+    struct fd *source;
+    struct fd *destination;
+    int new_fd;
+    int i;
+    if (!fd_lookup(old_fd, &source)) {
+        *result = -1;
+        return 0;
+    }
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+        *result = -1;
+        return 0;
+    }
+    destination = fd_table_base();
+    i = 0;
+    while (i < FD_MAX) {
+        if (destination->type == FD_TYPE_FREE) {
+            new_fd = i;
+            break;
+        }
+        destination = destination + 1;
+        i = i + 1;
+    }
+    if (i == FD_MAX) {
+        *result = -1;
+        return 0;
+    }
+    // Byte-copy the entry, then reset dirty on the destination.
+    memcpy(destination, source, FD_ENTRY_SIZE);
+    destination->dirty = 0;
+    *result = new_fd;
+    return 1;
+}
+
+// fd_dup2: copy old_fd's entry over target_fd's slot.  Closes whatever
+// was at target first (respecting dirty).  If old == target, returns
+// target unchanged (Linux semantics).  AX = target on success; CF set
+// on error (bad old_fd, singleton-opener type, or out-of-range target).
+__attribute__((carry_return))
+int fd_dup2(int *result __attribute__((out_register("ax"))),
+            int old_fd __attribute__((in_register("bx"))),
+            int target_fd __attribute__((in_register("dx")))) {
+    struct fd *source;
+    struct fd *destination;
+    if (!fd_lookup(old_fd, &source)) {
+        *result = -1;
+        return 0;
+    }
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+        *result = -1;
+        return 0;
+    }
+    if (target_fd < 0 || target_fd >= FD_MAX) {
+        *result = -1;
+        return 0;
+    }
+    if (old_fd == target_fd) {
+        *result = target_fd;
+        return 1;
+    }
+    // Close whatever was at target (no-op if free; flushes if needed).
+    fd_close(target_fd);
+    // fd_lookup the destination slot fresh — fd_close may have touched
+    // it; we need a pointer to the now-free slot.
+    destination = fd_table_base();
+    destination = destination + target_fd;
+    memcpy(destination, source, FD_ENTRY_SIZE);
+    destination->dirty = 0;
+    *result = target_fd;
     return 1;
 }
 
@@ -452,6 +530,7 @@ int fd_open(int *result __attribute__((out_register("ax"))),
     entry->directory_offset = vfs_found_dir_off;
     if ((flags & O_TRUNC) != 0) {
         entry->size = 0;
+        entry->dirty = 1;  // truncate is a write that must flush size=0 on close
     }
     *result = fd_num;
     return 1;
@@ -554,6 +633,9 @@ int fd_write(int *result __attribute__((out_register("ax"))),
     if (handler == 0) {
         *result = -1;
         return 0;
+    }
+    if (entry->type == FD_TYPE_FILE) {
+        entry->dirty = 1;
     }
     __tail_call(handler, entry, count);
 }

@@ -41,6 +41,7 @@
 #define IPPROTO_ICMP 1
 #define IPPROTO_UDP 17
 #define MAX_INPUT 256
+#define MAX_PATH 64
 #define SECTOR_BUFFER ((char *)0xF000)
 #define SIG_DFL 0
 #define SIG_IGN 1

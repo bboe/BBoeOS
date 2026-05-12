@@ -33,6 +33,7 @@
         %assign FD_MAX 8
         %assign FD_OFFSET_DIRECTORY_OFFSET 14    ; offset of dir_off field within FD entry
         %assign FD_OFFSET_DIRECTORY_SECTOR 12    ; offset of dir_sec field within FD entry
+        %assign FD_OFFSET_DIRTY 19      ; uint8: 1 iff fd_write has touched this fd; gates vfs_update_size in fd_close
         %assign FD_OFFSET_EVENT_BUF 20  ; FD_EVENT_QUEUE_LEN * 4 bytes; 4-aligned for dword loads
         %assign FD_OFFSET_EVENT_HEAD 17 ; ring read cursor (uint8); == TAIL means empty
         %assign FD_OFFSET_EVENT_TAIL 18 ; ring write cursor (uint8); (TAIL+1)&mask == HEAD means full
@@ -144,12 +145,14 @@
         %assign SYS_FS_UNLINK 04h
 
         %assign SYS_IO_CLOSE 10h    ; BX=fd; CF on error
-        %assign SYS_IO_FSTAT 11h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
-        %assign SYS_IO_IOCTL 12h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
-        %assign SYS_IO_OPEN  13h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
-        %assign SYS_IO_READ  14h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
-        %assign SYS_IO_SEEK  15h    ; BX=fd, ECX=offset, AL=whence (0/1/2); returns EAX=new position, CF on error
-        %assign SYS_IO_WRITE 16h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
+        %assign SYS_IO_DUP   11h    ; BX=old_fd; returns AX=new_fd, CF on error
+        %assign SYS_IO_DUP2  12h    ; BX=old_fd, DX=target_fd; returns AX=target, CF on error
+        %assign SYS_IO_FSTAT 13h    ; BX=fd; returns AL=mode, CX:DX=size (32-bit), CF on error
+        %assign SYS_IO_IOCTL 14h    ; BX=fd, AL=cmd, other regs per (fd_type,cmd); CF on error
+        %assign SYS_IO_OPEN  15h    ; SI=filename, AL=flags, DL=mode; returns AX=fd, CF on error
+        %assign SYS_IO_READ  16h    ; BX=fd, DI=buffer, CX=count; returns AX=bytes read, CF on error
+        %assign SYS_IO_SEEK  17h    ; BX=fd, ECX=offset, AL=whence (0/1/2); returns EAX=new position, CF on error
+        %assign SYS_IO_WRITE 18h    ; BX=fd, SI=buffer, CX=count; returns AX=bytes written, CF on error
 
         ;; SEEK_* whence values — passed in AL of SYS_IO_SEEK.  Match POSIX so
         ;; libc lseek can pass the user value through unchanged.

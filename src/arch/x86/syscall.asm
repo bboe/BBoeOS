@@ -98,6 +98,8 @@ syscall_handler:
         SYS_ENTRY SYS_FS_RMDIR,      .fs_rmdir
         SYS_ENTRY SYS_FS_UNLINK,     .fs_unlink
         SYS_ENTRY SYS_IO_CLOSE,      .io_close
+        SYS_ENTRY SYS_IO_DUP,        .io_dup
+        SYS_ENTRY SYS_IO_DUP2,       .io_dup2
         SYS_ENTRY SYS_IO_FSTAT,      .io_fstat
         SYS_ENTRY SYS_IO_IOCTL,      .io_ioctl
         SYS_ENTRY SYS_IO_OPEN,       .io_open
@@ -255,6 +257,14 @@ syscall_handler:
         ;; BX = fd.
         call fd_close
         jmp .iret_cf
+
+        .io_dup:
+        call fd_dup
+        jmp .iret_cf_eax
+
+        .io_dup2:
+        call fd_dup2
+        jmp .iret_cf_eax
 
         .io_fstat:
         ;; BX = fd.  fd_fstat returns AL = mode, CX:DX = size (32-bit).
@@ -723,13 +733,49 @@ syscall_handler:
         mov dword [current_program_state], program_state_a
         .exec_slot_chosen:
 
-        ;; Zero the child's slot (clears fd_table; defaults are 0 = SIG_DFL,
-        ;; no alarm armed, etc.).
+        ;; Zero the child's slot (clears non-fd_table fields: signal
+        ;; handlers, pending bits, alarm state, etc.).  fd_table is
+        ;; overwritten next with the parent's table — copied here while
+        ;; both slots are still addressable.
         mov edi, [current_program_state]
         mov ecx, PROGRAM_STATE_SIZE / 4
         xor eax, eax
         cld
         rep stosd
+
+        ;; Inherit parent's fd_table into child's slot.  Both program_state
+        ;; structs live in kernel BSS; straight rep movsd between them.
+        mov esi, [parent_program_state]
+        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov edi, [current_program_state]
+        add edi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov ecx, (FD_MAX * FD_ENTRY_SIZE) / 4
+        cld
+        rep movsd
+
+        ;; Walk the child's inherited fd_table; for each FD_TYPE_CONSOLE
+        ;; entry, zero event_head/event_tail/event_buf so the child doesn't
+        ;; inherit keystrokes the parent had buffered before exec.
+        mov esi, [current_program_state]
+        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov ecx, FD_MAX
+.exec_clear_console_ring:
+        cmp byte [esi + FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        jne .exec_clear_console_next
+        mov byte [esi + FD_OFFSET_EVENT_HEAD], 0
+        mov byte [esi + FD_OFFSET_EVENT_TAIL], 0
+        push edi
+        push ecx
+        lea edi, [esi + FD_OFFSET_EVENT_BUF]
+        mov ecx, 32 / 4
+        xor eax, eax
+        cld
+        rep stosd
+        pop ecx
+        pop edi
+.exec_clear_console_next:
+        add esi, FD_ENTRY_SIZE
+        loop .exec_clear_console_ring
 
         ;; Switch CR3 to kernel_idle_pd; do NOT destroy parent's PD.
         mov eax, [kernel_idle_pd_phys]

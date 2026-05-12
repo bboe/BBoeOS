@@ -103,6 +103,7 @@ class CodeGeneratorBase:
         "IPPROTO_ICMP",
         "IPPROTO_UDP",
         "MAX_INPUT",
+        "MAX_PATH",
         "NULL",
         "O_CREAT",
         "O_RDONLY",

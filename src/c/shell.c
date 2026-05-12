@@ -16,6 +16,29 @@
    support char/int/uint8_t/struct elements, hence offsets-not-pointers. */
 char chain_buf[MAX_INPUT];
 
+/* Redirection state for one dispatch_buffer call.  parse_redirections
+   fills these; apply_redirections consumes them.  Each filename is
+   null-terminated and lives in redirect_names; the redirect entries
+   point in via byte offsets (cc.py arrays don't carry pointer-element
+   types end-to-end).  Operator kinds: IN = `<` ; OUT = `>` (truncate);
+   APPND = `>>` (append). */
+#define MAX_REDIRECTS 3
+#define REDIRECT_OP_APPND 0
+#define REDIRECT_OP_IN    1
+#define REDIRECT_OP_NONE  2
+#define REDIRECT_OP_OUT   3
+
+int redirect_count;
+char redirect_names[192];  /* MAX_REDIRECTS * MAX_PATH = 3 * 64 */
+char redirect_ops[MAX_REDIRECTS];
+char redirect_targets[MAX_REDIRECTS];  /* target fd: 0 (stdin) or 1 (stdout) */
+
+/* saved_fds[target] = saved-fd-number from dup(target) before the
+   redirect was applied, or -1 if no save was taken.  Indexed by
+   target fd (0 or 1).  apply_redirections fills it; restore_redirections
+   consumes and clears it. */
+int saved_fds[2];
+
 /* Command history ring.  history is a flat array of HISTORY_SIZE slots,
    each MAX_INPUT bytes.  Access slot i as history + (i * MAX_INPUT).
    history_count is the lifetime push count, clipped to HISTORY_SIZE
@@ -43,6 +66,67 @@ int saved_line_length;
 
 int segment_offsets[MAX_SEGMENTS];
 char segment_ops[MAX_SEGMENTS];
+
+/* Forward decl: apply_redirections calls restore_redirections on the
+   error-rollback path; restore_redirections sorts after apply in
+   source order.  cc.py resolves forward refs silently; clang under
+   -std=c99 needs the prototype. */
+int restore_redirections();
+
+int apply_redirections() {
+    /* For each redirect in order: save the original target via dup,
+       open the file, dup2 over the target, close the temp fd.
+       Returns 0 on success, -1 on error (with prior saves rolled
+       back).  Sets last_exec_status on failure. */
+    saved_fds[0] = -1;
+    saved_fds[1] = -1;
+    int index = 0;
+    while (index < redirect_count) {
+        int target = redirect_targets[index];
+        int op = redirect_ops[index];
+        char *path = redirect_names + (index * MAX_PATH);
+        /* Save target only once (later same-target redirects reuse the
+           same save — bash "last wins" semantics; the earlier file is
+           opened+truncated+closed by the later dup2). */
+        if (saved_fds[target] < 0) {
+            int saved = dup(target);
+            if (saved < 0) {
+                printf("dup failed\n");
+                last_exec_status = 1 << 8;
+                return -1;
+            }
+            saved_fds[target] = saved;
+        }
+        int flags;
+        if (op == REDIRECT_OP_IN) {
+            flags = O_RDONLY;
+        } else if (op == REDIRECT_OP_OUT) {
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+        } else {
+            flags = O_WRONLY | O_CREAT;
+        }
+        int new_fd = open(path, flags);
+        if (new_fd < 0) {
+            printf("cannot open %s\n", path);
+            last_exec_status = 1 << 8;
+            restore_redirections();
+            return -1;
+        }
+        if (op == REDIRECT_OP_APPND) {
+            seek(new_fd, 0, SEEK_END);
+        }
+        if (dup2(new_fd, target) < 0) {
+            close(new_fd);
+            printf("dup2 failed\n");
+            last_exec_status = 1 << 8;
+            restore_redirections();
+            return -1;
+        }
+        close(new_fd);
+        index = index + 1;
+    }
+    return 0;
+}
 
 int cursor_back(int count) {
     if (count > 0) {
@@ -329,6 +413,78 @@ int parse_chain(char *line) {
     return count + 1;
 }
 
+int parse_redirections(char *segment) {
+    /* Scan `segment` for `>>`, `>`, `<` tokens; for each, capture the
+       following whitespace-delimited filename into redirect_names and
+       overwrite the operator+filename region with spaces so the
+       remaining text dispatches normally.  Returns 0 on success or -1
+       on syntax error (missing filename, filename too long, more than
+       MAX_REDIRECTS).  Sets redirect_count. */
+    redirect_count = 0;
+    int i = 0;
+    int len = strlen(segment);
+    while (i < len) {
+        char ch = segment[i];
+        int op = REDIRECT_OP_NONE;
+        int op_length = 0;
+        int target_fd = 0;
+        if (ch == '>' && i + 1 < len && segment[i + 1] == '>') {
+            op = REDIRECT_OP_APPND;
+            op_length = 2;
+            target_fd = 1;
+        } else if (ch == '>') {
+            op = REDIRECT_OP_OUT;
+            op_length = 1;
+            target_fd = 1;
+        } else if (ch == '<') {
+            op = REDIRECT_OP_IN;
+            op_length = 1;
+            target_fd = 0;
+        } else {
+            i = i + 1;
+            continue;
+        }
+        if (redirect_count >= MAX_REDIRECTS) {
+            return -1;
+        }
+        int token_start = i;
+        int scan = i + op_length;
+        while (scan < len && segment[scan] == ' ') {
+            scan = scan + 1;
+        }
+        if (scan == len || segment[scan] == '>' || segment[scan] == '<') {
+            return -1;
+        }
+        int name_start = scan;
+        while (scan < len && segment[scan] != ' '
+               && segment[scan] != '>' && segment[scan] != '<') {
+            scan = scan + 1;
+        }
+        int name_length = scan - name_start;
+        if (name_length >= MAX_PATH) {
+            return -1;
+        }
+        char *destination = redirect_names + (redirect_count * MAX_PATH);
+        int copy_index = 0;
+        while (copy_index < name_length) {
+            destination[copy_index] = segment[name_start + copy_index];
+            copy_index = copy_index + 1;
+        }
+        destination[name_length] = '\0';
+        redirect_ops[redirect_count] = op;
+        redirect_targets[redirect_count] = target_fd;
+        redirect_count = redirect_count + 1;
+        /* Blank the operator+filename region in the segment. */
+        int blank_index = token_start;
+        while (blank_index < scan) {
+            segment[blank_index] = ' ';
+            blank_index = blank_index + 1;
+        }
+        i = scan;
+    }
+    return 0;
+}
+
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length) {
     /* Erase the current input area on screen by stepping cursor back
        to col 0 of input, overprinting end with spaces, stepping back,
@@ -347,6 +503,22 @@ int replace_line(char *buf, int cursor, int end, char *new_content, int new_leng
         write(STDOUT, buf, new_length);
     }
     return new_length;
+}
+
+int restore_redirections() {
+    /* Reverse-apply: for each saved fd, dup2 it back onto the target
+       and close the saved.  Idempotent — saved_fds[i] == -1 means no
+       save was taken for that target. */
+    int index = 0;
+    while (index < 2) {
+        if (saved_fds[index] >= 0) {
+            dup2(saved_fds[index], index);
+            close(saved_fds[index]);
+            saved_fds[index] = -1;
+        }
+        index = index + 1;
+    }
+    return 0;
 }
 
 int strcmp(const char *a, const char *b) {
@@ -584,7 +756,18 @@ int main() {
             if (run && segment[0] != '\0') {
                 int seg_len = strlen(segment);
                 memcpy(buf, segment, seg_len + 1);
-                dispatch_buffer(buf, exec_path);
+                /* Strip redirections out of buf and into the redirect_*
+                   globals BEFORE dispatch_buffer's first-space split looks
+                   at the cmd name.  Parse errors short-circuit dispatch. */
+                if (parse_redirections(buf) < 0) {
+                    printf("redirection syntax error\n");
+                    last_exec_status = 1 << 8;
+                } else if (apply_redirections() == 0) {
+                    dispatch_buffer(buf, exec_path);
+                    restore_redirections();
+                }
+                /* On apply_redirections failure last_exec_status is set; nothing
+                   to restore (apply rolls back its own saves on the failure path). */
             }
             seg_index += 1;
         }

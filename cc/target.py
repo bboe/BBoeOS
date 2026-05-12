@@ -188,6 +188,8 @@ class X86CodegenTarget(CodegenTarget):
         "FS_RMDIR": ("mov ah, SYS_FS_RMDIR", "int 30h"),
         "FS_UNLINK": ("mov ah, SYS_FS_UNLINK", "int 30h"),
         "IO_CLOSE": ("mov ah, SYS_IO_CLOSE", "int 30h"),
+        "IO_DUP": ("mov ah, SYS_IO_DUP", "int 30h"),
+        "IO_DUP2": ("mov ah, SYS_IO_DUP2", "int 30h"),
         "IO_FSTAT": ("mov ah, SYS_IO_FSTAT", "int 30h"),
         "IO_IOCTL": ("mov ah, SYS_IO_IOCTL", "int 30h"),
         "IO_OPEN": ("mov ah, SYS_IO_OPEN", "int 30h"),
