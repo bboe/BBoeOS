@@ -1165,15 +1165,39 @@ spawn_failed_unwind:
 ;;; -----------------------------------------------------------------------
 global kernel_yield_read
 kernel_yield_read:
-        mov ebx, [esp + 4]              ; struct pipe *p
+        ;; The cc.py-emitted callers (fd_read_pipe / fd_write_pipe) treat
+        ;; EBP as callee-preserved across this call — every local access
+        ;; in the loop body indexes off `[ebp-N]`.  But syscall_handler's
+        ;; dispatch uses `mov ebp, [.table + eax*4]; jmp ebp` to indirect
+        ;; into the per-syscall handler, leaving EBP holding a kernel
+        ;; code address.  After a slot yields and a peer's syscall
+        ;; dispatch runs in between, the peer's syscall_handler clobbers
+        ;; the (CPU-level) EBP register, and when the parking slot
+        ;; resumes via kernel_yield's `ret`, the parking slot's EBP no
+        ;; longer matches its kernel-stack frame.  fd_write_pipe's
+        ;; `mov esp, ebp; pop ebp; ret` epilogue would then set ESP to
+        ;; the wrong (kernel-code) address and ret-pop garbage.
+        ;;
+        ;; Push EBP onto the parking slot's kernel stack so it survives
+        ;; the yield.  kernel_yield saves ESP after this push, so the
+        ;; matching pop on resume restores the slot's EBP before the
+        ;; cdecl `ret` returns to the C caller.
+        push ebp
+        mov ebx, [esp + 8]              ; struct pipe *p (skip pushed ebp)
         mov al, STATE_BLOCKED_READ
-        jmp kernel_yield
+        call kernel_yield
+        pop ebp
+        ret
 
 global kernel_yield_write
 kernel_yield_write:
-        mov ebx, [esp + 4]              ; struct pipe *p
+        ;; See kernel_yield_read above for the EBP-preservation rationale.
+        push ebp
+        mov ebx, [esp + 8]              ; struct pipe *p (skip pushed ebp)
         mov al, STATE_BLOCKED_WRITE
-        jmp kernel_yield
+        call kernel_yield
+        pop ebp
+        ret
 
 kernel_yield:
         ;; Save current slot's state.
