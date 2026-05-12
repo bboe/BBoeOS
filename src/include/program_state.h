@@ -27,6 +27,10 @@ struct program_state {
     uint32_t program_break_min;    // 0x218
     uint32_t sigalrm_handler;      // 0x21C
     uint32_t sigint_handler;       // 0x220
-};                                 // total 0x224 = 548 bytes
+    uint32_t current_pipe;         // 0x224  struct pipe* or NULL
+    uint8_t state;                 // 0x228  STATE_*
+    uint8_t pad_after_state[3];    // 0x229
+    uint32_t wait_status;          // 0x22C  parked exit code while STATE_EXITED
+};                                 // total 0x230 = 560 bytes
 
 extern struct program_state *current_program_state;

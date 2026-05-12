@@ -409,6 +409,7 @@ high_entry:
 %include "entry.asm"
 %include "fs/block.asm"
 %include "fs/fd.kasm"
+%include "fs/pipe.kasm"
 %include "fs/sector_cache.kasm"
 %include "fs/vfs.kasm"
 %include "net/net.asm"
