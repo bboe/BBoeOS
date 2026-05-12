@@ -1026,6 +1026,23 @@ spawn_failed_unwind:
 ;;; slot_a (the shell) via slot_a.saved_esp — which holds the ESP
 ;;; that sys_pipeline2 saved just before its first kernel_yield call.
 ;;; -----------------------------------------------------------------------
+;;; kernel_yield_read / kernel_yield_write — cdecl wrappers around
+;;; kernel_yield.  Translate the C (struct pipe *p) argument into the
+;;; AL/EBX register convention kernel_yield consumes.  Never return to
+;;; the C caller; the scheduler resumes whichever slot it picks.
+;;; -----------------------------------------------------------------------
+global kernel_yield_read
+kernel_yield_read:
+        mov ebx, [esp + 4]              ; struct pipe *p
+        mov al, STATE_BLOCKED_READ
+        jmp kernel_yield
+
+global kernel_yield_write
+kernel_yield_write:
+        mov ebx, [esp + 4]              ; struct pipe *p
+        mov al, STATE_BLOCKED_WRITE
+        jmp kernel_yield
+
 kernel_yield:
         ;; Save current slot's state.
         cli

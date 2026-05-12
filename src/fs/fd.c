@@ -250,9 +250,9 @@ int fd_close(int fd_num __attribute__((in_register("bx")))) {
     return 1;
 }
 
-// fd_close_pipe — decrement the per-end refcount on close.  When both
-// ends have closed the pool slot is freed.  Wakeup of a peer blocked
-// on the closed end is Task 5's responsibility.
+// fd_close_pipe — decrement the per-end refcount on close.  Wake the
+// peer if its end fully closes so it can see EOF or EPIPE.  When both
+// ends have closed the pool slot is freed.
 void fd_close_pipe(struct fd *entry) {
     struct pipe *p;
     p = pipe_at(entry->start);
@@ -264,8 +264,18 @@ void fd_close_pipe(struct fd *entry) {
     }
     if (entry->type == FD_TYPE_PIPE_R) {
         pipe_decrement_reader(p);
+        if (pipe_reader_open(p) == 0) {
+            // No more readers — wake any writer parked on full buffer
+            // so it sees EPIPE on its next attempt.
+            pipe_wake_writer(p);
+        }
     } else {
         pipe_decrement_writer(p);
+        if (pipe_writer_open(p) == 0) {
+            // No more writers — wake any reader parked on empty so it
+            // drains the buffer and then sees EOF.
+            pipe_wake_reader(p);
+        }
     }
     if (pipe_both_ends_closed(p)) {
         pipe_release(p);
@@ -606,9 +616,9 @@ int fd_read(int *result __attribute__((out_register("ax"))),
 }
 
 // fd_read_pipe — dequeue up to `count` bytes from the pipe's ring
-// into the user buffer at EDI.  Non-blocking: returns 0 bytes on an
-// empty buffer (CF clear, success).  Task 5 will replace the 0-byte
-// return with a cooperative kernel_yield.
+// into the user buffer at EDI.  Blocks (via kernel_yield_read) when
+// the buffer is empty and the write end is still open.  Returns 0
+// (EOF) when the writer end is fully closed and the buffer is drained.
 __attribute__((carry_return))
 int fd_read_pipe(int *result __attribute__((out_register("ax"))),
                  struct fd *entry __attribute__((in_register("esi"))),
@@ -621,9 +631,21 @@ int fd_read_pipe(int *result __attribute__((out_register("ax"))),
         *result = -1;
         return 0;
     }
-    bytes_read = pipe_buffer_read(p, buffer, count);
-    *result = bytes_read;
-    return 1;
+    while (1) {
+        bytes_read = pipe_buffer_read(p, buffer, count);
+        if (bytes_read > 0) {
+            pipe_wake_writer(p);
+            *result = bytes_read;
+            return 1;
+        }
+        if (pipe_writer_open(p) == 0) {
+            *result = 0;
+            return 1;
+        }
+        kernel_yield_read(p);
+        /* When kernel_yield_read returns, the scheduler has decided
+           we're runnable again — try the read again. */
+    }
 }
 
 // fd_seek: reposition the read/write cursor for a regular file fd.
@@ -702,22 +724,42 @@ int fd_write(int *result __attribute__((out_register("ax"))),
 }
 
 // fd_write_pipe — enqueue up to `count` bytes from fd_write_buffer
-// into the pipe's ring.  Non-blocking: returns whatever fits
-// (possibly 0) on a full buffer (CF clear, success).  Task 5 will
-// replace the partial/0 return with a cooperative kernel_yield.
+// into the pipe's ring.  Blocks (via kernel_yield_write) when the
+// buffer is full and the read end is still open.  Returns -1 (EPIPE)
+// when the reader end is fully closed and we still have bytes to
+// write.  Otherwise returns the full `count` once all bytes are in.
 __attribute__((carry_return))
 int fd_write_pipe(int *result __attribute__((out_register("ax"))),
                   struct fd *entry __attribute__((in_register("esi"))),
                   int count __attribute__((in_register("ecx")))) {
     struct pipe *p;
     int bytes_written;
+    int total;
+    uint8_t *cursor;
     p = pipe_at(entry->start);
     if (p == 0) {
         *result = -1;
         return 0;
     }
-    bytes_written = pipe_buffer_write(p, fd_write_buffer, count);
-    *result = bytes_written;
+    cursor = fd_write_buffer;
+    total = 0;
+    while (total < count) {
+        if (pipe_reader_open(p) == 0) {
+            *result = -1;
+            return 0;
+        }
+        bytes_written = pipe_buffer_write(p, cursor, count - total);
+        if (bytes_written > 0) {
+            pipe_wake_reader(p);
+            total = total + bytes_written;
+            cursor = cursor + bytes_written;
+        } else {
+            kernel_yield_write(p);
+            /* When kernel_yield_write returns, the scheduler has
+               decided we're runnable — try the write again. */
+        }
+    }
+    *result = total;
     return 1;
 }
 

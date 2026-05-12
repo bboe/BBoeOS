@@ -125,6 +125,7 @@ class CodeGeneratorBase:
         "SIGINT",
         "SOCK_DGRAM",
         "SOCK_RAW",
+        "STATE_RUNNING",
         "STDERR",
         "STDIN",
         "STDOUT",

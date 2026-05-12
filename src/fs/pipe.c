@@ -1,5 +1,6 @@
 // fs/pipe.c — anonymous pipe pool + ring buffer.
 #include "macros.h"
+#include "program_state.h"
 //
 // One static pool of MAX_PIPES struct pipes lives in BSS.  Allocation
 // is linear search keyed on the in_use flag.  Each pipe's ring buffer
@@ -117,8 +118,50 @@ void pipe_decrement_writer(struct pipe *p) {
     p->writer_fd_open = MAX(p->writer_fd_open - 1, 0);
 }
 
+// pipe_reader_open / pipe_writer_open — read the per-end open
+// refcount.  Returns 0 if the end is fully closed.  Used by
+// fd_close_pipe to decide whether to wake the peer.
+int pipe_reader_open(struct pipe *p) {
+    return p->reader_fd_open;
+}
+
 // Clearing in_use is sufficient — pipe_alloc zero-fills the slot
 // on the next allocation, so no memset here.
 void pipe_release(struct pipe *p) {
     p->in_use = 0;
+}
+
+// pipe_wake_reader — clear the pipe's blocked_reader hook and mark
+// the reader RUNNING so the scheduler picks it up next yield.
+// Called from pipe_buffer_write success path (reader can now drain
+// the new bytes) and from fd_close on a write end (reader will see
+// EOF after draining whatever remains).
+void pipe_wake_reader(struct pipe *p) {
+    struct program_state *reader;
+    if (p->blocked_reader == 0) {
+        return;
+    }
+    reader = (struct program_state *)p->blocked_reader;
+    reader->state = STATE_RUNNING;
+    reader->current_pipe = 0;
+    p->blocked_reader = 0;
+}
+
+// pipe_wake_writer — mirror of pipe_wake_reader for the write end.
+// Called from pipe_buffer_read success (writer can now deposit more
+// bytes) and from fd_close on a read end (writer will see EPIPE on
+// next write attempt).
+void pipe_wake_writer(struct pipe *p) {
+    struct program_state *writer;
+    if (p->blocked_writer == 0) {
+        return;
+    }
+    writer = (struct program_state *)p->blocked_writer;
+    writer->state = STATE_RUNNING;
+    writer->current_pipe = 0;
+    p->blocked_writer = 0;
+}
+
+int pipe_writer_open(struct pipe *p) {
+    return p->writer_fd_open;
 }

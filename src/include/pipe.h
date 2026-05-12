@@ -42,7 +42,27 @@ int pipe_buffer_write(struct pipe *p, uint8_t *src, int want);
 void pipe_decrement_reader(struct pipe *p);
 void pipe_decrement_writer(struct pipe *p);
 
+/* pipe_reader_open / pipe_writer_open — read the per-end open
+   refcount.  Returns 0 if the end is fully closed.  Used by
+   fd_close_pipe to decide whether to wake the peer. */
+int pipe_reader_open(struct pipe *p);
+
 /* Mark the pool slot as free (in_use = 0). */
 void pipe_release(struct pipe *p);
+
+/* pipe_wake_reader / pipe_wake_writer — flip a blocked peer's state
+   back to RUNNING so the scheduler resumes it on the next yield.
+   No-op if no peer is parked. */
+void pipe_wake_reader(struct pipe *p);
+void pipe_wake_writer(struct pipe *p);
+
+int pipe_writer_open(struct pipe *p);
+
+/* Implemented in entry.asm; never returns to the caller (the
+   scheduler resumes whichever slot it picks).  These are the cdecl
+   wrappers around the asm `kernel_yield` routine — they set up the
+   AL / EBX register convention that kernel_yield expects. */
+void kernel_yield_read(struct pipe *p);
+void kernel_yield_write(struct pipe *p);
 
 #endif
