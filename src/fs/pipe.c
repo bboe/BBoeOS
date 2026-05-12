@@ -131,6 +131,21 @@ void pipe_release(struct pipe *p) {
     p->in_use = 0;
 }
 
+// pipe_release_by_index — release a pipe by its pool index.  Used by
+// sys_pipeline2's error-unwind paths when a pipeline build fails
+// before either child has fully owned the pipe ends (so no fd_close
+// will ever drive pipe_decrement_reader/writer down to zero).
+// Out-of-range indices are silently ignored so the unwind paths can
+// be uniform regardless of how far the build got.
+void pipe_release_by_index(int index) {
+    struct pipe *p;
+    p = pipe_at(index);
+    if (p == 0) {
+        return;
+    }
+    pipe_release(p);
+}
+
 // pipe_wake_reader — clear the pipe's blocked_reader hook and mark
 // the reader RUNNING so the scheduler picks it up next yield.
 // Called from pipe_buffer_write success path (reader can now drain

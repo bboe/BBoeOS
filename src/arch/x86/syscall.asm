@@ -127,6 +127,7 @@ syscall_handler:
         SYS_ENTRY SYS_SYS_BREAK,     .sys_break
         SYS_ENTRY SYS_SYS_EXEC,      .sys_exec
         SYS_ENTRY SYS_SYS_EXIT,      .sys_exit
+        SYS_ENTRY SYS_SYS_PIPELINE2, .sys_pipeline2
         SYS_ENTRY SYS_SYS_REBOOT,    .sys_reboot
         SYS_ENTRY SYS_SYS_SHUTDOWN,  .sys_shutdown
         SYS_ENTRY SYS_SYS_SIGNAL,    .sys_signal
@@ -403,6 +404,413 @@ syscall_handler:
         jmp .iret_cf
 
         .net_bad_pointer:
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
+
+        ;; ------------------------------------------------------------
+        ;; Pipeline / exec helpers + SYS_SYS_PIPELINE2 handler.
+        ;;
+        ;; .populate_handoff_from_shell and .build_child_slot factor
+        ;; the per-child setup that both .sys_exec and .sys_pipeline2
+        ;; need: copy BUFFER + EXEC_ARG from the calling shell into a
+        ;; fresh user_data frame, wipe the child slot, inherit the
+        ;; parent's fd_table, and clear console event rings in the
+        ;; copy.
+        ;;
+        ;; .sys_pipeline2 builds slot_b with cmd1, slot_c with cmd2,
+        ;; installs pipe fds on STDOUT(b) / STDIN(c), and cooperatively
+        ;; schedules them via kernel_yield_to_pipeline_start.  Returns
+        ;; cmd2's wait status to the shell once both children exit.
+        ;; ------------------------------------------------------------
+
+        .build_child_slot:
+        ;; Wipe [current_program_state] preserving its kernel_stack_top,
+        ;; copy [parent_program_state]'s fd_table into the just-zeroed
+        ;; slot, then clear FD_TYPE_CONSOLE event rings in the copy so
+        ;; the child doesn't inherit buffered keystrokes from before
+        ;; the exec.
+        ;;
+        ;; In:  [current_program_state] = child slot,
+        ;;      [parent_program_state]  = parent slot.
+        ;; Clobbers: EAX, ECX, EDX, ESI, EDI.
+        mov edi, [current_program_state]
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+        ;; Copy parent's fd_table into the child slot.
+        mov esi, [parent_program_state]
+        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov edi, [current_program_state]
+        add edi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov ecx, (FD_MAX * FD_ENTRY_SIZE) / 4
+        cld
+        rep movsd
+        ;; Clear console event rings in the copy.
+        mov esi, [current_program_state]
+        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
+        mov ecx, FD_MAX
+.bcs_loop:
+        cmp byte [esi + FD_OFFSET_TYPE], FD_TYPE_CONSOLE
+        jne .bcs_next
+        mov byte [esi + FD_OFFSET_EVENT_HEAD], 0
+        mov byte [esi + FD_OFFSET_EVENT_TAIL], 0
+        push edi
+        push ecx
+        lea edi, [esi + FD_OFFSET_EVENT_BUF]
+        mov ecx, 32 / 4
+        xor eax, eax
+        cld
+        rep stosd
+        pop ecx
+        pop edi
+.bcs_next:
+        add esi, FD_ENTRY_SIZE
+        loop .bcs_loop
+        ret
+
+        .pipeline_unwind_slot_b:
+        ;; Tear down slot_b after a partial pipeline build (cmd1 built
+        ;; but cmd2 setup failed before slot_c was committed).  Free
+        ;; the pipe pool slot, destroy slot_b's PD, free any pending
+        ;; handoff frame allocated for slot_c, wipe slot_b, clear
+        ;; parent_program_state + pending_pipeline_pipe.
+        ;;
+        ;; Also reachable from spawn_failed_unwind (entry.asm) when
+        ;; pipeline_partial_state == 1 — slot_c's build_child_program_state
+        ;; OOMed after slot_b was fully built.
+        ;;
+        ;; Clobbers: EAX, EBX, ECX, EDX, EDI.
+        mov eax, [pending_pipeline_pipe]
+        push eax
+        call pipe_release_by_index
+        add esp, 4
+        mov ebx, program_state_b
+        mov eax, [ebx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        test eax, eax
+        jz .punw_no_pd
+        push eax
+        call address_space_destroy
+        add esp, 4
+        mov dword [ebx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
+.punw_no_pd:
+        ;; Free any pending handoff frame (allocated for slot_c but
+        ;; never consumed because vfs_find / executable check failed).
+        mov eax, [next_handoff_frame_phys]
+        test eax, eax
+        jz .punw_no_handoff
+        call frame_free
+        mov dword [next_handoff_frame_phys], 0
+.punw_no_handoff:
+        ;; Wipe slot_b state, clear parent + pending-pipe globals.
+        ;; Restoring current_program_state -> program_state_a is critical:
+        ;; without it the eventual iret_cf path runs
+        ;; tss_set_esp0_for_current_slot on slot_b and the next int 0x30
+        ;; from the shell would enter the syscall handler with slot_b's
+        ;; (now FD_TYPE_FREE) fd_table — wedging the shell.
+        mov edi, program_state_b
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+        mov dword [parent_program_state], 0
+        mov dword [pending_pipeline_pipe], 0
+        mov dword [pipeline_active], 0
+        mov dword [pipeline_partial_state], 0
+        mov dword [current_program_state], program_state_a
+        ret
+
+        .populate_handoff_from_shell:
+        ;; Populate the user_data handoff frame at
+        ;; [next_handoff_frame_phys] from the shell's user pages.  The
+        ;; new frame is reached through kmap_map so it stays addressable
+        ;; even when the bitmap allocator hands out a frame above the
+        ;; direct-map ceiling.
+        ;;
+        ;; In:  [next_handoff_frame_phys] = pre-allocated frame phys.
+        ;;      Active CR3 = shell's PD (so BUFFER / EXEC_ARG resolve).
+        ;; Out: frame zeroed; EXEC_ARG + BUFFER copied at matching
+        ;;      in-frame offsets; CR3 unchanged.
+        ;; Clobbers: EAX, ECX.  Preserves EBX, EDX, ESI, EDI, EBP.
+        push esi
+        push edi
+        mov eax, [next_handoff_frame_phys]
+        call kmap_map                   ; EAX = handoff kvirt
+        push eax                        ; [esp+0] = kvirt; reloaded below
+        mov edi, eax
+        mov ecx, 1024
+        xor eax, eax
+        cld
+        rep stosd
+        ;; Reload kvirt (rep stosd advanced edi past the frame).
+        mov edi, [esp]
+        mov eax, [EXEC_ARG]
+        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
+        mov esi, BUFFER
+        add edi, (BUFFER - USER_DATA_BASE)
+        mov ecx, MAX_INPUT / 4
+        cld
+        rep movsd
+        pop eax                         ; handoff kvirt
+        call kmap_unmap
+        pop edi
+        pop esi
+        ret
+
+        .sys_pipeline2:
+        ;; SYS_SYS_PIPELINE2: cooperatively run two pipeline children
+        ;; (cmd1 | cmd2) in slot_b and slot_c, return when both have
+        ;; exited with cmd2's wait status in EAX.
+        ;;
+        ;; In:  ESI = argv1 (cmd1 path, in shell user-virt)
+        ;;      EDI = argv2 (cmd2 path, in shell user-virt)
+        ;; Out: EAX = cmd2 wait status (POSIX-shaped, zero-extended).
+        ;;      CF = 0 on success.  CF = 1 + AL = ERROR_* on failure
+        ;;      (bad pointer, not found, not executable, OOM, nested
+        ;;      pipeline rejection).
+        ;;
+        ;; Reject nested pipelines: a parent must not already be
+        ;; suspended.  Same rule as sys_exec.
+        cmp dword [parent_program_state], 0
+        je .pipeline_no_parent
+        mov al, ERROR_INVALID
+        stc
+        jmp .iret_cf
+.pipeline_no_parent:
+        ;; Snapshot the shell's pushad+iret kernel-stack frame so any
+        ;; future child_terminate-style return path that uses
+        ;; parent_iret_frame finds a consistent snapshot.  In practice
+        ;; the pipeline-resume path returns through
+        ;; kernel_yield_to_pipeline_start's saved ESP — not through
+        ;; parent_iret_frame — but writing the snapshot keeps the
+        ;; invariant uniform with sys_exec.
+        mov esi, esp
+        mov edi, parent_iret_frame
+        mov ecx, 13
+        cld
+        rep movsd
+        ;; rep movsd clobbered ESI/EDI; reload argv1 from pushad slot.
+        ;; pushad layout: [esp+0]=EDI, [esp+4]=ESI, ...; cc.py emitted
+        ;; SI=argv1, DI=argv2 per the SYS_SYS_PIPELINE2 ABI.
+        mov esi, [esp + 4]              ; argv1
+        call .check_path
+        jc .pipeline_bad_pointer
+        mov esi, [esp + 0]              ; argv2
+        call .check_path
+        jc .pipeline_bad_pointer
+
+        ;; Allocate the pipe.
+        call pipe_alloc
+        cmp eax, 0
+        jl .pipeline_no_pipe
+        mov [pending_pipeline_pipe], eax
+
+        ;; --- Build slot_b (cmd1: writer side) ---
+        mov esi, [esp + 4]              ; argv1 path
+        call vfs_find
+        jc .pipeline_b_not_found
+        test byte [vfs_found_mode], FLAG_EXECUTE
+        jz .pipeline_b_not_execute
+        call frame_alloc
+        jc .pipeline_b_oom_handoff
+        mov [next_handoff_frame_phys], eax
+        call .populate_handoff_from_shell
+
+        ;; Take parent <- slot_a (shell), current <- slot_b.
+        mov eax, [current_program_state]
+        mov [parent_program_state], eax
+        mov dword [current_program_state], program_state_b
+
+        ;; Wipe + inherit fd_table from parent (shell).
+        call .build_child_slot
+
+        ;; Install the pipe-write fd at STDOUT (fd 1) in slot_b.
+        mov ebx, [current_program_state]
+        add ebx, PROGRAM_STATE_OFFSET_FD_TABLE
+        add ebx, STDOUT * FD_ENTRY_SIZE
+        mov byte [ebx + FD_OFFSET_TYPE], FD_TYPE_PIPE_W
+        mov eax, [pending_pipeline_pipe]
+        mov [ebx + FD_OFFSET_START], ax
+        ;; Bump the pipe's writer_fd_open refcount.
+        push eax
+        call pipe_at
+        add esp, 4
+        inc byte [eax + PIPE_OFFSET_WRITER_FD_OPEN]
+
+        ;; Switch CR3 to kernel_idle_pd before building slot_b's PD.
+        ;; The shell's PD is preserved (parent_program_state holds it).
+        mov eax, [kernel_idle_pd_phys]
+        mov cr3, eax
+
+        ;; Build slot_b's PD (allocates PD, streams binary, maps stack,
+        ;; etc.) without iretding.  OOM in here unwinds via
+        ;; build_child_program_state.oom -> spawn_failed_unwind, which
+        ;; tears down slot_b and returns ERROR_FAULT to the shell —
+        ;; pipe pool slot is leaked in that path (acceptable for v1).
+        call build_child_program_state
+
+        ;; Prime slot_b's kernel stack so kernel_yield's first resume
+        ;; lands at userland_entry_stub, which popad+iretds into user
+        ;; code at PROGRAM_BASE.
+        call build_initial_iret_frame
+
+        ;; Slot_b is now fully built (PD, kernel-stack iret frame,
+        ;; pipe-W fd installed, pipe refcount bumped).  Arm the
+        ;; pipeline_partial_state hook so spawn_failed_unwind (called
+        ;; from build_child_program_state.oom on slot_c) tears down
+        ;; slot_b too instead of leaking its PD + pipe pool slot.
+        mov dword [pipeline_partial_state], 1
+
+        ;; --- Build slot_c (cmd2: reader side) ---
+        ;; Swap CR3 back to kernel_idle_pd (already there from the
+        ;; slot_b build, but explicit for clarity) and re-resolve cmd2
+        ;; through the shell's view.  We need shell-PD-active to call
+        ;; populate_handoff_from_shell — but we already left it; the
+        ;; shell's user pages are NOT directly mapped under
+        ;; kernel_idle_pd.  Switch back to slot_a's PD briefly to read
+        ;; the shell's BUFFER / EXEC_ARG, then back to kernel_idle_pd
+        ;; for the slot_c build.
+        mov eax, [parent_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+
+        mov esi, [esp + 0]              ; argv2 path
+        call vfs_find
+        jc .pipeline_c_not_found
+        test byte [vfs_found_mode], FLAG_EXECUTE
+        jz .pipeline_c_not_execute
+        call frame_alloc
+        jc .pipeline_c_oom_handoff
+        mov [next_handoff_frame_phys], eax
+        call .populate_handoff_from_shell
+
+        ;; current <- slot_c; parent_program_state still = slot_a.
+        mov dword [current_program_state], program_state_c
+
+        ;; Wipe + inherit fd_table from parent (shell).
+        call .build_child_slot
+
+        ;; Install the pipe-read fd at STDIN (fd 0) in slot_c.
+        mov ebx, [current_program_state]
+        add ebx, PROGRAM_STATE_OFFSET_FD_TABLE
+        add ebx, STDIN * FD_ENTRY_SIZE
+        mov byte [ebx + FD_OFFSET_TYPE], FD_TYPE_PIPE_R
+        mov eax, [pending_pipeline_pipe]
+        mov [ebx + FD_OFFSET_START], ax
+        ;; Bump the pipe's reader_fd_open refcount.
+        push eax
+        call pipe_at
+        add esp, 4
+        inc byte [eax + PIPE_OFFSET_READER_FD_OPEN]
+
+        ;; Switch CR3 to kernel_idle_pd for slot_c's PD build.
+        mov eax, [kernel_idle_pd_phys]
+        mov cr3, eax
+        call build_child_program_state
+        call build_initial_iret_frame
+
+        ;; --- Mark both children runnable ---
+        mov byte [program_state_b + PROGRAM_STATE_OFFSET_STATE], STATE_RUNNING
+        mov byte [program_state_c + PROGRAM_STATE_OFFSET_STATE], STATE_RUNNING
+
+        ;; Disarm pipeline_partial_state: both slots are now built and
+        ;; either child terminating runs the normal child_terminate path
+        ;; (which closes the fd_table and frees the PD per-slot), so
+        ;; spawn_failed_unwind must NOT call pipeline_unwind_slot_b if it
+        ;; ever runs after this point.
+        mov dword [pipeline_partial_state], 0
+
+        ;; Arm the pipeline-active flag so child_terminate routes
+        ;; sys_exit / signal-kill exits from slot_b / slot_c through
+        ;; kernel_yield rather than the parent_iret_frame restore.
+        mov dword [pipeline_active], 1
+
+        ;; --- Switch CR3 back to the shell (slot_a) before yielding ---
+        ;; kernel_yield_to_pipeline_start will then save slot_a's ESP
+        ;; and pick slot_b (running cmd1) — its first kernel_yield
+        ;; lands at userland_entry_stub which iretds into cmd1.
+        mov dword [current_program_state], program_state_a
+        mov eax, [program_state_a + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+        sti
+        call kernel_yield_to_pipeline_start
+        cli
+
+        ;; --- Pipeline complete; both children EXITED.  We're on
+        ;;     slot_a's kernel stack again, with slot_a's PD active.
+        ;; Read cmd2's wait status, tear down pipeline-level state,
+        ;; return success to the shell.
+        movzx eax, word [program_state_c + PROGRAM_STATE_OFFSET_WAIT_STATUS]
+        ;; Wipe slot_b + slot_c (preserving kernel_stack_top) — both
+        ;; PDs were freed by child_terminate's address_space_destroy
+        ;; on each child's sys_exit; the fd_tables were closed by
+        ;; child_terminate's per-fd close loop (which also dropped the
+        ;; pipe refcounts and released the pipe pool slot when both
+        ;; ends fully closed).  All that's left is to zero the
+        ;; per-slot scheduling state.
+        push eax                        ; stash cmd2 wait status
+        mov edi, program_state_b
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+        mov edi, program_state_c
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+        mov dword [parent_program_state], 0
+        mov dword [pending_pipeline_pipe], 0
+        mov dword [pipeline_active], 0
+        pop eax
+        sti
+        clc
+        jmp .iret_cf_eax
+
+;; --- Early error paths (no slot_b state to unwind) ---
+.pipeline_bad_pointer:
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
+.pipeline_no_pipe:
+        ;; pipe_alloc returned -1 (all 4 slots in use) — surface as
+        ;; ERROR_FAULT (OOM-shaped) to match the pattern other resource
+        ;; exhaustion paths use.
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
+.pipeline_b_not_found:
+        mov eax, [pending_pipeline_pipe]
+        push eax
+        call pipe_release_by_index
+        add esp, 4
+        mov dword [pending_pipeline_pipe], 0
+        mov dword [pipeline_active], 0
+        mov al, ERROR_NOT_FOUND
+        stc
+        jmp .iret_cf
+.pipeline_b_not_execute:
+        mov eax, [pending_pipeline_pipe]
+        push eax
+        call pipe_release_by_index
+        add esp, 4
+        mov dword [pending_pipeline_pipe], 0
+        mov dword [pipeline_active], 0
+        mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+.pipeline_b_oom_handoff:
+        mov eax, [pending_pipeline_pipe]
+        push eax
+        call pipe_release_by_index
+        add esp, 4
+        mov dword [pending_pipeline_pipe], 0
+        mov dword [pipeline_active], 0
+        mov al, ERROR_FAULT
+        stc
+        jmp .iret_cf
+;; --- Late error paths (slot_b built; unwind via pipeline_unwind_slot_b) ---
+.pipeline_c_not_found:
+        call .pipeline_unwind_slot_b
+        mov al, ERROR_NOT_FOUND
+        stc
+        jmp .iret_cf
+.pipeline_c_not_execute:
+        call .pipeline_unwind_slot_b
+        mov al, ERROR_NOT_EXECUTE
+        stc
+        jmp .iret_cf
+.pipeline_c_oom_handoff:
+        call .pipeline_unwind_slot_b
         mov al, ERROR_FAULT
         stc
         jmp .iret_cf
@@ -696,37 +1104,15 @@ syscall_handler:
         ;; to program_enter via [next_handoff_frame_phys].
         ;;
         ;; Reads from BUFFER (user-virt 0x1500) and EXEC_ARG (user-virt
-        ;; 0x14FC) below resolve through the shell's PD because we
-        ;; haven't switched CR3 yet.  Once the new frame is populated,
-        ;; we switch CR3 to kernel_idle_pd; the parent's PD is preserved
-        ;; (not destroyed) so child_terminate can restore it later.
+        ;; 0x14FC) inside populate_handoff_from_shell resolve through
+        ;; the shell's PD because we haven't switched CR3 yet.  Once
+        ;; the new frame is populated we switch CR3 to kernel_idle_pd;
+        ;; the parent's PD is preserved (not destroyed) so
+        ;; child_terminate can restore it later.
         call frame_alloc
         jc .exec_oom
         mov [next_handoff_frame_phys], eax
-        push esi
-        push edi
-        call kmap_map                   ; EAX = handoff kvirt
-        push eax                        ; [esp+0] = kvirt; saved for unmap below
-        ;; Zero entire frame so unused slots (ARGV etc.) start clean.
-        mov edi, eax
-        mov ecx, 1024
-        xor eax, eax
-        cld
-        rep stosd
-        ;; Reload kvirt (rep stosd advanced edi past the frame).
-        mov edi, [esp]
-        ;; Copy EXEC_ARG (4 B) and BUFFER (256 B) from the shell PD's
-        ;; user pages into the new frame at the matching offsets.
-        mov eax, [EXEC_ARG]
-        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
-        mov esi, BUFFER
-        add edi, (BUFFER - USER_DATA_BASE)
-        mov ecx, MAX_INPUT / 4
-        rep movsd
-        pop eax                         ; handoff kvirt
-        call kmap_unmap
-        pop edi
-        pop esi
+        call .populate_handoff_from_shell
         ;; Do NOT destroy the parent's PD.  Save it, switch slots, switch
         ;; CR3 to kernel_idle_pd, build the child via program_enter.
         mov eax, [current_program_state]
@@ -741,50 +1127,10 @@ syscall_handler:
         mov dword [current_program_state], program_state_a
         .exec_slot_chosen:
 
-        ;; Zero the child's slot (clears non-fd_table fields: signal
-        ;; handlers, pending bits, alarm state, etc.).  fd_table is
-        ;; overwritten next with the parent's table — copied here while
-        ;; both slots are still addressable.  kernel_stack_top is
-        ;; preserved across the wipe — it's a per-slot constant set up
-        ;; once by shell_reload and read by tss_set_esp0_for_current_slot
-        ;; on every iretd-to-user; the first int 30h from the child
-        ;; would #PF at TSS.ESP0=0 if we cleared it here.
-        mov edi, [current_program_state]
-        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
-
-        ;; Inherit parent's fd_table into child's slot.  Both program_state
-        ;; structs live in kernel BSS; straight rep movsd between them.
-        mov esi, [parent_program_state]
-        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
-        mov edi, [current_program_state]
-        add edi, PROGRAM_STATE_OFFSET_FD_TABLE
-        mov ecx, (FD_MAX * FD_ENTRY_SIZE) / 4
-        cld
-        rep movsd
-
-        ;; Walk the child's inherited fd_table; for each FD_TYPE_CONSOLE
-        ;; entry, zero event_head/event_tail/event_buf so the child doesn't
-        ;; inherit keystrokes the parent had buffered before exec.
-        mov esi, [current_program_state]
-        add esi, PROGRAM_STATE_OFFSET_FD_TABLE
-        mov ecx, FD_MAX
-.exec_clear_console_ring:
-        cmp byte [esi + FD_OFFSET_TYPE], FD_TYPE_CONSOLE
-        jne .exec_clear_console_next
-        mov byte [esi + FD_OFFSET_EVENT_HEAD], 0
-        mov byte [esi + FD_OFFSET_EVENT_TAIL], 0
-        push edi
-        push ecx
-        lea edi, [esi + FD_OFFSET_EVENT_BUF]
-        mov ecx, 32 / 4
-        xor eax, eax
-        cld
-        rep stosd
-        pop ecx
-        pop edi
-.exec_clear_console_next:
-        add esi, FD_ENTRY_SIZE
-        loop .exec_clear_console_ring
+        ;; Build the child slot: wipe (preserving kernel_stack_top),
+        ;; copy parent's fd_table, clear console event rings in the
+        ;; copy.
+        call .build_child_slot
 
         ;; Switch CR3 to kernel_idle_pd; do NOT destroy parent's PD.
         mov eax, [kernel_idle_pd_phys]

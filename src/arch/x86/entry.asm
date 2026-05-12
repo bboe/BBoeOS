@@ -189,6 +189,10 @@ pmode_irq6_handler:
 ;;; Never returns.  On panic (allocator OOM or disk error during
 ;;; PD build) the kernel halts — there's no graceful recovery for
 ;;; "ran out of frames / lost a sector mid-program-load" yet.
+;;;
+;;; The PD-build body is factored into `build_child_program_state`
+;;; (below) so sys_pipeline2 can reuse it without the trailing iretd
+;;; — its children's first run is reached via kernel_yield, not iretd.
 ;;; -----------------------------------------------------------------------
 program_enter:
         ;; Boot / shell_reload: initialize fresh fd_table.  sys_exec:
@@ -198,7 +202,47 @@ program_enter:
         jne .skip_fd_init
         call fd_init
 .skip_fd_init:
+        call build_child_program_state
+        ;; --- iretd into ring 3 ---
+        ;; Reload data segments to USER_DATA_SELECTOR before the iretd
+        ;; (iretd doesn't reload DS/ES/FS/GS).  CPL=0 can still
+        ;; read/write through those selectors because CPL <= DPL on
+        ;; access.
+        mov ax, USER_DATA_SELECTOR
+        mov ds, ax
+        mov es, ax
+        mov fs, ax
+        mov gs, ax
+        push dword USER_DATA_SELECTOR
+        push dword USER_STACK_TOP
+        push dword 0x202
+        push dword USER_CODE_SELECTOR
+        push dword PROGRAM_BASE
+        ;; Update TSS.ESP0 to the entering slot's kernel-stack top so the
+        ;; next ring-3-to-ring-0 transition (syscall / IRQ / exception)
+        ;; lands on this slot's private kernel stack.
+        call tss_set_esp0_for_current_slot
+        iretd
 
+;;; -----------------------------------------------------------------------
+;;; build_child_program_state
+;;;
+;;; PD-build core extracted from program_enter.  Allocates the
+;;; per-program PD, populates the user-visible regions (handoff
+;;; frame, program text + BSS, vDSO code page, user stack), switches
+;;; CR3 to the new PD, enables the FPU, drains PS/2, and returns.
+;;;
+;;; Caller invariants: same as program_enter (active PD = kernel_idle_pd,
+;;; vfs_found_* populated, next_handoff_frame_phys either pre-populated
+;;; or zero).
+;;;
+;;; OOM during the build does NOT return; it falls through to the local
+;;; .oom path which either (a) `jmp spawn_failed_unwind` (if a parent
+;;; is suspended — sys_exec or sys_pipeline2 failure), (b) prints a
+;;; message and `jmp shell_reload` (shell-load-itself OOM is fatal —
+;;; gated by loading_shell_flag → .panic).
+;;; -----------------------------------------------------------------------
+build_child_program_state:
         ;; --- Allocate fresh PD ---
         call address_space_create
         jc .oom
@@ -545,26 +589,10 @@ program_enter:
         ;; clears head / tail / buffer for every console fd in one shot.
         call ps2_drain
 
-        ;; --- iretd into ring 3 ---
-        ;; Reload data segments to USER_DATA_SELECTOR before the iretd
-        ;; (iretd doesn't reload DS/ES/FS/GS).  CPL=0 can still
-        ;; read/write through those selectors because CPL ≤ DPL on
-        ;; access.
-        mov ax, USER_DATA_SELECTOR
-        mov ds, ax
-        mov es, ax
-        mov fs, ax
-        mov gs, ax
-        push dword USER_DATA_SELECTOR
-        push dword USER_STACK_TOP
-        push dword 0x202
-        push dword USER_CODE_SELECTOR
-        push dword PROGRAM_BASE
-        ;; Update TSS.ESP0 to the entering slot's kernel-stack top so the
-        ;; next ring-3-to-ring-0 transition (syscall / IRQ / exception)
-        ;; lands on this slot's private kernel stack.
-        call tss_set_esp0_for_current_slot
-        iretd
+        ;; PD fully built.  Return to caller (program_enter for the
+        ;; sys_exec / boot / shell_reload path, sys_pipeline2 for the
+        ;; pipeline-child path).
+        ret
 
 .oom:
         ;; Allocator OOM (or disk error) during program load.  If we
@@ -650,6 +678,60 @@ program_enter:
         jmp $-1
 
 oom_msg db "exec: out of memory", 13, 10, 0
+
+;;; -----------------------------------------------------------------------
+;;; build_initial_iret_frame
+;;;
+;;; Prime [current_program_state]'s kernel stack with a 14-dword frame
+;;; that, when reached via kernel_yield's `ret`, lands at
+;;; userland_entry_stub.  The stub then `popad; iretd`s the slot into
+;;; user code at PROGRAM_BASE / USER_STACK_TOP.
+;;;
+;;; Layout (high to low — popad+iretd consumes them in this order
+;;; once the ret pops the return address):
+;;;   [top - 4]   ss      = USER_DATA_SELECTOR
+;;;   [top - 8]   esp     = USER_STACK_TOP
+;;;   [top - 12]  eflags  = 0x202 (IF=1, reserved bit 1 set)
+;;;   [top - 16]  cs      = USER_CODE_SELECTOR
+;;;   [top - 20]  eip     = PROGRAM_BASE
+;;;   [top - 24]  eax     = 0       \
+;;;   [top - 28]  ecx     = 0       |
+;;;   [top - 32]  edx     = 0       |
+;;;   [top - 36]  ebx     = 0       | pushad area (8 dwords)
+;;;   [top - 40]  esp_pushad = 0    |
+;;;   [top - 44]  ebp     = 0       |
+;;;   [top - 48]  esi     = 0       |
+;;;   [top - 52]  edi     = 0       /
+;;;   [top - 56]  return addr = userland_entry_stub  <- ret pops this
+;;;
+;;; saved_esp is set to (top - 56) so kernel_yield's `mov esp, saved_esp;
+;;; ret` lands at userland_entry_stub with the popad+iret frame above.
+;;;
+;;; In:  [current_program_state] = slot to prime.
+;;; Clobbers: EAX, EDX.
+;;; -----------------------------------------------------------------------
+build_initial_iret_frame:
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]
+        mov dword [eax - 4],  USER_DATA_SELECTOR
+        mov dword [eax - 8],  USER_STACK_TOP
+        mov dword [eax - 12], 0x202
+        mov dword [eax - 16], USER_CODE_SELECTOR
+        mov dword [eax - 20], PROGRAM_BASE
+        xor edx, edx
+        mov [eax - 24], edx
+        mov [eax - 28], edx
+        mov [eax - 32], edx
+        mov [eax - 36], edx
+        mov [eax - 40], edx
+        mov [eax - 44], edx
+        mov [eax - 48], edx
+        mov [eax - 52], edx
+        mov dword [eax - 56], userland_entry_stub
+        sub eax, 56
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], eax
+        ret
 
 protected_mode_entry:
         ;; Segment registers, ESP, GDTR, and IDTR are already in place
@@ -743,6 +825,11 @@ shell_reload:
         ;; Boot path / shell-itself-died fallback — re-establish the
         ;; canonical "shell is the sole live program" state.
         mov dword [parent_program_state], 0
+        ;; Clear pipeline globals in case the shell died mid-pipeline
+        ;; (e.g. SIGINT killed the shell while sys_pipeline2 was on
+        ;; the kernel stack).  Fresh boot path: already zero by BSS.
+        mov dword [pipeline_active], 0
+        mov dword [pending_pipeline_pipe], 0
         mov edi, parent_iret_frame
         mov ecx, 13
         xor eax, eax
@@ -839,11 +926,17 @@ child_terminate:
         push eax
         call address_space_destroy
         add esp, 4
+        mov edx, [current_program_state]
+        mov dword [edx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
 
         ;; Close every non-free fd in the child's fd_table before zeroing
         ;; the slot.  This drives the per-type teardown — vfs_update_size
         ;; flush for writable file fds, sb16_close, midi reset — that the
-        ;; child would have run if it had called close() itself.
+        ;; child would have run if it had called close() itself.  For
+        ;; pipeline children, closing the pipe-end fds drives
+        ;; fd_close_pipe → pipe_decrement_*; the matching pipe_wake_*
+        ;; rewakes a peer parked on the empty/full buffer so it can see
+        ;; EOF / EPIPE on its next attempt.
         ;; fd_close needs current_program_state pointing at the child;
         ;; we haven't swapped to the parent yet (see the swap below), so
         ;; that's still correct here.
@@ -861,6 +954,29 @@ child_terminate:
         jmp .child_term_close_loop
 .child_term_close_done:
         pop ebx                         ; restore wait status
+
+        ;; Pipeline-child branch.  pipeline_active is non-zero while
+        ;; sys_pipeline2 is suspended on
+        ;; kernel_yield_to_pipeline_start, so a sys_exit from slot_b /
+        ;; slot_c during that window means "pipeline child exiting."
+        ;; Mark this slot EXITED, stash wait_status in the slot, and
+        ;; kernel_yield — the scheduler will pick the peer if it's
+        ;; still RUNNING, or fall back to slot_a (resuming
+        ;; sys_pipeline2's epilogue) once both children have exited.
+        ;;
+        ;; The PD is already destroyed and the fd_table is already
+        ;; closed above, so all that's left for this slot is the
+        ;; scheduling-state bookkeeping kernel_yield does.  We
+        ;; intentionally skip the WIPE_SLOT here so wait_status
+        ;; survives until sys_pipeline2 reads it.
+        cmp dword [pipeline_active], 0
+        je .child_term_non_pipeline
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_WAIT_STATUS], ebx
+        mov al, STATE_EXITED
+        xor ebx, ebx                    ; not parked on a pipe
+        jmp kernel_yield
+.child_term_non_pipeline:
 
         ;; Zero the child's slot (clears fd_table, pending bits, etc.).
         ;; kernel_stack_top is a per-slot constant — preserve it across
@@ -973,6 +1089,22 @@ spawn_failed_unwind:
         mov edx, [current_program_state]
         mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov cr3, eax
+
+        ;; Pipeline-aware tail: if sys_pipeline2 had already finished
+        ;; building slot_b when slot_c's build_child_program_state OOMed,
+        ;; the unwind above only tore down slot_c.  Slot_b's PD, its
+        ;; FD_TYPE_PIPE_W fd, and the pipe pool slot would leak.
+        ;; pipeline_partial_state == 1 means "slot_b is built and needs
+        ;; cleanup" — call into syscall_handler.pipeline_unwind_slot_b,
+        ;; which destroys slot_b's PD, releases the pipe pool slot, and
+        ;; clears pipeline_active + pending_pipeline_pipe +
+        ;; pipeline_partial_state.  It also re-asserts
+        ;; current_program_state = program_state_a (already true here
+        ;; from the swap above, idempotent).
+        cmp dword [pipeline_partial_state], 0
+        je .spawn_failed_no_pipeline
+        call syscall_handler.pipeline_unwind_slot_b
+.spawn_failed_no_pipeline:
 
         ;; Restore parent kernel-stack frame, set EAX=ERROR_FAULT, set CF.
         ;; The parent in these unwind paths is always slot_a (the shell), so
@@ -1097,6 +1229,49 @@ kernel_yield:
         cli
         hlt
         jmp $-1
+
+;;; -----------------------------------------------------------------------
+;;; kernel_yield_to_pipeline_start — sys_pipeline2's first-yield variant
+;;; of kernel_yield.  Used exactly once per pipeline: after both children
+;;; have been built and marked STATE_RUNNING, the shell calls this to
+;;; save slot_a's kernel ESP and switch into the first runnable child.
+;;;
+;;; Differences from kernel_yield:
+;;;   * Does NOT park slot_a on a pipe (the shell isn't blocked on one
+;;;     — it's just suspended until both children exit).
+;;;   * Does NOT touch slot_a.state — the scheduler distinguishes
+;;;     "shell-suspended" from a child purely by current_program_state
+;;;     identity; the slot_a fallback in kernel_yield is reached only
+;;;     after both children EXIT, and at that point any state value
+;;;     in slot_a is fine.
+;;;
+;;; Returns when both pipeline children have exited and kernel_yield's
+;;; fallback path resumes slot_a's saved ESP — that lands here right
+;;; after the `mov esp, saved_esp; ret` sequence in the resume path.
+;;;
+;;; Clobbers: EAX, EDX (same shape as kernel_yield).
+;;; -----------------------------------------------------------------------
+kernel_yield_to_pipeline_start:
+        cli
+        ;; Save the shell's (slot_a's) kernel ESP.
+        mov edx, [current_program_state]
+        mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], esp
+        ;; Pick the first runnable child.  sys_pipeline2 set both
+        ;; program_state_b.state and program_state_c.state to
+        ;; STATE_RUNNING before calling here, so at least one is
+        ;; STATE_RUNNING.  Prefer slot_b so cmd1 runs first.
+        mov edx, program_state_b
+        cmp byte [edx + PROGRAM_STATE_OFFSET_STATE], STATE_RUNNING
+        je .pipeline_start_resume
+        mov edx, program_state_c
+.pipeline_start_resume:
+        mov [current_program_state], edx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+        mov esp, [edx + PROGRAM_STATE_OFFSET_SAVED_ESP]
+        call tss_set_esp0_for_current_slot
+        sti
+        ret
 
 ;;; -----------------------------------------------------------------------
 ;;; tss_set_esp0_for_current_slot — update TSS.ESP0 to point at the
@@ -1249,6 +1424,35 @@ parent_iret_frame       times 13 dd 0
 parent_program_state    dd 0
 
 pending_frame_phys      dd 0
+
+        ;; Active pipeline's pipe-pool index.  Set by sys_pipeline2 in
+        ;; entry, consumed by both child-build steps to install the
+        ;; matching FD_TYPE_PIPE_R / FD_TYPE_PIPE_W fds on slot_b /
+        ;; slot_c.  Holds the index verbatim — pool index 0 is valid,
+        ;; so the "is a pipeline active?" check uses pipeline_active
+        ;; below, not this field.  The error-unwind paths read this
+        ;; to release the pool slot when a partial build fails.
+pending_pipeline_pipe   dd 0
+
+        ;; Set non-zero by sys_pipeline2 between "both children built"
+        ;; and "both children exited" — used by child_terminate's
+        ;; sys_exit path to detect a pipeline-child exit vs. a regular
+        ;; sys_exec child exit.  The pipeline-child branch routes
+        ;; sys_exit through kernel_yield (no parent_iret_frame
+        ;; restore); the non-pipeline branch keeps the existing
+        ;; parent-restore behavior.
+pipeline_active         dd 0
+
+        ;; pipeline_partial_state — sys_pipeline2 sets this to 1 once
+        ;; slot_b is fully built (PD allocated, fd_table populated,
+        ;; pipe writer end installed), and back to 0 once both children
+        ;; are STATE_RUNNING.  spawn_failed_unwind consults it: if
+        ;; non-zero when slot_c's build_child_program_state OOMs, the
+        ;; normal slot_c teardown is followed by .pipeline_unwind_slot_b
+        ;; so slot_b's PD, the writer fd, and the pipe pool slot don't
+        ;; leak.  Values: 0 = no pipeline build in progress; 1 = slot_b
+        ;; built (needs teardown on slot_c OOM).
+pipeline_partial_state  dd 0
 
         ;; Kernel-side fd struct used by program_enter to stream the
         ;; program binary directly from disk into per-program user

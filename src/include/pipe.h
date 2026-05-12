@@ -50,6 +50,12 @@ int pipe_reader_open(struct pipe *p);
 /* Mark the pool slot as free (in_use = 0). */
 void pipe_release(struct pipe *p);
 
+/* pipe_release_by_index — release a pipe by its pool index.  Used by
+   sys_pipeline2's error-unwind paths to free the pipe pool slot when
+   a pipeline build fails before either child has fully owned the
+   pipe ends.  Out-of-range indices are silently ignored. */
+void pipe_release_by_index(int index);
+
 /* pipe_wake_reader / pipe_wake_writer — flip a blocked peer's state
    back to RUNNING so the scheduler resumes it on the next yield.
    No-op if no peer is parked. */
