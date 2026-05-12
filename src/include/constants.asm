@@ -4,12 +4,12 @@
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
         %assign BUFFER 1500h            ; 256 bytes; = USER_DATA_BASE + 0x500
         %assign DIRECTORY_ENTRY_SIZE 32
-        %assign DIRECTORY_MAX_ENTRIES 48
+        %assign DIRECTORY_MAX_ENTRIES 64
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
         %assign DIRECTORY_OFFSET_FLAGS (DIRECTORY_NAME_LENGTH)
         %assign DIRECTORY_OFFSET_SECTOR (DIRECTORY_NAME_LENGTH + 1)
         %assign DIRECTORY_OFFSET_SIZE (DIRECTORY_NAME_LENGTH + 3)   ; 32-bit (4 bytes)
-        %assign DIRECTORY_SECTORS 3
+        %assign DIRECTORY_SECTORS 4
         %assign ERROR_DIRECTORY_FULL 01h     ; Copy error: no free directory entries
         %assign ERROR_EXISTS         02h     ; Rename/copy error: destination name already exists
         %assign ERROR_FAULT          03h     ; Bad user pointer: out of user range, wraps, or filename has no NUL within MAX_PATH

@@ -53,7 +53,7 @@ int pipe_alloc() {
     return -1;
 }
 
-struct pipe *pipe_at(int index) {
+struct pipe *pipe_at(int index __attribute__((in_register("edx")))) {
     if (index < 0) {
         return 0;
     }
@@ -68,7 +68,9 @@ int pipe_both_ends_closed(struct pipe *p) {
     return p->reader_fd_open == 0 && p->writer_fd_open == 0;
 }
 
-int pipe_buffer_read(struct pipe *p, uint8_t *dst, int want) {
+int pipe_buffer_read(struct pipe *p,
+                     uint8_t *dst __attribute__((in_register("ebx"))),
+                     int want __attribute__((in_register("edi")))) {
     int bytes_read;
     uint8_t *buf;
     buf = p->buffer;
@@ -88,7 +90,9 @@ int pipe_buffer_read(struct pipe *p, uint8_t *dst, int want) {
     return bytes_read;
 }
 
-int pipe_buffer_write(struct pipe *p, uint8_t *src, int want) {
+int pipe_buffer_write(struct pipe *p,
+                      uint8_t *src __attribute__((in_register("ebx"))),
+                      int want __attribute__((in_register("edi")))) {
     int bytes_written;
     uint8_t *buf;
     buf = p->buffer;

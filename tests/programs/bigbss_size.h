@@ -7,7 +7,7 @@
    pool spans ~2 GB of physical RAM but the kernel direct map only
    covers 4 MB (PDE 1022 = FIRST_KERNEL_PDE); every frame above
    that handed out by the bitmap allocator is reached through a
-   kmap_map slot in PDE 1023's window.  With BIGBSS_PAGES = 523,569,
+   kmap_map slot in PDE 1023's window.  With BIGBSS_PAGES = 523,551,
    nearly all of program_enter's BSS zero-fills go through the slow
    path, proving the kmap helpers correctly alias high-physical
    frames.
@@ -45,4 +45,4 @@
    probe at -m 2048 and update this constant.  The two tripwire
    tests will go red (one or both) when it drifts. */
 
-#define BIGBSS_PAGES 523559
+#define BIGBSS_PAGES 523551

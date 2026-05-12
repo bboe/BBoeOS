@@ -726,6 +726,37 @@ class BuiltinsMixin:
         self.required_includes.add("parse_ip.asm")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
+    def builtin_pipeline2(self, arguments: list[Node], /) -> None:
+        """Generate code for the pipeline2(path1, path2) builtin.
+
+        Emits ``mov si, <path1> / mov di, <path2> / mov ah, SYS_SYS_PIPELINE2
+        / int 30h``.  Returns cmd2's exit status in AX with CF clear on
+        success; -errno on failure (CF set, mirrors exec()'s pattern).
+
+        Return value:
+        - success: zero-extended 16-bit wait status (>= 0).
+        - failure: -errno (negative).
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="pipeline2")
+        self.emit_si_from_argument(arguments[0])
+        self.emit_register_from_argument(argument=arguments[1], register=self.target.di_register)
+        self._emit_syscall("PIPELINE2")
+        label_index = self.new_label()
+        self.emit(f"        jc .pipeline2_failed_{label_index}")
+        # Success path: AX holds the 16-bit wait status; zero-extend to
+        # full accumulator width.
+        if self.target.int_size == 2:
+            self.emit("        xor ah, ah")
+        else:
+            self.emit(f"        movzx {self.target.acc}, ax")
+        self.emit(f"        jmp .pipeline2_done_{label_index}")
+        self.emit(f".pipeline2_failed_{label_index}:")
+        # Failure path: AL holds the ERROR_* code; zero-extend then negate.
+        self.emit_accumulator_zx_from_al()
+        self.emit(f"        neg {self.target.acc}")
+        self.emit(f".pipeline2_done_{label_index}:")
+        self.ax_clear()
+
     def builtin_print_datetime(self, arguments: list[Node], /) -> None:
         """Generate code for the print_datetime(unsigned long) builtin.
 

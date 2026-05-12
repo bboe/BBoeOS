@@ -22,8 +22,10 @@
 int pipe_alloc();
 
 /* Resolve a pool index to a struct pipe pointer.  Returns 0 if the
-   index is out of range. */
-struct pipe *pipe_at(int index);
+   index is out of range.  The index argument is passed in EDX (cc.py
+   auto-pin convention for single-parameter kernel functions that use
+   the value as a pure scalar throughout their body). */
+struct pipe *pipe_at(int index __attribute__((in_register("edx"))));
 
 /* Returns 1 if both the reader and writer refcounts are zero (no open
    fd holds this end); the caller should then call pipe_release. */
@@ -31,12 +33,18 @@ int pipe_both_ends_closed(struct pipe *p);
 
 /* Drain up to `want` bytes from the pipe's ring into `dst`.  Returns
    bytes actually transferred; may be 0 if the buffer is empty.
-   Never blocks — the caller is responsible for empty handling. */
-int pipe_buffer_read(struct pipe *p, uint8_t *dst, int want);
+   Never blocks — the caller is responsible for empty handling.
+   Calling convention: p on stack ([ebp+8]), dst in EBX, want in EDI. */
+int pipe_buffer_read(struct pipe *p,
+                     uint8_t *dst __attribute__((in_register("ebx"))),
+                     int want __attribute__((in_register("edi"))));
 
 /* Deposit up to `want` bytes from `src` into the pipe's ring.
-   Returns bytes actually transferred; may be 0 if full.  Never blocks. */
-int pipe_buffer_write(struct pipe *p, uint8_t *src, int want);
+   Returns bytes actually transferred; may be 0 if full.  Never blocks.
+   Calling convention: p on stack ([ebp+8]), src in EBX, want in EDI. */
+int pipe_buffer_write(struct pipe *p,
+                      uint8_t *src __attribute__((in_register("ebx"))),
+                      int want __attribute__((in_register("edi"))));
 
 /* Decrement the reader or writer open-fd refcount (saturating at 0). */
 void pipe_decrement_reader(struct pipe *p);

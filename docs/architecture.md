@@ -336,3 +336,79 @@ Userland surface: `unsigned int alarm_ms(unsigned int delay_ms, unsigned int
 interval_ms)` (BBoeOS extension) and the POSIX `unsigned int alarm(unsigned int
 seconds)` wrapper, both in `tools/libc/signal.c`.  cc.py-compiled programs call
 `alarm_ms()` directly via the matching builtin.
+
+## Cooperative pipes (`cmd1 | cmd2`)
+
+BBoeOS v1 supports a single-pipe two-command pipeline via `SYS_SYS_PIPELINE2` (F3h).
+The shell parses `cmd1 | cmd2` at the top level of each command segment (after
+chain operators `;`, `&&`, `||` split the command line): a single unquoted `|`
+triggers pipeline mode; multiple `|` or a `|` combined with `<`/`>`/`>>`
+redirections are rejected at parse time.
+
+### Slot layout
+
+The kernel maintains three `program_state` slots in BSS (`entry.asm`):
+
+- **slot_a** — always the shell. `SYS_SYS_PIPELINE2` is only callable from slot_a
+  (nested pipelines are rejected with `ERROR_INVALID`).
+- **slot_b** — cmd1 (writer side). Its `fd[STDOUT]` is replaced with an
+  `FD_TYPE_PIPE_W` entry pointing at the allocated pipe pool slot.
+- **slot_c** — cmd2 (reader side). Its `fd[STDIN]` is replaced with an
+  `FD_TYPE_PIPE_R` entry pointing at the same pipe pool slot.
+
+### Pipe pool
+
+`src/fs/pipe.c` maintains a static pool of `MAX_PIPES = 4` `struct pipe` objects,
+each occupying exactly one 4 KB frame (sized to match `PIPE_SIZE` in
+`constants.asm`). The ring buffer inside the struct is `PIPE_BUFFER_BYTES = 4076`
+bytes. Fields at known offsets (`PIPE_OFFSET_*` in `constants.asm`) let both
+kernel C code and `syscall.asm` reach the same struct.
+
+### Cooperative scheduling
+
+`SYS_SYS_PIPELINE2` builds both child slots atomically — allocates the pipe, builds
+slot_b (cmd1 writer), builds slot_c (cmd2 reader), marks both `STATE_RUNNING`, and
+calls `kernel_yield_to_pipeline_start` to hand off to the first child.
+
+`kernel_yield` (`src/arch/x86/entry.asm`) is the cooperative scheduler:
+
+1. Saves the current slot's kernel ESP to its `program_state.saved_esp`.
+2. Marks the current slot with the caller-supplied state (`STATE_BLOCKED_READ`,
+   `STATE_BLOCKED_WRITE`, or `STATE_EXITED`) and parks the slot on the pipe if
+   blocking.
+3. Scans slot_b then slot_c for the first `STATE_RUNNING` slot; switches CR3 and
+   loads the target's saved ESP.
+4. If neither child is `STATE_RUNNING` and both are `STATE_EXITED`, falls back to
+   slot_a — resuming the shell inside `SYS_SYS_PIPELINE2`'s epilogue, which reads
+   cmd2's wait status, wipes both slots, and returns to the shell.
+5. If neither child is `STATE_RUNNING` and at least one is not `STATE_EXITED`, the
+   scheduler panics (prints `*` on COM1 and halts) — this is a deadlock condition
+   that should be unreachable with a single pipe.
+
+### Block and wake
+
+`fd_read_pipe` (`src/fs/fd.c`) loops: try to drain the ring buffer; if empty and
+the writer end is still open, call `kernel_yield_read(p)` to park the reader and
+yield.  `fd_write_pipe` loops symmetrically: try to fill the ring buffer; if full
+and the reader end is still open, call `kernel_yield_write(p)` to park the writer
+and yield.  Each successful `pipe_buffer_read` or `pipe_buffer_write` also calls
+`pipe_wake_writer` or `pipe_wake_reader` respectively to unpark the blocked peer.
+
+### Exit and teardown
+
+When a pipeline child calls `sys_exit`, `child_terminate` runs the fd-close loop
+(which decrements the per-end open refcount and wakes the peer if the last writer
+or reader closes), marks the slot `STATE_EXITED` with `kernel_yield`, and the
+scheduler resumes the peer or the shell as described above. The shell's
+`SYS_SYS_PIPELINE2` epilogue wipes both child slots and clears `pipeline_active`.
+
+### v1 limitations
+
+- Only one pipe (`cmd1 | cmd2`); chains of three or more commands are rejected.
+- Pipe combined with I/O redirection (`cmd1 > file | cmd2`) is rejected.
+- Pipeline children receive no arguments (`argc = 0`); only the path is passed to
+  `SYS_SYS_PIPELINE2`.
+- No `SIGPIPE`; a writer that outlives its reader gets `EPIPE` on the next write
+  attempt (returned as `-1` from `write()`).
+- `SYS_SYS_PIPELINE2` can only be called from the shell (slot_a); programs cannot
+  spawn nested pipelines.

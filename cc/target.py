@@ -200,6 +200,7 @@ class X86CodegenTarget(CodegenTarget):
         "NET_OPEN": ("mov ah, SYS_NET_OPEN", "int 30h"),
         "NET_RECVFROM": ("mov ah, SYS_NET_RECVFROM", "int 30h"),
         "NET_SENDTO": ("mov ah, SYS_NET_SENDTO", "int 30h"),
+        "PIPELINE2": ("mov ah, SYS_SYS_PIPELINE2", "int 30h"),
         "REBOOT": ("mov ah, SYS_SYS_REBOOT", "int 30h"),
         "RTC_ALARM": ("mov ah, SYS_RTC_ALARM", "int 30h"),
         "RTC_DATETIME": ("mov ah, SYS_RTC_DATETIME", "int 30h"),

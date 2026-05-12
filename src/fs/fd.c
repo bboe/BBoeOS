@@ -626,6 +626,10 @@ int fd_read_pipe(int *result __attribute__((out_register("ax"))),
                  int count __attribute__((in_register("ecx")))) {
     struct pipe *p;
     int bytes_read;
+    if (count == 0) {
+        *result = 0;
+        return 1;
+    }
     p = pipe_at(entry->start);
     if (p == 0) {
         *result = -1;

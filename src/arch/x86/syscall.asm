@@ -627,9 +627,9 @@ syscall_handler:
         mov eax, [pending_pipeline_pipe]
         mov [ebx + FD_OFFSET_START], ax
         ;; Bump the pipe's writer_fd_open refcount.
-        push eax
+        ;; pipe_at takes its index argument in EDX (register convention).
+        mov edx, eax
         call pipe_at
-        add esp, 4
         inc byte [eax + PIPE_OFFSET_WRITER_FD_OPEN]
 
         ;; Switch CR3 to kernel_idle_pd before building slot_b's PD.
@@ -693,9 +693,9 @@ syscall_handler:
         mov eax, [pending_pipeline_pipe]
         mov [ebx + FD_OFFSET_START], ax
         ;; Bump the pipe's reader_fd_open refcount.
-        push eax
+        ;; pipe_at takes its index argument in EDX (register convention).
+        mov edx, eax
         call pipe_at
-        add esp, 4
         inc byte [eax + PIPE_OFFSET_READER_FD_OPEN]
 
         ;; Switch CR3 to kernel_idle_pd for slot_c's PD build.

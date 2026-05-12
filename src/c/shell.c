@@ -69,6 +69,38 @@ int saved_line_length;
 int segment_offsets[MAX_SEGMENTS];
 char segment_ops[MAX_SEGMENTS];
 
+/* Scratch buffers for the pipeline parser (`cmd1 | cmd2`).  File-scope
+   so that (a) cc.py passes their addresses correctly on function calls
+   and (b) they live in BSS without consuming additional user stack.
+   pipe_left_buf / pipe_right_buf hold the trimmed command tokens;
+   pipe_left_path / pipe_right_path hold the bin/-prefixed paths. */
+char pipe_left_buf[MAX_INPUT];
+char pipe_right_buf[MAX_INPUT];
+char pipe_left_path[MAX_PATH];
+char pipe_right_path[MAX_PATH];
+
+/* contains_redirect_token — return non-zero if `s` has an unquoted
+   `<`, `>`, or `>>`.  Used to reject pipe + redirect on the same
+   side (v1 limitation). */
+int contains_redirect_token(char *s) {
+    int i = 0;
+    int in_single = 0;
+    int in_double = 0;
+    while (s[i] != '\0') {
+        if (s[i] == '\'' && in_double == 0) {
+            in_single = 1 - in_single;
+        } else if (s[i] == '"' && in_single == 0) {
+            in_double = 1 - in_double;
+        } else if (in_single == 0 && in_double == 0) {
+            if (s[i] == '<' || s[i] == '>') {
+                return 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 /* Forward decl: apply_redirections calls restore_redirections on the
    error-rollback path; restore_redirections sorts after apply in
    source order.  cc.py resolves forward refs silently; clang under
@@ -289,6 +321,37 @@ int expand_dollar_question(char *buffer, int max_len) {
     }
     buffer[len] = '\0';
     return len;
+}
+
+/* find_top_level_pipe — scan `segment` for a `|` outside of quoted
+   regions that is NOT part of a `||` operator.  Returns the byte
+   offset of the first lone `|`, or -1 if none is present.  Returns
+   -2 if a second lone `|` is present (rejects double pipelines). */
+int find_top_level_pipe(char *segment) {
+    int i = 0;
+    int in_single = 0;
+    int in_double = 0;
+    int first = -1;
+    while (segment[i] != '\0') {
+        if (segment[i] == '\'' && in_double == 0) {
+            in_single = 1 - in_single;
+        } else if (segment[i] == '"' && in_single == 0) {
+            in_double = 1 - in_double;
+        } else if (segment[i] == '|' && in_single == 0 && in_double == 0) {
+            /* Skip `||` — that is a chain operator already handled. */
+            if (segment[i + 1] == '|') {
+                i += 2;
+                continue;
+            }
+            if (first < 0) {
+                first = i;
+            } else {
+                return -2;
+            }
+        }
+        i += 1;
+    }
+    return first;
 }
 
 /* Forward declarations: history_down / history_up are defined here in
@@ -758,6 +821,76 @@ int main() {
             if (run && segment[0] != '\0') {
                 int seg_len = strlen(segment);
                 memcpy(buf, segment, seg_len + 1);
+                /* Pipeline check: detect `cmd1 | cmd2` before touching
+                   redirection globals.  parse_chain already consumed `||`
+                   as OP_OR, so any remaining lone `|` is a pipe operator. */
+                int pipe_at = find_top_level_pipe(buf);
+                if (pipe_at == -2) {
+                    write(STDOUT, "shell: pipelines support only one |\n", 36);
+                    last_exec_status = 1 << 8;
+                } else if (pipe_at >= 0) {
+                    /* Copy left side into pipe_left_buf and trim trailing
+                       spaces. */
+                    int pi = 0;
+                    while (pi < pipe_at) {
+                        pipe_left_buf[pi] = buf[pi];
+                        pi += 1;
+                    }
+                    while (pi > 0 && pipe_left_buf[pi - 1] == ' ') {
+                        pi -= 1;
+                    }
+                    pipe_left_buf[pi] = 0;
+                    /* Copy right side into pipe_right_buf, skip leading
+                       spaces. */
+                    pi = pipe_at + 1;
+                    while (buf[pi] == ' ') {
+                        pi += 1;
+                    }
+                    int rj = 0;
+                    while (buf[pi] != '\0') {
+                        pipe_right_buf[rj] = buf[pi];
+                        pi += 1;
+                        rj += 1;
+                    }
+                    pipe_right_buf[rj] = 0;
+                    /* Reject redirect on either side (v1 limitation). */
+                    if (contains_redirect_token(pipe_left_buf) != 0 ||
+                        contains_redirect_token(pipe_right_buf) != 0) {
+                        write(STDOUT, "shell: pipes cannot combine with < > >>\n", 40);
+                        last_exec_status = 1 << 8;
+                    } else {
+                        /* Build bin/-prefixed paths into pipe_left_path and
+                           pipe_right_path.  Mirror the existing exec_path
+                           pattern in dispatch_buffer. */
+                        pipe_left_path[0] = 'b';
+                        pipe_left_path[1] = 'i';
+                        pipe_left_path[2] = 'n';
+                        pipe_left_path[3] = '/';
+                        int ci = 0;
+                        while (pipe_left_buf[ci] != '\0' && ci < MAX_PATH - 5) {
+                            pipe_left_path[4 + ci] = pipe_left_buf[ci];
+                            ci += 1;
+                        }
+                        pipe_left_path[4 + ci] = 0;
+                        pipe_right_path[0] = 'b';
+                        pipe_right_path[1] = 'i';
+                        pipe_right_path[2] = 'n';
+                        pipe_right_path[3] = '/';
+                        ci = 0;
+                        while (pipe_right_buf[ci] != '\0' && ci < MAX_PATH - 5) {
+                            pipe_right_path[4 + ci] = pipe_right_buf[ci];
+                            ci += 1;
+                        }
+                        pipe_right_path[4 + ci] = 0;
+                        int rc = pipeline2(pipe_left_path, pipe_right_path);
+                        if (rc < 0) {
+                            write(STDOUT, "shell: pipeline failed\n", 23);
+                            last_exec_status = -rc;
+                        } else {
+                            last_exec_status = rc;
+                        }
+                    }
+                } else {
                 /* Strip redirections out of buf and into the redirect_*
                    globals BEFORE dispatch_buffer's first-space split looks
                    at the cmd name.  Parse errors short-circuit dispatch. */
@@ -770,6 +903,7 @@ int main() {
                 }
                 /* On apply_redirections failure last_exec_status is set; nothing
                    to restore (apply rolls back its own saves on the failure path). */
+                }
             }
             seg_index += 1;
         }

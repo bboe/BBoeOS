@@ -11,6 +11,21 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Shell pipes (`cmd1 | cmd2`).** The shell parses a single unquoted `|` in
+  each command segment, rejects multiple `|` or pipe-with-redirect combinations
+  at parse time, and calls `SYS_SYS_PIPELINE2` (F3h) to atomically spawn both
+  children. The kernel allocates an anonymous pipe from a static pool
+  (`MAX_PIPES = 4`, each 4 KB, ring buffer 4076 bytes), installs the write end
+  as slot_b's `STDOUT` and the read end as slot_c's `STDIN`, marks both slots
+  `STATE_RUNNING`, and hands off via `kernel_yield_to_pipeline_start`.
+  `fd_read_pipe` / `fd_write_pipe` (`src/fs/fd.c`) block cooperatively via
+  `kernel_yield_read` / `kernel_yield_write`; `fd_close_pipe` wakes the peer
+  when the last writer or reader closes.  The bbfs directory was widened from
+  3 to 4 sectors (48 → 64 entries) to accommodate the two new test-fixture
+  programs (`bin/pipe_producer`, `bin/pipe_consumer`).  Tests:
+  `tests/test_pipeline_basic.py` (producer writes 20 bytes; consumer prints the
+  count), `tests/test_pipeline_reject.py` (double-pipe and pipe-with-redirect
+  both rejected).
 - **Shell I/O redirection: `>`, `>>`, `<`.**  The shell now supports bash-style
   redirection at the tail of each command segment.  Builtins honor redirection
   too (`help > out` works).  Under the hood: a per-fd `dirty` bit gates the

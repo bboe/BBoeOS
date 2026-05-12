@@ -61,8 +61,8 @@ from add_file import (  # noqa: E402
 )
 
 _ALL_FILESYSTEMS = frozenset({"bbfs", "ext2"})
-_BBFS_DIRECTORY_SECTORS = 3
-_BBFS_DIRECTORY_MAX_ENTRIES = _BBFS_DIRECTORY_SECTORS * ENTRIES_PER_SECTOR  # 48
+_BBFS_DIRECTORY_SECTORS = 4
+_BBFS_DIRECTORY_MAX_ENTRIES = _BBFS_DIRECTORY_SECTORS * ENTRIES_PER_SECTOR  # 64
 _DOUBLY_INDIRECT_SENTINEL = b"EXT2_DOUBLY_INDIRECT_OK"
 _DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
 _EXT2_DIRECT_BLOCKS = 12  # ext2 directory blocks ext2_search_dir walks (i_block[0..11])
@@ -153,18 +153,18 @@ def _bbfs_bin_entry_names(*, image: Path) -> list[str | None]:
 
 
 def _bbfs_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
-    """Pad bin/ to BBfs's 48-entry cap with an executable probe written last.
+    """Pad bin/ to BBfs's 64-entry cap with an executable probe written last.
 
     bbfs subdirectories don't carry . / ..; bin/ starts populated with
     the PROGRAMS list (count varies as PROGRAMS grows).  The setup
-    counts the existing entries, adds (47 - existing) empty fillers
+    counts the existing entries, adds (63 - existing) empty fillers
     in a single batched image flush, then writes _zexec_last as the
-    literal final entry (slot 47, in sector 2 of bbfs's 3-sector
+    literal final entry (slot 63, in sector 3 of bbfs's 4-sector
     directory).  Asserts arp (slot 0, sector 0), a runtime-picked
     sector-1 entry (slots 16..31, name chosen from the post-padding
     bin/ layout so the test stays robust to PROGRAMS reordering), and
-    _zexec_last (slot 47, sector 2) all resolve so the lookup walks
-    all three of bbfs's directory sectors.
+    _zexec_last (slot 63, sector 3) all resolve so the lookup walks
+    all four of bbfs's directory sectors.
     """
     names = _bbfs_bin_entry_names(image=image)
     used = sum(1 for name in names if name is not None)
@@ -587,7 +587,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("alarm_repeat", ["alarm_repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
-    # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,341 of
+    # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,551 of
     # BSS at -m 2048 — large enough that ~half the frames sit
     # above FRAME_DIRECT_MAP_LIMIT (~1020 MB).  program_enter's
     # phase-2 zero-fills those high frames through the kmap window
