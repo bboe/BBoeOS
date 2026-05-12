@@ -61,13 +61,13 @@ def main() -> int:
                 break
             cursor = cursor.parent
         search_paths: tuple[Path, ...] = (include_dir,) if include_dir is not None else ()
-        source, defines = preprocess(
+        source, defines, function_defines = preprocess(
             source,
             include_base=input_path.parent,
             search_paths=search_paths,
         )
         tokens = tokenize(source)
-        tokens = apply_defines(defines=defines, tokens=tokens)
+        tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
         constants_asm = include_dir / "constants.asm" if include_dir is not None else None
         constant_values = parse_asm_constants(constants_asm) if constants_asm is not None and constants_asm.is_file() else {}
