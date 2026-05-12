@@ -43,8 +43,12 @@
 #define MAX_INPUT 256
 #define MAX_PATH 64
 #define SECTOR_BUFFER ((char *)0xF000)
-#define SIG_DFL 0
-#define SIG_IGN 1
+/* Host-side casts: cc.py accepts the bare integers, but clang's
+   stricter type-checker rejects passing an int where the second
+   signal() argument expects void (*)(int).  The cast mirrors POSIX's
+   <signal.h> definition without changing the runtime value. */
+#define SIG_DFL ((void (*)(int))0)
+#define SIG_IGN ((void (*)(int))1)
 #define SIGALRM 14
 #define SIGINT 2
 #define SIGPIPE 13
@@ -91,10 +95,13 @@ int mac(char *buffer);
 int net_open(int type, int protocol);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
-/* Atomically spawn two children connected by a pipe: cmd1's stdout
-   feeds cmd2's stdin.  Returns cmd2's wait status on success or a
+/* Atomically spawn two children connected by a pipe: left_path's stdout
+   feeds right_path's stdin.  Each side's args string (NUL-terminated,
+   or NULL for no args) is staged into the child's EXEC_ARG + BUFFER by
+   the kernel.  Returns right_path's wait status on success or a
    negative ERROR_* code on error.  Caller must be the shell (slot_a). */
-int pipeline2(const char *cmd1_path, const char *cmd2_path);
+int pipeline2(const char *left_path, const char *left_args,
+              const char *right_path, const char *right_args);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
 void print_datetime(unsigned long epoch);
 /* Print 4-byte IP as A.B.C.D (no POSIX equivalent) */

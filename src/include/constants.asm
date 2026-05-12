@@ -213,7 +213,7 @@
         %assign SYS_SYS_BREAK     0F0h    ; EBX = new break (0 = query); returns EAX = resulting break, CF=0
         %assign SYS_SYS_EXEC      0F1h
         %assign SYS_SYS_EXIT      0F2h
-        %assign SYS_SYS_PIPELINE2 0F3h    ; SI=argv1, DI=argv2; returns AX=wait_status (cmd2's), CF on error
+        %assign SYS_SYS_PIPELINE2 0F3h    ; SI=left_path, DI=right_path, DX=left_args (0=none), CX=right_args (0=none); returns AX=wait_status (cmd2's), CF on error
         %assign SYS_SYS_REBOOT    0F4h
         %assign SYS_SYS_SHUTDOWN  0F5h
         %assign SYS_SYS_SIGNAL    0F6h    ; EBX = signum (SIGINT, SIGPIPE, or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler

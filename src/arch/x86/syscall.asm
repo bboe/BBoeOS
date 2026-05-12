@@ -515,6 +515,49 @@ syscall_handler:
         mov dword [current_program_state], program_state_a
         ret
 
+        .stage_pipeline_child_args:
+        ;; Stage the EXEC_ARG / BUFFER region in the shell's user_data
+        ;; frame so the next call to .populate_handoff_from_shell hands
+        ;; the right per-child argument string to the child being built.
+        ;;
+        ;; In:  EAX = user-virt pointer to the args string in the shell's
+        ;;            BSS (NUL-terminated; ECX-bounded), or 0 for "no args".
+        ;;      Active CR3 = shell's PD (BSS pointer + BUFFER both resolve).
+        ;; Out: [EXEC_ARG] (user-virt 0x14FC) = BUFFER (0x1500) when EAX
+        ;;      was non-zero and the string fit; 0 otherwise.  The args
+        ;;      bytes (including the NUL) are copied into BUFFER so that
+        ;;      .populate_handoff_from_shell's BUFFER-copy step propagates
+        ;;      them into the child's user_data frame at the matching
+        ;;      offset, and the EXEC_ARG pointer resolves under the child's
+        ;;      PD (USER_DATA_BASE is freshly mapped per child).
+        ;;
+        ;; The args pointer is validated up-front by .sys_pipeline2 via
+        ;; access_ok_string; we only re-check the in-range NUL fit here.
+        ;; Clobbers: EAX, ECX, ESI, EDI.
+        test eax, eax
+        jz .spca_clear
+        mov esi, eax
+        mov edi, BUFFER
+        mov ecx, MAX_INPUT
+        cld
+.spca_copy:
+        lodsb
+        stosb
+        test al, al
+        jz .spca_done
+        loop .spca_copy
+        ;; ECX exhausted without finding NUL — the access_ok_string
+        ;; pre-check above caps the source at MAX_INPUT, so we should
+        ;; not reach here; defensively clear EXEC_ARG to fall back to
+        ;; no-args rather than risk a half-copied tail.
+        jmp .spca_clear
+.spca_done:
+        mov dword [EXEC_ARG], BUFFER
+        ret
+.spca_clear:
+        mov dword [EXEC_ARG], 0
+        ret
+
         .populate_handoff_from_shell:
         ;; Populate the user_data handoff frame at
         ;; [next_handoff_frame_phys] from the shell's user pages.  The
@@ -557,8 +600,10 @@ syscall_handler:
         ;; (cmd1 | cmd2) in slot_b and slot_c, return when both have
         ;; exited with cmd2's wait status in EAX.
         ;;
-        ;; In:  ESI = argv1 (cmd1 path, in shell user-virt)
-        ;;      EDI = argv2 (cmd2 path, in shell user-virt)
+        ;; In:  ESI = left_path  (cmd1 path, in shell user-virt)
+        ;;      EDI = right_path (cmd2 path, in shell user-virt)
+        ;;      EDX = left_args  (cmd1 args, in shell user-virt; 0 = none)
+        ;;      ECX = right_args (cmd2 args, in shell user-virt; 0 = none)
         ;; Out: EAX = cmd2 wait status (POSIX-shaped, zero-extended).
         ;;      CF = 0 on success.  CF = 1 + AL = ERROR_* on failure
         ;;      (bad pointer, not found, not executable, OOM, nested
@@ -584,15 +629,39 @@ syscall_handler:
         mov ecx, 13
         cld
         rep movsd
-        ;; rep movsd clobbered ESI/EDI; reload argv1 from pushad slot.
-        ;; pushad layout: [esp+0]=EDI, [esp+4]=ESI, ...; cc.py emitted
-        ;; SI=argv1, DI=argv2 per the SYS_SYS_PIPELINE2 ABI.
-        mov esi, [esp + 4]              ; argv1
+        ;; rep movsd clobbered ESI/EDI; reload left_path from pushad slot.
+        ;; pushad layout: [esp+0]=EDI, [esp+4]=ESI, [esp+20]=EDX, [esp+24]=ECX;
+        ;; cc.py emitted SI=left_path, DI=right_path, DX=left_args,
+        ;; CX=right_args per the SYS_SYS_PIPELINE2 ABI.
+        mov esi, [esp + 4]              ; left_path
         call .check_path
         jc .pipeline_bad_pointer
-        mov esi, [esp + 0]              ; argv2
+        mov esi, [esp + 0]              ; right_path
         call .check_path
         jc .pipeline_bad_pointer
+        ;; Validate args pointers (NUL-bounded within MAX_INPUT) — only
+        ;; if non-zero; zero means "no args" and is allowed.  Same
+        ;; access_ok_string discipline as paths but with the wider
+        ;; MAX_INPUT cap (args strings come from the shell's input
+        ;; buffer; paths from MAX_PATH-sized scratch).
+        mov esi, [esp + 20]             ; left_args
+        test esi, esi
+        jz .pipeline_left_args_ok
+        push ecx
+        mov ecx, MAX_INPUT
+        call access_ok_string
+        pop ecx
+        jc .pipeline_bad_pointer
+.pipeline_left_args_ok:
+        mov esi, [esp + 24]             ; right_args
+        test esi, esi
+        jz .pipeline_right_args_ok
+        push ecx
+        mov ecx, MAX_INPUT
+        call access_ok_string
+        pop ecx
+        jc .pipeline_bad_pointer
+.pipeline_right_args_ok:
 
         ;; Allocate the pipe.
         call pipe_alloc
@@ -601,7 +670,7 @@ syscall_handler:
         mov [pending_pipeline_pipe], eax
 
         ;; --- Build slot_b (cmd1: writer side) ---
-        mov esi, [esp + 4]              ; argv1 path
+        mov esi, [esp + 4]              ; left_path
         call vfs_find
         jc .pipeline_b_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
@@ -609,6 +678,12 @@ syscall_handler:
         call frame_alloc
         jc .pipeline_b_oom_handoff
         mov [next_handoff_frame_phys], eax
+        ;; Stage cmd1's args into the shell's BUFFER + EXEC_ARG slots
+        ;; before populate_handoff_from_shell copies them into slot_b's
+        ;; new user_data frame.  Active CR3 = shell's PD; the args
+        ;; string lives in the shell's BSS at user-virt EDX_saved.
+        mov eax, [esp + 20]             ; left_args
+        call .stage_pipeline_child_args
         call .populate_handoff_from_shell
 
         ;; Take parent <- slot_a (shell), current <- slot_b.
@@ -669,7 +744,7 @@ syscall_handler:
         mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov cr3, eax
 
-        mov esi, [esp + 0]              ; argv2 path
+        mov esi, [esp + 0]              ; right_path
         call vfs_find
         jc .pipeline_c_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
@@ -677,6 +752,12 @@ syscall_handler:
         call frame_alloc
         jc .pipeline_c_oom_handoff
         mov [next_handoff_frame_phys], eax
+        ;; Stage cmd2's args into the shell's BUFFER + EXEC_ARG slots
+        ;; before populate_handoff_from_shell copies them into slot_c's
+        ;; user_data frame.  We just switched CR3 back to the shell's PD
+        ;; above, so the BSS pointer in [esp+24] resolves.
+        mov eax, [esp + 24]             ; right_args
+        call .stage_pipeline_child_args
         call .populate_handoff_from_shell
 
         ;; current <- slot_c; parent_program_state still = slot_a.

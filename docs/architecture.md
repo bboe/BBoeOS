@@ -416,9 +416,24 @@ scheduler resumes the peer or the shell as described above. The shell's
 
 - Only one pipe (`cmd1 | cmd2`); chains of three or more commands are rejected.
 - Pipe combined with I/O redirection (`cmd1 > file | cmd2`) is rejected.
-- Pipeline children receive no arguments (`argc = 0`); only the path is passed to
-  `SYS_SYS_PIPELINE2`.
-- No `SIGPIPE`; a writer that outlives its reader gets `EPIPE` on the next write
-  attempt (returned as `-1` from `write()`).
 - `SYS_SYS_PIPELINE2` can only be called from the shell (slot_a); programs cannot
   spawn nested pipelines.
+
+### Per-child arguments
+
+`SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`,
+`DI = right_path`, `DX = left_args`, `CX = right_args`.  The shell splits each
+side at the first unquoted space and stashes the command name into
+`pipe_left_path` / `pipe_right_path` (`bin/`-prefixed) and the args tail into
+`pipe_left_args` / `pipe_right_args` (256-byte BSS arrays).  Passing 0 for an
+args pointer means "this child gets no argv" (the kernel clears `EXEC_ARG` for
+that child).
+
+For each child, immediately before `.populate_handoff_from_shell` runs (with
+the shell's PD active, so the BSS pointer + `BUFFER` both resolve), the kernel
+helper `.stage_pipeline_child_args` copies the NUL-terminated args bytes into
+the shell's `BUFFER` slot (user-virt 0x1500) and writes `EXEC_ARG` =
+`BUFFER`.  The subsequent handoff-frame copy carries both into the child's
+new user_data frame at matching offsets, so the child's `FUNCTION_PARSE_ARGV`
+prologue resolves the pointer through the child's PD just like it does for
+`exec()`.
