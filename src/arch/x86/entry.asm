@@ -70,8 +70,8 @@ pmode_irq0_handler:
         ;; stays O(1) (the alarm check is constant-time per slot).
         pushad
         inc dword [system_ticks]
-        ;; Per-slot alarm check.  Iterate (program_state_a, program_state_b);
-        ;; each slot is independently armed.  pd_phys == 0 means the slot
+        ;; Per-slot alarm check.  Iterate (program_state_a, program_state_b,
+        ;; program_state_c); each slot is independently armed.  pd_phys == 0 means the slot
         ;; is unused (no program loaded — e.g., when only the parent is
         ;; live and program_state_b is empty).  Coalescing: if
         ;; PENDING_SIGALRM is already 1 the second set is a no-op
@@ -81,6 +81,8 @@ pmode_irq0_handler:
         mov ebx, program_state_a
         call .pmode_irq0_check_slot
         mov ebx, program_state_b
+        call .pmode_irq0_check_slot
+        mov ebx, program_state_c
         call .pmode_irq0_check_slot
         pop ebx
         jmp .pmode_irq0_after_alarm
@@ -558,6 +560,10 @@ program_enter:
         push dword 0x202
         push dword USER_CODE_SELECTOR
         push dword PROGRAM_BASE
+        ;; Update TSS.ESP0 to the entering slot's kernel-stack top so the
+        ;; next ring-3-to-ring-0 transition (syscall / IRQ / exception)
+        ;; lands on this slot's private kernel stack.
+        call tss_set_esp0_for_current_slot
         iretd
 
 .oom:
@@ -608,6 +614,8 @@ program_enter:
         ;; Reset kernel ESP.  The kernel stack may have transient pushes
         ;; from inner alloc+map pairs; reset to a known top before any
         ;; further work.
+        ;; The parent in these unwind paths is always slot_a (the shell), so
+        ;; kernel_stack_top (= kernel_stack_a_top) is the right reset target.
         mov esp, kernel_stack_top
 
         ;; If a parent is suspended, this is a failed child load — return
@@ -748,6 +756,20 @@ shell_reload:
         mov ecx, PROGRAM_STATE_SIZE / 4
         xor eax, eax
         rep stosd
+        mov edi, program_state_c
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        rep stosd
+        ;; Re-establish each slot's kernel_stack_top after the BSS-style
+        ;; wipe above.  tss_set_esp0_for_current_slot reads this field on
+        ;; every iretd-to-userland so the next ring-3-to-ring-0 transition
+        ;; lands on the running slot's kernel stack.  Slot_a reuses the
+        ;; shell's existing kernel stack (kernel_stack_a_top aliases
+        ;; kernel_stack_top in kernel.asm); slot_b/c have their own 4 KB
+        ;; regions reserved alongside program_state_b/c below.
+        mov dword [program_state_a + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP], kernel_stack_a_top
+        mov dword [program_state_b + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP], kernel_stack_b_top
+        mov dword [program_state_c + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP], kernel_stack_c_top
         mov dword [current_program_state], program_state_a
         ;; Restore 80x25 text mode if a dying program left the VGA card
         ;; in a graphics mode (e.g. Doom in mode 13h).  No-op on the
@@ -841,11 +863,11 @@ child_terminate:
         pop ebx                         ; restore wait status
 
         ;; Zero the child's slot (clears fd_table, pending bits, etc.).
+        ;; kernel_stack_top is a per-slot constant — preserve it across
+        ;; the wipe so the next sys_exec into this slot has the right
+        ;; TSS.ESP0 target.
         mov edi, [current_program_state]
-        mov ecx, PROGRAM_STATE_SIZE / 4
-        xor eax, eax
-        cld
-        rep stosd
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
 
         ;; Swap back to parent.
         mov eax, [parent_program_state]
@@ -860,6 +882,8 @@ child_terminate:
         ;; Restore parent kernel-stack frame.  parent_iret_frame holds 13
         ;; dwords (8 pushad slots + 5 cross-priv iret slots).  Place them
         ;; at kernel_stack_top - 52 so popad+iretd consume exactly that.
+        ;; The parent in these unwind paths is always slot_a (the shell), so
+        ;; kernel_stack_top (= kernel_stack_a_top) is the right reset target.
         mov esp, kernel_stack_top
         sub esp, 52
         mov edi, esp
@@ -884,6 +908,9 @@ child_terminate:
         ;; from current_program_state (now the parent), dispatches if
         ;; pending — same path as the IRQ-tail check.
         SIGNAL_TAIL_CHECK
+        ;; Update TSS.ESP0 to the parent slot's kernel-stack top so the
+        ;; parent's next ring transition lands on its own kernel stack.
+        call tss_set_esp0_for_current_slot
         iretd
 
 ;;; -----------------------------------------------------------------------
@@ -930,12 +957,12 @@ spawn_failed_unwind:
         jmp .spawn_failed_close_loop
 .spawn_failed_close_done:
 
-        ;; Zero the child's slot.
+        ;; Zero the child's slot.  Preserve kernel_stack_top across the
+        ;; wipe — it's a per-slot constant the next sys_exec into this
+        ;; slot will need (tss_set_esp0_for_current_slot reads it on
+        ;; every iretd-to-user).
         mov edi, [current_program_state]
-        mov ecx, PROGRAM_STATE_SIZE / 4
-        xor eax, eax
-        cld
-        rep stosd
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
 
         ;; Swap back to parent.
         mov eax, [parent_program_state]
@@ -948,6 +975,8 @@ spawn_failed_unwind:
         mov cr3, eax
 
         ;; Restore parent kernel-stack frame, set EAX=ERROR_FAULT, set CF.
+        ;; The parent in these unwind paths is always slot_a (the shell), so
+        ;; kernel_stack_top (= kernel_stack_a_top) is the right reset target.
         mov esp, kernel_stack_top
         sub esp, 52
         mov edi, esp
@@ -959,6 +988,145 @@ spawn_failed_unwind:
         or dword [esp + 40], 1
 
         SIGNAL_TAIL_CHECK
+        ;; Update TSS.ESP0 to the parent slot's kernel-stack top before
+        ;; resuming the parent at CPL=3 — its next ring transition must
+        ;; land on its own kernel stack.
+        call tss_set_esp0_for_current_slot
+        iretd
+
+;;; -----------------------------------------------------------------------
+;;; kernel_yield — cooperative slot switch on pipe block (or pipeline-
+;;; child exit).  Save the current slot's kernel ESP to its program_state
+;;; slot, walk slot_b/slot_c for the next runnable slot, switch CR3, load
+;;; the peer's saved ESP, return.  The "return" lands at the peer's last
+;;; kernel_yield call site (which is now resuming).
+;;;
+;;; For a never-run slot (sys_pipeline2 in Task 6 primes its kernel
+;;; stack so the first ret target is userland_entry_stub), the peer's
+;;; first resume falls through to popad+iretd into userland at
+;;; PROGRAM_BASE.
+;;;
+;;; Precondition: sys_pipeline2 must set slot_b.state and slot_c.state
+;;; to STATE_RUNNING before the first kernel_yield call.  A never-
+;;; initialized slot has state == STATE_BLOCKED_READ (0) from BSS
+;;; zero-init, which the deadlock check below would misread as "not
+;;; runnable" — and if BOTH children are still in that state, the
+;;; "both EXITED" check fails too, triggering deadlock_panic.
+;;;
+;;; In:  AL = STATE_BLOCKED_READ | STATE_BLOCKED_WRITE | STATE_EXITED
+;;;      EBX = struct pipe* the caller is blocked on (or 0 for EXITED)
+;;; Out: returns to whichever slot the scheduler picks.  Caller's
+;;;      kernel call chain is preserved on its own slot's kernel stack
+;;;      and will resume when the slot is re-scheduled.
+;;;
+;;; Clobbers: EAX, ECX, EDX (EBX consumed as input).  EBP, ESI, EDI
+;;; preserved by virtue of not being touched.
+;;;
+;;; If both slot_b and slot_c are STATE_EXITED, control returns to
+;;; slot_a (the shell) via slot_a.saved_esp — which holds the ESP
+;;; that sys_pipeline2 saved just before its first kernel_yield call.
+;;; -----------------------------------------------------------------------
+kernel_yield:
+        ;; Save current slot's state.
+        cli
+        mov edx, [current_program_state]
+        mov byte [edx + PROGRAM_STATE_OFFSET_STATE], al
+        mov [edx + PROGRAM_STATE_OFFSET_CURRENT_PIPE], ebx
+        ;; Park caller on the pipe (only if blocking, not if exiting).
+        cmp al, STATE_EXITED
+        je .park_done
+        cmp al, STATE_BLOCKED_READ
+        jne .park_writer
+        mov [ebx + PIPE_OFFSET_BLOCKED_READER], edx
+        jmp .park_done
+.park_writer:
+        mov [ebx + PIPE_OFFSET_BLOCKED_WRITER], edx
+.park_done:
+        ;; Save current ESP into current slot's saved_esp.
+        mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], esp
+
+        ;; Pick next runnable slot from {slot_b, slot_c} first; only
+        ;; fall back to slot_a if both pipeline children have exited.
+        mov edx, program_state_b
+        cmp byte [edx + PROGRAM_STATE_OFFSET_STATE], STATE_RUNNING
+        je .resume_slot
+        mov edx, program_state_c
+        cmp byte [edx + PROGRAM_STATE_OFFSET_STATE], STATE_RUNNING
+        je .resume_slot
+        ;; No runnable child.  Both must be EXITED for shell-resume to
+        ;; be valid (deadlock case is the only other possibility, and
+        ;; with 2 children + 1 pipe it's unreachable).
+        mov eax, program_state_b
+        cmp byte [eax + PROGRAM_STATE_OFFSET_STATE], STATE_EXITED
+        jne .deadlock_panic
+        mov eax, program_state_c
+        cmp byte [eax + PROGRAM_STATE_OFFSET_STATE], STATE_EXITED
+        jne .deadlock_panic
+        ;; Pipeline complete — return to shell (slot_a).
+        mov edx, program_state_a
+.resume_slot:
+        ;; EDX = chosen slot.  Switch CR3 + ESP, update TSS.
+        mov [current_program_state], edx
+        mov eax, [edx + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
+        mov esp, [edx + PROGRAM_STATE_OFFSET_SAVED_ESP]
+        call tss_set_esp0_for_current_slot
+        sti
+        ret    ; returns to the saved kernel-mode IP in this slot's stack
+.deadlock_panic:
+        mov dx, COM1_DATA
+        mov al, '*'
+        out dx, al
+        cli
+        hlt
+        jmp $-1
+
+;;; -----------------------------------------------------------------------
+;;; tss_set_esp0_for_current_slot — update TSS.ESP0 to point at the
+;;; current_program_state's per-slot kernel stack top.  Called before
+;;; every iretd-to-userland so the next ring-3-to-ring-0 transition
+;;; lands on the correct slot's kernel stack.
+;;;
+;;; Preserves all GP registers: callers invoke this between popad and
+;;; iretd in the syscall-return / child-terminate / spawn-failed paths,
+;;; where the GP regs already hold the user's restored values.
+;;;
+;;; Out: TSS.ESP0 updated; all registers preserved.
+;;; -----------------------------------------------------------------------
+tss_set_esp0_for_current_slot:
+        push eax
+        push edx
+        mov edx, [current_program_state]
+        mov eax, [edx + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]
+        mov [tss_data + 4], eax
+        pop edx
+        pop eax
+        ret
+
+;;; -----------------------------------------------------------------------
+;;; userland_entry_stub — used to prime a never-run slot's kernel
+;;; stack.  When a slot is first scheduled via kernel_yield, the
+;;; saved_esp it loads points at a stack where:
+;;;   [esp]      = userland_entry_stub  (this label's address)
+;;;   [esp+4]    = edi    \
+;;;   [esp+8]    = esi    |
+;;;   [esp+12]   = ebp    | pushad area (8 dwords)
+;;;   [esp+16]   = esp    |
+;;;   [esp+20]   = ebx    |
+;;;   [esp+24]   = edx    |
+;;;   [esp+28]   = ecx    |
+;;;   [esp+32]   = eax    /
+;;;   [esp+36]   = eip    \
+;;;   [esp+40]   = cs     | iret frame (5 dwords)
+;;;   [esp+44]   = eflags |
+;;;   [esp+48]   = esp    |
+;;;   [esp+52]   = ss     /
+;;;
+;;; kernel_yield's ret pops `userland_entry_stub` into EIP, leaving the
+;;; pushad+iret frame at [esp..esp+52).  popad+iretd then drops to user.
+;;; -----------------------------------------------------------------------
+userland_entry_stub:
+        popad
         iretd
 
 vdso_install:
@@ -1039,6 +1207,13 @@ program_state_a       times PROGRAM_STATE_SIZE db 0
         ;; Second slot for the child while a parent is suspended;
         ;; program_state_b completes the pair alongside program_state_a.
 program_state_b       times PROGRAM_STATE_SIZE db 0
+
+        ;; Third slot — second pipeline child.  Used by sys_pipeline2
+        ;; (Task 6) so the shell + two cooperatively-scheduled pipeline
+        ;; commands all have their own program_state.  Stays zero
+        ;; (STATE_BLOCKED_READ-ish from BSS, pd_phys=0) outside of an
+        ;; active pipeline; shell_reload re-zeroes it on every reload.
+program_state_c       times PROGRAM_STATE_SIZE db 0
 
         ;; OOM-recovery tracking.  pending_frame_phys is set immediately
         ;; after every frame_alloc that has not yet been mapped via

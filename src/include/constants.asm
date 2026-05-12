@@ -116,27 +116,33 @@
         ;; PIPE_OFFSET 0xFFD..0xFFF are _pad[3]; total struct size = 0x1000.
         %assign PIPE_SIZE                    0x1000
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
-        ;; ProgramState layout — per-program kernel state. Two BSS-resident
-        ;; slots (program_state_a, program_state_b) hold one struct each;
-        ;; current_program_state pointer indicates which slot the running
-        ;; program owns.  Field order is strict-alphabetical; padding bytes
-        ;; absorb the byte fields so dword fields stay 4-byte-aligned.
+        ;; ProgramState layout — per-program kernel state. Three BSS-resident
+        ;; slots (program_state_a, program_state_b, program_state_c) hold one
+        ;; struct each; current_program_state pointer indicates which slot the
+        ;; running program owns.  Slot_a is the shell; slot_b/slot_c are the
+        ;; cooperatively-scheduled pipeline children.  Field order is
+        ;; strict-alphabetical; padding bytes absorb the byte fields so dword
+        ;; fields stay 4-byte-aligned.
         %assign PROGRAM_STATE_OFFSET_ALARM_DEADLINE     0x000
         %assign PROGRAM_STATE_OFFSET_ALARM_INTERVAL     0x004
-        %assign PROGRAM_STATE_OFFSET_CURRENT_PIPE       0x224  ; uint32_t struct pipe* or 0
-        %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x008
-        %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x208
-        %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x20C
-        %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x210
-        %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x211
-        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x214
-        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x218
-        %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x21C
-        %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x220
-        %assign PROGRAM_STATE_OFFSET_STATE              0x228  ; uint8_t STATE_*
-        ;; bytes 0x229..0x22B are _pad_after_state[3]
-        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x22C  ; uint32_t parked exit code while STATE_EXITED
-        %assign PROGRAM_STATE_SIZE                      0x230
+        %assign PROGRAM_STATE_OFFSET_CURRENT_PIPE       0x008  ; uint32_t struct pipe* or 0
+        %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x00C
+        %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x20C
+        ;; bytes 0x20D..0x20F are pad_after_handler[3]
+        %assign PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP   0x210  ; uint32_t pointer to this slot's kernel stack top
+        %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x214
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x218
+        %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x219
+        ;; bytes 0x21A..0x21B are pad_after_pending[2]
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x21C
+        %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x220
+        %assign PROGRAM_STATE_OFFSET_SAVED_ESP          0x224  ; uint32_t parked kernel ESP while this slot is not current
+        %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x228
+        %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x22C
+        %assign PROGRAM_STATE_OFFSET_STATE              0x230  ; uint8_t STATE_*
+        ;; bytes 0x231..0x233 are pad_after_state[3]
+        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x234  ; uint32_t parked exit code while STATE_EXITED
+        %assign PROGRAM_STATE_SIZE                      0x238
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches
         ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
@@ -289,3 +295,25 @@
         %assign MODE13H_BYTES     320 * 200   ; 64000 bytes (16 pages worth)
         %assign MODE13H_PHYS      0A0000h     ; physical address of the mode-13h framebuffer
         %assign MODE13H_USER_VIRT 0B8000000h  ; user-virt slot where SYS_VIDEO_MAP exposes the framebuffer
+
+;; WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
+;;
+;; Zero a program_state slot (PROGRAM_STATE_SIZE bytes) but preserve
+;; the KERNEL_STACK_TOP field across the wipe.  Used by sys_exec,
+;; child_terminate, and spawn_failed_unwind when reclaiming a slot
+;; without losing its bound kernel-stack assignment.
+;;
+;; In:  EDI = slot pointer (program_state_X).
+;; Out: slot zeroed except KERNEL_STACK_TOP.  Clobbers: EAX, ECX, EDX.
+;;      EDI advanced past the slot (rep stosd post-condition).
+%macro WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP 0
+        mov edx, [edi + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]
+        mov ecx, PROGRAM_STATE_SIZE / 4
+        xor eax, eax
+        cld
+        rep stosd
+        ;; rep stosd advanced edi past the slot; back up to write the
+        ;; preserved kernel_stack_top.
+        sub edi, PROGRAM_STATE_SIZE
+        mov [edi + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP], edx
+%endmacro

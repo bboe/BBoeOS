@@ -79,6 +79,14 @@ syscall_handler:
         .iret_cf_write:
         mov [esp + SYSCALL_SAVED_EAX], eax
         SIGNAL_TAIL_CHECK
+        ;; Update TSS.ESP0 to the current slot's kernel-stack top.  After
+        ;; a syscall that yielded mid-flight (e.g. fd_read_pipe), the
+        ;; resuming slot may differ from the slot that entered the
+        ;; dispatcher — the next int 30h from this slot must land on
+        ;; the slot's own kernel stack.  Cheap when the slot didn't
+        ;; change.  Preserves all GP regs so popad's restored values
+        ;; survive into the user iretd frame.
+        call tss_set_esp0_for_current_slot
         iretd
 
         ;; Each SYS_ENTRY pads with .iret_invalid up to the requested slot,
@@ -736,12 +744,13 @@ syscall_handler:
         ;; Zero the child's slot (clears non-fd_table fields: signal
         ;; handlers, pending bits, alarm state, etc.).  fd_table is
         ;; overwritten next with the parent's table — copied here while
-        ;; both slots are still addressable.
+        ;; both slots are still addressable.  kernel_stack_top is
+        ;; preserved across the wipe — it's a per-slot constant set up
+        ;; once by shell_reload and read by tss_set_esp0_for_current_slot
+        ;; on every iretd-to-user; the first int 30h from the child
+        ;; would #PF at TSS.ESP0=0 if we cleared it here.
         mov edi, [current_program_state]
-        mov ecx, PROGRAM_STATE_SIZE / 4
-        xor eax, eax
-        cld
-        rep stosd
+        WIPE_SLOT_PRESERVING_KERNEL_STACK_TOP
 
         ;; Inherit parent's fd_table into child's slot.  Both program_state
         ;; structs live in kernel BSS; straight rep movsd between them.
