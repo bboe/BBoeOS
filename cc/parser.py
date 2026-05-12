@@ -16,6 +16,7 @@ from cc.ast_nodes import (
     Break,
     Call,
     Char,
+    Conditional,
     Continue,
     DerefAssign,
     DoWhile,
@@ -544,6 +545,25 @@ class Parser:
             return expression
         return BinaryOperation(left=expression, line=expression.line, operation="!=", right=Int(line=expression.line, value=0))
 
+    def parse_conditional(self) -> Node:
+        """Parse a ternary conditional ``cond ? then_expr : else_expr``.
+
+        Lower precedence than ``||``, higher than assignment.  Right-
+        associative: the else-branch is parsed by recursing into
+        :meth:`parse_conditional`, so ``a ? b : c ? d : e`` becomes
+        ``a ? b : (c ? d : e)``.  A leading expression that isn't
+        followed by ``?`` is returned unchanged so the call is free at
+        every expression site.
+        """
+        condition = self.parse_logical_or()
+        if self.peek()[0] != "QUESTION":
+            return condition
+        question_token = self.eat("QUESTION")
+        then_expr = self.parse_expression()
+        self.eat("COLON")
+        else_expr = self.parse_conditional()
+        return Conditional(condition=condition, else_expr=else_expr, line=question_token[2], then_expr=then_expr)
+
     def parse_do_while(self) -> Node:
         """Parse a do...while loop statement.
 
@@ -568,7 +588,7 @@ class Parser:
             An AST node for the expression.
 
         """
-        return self.parse_logical_or()
+        return self.parse_conditional()
 
     def parse_if(self) -> Node:
         """Parse an if statement.

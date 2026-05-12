@@ -31,6 +31,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Break,
     Call,
+    Conditional,
     Continue,
     DerefAssign,
     DoWhile,
@@ -44,6 +45,8 @@ from cc.ast_nodes import (
     IndexMemberIndexAssign,
     InlineAsm,
     Int,
+    LogicalAnd,
+    LogicalOr,
     MemberAccess,
     MemberAssign,
     MemberIndex,
@@ -57,10 +60,11 @@ from cc.ast_nodes import (
     VarDecl,
     While,
 )
-from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED
+from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED, JUMP_WHEN_TRUE, JUMP_WHEN_TRUE_UNSIGNED
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
 from cc.target import X86CodegenTarget16
+from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
 
@@ -331,6 +335,53 @@ class EmissionMixin:
         if saved is not None:
             self.visible_vars = saved
 
+    def _generate_conditional(self, expression: Conditional, /) -> None:
+        """Lower a ternary ``c ? t : e`` to a conditional branch.
+
+        Evaluates the condition; jumps over the then-branch when false;
+        evaluates the chosen branch (only one fires) and leaves the
+        result in AX/EAX.  The condition is normalised the same way
+        ``parse_condition`` normalises ``if`` / ``while`` heads — bare
+        expressions become ``expr != 0`` so the shared
+        :meth:`emit_condition_false_jump` machinery handles short-
+        circuit ``&&`` / ``||`` and carry-flag callees uniformly.
+
+        Both branches reach the same end label, so AX-tracking
+        (``ax_local`` / ``ax_is_byte``) is cleared after the merge:
+        whichever branch the actual control flow took, the merge
+        point can't promise that AX still holds the then-branch's
+        value tag.
+
+        Fast path for ``MAX(a, b)`` / ``MIN(a, b)`` macro expansion:
+        when the then-branch is structurally identical to the
+        comparison's left operand (and pure — no calls), ``AX`` will
+        already hold the desired value after :meth:`emit_condition`,
+        so the then-branch's re-evaluation is elided and we jump
+        directly to the end label on cond-true.  This collapses
+        ``MIN(total_length - logical_offset, 512)`` to the same
+        compact ``cmp / Jcc / mov ax, 512`` that the hand-written
+        ``if`` saturation would emit, without a redundant
+        ``sub`` second time around.
+        """
+        condition = self._normalise_ternary_condition(expression.condition)
+        if self._try_emit_conditional_via_cond_value(condition=condition, expression=expression):
+            return
+        label_index = self.new_label()
+        else_label = f".cond_else_{label_index}"
+        end_label = f".cond_end_{label_index}"
+        self.emit_condition_false_jump(condition=condition, context="ast", fail_label=else_label)
+        self.generate_expression(expression.then_expr)
+        self.emit(f"        jmp {end_label}")
+        self.emit(f"{else_label}:")
+        # Else-branch enters from the conditional jump; AX state
+        # accumulated by the then-branch is invalid here.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # At the merge, AX holds the result of whichever branch ran;
+        # neither branch's variable-tracking is guaranteed.
+        self.ax_clear()
+
     def _has_tail_dispatch_shape(self, body: list[Node], /) -> bool:
         """``body[-1]`` is an ``If/else`` whose branches both tail-call.
 
@@ -353,6 +404,38 @@ class EmissionMixin:
             and isinstance(if_stmt.else_body[-1], Call)
             and self._is_tail_call_eligible(if_stmt.else_body[-1])
         )
+
+    def _is_pure_expression(self, node: Node, /) -> bool:
+        """Return True if evaluating *node* has no observable side effect.
+
+        Conservative: only literals, variable / named-constant reads,
+        struct-member reads, array indexing, address-of, sizeof, and
+        arithmetic / comparison / logical / bitwise binary operations
+        over pure operands qualify.  Anything that could ``call`` user
+        code (``Call``, ``TailCall``) or that mutates state is
+        rejected.  Used by :meth:`_try_emit_conditional_via_cond_value`
+        to decide whether eliding the then-branch (which by the textual
+        macro semantics would otherwise be re-evaluated) is safe.
+        """
+        if isinstance(node, (Int, String, Var, SizeofType, SizeofVar, AddressOf)):
+            return True
+        if isinstance(node, BinaryOperation):
+            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
+        if isinstance(node, (LogicalAnd, LogicalOr)):
+            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
+        if isinstance(node, Index):
+            # ``arr[i]`` reads from memory but doesn't write; the index
+            # itself must also be pure.
+            return self._is_pure_expression(node.index)
+        if isinstance(node, (MemberAccess, MemberIndex, IndexMemberAccess, IndexMemberIndex)):
+            return True
+        if isinstance(node, Conditional):
+            return (
+                self._is_pure_expression(node.condition)
+                and self._is_pure_expression(node.then_expr)
+                and self._is_pure_expression(node.else_expr)
+            )
+        return False
 
     def _is_tail_call_eligible(self, call: Call, /) -> bool:
         """Check whether a tail-call replacement (``jmp`` for ``call; ret``) is safe.
@@ -1050,6 +1133,8 @@ class EmissionMixin:
             self.generate_index_member_access(expression)
         elif isinstance(expression, IndexMemberIndex):
             self.generate_index_member_index(expression)
+        elif isinstance(expression, Conditional):
+            self._generate_conditional(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -1148,6 +1233,23 @@ class EmissionMixin:
                     if isinstance(item, Node) and self._node_contains_var(item, name):
                         return True
         return False
+
+    @staticmethod
+    def _normalise_ternary_condition(condition: Node) -> Node:
+        """Wrap a ternary condition as ``expr != 0`` unless it's already a comparison.
+
+        Mirrors :meth:`cc.parser.Parser.parse_condition`: ``&&`` / ``||``
+        and explicit comparisons (``==`` / ``<`` / etc.) are passed
+        through; everything else (a bare variable, an arithmetic
+        expression, a call) is normalised to ``expr != 0`` so the
+        downstream :meth:`emit_condition_false_jump` always sees a
+        comparison-shaped node.
+        """
+        if isinstance(condition, (LogicalAnd, LogicalOr)):
+            return condition
+        if isinstance(condition, BinaryOperation) and condition.operation in COMPARISON_OPERATIONS:
+            return condition
+        return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
 
     def _param_slot_is_read(self, body: list[Node], param_name: str, /) -> bool:
         """Return True if the local slot for param_name is read anywhere in body.
@@ -1986,6 +2088,68 @@ class EmissionMixin:
             for reg in reversed(self.current_preserve_registers):
                 self.emit(f"        pop {reg}")
         self.emit(f"        jmp {target_register}")
+
+    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
+        """Elide the then-branch when it duplicates the comparison's left operand.
+
+        Returns True when the ternary matched the pure-then-equals-cond.left
+        shape and the lowering was emitted; the caller (``_generate_conditional``)
+        then skips its default cond-jump / then / jmp / else / end layout.
+
+        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
+        after function-like macro expansion):
+
+            Conditional(
+                condition=BinaryOperation(left=X, op=COMP, right=Y),
+                then_expr=X,                 # structurally equal to cond.left
+                else_expr=anything,
+            )
+
+        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
+        AX = X.  A *true*-jump to the merge label therefore skips the
+        else branch with no re-evaluation of X — which is exactly the
+        savings the textual macro pattern needs (``MIN(a-b, K)`` would
+        otherwise emit ``a-b`` twice).
+
+        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
+        textual macro semantics require evaluating the chosen branch in
+        full, side effects included.  Refused too for ``&&`` / ``||``
+        condition shapes (those go through the general
+        :meth:`emit_condition_false_jump` short-circuit machinery, which
+        doesn't leave a single representative value in AX), for unsigned
+        long destinations (32-bit accumulator handling differs), and for
+        byte-byte comparisons (AL holds the left byte but AH is stale,
+        so falling through with AX as the result needs a zero-extend
+        the standard path already issues separately).
+        """
+        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
+            return False
+        if expression.then_expr != condition.left:
+            return False
+        if not self._is_pure_expression(expression.then_expr):
+            return False
+        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
+            return False
+        operator, unsigned = self.emit_condition(condition=condition, context="ast")
+        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
+        # ``emit_condition`` may have returned the synthetic "carry" /
+        # "not_carry" operator for a ``carry_return`` callee — there's
+        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
+        # this fast track depends on wasn't taken.  Bail.
+        if operator not in table:
+            return False
+        end_label = f".cond_end_{self.new_label()}"
+        self.emit(f"        {table[operator]} {end_label}")
+        # Cond is false here — load else_expr into AX.  Clear ax_local
+        # first so a Var(then_expr.name) shape inside else_expr doesn't
+        # short-circuit on stale tracking.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # Merge: AX holds whichever branch's value ran, but the
+        # cross-path variable tracking is no longer guaranteed.
+        self.ax_clear()
+        return True
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.

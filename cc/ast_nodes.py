@@ -94,6 +94,22 @@ class Call(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class Conditional(Node):
+    """Ternary conditional expression ``condition ? then_expr : else_expr``.
+
+    Right-associative: ``a ? b : c ? d : e`` parses as
+    ``a ? b : (c ? d : e)``.  Lower precedence than ``||``, higher than
+    assignment (which is a statement, not an expression, in cc.py).
+    The chosen branch is the only one evaluated at runtime — the
+    codegen lowers to a conditional jump over the unchosen branch.
+    """
+
+    condition: Node
+    else_expr: Node
+    then_expr: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class Continue(Node):
     """``continue;`` statement (jumps to the innermost loop's condition test)."""
 

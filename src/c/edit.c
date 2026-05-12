@@ -1,3 +1,5 @@
+#include "macros.h"
+
 #define EDIT_BUFFER_SIZE 0x70000
 #define EDIT_KILL_BUFFER_SIZE 0xA00
 
@@ -399,10 +401,7 @@ int main(int argc, char *argv[]) {
                 int logical_offset = 0;
                 int write_err = 0;
                 while (logical_offset < total_length) {
-                    int chunk_size = total_length - logical_offset;
-                    if (chunk_size > 512) {
-                        chunk_size = 512;
-                    }
+                    int chunk_size = MIN(total_length - logical_offset, 512);
                     int i = 0;
                     while (i < chunk_size) {
                         sector[i] = buffer_character_at(logical_offset + i);
