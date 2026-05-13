@@ -918,8 +918,13 @@ class BuiltinsMixin:
         Returns 0 on success or an ERROR_* code on failure.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="rename")
-        self.emit_si_from_argument(arguments[0])
+        # Evaluate newname (EDI) before oldname (ESI): generating an
+        # Index expression like ``argv[N]`` uses ESI as scratch
+        # internally, so doing ESI first would let the EDI evaluation
+        # clobber it.  EDI-first is safe because nothing in
+        # emit_si_from_argument's lowering reads EDI as scratch.
         self.emit_register_from_argument(argument=arguments[1], register=self.target.di_register)
+        self.emit_si_from_argument(arguments[0])
         self._emit_syscall("FS_RENAME")
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=True)
 

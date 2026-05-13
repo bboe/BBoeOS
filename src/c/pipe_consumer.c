@@ -20,7 +20,7 @@ int strcmp(const char *a, const char *b) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc >= 1 && strcmp(argv[0], "slow") == 0) {
+    if (argc >= 2 && strcmp(argv[1], "slow") == 0) {
         char b;
         int n;
         while (1) {
@@ -32,7 +32,7 @@ int main(int argc, char *argv[]) {
         }
         return 0;
     }
-    if (argc >= 1 && strcmp(argv[0], "fail") == 0) {
+    if (argc >= 2 && strcmp(argv[1], "fail") == 0) {
         char b;
         read(STDIN, &b, 1);
         return 9;

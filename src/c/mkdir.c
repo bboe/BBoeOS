@@ -1,8 +1,8 @@
 int main(int argc, char *argv[]) {
-    if (argc != 1) {
+    if (argc != 2) {
         die("Usage: mkdir <name>\n");
     }
-    int error = mkdir(argv[0]);
+    int error = mkdir(argv[1]);
     if (!error) {
         return 0;
     }

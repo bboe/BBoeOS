@@ -6,17 +6,19 @@
 main:
         cld
 
-        ;; Require exactly two arguments
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; require argc == 3.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 2
+        cmp ecx, 3
         jne .usage
 
-        mov eax, [ARGV+4]
+        mov eax, [esp+8]              ; argv[2] = dest
         mov [dest_name], eax
 
-        ;; Open source file for reading
-        mov esi, [ARGV]
+        ;; Open source file (argv[1]) for reading.
+        mov esi, [esp+4]
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN
         int 30h

@@ -2237,11 +2237,11 @@ int lookup_ident_here(int advance) {
 int main(int argc, char *argv[]) {
     default_bits = 16;
     parse_operand_address_size = 16;
-    if (argc != 2) {
+    if (argc != 3) {
         die("Usage: asm <source> <output>\n");
     }
-    source_name = argv[0];
-    output_name = argv[1];
+    source_name = argv[1];
+    output_name = argv[2];
     compute_source_prefix();
     int fd = open(output_name, O_WRONLY + O_CREAT + O_TRUNC, FLAG_EXECUTE);
     if (fd < 0) {

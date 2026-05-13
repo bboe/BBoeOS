@@ -6,14 +6,16 @@
 main:
         cld
 
-        ;; Require exactly one argument
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; require argc == 2.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 1
+        cmp ecx, 2
         jne .usage
 
-        ;; Parse target IP (before MAC read clobbers BUFFER)
-        mov esi, [ARGV]
+        ;; Parse target IP (argv[1]) before MAC read clobbers BUFFER.
+        mov esi, [esp+4]
         mov edi, target_ip
         call parse_ip
         jc .usage

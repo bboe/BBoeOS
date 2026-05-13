@@ -6,14 +6,19 @@
 main:
         cld
 
-        ;; Require exactly two arguments: mode (+x/-x) and filename
-        mov edi, ARGV
+        ;; Linux-style argv: reserve a stack buffer for the pointer
+        ;; slots (matches cc.py's main prologue shape) and require
+        ;; argc == 3 (basename, mode, filename).
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 2
+        cmp ecx, 3
         jne .usage
 
-        ;; Parse mode argument (argv[0])
-        mov esi, [ARGV]
+        ;; Parse mode argument (argv[1] = first user arg).  ESP points at
+        ;; the argv pointer array; argv[1] is at [esp+4].
+        mov esi, [esp+4]
         lodsb
         cmp al, '+'
         je .set_exec
@@ -34,8 +39,8 @@ main:
         cmp byte [esi], 0     ; Mode arg must be exactly 2 chars
         jne .usage
 
-        ;; ESI = filename (argv[1] — pointers are 4 bytes apart in 32-bit)
-        mov esi, [ARGV+4]
+        ;; ESI = filename (argv[2]).
+        mov esi, [esp+8]
         mov al, dl             ; AL = new flags value
         mov ah, SYS_FS_CHMOD
         int 30h

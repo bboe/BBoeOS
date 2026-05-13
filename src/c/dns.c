@@ -89,7 +89,7 @@ char name_buffer[128];
 char query_buffer[512];
 
 int main(int argc, char *argv[]) {
-    if (argc != 1) {
+    if (argc != 2) {
         die("Usage: dns <domain>\n");
     }
 
@@ -98,7 +98,7 @@ int main(int argc, char *argv[]) {
         die("No NIC found\n");
     }
 
-    printf("Querying %s...\n", argv[0]);
+    printf("Querying %s...\n", argv[1]);
 
     /* Header: ID=0x0001, Flags=0x0100 (RD), QDCOUNT=1 */
     query_buffer[0] = 0;
@@ -116,7 +116,7 @@ int main(int argc, char *argv[]) {
 
     /* Encode domain into QNAME starting at offset 12 */
     char *qname = query_buffer + 12;
-    int name_length = encode_domain(argv[0], qname);
+    int name_length = encode_domain(argv[1], qname);
     if (name_length == 0) {
         die("DNS query failed\n");
     }

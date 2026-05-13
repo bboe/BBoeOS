@@ -1,15 +1,15 @@
 char io_buffer[512];
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
+    if (argc != 3) {
         die("Usage: cp <srcname> <destname>\n");
     }
-    int source_fd = open(argv[0], O_RDONLY);
+    int source_fd = open(argv[1], O_RDONLY);
     if (source_fd < 0) {
         die("File not found\n");
     }
     int mode = fstat(source_fd);
-    int destination_fd = open(argv[1], O_WRONLY + O_CREAT, mode);
+    int destination_fd = open(argv[2], O_WRONLY + O_CREAT, mode);
     if (destination_fd < 0) {
         close(source_fd);
         die("File already exists\n");

@@ -3,11 +3,11 @@ char receive_buffer[128];
 char target_ip[4];
 
 int main(int argc, char *argv[]) {
-    if (argc != 1) {
+    if (argc != 2) {
         die("usage: arp <ip>\n");
     }
 
-    int error = parse_ip(argv[0], target_ip);
+    int error = parse_ip(argv[1], target_ip);
     if (error) {
         die("usage: arp <ip>\n");
     }

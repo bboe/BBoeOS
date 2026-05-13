@@ -1,4 +1,3 @@
-        %assign ARGV 14DEh              ; 32 bytes (16 word-sized pointers); = USER_DATA_BASE + 0x4DE
         %assign BOOT_STASH_OFFSET 2     ; offset within kernel.bin of boot_disk (db) followed by directory_sector (dw); written by boot.asm post-load and read by the kernel through the direct map.  Layout contract: kernel.asm's first instruction is `jmp short high_entry` which skips past these bytes.
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
@@ -81,6 +80,11 @@
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
         %assign MAX_INPUT 256
+        ;; ARG_MAX and ARGV_RESERVE_BYTES live here (out of strict alphabetical order)
+        ;; because %assign does not resolve forward references to other %assign
+        ;; symbols; both expressions reference MAX_INPUT.  Bump them in lockstep.
+        %assign ARG_MAX MAX_INPUT       ; argv-tokenisation cap (bytes); matches MAX_INPUT for now (Linux ARG_MAX is 4096).  shared_parse_argv splits within this bound; cc.py's main argv-buffer reservation derives from this.
+        %assign ARGV_RESERVE_BYTES ((ARG_MAX / 2 + 1) * 4) ; main reserves this many bytes on the user stack for argv pointer slots (worst case: every other byte is a space → 128 tokens + NULL terminator).
         %assign MAX_PATH 64             ; Hard cap on user-supplied filename byte count (incl. NUL); enough for "<24-char dir>/<24-char file>" plus headroom
         %assign MAX_PIPES                    4
         %assign NE2K_BASE 300h
@@ -243,10 +247,10 @@
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
-        %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (ARGV / EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
+        %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
-        %assign VDSO_SIGRETURN_OFFSET 0450h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`
+        %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.  Bumped from 0x450 when shared_parse_argv grew for the Linux-style argv layout.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with

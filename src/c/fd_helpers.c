@@ -89,22 +89,12 @@ int strcmp(const char *a, const char *b) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 1) {
+    if (argc < 2) {
         die("Usage: fd_helpers <case> [args]\n");
     }
-    /* argv[0] holds the full arg tail past the program name; split at
-       the first space so the case name is null-terminated and the
-       remainder is the arg string for that case. */
-    char *case_name = argv[0];
-    int split = 0;
-    while (case_name[split] != '\0' && case_name[split] != ' ') {
-        split = split + 1;
-    }
-    char *rest = case_name + split;
-    if (case_name[split] == ' ') {
-        case_name[split] = '\0';
-        rest = case_name + split + 1;
-    }
+    /* Linux-style argv: argv[0]=basename, argv[1]=case_name,
+       argv[2]=optional path for cases like `noop`. */
+    char *case_name = argv[1];
     if (strcmp(case_name, "dup2_close_target") == 0) {
         return run_dup2_close_target();
     }
@@ -118,10 +108,10 @@ int main(int argc, char *argv[]) {
         return run_dup_vga();
     }
     if (strcmp(case_name, "noop") == 0) {
-        if (rest[0] == '\0') {
+        if (argc < 3) {
             die("Usage: fd_helpers noop <path>\n");
         }
-        return run_noop(rest);
+        return run_noop(argv[2]);
     }
     die("unknown case\n");
     return 1;

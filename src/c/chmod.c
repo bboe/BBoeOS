@@ -1,8 +1,8 @@
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
+    if (argc != 3) {
         die("Usage: chmod [+x|-x] <file>\n");
     }
-    char *mode = argv[0];
+    char *mode = argv[1];
     int flags;
     if (mode[0] == '+') {
         flags = FLAG_EXECUTE;
@@ -14,7 +14,7 @@ int main(int argc, char *argv[]) {
     if (mode[1] != 'x') {
         die("Usage: chmod [+x|-x] <file>\n");
     }
-    int error = chmod(argv[1], flags);
+    int error = chmod(argv[2], flags);
     if (!error) {
         return 0;
     }

@@ -6,15 +6,19 @@
 main:
         cld
 
-        ;; Require exactly two arguments
-        mov edi, ARGV
+        ;; Linux-style argv: reserve a stack buffer for the pointer
+        ;; slots (matches cc.py's main prologue shape) and require
+        ;; argc == 3 (basename, oldname, newname).
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 2
+        cmp ecx, 3
         jne .usage
 
-        ;; Validate newname length (4-byte argv slots in 32-bit)
-        mov esi, [ARGV]         ; ESI = oldname (for syscall later)
-        mov edi, [ARGV+4]       ; EDI = newname (for syscall later)
+        ;; Validate newname length.
+        mov esi, [esp+4]        ; ESI = oldname (argv[1]; for syscall later)
+        mov edi, [esp+8]        ; EDI = newname (argv[2]; for syscall later)
         push esi
         push edi
         mov esi, edi
