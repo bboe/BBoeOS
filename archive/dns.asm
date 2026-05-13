@@ -15,12 +15,14 @@ main:
         int 30h
         jc .no_nic
 
-        ;; Require exactly one argument
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; require argc == 2.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 1
+        cmp ecx, 2
         jne .no_arg
-        mov ebx, [ARGV]
+        mov ebx, [esp+4]
         mov [domain_arg], ebx
         mov byte [found_a], 0
 

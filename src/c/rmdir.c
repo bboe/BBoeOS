@@ -1,8 +1,8 @@
 int main(int argc, char *argv[]) {
-    if (argc != 1) {
+    if (argc != 2) {
         die("Usage: rmdir <dir>\n");
     }
-    int error = rmdir(argv[0]);
+    int error = rmdir(argv[1]);
     if (!error) {
         return 0;
     }

@@ -423,11 +423,12 @@ scheduler resumes the peer or the shell as described above. The shell's
 
 `SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`,
 `DI = right_path`, `DX = left_args`, `CX = right_args`.  The shell splits each
-side at the first unquoted space and stashes the command name into
-`pipe_left_path` / `pipe_right_path` (`bin/`-prefixed) and the args tail into
-`pipe_left_args` / `pipe_right_args` (256-byte BSS arrays).  Passing 0 for an
-args pointer means "this child gets no argv" (the kernel clears `EXEC_ARG` for
-that child).
+side at the first unquoted space, stashes the command name into
+`pipe_left_path` / `pipe_right_path` (`bin/`-prefixed), and writes a
+Linux-style `name args` string (program name followed by the user arg tail)
+into `pipe_left_args` / `pipe_right_args` (256-byte BSS arrays).  The
+`name args` shape ensures the child's `argv[0]` resolves to the basename
+after `FUNCTION_PARSE_ARGV` runs.
 
 For each child, immediately before `.populate_handoff_from_shell` runs (with
 the shell's PD active, so the BSS pointer + `BUFFER` both resolve), the kernel

@@ -23,7 +23,7 @@
 
 /* --- Constants (from src/include/constants.asm) --- */
 
-#define ARGV ((char *)0x14DE)
+#define ARG_MAX 256
 #define BUFFER ((char *)0x1500)
 #define DIRECTORY_ENTRY_SIZE 32
 #define DIRECTORY_NAME_LENGTH 25

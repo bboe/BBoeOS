@@ -6,13 +6,15 @@
 main:
         cld
 
-        ;; Require exactly one argument
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; require argc == 2.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 1
+        cmp ecx, 2
         jne .usage
 
-        mov esi, [ARGV]
+        mov esi, [esp+4]
         mov ah, SYS_FS_MKDIR
         int 30h
         jnc .done

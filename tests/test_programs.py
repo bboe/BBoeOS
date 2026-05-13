@@ -754,6 +754,13 @@ TESTS: list[ProgramTest] = [
     # exit_status runs _exit(N) and the shell encodes N into bits 15..8 of
     # the wait status.  expand_dollar_question extracts WEXITSTATUS and
     # echo $? prints the original value.
+    # Linux-style argv layout: argv[0] = basename, argc counts it,
+    # argv[argc] = NULL.  argv_basename.c prints all four to confirm.
+    ProgramTest(
+        "argv_basename",
+        ["argv_basename alpha bravo"],
+        r"argc=3\nargv\[0\]=argv_basename\nargv\[1\]=alpha\nargv\[2\]=bravo\nargv\[argc\]=NULL",
+    ),
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),

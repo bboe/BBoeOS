@@ -38,7 +38,7 @@
 
         ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
         ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
-        ;;   PTE 0x00001             : private — ARGV, EXEC_ARG, BUFFER (USER_DATA_BASE)
+        ;;   PTE 0x00001             : private — EXEC_ARG, BUFFER (USER_DATA_BASE)
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
@@ -271,8 +271,8 @@ build_child_program_state:
         mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
 
         ;; --- Acquire and map the shell↔program handoff frame ---
-        ;; The frame holds ARGV (32 B at +0x4DE), EXEC_ARG (4 B at
-        ;; +0x4FC), and BUFFER (256 B at +0x500).  It sits at user-
+        ;; The frame holds EXEC_ARG (4 B at +0x4FC) and BUFFER (256 B
+        ;; at +0x500).  It sits at user-
         ;; virt 0x1000 (PTE[1]) so PTE[0] (virt 0..0xFFF) stays
         ;; not-present and a NULL deref from CPL=3 raises #PF instead
         ;; of silently reading/writing this frame.  In-frame offsets

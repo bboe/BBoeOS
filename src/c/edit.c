@@ -74,7 +74,7 @@ int gap_move_right() {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 1) {
+    if (argc != 2) {
         die("Usage: edit <filename>\n");
     }
     /* Ignore SIGINT — Ctrl+C while editing would otherwise SIG_DFL-kill
@@ -86,7 +86,7 @@ int main(int argc, char *argv[]) {
         "mov ecx, SIG_IGN\n"
         "mov ah, SYS_SYS_SIGNAL\n"
         "int 30h\n");
-    char *filename = argv[0];
+    char *filename = argv[1];
     gap_end = EDIT_BUFFER_SIZE;
     char sector[512];
 

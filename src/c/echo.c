@@ -1,7 +1,7 @@
 int main(int argc, char *argv[]) {
-    int i = 0;
+    int i = 1;
     while (i < argc) {
-	if (i > 0) {
+	if (i > 1) {
 	    putchar(' ');
 	}
         int len = strlen(argv[i]);

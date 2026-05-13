@@ -1,8 +1,8 @@
 int main(int argc, char *argv[]) {
     char entry[DIRECTORY_ENTRY_SIZE];
     char *name = ".";
-    if (argc > 0) {
-        name = argv[0];
+    if (argc > 1) {
+        name = argv[1];
     }
     int fd = open(name, O_RDONLY);
     if (fd < 0) {

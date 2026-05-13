@@ -24,11 +24,11 @@ int strcmp(const char *a, const char *b) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 1) {
+    if (argc < 2) {
         write(STDOUT, "hello from producer\n", 20);
         return 0;
     }
-    if (strcmp(argv[0], "bulk") == 0) {
+    if (strcmp(argv[1], "bulk") == 0) {
         char buffer[64];
         int j = 0;
         while (j < 64) {
@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
         }
         return 0;
     }
-    if (strcmp(argv[0], "early") == 0) {
+    if (strcmp(argv[1], "early") == 0) {
         write(STDOUT, "x", 1);
         return 7;
     }

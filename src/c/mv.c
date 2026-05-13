@@ -1,11 +1,11 @@
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
+    if (argc != 3) {
         die("Usage: mv <oldname> <newname>\n");
     }
-    if (strlen(argv[1]) > 24) {
+    if (strlen(argv[2]) > 24) {
         die("Name too long (max 26 chars)\n");
     }
-    int error = rename(argv[0], argv[1]);
+    int error = rename(argv[1], argv[2]);
     if (!error) {
         return 0;
     }

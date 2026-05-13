@@ -2282,13 +2282,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
         """Emit inline startup code that parses EXEC_ARG into argc/argv.
 
-        Registers ``argv`` as a constant alias to ``ARGV`` so all
-        subsequent accesses use the kernel constant directly, avoiding
-        a memory local and store/reload traffic.
+        Linux-style argv: ``argv[0]`` is the program basename (set by
+        the shell as the first space-delimited token in EXEC_ARG),
+        ``argv[1..argc-1]`` are the user arguments, ``argv[argc]`` is
+        ``NULL``, and ``argc`` includes the program name.
+
+        ``argv`` is a real ``char **`` local pointing at a stack-
+        allocated pointer array.  The startup reserves
+        ``ARGV_RESERVE_BYTES`` on the user stack via ``sub esp, N``,
+        records the base in the ``argv`` local, then dispatches to
+        ``FUNCTION_PARSE_ARGV`` which fills consecutive slots and
+        writes the trailing NULL.  ``main`` exits via
+        ``jmp FUNCTION_EXIT`` (sys_exit) so the reservation does not
+        need an epilogue add — the kernel discards the user stack
+        on exit.
 
         When the first statement in *body* is ``if (argc != N) die(msg)``,
         the argc check is fused directly into the startup using
-        ``cmp cx, N`` (before CX is clobbered), eliminating the
+        ``cmp ecx, N`` (before ECX is clobbered), eliminating the
         ``_l_argc`` memory local entirely.  Returns the (possibly
         trimmed) body.
         """
@@ -2302,11 +2313,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if not argv_name:
             return body
 
-        # argv is always the fixed ARGV address — register as constant alias.
-        self.constant_aliases[argv_name] = "ARGV"
+        # argv is a real pointer local now (was a constant alias to the
+        # fixed ARGV buffer pre-refactor).  Its slot was already
+        # allocated by the caller; the startup just writes the runtime
+        # stack-base pointer into it after the reservation.
 
         self.emit("        cld")
-        self.emit(f"        mov {self.target.di_register}, ARGV")
+        self.emit(f"        sub {self.target.stack_register}, ARGV_RESERVE_BYTES")
+        self.emit(f"        mov {self.target.di_register}, {self.target.stack_register}")
+        self.emit(f"        mov [{self._local_address(argv_name)}], {self.target.di_register}")
+        self.emit(f"        mov {self.target.count_register}, ARGV_RESERVE_BYTES / 4")
         self.emit("        call FUNCTION_PARSE_ARGV")
 
         # Try to fuse the first body statement: if (argc != N) die(msg)

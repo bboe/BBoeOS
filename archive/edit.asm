@@ -43,12 +43,14 @@ main:
         int 30h
         mov [vga_fd], eax
 
-        ;; Require exactly one argument
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; require argc == 2.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 1
+        cmp ecx, 2
         jne .usage
-        mov ebx, [ARGV]
+        mov ebx, [esp+4]
         mov [filename], ebx
 
         ;; Try to open the file for reading

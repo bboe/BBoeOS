@@ -88,12 +88,23 @@ shared_get_character:
         ret
 
 shared_parse_argv:
-        ;; Split [EXEC_ARG] (kernel-side; unchanged this milestone) into
-        ;; an argv-style array of dword pointers.
-        ;; Input:  EDI = buffer for argv pointers
-        ;; Output: ECX = argc
-        ;; Clobbers: EAX, ESI (and EDI advances past the populated slots)
-        xor ecx, ecx
+        ;; Split [EXEC_ARG] (a NUL-terminated "name arg1 arg2 ..."
+        ;; string built by the shell in the user data frame) into a
+        ;; Linux-style argv pointer array in a caller-supplied buffer.
+        ;; argv[0] is the program name (basename) and argv[argc] is
+        ;; NULL.  Tokens are NUL-terminated in place inside EXEC_ARG so
+        ;; each argv[i] points at a contiguous C string.
+        ;;
+        ;; Input:  EDI = base of caller's argv slot region (writable;
+        ;;               typically ESP after `sub esp, N`).
+        ;;         ECX = slot cap (max dwords writable, including the
+        ;;               trailing NULL slot).  cc.py passes the value
+        ;;               derived from ARGV_RESERVE_BYTES.
+        ;; Output: ECX = argc (token count, not counting NULL).
+        ;;         EDI advanced past the (argc + 1) populated slots.
+        ;; Clobbers: EAX, EBX, ESI.
+        mov ebx, ecx                            ; ebx = dword slots remaining
+        xor ecx, ecx                            ; ecx = argc
         mov esi, [EXEC_ARG]
         test esi, esi
         jz .parse_argv_done
@@ -105,8 +116,13 @@ shared_parse_argv:
         .parse_argv_check:
         cmp byte [esi], 0
         je .parse_argv_done
+        ;; Need at least 2 slots remaining (one for this token, one for
+        ;; the trailing NULL).  Out of room → stop tokenising.
+        cmp ebx, 2
+        jb .parse_argv_done
         mov [edi], esi
         add edi, 4
+        dec ebx
         inc ecx
         .parse_argv_end:
         cmp byte [esi], 0
@@ -120,6 +136,8 @@ shared_parse_argv:
         inc esi
         jmp .parse_argv_scan
         .parse_argv_done:
+        mov dword [edi], 0                      ; argv[argc] = NULL terminator
+        add edi, 4
         ret
 
 shared_print_byte_decimal:

@@ -106,11 +106,11 @@ int main(int argc, char *argv[]) {
     if (mac(query_buffer)) {
         die("No NIC found\n");
     }
-    if (argc != 1) {
+    if (argc != 2) {
         die("Usage: ping <ip|hostname>\n");
     }
-    if (parse_ip(argv[0], target_ip)) {
-        if (resolve_dns(argv[0], target_ip, query_buffer, dns_ip)) {
+    if (parse_ip(argv[1], target_ip)) {
+        if (resolve_dns(argv[1], target_ip, query_buffer, dns_ip)) {
             die("Could not resolve hostname\n");
         }
     }

@@ -32,7 +32,7 @@ int strcmp(const char *a, const char *b) {
 
 int main(int argc, char *argv[]) {
     int ignore_sigpipe = 0;
-    if (argc >= 1 && strcmp(argv[0], "ignore") == 0) {
+    if (argc >= 2 && strcmp(argv[1], "ignore") == 0) {
         signal(SIGPIPE, SIG_IGN);
         ignore_sigpipe = 1;
     }

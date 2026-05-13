@@ -71,7 +71,7 @@ class CodeGeneratorBase:
     #: them from ``constants.asm``.  BBoeOS-specific but arch-agnostic:
     #: any backend running on BBoeOS needs them.
     NAMED_CONSTANTS: ClassVar[frozenset[str]] = frozenset({
-        "ARGV",
+        "ARG_MAX",
         "arp_frame",
         "AUDIO_IOCTL_QUERY",
         "BUFFER",
@@ -724,7 +724,14 @@ class CodeGeneratorBase:
         if isinstance(node, String):
             return "pointer"
         if isinstance(node, Index):
-            variable_type = self.variable_types.get(node.array.name)
+            name = node.array.name
+            variable_type = self.variable_types.get(name)
+            # An indexed access on a ``char *NAME[]`` parameter (which
+            # the parser records as ``type="char*"`` + variable_arrays
+            # membership) yields a ``char *`` element, not a ``char``.
+            # ``main``'s ``argv[i] == NULL`` walks land here.
+            if variable_type == "char*" and name in self.variable_arrays:
+                return "pointer"
             if variable_type in ("char", "char*"):
                 return "char"
             return "integer"

@@ -6,19 +6,21 @@
 main:
         cld
 
-        ;; Parse arguments (0 or 1)
-        mov edi, ARGV
+        ;; Linux-style argv: reserve stack slots; accept argc 1 or 2.
+        sub esp, ARGV_RESERVE_BYTES
+        mov edi, esp
+        mov ecx, ARGV_RESERVE_BYTES / 4
         call FUNCTION_PARSE_ARGV
-        cmp ecx, 1
+        cmp ecx, 2
         ja .not_found
 
-        ;; Open directory: use argument or "." for root
+        ;; Open directory: use argv[1] if present, else "." for root.
         je .have_arg
         .open_root:
         mov esi, DOT
         jmp .open_dir
         .have_arg:
-        mov esi, [ARGV]
+        mov esi, [esp+4]
         .open_dir:
         mov al, O_RDONLY
         mov ah, SYS_IO_OPEN

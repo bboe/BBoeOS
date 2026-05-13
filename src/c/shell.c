@@ -73,10 +73,14 @@ char segment_ops[MAX_SEGMENTS];
    so that (a) cc.py passes their addresses correctly on function calls
    and (b) they live in BSS without consuming additional user stack.
    pipe_left_buf / pipe_right_buf hold the trimmed command tokens;
+   pipe_left_name / pipe_right_name hold the bare basenames (for
+   building the bin/-prefixed path);
    pipe_left_path / pipe_right_path hold the bin/-prefixed paths;
-   pipe_left_args / pipe_right_args hold the per-child argv tails
-   (passed through SYS_SYS_PIPELINE2 so the kernel can stage them into
-   each child's EXEC_ARG / BUFFER slot before the handoff copy). */
+   pipe_left_args / pipe_right_args hold the per-child "name args"
+   strings — Linux-style, with the program name as the first token so
+   the child's argv[0] resolves to the basename.  Passed through
+   SYS_SYS_PIPELINE2 so the kernel can stage them into each child's
+   EXEC_ARG / BUFFER slot before the handoff copy. */
 char pipe_left_args[MAX_INPUT];
 char pipe_left_buf[MAX_INPUT];
 char pipe_left_name[MAX_INPUT];
@@ -197,52 +201,70 @@ int delete_at_cursor(char *buf, int cursor, int end) {
 int expand_dollar_question(char *buffer, int max_len);
 int try_exec(char *name);
 
-void dispatch_buffer(char *buf, char *exec_path) {
-    /* Run a single command sitting in BUFFER.  Splits at the first
-       space, expands $? in the argument tail, and routes to a builtin
-       or external executable.  Updates last_exec_status so that chain
+/* dispatch_name / dispatch_bin scratch buffers — file-scope so they
+   stay live for try_exec() without consuming user stack on every call.
+   dispatch_name holds the bare program name (no `bin/` prefix); the
+   child's argv[0] is taken from EXEC_ARG = buf which always starts
+   with the same name token, so argv[0] === dispatch_name byte-for-byte
+   for the duration of the exec().  dispatch_bin holds the
+   `bin/<name>` fallback path. */
+char dispatch_name[MAX_INPUT];
+char dispatch_bin[MAX_PATH];
+
+void dispatch_buffer(char *buf) {
+    /* Run a single command sitting in BUFFER.  The Linux-style argv
+       layout requires argv[0] to be the program name, so leave buf
+       intact as "name args" and point EXEC_ARG at it — the vDSO's
+       shared_parse_argv splits on whitespace and writes argv[0]
+       directly from the first token.  exec()'s path argument still
+       needs a NUL-terminated bare name, so we copy that out into
+       dispatch_name once.  Updates last_exec_status so that chain
        operators (&&, ||) and subsequent $? expansions see the result. */
-    set_exec_arg(NULL);
     int scan = 0;
     while (buf[scan] != '\0' && buf[scan] != ' ') {
+        dispatch_name[scan] = buf[scan];
         scan += 1;
     }
+    dispatch_name[scan] = '\0';
     if (buf[scan] == ' ') {
-        buf[scan] = '\0';
-        set_exec_arg(buf + scan + 1);
         if (expand_dollar_question(buf + scan + 1, MAX_INPUT - (scan + 1)) < 0) {
             printf("$? expansion exceeded MAX_INPUT\n");
             last_exec_status = 1 << 8;
             return;
         }
     }
-    if (strcmp(buf, "help") == 0) {
+    /* EXEC_ARG points at the full "name args" string so the child's
+       argv[0] resolves to the program name.  parse_argv NUL-terminates
+       tokens in place, but that mutation happens in the child's copy
+       of BUFFER, not the shell's buf. */
+    set_exec_arg(buf);
+    if (strcmp(dispatch_name, "help") == 0) {
         printf("Commands: help reboot shutdown\n");
         last_exec_status = 0;
-    } else if (strcmp(buf, "reboot") == 0) {
+    } else if (strcmp(dispatch_name, "reboot") == 0) {
         reboot();
-    } else if (strcmp(buf, "shutdown") == 0) {
+    } else if (strcmp(dispatch_name, "shutdown") == 0) {
         shutdown();
         printf("APM shutdown failed\n");
         last_exec_status = 1 << 8;
     } else {
-        int result = try_exec(buf);
+        int result = try_exec(dispatch_name);
         if (result == 1) {
             last_exec_status = 126 << 8;   /* bash: not executable */
             printf("not executable\n");
         } else if (result == 0) {
             /* Not found in root — retry inside bin/ */
-            exec_path[0] = 'b';
-            exec_path[1] = 'i';
-            exec_path[2] = 'n';
-            exec_path[3] = '/';
+            dispatch_bin[0] = 'b';
+            dispatch_bin[1] = 'i';
+            dispatch_bin[2] = 'n';
+            dispatch_bin[3] = '/';
             int copy_index = 0;
-            while (buf[copy_index] != '\0') {
-                exec_path[4 + copy_index] = buf[copy_index];
+            while (dispatch_name[copy_index] != '\0' && copy_index < MAX_PATH - 5) {
+                dispatch_bin[4 + copy_index] = dispatch_name[copy_index];
                 copy_index += 1;
             }
-            exec_path[4 + copy_index] = '\0';
-            int bin_result = try_exec(exec_path);
+            dispatch_bin[4 + copy_index] = '\0';
+            int bin_result = try_exec(dispatch_bin);
             if (bin_result == 1) {
                 last_exec_status = 126 << 8;
                 printf("not executable\n");
@@ -367,7 +389,7 @@ int find_top_level_pipe(char *segment) {
    under -std=c99 (test_cc_compatibility's reference build) requires
    explicit declarations. */
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
-int split_pipeline_side(char *source, char *name_out, char *args_out);
+void split_pipeline_side(char *source, char *name_out, char *args_out);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -595,14 +617,13 @@ int restore_redirections() {
 }
 
 /* split_pipeline_side — split `source` (a pipeline side, e.g. "ls -l" or
-   "pipe_producer bulk") into name (copied into `name_out`, MAX_INPUT)
-   and args tail (copied into `args_out`, MAX_INPUT).  The split happens
-   at the first unquoted space; the args tail keeps its original spacing
-   (the kernel's parse_argv re-tokenises it on the child's behalf).
-   `args_out[0]` is NUL when the side has no arguments — the shell
-   passes a NULL args pointer for that child to suppress EXEC_ARG.
-   Returns 1 when args are present, 0 otherwise. */
-int split_pipeline_side(char *source, char *name_out, char *args_out) {
+   "pipe_producer bulk") into the bare basename (copied into `name_out`,
+   MAX_INPUT) and a Linux-style argv input string (copied into
+   `args_out`, MAX_INPUT) shaped as "name args" — i.e. starting with the
+   program name so the child's argv[0] is the basename.  Trailing
+   whitespace on the args side is trimmed; a side with no user args
+   collapses `args_out` to just the bare name. */
+void split_pipeline_side(char *source, char *name_out, char *args_out) {
     int scan = 0;
     int in_single = 0;
     int in_double = 0;
@@ -619,31 +640,34 @@ int split_pipeline_side(char *source, char *name_out, char *args_out) {
     int name_index = 0;
     while (name_index < scan) {
         name_out[name_index] = source[name_index];
+        args_out[name_index] = source[name_index];
         name_index += 1;
     }
     name_out[name_index] = '\0';
     if (source[scan] == '\0') {
-        args_out[0] = '\0';
-        return 0;
+        args_out[name_index] = '\0';
+        return;
     }
     /* Skip the run of separating spaces so a trailing-only-spaces side
-       (e.g. "cmd   ") collapses to "no args" instead of an empty string
-       that confuses parse_argv. */
+       (e.g. "cmd   ") collapses to "name" (no args) instead of leaving
+       a dangling space that parse_argv would treat as an empty token. */
     int args_start = scan + 1;
     while (source[args_start] == ' ') {
         args_start += 1;
     }
     if (source[args_start] == '\0') {
-        args_out[0] = '\0';
-        return 0;
+        args_out[name_index] = '\0';
+        return;
     }
+    /* Emit "name<space>args" into args_out so the child's argv[0]
+       resolves to the basename. */
+    args_out[name_index] = ' ';
     int args_index = 0;
     while (source[args_start + args_index] != '\0') {
-        args_out[args_index] = source[args_start + args_index];
+        args_out[name_index + 1 + args_index] = source[args_start + args_index];
         args_index += 1;
     }
-    args_out[args_index] = '\0';
-    return 1;
+    args_out[name_index + 1 + args_index] = '\0';
 }
 
 int strcmp(const char *a, const char *b) {
@@ -702,9 +726,6 @@ int main() {
        appears once across N commands, verifying shell-survives-child. */
     write(STDOUT, "[shell:start]\n", 14);
     char *buf = BUFFER;
-    /* exec_path assembles "bin/<name>" for the fallback lookup.  ARGV
-       (32 bytes) is unused by the shell since main() takes no args. */
-    char *exec_path = ARGV;
     int vga_fd = open("/dev/vga", O_WRONLY);
     int kill_len = 0;
     while (1) {
@@ -919,18 +940,20 @@ int main() {
                         write(STDOUT, "shell: pipes cannot combine with < > >>\n", 40);
                         last_exec_status = 1 << 8;
                     } else {
-                        /* Split each side at the first unquoted space: name
-                           token into pipe_left_buf / pipe_right_buf (reused
-                           in place for the bin/-prefixed path build), args
-                           tail into pipe_left_args / pipe_right_args.  The
-                           kernel's sys_pipeline2 reads each *_args pointer
-                           (NULL = no args) and stages it into the child's
-                           EXEC_ARG + BUFFER before the handoff copy. */
-                        int has_left_args = split_pipeline_side(pipe_left_buf, pipe_left_name, pipe_left_args);
-                        int has_right_args = split_pipeline_side(pipe_right_buf, pipe_right_name, pipe_right_args);
+                        /* Split each side at the first unquoted space:
+                           pipe_*_name receives the bare basename (used
+                           for the bin/-prefixed path build below),
+                           pipe_*_args receives the Linux-style "name
+                           args" string that the kernel's
+                           stage_pipeline_child_args helper stages into
+                           the child's EXEC_ARG + BUFFER before the
+                           handoff copy.  The child's parse_argv then
+                           splits args back out with argv[0] = name. */
+                        split_pipeline_side(pipe_left_buf, pipe_left_name, pipe_left_args);
+                        split_pipeline_side(pipe_right_buf, pipe_right_name, pipe_right_args);
                         /* Build bin/-prefixed paths into pipe_left_path and
-                           pipe_right_path.  Mirror the existing exec_path
-                           pattern in dispatch_buffer. */
+                           pipe_right_path.  Mirror dispatch_buffer's
+                           dispatch_bin assembly. */
                         pipe_left_path[0] = 'b';
                         pipe_left_path[1] = 'i';
                         pipe_left_path[2] = 'n';
@@ -951,23 +974,12 @@ int main() {
                             ci += 1;
                         }
                         pipe_right_path[4 + ci] = 0;
-                        /* Pass NULL for empty-args sides so the kernel's
-                           stage_pipeline_child_args helper clears the
-                           child's EXEC_ARG (zero pointer == no args). */
-                        char *left_args_ptr;
-                        char *right_args_ptr;
-                        if (has_left_args != 0) {
-                            left_args_ptr = pipe_left_args;
-                        } else {
-                            left_args_ptr = NULL;
-                        }
-                        if (has_right_args != 0) {
-                            right_args_ptr = pipe_right_args;
-                        } else {
-                            right_args_ptr = NULL;
-                        }
-                        int rc = pipeline2(pipe_left_path, left_args_ptr,
-                                           pipe_right_path, right_args_ptr);
+                        /* pipe_*_args is always non-empty now (at
+                           minimum it carries the program name so the
+                           child's argv[0] resolves).  Pass it directly
+                           to the kernel's pipeline2 syscall. */
+                        int rc = pipeline2(pipe_left_path, pipe_left_args,
+                                           pipe_right_path, pipe_right_args);
                         if (rc < 0) {
                             write(STDOUT, "shell: pipeline failed\n", 23);
                             last_exec_status = -rc;
@@ -983,7 +995,7 @@ int main() {
                     printf("redirection syntax error\n");
                     last_exec_status = 1 << 8;
                 } else if (apply_redirections() == 0) {
-                    dispatch_buffer(buf, exec_path);
+                    dispatch_buffer(buf);
                     restore_redirections();
                 }
                 /* On apply_redirections failure last_exec_status is set; nothing
