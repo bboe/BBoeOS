@@ -684,30 +684,40 @@ oom_msg db "exec: out of memory", 13, 10, 0
 ;;; -----------------------------------------------------------------------
 ;;; build_initial_iret_frame
 ;;;
-;;; Prime [current_program_state]'s kernel stack with a 14-dword frame
-;;; that, when reached via kernel_yield's `ret`, lands at
+;;; Prime [current_program_state]'s kernel stack with a frame that,
+;;; when reached via kernel_yield's `popad; ret`, lands at
 ;;; userland_entry_stub.  The stub then `popad; iretd`s the slot into
 ;;; user code at PROGRAM_BASE / USER_STACK_TOP.
 ;;;
-;;; Layout (high to low — popad+iretd consumes them in this order
-;;; once the ret pops the return address):
-;;;   [top - 4]   ss      = USER_DATA_SELECTOR
-;;;   [top - 8]   esp     = USER_STACK_TOP
+;;; Layout (high to low — kernel_yield consumes the bottom block, then
+;;; userland_entry_stub consumes the upper popad area, then iretd
+;;; consumes the top cross-priv iret frame):
+;;;   [top -  4]  ss      = USER_DATA_SELECTOR
+;;;   [top -  8]  esp     = USER_STACK_TOP
 ;;;   [top - 12]  eflags  = 0x202 (IF=1, reserved bit 1 set)
 ;;;   [top - 16]  cs      = USER_CODE_SELECTOR
 ;;;   [top - 20]  eip     = PROGRAM_BASE
 ;;;   [top - 24]  eax     = 0       \
 ;;;   [top - 28]  ecx     = 0       |
 ;;;   [top - 32]  edx     = 0       |
-;;;   [top - 36]  ebx     = 0       | pushad area (8 dwords)
+;;;   [top - 36]  ebx     = 0       | userland_entry_stub's popad (8)
 ;;;   [top - 40]  esp_pushad = 0    |
 ;;;   [top - 44]  ebp     = 0       |
 ;;;   [top - 48]  esi     = 0       |
 ;;;   [top - 52]  edi     = 0       /
-;;;   [top - 56]  return addr = userland_entry_stub  <- ret pops this
+;;;   [top - 56]  return addr = userland_entry_stub  <- kernel_yield's ret
+;;;   [top - 60]  pad_eax = 0       \
+;;;   [top - 64]  pad_ecx = 0       |
+;;;   [top - 68]  pad_edx = 0       |
+;;;   [top - 72]  pad_ebx = 0       | kernel_yield's popad (8 dummies;
+;;;   [top - 76]  pad_esp = 0       | values discarded into the GP file
+;;;   [top - 80]  pad_ebp = 0       | which userland_entry_stub will
+;;;   [top - 84]  pad_esi = 0       | overwrite via its own popad below)
+;;;   [top - 88]  pad_edi = 0       /
 ;;;
-;;; saved_esp is set to (top - 56) so kernel_yield's `mov esp, saved_esp;
-;;; ret` lands at userland_entry_stub with the popad+iret frame above.
+;;; saved_esp is set to (top - 88) so kernel_yield's
+;;; `mov esp, saved_esp; popad; ret` consumes the bottom pad block and
+;;; lands at userland_entry_stub with the upper popad + iret frame ready.
 ;;;
 ;;; In:  [current_program_state] = slot to prime.
 ;;; Clobbers: EAX, EDX.
@@ -730,7 +740,18 @@ build_initial_iret_frame:
         mov [eax - 48], edx
         mov [eax - 52], edx
         mov dword [eax - 56], userland_entry_stub
-        sub eax, 56
+        ;; Bottom pad block — kernel_yield's popad consumes these and
+        ;; discards the values (userland_entry_stub's own popad fills
+        ;; the GP file with the iret-prep zeros above before iretd).
+        mov [eax - 60], edx
+        mov [eax - 64], edx
+        mov [eax - 68], edx
+        mov [eax - 72], edx
+        mov [eax - 76], edx
+        mov [eax - 80], edx
+        mov [eax - 84], edx
+        mov [eax - 88], edx
+        sub eax, 88
         mov edx, [current_program_state]
         mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], eax
         ret
@@ -1167,43 +1188,32 @@ spawn_failed_unwind:
 ;;; -----------------------------------------------------------------------
 global kernel_yield_read
 kernel_yield_read:
-        ;; The cc.py-emitted callers (fd_read_pipe / fd_write_pipe) treat
-        ;; EBP as callee-preserved across this call — every local access
-        ;; in the loop body indexes off `[ebp-N]`.  But syscall_handler's
-        ;; dispatch uses `mov ebp, [.table + eax*4]; jmp ebp` to indirect
-        ;; into the per-syscall handler, leaving EBP holding a kernel
-        ;; code address.  After a slot yields and a peer's syscall
-        ;; dispatch runs in between, the peer's syscall_handler clobbers
-        ;; the (CPU-level) EBP register, and when the parking slot
-        ;; resumes via kernel_yield's `ret`, the parking slot's EBP no
-        ;; longer matches its kernel-stack frame.  fd_write_pipe's
-        ;; `mov esp, ebp; pop ebp; ret` epilogue would then set ESP to
-        ;; the wrong (kernel-code) address and ret-pop garbage.
-        ;;
-        ;; Push EBP onto the parking slot's kernel stack so it survives
-        ;; the yield.  kernel_yield saves ESP after this push, so the
-        ;; matching pop on resume restores the slot's EBP before the
-        ;; cdecl `ret` returns to the C caller.
-        push ebp
-        mov ebx, [esp + 8]              ; struct pipe *p (skip pushed ebp)
+        mov ebx, [esp + 4]              ; struct pipe *p
         mov al, STATE_BLOCKED_READ
-        call kernel_yield
-        pop ebp
-        ret
+        jmp kernel_yield
 
 global kernel_yield_write
 kernel_yield_write:
-        ;; See kernel_yield_read above for the EBP-preservation rationale.
-        push ebp
-        mov ebx, [esp + 8]              ; struct pipe *p (skip pushed ebp)
+        mov ebx, [esp + 4]              ; struct pipe *p
         mov al, STATE_BLOCKED_WRITE
-        call kernel_yield
-        pop ebp
-        ret
+        jmp kernel_yield
 
 kernel_yield:
-        ;; Save current slot's state.
+        ;; Save current slot's state.  The parking slot's CPU register
+        ;; state needs to survive across the switch — without this,
+        ;; callers would have to manually push/pop every callee-saved
+        ;; register before invoking kernel_yield.  The original
+        ;; kernel_yield_read/write wrappers used to push EBP explicitly
+        ;; because syscall_handler's dispatch (`mov ebp, [.table + eax*4];
+        ;; jmp ebp`) leaves EBP holding a kernel code address — a peer
+        ;; slot's syscall_handler running during the yield clobbered the
+        ;; parking slot's EBP, and fd_write_pipe's `mov esp, ebp;
+        ;; pop ebp; ret` epilogue would then ret-pop garbage.  pushad here
+        ;; covers EBP and the rest of the GP file in one place so
+        ;; child_terminate's `jmp kernel_yield` and any future caller
+        ;; gets the same guarantee.
         cli
+        pushad
         mov edx, [current_program_state]
         mov byte [edx + PROGRAM_STATE_OFFSET_STATE], al
         mov [edx + PROGRAM_STATE_OFFSET_CURRENT_PIPE], ebx
@@ -1217,7 +1227,8 @@ kernel_yield:
 .park_writer:
         mov [ebx + PIPE_OFFSET_BLOCKED_WRITER], edx
 .park_done:
-        ;; Save current ESP into current slot's saved_esp.
+        ;; Save current ESP (pointing into the just-pushad'd register
+        ;; block) into current slot's saved_esp.
         mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], esp
 
         ;; Pick next runnable slot from {slot_b, slot_c} first; only
@@ -1247,6 +1258,7 @@ kernel_yield:
         mov esp, [edx + PROGRAM_STATE_OFFSET_SAVED_ESP]
         call tss_set_esp0_for_current_slot
         sti
+        popad                  ; restore the resuming slot's GP regs
         ret    ; returns to the saved kernel-mode IP in this slot's stack
 .deadlock_panic:
         mov dx, COM1_DATA
@@ -1279,7 +1291,14 @@ kernel_yield:
 ;;; -----------------------------------------------------------------------
 kernel_yield_to_pipeline_start:
         cli
-        ;; Save the shell's (slot_a's) kernel ESP.
+        ;; pushad mirrors kernel_yield's prologue so that the eventual
+        ;; slot_a-resume (kernel_yield's .resume_slot path after both
+        ;; children exit) can popad-restore slot_a's GP regs.  Without
+        ;; this, kernel_yield's popad would restore garbage off whatever
+        ;; happened to be at the parked slot_a ESP.
+        pushad
+        ;; Save the shell's (slot_a's) kernel ESP (pointing into the
+        ;; pushad block just pushed).
         mov edx, [current_program_state]
         mov [edx + PROGRAM_STATE_OFFSET_SAVED_ESP], esp
         ;; Pick the first runnable child.  sys_pipeline2 set both
@@ -1297,6 +1316,10 @@ kernel_yield_to_pipeline_start:
         mov esp, [edx + PROGRAM_STATE_OFFSET_SAVED_ESP]
         call tss_set_esp0_for_current_slot
         sti
+        popad                  ; the first child's pushad block (primed by
+                               ; build_initial_iret_frame) lands here on
+                               ; first run; on subsequent yields the
+                               ; resuming slot's own pushad is restored.
         ret
 
 ;;; -----------------------------------------------------------------------
