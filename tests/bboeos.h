@@ -35,11 +35,11 @@
 #define ERROR_NOT_EXECUTE 0x07
 #define ERROR_NOT_FOUND 0x08
 #define ERROR_PROTECTED 0x09
-#define EXEC_ARG ((char *)0x14FC)
 #define FLAG_DIRECTORY 0x02
 #define FLAG_EXECUTE 0x01
 #define IPPROTO_ICMP 1
 #define IPPROTO_UDP 17
+#define MAX_ARGV_ENTRIES 64
 #define MAX_INPUT 256
 #define MAX_PATH 64
 #define SECTOR_BUFFER ((char *)0xF000)
@@ -75,9 +75,11 @@ int checksum(const char *buffer, int length);
 unsigned long datetime(void);
 /* Print message and exit (no POSIX equivalent) */
 void die(const char *message) __attribute__((noreturn));
-/* Execute a filesystem program. On success never returns; on failure
-   returns an ERROR_* code (e.g. ERROR_NOT_EXECUTE, ERROR_NOT_FOUND). */
-int exec(const char *name);
+/* Execute a filesystem program (Linux execv shape: argv is a
+   NULL-terminated char** array).  Parent stays suspended; on the
+   child's exit the shell receives the wait status (zero-extended 16-bit)
+   in AX.  On failure returns a negative ERROR_* code. */
+int exec(const char *name, char *const argv[]);
 /* Far-memory accessors for the symbol-segment data in real-mode asm.c.
    Compile to ``[es:<offset>]`` memory accesses; will retarget to flat
    ``[<offset>]`` loads/stores when the OS ports to protected mode. */
@@ -96,12 +98,17 @@ int net_open(int type, int protocol);
 /* Parse dotted-decimal IP into 4-byte buffer (no POSIX equivalent) */
 int parse_ip(const char *string, char *buffer);
 /* Atomically spawn two children connected by a pipe: left_path's stdout
-   feeds right_path's stdin.  Each side's args string (NUL-terminated,
-   or NULL for no args) is staged into the child's EXEC_ARG + BUFFER by
-   the kernel.  Returns right_path's wait status on success or a
-   negative ERROR_* code on error.  Caller must be the shell (slot_a). */
-int pipeline2(const char *left_path, const char *left_args,
-              const char *right_path, const char *right_args);
+   feeds right_path's stdin.  Each side's argv is a NULL-terminated
+   char** array (or NULL for no args).  The kernel validates each array
+   under the shell's PD up front and stays on the shell's PD across
+   both child builds; for each child, stage_user_argv re-walks the
+   array under that PD and copies the strings directly into the child's
+   stack page via a kmap alias, building the Linux SysV i386 startup
+   frame in place with no intermediate kernel buffer.  Returns
+   right_path's wait status on success or a negative ERROR_* code on
+   error.  Caller must be the shell (slot_a). */
+int pipeline2(const char *left_path,  char *const left_argv[],
+              const char *right_path, char *const right_argv[]);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
 void print_datetime(unsigned long epoch);
 /* Print 4-byte IP as A.B.C.D (no POSIX equivalent) */
@@ -118,8 +125,6 @@ int recvfrom(int fd, char *buffer, int length, int port);
 int seek(int fd, int offset, int whence);
 /* Send UDP datagram (BBoeOS-specific) */
 int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
-/* Publish the argument pointer for the next exec()'d program */
-void set_exec_arg(const char *arg);
 /* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
 void set_palette_color(int fd, int index, int r, int g, int b);
 /* Register handler for SIGINT, SIGPIPE, or SIGALRM. */

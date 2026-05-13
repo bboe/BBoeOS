@@ -422,19 +422,20 @@ scheduler resumes the peer or the shell as described above. The shell's
 ### Per-child arguments
 
 `SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`,
-`DI = right_path`, `DX = left_args`, `CX = right_args`.  The shell splits each
-side at the first unquoted space, stashes the command name into
-`pipe_left_path` / `pipe_right_path` (`bin/`-prefixed), and writes a
-Linux-style `name args` string (program name followed by the user arg tail)
-into `pipe_left_args` / `pipe_right_args` (256-byte BSS arrays).  The
-`name args` shape ensures the child's `argv[0]` resolves to the basename
-after `FUNCTION_PARSE_ARGV` runs.
+`DI = right_path`, `DX = left_argv` (`char **`), `CX = right_argv` (`char **`).
+The shell tokenises each pipeline side in place (NUL-splitting whitespace
+runs in `pipe_left_buf` / `pipe_right_buf`), fills `pipe_left_argv` /
+`pipe_right_argv` with pointers to each token, and terminates each array with
+NULL.  `argv[0]` always points at the program-name token.
 
-For each child, immediately before `.populate_handoff_from_shell` runs (with
-the shell's PD active, so the BSS pointer + `BUFFER` both resolve), the kernel
-helper `.stage_pipeline_child_args` copies the NUL-terminated args bytes into
-the shell's `BUFFER` slot (user-virt 0x1500) and writes `EXEC_ARG` =
-`BUFFER`.  The subsequent handoff-frame copy carries both into the child's
-new user_data frame at matching offsets, so the child's `FUNCTION_PARSE_ARGV`
-prologue resolves the pointer through the child's PD just like it does for
-`exec()`.
+Up front (with the shell's PD still active), the kernel's `.copy_user_argv`
+helper walks each `char**` array, validates every pointer with
+`access_ok` / `access_ok_string`, and copies the strings into per-side BSS
+scratch (`exec_args_strings_a` for the left, `..._b` for the right) with the
+matching offsets in `exec_args_offsets_a` / `exec_args_offsets_b` and counts in
+`exec_args_argc_a` / `_b`.  The shell PD is then released; later, inside each
+child's `build_child_program_state`, `stage_user_argv` consumes the per-side
+scratch and writes the Linux SysV i386 startup frame (argc / argv pointers /
+NULL / empty envp) onto the topmost page of that child's user stack via
+`kmap_map`.  The child reads `argc` from `[esp]` and `argv` from `[esp+4]` at
+process entry — no vDSO `parse_argv` step.

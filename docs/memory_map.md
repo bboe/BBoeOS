@@ -56,7 +56,7 @@ builds.
 | User-virt range | Size | Purpose |
 |---|---|---|
 | `0x00000000..0x00000FFF` | 4 KB | NULL guard — not mapped (PTE[0] absent so `*(int *)0` raises #PF) |
-| `0x00001000..0x00001FFF` | 4 KB | shell↔program handoff frame at `USER_DATA_BASE` (EXEC_ARG at +0x4FC, BUFFER at +0x500) |
+| `0x00001000..0x00001FFF` | 4 KB | per-program user-data page at `USER_DATA_BASE` (shell input buffer `BUFFER` at +0x500; zero-filled for non-shell programs). argv/envp now live on the user stack — see the `USER_STACK_TOP` row — not in this page |
 | `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
 | `0x08048000..` | program-sized | program text + BSS (Linux ELF-shaped load address) |
 | `0xFF7E0000..0xFF7EFFFF` | 64 KB | unmapped (stack guard region) |

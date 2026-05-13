@@ -1371,6 +1371,12 @@ class EmissionMixin:
 
             if _body_has_stack_arrays(body):
                 self.elide_frame = False
+            # main(argc, argv) reads its parameters off the kernel-supplied
+            # SysV i386 startup frame at [ebp + 4] / [ebp + 8] (see
+            # emit_argument_vector_startup).  EBP must point at the saved
+            # entry-ESP — keep the prologue so push ebp / mov ebp, esp runs.
+            if parameters:
+                self.elide_frame = False
 
         # Globals are visible in every function.  Scalars get a
         # ``_g_<name>`` memory slot; arrays are resolved via the

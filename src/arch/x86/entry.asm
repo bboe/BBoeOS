@@ -7,16 +7,15 @@
 ;;; (built by `high_entry`, replaces the boot PD which has been freed).
 ;;;
 ;;; shell_reload is the re-entry point for SYS_EXIT (after the dying
-;;; program's PD has been torn down by sys_exit).  It loads bin/shell
-;;; off disk into a kernel-side scratch buffer, zeroes the BUFFER /
-;;; EXEC_ARG snapshots (a fresh shell inherits no args), and `jmp`s
+;;; program's PD has been torn down by sys_exit).  It vfs_finds bin/shell,
+;;; clears pending_argv_argc (a fresh shell inherits no args), and `jmp`s
 ;;; program_enter.
 ;;;
 ;;; program_enter builds a fresh per-program PD via address_space_create,
 ;;; populates the user-visible regions (program text + BSS, vDSO code
-;;; page, user stack), restores BUFFER / EXEC_ARG into the new program's
-;;; first user frame, snapshots the kernel ESP for sys_exit, switches
-;;; CR3, and `iretd`s at CPL=3.
+;;; page, user stack), stages the Linux argv/envp/argc frame onto the
+;;; top of the new user stack (see stage_user_argv), snapshots the kernel
+;;; ESP for sys_exit, switches CR3, and `iretd`s at CPL=3.
 ;;;
 ;;; Any CPU exception fired past this point vectors through `idt.asm`'s
 ;;; `exc_common` and prints `EXCnn` on COM1.  CPL=3 faults — and CPL=0
@@ -38,7 +37,7 @@
 
         ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
         ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
-        ;;   PTE 0x00001             : private — EXEC_ARG, BUFFER (USER_DATA_BASE)
+        ;;   PTE 0x00001             : private — user-data page (shell BUFFER lives at +0x500); USER_DATA_BASE
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
@@ -170,14 +169,17 @@ pmode_irq6_handler:
 ;;;
 ;;; Builds the per-program PD and `iretd`s into ring 3.  Caller
 ;;; invariants:
-;;;   * Active PD = `kernel_idle_pd` (no user mappings).
+;;;   * Active PD = the parent's (sys_exec / sys_pipeline2 path) so
+;;;     stage_user_argv can dereference user-virt argv directly; or
+;;;     `kernel_idle_pd` (boot / shell_reload path, where
+;;;     pending_argv_user_ptr is NULL and stage_user_argv touches no
+;;;     user pages).
 ;;;   * `vfs_find` (or equivalent) has populated `vfs_found_*` for
 ;;;     the binary file.
-;;;   * `[next_handoff_frame_phys]` either holds the phys of a
-;;;     pre-allocated + populated USER_DATA handoff frame (sys_exec
-;;;     path: BUFFER / EXEC_ARG copied from the dying shell) or is
-;;;     zero (boot / sys_exit path: fresh shell, no inherited args
-;;;     — `program_enter` allocates + zeroes the frame itself).
+;;;   * `pending_argv_user_ptr` is either a user-virt `char**` that
+;;;     `.validate_user_argv` has already accepted under the active
+;;;     PD, or 0 — boot / shell_reload's "no args" case yields an
+;;;     `argc=0, argv[0]=NULL, envp[0]=NULL` startup frame.
 ;;;
 ;;; Streams the binary directly from disk into per-program user
 ;;; frames — sector-by-sector via `vfs_read_sec` and a private
@@ -197,12 +199,23 @@ pmode_irq6_handler:
 program_enter:
         ;; Boot / shell_reload: initialize fresh fd_table.  sys_exec:
         ;; .exec_load already copied parent's fd_table into the child's
-        ;; slot; skip fd_init so the inheritance isn't clobbered.
-        cmp dword [next_handoff_frame_phys], 0
+        ;; slot via .build_child_slot; skip fd_init so the inheritance
+        ;; isn't clobbered.  parent_program_state is the discriminator —
+        ;; non-zero means a parent is suspended (sys_exec or sys_pipeline2
+        ;; path) and the child slot already has its inherited fd_table.
+        cmp dword [parent_program_state], 0
         jne .skip_fd_init
         call fd_init
 .skip_fd_init:
         call build_child_program_state
+        ;; --- Switch CR3 to the child PD ---
+        ;; build_child_program_state ran under the *parent*'s PD (so
+        ;; stage_user_argv could read argv directly from user-virt).
+        ;; The iretd below needs the child PD active so PROGRAM_BASE
+        ;; and the user stack resolve.
+        mov eax, [current_program_state]
+        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
+        mov cr3, eax
         ;; --- iretd into ring 3 ---
         ;; Reload data segments to USER_DATA_SELECTOR before the iretd
         ;; (iretd doesn't reload DS/ES/FS/GS).  CPL=0 can still
@@ -214,7 +227,8 @@ program_enter:
         mov fs, ax
         mov gs, ax
         push dword USER_DATA_SELECTOR
-        push dword USER_STACK_TOP
+        mov eax, [current_program_state]
+        push dword [eax + PROGRAM_STATE_OFFSET_INITIAL_ESP]
         push dword 0x202
         push dword USER_CODE_SELECTOR
         push dword PROGRAM_BASE
@@ -229,12 +243,19 @@ program_enter:
 ;;;
 ;;; PD-build core extracted from program_enter.  Allocates the
 ;;; per-program PD, populates the user-visible regions (handoff
-;;; frame, program text + BSS, vDSO code page, user stack), switches
-;;; CR3 to the new PD, enables the FPU, drains PS/2, and returns.
+;;; frame, program text + BSS, vDSO code page, user stack), stages
+;;; the Linux argv/envp/argc frame onto the user stack via kmap,
+;;; enables the FPU, drains PS/2, and returns.  Does **not** switch
+;;; CR3 — the caller stays under the parent's (or kernel_idle_pd's)
+;;; address space so stage_user_argv can read the user argv array
+;;; directly via the active PD; the iretd / yield path is responsible
+;;; for switching to the new PD before user code runs.
 ;;;
-;;; Caller invariants: same as program_enter (active PD = kernel_idle_pd,
-;;; vfs_found_* populated, next_handoff_frame_phys either pre-populated
-;;; or zero).
+;;; Caller invariants: vfs_found_* populated; pending_argv_user_ptr
+;;; either NULL (boot / shell_reload / programs that pass no args) or
+;;; a user-virt char** that .validate_user_argv has already accepted;
+;;; active CR3 must be the address space where pending_argv_user_ptr
+;;; (and its element strings) resolve.
 ;;;
 ;;; OOM during the build does NOT return; it falls through to the local
 ;;; .oom path which either (a) `jmp spawn_failed_unwind` (if a parent
@@ -270,25 +291,16 @@ build_child_program_state:
         mov ax, [vfs_found_dir_off]
         mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
 
-        ;; --- Acquire and map the shell↔program handoff frame ---
-        ;; The frame holds EXEC_ARG (4 B at +0x4FC) and BUFFER (256 B
-        ;; at +0x500).  It sits at user-
-        ;; virt 0x1000 (PTE[1]) so PTE[0] (virt 0..0xFFF) stays
-        ;; not-present and a NULL deref from CPL=3 raises #PF instead
-        ;; of silently reading/writing this frame.  In-frame offsets
-        ;; are ``<symbol> - USER_DATA_BASE`` so the per-symbol page
-        ;; offset survives any future shift of USER_DATA_BASE.
-        ;;
-        ;; sys_exec's `.exec_load` (syscall.asm) pre-allocates this
-        ;; frame and populates it directly from the dying shell's
-        ;; user pages — no kernel staging buffer needed.  In that
-        ;; path [next_handoff_frame_phys] holds the populated phys.
-        ;; The boot / sys_exit path leaves it at zero, which means
-        ;; "fresh shell with no inherited args" — frame_alloc here
-        ;; and zero-fill the slot.
-        mov eax, [next_handoff_frame_phys]
-        test eax, eax
-        jnz .handoff_have
+        ;; --- Acquire and map the user-data frame at USER_DATA_BASE ---
+        ;; A single 4 KB private page at user-virt 0x1000 (PTE[1]).  Sits
+        ;; at PTE[1] so PTE[0] (virt 0..0xFFF) stays not-present and a
+        ;; NULL deref from CPL=3 raises #PF instead of silently
+        ;; reading/writing this frame.  The shell uses bytes at +0x500
+        ;; (BUFFER) as its input line buffer; other programs see the
+        ;; page as zeroed BSS-like scratch.  Allocated and zero-filled
+        ;; here on every program load — argv staging happens on the
+        ;; user stack now (see stage_user_argv below), so there is no
+        ;; cross-PD copy in this path anymore.
         call frame_alloc
         jc .oom
         mov [pending_frame_phys], eax
@@ -301,15 +313,7 @@ build_child_program_state:
         rep stosd
         pop eax                             ; handoff_kvirt
         call kmap_unmap
-        mov eax, [pending_frame_phys]       ; reload phys for .handoff_map
-        jmp .handoff_map
-        .handoff_have:
-        ;; Pre-allocated by sys_exec — already populated.  Transfer
-        ;; ownership from next_handoff_frame_phys to pending_frame_phys
-        ;; so the OOM handler frees it exactly once.
-        mov dword [next_handoff_frame_phys], 0
-        mov [pending_frame_phys], eax
-        .handoff_map:
+        mov eax, [pending_frame_phys]       ; reload phys for the map step
         mov ecx, eax                        ; handoff frame phys
         mov eax, [current_program_state]
         mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
@@ -529,6 +533,12 @@ build_child_program_state:
         jc .oom
 
         ;; --- Map user stack (private, 16 frames, zeroed) ---
+        ;; Captures the topmost frame's phys (the one mapped at virt
+        ;; STACK_VIRT_END - 0x1000 = 0xFF7FF000) into topmost_stack_frame_phys
+        ;; on every iteration; after the loop the last write wins, so the
+        ;; variable holds the frame containing USER_STACK_TOP-1.
+        ;; stage_user_argv below consumes it to write the Linux argv
+        ;; frame into the high end of the page.
         mov dword [virt_cursor], STACK_VIRT_BASE
 .stack_page_loop:
         mov eax, [virt_cursor]
@@ -537,6 +547,7 @@ build_child_program_state:
         call frame_alloc
         jc .oom
         mov [pending_frame_phys], eax
+        mov [topmost_stack_frame_phys], eax
         call kmap_map                       ; EAX = kvirt
         push eax                            ; save kvirt for the unmap below
         mov edi, eax
@@ -558,10 +569,15 @@ build_child_program_state:
         jmp .stack_page_loop
 .stack_pages_done:
 
-        ;; --- Switch to the new PD ---
-        mov eax, [current_program_state]
-        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
-        mov cr3, eax
+        ;; --- Stage Linux argv / envp / argc frame on the topmost
+        ;;     user stack page and record initial_esp in the slot.
+        ;;     Reads pending_argv_user_ptr (a user-virt char**, 0 for
+        ;;     the boot / shell_reload "no args" path), dereferences it
+        ;;     under the active CR3 = parent's PD, and writes the
+        ;;     resulting frame into the child's stack via a kmap alias
+        ;;     of the captured topmost_stack_frame_phys.  CR3 is
+        ;;     unchanged.
+        call stage_user_argv
 
         ;; --- Enable x87 FPU for ring-3 ---
         ;; CR0.EM=0 (use FPU instructions, don't trap with #NM),
@@ -615,17 +631,6 @@ build_child_program_state:
         call frame_free
         mov dword [pending_frame_phys], 0
 .oom_no_pending:
-
-        ;; Free the pre-allocated handoff frame from sys_exec, if it
-        ;; never got consumed (e.g. address_space_create OOM'd before
-        ;; we reached the handoff section).  The .handoff_have path
-        ;; clears it itself before mapping.
-        mov eax, [next_handoff_frame_phys]
-        test eax, eax
-        jz .oom_no_handoff
-        call frame_free
-        mov dword [next_handoff_frame_phys], 0
-.oom_no_handoff:
 
         ;; Tear down the partial PD.  address_space_destroy walks user
         ;; PDEs only and frees mapped user pages (skipping shared,
@@ -726,7 +731,8 @@ build_initial_iret_frame:
         mov edx, [current_program_state]
         mov eax, [edx + PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP]
         mov dword [eax - 4],  USER_DATA_SELECTOR
-        mov dword [eax - 8],  USER_STACK_TOP
+        mov ebx, [edx + PROGRAM_STATE_OFFSET_INITIAL_ESP]
+        mov [eax - 8],  ebx
         mov dword [eax - 12], 0x202
         mov dword [eax - 16], USER_CODE_SELECTOR
         mov dword [eax - 20], PROGRAM_BASE
@@ -890,9 +896,9 @@ shell_reload:
         ;; dying program's PD and switched CR3 off it, or this is the
         ;; first boot and CR3 was set up by high_entry).  Look up bin/shell
         ;; (program_enter streams its bytes from disk on demand) and
-        ;; jmp program_enter.  Leaving [next_handoff_frame_phys] at
-        ;; zero tells program_enter to allocate + zero a fresh handoff
-        ;; frame (a fresh shell inherits no args).
+        ;; jmp program_enter.  pending_argv_user_ptr = 0 here gives the
+        ;; shell an argc=0 startup frame — stage_user_argv writes just
+        ;; argc / argv NULL / envp NULL.
         ;;
         ;; loading_shell_flag = 1 promotes any OOM in this load to a
         ;; hard panic (.oom → .panic in program_enter); program_enter
@@ -903,7 +909,7 @@ shell_reload:
         mov esi, shell_path
         call vfs_find
         jc .shell_fail
-        mov dword [next_handoff_frame_phys], 0
+        mov dword [pending_argv_user_ptr], 0
         jmp program_enter
 
         .shell_fail:
@@ -1323,6 +1329,204 @@ kernel_yield_to_pipeline_start:
         ret
 
 ;;; -----------------------------------------------------------------------
+;;; stage_user_argv
+;;;
+;;; Write the Linux SysV i386 startup frame onto the topmost page of the
+;;; new program's user stack and record the resulting initial ESP into
+;;; [current_program_state + PROGRAM_STATE_OFFSET_INITIAL_ESP].
+;;;
+;;; Final user-stack layout at process entry (high-to-low addresses
+;;; growing down toward initial_esp):
+;;;
+;;;   USER_STACK_TOP  -> (one past last writable byte)
+;;;   ... argv[0..argc-1] NUL-terminated string bytes (packed high) ...
+;;;   ... padding to 16-byte alignment of the pointer-array start ...
+;;;   NULL                              <-- envp[0] terminator
+;;;   NULL                              <-- argv[argc] terminator
+;;;   argv[argc-1] pointer (user-virt)
+;;;   ...
+;;;   argv[0] pointer (user-virt)
+;;;   argc                              <-- initial_esp
+;;;
+;;; A program reads `argc` from `[esp]` and `argv` from `lea r,[esp+4]`.
+;;; `envp` (always empty here) sits at `[esp + 4*(argc+1) + 4]`.
+;;;
+;;; The user argv strings are read **directly** from the caller's PD —
+;;; sys_exec / sys_pipeline2 keep the parent's PD as the active CR3 from
+;;; entry through child build, so [esi + i*4] (the argv pointer slot) and
+;;; the strings themselves resolve under the parent's address space.  The
+;;; writes go through `kmap_map` on the child's stack frame, which lives
+;;; in the kernel half (shared across every PD).  No kernel scratch is
+;;; involved — the bytes flow shell PD → kmap kvirt in one pass.
+;;;
+;;; Inputs:  [pending_argv_user_ptr] = user-virt char** (0 = no args).
+;;;                                    Must have been validated by
+;;;                                    .validate_user_argv (syscall.asm)
+;;;                                    before this point.
+;;;          Active CR3 = caller's PD (so user-virt reads resolve).
+;;;          [topmost_stack_frame_phys] = phys of the user stack page
+;;;                                    that contains USER_STACK_TOP-1
+;;;                                    (mapped at user-virt 0xFF7FF000).
+;;;                                    Captured by build_child_program_state's
+;;;                                    stack-mapping loop.
+;;;
+;;; Output:  [current_program_state + INITIAL_ESP] = user-virt ESP for
+;;;          the first iretd into ring 3.
+;;;
+;;; Clobbers: EAX, EBX, ECX, EDX, ESI, EDI, EBP.
+;;; -----------------------------------------------------------------------
+stage_user_argv:
+        ;; Local frame (referenced via EBP-relative addressing so the
+        ;; push loop in step 1 doesn't shift the offsets):
+        ;;   [ebp -  4]  kvirt        — kmap alias of the child's
+        ;;                              topmost stack frame
+        ;;   [ebp -  8]  argc         — final argv count
+        ;;   [ebp - 12]  cursor       — in-frame byte offset of the
+        ;;                              next byte to write (descends
+        ;;                              from 0x1000 toward 0)
+        ;;   [ebp - 16]  argv_base    — saved [pending_argv_user_ptr]
+        push ebp
+        mov  ebp, esp
+        sub  esp, 16
+        push ebx
+        push esi
+        push edi
+
+        mov  eax, [topmost_stack_frame_phys]
+        call kmap_map                           ; EAX = kvirt
+        mov  [ebp - 4], eax
+        mov  dword [ebp - 12], 0x1000
+
+        ;; --- Count argv entries (capped at MAX_ARGV_ENTRIES; pre-
+        ;;     validated by .validate_user_argv before we got here).
+        mov  eax, [pending_argv_user_ptr]
+        mov  [ebp - 16], eax
+        test eax, eax
+        jz   .argc_zero
+        mov  esi, eax
+        xor  ebx, ebx
+.count_loop:
+        cmp  ebx, MAX_ARGV_ENTRIES
+        jae  .have_argc
+        mov  edx, [esi + ebx*4]
+        test edx, edx
+        jz   .have_argc
+        inc  ebx
+        jmp  .count_loop
+.argc_zero:
+        xor  ebx, ebx
+.have_argc:
+        mov  [ebp - 8], ebx
+        test ebx, ebx
+        jz   .strings_done
+
+        ;; --- Step 1: walk argv forward (i = 0..argc-1), measure each
+        ;;     string under the caller's PD, reserve (len+1) bytes at
+        ;;     the top of the in-frame cursor, copy directly into the
+        ;;     kmap alias, and push the resulting child-side user-virt
+        ;;     onto the kernel stack.  After this loop the kernel
+        ;;     stack contains, top-down:
+        ;;        [esp]                 argv[argc-1] uvirt
+        ;;        [esp + 4]             argv[argc-2] uvirt
+        ;;        ...
+        ;;        [esp + 4*(argc-1)]    argv[0] uvirt
+        ;;     The pop loop below consumes these in argc-1..0 order,
+        ;;     descending the cursor → the child reads argv[0] at the
+        ;;     lowest address, argv[argc-1] at the highest, matching
+        ;;     the SysV layout.
+        xor  ebx, ebx                           ; i = 0
+.string_loop:
+        cmp  ebx, [ebp - 8]
+        jae  .strings_done
+
+        mov  esi, [ebp - 16]
+        mov  eax, [esi + ebx*4]                 ; user_ptr (caller PD)
+        mov  esi, eax                           ; ESI = source for rep movsb below
+
+        ;; strlen capped at ARG_MAX; EDI = length excluding NUL.
+        xor  edi, edi
+.strlen_loop:
+        cmp  edi, ARG_MAX
+        jae  .strlen_done
+        cmp  byte [esi + edi], 0
+        je   .strlen_done
+        inc  edi
+        jmp  .strlen_loop
+.strlen_done:
+        inc  edi                                ; +1 for the NUL byte
+
+        ;; cursor -= byte_count.
+        mov  ecx, [ebp - 12]
+        sub  ecx, edi
+        mov  [ebp - 12], ecx
+
+        ;; rep movsb: ESI = user source (set), EDI = kvirt dest,
+        ;; ECX = byte count.
+        mov  ecx, edi                           ; count
+        mov  edi, [ebp - 4]                     ; kvirt
+        add  edi, [ebp - 12]                    ; + cursor
+        cld
+        rep  movsb
+
+        ;; Stash the child-side user-virt of this string.
+        mov  eax, [ebp - 12]
+        add  eax, STACK_VIRT_END - 0x1000
+        push eax
+
+        inc  ebx
+        jmp  .string_loop
+.strings_done:
+
+        ;; --- Step 2: 16-byte align the cursor down.  USER_STACK_TOP
+        ;;     and 0x1000 are both 16-byte aligned, so the resulting
+        ;;     user-virt is too.
+        mov  ecx, [ebp - 12]
+        and  ecx, ~0x0F
+
+        ;; --- Step 3: envp[0] = NULL (empty envp, reserved slot).
+        sub  ecx, 4
+        mov  eax, [ebp - 4]                     ; kvirt (reused across all writes below)
+        mov  dword [eax + ecx], 0
+
+        ;; --- Step 4: argv[argc] = NULL.
+        sub  ecx, 4
+        mov  dword [eax + ecx], 0
+
+        ;; --- Step 5: pop argc child-side user-virts off the kernel
+        ;;     stack into argv[argc-1..0] (cursor descending).
+        mov  edx, [ebp - 8]
+        test edx, edx
+        jz   .ptrs_done
+.ptr_loop:
+        sub  ecx, 4
+        pop  edi                                ; child-side user-virt
+        mov  [eax + ecx], edi
+        dec  edx
+        jnz  .ptr_loop
+.ptrs_done:
+
+        ;; --- Step 6: argc at the bottom of the frame.
+        sub  ecx, 4
+        mov  edx, [ebp - 8]
+        mov  [eax + ecx], edx
+
+        ;; --- Step 7: record initial_esp into the slot.
+        lea  eax, [ecx + STACK_VIRT_END - 0x1000]
+        mov  edx, [current_program_state]
+        mov  [edx + PROGRAM_STATE_OFFSET_INITIAL_ESP], eax
+
+        ;; --- Step 8: kmap_unmap and return.
+        mov  eax, [ebp - 4]                     ; kvirt
+        call kmap_unmap
+
+        pop  edi
+        pop  esi
+        pop  ebx
+        mov  esp, ebp
+        pop  ebp
+        ret
+
+;;; -----------------------------------------------------------------------
 ;;; tss_set_esp0_for_current_slot — update TSS.ESP0 to point at the
 ;;; current_program_state's per-slot kernel stack top.  Called before
 ;;; every iretd-to-userland so the next ring-3-to-ring-0 transition
@@ -1474,6 +1678,24 @@ parent_program_state    dd 0
 
 pending_frame_phys      dd 0
 
+        ;; User-virt char** that stage_user_argv (called from
+        ;; build_child_program_state) walks under the caller's PD to copy
+        ;; argv strings directly onto the new program's user stack via
+        ;; kmap.  Set by sys_exec / sys_pipeline2 before each child
+        ;; build; 0 means "no args" (the boot / sys_exit shell-reload
+        ;; path, or an explicit NULL argv from a user program).
+        ;; Callers must have validated the array with .validate_user_argv
+        ;; first so stage_user_argv can trust every dereference.
+        align 4
+pending_argv_user_ptr   dd 0
+
+        ;; Phys of the topmost user stack frame (virt 0xFF7FF000) — the
+        ;; one that holds USER_STACK_TOP-1 and below.  Captured during
+        ;; build_child_program_state's stack-mapping loop and consumed
+        ;; by stage_user_argv to write the Linux argv/envp/argc frame.
+        align 4
+topmost_stack_frame_phys dd 0
+
         ;; Active pipeline's pipe-pool index.  Set by sys_pipeline2 in
         ;; entry, consumed by both child-build steps to install the
         ;; matching FD_TYPE_PIPE_R / FD_TYPE_PIPE_W fds on slot_b /
@@ -1513,16 +1735,6 @@ pipeline_partial_state  dd 0
 program_fd              times FD_ENTRY_SIZE db 0
 
 shell_path      db "bin/shell", 0
-
-        ;; sys_exec pre-allocates the new program's USER_DATA handoff
-        ;; frame and populates it directly from the dying shell's user
-        ;; pages (BUFFER + EXEC_ARG) via the kernel direct map, then
-        ;; passes the phys to program_enter through this slot.  The
-        ;; boot / sys_exit path leaves it at zero; program_enter
-        ;; treats zero as "no pre-allocation" and frame_allocs +
-        ;; zero-fills a fresh frame for the respawning shell.
-        align 4
-next_handoff_frame_phys dd 0
 
         ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
         ;; protected_mode_entry); all other fields stay zero because we

@@ -7,10 +7,11 @@ main:
         cld
 
         ;; Linux-style argv: reserve stack slots; require argc == 3.
-        sub esp, ARGV_RESERVE_BYTES
-        mov edi, esp
-        mov ecx, ARGV_RESERVE_BYTES / 4
-        call FUNCTION_PARSE_ARGV
+        ;; Linux SysV i386 startup: argc at [esp], argv ptrs at [esp+4..].
+        ;; Pop argc into ECX and leave argv[0] at [esp+0] to match the
+        ;; legacy parse_argv layout this program is written against.
+        pop ecx                                 ; ecx = argc
+        mov edi, esp                            ; edi = argv base
         cmp ecx, 3
         jne .usage
 

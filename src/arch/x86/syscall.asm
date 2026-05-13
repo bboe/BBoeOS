@@ -411,12 +411,16 @@ syscall_handler:
         ;; ------------------------------------------------------------
         ;; Pipeline / exec helpers + SYS_SYS_PIPELINE2 handler.
         ;;
-        ;; .populate_handoff_from_shell and .build_child_slot factor
-        ;; the per-child setup that both .sys_exec and .sys_pipeline2
-        ;; need: copy BUFFER + EXEC_ARG from the calling shell into a
-        ;; fresh user_data frame, wipe the child slot, inherit the
-        ;; parent's fd_table, and clear console event rings in the
-        ;; copy.
+        ;; .validate_user_argv and .build_child_slot factor the
+        ;; per-child setup that both .sys_exec and .sys_pipeline2 need:
+        ;; access_ok-walk the user-supplied argv (char**) under the
+        ;; parent's PD; wipe the child slot; inherit the parent's
+        ;; fd_table; and clear console event rings in the copy.  The
+        ;; user argv pointer itself is stashed in pending_argv_user_ptr;
+        ;; stage_user_argv (inside build_child_program_state) re-walks
+        ;; it under the still-active parent PD and writes each string
+        ;; directly into the child's stack frame through a kmap alias,
+        ;; with no kernel scratch buffer in between.
         ;;
         ;; .sys_pipeline2 builds slot_b with cmd1, slot_c with cmd2,
         ;; installs pipe fds on STDOUT(b) / STDIN(c), and cooperatively
@@ -492,14 +496,6 @@ syscall_handler:
         add esp, 4
         mov dword [ebx + PROGRAM_STATE_OFFSET_PD_PHYS], 0
 .punw_no_pd:
-        ;; Free any pending handoff frame (allocated for slot_c but
-        ;; never consumed because vfs_find / executable check failed).
-        mov eax, [next_handoff_frame_phys]
-        test eax, eax
-        jz .punw_no_handoff
-        call frame_free
-        mov dword [next_handoff_frame_phys], 0
-.punw_no_handoff:
         ;; Wipe slot_b state, clear parent + pending-pipe globals.
         ;; Restoring current_program_state -> program_state_a is critical:
         ;; without it the eventual iret_cf path runs
@@ -515,84 +511,62 @@ syscall_handler:
         mov dword [current_program_state], program_state_a
         ret
 
-        .stage_pipeline_child_args:
-        ;; Stage the EXEC_ARG / BUFFER region in the shell's user_data
-        ;; frame so the next call to .populate_handoff_from_shell hands
-        ;; the right per-child argument string to the child being built.
+        .validate_user_argv:
+        ;; Validate a user-supplied argv (char**) under the caller's
+        ;; active PD.  Walks the pointer array up to MAX_ARGV_ENTRIES
+        ;; slots (stopping at a NULL terminator); access_ok's the array
+        ;; range, then access_ok_string's each element with an ARG_MAX
+        ;; byte cap.  No copy — stage_user_argv re-walks under the same
+        ;; PD later and reads the bytes directly into the child's stack
+        ;; frame via kmap.  Single-threaded kernel + suspended user =
+        ;; no TOCTOU between this validation and the later copy.
         ;;
-        ;; In:  EAX = user-virt pointer to the args string in the shell's
-        ;;            BSS (NUL-terminated; ECX-bounded), or 0 for "no args".
-        ;;      Active CR3 = shell's PD (BSS pointer + BUFFER both resolve).
-        ;; Out: [EXEC_ARG] (user-virt 0x14FC) = BUFFER (0x1500) when EAX
-        ;;      was non-zero and the string fit; 0 otherwise.  The args
-        ;;      bytes (including the NUL) are copied into BUFFER so that
-        ;;      .populate_handoff_from_shell's BUFFER-copy step propagates
-        ;;      them into the child's user_data frame at the matching
-        ;;      offset, and the EXEC_ARG pointer resolves under the child's
-        ;;      PD (USER_DATA_BASE is freshly mapped per child).
-        ;;
-        ;; The args pointer is validated up-front by .sys_pipeline2 via
-        ;; access_ok_string; we only re-check the in-range NUL fit here.
-        ;; Clobbers: EAX, ECX, ESI, EDI.
-        test eax, eax
-        jz .spca_clear
-        mov esi, eax
-        mov edi, BUFFER
-        mov ecx, MAX_INPUT
-        cld
-.spca_copy:
-        lodsb
-        stosb
-        test al, al
-        jz .spca_done
-        loop .spca_copy
-        ;; ECX exhausted without finding NUL — the access_ok_string
-        ;; pre-check above caps the source at MAX_INPUT, so we should
-        ;; not reach here; defensively clear EXEC_ARG to fall back to
-        ;; no-args rather than risk a half-copied tail.
-        jmp .spca_clear
-.spca_done:
-        mov dword [EXEC_ARG], BUFFER
-        ret
-.spca_clear:
-        mov dword [EXEC_ARG], 0
-        ret
+        ;; In:  ESI = user_argv (char**), or 0 (treated as argc=0).
+        ;;      Active CR3 = caller's PD.
+        ;; Out: CF=0 on success.  CF=1 + AL = ERROR_FAULT (bad pointer
+        ;;      or no NUL within ARG_MAX) or ERROR_INVALID (more than
+        ;;      MAX_ARGV_ENTRIES entries) on failure.
+        ;; Clobbers: EAX, EBX, ECX.  Preserves ESI, EDI, EDX, EBP.
+        test esi, esi
+        jz .vua_ok
 
-        .populate_handoff_from_shell:
-        ;; Populate the user_data handoff frame at
-        ;; [next_handoff_frame_phys] from the shell's user pages.  The
-        ;; new frame is reached through kmap_map so it stays addressable
-        ;; even when the bitmap allocator hands out a frame above the
-        ;; direct-map ceiling.
-        ;;
-        ;; In:  [next_handoff_frame_phys] = pre-allocated frame phys.
-        ;;      Active CR3 = shell's PD (so BUFFER / EXEC_ARG resolve).
-        ;; Out: frame zeroed; EXEC_ARG + BUFFER copied at matching
-        ;;      in-frame offsets; CR3 unchanged.
-        ;; Clobbers: EAX, ECX.  Preserves EBX, EDX, ESI, EDI, EBP.
+        ;; access_ok on (MAX_ARGV_ENTRIES + 1)*4 bytes (the worst-case
+        ;; array footprint).  access_ok preserves all caller registers.
         push esi
-        push edi
-        mov eax, [next_handoff_frame_phys]
-        call kmap_map                   ; EAX = handoff kvirt
-        push eax                        ; [esp+0] = kvirt; reloaded below
-        mov edi, eax
-        mov ecx, 1024
-        xor eax, eax
-        cld
-        rep stosd
-        ;; Reload kvirt (rep stosd advanced edi past the frame).
-        mov edi, [esp]
-        mov eax, [EXEC_ARG]
-        mov [edi + (EXEC_ARG - USER_DATA_BASE)], eax
-        mov esi, BUFFER
-        add edi, (BUFFER - USER_DATA_BASE)
-        mov ecx, MAX_INPUT / 4
-        cld
-        rep movsd
-        pop eax                         ; handoff kvirt
-        call kmap_unmap
-        pop edi
+        mov ebx, esi
+        mov ecx, (MAX_ARGV_ENTRIES + 1) * 4
+        call access_ok
         pop esi
+        jc .vua_fault
+
+        xor ebx, ebx                            ; ebx = i
+.vua_loop:
+        cmp ebx, MAX_ARGV_ENTRIES
+        jae .vua_too_many
+        mov eax, [esi + ebx*4]
+        test eax, eax
+        jz .vua_ok
+        push esi
+        push ebx
+        mov esi, eax
+        mov ecx, ARG_MAX
+        call access_ok_string
+        pop ebx
+        pop esi
+        jc .vua_fault
+        inc ebx
+        jmp .vua_loop
+
+.vua_ok:
+        clc
+        ret
+.vua_fault:
+        mov al, ERROR_FAULT
+        stc
+        ret
+.vua_too_many:
+        mov al, ERROR_INVALID
+        stc
         ret
 
         .sys_pipeline2:
@@ -602,8 +576,8 @@ syscall_handler:
         ;;
         ;; In:  ESI = left_path  (cmd1 path, in shell user-virt)
         ;;      EDI = right_path (cmd2 path, in shell user-virt)
-        ;;      EDX = left_args  (cmd1 args, in shell user-virt; 0 = none)
-        ;;      ECX = right_args (cmd2 args, in shell user-virt; 0 = none)
+        ;;      EDX = left_argv  (cmd1 argv char**, in shell user-virt; 0 = none)
+        ;;      ECX = right_argv (cmd2 argv char**, in shell user-virt; 0 = none)
         ;; Out: EAX = cmd2 wait status (POSIX-shaped, zero-extended).
         ;;      CF = 0 on success.  CF = 1 + AL = ERROR_* on failure
         ;;      (bad pointer, not found, not executable, OOM, nested
@@ -639,29 +613,18 @@ syscall_handler:
         mov esi, [esp + 0]              ; right_path
         call .check_path
         jc .pipeline_bad_pointer
-        ;; Validate args pointers (NUL-bounded within MAX_INPUT) — only
-        ;; if non-zero; zero means "no args" and is allowed.  Same
-        ;; access_ok_string discipline as paths but with the wider
-        ;; MAX_INPUT cap (args strings come from the shell's input
-        ;; buffer; paths from MAX_PATH-sized scratch).
-        mov esi, [esp + 20]             ; left_args
-        test esi, esi
-        jz .pipeline_left_args_ok
-        push ecx
-        mov ecx, MAX_INPUT
-        call access_ok_string
-        pop ecx
-        jc .pipeline_bad_pointer
-.pipeline_left_args_ok:
-        mov esi, [esp + 24]             ; right_args
-        test esi, esi
-        jz .pipeline_right_args_ok
-        push ecx
-        mov ecx, MAX_INPUT
-        call access_ok_string
-        pop ecx
-        jc .pipeline_bad_pointer
-.pipeline_right_args_ok:
+
+        ;; Validate both argv arrays under the shell's PD.  No copy —
+        ;; stage_user_argv re-walks each array later (while still under
+        ;; the shell's PD, since we never swap CR3 during the build)
+        ;; and writes the strings directly to each child's stack via
+        ;; kmap.
+        mov esi, [esp + 20]             ; left_argv
+        call .validate_user_argv
+        jc .pipeline_argv_failed
+        mov esi, [esp + 24]             ; right_argv
+        call .validate_user_argv
+        jc .pipeline_argv_failed
 
         ;; Allocate the pipe.
         call pipe_alloc
@@ -675,16 +638,12 @@ syscall_handler:
         jc .pipeline_b_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
         jz .pipeline_b_not_execute
-        call frame_alloc
-        jc .pipeline_b_oom_handoff
-        mov [next_handoff_frame_phys], eax
-        ;; Stage cmd1's args into the shell's BUFFER + EXEC_ARG slots
-        ;; before populate_handoff_from_shell copies them into slot_b's
-        ;; new user_data frame.  Active CR3 = shell's PD; the args
-        ;; string lives in the shell's BSS at user-virt EDX_saved.
-        mov eax, [esp + 20]             ; left_args
-        call .stage_pipeline_child_args
-        call .populate_handoff_from_shell
+
+        ;; Aim pending_argv_user_ptr at left_argv so stage_user_argv
+        ;; (inside build_child_program_state below) reads it under the
+        ;; shell's PD — which stays the active CR3 throughout.
+        mov eax, [esp + 20]             ; left_argv
+        mov [pending_argv_user_ptr], eax
 
         ;; Take parent <- slot_a (shell), current <- slot_b.
         mov eax, [current_program_state]
@@ -707,13 +666,11 @@ syscall_handler:
         call pipe_at
         inc byte [eax + PIPE_OFFSET_WRITER_FD_OPEN]
 
-        ;; Switch CR3 to kernel_idle_pd before building slot_b's PD.
-        ;; The shell's PD is preserved (parent_program_state holds it).
-        mov eax, [kernel_idle_pd_phys]
-        mov cr3, eax
-
-        ;; Build slot_b's PD (allocates PD, streams binary, maps stack,
-        ;; etc.) without iretding.  OOM in here unwinds via
+        ;; Build slot_b's PD under the shell's PD (active CR3 = shell).
+        ;; stage_user_argv inside build_child_program_state reads
+        ;; pending_argv_user_ptr through the shell's mappings and writes
+        ;; the result through a kmap alias of the child's stack frame
+        ;; (kernel half — works under any PD).  OOM in here unwinds via
         ;; build_child_program_state.oom -> spawn_failed_unwind, which
         ;; closes every slot_b fd before wiping the slot — including the
         ;; STDOUT (FD_TYPE_PIPE_W) entry installed above.  fd_close_pipe
@@ -735,33 +692,19 @@ syscall_handler:
         mov dword [pipeline_partial_state], 1
 
         ;; --- Build slot_c (cmd2: reader side) ---
-        ;; Swap CR3 back to kernel_idle_pd (already there from the
-        ;; slot_b build, but explicit for clarity) and re-resolve cmd2
-        ;; through the shell's view.  We need shell-PD-active to call
-        ;; populate_handoff_from_shell — but we already left it; the
-        ;; shell's user pages are NOT directly mapped under
-        ;; kernel_idle_pd.  Switch back to slot_a's PD briefly to read
-        ;; the shell's BUFFER / EXEC_ARG, then back to kernel_idle_pd
-        ;; for the slot_c build.
-        mov eax, [parent_program_state]
-        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
-        mov cr3, eax
-
+        ;; CR3 is still the shell's PD — build_child_program_state didn't
+        ;; switch it.  No swap dance needed: vfs_find reads right_path
+        ;; through the shell's mappings, and stage_user_argv reads
+        ;; right_argv the same way during the build below.
         mov esi, [esp + 0]              ; right_path
         call vfs_find
         jc .pipeline_c_not_found
         test byte [vfs_found_mode], FLAG_EXECUTE
         jz .pipeline_c_not_execute
-        call frame_alloc
-        jc .pipeline_c_oom_handoff
-        mov [next_handoff_frame_phys], eax
-        ;; Stage cmd2's args into the shell's BUFFER + EXEC_ARG slots
-        ;; before populate_handoff_from_shell copies them into slot_c's
-        ;; user_data frame.  We just switched CR3 back to the shell's PD
-        ;; above, so the BSS pointer in [esp+24] resolves.
-        mov eax, [esp + 24]             ; right_args
-        call .stage_pipeline_child_args
-        call .populate_handoff_from_shell
+
+        ;; Aim pending_argv_user_ptr at right_argv for slot_c.
+        mov eax, [esp + 24]             ; right_argv
+        mov [pending_argv_user_ptr], eax
 
         ;; current <- slot_c; parent_program_state still = slot_a.
         mov dword [current_program_state], program_state_c
@@ -782,9 +725,8 @@ syscall_handler:
         call pipe_at
         inc byte [eax + PIPE_OFFSET_READER_FD_OPEN]
 
-        ;; Switch CR3 to kernel_idle_pd for slot_c's PD build.
-        mov eax, [kernel_idle_pd_phys]
-        mov cr3, eax
+        ;; CR3 is still the shell's PD; build_child_program_state runs
+        ;; under it so stage_user_argv can read right_argv directly.
         call build_child_program_state
         call build_initial_iret_frame
 
@@ -804,13 +746,13 @@ syscall_handler:
         ;; kernel_yield rather than the parent_iret_frame restore.
         mov dword [pipeline_active], 1
 
-        ;; --- Switch CR3 back to the shell (slot_a) before yielding ---
-        ;; kernel_yield_to_pipeline_start will then save slot_a's ESP
-        ;; and pick slot_b (running cmd1) — its first kernel_yield
-        ;; lands at userland_entry_stub which iretds into cmd1.
+        ;; --- Hand the shell back as current and yield into slot_b ---
+        ;; CR3 is already the shell's PD (we never swapped during the
+        ;; builds).  kernel_yield_to_pipeline_start saves slot_a's ESP
+        ;; and picks slot_b (running cmd1); slot_b's first kernel_yield
+        ;; lands at userland_entry_stub which switches CR3 to slot_b's
+        ;; PD and iretds into cmd1.
         mov dword [current_program_state], program_state_a
-        mov eax, [program_state_a + PROGRAM_STATE_OFFSET_PD_PHYS]
-        mov cr3, eax
         sti
         call kernel_yield_to_pipeline_start
         cli
@@ -872,15 +814,10 @@ syscall_handler:
         mov al, ERROR_NOT_EXECUTE
         stc
         jmp .iret_cf
-.pipeline_b_oom_handoff:
-        mov eax, [pending_pipeline_pipe]
-        push eax
-        call pipe_release_by_index
-        add esp, 4
-        mov dword [pending_pipeline_pipe], 0
-        mov dword [pipeline_active], 0
-        mov al, ERROR_FAULT
-        stc
+.pipeline_argv_failed:
+        ;; .copy_user_argv already set CF=1 and AL=ERROR_*.  We're still
+        ;; in the early phase — no pipe slot allocated, no parent slot
+        ;; suspended, no child slot built — so iret straight back.
         jmp .iret_cf
 ;; --- Late error paths (slot_b built; unwind via pipeline_unwind_slot_b) ---
 .pipeline_c_not_found:
@@ -891,11 +828,6 @@ syscall_handler:
 .pipeline_c_not_execute:
         call .pipeline_unwind_slot_b
         mov al, ERROR_NOT_EXECUTE
-        stc
-        jmp .iret_cf
-.pipeline_c_oom_handoff:
-        call .pipeline_unwind_slot_b
-        mov al, ERROR_FAULT
         stc
         jmp .iret_cf
 
@@ -1179,26 +1111,22 @@ syscall_handler:
         stc
         jmp .iret_cf
         .exec_load:
-        ;; Pre-allocate the new program's USER_DATA handoff frame from
-        ;; the bitmap allocator and populate it *directly* from the
-        ;; dying shell's user pages.  The frame is reached through
-        ;; kmap_map so it stays addressable even when the bitmap
-        ;; allocator hands out a frame above the direct-map ceiling
-        ;; (FRAME_DIRECT_MAP_LIMIT, ~1020 MB).  The phys is handed off
-        ;; to program_enter via [next_handoff_frame_phys].
+        ;; Validate the user-supplied argv (char**) at saved EDX under
+        ;; the shell's PD.  stage_user_argv (called from
+        ;; build_child_program_state) walks the same array again to
+        ;; copy strings directly into the new program's stack via
+        ;; kmap; we stay on the shell's PD throughout so user-virt
+        ;; reads keep resolving.
         ;;
-        ;; Reads from BUFFER (user-virt 0x1500) and EXEC_ARG (user-virt
-        ;; 0x14FC) inside populate_handoff_from_shell resolve through
-        ;; the shell's PD because we haven't switched CR3 yet.  Once
-        ;; the new frame is populated we switch CR3 to kernel_idle_pd;
-        ;; the parent's PD is preserved (not destroyed) so
-        ;; child_terminate can restore it later.
-        call frame_alloc
-        jc .exec_oom
-        mov [next_handoff_frame_phys], eax
-        call .populate_handoff_from_shell
-        ;; Do NOT destroy the parent's PD.  Save it, switch slots, switch
-        ;; CR3 to kernel_idle_pd, build the child via program_enter.
+        ;; pushad layout: [esp+20] = saved EDX = user_argv (char**).
+        mov esi, [esp + SYSCALL_SAVED_EDX]
+        call .validate_user_argv
+        jc .exec_argv_failed
+        mov [pending_argv_user_ptr], esi
+        ;; Do NOT destroy the parent's PD.  Save it, switch slots,
+        ;; build the child via program_enter.  CR3 stays on the parent
+        ;; throughout build_child_program_state; program_enter does the
+        ;; final switch to the child PD immediately before iretd.
         mov eax, [current_program_state]
         mov [parent_program_state], eax
 
@@ -1216,18 +1144,11 @@ syscall_handler:
         ;; copy.
         call .build_child_slot
 
-        ;; Switch CR3 to kernel_idle_pd; do NOT destroy parent's PD.
-        mov eax, [kernel_idle_pd_phys]
-        mov cr3, eax
         sti
         jmp program_enter
-        .exec_oom:
-        ;; frame_alloc returned CF=1 — bitmap exhausted.  Shell stays
-        ;; alive (we haven't touched its PD yet); surface the failure
-        ;; via ERROR_FAULT so the caller can report and retry / give
-        ;; up.  In practice frames are abundant, so this is rare.
-        mov al, ERROR_FAULT
-        stc
+        .exec_argv_failed:
+        ;; .validate_user_argv set CF=1 and AL=ERROR_*.  Shell is still
+        ;; the current slot; no state to unwind.
         jmp .iret_cf
 
         .sys_exit:

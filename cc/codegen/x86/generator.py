@@ -128,7 +128,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "rmdir": frozenset({"ax", "si"}),
         "seek": frozenset({"ax", "bx", "cx"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
-        "set_exec_arg": frozenset({"ax"}),
         "set_palette_color": frozenset({"ax", "bx", "cx", "dx"}),
         "shutdown": frozenset({"ax"}),
         "signal": frozenset({"ax", "bx", "cx"}),
@@ -2280,27 +2279,30 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        movzx {self.target.acc}, al")
 
     def emit_argument_vector_startup(self, parameters: list[Param], /, *, body: list[Node]) -> list[Node]:
-        """Emit inline startup code that parses EXEC_ARG into argc/argv.
+        """Emit inline startup code that loads argc/argv from the user stack.
 
-        Linux-style argv: ``argv[0]`` is the program basename (set by
-        the shell as the first space-delimited token in EXEC_ARG),
-        ``argv[1..argc-1]`` are the user arguments, ``argv[argc]`` is
-        ``NULL``, and ``argc`` includes the program name.
+        The kernel writes a Linux SysV i386 startup frame on the new
+        program's user stack before iretd'ing into ring 3.  At entry:
 
-        ``argv`` is a real ``char **`` local pointing at a stack-
-        allocated pointer array.  The startup reserves
-        ``ARGV_RESERVE_BYTES`` on the user stack via ``sub esp, N``,
-        records the base in the ``argv`` local, then dispatches to
-        ``FUNCTION_PARSE_ARGV`` which fills consecutive slots and
-        writes the trailing NULL.  ``main`` exits via
-        ``jmp FUNCTION_EXIT`` (sys_exit) so the reservation does not
-        need an epilogue add — the kernel discards the user stack
-        on exit.
+            [esp + 0]                       argc
+            [esp + 4 + 4*i]                 argv[i]   (0 <= i < argc)
+            [esp + 4 + 4*argc]              NULL      (argv terminator)
+            [esp + 4 + 4*argc + 4]          NULL      (envp terminator,
+                                                       envp is currently
+                                                       always empty)
 
-        When the first statement in *body* is ``if (argc != N) die(msg)``,
-        the argc check is fused directly into the startup using
-        ``cmp ecx, N`` (before ECX is clobbered), eliminating the
-        ``_l_argc`` memory local entirely.  Returns the (possibly
+        Codegen loads ``argc`` from ``[esp]`` and ``argv`` as
+        ``esp + 4`` (a real ``char **`` pointing at the on-stack
+        pointer array).  Both are then stored into their per-function
+        locals.  The user stack frame stays live for the duration of
+        ``main`` because ``main`` exits via ``jmp FUNCTION_EXIT``
+        (sys_exit) — the kernel discards the user stack on exit, so
+        the layout's lifetime matches the program's.
+
+        When the first statement in *body* is
+        ``if (argc != N) die(msg)``, the argc check is fused directly
+        against the memory operand ``[esp]`` so the per-function
+        ``argc`` local is never written.  Returns the (possibly
         trimmed) body.
         """
         argc_name = None
@@ -2313,17 +2315,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if not argv_name:
             return body
 
-        # argv is a real pointer local now (was a constant alias to the
-        # fixed ARGV buffer pre-refactor).  Its slot was already
-        # allocated by the caller; the startup just writes the runtime
-        # stack-base pointer into it after the reservation.
-
-        self.emit("        cld")
-        self.emit(f"        sub {self.target.stack_register}, ARGV_RESERVE_BYTES")
-        self.emit(f"        mov {self.target.di_register}, {self.target.stack_register}")
+        # The function prologue ran `push ebp; mov ebp, esp; sub esp, N`
+        # before this startup, so ESP has already been adjusted by the
+        # locals reservation but EBP still points at the saved old EBP
+        # just below the kernel-supplied argv frame:
+        #     [ebp + 0] = saved EBP
+        #     [ebp + 4] = argc
+        #     [ebp + 8] = argv[0] pointer  (start of the on-stack argv array)
+        # Use EBP-relative addressing so the offsets stay stable
+        # regardless of how many local bytes the prologue reserved.
+        self.emit(f"        lea {self.target.di_register}, [{self.target.base_register} + 8]")
         self.emit(f"        mov [{self._local_address(argv_name)}], {self.target.di_register}")
-        self.emit(f"        mov {self.target.count_register}, ARGV_RESERVE_BYTES / 4")
-        self.emit("        call FUNCTION_PARSE_ARGV")
 
         # Try to fuse the first body statement: if (argc != N) die(msg)
         fused_argc = False
@@ -2347,7 +2349,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 die_label = self.new_string_label(die_message.content)
                 die_length = string_byte_length(die_message.content)
                 expected = first.cond.right.value
-                self.emit(f"        cmp {self.target.count_register}, {expected}")
+                stack_word = "dword" if self.target.int_size == 4 else "word"
+                self.emit(f"        cmp {stack_word} [{self.target.base_register} + 4], {expected}")
                 self.emit(f"        mov {self.target.si_register}, {die_label}")
                 self.emit(f"        mov {self.target.count_register}, {die_length}")
                 self.emit("        jne FUNCTION_DIE")
@@ -2355,6 +2358,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 body = body[1:]
 
         if argc_name and not fused_argc:
+            self.emit(f"        mov {self.target.count_register}, [{self.target.base_register} + 4]")
             self.emit(f"        mov [{self._local_address(argc_name)}], {self.target.count_register}")
         return body
 
