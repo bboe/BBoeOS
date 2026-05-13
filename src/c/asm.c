@@ -160,6 +160,8 @@ int symbol_count;
    ``user_functions`` registry regardless of source order, but clang
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
+__attribute__((regparm(1)))
+int apply_binary(int lhs, int op, int rhs);
 void define_macro();
 __attribute__((regparm(1)))
 void emit_address_disp(int disp);
@@ -207,11 +209,16 @@ int match_word(char *keyword);
 __attribute__((regparm(1)))
 void mem_op_reg_emit(int opcode);
 __attribute__((regparm(1)))
+int op_precedence(int op);
+__attribute__((regparm(1)))
 int open_file_ro(char *path);
+int parse_atom();
+int parse_creg();
 void parse_directive();
+__attribute__((regparm(1)))
+int parse_expression(int min_prec);
 void parse_line();
 void parse_mnemonic();
-int parse_creg();
 int parse_operand();
 int parse_register();
 __attribute__((carry_return))
@@ -3069,13 +3076,79 @@ int parse_creg() {
     return c - '0';
 }
 
-/* Shared RHS step for ``resolve_value``'s operator chain — advance past
-   the operator byte, skip whitespace, and recurse.  Factored so the
-   7 operator arms each collapse to ``value = value OP parse_rhs();``. */
-int parse_rhs() {
-    source_cursor += 1;
-    skip_ws();
-    return resolve_value();
+/* Return the binding precedence of a binary operator at the current
+   cursor, or -1 if no operator is present.  Levels match C / NASM
+   precedence — `*` `/` bind tighter than `+` `-`, which bind tighter
+   than `&`, `^`, `|`.  All operators are left-associative (the
+   precedence-climbing loop in `parse_expression` re-enters with
+   `prec + 1` to enforce that). */
+__attribute__((regparm(1)))
+int op_precedence(int op) {
+    if (op == '*' || op == '/') {
+        return 5;
+    }
+    if (op == '+' || op == '-') {
+        return 4;
+    }
+    if (op == '&') {
+        return 3;
+    }
+    if (op == '^') {
+        return 2;
+    }
+    if (op == '|') {
+        return 1;
+    }
+    return -1;
+}
+
+__attribute__((regparm(1)))
+int apply_binary(int lhs, int op, int rhs) {
+    if (op == '+') {
+        return lhs + rhs;
+    }
+    if (op == '-') {
+        return lhs - rhs;
+    }
+    if (op == '*') {
+        return lhs * rhs;
+    }
+    if (op == '/') {
+        return lhs / rhs;
+    }
+    if (op == '&') {
+        return lhs & rhs;
+    }
+    if (op == '|') {
+        return lhs | rhs;
+    }
+    return lhs ^ rhs;
+}
+
+/* Precedence-climbing parser for the binary-operator subset NASM uses
+   in `%assign` / displacement expressions.  ``min_prec`` is the
+   minimum precedence the current frame will consume; an operator
+   below it returns control to the caller so it can combine the
+   running ``lhs`` with its own higher-precedence subexpression.  The
+   recursive call uses ``prec + 1`` to make every operator
+   left-associative (e.g., ``a - b - c`` = ``(a - b) - c``, matching
+   both C and NASM). */
+__attribute__((regparm(1)))
+int parse_expression(int min_prec) {
+    int lhs = parse_atom();
+    while (1) {
+        skip_ws();
+        int op = source_cursor[0];
+        int prec = op_precedence(op);
+        if (prec < min_prec) {
+            return lhs;
+        }
+        source_cursor += 1;
+        skip_ws();
+        int rhs = parse_expression(prec + 1);
+        lhs = apply_binary(lhs, op, rhs);
+    }
+    return lhs;
 }
 
 /* Lookup a label's address without advancing SI.  Used by
@@ -3208,14 +3281,15 @@ int resolve_label() {
    ``ret`` directly after (naked_asm elide), so the missing C-level
    ``return`` that clang's -Wreturn-type warns about is harmless —
    same pattern as ``load_src_sector``. */
-int resolve_value() {
+/* Parse a single leading term: a parenthesised subexpression, a
+   character literal, a `$` (current address), a numeric literal, or
+   an identifier.  A leading unary `-` / `+` on the first term is
+   handled here so `parse_expression`'s climb stays purely binary.
+   The matching '-' / '+' inside an operator chain is read by
+   `parse_expression`'s loop, not this function. */
+int parse_atom() {
     skip_ws();
     int value;
-    /* Leading unary ``-`` / ``+`` on the first term — matches NASM's
-       displacement-expression semantics where ``[bp-4+1]`` evaluates
-       left-to-right as ``((-4) + 1) = -3``.  Negation applies only
-       to the first term; the operator chain that follows picks up
-       from there. */
     int negate = 0;
     if (source_cursor[0] == '-') {
         source_cursor += 1;
@@ -3279,28 +3353,11 @@ int resolve_value() {
     if (negate) {
         value = 0 - value;
     }
-    /* Operator chain (flat precedence, right-associative via recursion
-       in ``parse_rhs``).  NASM's constant-expression lowering
-       parenthesises every subtree, so flat precedence still produces
-       the intended grouping. */
-    skip_ws();
-    char op = source_cursor[0];
-    if (op == '+') {
-        value += parse_rhs();
-    } else if (op == '-') {
-        value -= parse_rhs();
-    } else if (op == '*') {
-        value *= parse_rhs();
-    } else if (op == '/') {
-        value /= parse_rhs();
-    } else if (op == '&') {
-        value &= parse_rhs();
-    } else if (op == '|') {
-        value |= parse_rhs();
-    } else if (op == '^') {
-        value ^= parse_rhs();
-    }
     return value;
+}
+
+int resolve_value() {
+    return parse_expression(0);
 }
 
 /* Iterative pass 1.  Starts every jcc/jmp pessimistic (near form)
