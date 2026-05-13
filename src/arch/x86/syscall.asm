@@ -715,8 +715,11 @@ syscall_handler:
         ;; Build slot_b's PD (allocates PD, streams binary, maps stack,
         ;; etc.) without iretding.  OOM in here unwinds via
         ;; build_child_program_state.oom -> spawn_failed_unwind, which
-        ;; tears down slot_b and returns ERROR_FAULT to the shell —
-        ;; pipe pool slot is leaked in that path (acceptable for v1).
+        ;; closes every slot_b fd before wiping the slot — including the
+        ;; STDOUT (FD_TYPE_PIPE_W) entry installed above.  fd_close_pipe
+        ;; decrements the writer refcount and (since reader_fd_open is
+        ;; still 0) calls pipe_release on the pool slot, so no leak.
+        ;; tests/test_pipeline_pool_recycle.py regresses this contract.
         call build_child_program_state
 
         ;; Prime slot_b's kernel stack so kernel_yield's first resume
