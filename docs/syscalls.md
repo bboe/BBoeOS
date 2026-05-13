@@ -39,10 +39,10 @@ numbers are defined symbolically as `SYS_*` constants in
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
 | F1h   | sys_exec     | Execute program, SI = filename, CF on error            |
 | F2h   | sys_exit     | Reload and return to shell                             |
-| F3h   | sys_pipeline2 | Run two pipeline children: SI = cmd1 path, DI = cmd2 path; cmd1's stdout is piped to cmd2's stdin; AX = cmd2 wait status on success; CF on error (AL = ERROR_*). Only callable from the shell (slot_a); nested pipelines are rejected with ERROR_INVALID. |
+| F3h   | sys_pipeline2 | Run two pipeline children: SI = left_path, DI = right_path, DX = left_args (0 = none), CX = right_args (0 = none); cmd1's stdout is piped to cmd2's stdin; AX = cmd2 wait status on success; CF on error (AL = ERROR_*). Each *_args is a NUL-terminated user-virt pointer in the shell's BSS staged into the child's EXEC_ARG + BUFFER before handoff. Only callable from the shell (slot_a); nested pipelines are rejected with ERROR_INVALID. |
 | F4h   | sys_reboot   | Reboot                                                |
 | F5h   | sys_shutdown | Shutdown                                              |
-| F6h   | sys_signal   | Register signal handler. EBX = signum (SIGINT or SIGALRM), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |
+| F6h   | sys_signal   | Register signal handler. EBX = signum (SIGINT, SIGPIPE, or SIGALRM), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |
 | F7h   | sys_sigreturn| Restore sigcontext from user stack at [user_esp + 4]; never returns through the regular path — resumes the saved EIP/EFLAGS/ESP/registers. Used only via the vDSO trampoline at the end of a signal handler |
 
 ## `/dev/midi` ioctls (FD_TYPE_MIDI = 6)

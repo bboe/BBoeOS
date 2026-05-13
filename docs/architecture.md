@@ -185,14 +185,15 @@ disk:
 ## Signal delivery
 
 Signal delivery is split into two independent axes — detection and delivery —
-and three dispatch modes depending on the handler registered by the program. Two
-signals share this path: SIGINT (Ctrl+C) and SIGALRM (interval-timer expiry, see
-[SIGALRM and interval timers](#sigalrm-and-interval-timers) below).
+and three dispatch modes depending on the handler registered by the program.
+Three signals share this path: SIGINT (Ctrl+C), SIGPIPE (write to a pipe with no
+readers), and SIGALRM (interval-timer expiry, see [SIGALRM and interval
+timers](#sigalrm-and-interval-timers) below).
 
 ### Detection
 
-Three paths set per-signal pending bits (single bytes in kernel BSS —
-`pending_sigint` and `pending_sigalrm`):
+Four paths set per-signal pending bits (single bytes in the per-slot
+`program_state` — `pending_sigint`, `pending_sigpipe`, `pending_sigalrm`):
 
 - **PS/2 IRQ 1** (`src/drivers/ps2.c`): the cooked-byte path recognises the
   Ctrl+C scancode sequence and sets `pending_sigint` before returning from the
@@ -203,6 +204,12 @@ Three paths set per-signal pending bits (single bytes in kernel BSS —
   poll branch checks each received byte; if it equals `0x03` (ASCII ETX, the
   byte a terminal sends for Ctrl+C) it sets `pending_sigint` and does not
   enqueue the byte into the line buffer.
+- **`fd_write_pipe`** (`src/fs/fd.c`): when a writer resumes from
+  `kernel_yield_write` and observes `pipe_reader_open(p) == 0`, it sets
+  `pending_sigpipe` on the current slot before returning -1 to userspace.  The
+  syscall epilogue's `SIGNAL_TAIL_CHECK` then delivers SIGPIPE — `SIG_DFL` kills
+  the writer before the -1 surfaces; `SIG_IGN` clears the pending bit and lets
+  the caller see the -1 (`EPIPE`).
 - **PIT IRQ 0** (`src/arch/x86/entry.asm`, `pmode_irq0_handler`): when an alarm
   is armed (`alarm_deadline != 0`) and `system_ticks` reaches the deadline, the
   handler sets `pending_sigalrm` and either re-arms (`alarm_interval != 0`) or
@@ -222,12 +229,12 @@ macro:
 2. Tests `in_signal_handler`; if set, falls through to popad + IRET (block
    re-entry until SYS_SYS_SIGRETURN clears the flag — POSIX-default same-mask
    behavior, single flag covers both signals).
-3. Tests `pending_sigint` first (lower signum = higher priority); if set, picks
-   SIGINT.  Otherwise tests `pending_sigalrm`; if set, picks SIGALRM.  If both
-   clear, falls through to popad + IRET.
-4. Loads `EAX` with the picked signal's handler (`sigint_handler` or
-   `sigalrm_handler` — both in entry.asm BSS, one dword per program, reset to
-   `SIG_DFL` on each `shell_reload`) and `EDX` with the signum (2 or 14).
+3. Tests pending bits in signum order (lower = higher priority): `pending_sigint`
+   (SIGINT, 2), then `pending_sigpipe` (SIGPIPE, 13), then `pending_sigalrm`
+   (SIGALRM, 14).  If all clear, falls through to popad + IRET.
+4. Loads `EAX` with the picked signal's handler (`sigint_handler`,
+   `sigpipe_handler`, or `sigalrm_handler` — per-slot dwords in `program_state`,
+   reset to `SIG_DFL` by `program_enter`) and `EDX` with the signum.
 5. Branches on EAX: SIG_DFL → `signal_dispatch_kill` (does NOT clear the pending
    bit — the program is dying anyway); SIG_IGN → clear the pending bit
    corresponding to EDX, fall through; user-virt → `signal_dispatch_user` (which
@@ -236,11 +243,14 @@ macro:
 
 ### Dispatch modes
 
-- **`SIG_DFL` (0)** — `signal_dispatch_kill`: calls `address_space_destroy` on
-  the current program's PD, prints a signum-specific banner to the console (`^C`
-  for SIGINT, `^A` for SIGALRM, `^?` for the corrupt-sigcontext kill from
+- **`SIG_DFL` (0)** — `signal_dispatch_kill`: resets ESP to the current slot's
+  per-slot kernel stack top (so pipeline children don't trample slot_a's stack
+  while it's parked at `kernel_yield_to_pipeline_start`), calls
+  `address_space_destroy` on the current program's PD, prints a signum-specific
+  banner to the console (`^C` for SIGINT, `^P` for SIGPIPE, `^A` for SIGALRM,
+  `^?` for the corrupt-sigcontext kill from
   `signal_resume_after_handler`'s validation failure), and falls into
-  `shell_reload`. This is the out-of-the-box terminate behaviour: a runaway
+  `child_terminate`. This is the out-of-the-box terminate behaviour: a runaway
   program is killed and the shell prompt reappears.
 - **`SIG_IGN` (1)** — clear the corresponding pending bit (already done by
   `SIGNAL_TAIL_CHECK`), resume the IRET path unchanged. The signal is silently
@@ -406,9 +416,24 @@ scheduler resumes the peer or the shell as described above. The shell's
 
 - Only one pipe (`cmd1 | cmd2`); chains of three or more commands are rejected.
 - Pipe combined with I/O redirection (`cmd1 > file | cmd2`) is rejected.
-- Pipeline children receive no arguments (`argc = 0`); only the path is passed to
-  `SYS_SYS_PIPELINE2`.
-- No `SIGPIPE`; a writer that outlives its reader gets `EPIPE` on the next write
-  attempt (returned as `-1` from `write()`).
 - `SYS_SYS_PIPELINE2` can only be called from the shell (slot_a); programs cannot
   spawn nested pipelines.
+
+### Per-child arguments
+
+`SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`,
+`DI = right_path`, `DX = left_args`, `CX = right_args`.  The shell splits each
+side at the first unquoted space and stashes the command name into
+`pipe_left_path` / `pipe_right_path` (`bin/`-prefixed) and the args tail into
+`pipe_left_args` / `pipe_right_args` (256-byte BSS arrays).  Passing 0 for an
+args pointer means "this child gets no argv" (the kernel clears `EXEC_ARG` for
+that child).
+
+For each child, immediately before `.populate_handoff_from_shell` runs (with
+the shell's PD active, so the BSS pointer + `BUFFER` both resolve), the kernel
+helper `.stage_pipeline_child_args` copies the NUL-terminated args bytes into
+the shell's `BUFFER` slot (user-virt 0x1500) and writes `EXEC_ARG` =
+`BUFFER`.  The subsequent handoff-frame copy carries both into the child's
+new user_data frame at matching offsets, so the child's `FUNCTION_PARSE_ARGV`
+prologue resolves the pointer through the child's PD just like it does for
+`exec()`.

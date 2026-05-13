@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **SIGPIPE.**  Writing to a pipe whose read end has fully closed now raises
+  SIGPIPE (signum 13) on the writer.  Default action (`SIG_DFL`) terminates the
+  writer before the `write()` syscall returns to userspace; the kernel banner is
+  `^P`.  `SIG_IGN` suppresses the kill and lets `write()` return -1 (`EPIPE`).
+  Implementation: `fd_write_pipe` sets `pending_sigpipe` on the current slot
+  when `pipe_reader_open(p) == 0`; the syscall epilogue's `SIGNAL_TAIL_CHECK`
+  delivers it before `iretd`.  `signal_dispatch_kill` now resets ESP to the
+  current slot's per-slot kernel stack (not the global slot_a stack) so a
+  pipeline child dying via SIGPIPE doesn't trample slot_a's parked frame.
+  `program_state` gained `pending_sigpipe` / `sigpipe_handler` fields; struct
+  size is now 0x23C.  Tests: `tests/test_sigpipe.py`.
 - **Shell pipes (`cmd1 | cmd2`).** The shell parses a single unquoted `|` in
   each command segment, rejects multiple `|` or pipe-with-redirect combinations
   at parse time, and calls `SYS_SYS_PIPELINE2` (F3h) to atomically spawn both

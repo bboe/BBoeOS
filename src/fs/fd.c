@@ -729,9 +729,11 @@ int fd_write(int *result __attribute__((out_register("ax"))),
 
 // fd_write_pipe — enqueue up to `count` bytes from fd_write_buffer
 // into the pipe's ring.  Blocks (via kernel_yield_write) when the
-// buffer is full and the read end is still open.  Returns -1 (EPIPE)
-// when the reader end is fully closed and we still have bytes to
-// write.  Otherwise returns the full `count` once all bytes are in.
+// buffer is full and the read end is still open.  When the reader is
+// fully closed, raises SIGPIPE on the current slot: SIG_DFL terminates
+// the writer before this return reaches userspace; SIG_IGN lets the
+// -1 (EPIPE) return surface to the caller.  Otherwise returns the
+// full `count` once all bytes are in.
 __attribute__((carry_return))
 int fd_write_pipe(int *result __attribute__((out_register("ax"))),
                   struct fd *entry __attribute__((in_register("esi"))),
@@ -749,6 +751,7 @@ int fd_write_pipe(int *result __attribute__((out_register("ax"))),
     total = 0;
     while (total < count) {
         if (pipe_reader_open(p) == 0) {
+            current_program_state->pending_sigpipe = 1;
             *result = -1;
             return 0;
         }

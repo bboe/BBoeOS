@@ -123,6 +123,7 @@ class CodeGeneratorBase:
         "SIG_IGN",
         "SIGALRM",
         "SIGINT",
+        "SIGPIPE",
         "SOCK_DGRAM",
         "SOCK_RAW",
         "STATE_RUNNING",

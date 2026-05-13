@@ -73,10 +73,17 @@ char segment_ops[MAX_SEGMENTS];
    so that (a) cc.py passes their addresses correctly on function calls
    and (b) they live in BSS without consuming additional user stack.
    pipe_left_buf / pipe_right_buf hold the trimmed command tokens;
-   pipe_left_path / pipe_right_path hold the bin/-prefixed paths. */
+   pipe_left_path / pipe_right_path hold the bin/-prefixed paths;
+   pipe_left_args / pipe_right_args hold the per-child argv tails
+   (passed through SYS_SYS_PIPELINE2 so the kernel can stage them into
+   each child's EXEC_ARG / BUFFER slot before the handoff copy). */
+char pipe_left_args[MAX_INPUT];
 char pipe_left_buf[MAX_INPUT];
-char pipe_right_buf[MAX_INPUT];
+char pipe_left_name[MAX_INPUT];
 char pipe_left_path[MAX_PATH];
+char pipe_right_args[MAX_INPUT];
+char pipe_right_buf[MAX_INPUT];
+char pipe_right_name[MAX_INPUT];
 char pipe_right_path[MAX_PATH];
 
 /* contains_redirect_token — return non-zero if `s` has an unquoted
@@ -360,6 +367,7 @@ int find_top_level_pipe(char *segment) {
    under -std=c99 (test_cc_compatibility's reference build) requires
    explicit declarations. */
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
+int split_pipeline_side(char *source, char *name_out, char *args_out);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -584,6 +592,58 @@ int restore_redirections() {
         index = index + 1;
     }
     return 0;
+}
+
+/* split_pipeline_side — split `source` (a pipeline side, e.g. "ls -l" or
+   "pipe_producer bulk") into name (copied into `name_out`, MAX_INPUT)
+   and args tail (copied into `args_out`, MAX_INPUT).  The split happens
+   at the first unquoted space; the args tail keeps its original spacing
+   (the kernel's parse_argv re-tokenises it on the child's behalf).
+   `args_out[0]` is NUL when the side has no arguments — the shell
+   passes a NULL args pointer for that child to suppress EXEC_ARG.
+   Returns 1 when args are present, 0 otherwise. */
+int split_pipeline_side(char *source, char *name_out, char *args_out) {
+    int scan = 0;
+    int in_single = 0;
+    int in_double = 0;
+    while (source[scan] != '\0') {
+        if (source[scan] == '\'' && in_double == 0) {
+            in_single = 1 - in_single;
+        } else if (source[scan] == '"' && in_single == 0) {
+            in_double = 1 - in_double;
+        } else if (source[scan] == ' ' && in_single == 0 && in_double == 0) {
+            break;
+        }
+        scan += 1;
+    }
+    int name_index = 0;
+    while (name_index < scan) {
+        name_out[name_index] = source[name_index];
+        name_index += 1;
+    }
+    name_out[name_index] = '\0';
+    if (source[scan] == '\0') {
+        args_out[0] = '\0';
+        return 0;
+    }
+    /* Skip the run of separating spaces so a trailing-only-spaces side
+       (e.g. "cmd   ") collapses to "no args" instead of an empty string
+       that confuses parse_argv. */
+    int args_start = scan + 1;
+    while (source[args_start] == ' ') {
+        args_start += 1;
+    }
+    if (source[args_start] == '\0') {
+        args_out[0] = '\0';
+        return 0;
+    }
+    int args_index = 0;
+    while (source[args_start + args_index] != '\0') {
+        args_out[args_index] = source[args_start + args_index];
+        args_index += 1;
+    }
+    args_out[args_index] = '\0';
+    return 1;
 }
 
 int strcmp(const char *a, const char *b) {
@@ -859,6 +919,15 @@ int main() {
                         write(STDOUT, "shell: pipes cannot combine with < > >>\n", 40);
                         last_exec_status = 1 << 8;
                     } else {
+                        /* Split each side at the first unquoted space: name
+                           token into pipe_left_buf / pipe_right_buf (reused
+                           in place for the bin/-prefixed path build), args
+                           tail into pipe_left_args / pipe_right_args.  The
+                           kernel's sys_pipeline2 reads each *_args pointer
+                           (NULL = no args) and stages it into the child's
+                           EXEC_ARG + BUFFER before the handoff copy. */
+                        int has_left_args = split_pipeline_side(pipe_left_buf, pipe_left_name, pipe_left_args);
+                        int has_right_args = split_pipeline_side(pipe_right_buf, pipe_right_name, pipe_right_args);
                         /* Build bin/-prefixed paths into pipe_left_path and
                            pipe_right_path.  Mirror the existing exec_path
                            pattern in dispatch_buffer. */
@@ -867,8 +936,8 @@ int main() {
                         pipe_left_path[2] = 'n';
                         pipe_left_path[3] = '/';
                         int ci = 0;
-                        while (pipe_left_buf[ci] != '\0' && ci < MAX_PATH - 5) {
-                            pipe_left_path[4 + ci] = pipe_left_buf[ci];
+                        while (pipe_left_name[ci] != '\0' && ci < MAX_PATH - 5) {
+                            pipe_left_path[4 + ci] = pipe_left_name[ci];
                             ci += 1;
                         }
                         pipe_left_path[4 + ci] = 0;
@@ -877,12 +946,28 @@ int main() {
                         pipe_right_path[2] = 'n';
                         pipe_right_path[3] = '/';
                         ci = 0;
-                        while (pipe_right_buf[ci] != '\0' && ci < MAX_PATH - 5) {
-                            pipe_right_path[4 + ci] = pipe_right_buf[ci];
+                        while (pipe_right_name[ci] != '\0' && ci < MAX_PATH - 5) {
+                            pipe_right_path[4 + ci] = pipe_right_name[ci];
                             ci += 1;
                         }
                         pipe_right_path[4 + ci] = 0;
-                        int rc = pipeline2(pipe_left_path, pipe_right_path);
+                        /* Pass NULL for empty-args sides so the kernel's
+                           stage_pipeline_child_args helper clears the
+                           child's EXEC_ARG (zero pointer == no args). */
+                        char *left_args_ptr;
+                        char *right_args_ptr;
+                        if (has_left_args != 0) {
+                            left_args_ptr = pipe_left_args;
+                        } else {
+                            left_args_ptr = NULL;
+                        }
+                        if (has_right_args != 0) {
+                            right_args_ptr = pipe_right_args;
+                        } else {
+                            right_args_ptr = NULL;
+                        }
+                        int rc = pipeline2(pipe_left_path, left_args_ptr,
+                                           pipe_right_path, right_args_ptr);
                         if (rc < 0) {
                             write(STDOUT, "shell: pipeline failed\n", 23);
                             last_exec_status = -rc;

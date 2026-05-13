@@ -727,19 +727,32 @@ class BuiltinsMixin:
         self.emit_error_syscall_tail(fuse_die=fuse_die, fuse_exit=fuse_exit, preserve_al=False)
 
     def builtin_pipeline2(self, arguments: list[Node], /) -> None:
-        """Generate code for the pipeline2(path1, path2) builtin.
+        """Generate code for the four-arg pipeline2() builtin.
 
-        Emits ``mov si, <path1> / mov di, <path2> / mov ah, SYS_SYS_PIPELINE2
-        / int 30h``.  Returns cmd2's exit status in AX with CF clear on
-        success; -errno on failure (CF set, mirrors exec()'s pattern).
+        ``pipeline2(left_path, left_args, right_path, right_args)``
+        emits ``mov si, <left_path> / mov di, <right_path> /
+        mov dx, <left_args> / mov cx, <right_args> /
+        mov ah, SYS_SYS_PIPELINE2 / int 30h``.  Returns cmd2's exit
+        status in AX with CF clear on success; -errno on failure (CF
+        set, mirrors exec()'s pattern).
+
+        The args parameters are NUL-terminated user-virt pointers into
+        the shell's BSS (or 0 for "no args" — the kernel handles a NULL
+        pointer by clearing EXEC_ARG for that child).  The kernel
+        stages each child's args string into the shell's BUFFER +
+        EXEC_ARG slots immediately before the per-child handoff copy,
+        so each child sees its own argv.
 
         Return value:
         - success: zero-extended 16-bit wait status (>= 0).
         - failure: -errno (negative).
         """
-        self._check_argument_count(arguments=arguments, expected=2, name="pipeline2")
-        self.emit_si_from_argument(arguments[0])
-        self.emit_register_from_argument(argument=arguments[1], register=self.target.di_register)
+        self._check_argument_count(arguments=arguments, expected=4, name="pipeline2")
+        left_path, left_args, right_path, right_args = arguments
+        self.emit_si_from_argument(left_path)
+        self.emit_register_from_argument(argument=right_path, register=self.target.di_register)
+        self.emit_register_from_argument(argument=left_args, register=self.target.dx_register)
+        self.emit_register_from_argument(argument=right_args, register=self.target.count_register)
         self._emit_syscall("PIPELINE2")
         label_index = self.new_label()
         self.emit(f"        jc .pipeline2_failed_{label_index}")
@@ -1011,7 +1024,7 @@ class BuiltinsMixin:
     def builtin_signal(self, arguments: list[Node], /) -> None:
         """Generate code for the signal(signum, handler) builtin.
 
-        Registers *handler* as the SIGINT or SIGALRM handler via
+        Registers *handler* as the SIGINT, SIGPIPE, or SIGALRM handler via
         SYS_SYS_SIGNAL (0F5h).  *handler* must be a function name
         (user-virt pointer), SIG_DFL (0), or SIG_IGN (1).  Returns the
         previous handler value in EAX.
