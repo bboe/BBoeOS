@@ -12,8 +12,8 @@
    place by replacing operator chars with NUL, fills segment_offsets[]
    with byte offsets into chain_buf, and writes the operator type
    *following* each segment into segment_ops[] (the last entry is
-   OP_END).  Each segment is memcpy'd into BUFFER one-at-a-time and
-   dispatched (tokenize_argv splits BUFFER in place into dispatch_argv,
+   OP_END).  Each segment is memcpy'd into input_buf one-at-a-time and
+   dispatched (tokenize_argv splits input_buf in place into dispatch_argv,
    handed straight to the exec() syscall).  cc.py global arrays only
    support char/int/uint8_t/struct elements, hence offsets-not-pointers. */
 char chain_buf[MAX_INPUT];
@@ -49,6 +49,15 @@ int saved_fds[2];
 char history[HISTORY_SIZE * MAX_INPUT];
 int history_count;
 int history_view;
+
+/* Live input line buffer — the line editor writes characters here as
+   the user types; after Enter the line is copied into chain_buf for
+   chain parsing and then memcpy'd back into input_buf one segment at
+   a time for dispatch.  Used to live at the static user-data frame
+   (USER_DATA_BASE+0x500 = 0x1500, named BUFFER) shared by every
+   program, but the EXEC_ARG handoff was the only cross-program use
+   and is gone — so this is now plain shell-private .bss. */
+char input_buf[MAX_INPUT];
 
 /* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
    per-program PDs do not alias the low 1 MB so a fixed-address scratch
@@ -218,7 +227,7 @@ char dispatch_bin[MAX_PATH];
 char dispatch_name[MAX_INPUT];
 
 void dispatch_buffer(char *buf) {
-    /* Run a single command sitting in BUFFER.  The Linux-style argv
+    /* Run a single command sitting in input_buf.  The Linux-style argv
        layout requires argv[0] to be the program name; we extract that
        name into dispatch_name (used for the bin/-prefixed retry below),
        expand any $? in the args portion, then tokenise the whole buf
@@ -757,7 +766,7 @@ int main() {
     /* Marker print exactly once per shell-load.  Tests assert this line
        appears once across N commands, verifying shell-survives-child. */
     write(STDOUT, "[shell:start]\n", 14);
-    char *buf = BUFFER;
+    char *buf = input_buf;
     int vga_fd = open("/dev/vga", O_WRONLY);
     int kill_len = 0;
     while (1) {
@@ -910,8 +919,8 @@ int main() {
             continue;
         }
         /* Tokenize the line into chained segments (`;`, `&&`, `||`),
-           then dispatch each in BUFFER one-at-a-time.  chain_buf holds
-           the parsed copy so per-segment $? expansion in BUFFER does
+           then dispatch each in input_buf one-at-a-time.  chain_buf holds
+           the parsed copy so per-segment $? expansion in input_buf does
            not corrupt segments not yet processed. */
         memcpy(chain_buf, buf, end + 1);
         int n_segments = parse_chain(chain_buf);

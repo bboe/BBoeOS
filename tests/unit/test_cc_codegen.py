@@ -1684,14 +1684,14 @@ def test_naked_single_call_becomes_tail_jmp() -> None:
 def test_named_constant_emits_immediate_not_memory_operand() -> None:
     """A NAMED_CONSTANTS identifier resolves as an immediate, not ``[name]``."""
     source = """
-        void test_buffer_addr() {
-            uint8_t *buf;
-            buf = BUFFER;
+        void test_named_const_addr() {
+            int n;
+            n = MAX_INPUT;
         }
     """
     output = _kernel(source)
-    assert "BUFFER" in output
-    assert "[BUFFER]" not in output
+    assert "MAX_INPUT" in output
+    assert "[MAX_INPUT]" not in output
 
 
 def test_not_carry_return_call_emits_jnc() -> None:

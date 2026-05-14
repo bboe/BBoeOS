@@ -61,7 +61,7 @@ main:
         mov dword [poll_remaining], 30000
         .poll:
         mov ebx, [net_fd]
-        mov edi, BUFFER + 128
+        mov edi, recv_buf
         mov ecx, 128
         mov ah, SYS_IO_READ
         int 30h
@@ -70,19 +70,19 @@ main:
         jz .poll_next
 
         ;; Check EtherType = 0x0806 (ARP)
-        cmp byte [BUFFER + 128 + 12], 08h
+        cmp byte [recv_buf + 12], 08h
         jne .poll_next
-        cmp byte [BUFFER + 128 + 13], 06h
+        cmp byte [recv_buf + 13], 06h
         jne .poll_next
 
         ;; Check opcode = 0x0002 (ARP reply)
-        cmp byte [BUFFER + 128 + 20], 00h
+        cmp byte [recv_buf + 20], 00h
         jne .poll_next
-        cmp byte [BUFFER + 128 + 21], 02h
+        cmp byte [recv_buf + 21], 02h
         jne .poll_next
 
         ;; Check sender IP matches our target — single 4-byte compare.
-        mov eax, [BUFFER + 128 + 28]
+        mov eax, [recv_buf + 28]
         cmp eax, [target_ip]
         jne .poll_next
 
@@ -97,7 +97,7 @@ main:
         mov esi, MESSAGE_IS_AT
         mov ecx, MESSAGE_IS_AT_LENGTH
         call FUNCTION_WRITE_STDOUT
-        mov esi, BUFFER + 128 + 22  ; Sender MAC from reply
+        mov esi, recv_buf + 22  ; Sender MAC from reply
         call FUNCTION_PRINT_MAC
         mov al, `\n`
         call FUNCTION_PRINT_CHARACTER
@@ -130,6 +130,7 @@ main:
         my_mac times 6 db 0
         net_fd dd 0
         poll_remaining dd 0
+        recv_buf times 128 db 0
         target_ip times 4 db 0
 
         MESSAGE_IS_AT db ` is at `

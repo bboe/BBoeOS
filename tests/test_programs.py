@@ -797,8 +797,7 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("mv", ["mkdir tmpe", "mv tmpe tmpf", "ls"], r"tmpf/"),
     # Writing to virt 0 raises #PF (PTE[0] is not-present in every
-    # per-program PD; the shell↔program handoff frame moved to
-    # USER_DATA_BASE = 0x1000 to keep page 0 unmapped).  The user-fault
+    # per-program PD, so page 0 is always unmapped).  The user-fault
     # kill path tears down the PD and respawns the shell; echo recovered
     # then runs to confirm the new shell works.
     ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),

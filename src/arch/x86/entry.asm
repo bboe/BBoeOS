@@ -37,7 +37,6 @@
 
         ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
         ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
-        ;;   PTE 0x00001             : private — user-data page (shell BUFFER lives at +0x500); USER_DATA_BASE
         ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
@@ -290,38 +289,6 @@ build_child_program_state:
         mov [program_fd + FD_OFFSET_DIRECTORY_SECTOR], ax
         mov ax, [vfs_found_dir_off]
         mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
-
-        ;; --- Acquire and map the user-data frame at USER_DATA_BASE ---
-        ;; A single 4 KB private page at user-virt 0x1000 (PTE[1]).  Sits
-        ;; at PTE[1] so PTE[0] (virt 0..0xFFF) stays not-present and a
-        ;; NULL deref from CPL=3 raises #PF instead of silently
-        ;; reading/writing this frame.  The shell uses bytes at +0x500
-        ;; (BUFFER) as its input line buffer; other programs see the
-        ;; page as zeroed BSS-like scratch.  Allocated and zero-filled
-        ;; here on every program load — argv staging happens on the
-        ;; user stack now (see stage_user_argv below), so there is no
-        ;; cross-PD copy in this path anymore.
-        call frame_alloc
-        jc .oom
-        mov [pending_frame_phys], eax
-        call kmap_map                       ; EAX = handoff_kvirt
-        push eax                            ; save kvirt for the unmap below
-        mov edi, eax
-        mov ecx, 1024
-        xor eax, eax
-        cld
-        rep stosd
-        pop eax                             ; handoff_kvirt
-        call kmap_unmap
-        mov eax, [pending_frame_phys]       ; reload phys for the map step
-        mov ecx, eax                        ; handoff frame phys
-        mov eax, [current_program_state]
-        mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
-        mov ebx, USER_DATA_BASE
-        mov edx, PTE_USER_RW
-        call address_space_map_page
-        jc .oom
-        mov dword [pending_frame_phys], 0
 
         ;; --- Stream binary pages directly from disk ---
         ;; Each loaded user frame is zero-filled then populated sector-
