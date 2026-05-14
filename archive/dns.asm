@@ -3,9 +3,6 @@
 
 %include "constants.asm"
 
-%assign rr_name_buf BUFFER
-%assign cname_buf (BUFFER + 128)
-
 main:
         cld
 
@@ -206,12 +203,14 @@ decode_domain:
 
         ;; Data
         ans_count db 0
+        cname_buf times 128 db 0
         dns_base dd 0
         dns_server_ip db 10, 0, 2, 3
         dns_socket_fd dd 0
         domain_arg dd 0
         found_a db 0
         my_mac times 6 db 0
+        rr_name_buf times 128 db 0
         rr_name_ptr dd 0
 
         MESSAGE_CNAME db ` is a CNAME for `

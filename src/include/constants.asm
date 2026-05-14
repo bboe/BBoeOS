@@ -1,7 +1,6 @@
         %assign BOOT_STASH_OFFSET 2     ; offset within kernel.bin of boot_disk (db) followed by directory_sector (dw); written by boot.asm post-load and read by the kernel through the direct map.  Layout contract: kernel.asm's first instruction is `jmp short high_entry` which skips past these bytes.
         %assign BSS_MAGIC 0B055h        ; Legacy 4-byte trailer (dw bss_size; dw 0xB055)
         %assign BSS_MAGIC32 0B032h      ; New 6-byte trailer (dd bss_size; dw 0xB032), 4 GB max
-        %assign BUFFER 1500h            ; 256 bytes; = USER_DATA_BASE + 0x500
         %assign DIRECTORY_ENTRY_SIZE 32
         %assign DIRECTORY_MAX_ENTRIES 64
         %assign DIRECTORY_NAME_LENGTH 25         ; 24 chars + null
@@ -246,7 +245,6 @@
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
-        %assign USER_DATA_BASE 1000h    ; user-virt of the per-program user-data page (shell BUFFER lives at +0x500); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
         %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.

@@ -19,12 +19,12 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
 |---------|----------------|-------------|-----------|-------|
-| arp     | 466            | 558         | 587       | +29   |
+| arp     | 466            | 686         | 587       | -99   |
 | cat     | 145            | 166         | 183       | +17   |
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |
-| dns     | 724            | 926         | 1298      | +372  |
+| dns     | 724            | 1182        | 1298      | +116  |
 | edit    | 2018           | 2659        | 3357      | +698  |
 | ls      | 135            | 170         | 199       | +29   |
 | mkdir   | 123            | 142         | 163       | +21   |
@@ -32,15 +32,19 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | ping    | 1034           | 1227        | 1556      | +329  |
 | uptime  | 50             | 67          | 102       | +35   |
 
-**arp (+44):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
-`target_ip[4]`) are file-scope BSS globals; the assembly version uses inline
-`BUFFER`/`BUFFER+N` offsets.  Two structural wins from 32-bit: the 6-byte MAC
-copy (was 3× ``movsw``) collapses to ``movsd + movsw``, and the sender-IP match
-(was two 2-byte ``mov ax, [..]; cmp ax, [..]``) collapses to a single 4-byte
-compare.  Most of the +41 jump from the 16-bit +3 baseline is cc.py gaining
-BP-frame setup overhead and ``movzx`` zero-extends on the per-byte EtherType /
-opcode checks (each grows from a 5-byte ``cmp byte [],imm8`` to a wider
-zero-extend-then-compare pair).
+**arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
+`target_ip[4]`) are file-scope BSS globals in both versions now — the asm side
+used to reach into the shared `BUFFER` / `BUFFER+N` window at user-virt
+`USER_DATA_BASE+0x500`, but the EXEC_ARG handoff removal retired that frame, so
+the asm now declares its own `recv_buf times 128 db 0` in the program's data
+section.  Two structural wins from 32-bit: the 6-byte MAC copy (was 3×
+``movsw``) collapses to ``movsd + movsw``, and the sender-IP match (was two
+2-byte ``mov ax, [..]; cmp ax, [..]``) collapses to a single 4-byte compare.
+The delta swung negative because the asm now carries the 128-byte receive
+buffer inline while the C side still places `receive_buffer` in BSS (counted in
+the kernel bss-size trailer, not the .bin size); cc.py pays per-byte ``movzx``
+zero-extends on the EtherType / opcode checks but those are now small relative
+to the 128-byte buffer the asm carries in its image.
 
 **chmod (+53):** The assembly version walks the mode argument with `lodsb` (1
 byte per character read); the C version reloads the base pointer and indexes for
@@ -49,9 +53,11 @@ each character check.  The 32-bit asm uses 4-byte argv pointer slots on the user
 check sequence carries proportionally more byte-load + zero-extend overhead than
 16-bit, so the delta inflates from +25 to +53.
 
-**dns (+500):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
+**dns (+116):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals; the
-assembly version reused `SECTOR_BUFFER` and `BUFFER`.  Most of the delta comes
+assembly version reused `SECTOR_BUFFER` and `BUFFER`, but with `BUFFER` retired
+(see the arp note) the asm now declares its own `rr_name_buf` and `cname_buf`
+as two 128-byte arrays in the program's data section.  Most of the delta comes
 from `decode_domain` and `encode_domain` carrying full stack-frame overhead
 (push bp / mov bp,sp / pop bp / ret per call) and passing arguments via the
 stack (their callers pass complex expressions, so the register calling
@@ -68,9 +74,11 @@ stores full EAX through them).  ``mov si, ax`` in decode_domain's
 pointer-resolution path becomes ``movzx eax, ax; add eax, [dns_base]; mov esi,
 eax`` (the 16-bit form added a 16-bit offset to a 16-bit base; the 32-bit form
 needs the zero-extend because [dns_base] is now a 32-bit linear address).  Δ
-jumped from +405 to +500 mostly because cc.py's 32-bit codegen pays the
-``movzx`` zero-extend cost on every byte read in the answer-walking loop, which
-the asm version still avoids.
+landed at +116 — cc.py's 32-bit codegen still pays the ``movzx`` zero-extend
+cost on every byte read in the answer-walking loop (which the asm avoids), but
+the asm version now carries 256 bytes of decode-target buffers inline that the
+C version keeps in BSS, so the asm-side image grew enough to outweigh those
+per-byte differences.
 
 **edit (+670):** Restored from git history (retired during the pmode merge
 because the 16-bit C build couldn't represent a 256 KB buffer base).  The 32-bit

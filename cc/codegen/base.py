@@ -74,7 +74,6 @@ class CodeGeneratorBase:
         "ARG_MAX",
         "arp_frame",
         "AUDIO_IOCTL_QUERY",
-        "BUFFER",
         "DIRECTORY_ENTRY_SIZE",
         "DIRECTORY_NAME_LENGTH",
         "DIRECTORY_OFFSET_FLAGS",
