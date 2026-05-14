@@ -28,7 +28,7 @@
         %include "constants.asm"
 
 ;;; -----------------------------------------------------------------------
-;;; FUNCTION_TABLE — 14 × 5-byte `jmp strict near` slots at offset 0.
+;;; FUNCTION_TABLE — 13 × 5-byte `jmp strict near` slots at offset 0.
 ;;; Order and address strides MUST match the FUNCTION_* constants in
 ;;; constants.asm, which programs `call` / `jmp` directly.
 ;;; -----------------------------------------------------------------------
@@ -37,17 +37,16 @@ function_table:
         jmp strict near shared_die              ; FUNCTION_DIE              (+0)
         jmp strict near shared_exit             ; FUNCTION_EXIT             (+5)
         jmp strict near shared_get_character    ; FUNCTION_GET_CHARACTER   (+10)
-        jmp strict near shared_parse_argv       ; FUNCTION_PARSE_ARGV      (+15)
-        jmp strict near shared_print_byte_decimal ; FUNCTION_PRINT_BYTE_DECIMAL (+20)
-        jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER (+25)
-        jmp strict near shared_print_datetime   ; FUNCTION_PRINT_DATETIME  (+30)
-        jmp strict near shared_print_decimal    ; FUNCTION_PRINT_DECIMAL   (+35)
-        jmp strict near shared_print_hex        ; FUNCTION_PRINT_HEX       (+40)
-        jmp strict near shared_print_ip         ; FUNCTION_PRINT_IP        (+45)
-        jmp strict near shared_print_mac        ; FUNCTION_PRINT_MAC       (+50)
-        jmp strict near shared_print_string     ; FUNCTION_PRINT_STRING    (+55)
-        jmp strict near shared_printf           ; FUNCTION_PRINTF          (+60)
-        jmp strict near shared_write_stdout     ; FUNCTION_WRITE_STDOUT    (+65)
+        jmp strict near shared_print_byte_decimal ; FUNCTION_PRINT_BYTE_DECIMAL (+15)
+        jmp strict near shared_print_character  ; FUNCTION_PRINT_CHARACTER (+20)
+        jmp strict near shared_print_datetime   ; FUNCTION_PRINT_DATETIME  (+25)
+        jmp strict near shared_print_decimal    ; FUNCTION_PRINT_DECIMAL   (+30)
+        jmp strict near shared_print_hex        ; FUNCTION_PRINT_HEX       (+35)
+        jmp strict near shared_print_ip         ; FUNCTION_PRINT_IP        (+40)
+        jmp strict near shared_print_mac        ; FUNCTION_PRINT_MAC       (+45)
+        jmp strict near shared_print_string     ; FUNCTION_PRINT_STRING    (+50)
+        jmp strict near shared_printf           ; FUNCTION_PRINTF          (+55)
+        jmp strict near shared_write_stdout     ; FUNCTION_WRITE_STDOUT    (+60)
 
 ;;; -----------------------------------------------------------------------
 ;;; Helper bodies — ported from src/lib/proc.asm and src/lib/print.asm.
@@ -85,59 +84,6 @@ shared_get_character:
         pop edi
         pop ecx
         pop ebx
-        ret
-
-shared_parse_argv:
-        ;; Split [EXEC_ARG] (a NUL-terminated "name arg1 arg2 ..."
-        ;; string built by the shell in the user data frame) into a
-        ;; Linux-style argv pointer array in a caller-supplied buffer.
-        ;; argv[0] is the program name (basename) and argv[argc] is
-        ;; NULL.  Tokens are NUL-terminated in place inside EXEC_ARG so
-        ;; each argv[i] points at a contiguous C string.
-        ;;
-        ;; Input:  EDI = base of caller's argv slot region (writable;
-        ;;               typically ESP after `sub esp, N`).
-        ;;         ECX = slot cap (max dwords writable, including the
-        ;;               trailing NULL slot).  cc.py passes the value
-        ;;               derived from ARGV_RESERVE_BYTES.
-        ;; Output: ECX = argc (token count, not counting NULL).
-        ;;         EDI advanced past the (argc + 1) populated slots.
-        ;; Clobbers: EAX, EBX, ESI.
-        mov ebx, ecx                            ; ebx = dword slots remaining
-        xor ecx, ecx                            ; ecx = argc
-        mov esi, [EXEC_ARG]
-        test esi, esi
-        jz .parse_argv_done
-        .parse_argv_scan:
-        cmp byte [esi], ' '
-        jne .parse_argv_check
-        inc esi
-        jmp .parse_argv_scan
-        .parse_argv_check:
-        cmp byte [esi], 0
-        je .parse_argv_done
-        ;; Need at least 2 slots remaining (one for this token, one for
-        ;; the trailing NULL).  Out of room → stop tokenising.
-        cmp ebx, 2
-        jb .parse_argv_done
-        mov [edi], esi
-        add edi, 4
-        dec ebx
-        inc ecx
-        .parse_argv_end:
-        cmp byte [esi], 0
-        je .parse_argv_done
-        cmp byte [esi], ' '
-        je .parse_argv_term
-        inc esi
-        jmp .parse_argv_end
-        .parse_argv_term:
-        mov byte [esi], 0
-        inc esi
-        jmp .parse_argv_scan
-        .parse_argv_done:
-        mov dword [edi], 0                      ; argv[argc] = NULL terminator
-        add edi, 4
         ret
 
 shared_print_byte_decimal:

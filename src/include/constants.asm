@@ -18,7 +18,6 @@
         %assign ERROR_NOT_EXECUTE    07h     ; Exec error: file exists but is not executable
         %assign ERROR_NOT_FOUND      08h     ; File not found
         %assign ERROR_PROTECTED      09h     ; Rename/chmod error: file is protected
-        %assign EXEC_ARG 14FCh          ; 4 bytes (dword pointer under --bits 32); before BUFFER; = USER_DATA_BASE + 0x4FC
         %assign FD_ENTRY_SIZE 64
         ;; Per-fd PS/2 event ring (FD_TYPE_CONSOLE only).  Events are
         ;; (pressed << 16) | bbkey, 32-bit slots.  Linux's evdev pattern:
@@ -65,26 +64,25 @@
         %assign FUNCTION_DIE                FUNCTION_TABLE +  0 ; SI=msg, CX=len: write to stdout then exit
         %assign FUNCTION_EXIT               FUNCTION_TABLE +  5 ; Exit program (reload shell)
         %assign FUNCTION_GET_CHARACTER      FUNCTION_TABLE + 10 ; Read one byte from stdin; returns AL
-        %assign FUNCTION_PARSE_ARGV         FUNCTION_TABLE + 15 ; DI=argv buf: split EXEC_ARG, CX=argc
-        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_TABLE + 20 ; AL=byte: print 1-3 decimal digits
-        %assign FUNCTION_PRINT_CHARACTER    FUNCTION_TABLE + 25 ; AL=char: print to stdout
-        %assign FUNCTION_PRINT_DATETIME     FUNCTION_TABLE + 30 ; EAX=epoch seconds: print YYYY-MM-DD HH:MM:SS
-        %assign FUNCTION_PRINT_DECIMAL      FUNCTION_TABLE + 35 ; AL=byte: print 2 zero-padded decimal digits
-        %assign FUNCTION_PRINT_HEX          FUNCTION_TABLE + 40 ; AL=byte: print 2 hex digits
-        %assign FUNCTION_PRINT_IP           FUNCTION_TABLE + 45 ; SI=4-byte IP: print dotted decimal
-        %assign FUNCTION_PRINT_MAC           FUNCTION_TABLE + 50 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
-        %assign FUNCTION_PRINT_STRING       FUNCTION_TABLE + 55 ; DI=null-terminated string: write to stdout
-        %assign FUNCTION_PRINTF             FUNCTION_TABLE + 60 ; cdecl: push args R-to-L, push fmt, call
-        %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 65 ; SI=buf, CX=len: write to stdout
+        %assign FUNCTION_PRINT_BYTE_DECIMAL FUNCTION_TABLE + 15 ; AL=byte: print 1-3 decimal digits
+        %assign FUNCTION_PRINT_CHARACTER    FUNCTION_TABLE + 20 ; AL=char: print to stdout
+        %assign FUNCTION_PRINT_DATETIME     FUNCTION_TABLE + 25 ; EAX=epoch seconds: print YYYY-MM-DD HH:MM:SS
+        %assign FUNCTION_PRINT_DECIMAL      FUNCTION_TABLE + 30 ; AL=byte: print 2 zero-padded decimal digits
+        %assign FUNCTION_PRINT_HEX          FUNCTION_TABLE + 35 ; AL=byte: print 2 hex digits
+        %assign FUNCTION_PRINT_IP           FUNCTION_TABLE + 40 ; SI=4-byte IP: print dotted decimal
+        %assign FUNCTION_PRINT_MAC          FUNCTION_TABLE + 45 ; SI=6-byte MAC: print XX:XX:XX:XX:XX:XX
+        %assign FUNCTION_PRINT_STRING       FUNCTION_TABLE + 50 ; DI=null-terminated string: write to stdout
+        %assign FUNCTION_PRINTF             FUNCTION_TABLE + 55 ; cdecl: push args R-to-L, push fmt, call
+        %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 60 ; SI=buf, CX=len: write to stdout
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
         %assign MAX_INPUT 256
-        ;; ARG_MAX and ARGV_RESERVE_BYTES live here (out of strict alphabetical order)
-        ;; because %assign does not resolve forward references to other %assign
-        ;; symbols; both expressions reference MAX_INPUT.  Bump them in lockstep.
-        %assign ARG_MAX MAX_INPUT       ; argv-tokenisation cap (bytes); matches MAX_INPUT for now (Linux ARG_MAX is 4096).  shared_parse_argv splits within this bound; cc.py's main argv-buffer reservation derives from this.
-        %assign ARGV_RESERVE_BYTES ((ARG_MAX / 2 + 1) * 4) ; main reserves this many bytes on the user stack for argv pointer slots (worst case: every other byte is a space → 128 tokens + NULL terminator).
+        ;; ARG_MAX and MAX_ARGV_ENTRIES live here (out of strict alphabetical
+        ;; order) because %assign does not resolve forward references to other
+        ;; %assign symbols; ARG_MAX references MAX_INPUT.  Bump in lockstep.
+        %assign ARG_MAX MAX_INPUT          ; argv-string-bytes cap per exec; matches MAX_INPUT for now (Linux ARG_MAX is 4096).  Kernel rejects with ERROR_FAULT if a per-side argv copy exceeds this cumulative byte budget.
+        %assign MAX_ARGV_ENTRIES 64        ; per-side argv pointer-slot cap (excluding the NULL terminator); kernel rejects with ERROR_INVALID above this.
         %assign MAX_PATH 64             ; Hard cap on user-supplied filename byte count (incl. NUL); enough for "<24-char dir>/<24-char file>" plus headroom
         %assign MAX_PIPES                    4
         %assign NE2K_BASE 300h
@@ -148,7 +146,8 @@
         %assign PROGRAM_STATE_OFFSET_STATE              0x234  ; uint8_t STATE_*
         ;; bytes 0x235..0x237 are pad_after_state[3]
         %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x238  ; uint32_t parked exit code while STATE_EXITED
-        %assign PROGRAM_STATE_SIZE                      0x23C
+        %assign PROGRAM_STATE_OFFSET_INITIAL_ESP        0x23C  ; uint32_t user-virt ESP for the first iretd into ring 3; build_initial_iret_frame writes this into the on-stack SS:ESP slot
+        %assign PROGRAM_STATE_SIZE                      0x240
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches
         ;; the rtc.c / ne2k.c convention — cc.py emits #define as %define which
@@ -217,7 +216,7 @@
         %assign SYS_SYS_BREAK     0F0h    ; EBX = new break (0 = query); returns EAX = resulting break, CF=0
         %assign SYS_SYS_EXEC      0F1h
         %assign SYS_SYS_EXIT      0F2h
-        %assign SYS_SYS_PIPELINE2 0F3h    ; SI=left_path, DI=right_path, DX=left_args (0=none), CX=right_args (0=none); returns AX=wait_status (cmd2's), CF on error
+        %assign SYS_SYS_PIPELINE2 0F3h    ; SI=left_path, DI=right_path, DX=left_argv (char**, 0=none), CX=right_argv (char**, 0=none); returns AX=wait_status (cmd2's), CF on error
         %assign SYS_SYS_REBOOT    0F4h
         %assign SYS_SYS_SHUTDOWN  0F5h
         %assign SYS_SYS_SIGNAL    0F6h    ; EBX = signum (SIGINT, SIGPIPE, or SIGALRM); ECX = handler (SIG_DFL/SIG_IGN/user-virt); EAX = previous handler; CF on bad signum / handler
@@ -247,10 +246,10 @@
 
         %assign TSS_SELECTOR 28h        ; GDT[5]: 32-bit available TSS, DPL=0
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
-        %assign USER_DATA_BASE 1000h    ; user-virt of the shell↔program handoff frame (EXEC_ARG / BUFFER); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
+        %assign USER_DATA_BASE 1000h    ; user-virt of the per-program user-data page (shell BUFFER lives at +0x500); PTE[0] (virt 0..0xFFF) stays unmapped so NULL deref faults
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
-        %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.  Bumped from 0x450 when shared_parse_argv grew for the Linux-style argv layout.
+        %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with

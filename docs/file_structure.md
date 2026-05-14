@@ -16,8 +16,8 @@ nav_order: 90
 ## Shared includes
 
 - `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`,
-  `SECTOR_BUFFER`, `EXEC_ARG`, `NE2K_BASE`, `PROGRAM_BASE`, `SYS_*` syscall
-  numbers, etc.)
+  `SECTOR_BUFFER`, `NE2K_BASE`, `PROGRAM_BASE`, `MAX_ARGV_ENTRIES`, `SYS_*`
+  syscall numbers, etc.)
 - `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared
   DNS/IP helpers; see source headers for calling conventions.
 

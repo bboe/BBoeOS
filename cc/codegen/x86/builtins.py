@@ -201,21 +201,26 @@ class BuiltinsMixin:
         self.ax_clear()
 
     def builtin_exec(self, arguments: list[Node], /) -> None:
-        """Generate code for the exec(name) builtin.
+        """Generate code for the exec(name, argv) builtin.
 
-        Emits ``mov si, <name> / mov ah, SYS_EXEC / int 30h``.
-
-        After Phase B's kernel changes exec() returns to the caller on
-        success: the kernel runs the child in the same page directory,
-        waits for it, and delivers the wait status (16-bit) in AX with
-        CF clear.  On failure (CF set), AL holds an ``ERROR_*`` code.
+        Emits ``mov si, <name> / mov dx, <argv> / mov ah, SYS_EXEC /
+        int 30h``.  ``argv`` is a ``char **`` NULL-terminated array in
+        the caller's user-virt; the kernel validates each pointer under
+        the caller's PD up front, then (during build_child_program_state,
+        still under the caller's PD) re-walks the array and copies each
+        string directly into the child's stack frame through a kmap
+        alias — no kernel scratch — and writes a Linux SysV i386
+        startup frame (argc / argv / NULL / NULL envp) onto the child's
+        user stack before iretd.  Pass ``0``/``NULL`` for an empty
+        argv — the child sees ``argc == 0``.
 
         Return value (full accumulator-width int):
         - success: zero-extended 16-bit wait status (>= 0).
         - failure: -errno (negative; AL zero-extended then negated).
         """
-        self._check_argument_count(arguments=arguments, expected=1, name="exec")
+        self._check_argument_count(arguments=arguments, expected=2, name="exec")
         self.emit_si_from_argument(arguments[0])
+        self.emit_register_from_argument(argument=arguments[1], register=self.target.dx_register)
         self._emit_syscall("EXEC")
         label_index = self.new_label()
         self.emit(f"        jc .exec_failed_{label_index}")
@@ -729,19 +734,22 @@ class BuiltinsMixin:
     def builtin_pipeline2(self, arguments: list[Node], /) -> None:
         """Generate code for the four-arg pipeline2() builtin.
 
-        ``pipeline2(left_path, left_args, right_path, right_args)``
+        ``pipeline2(left_path, left_argv, right_path, right_argv)``
         emits ``mov si, <left_path> / mov di, <right_path> /
-        mov dx, <left_args> / mov cx, <right_args> /
+        mov dx, <left_argv> / mov cx, <right_argv> /
         mov ah, SYS_SYS_PIPELINE2 / int 30h``.  Returns cmd2's exit
         status in AX with CF clear on success; -errno on failure (CF
         set, mirrors exec()'s pattern).
 
-        The args parameters are NUL-terminated user-virt pointers into
-        the shell's BSS (or 0 for "no args" — the kernel handles a NULL
-        pointer by clearing EXEC_ARG for that child).  The kernel
-        stages each child's args string into the shell's BUFFER +
-        EXEC_ARG slots immediately before the per-child handoff copy,
-        so each child sees its own argv.
+        The argv parameters are ``char **`` NULL-terminated arrays in
+        the shell's user-virt (or 0 for "no args").  The kernel
+        validates each array under the shell's PD up front and stays
+        on the shell's PD across both child builds; stage_user_argv
+        re-walks each array under that same PD and copies the strings
+        directly into the matching child's stack frame through a kmap
+        alias, writing a Linux SysV i386 startup frame (argc / argv /
+        NULL / NULL envp) before the eventual iretd.  No kernel
+        scratch buffer is involved.
 
         Return value:
         - success: zero-extended 16-bit wait status (>= 0).
@@ -1003,18 +1011,6 @@ class BuiltinsMixin:
         self.emit(f"        mov {self.target.acc}, -1")
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
-
-    def builtin_set_exec_arg(self, arguments: list[Node], /) -> None:
-        """Generate code for the set_exec_arg(arg) builtin.
-
-        Writes the pointer *arg* to ``[EXEC_ARG]`` so that
-        ``FUNCTION_PARSE_ARGV`` in the next exec()'d program can find
-        it.  Pass NULL (0) to clear.  Used by the shell to forward
-        command arguments into child programs.
-        """
-        self._check_argument_count(arguments=arguments, expected=1, name="set_exec_arg")
-        self.generate_expression(arguments[0])
-        self.emit(f"        mov [EXEC_ARG], {self.target.acc}")
 
     def builtin_shutdown(self, arguments: list[Node], /) -> None:
         """Generate code for the shutdown() builtin.

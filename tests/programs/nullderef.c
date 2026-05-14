@@ -1,8 +1,8 @@
 /* Smoke test for the user-fault kill path on a NULL dereference.
    Writes to virtual address 0, which is unmapped in every per-program
    PD: PTE[0] (covering 0..0xFFF) stays not-present so any access to
-   the first page raises #PF.  Programs that need the shell↔program
-   handoff frame (EXEC_ARG / BUFFER) reach it through user-virt
+   the first page raises #PF.  The per-program user-data frame (the
+   shell's BUFFER input buffer lives there) sits at user-virt
    USER_DATA_BASE = 0x1000 (PTE[1]) instead.  The CPU raises #PF, the
    kernel sees a user-mode fault, tears down the PD, and re-enters
    shell_reload.  Pairs with the `nullderef` entry in tests/test_programs.py.

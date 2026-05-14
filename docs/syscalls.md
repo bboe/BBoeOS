@@ -37,9 +37,9 @@ numbers are defined symbolically as `SYS_*` constants in
 | 34h   | rtc_uptime   | Get uptime in seconds, EAX = elapsed seconds (wraps at ~136 yr)  |
 | 40h   | video_map    | Map mode-13h framebuffer into program PD; EAX = user-virt (0xB8000000) on success, EAX = 0 + CF on PT-allocation failure |
 | F0h   | sys_break      | Set/query program break, EBX = new break (0 to query); EAX = resulting break |
-| F1h   | sys_exec     | Execute program, SI = filename, CF on error            |
+| F1h   | sys_exec     | Execute program, SI = filename, DX = argv (`char **`, 0 = none); CF on error |
 | F2h   | sys_exit     | Reload and return to shell                             |
-| F3h   | sys_pipeline2 | Run two pipeline children: SI = left_path, DI = right_path, DX = left_args (0 = none), CX = right_args (0 = none); cmd1's stdout is piped to cmd2's stdin; AX = cmd2 wait status on success; CF on error (AL = ERROR_*). Each *_args is a NUL-terminated user-virt pointer in the shell's BSS staged into the child's EXEC_ARG + BUFFER before handoff. Only callable from the shell (slot_a); nested pipelines are rejected with ERROR_INVALID. |
+| F3h   | sys_pipeline2 | Run two pipeline children: SI = left_path, DI = right_path, DX = left_argv (`char **`, 0 = none), CX = right_argv (`char **`, 0 = none); cmd1's stdout is piped to cmd2's stdin; AX = cmd2 wait status on success; CF on error (AL = ERROR_*). Each argv is a NULL-terminated `char **` array in the shell's user-virt; the kernel validates it under the shell's PD up front and stays on the shell's PD across both child builds. For each child, stage_user_argv re-walks the array under that PD and copies the strings directly into the child's stack page through a kmap alias, building the Linux SysV i386 startup frame (argc / argv / NULL / empty envp) in place — no intermediate kernel buffer. Only callable from the shell (slot_a); nested pipelines are rejected with ERROR_INVALID. |
 | F4h   | sys_reboot   | Reboot                                                |
 | F5h   | sys_shutdown | Shutdown                                              |
 | F6h   | sys_signal   | Register signal handler. EBX = signum (SIGINT, SIGPIPE, or SIGALRM), ECX = handler (SIG_DFL=0, SIG_IGN=1, or user-virt addr ≥ PROGRAM_BASE); EAX = previous handler. CF set + AL=ERROR_INVALID on bad signum/addr |

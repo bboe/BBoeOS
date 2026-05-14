@@ -117,8 +117,10 @@ AST so the compiler can record metadata (calling convention overrides, register
 pinning) before the body is parsed. Recursion works.
 
 `main` is special: if its parameter list is `int argc, char *argv[]` the runtime
-fills it from the program's `EXEC_ARG` string before entering ring 3. A `main`
-that takes no arguments is allowed.
+reads them off the Linux SysV i386 startup frame the kernel writes onto the
+user stack before iretd — `argc` from `[esp]`, `argv` from `[esp+4]` (a real
+pointer into the kernel-supplied argv slot array). A `main` that takes no
+arguments is allowed.
 
 Variadic user functions are not supported; the only variadic call site in the
 language is the builtin `printf`.
@@ -195,7 +197,7 @@ names** and emits inline syscall sequences for them. The authoritative list is
 | Memory | `memcpy`, `memcmp`, `memset`, `fill_block` |
 | Networking | `net_open`, `sendto`, `recvfrom`, `mac`, `parse_ip`, `print_ip`, `print_mac`, `checksum` |
 | Time | `uptime`, `uptime_ms`, `sleep`, `datetime`, `print_datetime` |
-| System | `exec`, `set_exec_arg`, `reboot`, `shutdown` |
+| System | `exec`, `reboot`, `shutdown` |
 | Video | `video_mode`, `set_palette_color` |
 | Kernel-only port I/O | `kernel_inb`, `kernel_inw`, `kernel_insw`, `kernel_outb`, `kernel_outw`, `kernel_outsw` |
 | Far memory access | `far_read8`, `far_read16`, `far_read32`, `far_write8`, `far_write16`, `far_write32` |

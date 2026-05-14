@@ -30,7 +30,8 @@
 ;;; vDSO PTE marked with the AVL[0] PTE_SHARED bit so
 ;;; `address_space_destroy` skips frame_free on it.  Programs run
 ;;; with PROGRAM_BASE=0x08048000 and USER_STACK_TOP=0x40000000 (Linux
-;;; ELF convention); BUFFER (0x500), EXEC_ARG (0x4FC), and the vDSO
+;;; ELF convention); the per-program user-data page at USER_DATA_BASE
+;;; (0x1000) — shell input BUFFER lives at +0x500 — and the vDSO
 ;;; (0x10000) stay at low user-virt and reach the program through the
 ;;; per-program PD's first PT.
 ;;; ------------------------------------------------------------------------

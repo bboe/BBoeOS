@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Pipeline children can receive argv tails.
 
-Exercises the four-arg SYS_SYS_PIPELINE2 ABI: the shell splits each
-pipeline side at the first unquoted space, hands the kernel the args
-strings (in shell BSS), and the kernel stages them into each child's
-EXEC_ARG + BUFFER before the per-child handoff copy.  pipe_producer
-takes a `bulk` arg (16 KB) and an `early` arg (1 byte + exit 7) — both
-exercised here through the shell pipeline so a regression in the
-arg-plumbing surfaces as a wrong byte count or a wrong wait status.
+Exercises the four-arg SYS_SYS_PIPELINE2 ABI: the shell tokenises each
+pipeline side into its own ``char **`` argv array and hands both to the
+kernel, which walks them under the shell's PD, copies the strings into
+per-side argv scratch, and writes a Linux SysV i386 startup frame
+(argc / argv / NULL / empty envp) onto each child's user stack before
+iretd.  pipe_producer takes a `bulk` arg (16 KB) and an `early` arg
+(1 byte + exit 7) — both exercised here through the shell pipeline so
+a regression in the arg-plumbing surfaces as a wrong byte count or a
+wrong wait status.
 """
 
 from __future__ import annotations
