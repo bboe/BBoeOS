@@ -4,13 +4,15 @@
 // active filesystem implementation; ``vfs_init`` swaps the pointers
 // from bbfs to ext2 if an ext2 superblock is detected.
 //
-// vfs_init also allocates the FS scratch frame.  Layout (4 KB total,
-// ~1.5 KB used):
+// FS scratch layout (no longer shares a single frame):
 //
-//   0..511     sector_buffer     (512 B; populated by every disk read)
-//   512..1535  ext2_sd_buffer    (1 KB; ext2_search_blk's sliding
-//                                 2-sector directory window — only
-//                                 written on ext2 systems)
+//   sector_buffer      — 512 B in kernel .bss (sector_buffer_storage).
+//                        Always available; no frame_alloc.  `vfs_init`
+//                        publishes the address to consumers by writing
+//                        sector_buffer_storage into the pointer cell.
+//   ext2_sd_buffer     — 1 KB used inside a 4 KB frame_alloc'd by
+//                        `ext2_init` only when the ext2 superblock
+//                        magic matches.  bbfs systems never pay for it.
 //
 // Both are referenced from asm under their bare names.  The asm
 // `equ` shims below alias `_g_<name>` (cc.py's storage prefix) back
@@ -105,26 +107,15 @@ int (*vfs_update_size_fn)(struct fd *e __attribute__((in_register("esi")))) = bb
 // ``if (ext2_init())`` evaluating to 1 (true).
 // ---------------------------------------------------------------------------
 
-// vfs_init_scratch: allocate the FS scratch frame and store its
-// kernel-virt at `sector_buffer`.  Frame_alloc + direct-map adjust;
-// pulled out of vfs_init's C body because cc.py doesn't have a
-// pointer cast syntax for the int-to-`uint8_t *` conversion.
+// vfs_init_scratch: publish the kernel-virt of sector_buffer_storage
+// (a 512 B .bss reservation in kernel.asm) into `_g_sector_buffer`.
+// No frame_alloc — the storage is statically reserved at link time;
+// the bare label `sector_buffer_storage` resolves to its kernel-virt
+// in the .bss nobits section, which `high_entry` has already zeroed.
 void vfs_init_scratch();
 asm("vfs_init_scratch:\n"
-    "        push eax\n"
-    "        call frame_alloc\n"
-    "        jc .vis_oom\n"
-    "        add eax, DIRECT_MAP_BASE\n"
-    "        mov [_g_sector_buffer], eax\n"
-    "        pop eax\n"
-    "        ret\n"
-    ".vis_oom:\n"
-    // Frame allocator must succeed at boot — the bitmap was just
-    // populated from E820 with full conventional + extended RAM free.
-    // Hard-stop if it doesn't, rather than silently leaving
-    // sector_buffer = NULL.
-    "        hlt\n"
-    "        jmp .vis_oom\n");
+    "        mov dword [_g_sector_buffer], sector_buffer_storage\n"
+    "        ret\n");
 
 void sector_cache_init();
 

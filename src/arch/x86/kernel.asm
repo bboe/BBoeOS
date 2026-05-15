@@ -88,14 +88,22 @@ directory_sector dw 0                   ; offset 3
         ;; program_enter streams the binary directly from disk into
         ;; per-program user frames via vfs_read_sec, sector by sector.
         ;;
-        ;; sector_buffer (512 B) and ext2_sd_buffer (1 KB) share a
-        ;; single 4 KB FS scratch frame allocated by `vfs_init` from
-        ;; the bitmap allocator on every boot (FS is always used).
-        ;; sector_buffer is now a `uint8_t *` pointer in src/fs/vfs.c
-        ;; BSS — bbfs.asm / ext2.asm callers indirect through
-        ;; `[sector_buffer]` to load the base, then `[reg + offset]`.
-        ;; ext2_sd_buffer is the runtime pointer at sector_buffer+512,
-        ;; populated by ext2_init only on a successful ext2 detect.
+        ;; sector_buffer is a `uint8_t *` pointer cell in src/fs/vfs.c
+        ;; BSS, populated at boot by `vfs_init` with the kernel-virt of
+        ;; `sector_buffer_storage` — a 512 B `resb` block in this file's
+        ;; .bss section (see kernel_bss_start..kernel_bss_end below).
+        ;; bbfs.asm / ext2.asm callers indirect through `[sector_buffer]`
+        ;; to load the base, then `[reg + offset]`.  No frame_alloc;
+        ;; the storage is unconditional and tiny.
+        ;;
+        ;; ext2_sd_buffer is the runtime pointer to a 4 KB frame
+        ;; allocated by `ext2_init` when (and only when) the ext2
+        ;; superblock magic matches.  1 KB of the frame is used as
+        ;; ext2_search_blk's sliding 2-sector directory window; the
+        ;; upper 3 KB sits unused (no sub-page allocator).  bbfs
+        ;; systems never spend this frame.  `ext2_init` treats
+        ;; frame_alloc failure here as a hard panic — same recovery
+        ;; story as the deleted vfs_init_scratch.vis_oom.
         ;;
         ;; net_receive_buffer / net_transmit_buffer / arp_table /
         ;; udp_buffer share one 4 KB NIC scratch frame allocated by
@@ -672,6 +680,17 @@ program_state_b          resb PROGRAM_STATE_SIZE
         ;; (STATE_BLOCKED_READ-ish from BSS, pd_phys=0) outside of an
         ;; active pipeline; shell_reload re-zeroes it on every reload.
 program_state_c          resb PROGRAM_STATE_SIZE
+
+        ;; FS sector scratch — 512 B used by every disk read on both
+        ;; bbfs and ext2.  Address is published to consumers via the
+        ;; existing `sector_buffer` pointer cell (cc.py-side
+        ;; `_g_sector_buffer`); `vfs_init` writes the address of this
+        ;; storage block into the pointer cell at boot.  Pre-PR #364
+        ;; this lived in a `vfs_init`-allocated 4 KB scratch frame; the
+        ;; frame_alloc went away with that PR — bbfs no longer pays for
+        ;; a scratch frame at all, and ext2 pays for its own frame from
+        ;; ext2_init for the sliding directory window.
+sector_buffer_storage    resb 512
 
         ;; Phys of the topmost user stack frame (virt 0xFF7FF000) — the
         ;; one that holds USER_STACK_TOP-1 and below.  Captured during
