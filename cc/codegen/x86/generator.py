@@ -1346,6 +1346,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        push {self.constant_aliases[arg.name]}")
         elif isinstance(arg, Var) and arg.name in self.global_arrays:
             self.emit(f"        push _g_{arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.local_stack_arrays:
+            if self.elide_frame:
+                self.emit(f"        push _l_{arg.name}")
+            else:
+                offset = self.locals[arg.name]
+                self.emit(f"        lea {self.target.acc}, [{self.target.base_register}-{offset}]")
+                self.emit(f"        push {self.target.acc}")
         elif isinstance(arg, Var) and arg.name in self.pinned_register:
             self.emit(f"        push {self.pinned_register[arg.name]}")
         else:
@@ -1441,6 +1448,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov {target}, {self.constant_aliases[arg.name]}")
         elif isinstance(arg, Var) and arg.name in self.global_arrays:
             self.emit(f"        mov {target}, _g_{arg.name}")
+        elif isinstance(arg, Var) and arg.name in self.local_stack_arrays:
+            if self.elide_frame:
+                self.emit(f"        mov {target}, _l_{arg.name}")
+            else:
+                offset = self.locals[arg.name]
+                self.emit(f"        lea {target}, [{self.target.base_register}-{offset}]")
         elif isinstance(arg, Var):
             if self._is_byte_scalar(arg.name):
                 # Byte-scalar source into a word target: byte-load +
