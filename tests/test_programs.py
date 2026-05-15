@@ -875,6 +875,8 @@ TESTS: list[ProgramTest] = [
     # block 0, where the straddle_dir test still finds a usable
     # boundary at 512 — longer names push past 492 and break it.
     ProgramTest("seek", ["seek"], r"^seek: OK$"),
+    ProgramTest("seq_basic", ["seq 3"], r"^1$\n^2$\n^3$"),
+    ProgramTest("seq_range", ["seq 5 7"], r"^5$\n^6$\n^7$"),
     # [shell:start] is printed exactly once per shell-load at the top of
     # main().  Three successive echo commands must all run inside the same
     # shell instance — confirming shell-survives-child — so the marker
