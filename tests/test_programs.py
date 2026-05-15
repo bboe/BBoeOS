@@ -924,6 +924,11 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         setup=_ext2_add_straddle_dir_filler,
     ),
+    ProgramTest(
+        "tee_basic",
+        ["echo hello | tee teefile", "cat teefile"],
+        r"hello[\s\S]*hello",
+    ),
     ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
     ProgramTest("wc_lines", ["seq 1 7 | wc -l"], r"^7\s*$"),
