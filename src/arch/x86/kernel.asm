@@ -34,7 +34,7 @@
 ;;; reaches the program through the per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
-        org 0FF820000h
+        section .text progbits vstart=0FF820000h
         bits 32
         %include "constants.asm"
         %include "irq_tail.inc"
@@ -211,6 +211,31 @@ high_entry:
         mov ecx, KERNEL_STACK_BYTES / 4
         mov eax, 0xDEADBEEF
         cld
+        rep stosd
+
+        ;; --- Zero the kernel BSS ---
+        ;;
+        ;; `.bss` is a `nobits` section: the bootloader loaded no bytes
+        ;; for it, so without this fill, reads from program_state_a /
+        ;; tss_data / pipeline_active / etc. return whatever the boot PD
+        ;; left in those frames.  Runs after the stack switch (so we
+        ;; have a safe ESP) and after the stack poison-fill (which uses
+        ;; the same EAX/ECX/EDI register convention), but BEFORE `lidt`
+        ;; — the IDT install reads no BSS, but anything past it might
+        ;; (e.g. frame_init writes the bitmap; address_space_create
+        ;; reads kernel_idle_pd_phys).
+        ;;
+        ;; The (end - start + 3) / 4 ceiling-divide handles BSS sizes
+        ;; that aren't a multiple of 4; rep stosd will overshoot by up
+        ;; to 3 bytes into the next page, which is fine — the next page
+        ;; is either still in kernel direct map or unmapped (which would
+        ;; have faulted on the first byte we wrote anyway, so it can't
+        ;; be unmapped if we got this far).  kernel_bss_end is aligned
+        ;; up to 4 in practice (last entry is `tss_data resb 104`), so
+        ;; the overshoot is zero, but the form is defensive.
+        mov edi, kernel_bss_start
+        mov ecx, (kernel_bss_end - kernel_bss_start + 3) / 4
+        xor eax, eax
         rep stosd
 
         ;; Patch the high-half offsets of the static IDT entries (the
@@ -508,3 +533,169 @@ vdso_image:
 vdso_image_end:
 
 kernel_end:
+
+;;; -------------------------------------------------------------------------
+;;; Kernel BSS — zero-initialized data, NOT emitted to kernel.bin.
+;;;
+;;; All `resX` reservations across the kernel live here.  NASM places the
+;;; section immediately after .text in the load image's virtual address
+;;; space (`follows=.text`), but `nobits` means no bytes ride on disk.
+;;; `high_entry` zero-fills the range [kernel_bss_start, kernel_bss_end)
+;;; before any code reads from it; the bootloader will NOT have loaded
+;;; zeros here, so a missed init = garbage reads.
+;;;
+;;; The `make_os.sh` build script reads kernel_bss_start / kernel_bss_end
+;;; from `build/kernel.map` (emitted by the [map symbols] directive below)
+;;; and adds the BSS extent to KERNEL_RESERVED_BASE so the post-kernel
+;;; cluster (kernel stacks, boot PD, PT, bitmap) starts above BSS, not
+;;; above the on-disk image end.
+;;; -------------------------------------------------------------------------
+
+[map symbols build/kernel.map]
+
+section .bss nobits follows=.text align=4
+        align 4
+
+;;; Labels below are strict-alphabetical (matching the codebase's `equ`
+;;; convention).  Every reservation is `resd 1`, `resd N`, or `resb N`
+;;; with N a multiple of 4, so the section stays 4-aligned end-to-end
+;;; from the single `align 4` above without per-label re-aligns.
+
+kernel_bss_start:
+
+        ;; Physical address of the kernel idle PD — a long-lived 4 KB
+        ;; kernel-only page directory built in `high_entry` by
+        ;; copy-imaging the boot PD's kernel half (PDEs FIRST_KERNEL_PDE..1023)
+        ;; into a fresh frame_alloc'd frame and leaving the user half
+        ;; (PDEs 0..767) zero.  Used as the canonical kernel-half PDE
+        ;; source for `address_space_create`, as CR3 between programs
+        ;; (post sys_exit / kill, before program_enter swaps in the
+        ;; next program's PD), and as the CR3-swap target during
+        ;; `address_space_destroy` (which cannot run on the dying PD
+        ;; it is about to frame_free).  Replaces the boot PD's
+        ;; permanent-frame role; the boot PD's frame is freed once
+        ;; the idle PD takes over, returning a 4 KB conventional
+        ;; frame to the bitmap pool for user pages.
+kernel_idle_pd_phys      resd 1
+
+        ;; Phys of the last loaded binary frame, used by program_enter
+        ;; for the post-stream BSS-trailer peek.
+last_binary_frame_phys   resd 1
+
+        ;; OOM-recovery: 1 while shell_reload is bringing up the shell.
+        ;; An OOM in that window is fatal (no fallback); user-program
+        ;; loads run with the flag clear and recover by printing a
+        ;; message and re-entering shell_reload.  Paired with
+        ;; pending_frame_phys below for the unwind contract.
+loading_shell_flag       resd 1
+
+        ;; parent_iret_frame snapshots the parent's pushad+iret kernel-stack
+        ;; frame (52 bytes = 13 dwords) at sys_exec entry.
+parent_iret_frame        resd 13
+
+        ;; Non-null while a child is live; consumed by child_terminate
+        ;; to restore the parent on sys_exit.
+parent_program_state     resd 1
+
+        ;; User-virt char** that stage_user_argv (called from
+        ;; build_child_program_state) walks under the caller's PD to copy
+        ;; argv strings directly onto the new program's user stack via
+        ;; kmap.  Set by sys_exec / sys_pipeline2 before each child
+        ;; build; 0 means "no args" (the boot / sys_exit shell-reload
+        ;; path, or an explicit NULL argv from a user program).
+        ;; Callers must have validated the array with .validate_user_argv
+        ;; first so stage_user_argv can trust every dereference.
+pending_argv_user_ptr    resd 1
+
+        ;; Set immediately after every frame_alloc that has not yet been
+        ;; mapped via address_space_map_page; the .oom handler frees it
+        ;; before tearing down the partial PD.  Paired with
+        ;; loading_shell_flag above for the OOM-recovery contract.
+pending_frame_phys       resd 1
+
+        ;; Active pipeline's pipe-pool index.  Set by sys_pipeline2 in
+        ;; entry, consumed by both child-build steps to install the
+        ;; matching FD_TYPE_PIPE_R / FD_TYPE_PIPE_W fds on slot_b /
+        ;; slot_c.  Holds the index verbatim — pool index 0 is valid,
+        ;; so the "is a pipeline active?" check uses pipeline_active
+        ;; below, not this field.  The error-unwind paths read this
+        ;; to release the pool slot when a partial build fails.
+pending_pipeline_pipe    resd 1
+
+        ;; Set non-zero by sys_pipeline2 between "both children built"
+        ;; and "both children exited" — used by child_terminate's
+        ;; sys_exit path to detect a pipeline-child exit vs. a regular
+        ;; sys_exec child exit.  The pipeline-child branch routes
+        ;; sys_exit through kernel_yield (no parent_iret_frame
+        ;; restore); the non-pipeline branch keeps the existing
+        ;; parent-restore behavior.
+pipeline_active          resd 1
+
+        ;; sys_pipeline2 sets this to 1 once slot_b is fully built (PD
+        ;; allocated, fd_table populated, pipe writer end installed),
+        ;; and back to 0 once both children are STATE_RUNNING.
+        ;; spawn_failed_unwind consults it: if non-zero when slot_c's
+        ;; build_child_program_state OOMs, the normal slot_c teardown
+        ;; is followed by .pipeline_unwind_slot_b so slot_b's PD, the
+        ;; writer fd, and the pipe pool slot don't leak.  Values:
+        ;; 0 = no pipeline build in progress; 1 = slot_b built (needs
+        ;; teardown on slot_c OOM).
+pipeline_partial_state   resd 1
+
+        ;; Kernel-side fd struct used by program_enter to stream the
+        ;; program binary directly from disk into per-program user
+        ;; frames (sector-by-sector via vfs_read_sec).  Sized to
+        ;; FD_ENTRY_SIZE so the FD_OFFSET_* layout matches the user fd
+        ;; table, even though this slot lives outside it.  Only one
+        ;; program loads at a time, so a single static slot suffices.
+program_fd               resb FD_ENTRY_SIZE
+
+        ;; program_state_a holds the running program's PROGRAM_STATE
+        ;; slot.  current_program_state (initialized in .text to point
+        ;; here) is pre-set to it so the PIT handler is safe before
+        ;; shell_reload runs; shell_reload also sets it (redundant but
+        ;; harmless).  Signal delivery state — pending bits
+        ;; (PENDING_SIGINT, PENDING_SIGPIPE, PENDING_SIGALRM), the
+        ;; re-entry guard (IN_SIGNAL_HANDLER), and the alarm deadline /
+        ;; interval — lives inside this slot at the
+        ;; PROGRAM_STATE_OFFSET_* fields; program_enter resets them on
+        ;; every load.
+program_state_a          resb PROGRAM_STATE_SIZE
+
+        ;; Second slot for the child while a parent is suspended;
+        ;; completes the pair alongside program_state_a.
+program_state_b          resb PROGRAM_STATE_SIZE
+
+        ;; Third slot — second pipeline child.  Used by sys_pipeline2
+        ;; so the shell + two cooperatively-scheduled pipeline commands
+        ;; all have their own program_state.  Stays zero
+        ;; (STATE_BLOCKED_READ-ish from BSS, pd_phys=0) outside of an
+        ;; active pipeline; shell_reload re-zeroes it on every reload.
+program_state_c          resb PROGRAM_STATE_SIZE
+
+        ;; Phys of the topmost user stack frame (virt 0xFF7FF000) — the
+        ;; one that holds USER_STACK_TOP-1 and below.  Captured during
+        ;; build_child_program_state's stack-mapping loop and consumed
+        ;; by stage_user_argv to write the Linux argv/envp/argc frame.
+topmost_stack_frame_phys resd 1
+
+        ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
+        ;; protected_mode_entry); all other fields stay zero because we
+        ;; don't use hardware task switching.  Sized to the 104-byte
+        ;; standard layout so the IOPB-past-limit trick parks I/O.
+tss_data                 resb 104
+
+        ;; PROGRAM_BASE + binsize + bsssize, page-aligned up — used by
+        ;; program_enter to bound the user text+BSS extent during the
+        ;; stack-mapping / argv-staging passes.
+user_image_end           resd 1
+
+        ;; Phys of the shared vDSO code frame; program_enter aliases it
+        ;; into every per-program PD at user-virt FUNCTION_TABLE.
+vdso_code_phys           resd 1
+
+        ;; Current user-virt during page-walk loops in
+        ;; build_child_program_state / address_space_map_page callers.
+virt_cursor              resd 1
+
+kernel_bss_end:

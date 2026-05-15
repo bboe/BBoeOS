@@ -52,10 +52,26 @@ fi
 KERNEL_SIZE=$(wc -c < kernel.bin)
 KERNEL_SECTORS=$(( ( KERNEL_SIZE + 511 ) / 512 ))
 
-# Compute the first page above kernel.bin.  The kernel stack, NIC buffers,
-# program-scratch buffer, boot PD, and first kernel PT are stacked here.
+# Compute the first page above the kernel's *resident extent* — that's
+# .text/.data on-disk size PLUS the .bss extent.  The BSS section is
+# `nobits` (declared in src/arch/x86/kernel.asm), so its bytes don't
+# ride on disk; we read its size from build/kernel.map (emitted by
+# the [map symbols] directive at the end of kernel.asm).  Without
+# this, KERNEL_RESERVED_BASE would land inside the BSS region and
+# the kernel stack would overlap program_state_a / tss_data etc.
 # KERNEL_LOAD_PHYS = 0x20000 (must match boot.asm + kernel.asm).
-KERNEL_RESERVED_BASE=$(( (0x20000 + KERNEL_SIZE + 0xFFF) & ~0xFFF ))
+#
+# Map row format: leading whitespace, two identical hex address
+# columns (no 0x prefix), then the symbol name.
+BSS_START=$(awk '$NF=="kernel_bss_start"{print $1; exit}' build/kernel.map)
+BSS_END=$(awk '$NF=="kernel_bss_end"{print $1; exit}' build/kernel.map)
+if [ -z "$BSS_START" ] || [ -z "$BSS_END" ]; then
+    echo "make_os.sh: failed to read kernel_bss_{start,end} from build/kernel.map" >&2
+    exit 1
+fi
+BSS_BYTES=$(( 0x$BSS_END - 0x$BSS_START ))
+
+KERNEL_RESERVED_BASE=$(( (0x20000 + KERNEL_SIZE + BSS_BYTES + 0xFFF) & ~0xFFF ))
 
 # Safety: the entire kernel-side reserved region must stay below the
 # VGA aperture at phys 0xA0000.  Worst-case region size: 4 KB stack +
