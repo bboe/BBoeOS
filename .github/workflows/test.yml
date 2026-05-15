@@ -74,7 +74,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
       - name: Install pytest
-        if: needs.changes.outputs.docs_only != 'true' && matrix.suite == 'test_unit'
+        if: needs.changes.outputs.docs_only != 'true' && (matrix.suite == 'test_unit' || matrix.suite == 'test_pipeline')
         run: pip install pytest
       - name: Run ${{ matrix.suite }}
         if: needs.changes.outputs.docs_only != 'true'
@@ -110,6 +110,16 @@ jobs:
             command: python3 tests/test_floppy_boot.py
           - suite: test_kernel_archive
             command: python3 tests/test_kernel_archive.py
+          - suite: test_pipeline
+            # All five tests/test_pipeline_*.py drivers were added in
+            # ec3e75b4 (pipelines landing) but never wired into CI.
+            # They exercise SYS_SYS_PIPELINE2 end-to-end (basic,
+            # per-child args, early-close SIGPIPE, pool recycle,
+            # invalid-pipeline rejection).  Unlike test_programs.py,
+            # the pytest drivers don't run make_os.sh internally —
+            # they just open drive.img directly via run_qemu.py — so
+            # the command builds the image first.
+            command: ./make_os.sh && python3 -m pytest tests/test_pipeline_basic.py tests/test_pipeline_args.py tests/test_pipeline_early_close.py tests/test_pipeline_pool_recycle.py tests/test_pipeline_reject.py
           - suite: test_programs_floppy
             command: python3 tests/test_programs.py --floppy
           - suite: test_ps2
