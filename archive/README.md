@@ -20,7 +20,7 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | Program | ASM 16 (bytes) | ASM (bytes) | C (bytes) | Delta |
 |---------|----------------|-------------|-----------|-------|
 | arp     | 466            | 686         | 587       | -99   |
-| cat     | 145            | 166         | 183       | +17   |
+| cat     | 145            | 185         | 202       | +17   |
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |

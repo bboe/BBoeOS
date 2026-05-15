@@ -644,6 +644,7 @@ TESTS: list[ProgramTest] = [
         slow=True,
         timeout=_LARGE_FILE_TIMEOUT,
     ),
+    ProgramTest("cat_stdin", ["echo piped | cat"], r"^piped$"),
     ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),

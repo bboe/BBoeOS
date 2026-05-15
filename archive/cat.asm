@@ -7,12 +7,13 @@
 main:
         cld
 
-        ;; Linux-style argv: reserve stack slots and require argc == 2.
-        ;; Linux SysV i386 startup: argc at [esp], argv ptrs at [esp+4..].
-        ;; Pop argc into ECX and leave argv[0] at [esp+0] to match the
-        ;; legacy parse_argv layout this program is written against.
+        ;; Linux-style argv: argc at [esp], argv ptrs at [esp+4..].
+        ;; argc == 1 → read from STDIN (no open / no close).
+        ;; argc == 2 → open argv[1] for reading.
+        ;; anything else → usage.
         pop ecx                                 ; ecx = argc
-        mov edi, esp                            ; edi = argv base
+        cmp ecx, 1
+        je .stdin
         cmp ecx, 2
         jne .usage
 
@@ -24,6 +25,10 @@ main:
         jc .not_found
 
         mov ebx, eax            ; EBX = fd
+        jmp .read_loop
+
+.stdin:
+        xor ebx, ebx            ; EBX = STDIN (fd 0)
 
 .read_loop:
         mov edi, SECTOR_BUFFER
@@ -43,6 +48,8 @@ main:
         jmp .read_loop
 
 .done:
+        test ebx, ebx           ; skip close on STDIN (fd 0)
+        jz FUNCTION_EXIT
         mov ah, SYS_IO_CLOSE
         int 30h
         jmp FUNCTION_EXIT
@@ -53,8 +60,11 @@ main:
         jmp .output
 
 .disk_err:
+        test ebx, ebx           ; skip close on STDIN (fd 0)
+        jz .disk_err_msg
         mov ah, SYS_IO_CLOSE
         int 30h
+.disk_err_msg:
         mov esi, DISK_ERROR
         mov ecx, DISK_ERROR_LENGTH
         jmp .output
@@ -67,7 +77,7 @@ main:
         jmp FUNCTION_DIE
 
 ;; Strings
-USAGE        db `Usage: cat <filename>\n`
+USAGE        db `Usage: cat [filename]\n`
 USAGE_LENGTH equ $ - USAGE
 
 DISK_ERROR db `Disk read error\n\0`
