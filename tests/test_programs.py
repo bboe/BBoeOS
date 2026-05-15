@@ -763,6 +763,7 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
+    ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
@@ -919,6 +920,7 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         setup=_ext2_add_straddle_dir_filler,
     ),
+    ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
 ]
 
