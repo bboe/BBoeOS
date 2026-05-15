@@ -205,9 +205,23 @@ ext2_init:
         jc .ei_err
         cmp word [ebx+EXT2_SB_MAGIC], EXT2_MAGIC
         jne .ei_err
-        ;; Place ext2_sd_buffer at sector_buffer+512 (1 KB pair: bytes
-        ;; 0..511 = lo sector, 512..1023 = hi sector inside the slot).
-        lea eax, [ebx + 512]
+        ;; ext2 is confirmed (superblock magic matched).  Allocate a
+        ;; 4 KB frame to host ext2_search_blk's sliding 2-sector
+        ;; directory window (bytes 0..511 = lo sector, 512..1023 = hi
+        ;; sector inside the frame; the upper 3 KB is unused — we have
+        ;; no sub-page allocator).  bbfs systems never run this path
+        ;; so they never pay for this frame.  frame_alloc failure
+        ;; here is a hard panic — the boot-time bitmap was just
+        ;; populated from E820 with full RAM free, so an alloc failure
+        ;; at this point means something is fundamentally broken.
+        ;; Same recovery story as the deleted vfs_init_scratch.vis_oom.
+        ;;
+        ;; frame_alloc preserves EBX (it's pushed in the prologue and
+        ;; restored in the epilogue — see src/memory_management/frame.asm),
+        ;; so [sector_buffer] base in EBX is still valid afterward.
+        call frame_alloc
+        jc .ei_frame_alloc_panic
+        add eax, DIRECT_MAP_BASE
         mov [ext2_sd_buffer], eax
         ;; s_log_block_size: 0=1KB, 1=2KB, 2=4KB
         mov al, [ebx+EXT2_SB_LOG_BLOCK_SIZE]
@@ -255,6 +269,9 @@ ext2_init:
         pop ax
         stc
         ret
+.ei_frame_alloc_panic:
+        hlt
+        jmp .ei_frame_alloc_panic
 
 ext2_load:
         ;; Load file data into memory using vfs_found_inode and vfs_found_size.
