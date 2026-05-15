@@ -766,6 +766,8 @@ TESTS: list[ProgramTest] = [
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
+    ProgramTest("head_basic", ["seq 1 5 | head -n 2"], r"^1$\n^2$"),
+    ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"arp\*"),
