@@ -29,7 +29,7 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | ls      | 135            | 170         | 199       | +29   |
 | mkdir   | 123            | 142         | 163       | +21   |
 | mv      | 217            | 242         | 270       | +28   |
-| ping    | 1034           | 1227        | 1556      | +329  |
+| ping    | 1034           | 1227        | 1554      | +327  |
 | uptime  | 50             | 67          | 102       | +35   |
 
 **arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
@@ -115,7 +115,7 @@ leaving DF undefined in practice (typically clear via boot defaults).
 overhead; the +20 here picks up cc.py's frame setup and 32-bit prologue/epilogue
 cost too.
 
-**ping (+316):** Both versions build ICMP echo requests in userspace over the
+**ping (+327):** Both versions build ICMP echo requests in userspace over the
 same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` / ``SYS_NET_SENDTO`` /
 ``SYS_NET_RECVFROM`` path.  The four scratch arrays (``dns_ip[4]``,
 ``packet_buffer[128]``, ``query_buffer[512]``, ``target_ip[4]``) are local stack
