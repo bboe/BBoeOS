@@ -11,26 +11,46 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
-- **Linux-style `argv`.**  `main(int argc, char *argv[])` now matches the C/Linux
-  convention: `argv[0]` is the program's basename, `argv[1..argc-1]` are the
-  user arguments, `argc` includes the program name, and `argv[argc] == NULL`.
-  `argv` is a real `char **` pointing at a stack-allocated pointer array
+- **Kernel binary shrunk ~93 KB → ~40 KB on disk.**  Five interlocking changes
+  moved all zero-initialized kernel storage off the on-disk image into a real
+  NASM `.bss nobits` section.  (1) `kernel.asm` declares `section .bss nobits
+  follows=.text align=4` and `high_entry` zero-fills `[kernel_bss_start,
+  kernel_bss_end)` before any code reads it; `make_os.sh` reads the BSS extent
+  from `build/kernel.map` and includes it in `KERNEL_RESERVED_BASE =
+  page_align(0x20000 + kernel_size + bss_size)`. (2) The 512 B disk-sector
+  scratch moved into kernel BSS as `sector_buffer_storage`; the 4 KB ext2
+  directory window is now allocated by `ext2_init` via `frame_alloc` only on a
+  successful magic match — bbfs systems never spend the frame.  (3) The three
+  kernel stacks (`kernel_stack`, `kernel_stack_b`, `kernel_stack_c`) shrank from
+  4 KB to 1 KB each (`KERNEL_STACK_BYTES = 0x400`); `BOOT_PD_PHYS` page-aligns
+  up to absorb the sub-page slack.  (4) cc.py kernel-mode codegen now emits
+  zero-initialized globals as `resb N` inside `section .bss` instead of `times N
+  db 0` in the generated kasm, switching back to `.text` so the next `%include`
+  lands in code; `kernel_bss_start:` anchors at the top of `kernel.asm` so
+  NASM's source-order `.bss` layout places the cc.py reservations inside the
+  zero-loop range.  (5) New `tools/calibrate_bigbss.py` opt-in tool
+  binary-searches `BIGBSS_PAGES` and rewrites `tests/programs/bigbss_size.h` for
+  unattended kernel-layout drifts; the manual ±N edit remains the fast path for
+  small known drifts.
+- **Linux-style `argv`.**  `main(int argc, char *argv[])` now matches the
+  C/Linux convention: `argv[0]` is the program's basename, `argv[1..argc-1]` are
+  the user arguments, `argc` includes the program name, and `argv[argc] ==
+  NULL`. `argv` is a real `char **` pointing at a stack-allocated pointer array
   reserved in cc.py's main prologue (`ARGV_RESERVE_BYTES = 520`, derived from
   `ARG_MAX = 256`).  The fixed `ARGV` user-virt buffer is gone; cc.py codegen,
   the vDSO's `shared_parse_argv`, and the shell all dropped the magic address.
   Programs that previously read `argv[0]` for their first user arg now read
   `argv[1]` and check `argc` for `N+1` instead of `N`; `echo` no longer prints
   its program name; `fd_helpers` switched from in-place arg-tail splitting to
-  the standard argv layout.  Archive `.asm` versions of the same programs use
-  a `sub esp, ARGV_RESERVE_BYTES` / `mov edi, esp` / `mov ecx,
-  ARGV_RESERVE_BYTES / 4` / `call FUNCTION_PARSE_ARGV` startup sequence and
-  read `argv[i]` via `[esp+i*4]`.  cc.py's `builtin_rename` now evaluates its
-  arguments newname-first so that two consecutive `argv[i]` loads (which both
-  use ESI as a scratch base) no longer clobber each other.  `_type_of_operand`
-  treats `Index` on a `char *NAME[]` parameter as a pointer so
-  `argv[argc] == NULL` type-checks.  vDSO grew enough that
-  `VDSO_SIGRETURN_OFFSET` bumped from `0x450` to `0x460`.  Tests:
-  `tests/programs/argv_basename.c`.
+  the standard argv layout.  Archive `.asm` versions of the same programs use a
+  `sub esp, ARGV_RESERVE_BYTES` / `mov edi, esp` / `mov ecx, ARGV_RESERVE_BYTES
+  / 4` / `call FUNCTION_PARSE_ARGV` startup sequence and read `argv[i]` via
+  `[esp+i*4]`.  cc.py's `builtin_rename` now evaluates its arguments
+  newname-first so that two consecutive `argv[i]` loads (which both use ESI as a
+  scratch base) no longer clobber each other.  `_type_of_operand` treats `Index`
+  on a `char *NAME[]` parameter as a pointer so `argv[argc] == NULL`
+  type-checks.  vDSO grew enough that `VDSO_SIGRETURN_OFFSET` bumped from
+  `0x450` to `0x460`.  Tests: `tests/programs/argv_basename.c`.
 - **SIGPIPE.**  Writing to a pipe whose read end has fully closed now raises
   SIGPIPE (signum 13) on the writer.  Default action (`SIG_DFL`) terminates the
   writer before the `write()` syscall returns to userspace; the kernel banner is
@@ -51,8 +71,8 @@ time.
   `STATE_RUNNING`, and hands off via `kernel_yield_to_pipeline_start`.
   `fd_read_pipe` / `fd_write_pipe` (`src/fs/fd.c`) block cooperatively via
   `kernel_yield_read` / `kernel_yield_write`; `fd_close_pipe` wakes the peer
-  when the last writer or reader closes.  The bbfs directory was widened from
-  3 to 4 sectors (48 → 64 entries) to accommodate the two new test-fixture
+  when the last writer or reader closes.  The bbfs directory was widened from 3
+  to 4 sectors (48 → 64 entries) to accommodate the two new test-fixture
   programs (`bin/pipe_producer`, `bin/pipe_consumer`).  Tests:
   `tests/test_pipeline_basic.py` (producer writes 20 bytes; consumer prints the
   count), `tests/test_pipeline_reject.py` (double-pipe and pipe-with-redirect

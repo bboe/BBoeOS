@@ -27,19 +27,20 @@ nav_order: 90
   post-MBR real-mode bootstrap (second `INT 13h` read of `kernel.bin` directly
   into phys `0x20000`, E820 probe, PIC remap, A20, GDT load, `CR0.PE` flip) +
   32-bit `early_pe_entry` (build boot PD + first kernel PT, enable paging,
-  far-jump to `high_entry` at virt `0xC0020000`). No real-mode-to-PE relocation
+  far-jump to `high_entry` at virt `0xFF820000`). No real-mode-to-PE relocation
   copy — `KERNEL_LOAD_PHYS = 0x20000` is the kernel's final home. Post-MBR
   region pads to the next 512-byte boundary; `BOOT_SECTORS` is derived
   (`(boot_end - post_mbr_continue) / 512`) so the count auto-grows when the boot
   code crosses a sector. `make_os.sh` only has to measure `kernel.bin`'s sector
   count for the `-DKERNEL_SECTORS=N` second-pass nasm invocation.
-- `src/arch/x86/kernel.asm` — Post-paging high-half kernel (`org 0xC0020000` =
-  `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`): `high_entry` (segment / GDT / IDT /
-  stack setup, identity-drop, bitmap init, kernel-PT allocation, kernel_idle_pd
-  build, boot-PD freeback) followed by `%include`s of every kernel subsystem
-  (drivers, fs, helpers, net stack, syscall dispatcher, IDT, post-flip entry,
-  frame allocator, address-space helpers) and the kernel GDT + vDSO blob
-  (`incbin "vdso.bin"`).
+- `src/arch/x86/kernel.asm` — Post-paging high-half kernel (`section .text
+  progbits vstart=0FF820000h` = `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`, plus a
+  `section .bss nobits follows=.text` for zero-init reservations): `high_entry`
+  (segment / GDT / IDT / stack setup, identity-drop, bitmap init, kernel-PT
+  allocation, kernel_idle_pd build, boot-PD freeback) followed by `%include`s of
+  every kernel subsystem (drivers, fs, helpers, net stack, syscall dispatcher,
+  IDT, post-flip entry, frame allocator, address-space helpers) and the kernel
+  GDT + vDSO blob (`incbin "vdso.bin"`).
 - `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and `INT 30h`
   gate; `idt_init` (called from `high_entry`) patches the high-half handler
   offsets at boot since the IDT_ENTRY macro can only emit the low 16 bits in
@@ -52,9 +53,10 @@ nav_order: 90
   trailer-magic protocol, ESP snapshot, `iretd` to ring 3 at `PROGRAM_BASE`),
   and the IRQ 0 / IRQ 6 handlers. Segment / GDT / IDT / ESP setup happens in
   `kernel.asm`'s `high_entry` before falling into `protected_mode_entry`; the
-  ring-0 stack lives at virt `0xC0000000 + KERNEL_RESERVED_BASE` (~`0xC0028000`
-  for the current kernel size — see Kernel stack note in CLAUDE.md), not in
-  entry.asm.
+  ring-0 stacks (three 1 KB slots: `kernel_stack`, `kernel_stack_b`,
+  `kernel_stack_c`) live at virt `KERNEL_VIRT_BASE + KERNEL_RESERVED_BASE`
+  upward (≈`0xFF828000` for the current ~40 KB kernel) — see Kernel stack note
+  in `docs/architecture.md`, not in entry.asm.
 
 ## Memory management
 
@@ -136,8 +138,8 @@ nav_order: 90
   256-slot ring of 6-byte `(delay_lo, delay_hi, bank, reg, value, reserved)`
   commands; the IRQ 0 drainer pops up to 16 events per 1 ms tick and forwards
   register writes through `src/drivers/opl3.c`.  Implements `fd_read_midi`,
-  `fd_write_midi`, `fd_close_midi`, and `fd_ioctl_midi`
-  (`MIDI_IOCTL_DRAIN`).  Single-opener.
+  `fd_write_midi`, `fd_close_midi`, and `fd_ioctl_midi` (`MIDI_IOCTL_DRAIN`).
+  Single-opener.
 - `src/fs/block.asm` — Block I/O dispatcher: `read_sector`, `write_sector`
   (dispatches to fdc/ata based on `boot_disk`).
 - `src/fs/bbfs.asm` — BBoeOS filesystem (VFS backend): `bbfs_chmod`,

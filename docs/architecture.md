@@ -77,13 +77,15 @@ disk:
 ## Kernel-side runtime data
 
 - **Input buffer** at linear address `0x500`, max 256 characters.
-- **Disk buffer** (`sector_buffer`, 512 B) is the offset-0 slice of the FS
-  scratch frame that `vfs_init` allocates from the bitmap on every boot.
-  `bbfs.asm` and `ext2.asm` load the kernel-virt pointer indirectly: `mov ebx,
-  [sector_buffer]`. `ext2_sd_buffer` (the 1 KB sliding directory window used
-  only by `ext2_search_blk`) is the offset-512 slice of the same frame on ext2
-  mounts; on bbfs the pointer stays 0 since no caller reaches the ext2-only
-  paths.
+- **Disk buffer** (`sector_buffer`, 512 B) lives in the kernel `.bss` section as
+  `sector_buffer_storage` (a `resb 512` block in `kernel.asm`); `vfs_init`
+  populates the `sector_buffer` pointer cell with its kernel-virt address.
+  `bbfs.asm` and `ext2.asm` load the pointer indirectly: `mov ebx,
+  [sector_buffer]`. No frame allocation, always available, costs 0 bytes on disk
+  thanks to `.bss nobits`. `ext2_sd_buffer` (the 1 KB sliding directory window
+  used only by `ext2_search_blk`) is a separate 4 KB frame that `ext2_init`
+  allocates via `frame_alloc` only on a successful ext2 magic match — bbfs
+  systems never spend the frame.
 - **FD table** is allocated as kernel BSS (`struct fd fd_table[FD_MAX]` in
   `src/fs/fd.c`), so it lives inside `kernel.bin` like any other kernel global;
   no fixed-phys reservation needed.  `sys_exec` inherits the parent's `fd_table`
@@ -104,18 +106,20 @@ disk:
   Embedding inside `kernel.bin` lets the bitmap allocator hand out the IVT/BDA
   region (phys `0x000-0x4FF`), the `0x600-0x7BFF` gap, the MBR landing zone
   (`0x7C00-0x7DFF`), and the dead post-MBR boot bytes.
-- **Kernel stack** at phys `KERNEL_RESERVED_BASE..KERNEL_RESERVED_BASE+0x1000`
-  (4 KB; currently ~`0x28000..0x29000`, shifts with `kernel.bin` size).
-  `KERNEL_RESERVED_BASE = page_align(0x20000 + sizeof(kernel.bin))` is computed
-  by `make_os.sh` and passed via `-DKERNEL_RESERVED_BASE=N` to the second
-  `kernel.asm` pass and to `boot.asm`. Lives outside `kernel.bin` to avoid 4 KB
-  of zero padding on disk; reachable immediately after paging because
-  PDE[FIRST_KERNEL_PDE]'s direct map covers phys `0..0x3FFFFF`; reserved via
-  `frame_reserve_range` at boot. Sized at ~10× the measured peak (~412 B across
-  bbfs / ext2 / fault kill / network paths). `kernel_stack` / `kernel_stack_top`
-  are `equ`s in `kernel.asm`. `high_entry` poison-fills the region with
-  `0xDEADBEEF` at boot so a future stack-depth probe can find the high-water
-  mark by scanning upward.
+- **Kernel stacks** — three slots of `KERNEL_STACK_BYTES` (= 1 KB) each at phys
+  `KERNEL_RESERVED_BASE..KERNEL_RESERVED_BASE + 3 * KERNEL_STACK_BYTES`:
+  `kernel_stack` (slot_a), `kernel_stack_b` (pipeline cmd1), and
+  `kernel_stack_c` (pipeline cmd2). Sized at ~2× the measured peak (~412 B
+  across bbfs / ext2 / fault kill / network paths). `KERNEL_RESERVED_BASE =
+  page_align(0x20000 + sizeof(kernel.bin) + sizeof(kernel.bss))` is computed by
+  `make_os.sh` from `wc -c kernel.bin` plus the `kernel_bss_start` /
+  `kernel_bss_end` symbols in `build/kernel.map`, then passed via
+  `-DKERNEL_RESERVED_BASE=N` to the second `kernel.asm` pass and to `boot.asm`.
+  The post-kernel cluster lives outside `kernel.bin` to keep the on-disk image
+  small; reachable immediately after paging because PDE[FIRST_KERNEL_PDE]'s
+  direct map covers phys `0..0x3FFFFF`; reserved via `frame_reserve_range` at
+  boot. `high_entry` poison-fills each stack with `0xDEADBEEF` at boot so a
+  future stack-depth probe can find the high-water mark by scanning upward.
 
 ## Paging and address spaces
 
@@ -170,9 +174,11 @@ disk:
 ## Build-time derivation
 
 - Kernel sector count and reserved-region base are both derived at build time:
-  `make_os.sh` measures `kernel.bin`, passes the sector count to `boot.asm` as
-  `-DKERNEL_SECTORS=N`, computes `KERNEL_RESERVED_BASE = page_align(0x20000 +
-  sizeof(kernel.bin))`, then re-assembles `kernel.asm` and `boot.asm` with
+  `make_os.sh` measures `kernel.bin` and reads `kernel_bss_start` /
+  `kernel_bss_end` out of `build/kernel.map` (emitted by `[map symbols ...]` in
+  `kernel.asm`), passes the sector count to `boot.asm` as `-DKERNEL_SECTORS=N`,
+  computes `KERNEL_RESERVED_BASE = page_align(0x20000 + sizeof(kernel.bin) +
+  sizeof(kernel.bss))`, then re-assembles `kernel.asm` and `boot.asm` with
   `-DKERNEL_RESERVED_BASE=N`. A size-invariant check between the two
   `kernel.asm` passes confirms the change cannot shift the binary. A separate
   VGA-hole assert verifies that `KERNEL_RESERVED_BASE + reserved-region-size <
@@ -229,9 +235,10 @@ macro:
 2. Tests `in_signal_handler`; if set, falls through to popad + IRET (block
    re-entry until SYS_SYS_SIGRETURN clears the flag — POSIX-default same-mask
    behavior, single flag covers both signals).
-3. Tests pending bits in signum order (lower = higher priority): `pending_sigint`
-   (SIGINT, 2), then `pending_sigpipe` (SIGPIPE, 13), then `pending_sigalrm`
-   (SIGALRM, 14).  If all clear, falls through to popad + IRET.
+3. Tests pending bits in signum order (lower = higher priority):
+   `pending_sigint` (SIGINT, 2), then `pending_sigpipe` (SIGPIPE, 13), then
+   `pending_sigalrm` (SIGALRM, 14).  If all clear, falls through to popad +
+   IRET.
 4. Loads `EAX` with the picked signal's handler (`sigint_handler`,
    `sigpipe_handler`, or `sigalrm_handler` — per-slot dwords in `program_state`,
    reset to `SIG_DFL` by `program_enter`) and `EDX` with the signum.
@@ -248,10 +255,10 @@ macro:
   while it's parked at `kernel_yield_to_pipeline_start`), calls
   `address_space_destroy` on the current program's PD, prints a signum-specific
   banner to the console (`^C` for SIGINT, `^P` for SIGPIPE, `^A` for SIGALRM,
-  `^?` for the corrupt-sigcontext kill from
-  `signal_resume_after_handler`'s validation failure), and falls into
-  `child_terminate`. This is the out-of-the-box terminate behaviour: a runaway
-  program is killed and the shell prompt reappears.
+  `^?` for the corrupt-sigcontext kill from `signal_resume_after_handler`'s
+  validation failure), and falls into `child_terminate`. This is the
+  out-of-the-box terminate behaviour: a runaway program is killed and the shell
+  prompt reappears.
 - **`SIG_IGN` (1)** — clear the corresponding pending bit (already done by
   `SIGNAL_TAIL_CHECK`), resume the IRET path unchanged. The signal is silently
   discarded; the program continues as if nothing happened.
@@ -349,18 +356,18 @@ seconds)` wrapper, both in `tools/libc/signal.c`.  cc.py-compiled programs call
 
 ## Cooperative pipes (`cmd1 | cmd2`)
 
-BBoeOS v1 supports a single-pipe two-command pipeline via `SYS_SYS_PIPELINE2` (F3h).
-The shell parses `cmd1 | cmd2` at the top level of each command segment (after
-chain operators `;`, `&&`, `||` split the command line): a single unquoted `|`
-triggers pipeline mode; multiple `|` or a `|` combined with `<`/`>`/`>>`
-redirections are rejected at parse time.
+BBoeOS v1 supports a single-pipe two-command pipeline via `SYS_SYS_PIPELINE2`
+(F3h). The shell parses `cmd1 | cmd2` at the top level of each command segment
+(after chain operators `;`, `&&`, `||` split the command line): a single
+unquoted `|` triggers pipeline mode; multiple `|` or a `|` combined with
+`<`/`>`/`>>` redirections are rejected at parse time.
 
 ### Slot layout
 
 The kernel maintains three `program_state` slots in BSS (`entry.asm`):
 
-- **slot_a** — always the shell. `SYS_SYS_PIPELINE2` is only callable from slot_a
-  (nested pipelines are rejected with `ERROR_INVALID`).
+- **slot_a** — always the shell. `SYS_SYS_PIPELINE2` is only callable from
+  slot_a (nested pipelines are rejected with `ERROR_INVALID`).
 - **slot_b** — cmd1 (writer side). Its `fd[STDOUT]` is replaced with an
   `FD_TYPE_PIPE_W` entry pointing at the allocated pipe pool slot.
 - **slot_c** — cmd2 (reader side). Its `fd[STDIN]` is replaced with an
@@ -368,17 +375,18 @@ The kernel maintains three `program_state` slots in BSS (`entry.asm`):
 
 ### Pipe pool
 
-`src/fs/pipe.c` maintains a static pool of `MAX_PIPES = 4` `struct pipe` objects,
-each occupying exactly one 4 KB frame (sized to match `PIPE_SIZE` in
-`constants.asm`). The ring buffer inside the struct is `PIPE_BUFFER_BYTES = 4076`
-bytes. Fields at known offsets (`PIPE_OFFSET_*` in `constants.asm`) let both
-kernel C code and `syscall.asm` reach the same struct.
+`src/fs/pipe.c` maintains a static pool of `MAX_PIPES = 4` `struct pipe`
+objects, each occupying exactly one 4 KB frame (sized to match `PIPE_SIZE` in
+`constants.asm`). The ring buffer inside the struct is `PIPE_BUFFER_BYTES =
+4076` bytes. Fields at known offsets (`PIPE_OFFSET_*` in `constants.asm`) let
+both kernel C code and `syscall.asm` reach the same struct.
 
 ### Cooperative scheduling
 
-`SYS_SYS_PIPELINE2` builds both child slots atomically — allocates the pipe, builds
-slot_b (cmd1 writer), builds slot_c (cmd2 reader), marks both `STATE_RUNNING`, and
-calls `kernel_yield_to_pipeline_start` to hand off to the first child.
+`SYS_SYS_PIPELINE2` builds both child slots atomically — allocates the pipe,
+builds slot_b (cmd1 writer), builds slot_c (cmd2 reader), marks both
+`STATE_RUNNING`, and calls `kernel_yield_to_pipeline_start` to hand off to the
+first child.
 
 `kernel_yield` (`src/arch/x86/entry.asm`) is the cooperative scheduler:
 
@@ -388,51 +396,53 @@ calls `kernel_yield_to_pipeline_start` to hand off to the first child.
    blocking.
 3. Scans slot_b then slot_c for the first `STATE_RUNNING` slot; switches CR3 and
    loads the target's saved ESP.
-4. If neither child is `STATE_RUNNING` and both are `STATE_EXITED`, falls back to
-   slot_a — resuming the shell inside `SYS_SYS_PIPELINE2`'s epilogue, which reads
-   cmd2's wait status, wipes both slots, and returns to the shell.
-5. If neither child is `STATE_RUNNING` and at least one is not `STATE_EXITED`, the
-   scheduler panics (prints `*` on COM1 and halts) — this is a deadlock condition
-   that should be unreachable with a single pipe.
+4. If neither child is `STATE_RUNNING` and both are `STATE_EXITED`, falls back
+   to slot_a — resuming the shell inside `SYS_SYS_PIPELINE2`'s epilogue, which
+   reads cmd2's wait status, wipes both slots, and returns to the shell.
+5. If neither child is `STATE_RUNNING` and at least one is not `STATE_EXITED`,
+   the scheduler panics (prints `*` on COM1 and halts) — this is a deadlock
+   condition that should be unreachable with a single pipe.
 
 ### Block and wake
 
 `fd_read_pipe` (`src/fs/fd.c`) loops: try to drain the ring buffer; if empty and
 the writer end is still open, call `kernel_yield_read(p)` to park the reader and
-yield.  `fd_write_pipe` loops symmetrically: try to fill the ring buffer; if full
-and the reader end is still open, call `kernel_yield_write(p)` to park the writer
-and yield.  Each successful `pipe_buffer_read` or `pipe_buffer_write` also calls
-`pipe_wake_writer` or `pipe_wake_reader` respectively to unpark the blocked peer.
+yield.  `fd_write_pipe` loops symmetrically: try to fill the ring buffer; if
+full and the reader end is still open, call `kernel_yield_write(p)` to park the
+writer and yield.  Each successful `pipe_buffer_read` or `pipe_buffer_write`
+also calls `pipe_wake_writer` or `pipe_wake_reader` respectively to unpark the
+blocked peer.
 
 ### Exit and teardown
 
 When a pipeline child calls `sys_exit`, `child_terminate` runs the fd-close loop
-(which decrements the per-end open refcount and wakes the peer if the last writer
-or reader closes), marks the slot `STATE_EXITED` with `kernel_yield`, and the
-scheduler resumes the peer or the shell as described above. The shell's
-`SYS_SYS_PIPELINE2` epilogue wipes both child slots and clears `pipeline_active`.
+(which decrements the per-end open refcount and wakes the peer if the last
+writer or reader closes), marks the slot `STATE_EXITED` with `kernel_yield`, and
+the scheduler resumes the peer or the shell as described above. The shell's
+`SYS_SYS_PIPELINE2` epilogue wipes both child slots and clears
+`pipeline_active`.
 
 ### v1 limitations
 
 - Only one pipe (`cmd1 | cmd2`); chains of three or more commands are rejected.
 - Pipe combined with I/O redirection (`cmd1 > file | cmd2`) is rejected.
-- `SYS_SYS_PIPELINE2` can only be called from the shell (slot_a); programs cannot
-  spawn nested pipelines.
+- `SYS_SYS_PIPELINE2` can only be called from the shell (slot_a); programs
+  cannot spawn nested pipelines.
 
 ### Per-child arguments
 
-`SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`,
-`DI = right_path`, `DX = left_argv` (`char **`), `CX = right_argv` (`char **`).
-The shell tokenises each pipeline side in place (NUL-splitting whitespace
-runs in `pipe_left_buf` / `pipe_right_buf`), fills `pipe_left_argv` /
-`pipe_right_argv` with pointers to each token, and terminates each array with
-NULL.  `argv[0]` always points at the program-name token.
+`SYS_SYS_PIPELINE2`'s ABI carries four user-virt pointers: `SI = left_path`, `DI
+= right_path`, `DX = left_argv` (`char **`), `CX = right_argv` (`char **`). The
+shell tokenises each pipeline side in place (NUL-splitting whitespace runs in
+`pipe_left_buf` / `pipe_right_buf`), fills `pipe_left_argv` / `pipe_right_argv`
+with pointers to each token, and terminates each array with NULL.  `argv[0]`
+always points at the program-name token.
 
 Up front (with the shell's PD still active), the kernel's `.copy_user_argv`
-helper walks each `char**` array, validates every pointer with
-`access_ok` / `access_ok_string`, and copies the strings into per-side BSS
-scratch (`exec_args_strings_a` for the left, `..._b` for the right) with the
-matching offsets in `exec_args_offsets_a` / `exec_args_offsets_b` and counts in
+helper walks each `char**` array, validates every pointer with `access_ok` /
+`access_ok_string`, and copies the strings into per-side BSS scratch
+(`exec_args_strings_a` for the left, `..._b` for the right) with the matching
+offsets in `exec_args_offsets_a` / `exec_args_offsets_b` and counts in
 `exec_args_argc_a` / `_b`.  The shell PD is then released; later, inside each
 child's `build_child_program_state`, `stage_user_argv` consumes the per-side
 scratch and writes the Linux SysV i386 startup frame (argc / argv pointers /
