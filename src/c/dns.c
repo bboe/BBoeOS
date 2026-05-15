@@ -144,13 +144,20 @@ int main(int argc, char *argv[]) {
         die("DNS query failed\n");
     }
 
+    /* Poll for the DNS reply with a real time budget.  SYS_NET_RECVFROM
+       is non-blocking, so without a sleep between iterations 30,000 raw
+       polls complete in well under a millisecond — short enough that
+       even a sub-100 ms upstream DNS round-trip loses the race.  Sleep
+       1 ms per iteration up to 5 seconds total, which covers slow
+       container / corporate DNS while keeping a fast-path early-out. */
     int received = 0;
-    int tries = 30000;
+    int tries = 5000;
     while (tries > 0) {
         received = recvfrom(socket_fd, query_buffer, 512, 1024);
         if (received > 0) {
             break;
         }
+        sleep(1);
         tries -= 1;
     }
     close(socket_fd);

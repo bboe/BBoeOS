@@ -24,7 +24,7 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |
-| dns     | 724            | 1182        | 1298      | +116  |
+| dns     | 724            | 1182        | 1307      | +125  |
 | edit    | 2018           | 2659        | 3357      | +698  |
 | ls      | 135            | 170         | 199       | +29   |
 | mkdir   | 123            | 142         | 163       | +21   |
