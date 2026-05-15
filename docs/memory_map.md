@@ -37,8 +37,9 @@ every slot in one place.
 | `0x00020000..0x00020001` | `0xFF820000..0xFF820001` | 2 B | `jmp short high_entry` trampoline (offset 0 of kernel.bin) | yes |
 | `0x00020002` | `0xFF820002` | 1 B | `boot_disk` (BIOS drive number, written by boot.asm post-load) | yes |
 | `0x00020003..0x00020004` | `0xFF820003..0xFF820004` | 2 B | `directory_sector` (LBA of first directory sector) | yes |
-| `0x00020008..` | `0xFF820008..` | ~29 KB | `kernel.bin` `high_entry` and resident kernel code | yes |
-| `KERNEL_RESERVED_BASE` (~`0x28000..0x28FFF`) | `0xFF828000..` | 4 KB | `kernel_stack` (`KERNEL_RESERVED_BASE = page_align(0x20000 + kernel_size)`; poison-filled with `0xDEADBEEF` at boot for high-water tracking) | no |
+| `0x00020008..` | `0xFF820008..` | ~29 KB | `kernel.bin` `high_entry` and resident kernel code (on-disk image; BSS lives below `KERNEL_RESERVED_BASE`, see next row) | yes |
+| `KERNEL_LOAD_PHYS + .text_size..KERNEL_RESERVED_BASE` | `0xFF82xxxx..` | ~2 KB (today: `0x7D0` = 2000 B) | kernel BSS (`program_state_a/b/c`, `parent_iret_frame`, `tss_data`, FD slot, pipeline flags, OOM pending pointers, etc.); declared `section .bss nobits` in `src/arch/x86/kernel.asm` so the bytes do not ride on disk; zero-filled by `high_entry` after the kernel-stack poison-fill, before `lidt`. `make_os.sh` reads `kernel_bss_start` / `kernel_bss_end` from `build/kernel.map` and adds the extent to `KERNEL_RESERVED_BASE` so the kernel stack (next row) does not overlap. | no |
+| `KERNEL_RESERVED_BASE` (~`0x28000..0x28FFF`) | `0xFF828000..` | 4 KB | `kernel_stack` (`KERNEL_RESERVED_BASE = page_align(0x20000 + kernel_size + bss_size)`; poison-filled with `0xDEADBEEF` at boot for high-water tracking) | no |
 | ~`0x29000..0x29FFF` | `0xFF829000..` | 4 KB | boot PD (`BOOT_PD_PHYS`); freed back to the bitmap pool by `high_entry` after `kernel_idle_pd` takes over the CR3-target role. The slot is then just a regular conventional frame — the bitmap allocator can hand it out for user pages. | no |
 | ~`0x2A000..0x2AFFF` | `0xFF82A000..` | 4 KB | first kernel PT (`FIRST_KERNEL_PT_PHYS`) | no |
 | ~`0x2B000..` | `0xFF82B000..` | runtime, ≤ 128 KB | `frame_bitmap` (size set by `frame_init` from the highest type=1 E820 base, clamped to FRAME_PHYSICAL_LIMIT ≈ 4 GB — `-m 1` pays ~20 bytes, `-m 1024` pays 32 KB, `-m 4096` pays 128 KB; `frame_init` fills the storage before any allocator call, so the bytes don't ride on disk inside `kernel.bin`) | no |
@@ -56,7 +57,6 @@ builds.
 | User-virt range | Size | Purpose |
 |---|---|---|
 | `0x00000000..0x00000FFF` | 4 KB | NULL guard — not mapped (PTE[0] absent so `*(int *)0` raises #PF) |
-| `0x00001000..0x00001FFF` | 4 KB | per-program user-data page at `USER_DATA_BASE` (shell input buffer `BUFFER` at +0x500; zero-filled for non-shell programs). argv/envp now live on the user stack — see the `USER_STACK_TOP` row — not in this page |
 | `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
 | `0x08048000..` | program-sized | program text + BSS (Linux ELF-shaped load address) |
 | `0xFF7E0000..0xFF7EFFFF` | 64 KB | unmapped (stack guard region) |

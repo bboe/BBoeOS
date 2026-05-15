@@ -1582,134 +1582,16 @@ vdso_install:
         hlt
         jmp $-1
 
-        ;; Physical address of the kernel idle PD — a long-lived 4 KB
-        ;; kernel-only page directory built in `high_entry` by
-        ;; copy-imaging the boot PD's kernel half (PDEs FIRST_KERNEL_PDE..1023)
-        ;; into a fresh frame_alloc'd frame and leaving the user half
-        ;; (PDEs 0..767) zero.  Used as the canonical kernel-half PDE
-        ;; source for `address_space_create`, as CR3 between programs
-        ;; (post sys_exit / kill, before program_enter swaps in the
-        ;; next program's PD), and as the CR3-swap target during
-        ;; `address_space_destroy` (which cannot run on the dying PD
-        ;; it is about to frame_free).  Replaces the boot PD's
-        ;; permanent-frame role; the boot PD's frame is freed once
-        ;; the idle PD takes over, returning a 4 KB conventional
-        ;; frame to the bitmap pool for user pages.
-kernel_idle_pd_phys dd 0
-
         ;; Per-program-load state used by program_enter.
+        ;; current_program_state is pre-initialised to program_state_a (in
+        ;; BSS) so the PIT handler is safe before shell_reload runs;
+        ;; shell_reload also sets it (redundant but harmless).  The pointer
+        ;; itself stays in .text because it has a non-zero initializer; the
+        ;; PROGRAM_STATE slots and the other per-load scalars live in BSS
+        ;; (see kernel.asm's section .bss).
 current_program_state   dd program_state_a  ; pointer to the running program's PROGRAM_STATE slot
-last_binary_frame_phys  dd 0    ; phys of the last loaded binary frame (for trailer peek)
-user_image_end          dd 0    ; PROGRAM_BASE + binsize + bsssize, page-aligned up
-vdso_code_phys          dd 0    ; phys of the shared vDSO code frame
-virt_cursor             dd 0    ; current user-virt during page-walk loops
-
-        ;; Signal delivery state.  The pending bits (PENDING_SIGINT,
-        ;; PENDING_SIGPIPE, PENDING_SIGALRM), the re-entry guard
-        ;; (IN_SIGNAL_HANDLER), and the alarm deadline / interval all live
-        ;; inside current_program_state at their PROGRAM_STATE_OFFSET_*
-        ;; offsets; program_enter resets them on every load.
-        align 4
-        ;; program_state_a holds the running program's PROGRAM_STATE slot.
-        ;; current_program_state is pre-initialised to it so the PIT handler
-        ;; is safe before shell_reload runs; shell_reload also sets it
-        ;; (redundant but harmless).
-program_state_a       times PROGRAM_STATE_SIZE db 0
-
-        ;; Second slot for the child while a parent is suspended;
-        ;; program_state_b completes the pair alongside program_state_a.
-program_state_b       times PROGRAM_STATE_SIZE db 0
-
-        ;; Third slot — second pipeline child.  Used by sys_pipeline2
-        ;; (Task 6) so the shell + two cooperatively-scheduled pipeline
-        ;; commands all have their own program_state.  Stays zero
-        ;; (STATE_BLOCKED_READ-ish from BSS, pd_phys=0) outside of an
-        ;; active pipeline; shell_reload re-zeroes it on every reload.
-program_state_c       times PROGRAM_STATE_SIZE db 0
-
-        ;; OOM-recovery tracking.  pending_frame_phys is set immediately
-        ;; after every frame_alloc that has not yet been mapped via
-        ;; address_space_map_page; the .oom handler frees it before
-        ;; tearing down the partial PD.  loading_shell_flag is 1 while
-        ;; shell_reload is bringing up the shell — an OOM in that
-        ;; window is fatal because there's nothing to fall back to.
-        ;; user-program loads run with the flag clear and recover by
-        ;; printing a message and re-entering shell_reload.
-loading_shell_flag      dd 0
-
-        ;; parent_iret_frame snapshots the parent's pushad+iret kernel-stack
-        ;; frame (52 bytes = 13 dwords) at sys_exec entry;
-        ;; parent_program_state is non-null while a child is live.
-parent_iret_frame       times 13 dd 0
-parent_program_state    dd 0
-
-pending_frame_phys      dd 0
-
-        ;; User-virt char** that stage_user_argv (called from
-        ;; build_child_program_state) walks under the caller's PD to copy
-        ;; argv strings directly onto the new program's user stack via
-        ;; kmap.  Set by sys_exec / sys_pipeline2 before each child
-        ;; build; 0 means "no args" (the boot / sys_exit shell-reload
-        ;; path, or an explicit NULL argv from a user program).
-        ;; Callers must have validated the array with .validate_user_argv
-        ;; first so stage_user_argv can trust every dereference.
-        align 4
-pending_argv_user_ptr   dd 0
-
-        ;; Phys of the topmost user stack frame (virt 0xFF7FF000) — the
-        ;; one that holds USER_STACK_TOP-1 and below.  Captured during
-        ;; build_child_program_state's stack-mapping loop and consumed
-        ;; by stage_user_argv to write the Linux argv/envp/argc frame.
-        align 4
-topmost_stack_frame_phys dd 0
-
-        ;; Active pipeline's pipe-pool index.  Set by sys_pipeline2 in
-        ;; entry, consumed by both child-build steps to install the
-        ;; matching FD_TYPE_PIPE_R / FD_TYPE_PIPE_W fds on slot_b /
-        ;; slot_c.  Holds the index verbatim — pool index 0 is valid,
-        ;; so the "is a pipeline active?" check uses pipeline_active
-        ;; below, not this field.  The error-unwind paths read this
-        ;; to release the pool slot when a partial build fails.
-pending_pipeline_pipe   dd 0
-
-        ;; Set non-zero by sys_pipeline2 between "both children built"
-        ;; and "both children exited" — used by child_terminate's
-        ;; sys_exit path to detect a pipeline-child exit vs. a regular
-        ;; sys_exec child exit.  The pipeline-child branch routes
-        ;; sys_exit through kernel_yield (no parent_iret_frame
-        ;; restore); the non-pipeline branch keeps the existing
-        ;; parent-restore behavior.
-pipeline_active         dd 0
-
-        ;; pipeline_partial_state — sys_pipeline2 sets this to 1 once
-        ;; slot_b is fully built (PD allocated, fd_table populated,
-        ;; pipe writer end installed), and back to 0 once both children
-        ;; are STATE_RUNNING.  spawn_failed_unwind consults it: if
-        ;; non-zero when slot_c's build_child_program_state OOMs, the
-        ;; normal slot_c teardown is followed by .pipeline_unwind_slot_b
-        ;; so slot_b's PD, the writer fd, and the pipe pool slot don't
-        ;; leak.  Values: 0 = no pipeline build in progress; 1 = slot_b
-        ;; built (needs teardown on slot_c OOM).
-pipeline_partial_state  dd 0
-
-        ;; Kernel-side fd struct used by program_enter to stream the
-        ;; program binary directly from disk into per-program user
-        ;; frames (sector-by-sector via vfs_read_sec).  Sized to
-        ;; FD_ENTRY_SIZE so the FD_OFFSET_* layout matches the user fd
-        ;; table, even though this slot lives outside it.  Only one
-        ;; program loads at a time, so a single static slot suffices.
-        align 4
-program_fd              times FD_ENTRY_SIZE db 0
 
 shell_path      db "bin/shell", 0
-
-        ;; 32-bit TSS.  Only SS0/ESP0/IOPB-offset are populated (in
-        ;; protected_mode_entry); all other fields stay zero because we
-        ;; don't use hardware task switching.  Sized to the 104-byte
-        ;; standard layout so the IOPB-past-limit trick parks I/O.
-        align 4
-tss_data:
-        times 104 db 0
 
 welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.11.0 (2026/05/10)", 13, 10, 0
 
