@@ -61,9 +61,9 @@ directory_sector dw 0                   ; offset 3
         ;;   vDSO target at phys 0x10000          (1 page, mapped per-PD)
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
-        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 4 KB; slot_a)
-        ;;     kernel_stack_b                     (KERNEL_STACK_BYTES = 4 KB; pipeline cmd1)
-        ;;     kernel_stack_c                     (KERNEL_STACK_BYTES = 4 KB; pipeline cmd2)
+        ;;     kernel_stack                       (KERNEL_STACK_BYTES = 1 KB; slot_a)
+        ;;     kernel_stack_b                     (KERNEL_STACK_BYTES = 1 KB; pipeline cmd1)
+        ;;     kernel_stack_c                     (KERNEL_STACK_BYTES = 1 KB; pipeline cmd2)
         ;;   BOOT_PD_PHYS                         (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS                 (4 KB)
         ;;   FRAME_BITMAP_PHYS                    (frame_bitmap_bytes — runtime, ≤ 32 KB at the 1 GB direct-map cap)
@@ -112,7 +112,14 @@ directory_sector dw 0                   ; offset 3
         %ifndef KERNEL_RESERVED_BASE
         %define KERNEL_RESERVED_BASE 0x40000
         %endif
-        BOOT_PD_PHYS             equ KERNEL_STACK_C_TOP_PHYS
+        ;; Page-align up: BOOT_PD lives in the next 4 KB-aligned slot
+        ;; above the last kernel stack.  At 4 KB stacks the alignment
+        ;; was free (3 × 4 KB = 3 pages); at 1 KB stacks (3 × 1 KB =
+        ;; 0xC00, sub-page) we pay 0x400 = 1 KB of padding.  The pad
+        ;; bytes sit in the bitmap allocator's free pool — they are
+        ;; not part of any reserved region — so this is purely a
+        ;; physical-address alignment cost, not a memory cost.
+        BOOT_PD_PHYS             equ (KERNEL_STACK_C_TOP_PHYS + 0xFFF) & ~0xFFF
         DIRECT_MAP_BASE          equ 0FF800000h          ; equals KERNEL_VIRT_BASE; the user/kernel split lives here
         E820_TABLE_VIRT          equ DIRECT_MAP_BASE + 0x500
         FIRST_KERNEL_PDE         equ 1022                ; KERNEL_VIRT_BASE / 0x400000; one PDE of direct map + the kmap window at PDE 1023
@@ -138,7 +145,7 @@ directory_sector dw 0                   ; offset 3
         KERNEL_CODE_SELECTOR     equ 08h
         KERNEL_DATA_SELECTOR     equ 10h
         KERNEL_LOAD_PHYS         equ 0x20000
-        KERNEL_STACK_BYTES       equ 0x1000                              ; 4 KB (peak measured ~412 B; ~10× margin)
+        KERNEL_STACK_BYTES       equ 0x400                               ; 1 KB (peak measured ~412 B; ~2.5× margin; 0xDEADBEEF poison-fill at boot catches overruns)
         KERNEL_STACK_PHYS        equ KERNEL_RESERVED_BASE
         KERNEL_STACK_TOP_PHYS    equ KERNEL_STACK_PHYS + KERNEL_STACK_BYTES
         ;; Slot_b and slot_c each get their own 4 KB kernel stack in the

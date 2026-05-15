@@ -76,9 +76,9 @@
         ;; FIRST_KERNEL_PT_PHYS resolve to the same physical addresses
         ;; the kernel already expects.  In-memory layout (low to high):
         ;;   KERNEL_RESERVED_BASE          (kernel stack — slot_a)
-        ;;     + KERNEL_STACK_BYTES            (4 KB)
-        ;;   kernel_stack_b                    (4 KB; cooperative pipeline cmd1)
-        ;;   kernel_stack_c                    (4 KB; cooperative pipeline cmd2)
+        ;;     + KERNEL_STACK_BYTES            (1 KB)
+        ;;   kernel_stack_b                    (1 KB; cooperative pipeline cmd1)
+        ;;   kernel_stack_c                    (1 KB; cooperative pipeline cmd2)
         ;;   BOOT_PD_PHYS                      (4 KB)
         ;;   FIRST_KERNEL_PT_PHYS              (4 KB)
         ;;
@@ -97,15 +97,18 @@
         ;; the kernel runs at its direct-map alias).
         BOOT_DISK_PHYS              equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET
         ;; Skip past slot_a's kernel_stack + slot_b/c's per-pipeline
-        ;; kernel stacks (3 × KERNEL_STACK_BYTES) to reach the boot PD.
-        ;; Must match kernel.asm's KERNEL_STACK_C_TOP_PHYS computation.
-        BOOT_PD_PHYS                equ KERNEL_RESERVED_BASE + 3 * KERNEL_STACK_BYTES
+        ;; kernel stacks (3 × KERNEL_STACK_BYTES) to reach the boot PD,
+        ;; rounding up to the next 4 KB-aligned slot.  At 4 KB stacks
+        ;; the round was free; at 1 KB stacks the 3 × 0x400 = 0xC00
+        ;; tail needs 0x400 of padding to reach the next page.  Must
+        ;; match kernel.asm's BOOT_PD_PHYS computation.
+        BOOT_PD_PHYS                equ (KERNEL_RESERVED_BASE + 3 * KERNEL_STACK_BYTES + 0xFFF) & ~0xFFF
         DIRECTORY_SECTOR_PHYS       equ KERNEL_LOAD_PHYS + BOOT_STASH_OFFSET + 1
         FIRST_KERNEL_PDE            equ 1022                ; KERNEL_VIRT_BASE / 0x400000; must equal kernel.asm's value
         FIRST_KERNEL_PT_PHYS        equ BOOT_PD_PHYS + 0x1000
         HIGH_ENTRY_VIRT             equ 0xFF820000          ; KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS
         KERNEL_LOAD_PHYS            equ 0x20000
-        KERNEL_STACK_BYTES          equ 0x1000
+        KERNEL_STACK_BYTES          equ 0x400
 
 start:
         xor ax, ax
