@@ -925,6 +925,15 @@ TESTS: list[ProgramTest] = [
         setup=_ext2_add_straddle_dir_filler,
     ),
     ProgramTest(
+        "tail_file",
+        ["seq 1 5 | tee seqfile", "tail -n 2 seqfile"],
+        # Anchor on the tail command line so the tee output above can't
+        # false-positive — the buggy version printed "2\n3" but the
+        # upstream "1\n2\n3\n4\n5" from tee would still match a loose
+        # "^4$\n^5$" regex.
+        r"\$ tail -n 2 seqfile\r?\n4\r?\n5\r?\n\$",
+    ),
+    ProgramTest(
         "tee_basic",
         ["echo hello | tee teefile", "cat teefile"],
         r"hello[\s\S]*hello",
