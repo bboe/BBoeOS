@@ -924,6 +924,7 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
+    ProgramTest("yes_head", ["yes hi | head -n 3"], r"^hi$\n^hi$\n^hi$"),
 ]
 
 
