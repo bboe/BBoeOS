@@ -606,9 +606,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         In *user* mode, zero-initialized globals are deferred to BSS:
         collected in ``self.bss_vars`` and emitted by ``_emit_bss_trailer``
         as EQU definitions pointing past the binary end.  In *kernel* mode,
-        zero-initialized globals are emitted inline as ``times N db 0``
-        labels — the BSS-EQU model requires ``_program_end:`` which is
-        absent in kernel output.
+        zero-initialized globals are also collected in ``self.bss_vars``
+        and emitted by ``_emit_kernel_bss_trailer`` as ``resb`` reservations
+        inside the kernel's ``.bss nobits`` section — keeping the zero
+        bytes off the on-disk kernel image.
         """
         if not self.global_scalars and not self.global_arrays:
             return
@@ -631,10 +632,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 continue
             if declaration.init is None:
                 stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
-                if self.target_mode == "kernel":
-                    self.emit(f"_g_{name}: times {stride} db 0")
-                else:
-                    self.bss_vars.append((name, str(stride)))
+                self.bss_vars.append((name, str(stride)))
             else:
                 init_expression = self._constant_expression(declaration.init)
                 directive = "db" if self._is_byte_scalar_global(name) else int_directive
@@ -696,10 +694,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     byte_count = str(int(size_expression) * stride)
                 else:
                     byte_count = f"({size_expression})*{stride}"
-                if self.target_mode == "kernel":
-                    self.emit(f"_g_{name}: times {byte_count} db 0")
-                else:
-                    self.bss_vars.append((name, byte_count))
+                self.bss_vars.append((name, byte_count))
+
+    def _emit_kernel_bss_trailer(self) -> None:
+        """Emit kernel-mode zero-init globals as a ``section .bss`` block.
+
+        The kernel binary declares ``section .bss nobits follows=.text``
+        in src/arch/x86/kernel.asm; switching to ``.bss`` here parks each
+        ``resb N`` reservation in that section so the zero bytes never
+        ride on disk.  Switch back to ``.text`` afterwards so the next
+        ``%include``'d kasm (and any inline kernel code that follows)
+        lands in the code section.
+        """
+        if not self.bss_vars:
+            return
+        self.emit(";; --- kernel BSS (zero-initialized) ---")
+        self.emit("section .bss")
+        for name, size_expression in self.bss_vars:
+            self.emit(f"_g_{name}: resb {size_expression}")
+        self.emit("section .text")
 
     def _type_size(self, type_name: str, /) -> int:
         """Return the byte size of *type_name* including struct types.

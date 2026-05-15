@@ -39,6 +39,18 @@
         %include "constants.asm"
         %include "irq_tail.inc"
 
+        ;; Declare the .bss section up front and anchor `kernel_bss_start:`
+        ;; at its very first byte, before the kasm %includes below.  The
+        ;; kasms emitted by cc.py emit their zero-init globals as `resb`
+        ;; reservations inside this same `.bss` section, and NASM lays
+        ;; them out in source-encounter order — so they fall between
+        ;; `kernel_bss_start:` here and `kernel_bss_end:` at the tail
+        ;; of this file.  `high_entry`'s zero loop then covers every
+        ;; resb in the kernel, kernel-asm and cc.py alike.
+        section .bss nobits follows=.text align=4
+kernel_bss_start:
+        section .text
+
         ;; Trampoline + boot stash at the very top of kernel.bin.
         ;; boot.asm's far-jump targets virt 0xC0020000 = the first byte
         ;; of kernel.bin; the trampoline skips past the stash to
@@ -568,15 +580,27 @@ kernel_end:
 
 [map symbols build/kernel.map]
 
-section .bss nobits follows=.text align=4
+section .bss
+        ;; cc.py-emitted kasm `resb` reservations land between
+        ;; `kernel_bss_start:` (top of file) and here; some are odd
+        ;; sizes (`resb 1` byte scalars, `resb 6` mac_address, etc.),
+        ;; so the running offset is not guaranteed 4-aligned at this
+        ;; point.  Re-align before the kernel.asm-internal labels —
+        ;; every one of them is `resd 1` / `resd N` / `resb 4·N` and
+        ;; expects 4-aligned access.
         align 4
 
 ;;; Labels below are strict-alphabetical (matching the codebase's `equ`
 ;;; convention).  Every reservation is `resd 1`, `resd N`, or `resb N`
 ;;; with N a multiple of 4, so the section stays 4-aligned end-to-end
-;;; from the single `align 4` above without per-label re-aligns.
-
-kernel_bss_start:
+;;; from this `align 4` without per-label re-aligns.
+;;;
+;;; `kernel_bss_start:` is anchored at the *start* of .bss at the top
+;;; of this file (before the kasm %includes), so the cc.py-emitted
+;;; resb reservations from build/kernel-c/**/*.kasm fall between the
+;;; start label and `kernel_bss_end:` below.  All of them — kernel-asm
+;;; and cc.py-emitted alike — get zeroed by the boot loop in
+;;; `high_entry`.
 
         ;; Physical address of the kernel idle PD — a long-lived 4 KB
         ;; kernel-only page directory built in `high_entry` by

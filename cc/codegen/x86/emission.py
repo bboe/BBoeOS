@@ -212,6 +212,8 @@ class EmissionMixin:
             # never forward references — the self-hosted assembler cannot
             # resolve forward EQU references.
             self._emit_bss_equs()
+        else:
+            self._emit_kernel_bss_trailer()
         return "\n".join(self.lines) + "\n"
 
     def generate_body(self, statements: list[Node], /, *, scoped: bool = False) -> None:
