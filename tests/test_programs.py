@@ -924,6 +924,8 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
+    ProgramTest("wc_lines", ["seq 1 7 | wc -l"], r"^7\s*$"),
+    ProgramTest("wc_default", ["seq 1 2 | wc"], r"^2\s+2\s+4\s*$"),
     ProgramTest("yes_head", ["yes hi | head -n 3"], r"^hi$\n^hi$\n^hi$"),
 ]
 
