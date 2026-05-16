@@ -11,6 +11,16 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Userland common utilities (PR 3 of 3).**  Added `sort` (line-oriented
+  bottom-up merge sort with `-r` / `-n` / `-u`).  Uses a new `sys_break()` C
+  builtin that wraps `SYS_SYS_BREAK` (0xF0) to acquire a fixed 68 KB user heap
+  at startup; the heap is laid out as a 60 KB byte buffer for line storage plus
+  two 4 KB pointer arrays (the sorted index and an iterative-merge scratch).
+  Numeric mode parses each side with `strtol` and falls back to byte compare on
+  numeric ties for stability.  With this PR the eleven-program common-utilities
+  spec is complete.  To stay within the bbfs 64-entry directory cap the orphaned
+  `tests/programs/audio_open.c` smoke test (no `ProgramTest` entry referenced
+  it) was dropped.
 - **cc.py: extend topo arg-load scheduler to `memcmp`, `memcpy`, `memset`.** The
   three string-op builtins each load three caller expressions into DI/SI/CX (or
   DI/AX/CX) before emitting their `rep`-prefixed string instruction.  They were

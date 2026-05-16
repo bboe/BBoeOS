@@ -956,6 +956,10 @@ TESTS: list[ProgramTest] = [
     # following 0x03 byte arrives in the serial FIFO for the program's
     # read call to consume.
     ProgramTest("sigint_test", ["sigint_test\n\x03"], r"^CAUGHT$"),
+    ProgramTest("sort_basic", ["echo -e banana\\napple\\ncherry | sort"], r"^apple\r?\nbanana\r?\ncherry\r?\n"),
+    ProgramTest("sort_reverse", ["echo -e a\\nb\\nc | sort -r"], r"^c\r?\nb\r?\na\r?\n"),
+    ProgramTest("sort_numeric", ["echo -e 10\\n2\\n1 | sort -n"], r"^1\r?\n2\r?\n10\r?\n"),
+    ProgramTest("sort_unique", ["echo -e a\\na\\nb\\nb\\nb\\nc | sort -u"], r"^a\r?\nb\r?\nc\r?\n"),
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
     # Exercises cc.py's pointer-to-pointer support: strtol writes
     # *endptr (a char**) so the caller can recover the tail past the
