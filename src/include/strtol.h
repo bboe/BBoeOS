@@ -5,11 +5,8 @@
    - Optional leading '+' / '-' sign.
    - Decimal digits only; `base` argument must be 10 or 0.
    - No overflow detection (returns the wrap-around value).
-   - `endptr` is accepted for libc-signature compatibility but never
-     written: cc.py doesn't yet support pointer-to-pointer writes from
-     a non-out_register parameter, and every current caller passes
-     NULL.  A future cc.py extension can lift this; the call sites
-     don't need to change.
+   - `endptr` (if non-NULL) receives a pointer to the first character
+     past the parsed digits, matching libc's behaviour.
 
    Lives in a header so each program inlines a private copy — same
    pattern as `line_helpers.h`.  When a real libc lands, replace these
@@ -40,6 +37,9 @@ int strtol(char *string, char **endptr, int base) {
     while (string[index] >= '0' && string[index] <= '9') {
         value = value * 10 + (string[index] - '0');
         index += 1;
+    }
+    if (endptr != NULL) {
+        *endptr = string + index;
     }
     return sign * value;
 }

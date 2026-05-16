@@ -11,6 +11,31 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py pointer-to-pointer support.**  Six related fixes that together let
+  `src/include/strtol.h` write back through `endptr` the way libc does. (1)
+  `_type_of_operand` in `cc/codegen/base.py` now classifies `char**` /
+  `uint8_t**` / `int**` as pointers so `if (endptr != NULL)` compiles instead of
+  failing with `pointer compared to non-pointer`.  (2) Same classifier
+  propagates pointer type through `BinaryOperation` so `end == base + 2` keeps
+  both sides as pointers (`ptr - ptr` still classifies as integer).  (3)
+  `DerefAssign` in `cc/codegen/x86/emission.py` now lowers `*holder = expr` for
+  plain pointer locals and parameters (not just `out_register` params): the RHS
+  is computed into the accumulator, the holder is loaded into ESI, and the value
+  is stored at `[esi]` — byte-width for `char*`/`uint8_t*` holders, full width
+  otherwise.  (4) `_select_auto_pin_candidates` in `cc/codegen/x86/generator.py`
+  now disqualifies any local whose address is taken with `&` (mirrored in
+  `_is_constant_alias`); `&x` at an `out_register` arg position is exempt since
+  the captured value flows through a register, not memory.  (5) The out_register
+  capture emission widens cross-register too — a callee return in BX flowing
+  into an auto-pinned ECX zero-extends via `movzx ecx, bx` instead of the
+  invalid mixed-width `mov ecx, bx`. (6) Out_register captures are now emitted
+  in topological order so a capture whose source register is another capture's
+  pinned destination is emitted FIRST — fixes a kernel page-fault in
+  `fd_read_net` where naive in-order emission was `mov ecx, edi; mov edx, ecx`,
+  reading the already- overwritten ECX.  Regressions covered by
+  `test_double_pointer_*` / `test_address_of_*` /
+  `test_out_register_captures_topologically_ordered` in
+  `tests/unit/test_cc_codegen.py` and on-OS by `tests/programs/strtol_endptr.c`.
 - **Userland common utilities (PR 1 of 3).**  Added `true`, `false`, `seq`,
   `yes`, `wc`, `head`, `tail` (file mode), and `tee`, plus four shared headers
   in `src/include/`: `line_helpers.h` (the `read_line` line-buffered reader),

@@ -20,6 +20,7 @@ an ``__init__`` that initializes them.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import TYPE_CHECKING, ClassVar
 
 from cc import ir
@@ -532,10 +533,18 @@ class CodeGeneratorBase:
         Such locals can be replaced with the underlying constant
         expression directly, skipping the memory slot, the initial
         store, and every reload.
+
+        Address-taken locals (``&name`` anywhere in *body*) disqualify
+        — the alias optimization would erase the slot the address-of
+        needs, leaving ``_local_address`` with nothing to hand back.
+        Writes through that pointer would also see no effect on
+        subsequent reads since those would resolve to the constant.
         """
         if statement.type_name == "unsigned long":
             return False
         if self._constant_expression(statement.init) is None:
+            return False
+        if any(self._name_is_address_taken(name=statement.name, node=stmt) for stmt in body):
             return False
         return not any(self._name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
 
@@ -645,6 +654,35 @@ class CodeGeneratorBase:
             and statement.else_body is None
         )
 
+    def _name_is_address_taken(self, *, name: str, node: Node) -> bool:
+        """Return True if ``&name`` is taken as a real address anywhere in ``node``.
+
+        ``&x`` at an ``out_register`` call-site is a fake address — the
+        callee writes the named register and the caller captures it
+        back — so those occurrences don't count.  Every other AddressOf
+        does count.
+        """
+        if isinstance(node, Call):
+            out_regs = self.out_register_params.get(node.name, {})
+            for index, arg in enumerate(node.args):
+                if index in out_regs and isinstance(arg, AddressOf) and arg.var.name == name:
+                    continue
+                if self._name_is_address_taken(name=name, node=arg):
+                    return True
+            return False
+        if isinstance(node, AddressOf) and node.var.name == name:
+            return True
+        for child_field in fields(node):
+            value = getattr(node, child_field.name)
+            if isinstance(value, Node):
+                if self._name_is_address_taken(name=name, node=value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and self._name_is_address_taken(name=name, node=item):
+                        return True
+        return False
+
     @staticmethod
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
         """Return True if an ``Assign(name=name, ...)`` occurs inside ``node``."""
@@ -738,7 +776,7 @@ class CodeGeneratorBase:
             if node.name == "NULL":
                 return "null"
             variable_type = self.variable_types.get(node.name)
-            if variable_type in ("char*", "uint8_t*"):
+            if variable_type in ("char*", "uint8_t*", "char**", "uint8_t**", "int**"):
                 return "pointer"
             if variable_type == "char":
                 return "char"
@@ -746,7 +784,18 @@ class CodeGeneratorBase:
                 return "integer"
             message = f"undefined operand: {node.name}"
             raise CompileError(message, line=node.line)
-        if isinstance(node, (BinaryOperation, Call, Conditional, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
+        if isinstance(node, BinaryOperation):
+            # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
+            # are pointers; ``ptr - ptr`` is the byte difference (integer).
+            if node.operation in ("+", "-"):
+                left_type = self._type_of_operand(node.left)
+                right_type = self._type_of_operand(node.right)
+                if left_type == "pointer" and right_type == "pointer":
+                    return "integer"
+                if left_type == "pointer" or right_type == "pointer":
+                    return "pointer"
+            return "integer"
+        if isinstance(node, (Call, Conditional, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
             return "integer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
