@@ -169,44 +169,70 @@ def _bbfs_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     names = _bbfs_bin_entry_names(image=image)
     used = sum(1 for name in names if name is not None)
     fillers_needed = _BBFS_DIRECTORY_MAX_ENTRIES - used - 1
-    if fillers_needed < 0:
-        msg = f"bin/ already at or past cap ({used}/{_BBFS_DIRECTORY_MAX_ENTRIES}); cannot place _zexec_last"
-        raise RuntimeError(msg)
-    add_empty_files(
-        image_path=str(image),
-        names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],
-        subdirectory="bin",
-    )
-    _add_exec_probe(image=image, name="_zexec_last")
+    if fillers_needed >= 0:
+        add_empty_files(
+            image_path=str(image),
+            names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],
+            subdirectory="bin",
+        )
+        _add_exec_probe(image=image, name="_zexec_last")
+        names = _bbfs_bin_entry_names(image=image)
+        last_name = "_zexec_last"
+        last_expect = r"^EXEC _zexec_last$"
+    else:
+        # bin/ is already at the bbfs 64-entry cap from USER_PROGRAMS +
+        # tests/programs/ alone — no room to drop a synthetic
+        # _zexec_last.  Pick a natural sector-3 entry (slots 48..63)
+        # whose program has a runnable TESTS entry for the lookup probe.
+        sector_3_start = 3 * ENTRIES_PER_SECTOR
+        sector_3_end = 4 * ENTRIES_PER_SECTOR
+        last_name, last_expect = _bbfs_pick_sector_probe(
+            names=names,
+            slot_end=sector_3_end,
+            slot_start=sector_3_start,
+        )
 
-    middle_name, middle_expect = _bbfs_pick_sector1_probe(names=_bbfs_bin_entry_names(image=image))
-    test.commands = ["arp", middle_name, "_zexec_last"]
+    middle_name, middle_expect = _bbfs_pick_sector1_probe(names=names)
+    test.commands = ["arp", middle_name, last_name]
     test.expect = (
         r"usage: arp <ip>"
         rf"[\s\S]+{middle_expect}"
-        r"[\s\S]+^EXEC _zexec_last$"
+        rf"[\s\S]+{last_expect}"
     )
 
 
 def _bbfs_pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
     """Return (program_name, expected_regex) for some entry in sector 1.
 
-    Sector 1 spans slots 16..31.  Walks those slots in order and picks
-    the first whose program has a single-command, non-network, bbfs-eligible
-    entry in TESTS so its expected output regex is reusable here.
+    Sector 1 spans slots 16..31.  Convenience wrapper around
+    :func:`_bbfs_pick_sector_probe`.
+    """
+    return _bbfs_pick_sector_probe(
+        names=names,
+        slot_end=2 * ENTRIES_PER_SECTOR,
+        slot_start=ENTRIES_PER_SECTOR,
+    )
+
+
+def _bbfs_pick_sector_probe(*, names: list[str | None], slot_end: int, slot_start: int) -> tuple[str, str]:
+    """Return (program_name, expected_regex) for a slot in [slot_start, slot_end).
+
+    Walks the range in order and picks the first whose program has a
+    single-command, non-network, bbfs-eligible entry in TESTS so its
+    expected output regex is reusable here.  Used by the
+    ``exec_first_middle_last`` setup to verify the directory walk
+    reaches every sector of bbfs's 4-sector bin/.
     """
     runnable = {
         test.name: test.expect
         for test in TESTS
         if test.commands == [test.name] and not test.with_net and test.setup is None and test.skip is None and "bbfs" in test.filesystems
     }
-    sector_1_start = ENTRIES_PER_SECTOR
-    sector_1_end = 2 * ENTRIES_PER_SECTOR
-    for slot in range(sector_1_start, sector_1_end):
+    for slot in range(slot_start, slot_end):
         name = names[slot]
         if name is not None and name in runnable:
             return name, runnable[name]
-    msg = f"no testable program in bin/'s sector 1 (slots {sector_1_start}..{sector_1_end - 1}); update TESTS or _bbfs_pick_sector1_probe"
+    msg = f"no testable program in bin/'s slots {slot_start}..{slot_end - 1}; update TESTS"
     raise RuntimeError(msg)
 
 
@@ -762,11 +788,18 @@ TESTS: list[ProgramTest] = [
         ["argv_basename alpha bravo"],
         r"argc=3\nargv\[0\]=argv_basename\nargv\[1\]=alpha\nargv\[2\]=bravo\nargv\[argc\]=NULL",
     ),
+    ProgramTest("echo_basic", ["echo hello world"], r"^hello world\r?\n\$"),
+    ProgramTest("echo_dash_e", ["echo -e a\\nb\\tc"], r"^a\r?\nb\tc\r?\n\$"),
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
+    ProgramTest("grep_basic", ["echo -e aaa\\nbbb\\naaa | grep aaa"], r"^aaa\r?\naaa\r?\n\$"),
+    ProgramTest("grep_case", ["echo HELLO | grep -i hello"], r"^HELLO\r?\n\$"),
+    ProgramTest("grep_inverse", ["echo -e aaa\\nbbb\\naaa | grep -v aaa"], r"^bbb\r?\n\$"),
+    ProgramTest("grep_no_match", ["echo hi | grep nope; echo $?"], r"^1$"),
+    ProgramTest("grep_number", ["echo -e aaa\\nbbb\\naaa | grep -n aaa"], r"^1:aaa\r?\n3:aaa\r?\n\$"),
     ProgramTest("head_basic", ["seq 1 5 | head -n 2"], r"^1$\n^2$"),
     ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
@@ -939,12 +972,32 @@ TESTS: list[ProgramTest] = [
         # "^4$\n^5$" regex.
         r"\$ tail -n 2 seqfile\r?\n4\r?\n5\r?\n\$",
     ),
+    ProgramTest("tail_stdin", ["seq 1 5 | tail -n 2"], r"^4\r?\n5\r?\n\$"),
+    # ~589 KB of input through the 64 KB ring forces eviction many times.
+    # If the ring eviction logic is wrong, the final 3 lines won't match.
+    ProgramTest(
+        "tail_stdin_overflow",
+        ["seq 1 100000 | tail -n 3"],
+        r"^99998\r?\n99999\r?\n100000\r?\n\$",
+        timeout=5.0,
+    ),
+    ProgramTest("tail_stdin_zero", ["seq 1 5 | tail -n 0; echo done"], r"^done\r?\n\$"),
     ProgramTest(
         "tee_basic",
         ["echo hello | tee teefile", "cat teefile"],
         r"hello[\s\S]*hello",
     ),
+    ProgramTest("tr_basic", ["echo HELLO | tr A-Z a-z"], r"^hello\r?\n\$"),
+    ProgramTest("tr_delete", ["echo abc123 | tr -d 0-9"], r"^abc\r?\n\$"),
+    ProgramTest("tr_delete_extra_arg", ["tr -d abc xyz; echo $?"], r"Usage: tr -d <set1>"),
+    ProgramTest("tr_literal", ["echo abc | tr a x"], r"^xbc\r?\n\$"),
+    ProgramTest("tr_mismatch", ["echo abc | tr abc xy; echo $?"], r"tr: set length mismatch"),
     ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
+    ProgramTest("uniq_basic", ["echo -e a\\na\\nb\\nb\\na | uniq"], r"^a\r?\nb\r?\na\r?\n\$"),
+    ProgramTest("uniq_blank_lines", ["echo -n -e \\n\\n\\n | uniq -c"], r"^3 \r?\n\$"),
+    ProgramTest("uniq_count", ["echo -e a\\na\\nb | uniq -c"], r"^2 a\r?\n1 b\r?\n\$"),
+    ProgramTest("uniq_dups", ["echo -e a\\na\\nb\\nb\\nc | uniq -d"], r"^a\r?\nb\r?\n\$"),
+    ProgramTest("uniq_unterminated_last", ["echo -n -e foo\\nfoo | uniq -c"], r"^2 foo\r?\n\$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
     ProgramTest("wc_lines", ["seq 1 7 | wc -l"], r"^7\s*$"),
     ProgramTest("wc_default", ["seq 1 2 | wc"], r"^2\s+2\s+4\s*$"),

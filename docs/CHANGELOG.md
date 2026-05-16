@@ -11,10 +11,10 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
-- **cc.py: extend topo arg-load scheduler to `memcmp`, `memcpy`, `memset`.**
-  The three string-op builtins each load three caller expressions into DI/SI/CX
-  (or DI/AX/CX) before emitting their `rep`-prefixed string instruction.  They
-  were still using sequential `emit_register_from_argument` calls, so when an
+- **cc.py: extend topo arg-load scheduler to `memcmp`, `memcpy`, `memset`.** The
+  three string-op builtins each load three caller expressions into DI/SI/CX (or
+  DI/AX/CX) before emitting their `rep`-prefixed string instruction.  They were
+  still using sequential `emit_register_from_argument` calls, so when an
   argument expression read from a register that an earlier load had just
   overwritten, the second load aliased the first's destination.  Caught by `grep
   -i` (`memcmp(line + start, pattern, n)` with `pattern` pinned to EDI → `mov
@@ -25,6 +25,26 @@ time.
   `_emit_register_arg_moves` (its user-function-call sibling).  Regression
   covered by `test_memcmp_topologically_orders_aliased_args` in
   `tests/unit/test_cc_codegen.py`.
+- **Userland common utilities (PR 2 of 3).**  Added `grep` (literal substring +
+  `-v` / `-n` / `-i`, with the pattern and each input line folded once into
+  scratch buffers for `-i` so the inner comparison stays a single `memcmp`),
+  `tr` (range support, `-d` delete mode; one pass through `set1` populates a
+  256-byte translation table + 256-byte deleted flag walked in parallel with
+  `set2` via a stateful `set2_next()`, so the hot loop is a single `deleted[c]`
+  check plus `translation[c]` lookup per input byte — O(input) instead of
+  O(input × set_size)), and `uniq` (`-c` / `-d`; strips the trailing newline
+  before comparing so `foo\n` and `foo` collapse, and emits every line with an
+  explicit `\n` so output is normalized regardless of whether the input was
+  newline-terminated).  `tail` stdin now uses a true 64 KB byte ring with a
+  circular queue of the last N+1 newline offsets; when the ring is about to
+  overflow, the oldest tracked line is dropped by advancing `head` past the
+  queue front.  Lines can be any length up to the ring's capacity; only `\n`
+  terminates.  `echo` grew `-e` (expands `\n`, `\t`, `\r`, `\b`, `\e`, `\0`,
+  `\\`) and `-n` (suppresses trailing newline), parsed via getopt so
+  combinations like `echo -n -e foo\nbar` are natural.  `ctype.h` gains
+  `tolower` for `grep -i`.  The bbfs `exec_first_middle_last` setup now copes
+  with bin/ already at the 64-entry cap by picking a natural sector-3 entry
+  instead of appending a synthetic `_zexec_last`.
 - **cc.py pointer-to-pointer support.**  Six related fixes that together let
   `src/include/strtol.h` write back through `endptr` the way libc does. (1)
   `_type_of_operand` in `cc/codegen/base.py` now classifies `char**` /
