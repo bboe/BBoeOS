@@ -142,6 +142,10 @@ bboeos_sighandler_t signal(int signum, bboeos_sighandler_t handler);
 void shutdown(void);
 /* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);
    rely on cc.py's builtin for compilation, don't redeclare here. */
+/* Linux-style brk(2): set/query the program break.  EBX = new break (0 =
+   query); returns resulting break.  Used by src/c/sort.c to acquire its
+   line-buffer heap. */
+void *sys_break(void *new_break);
 /* BBoeOS syscall: seconds since boot */
 int uptime(void);
 /* Milliseconds since boot (low 16 bits; assign to unsigned long for the full DX:AX) */

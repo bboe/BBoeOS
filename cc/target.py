@@ -208,6 +208,7 @@ class X86CodegenTarget(CodegenTarget):
         "RTC_SLEEP": ("mov ah, SYS_RTC_SLEEP", "int 30h"),
         "RTC_UPTIME": ("mov ah, SYS_RTC_UPTIME", "int 30h"),
         "SHUTDOWN": ("mov ah, SYS_SYS_SHUTDOWN", "int 30h"),
+        "SYS_BREAK": ("mov ah, SYS_SYS_BREAK", "int 30h"),
         "SYS_EXIT": ("mov ah, SYS_SYS_EXIT", "int 30h"),
         "SYS_SIGNAL": ("mov ah, SYS_SYS_SIGNAL", "int 30h"),
     }

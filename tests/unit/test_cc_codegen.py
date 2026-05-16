@@ -3499,3 +3499,36 @@ def test_builtin_read_emits_fd_last() -> None:
             "tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
         )
     assert found_at_least_one, f"test source must compile to at least one SYS_IO_READ; got asm:\n{asm}"
+
+
+def test_builtin_sys_break_emits_break_syscall() -> None:
+    """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
+
+    The kernel handler at src/arch/x86/syscall.asm:.sys_break reads EBX as
+    "new break" (0 = query) and returns the resulting break in EAX with
+    CF=0 always.  We pin the C contract end of that ABI here so future
+    codegen refactors can't silently change it.
+    """
+    asm = _user(
+        """
+        int main(int argc, char *argv[]) {
+            uint32_t current = sys_break(0);
+            uint32_t requested = current + 65536;
+            uint32_t got = sys_break(requested);
+            if (got != requested) {
+                die("oom\\n");
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    assert "mov ebx, 0" in asm or "xor ebx, ebx" in asm, f"sys_break(0) (query form) must zero EBX before firing the syscall.\nasm:\n{asm}"
+    assert "mov ah, SYS_SYS_BREAK" in asm, (
+        "sys_break codegen must emit `mov ah, SYS_SYS_BREAK` — the constant lives in "
+        "src/include/constants.asm and is the only stable contract with the kernel handler.\n"
+        f"asm:\n{asm}"
+    )
+    assert asm.count("mov ah, SYS_SYS_BREAK") == 2, (
+        f"expected exactly two SYS_SYS_BREAK firings (query + set); got {asm.count('mov ah, SYS_SYS_BREAK')}.\nasm:\n{asm}"
+    )
