@@ -13,6 +13,51 @@ CC = REPO_ROOT / "cc.py"
 FIXTURE_DIR = REPO_ROOT / "tests" / "data" / "ccobj"
 
 
+def test_flat_mode_unchanged_by_object_plumbing(tmp_path: Path) -> None:
+    """Flat mode is unchanged by object-mode plumbing.
+
+    The default (flat) mode keeps emitting ``org`` + ``_program_end`` +
+    ``_bss_end`` after the ``--object`` plumbing lands.  Regression guard.
+    """
+    src = tmp_path / "hello.c"
+    src.write_text("int main() { return 0; }\n")
+    asm = tmp_path / "hello.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert "org 08048000h" in body
+    assert "_program_end:" in body
+    assert "_bss_end equ" in body
+    assert '%include "ccobj_markers.inc"' not in body
+
+
+def test_object_mode_emits_section_directives(tmp_path: Path) -> None:
+    """Object mode emits section directives and global declarations.
+
+    Checks that ``--object`` emits ``section .text`` (not ``org``),
+    ``global main``, ``%include "ccobj_markers.inc"``, and suppresses the
+    flat-mode ``_program_end``/``_bss_end`` trailer.
+    """
+    src = tmp_path / "hello.c"
+    src.write_text("int main() { return 0; }\n")
+    asm = tmp_path / "hello.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", "--object", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert '%include "ccobj_markers.inc"' in body
+    assert "section .text" in body
+    assert "global main" in body
+    assert "org 08048000h" not in body
+    assert "_program_end:" not in body
+    assert "_bss_end equ" not in body
+
+
 def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
     """Fixture .asm exercises every CCREL_* macro.
 

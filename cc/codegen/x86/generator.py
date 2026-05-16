@@ -554,7 +554,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``_bss_end`` and the per-variable EQUs after ``_program_end:``
         (avoiding forward references that the self-hosted assembler
         cannot resolve).
+
+        In object mode, BSS reservations are not yet supported (PR 3 will
+        add ``section .bss`` emission).  Programs with non-zero BSS will
+        raise ``NotImplementedError``; zero-BSS programs emit nothing.
         """
+        if self.object_mode:
+            if self.bss_vars:
+                message = (
+                    "object mode does not yet emit `section .bss` reservations; add support before compiling programs with non-zero BSS"
+                )
+                raise NotImplementedError(message)
+            return
         if not self.bss_vars:
             return
 

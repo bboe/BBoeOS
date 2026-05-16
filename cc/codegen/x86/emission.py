@@ -99,12 +99,21 @@ class EmissionMixin:
             The complete assembly source as a string.
 
         """
+        if self.object_mode and self.target_mode == "kernel":
+            message = "--object is not supported with --target kernel"
+            raise CompileError(message)
         for line in self.target.preamble_lines():
             self.emit(line)
         if self.target_mode == "user":
-            self.emit("        org 08048000h")
-            self.emit()
-            self.emit('%include "constants.asm"')
+            if self.object_mode:
+                self.emit('%include "constants.asm"')
+                self.emit('%include "ccobj_markers.inc"')
+                self.emit()
+                self.emit("section .text")
+            else:
+                self.emit("        org 08048000h")
+                self.emit()
+                self.emit('%include "constants.asm"')
         if self.defines:
             self.emit()
             for name in sorted(self.defines):
@@ -203,15 +212,16 @@ class EmissionMixin:
                     self.emit(f"{label}: {int_directive} {', '.join(elements)}")
         if self.target_mode == "user":
             self._emit_bss_trailer()
-            # Sentinel label at the very end so inline asm can address the
-            # first byte past the loaded image (scratch buffers, heap bases,
-            # etc.).  Zero bytes, so it does not affect programs that ignore
-            # it.
-            self.emit("_program_end:")
-            # BSS EQUs and _bss_end come *after* _program_end: so they are
-            # never forward references — the self-hosted assembler cannot
-            # resolve forward EQU references.
-            self._emit_bss_equs()
+            if not self.object_mode:
+                # Sentinel label at the very end so inline asm can address the
+                # first byte past the loaded image (scratch buffers, heap bases,
+                # etc.).  Zero bytes, so it does not affect programs that ignore
+                # it.
+                self.emit("_program_end:")
+                # BSS EQUs and _bss_end come *after* _program_end: so they are
+                # never forward references — the self-hosted assembler cannot
+                # resolve forward EQU references.
+                self._emit_bss_equs()
         else:
             self._emit_kernel_bss_trailer()
         return "\n".join(self.lines) + "\n"
@@ -1614,6 +1624,8 @@ class EmissionMixin:
                 self.locals[param.name] = -(self.target.param_slot_base + stack_position * self.target.int_size)
                 stack_position += 1
 
+        if self.object_mode:
+            self.emit(f"global {name}")
         self.emit(f"{name}:")
         if not self.elide_frame:
             for reg in self.current_preserve_registers:
