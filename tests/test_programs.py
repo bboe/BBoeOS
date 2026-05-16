@@ -169,44 +169,70 @@ def _bbfs_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     names = _bbfs_bin_entry_names(image=image)
     used = sum(1 for name in names if name is not None)
     fillers_needed = _BBFS_DIRECTORY_MAX_ENTRIES - used - 1
-    if fillers_needed < 0:
-        msg = f"bin/ already at or past cap ({used}/{_BBFS_DIRECTORY_MAX_ENTRIES}); cannot place _zexec_last"
-        raise RuntimeError(msg)
-    add_empty_files(
-        image_path=str(image),
-        names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],
-        subdirectory="bin",
-    )
-    _add_exec_probe(image=image, name="_zexec_last")
+    if fillers_needed >= 0:
+        add_empty_files(
+            image_path=str(image),
+            names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],
+            subdirectory="bin",
+        )
+        _add_exec_probe(image=image, name="_zexec_last")
+        names = _bbfs_bin_entry_names(image=image)
+        last_name = "_zexec_last"
+        last_expect = r"^EXEC _zexec_last$"
+    else:
+        # bin/ is already at the bbfs 64-entry cap from USER_PROGRAMS +
+        # tests/programs/ alone — no room to drop a synthetic
+        # _zexec_last.  Pick a natural sector-3 entry (slots 48..63)
+        # whose program has a runnable TESTS entry for the lookup probe.
+        sector_3_start = 3 * ENTRIES_PER_SECTOR
+        sector_3_end = 4 * ENTRIES_PER_SECTOR
+        last_name, last_expect = _bbfs_pick_sector_probe(
+            names=names,
+            slot_end=sector_3_end,
+            slot_start=sector_3_start,
+        )
 
-    middle_name, middle_expect = _bbfs_pick_sector1_probe(names=_bbfs_bin_entry_names(image=image))
-    test.commands = ["arp", middle_name, "_zexec_last"]
+    middle_name, middle_expect = _bbfs_pick_sector1_probe(names=names)
+    test.commands = ["arp", middle_name, last_name]
     test.expect = (
         r"usage: arp <ip>"
         rf"[\s\S]+{middle_expect}"
-        r"[\s\S]+^EXEC _zexec_last$"
+        rf"[\s\S]+{last_expect}"
     )
 
 
 def _bbfs_pick_sector1_probe(*, names: list[str | None]) -> tuple[str, str]:
     """Return (program_name, expected_regex) for some entry in sector 1.
 
-    Sector 1 spans slots 16..31.  Walks those slots in order and picks
-    the first whose program has a single-command, non-network, bbfs-eligible
-    entry in TESTS so its expected output regex is reusable here.
+    Sector 1 spans slots 16..31.  Convenience wrapper around
+    :func:`_bbfs_pick_sector_probe`.
+    """
+    return _bbfs_pick_sector_probe(
+        names=names,
+        slot_end=2 * ENTRIES_PER_SECTOR,
+        slot_start=ENTRIES_PER_SECTOR,
+    )
+
+
+def _bbfs_pick_sector_probe(*, names: list[str | None], slot_end: int, slot_start: int) -> tuple[str, str]:
+    """Return (program_name, expected_regex) for a slot in [slot_start, slot_end).
+
+    Walks the range in order and picks the first whose program has a
+    single-command, non-network, bbfs-eligible entry in TESTS so its
+    expected output regex is reusable here.  Used by the
+    ``exec_first_middle_last`` setup to verify the directory walk
+    reaches every sector of bbfs's 4-sector bin/.
     """
     runnable = {
         test.name: test.expect
         for test in TESTS
         if test.commands == [test.name] and not test.with_net and test.setup is None and test.skip is None and "bbfs" in test.filesystems
     }
-    sector_1_start = ENTRIES_PER_SECTOR
-    sector_1_end = 2 * ENTRIES_PER_SECTOR
-    for slot in range(sector_1_start, sector_1_end):
+    for slot in range(slot_start, slot_end):
         name = names[slot]
         if name is not None and name in runnable:
             return name, runnable[name]
-    msg = f"no testable program in bin/'s sector 1 (slots {sector_1_start}..{sector_1_end - 1}); update TESTS or _bbfs_pick_sector1_probe"
+    msg = f"no testable program in bin/'s slots {slot_start}..{slot_end - 1}; update TESTS"
     raise RuntimeError(msg)
 
 
