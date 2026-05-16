@@ -2007,36 +2007,54 @@ void handle_test() {
 
 /* ``handle_unknown_word`` — the parse_mnemonic fallback for bare
    labels (NASM accepts labels without colons, e.g., ``USAGE db ...``).
-   Walks SI past the alphanumeric span, null-terminates the word in
-   place, adds the symbol on pass 1 (or validates it on pass 2) with
-   the ``.``-prefix local-scope distinction, advances SI past the
-   null, and reinvokes parse_directive on whatever remains.  Uses
-   ``push si`` / ``pop si`` around symbol_set / symbol_lookup so SI
-   survives those calls' own register use.  ``handle_unknown_word``
-   is reached via ``jmp`` from parse_mnemonic, so the whole body
-   (prologue, work, epilogue) runs in one call frame — cc.py's
-   ``push bp / pop bp / ret`` wraps cleanly. */
+   Walks SI past the alphanumeric span and peeks at the next token.
+   If the follower is a data-defining keyword that legitimately
+   accepts a bare label as its name (``db`` / ``dw`` / ``dd`` /
+   ``times``), the original word is treated as a label: null-
+   terminate it, add the symbol on pass 1 (or validate it on pass 2),
+   then reinvoke parse_directive on the keyword.  Otherwise the
+   original word is almost certainly an unknown mnemonic typo
+   (``repe cmpsb`` got silently swallowed before this check was
+   added, wrecking every subsequent jump displacement), so we
+   ``abort_unknown`` with the offending token. */
 void handle_unknown_word() {
     char *name_start = source_cursor;
     while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
         source_cursor += 1;
     }
-    if (source_cursor[0] == '\0') {
-        return;
+    char *name_end = source_cursor;
+    if (name_end[0] == '\0') {
+        source_cursor = name_start;
+        abort_unknown();
     }
-    char *end_pos = source_cursor;
-    source_cursor[0] = '\0';
+    while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
+        source_cursor += 1;
+    }
+    char *next_token = source_cursor;
+    int is_data_directive = 0;
+    if (match_word(STR_DB)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_DW)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_DD)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_TIMES)) {
+        is_data_directive = 1;
+    }
+    source_cursor = next_token;
+    if (is_data_directive == 0) {
+        source_cursor = name_start;
+        abort_unknown();
+    }
+    name_end[0] = '\0';
     int is_local = 0;
     if (name_start[0] == '.') {
         is_local = 1;
     }
     source_cursor = name_start;
     define_label_here(is_local);
-    source_cursor = end_pos + 1;
-    skip_ws();
-    if (source_cursor[0] != '\0') {
-        parse_directive();
-    }
+    source_cursor = next_token;
+    parse_directive();
 }
 
 /* ``xchg r, r`` — uses the 90h+reg short form when one operand is
