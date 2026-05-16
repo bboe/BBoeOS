@@ -148,6 +148,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         bits: int = 16,
         constant_values: dict[str, int] | None = None,
         defines: dict[str, str] | None = None,
+        object_mode: bool = False,
         target_mode: str = "user",
     ) -> None:
         """Initialize code generator state.
@@ -169,6 +170,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         by :meth:`_eval_local_array_size` to size stack-local arrays
         whose element counts are named constants.  When omitted or
         ``None`` the generator falls back to the empty mapping.
+
+        ``object_mode`` is True when the caller wants object-file-friendly
+        NASM (section directives, CCREL_* marker macros, no flat-binary org
+        or BSS trailer).  Default False preserves flat-binary emission.
 
         ``target_mode`` is either ``"user"`` (default, stand-alone program
         at ``PROGRAM_BASE``) or ``"kernel"`` (bare assembly for ``%include``
@@ -199,6 +204,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._builtin_clobbers[name] |= extra
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
+        self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
@@ -207,6 +213,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # in_register_params / out_register_params map function name → {param_index → register}.
         # Populated during the first pass over function definitions in generate().
         self.in_register_params: dict[str, dict[int, str]] = {}
+        self.object_mode: bool = object_mode
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}
@@ -484,7 +491,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``_bss_end`` and the per-variable EQUs after ``_program_end:``
         (avoiding forward references that the self-hosted assembler
         cannot resolve).
+
+        In object mode, BSS reservations are not yet supported (PR 3 will
+        add ``section .bss`` emission).  Programs with non-zero BSS will
+        raise ``NotImplementedError``; zero-BSS programs emit nothing.
         """
+        if self.object_mode:
+            if self.bss_vars:
+                message = (
+                    "object mode does not yet emit `section .bss` reservations; add support before compiling programs with non-zero BSS"
+                )
+                raise NotImplementedError(message)
+            return
         if not self.bss_vars:
             return
 
