@@ -1387,6 +1387,45 @@ def test_kernel_source_order_preserved() -> None:
     assert pos_first < pos_second < pos_third, f"Functions not in source order\n{asm}"
 
 
+def test_logical_and_in_expression_position_compiles() -> None:
+    """``int x = a && b;`` compiles to a short-circuit 0/1 materialise.
+
+    Used to reject with ``unknown expression: LogicalAnd`` because
+    ``generate_expression`` only handled `&&` in condition position.
+    """
+    asm = _kernel(
+        """
+        void f(int a, int b) {
+            int same = a && b;
+            f(same, 0);
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("f:", 2)[1]
+    # The two operand tests + the 0/1 set + the merge jump:
+    assert "mov eax, 1" in body, f"expected mov eax, 1 (true leg)\n{asm}"
+    assert "xor eax, eax" in body, f"expected xor eax, eax (false leg)\n{asm}"
+    assert ".lbool_" in body, f"expected .lbool_ label scheme\n{asm}"
+
+
+def test_logical_or_in_expression_position_compiles() -> None:
+    """``int x = a || b;`` compiles to a short-circuit 0/1 materialise."""
+    asm = _kernel(
+        """
+        void f(int a, int b) {
+            int either = a || b;
+            f(either, 0);
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("f:", 2)[1]
+    assert "mov eax, 1" in body, f"expected mov eax, 1 (true leg)\n{asm}"
+    assert "xor eax, eax" in body, f"expected xor eax, eax (false leg)\n{asm}"
+    assert ".lbool_" in body, f"expected .lbool_ label scheme\n{asm}"
+
+
 def test_member_access_in_condition() -> None:
     """p->type can be compared in an if condition."""
     _compile_and_assemble(
