@@ -600,18 +600,37 @@ _EXT2_ONLY = frozenset({"ext2"})
 
 
 TESTS: list[ProgramTest] = [
-    ProgramTest("alarm_cancel", ["alarm_cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
-    ProgramTest("alarm_coalesce", ["alarm_coalesce"], r"^COALESCE_OK count=(\d|1[0-2])$"),
-    ProgramTest("alarm_during_sleep", ["alarm_during_sleep"], r"^EINTR_OK elapsed=(4[0-9]|[5-9][0-9]|100)$"),
+    ProgramTest("alarm_cancel", ["alarm_test cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
+    ProgramTest("alarm_coalesce", ["alarm_test coalesce"], r"^COALESCE_OK count=(\d|1[0-2])$"),
+    ProgramTest("alarm_during_sleep", ["alarm_test during_sleep"], r"^EINTR_OK elapsed=(4[0-9]|[5-9][0-9]|100)$"),
     ProgramTest(
         "alarm_default_kill",
-        ["alarm_default_kill", "echo recovered"],
+        ["alarm_test default_kill", "echo recovered"],
         r"ARMING[\s\S]*\^A[\s\S]*recovered",
     ),
-    ProgramTest("alarm_nesting", ["alarm_nesting\n\x03"], r"^NESTED_OK$"),
-    ProgramTest("alarm_oneshot", ["alarm_oneshot"], r"^ALARM_OK$"),
-    ProgramTest("alarm_repeat", ["alarm_repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
+    ProgramTest("alarm_nesting", ["alarm_test nesting\n\x03"], r"^NESTED_OK$"),
+    ProgramTest("alarm_oneshot", ["alarm_test oneshot"], r"^ALARM_OK$"),
+    ProgramTest("alarm_repeat", ["alarm_test repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
+    # audio_open: open /dev/audio, sleep ~600 ms while SB16 fires several
+    # half-buffer IRQ 5s, close.  Without -device sb16 the open returns -1.
+    ProgramTest(
+        "audio_open",
+        ["audio_open"],
+        r"^audio_open: fd=\d+[\s\S]*audio_open: closed cleanly$",
+        extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
+        timeout=3.0,
+    ),
+    # audio_tone: write 6 x 2048-byte chunks of a 1.1 kHz square wave to
+    # /dev/audio.  Each write should return 2048 once the ring drains via
+    # IRQ 5; final "closed" line confirms a clean exit.
+    ProgramTest(
+        "audio_tone",
+        ["audio_tone"],
+        r"audio_tone: write 5 returned 2048[\s\S]*audio_tone: closed$",
+        extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
+        timeout=5.0,
+    ),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
     # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,551 of
     # BSS at -m 2048 — large enough that ~half the frames sit
