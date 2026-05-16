@@ -215,7 +215,7 @@ names** and emits inline syscall sequences for them. The authoritative list is
 |-------|----------|
 | Console / I/O | `printf`, `putchar`, `getchar`, `read`, `write`, `strlen`, `die`, `exit`, `_exit` |
 | Filesystem | `open`, `close`, `unlink`, `rename`, `mkdir`, `rmdir`, `chmod`, `fstat`, `seek`, `dup`, `dup2` |
-| Memory | `memcpy`, `memcmp`, `memset`, `fill_block` |
+| Memory | `memcpy`, `memcmp`, `memset`, `fill_block`, `sys_break` |
 | Networking | `net_open`, `sendto`, `recvfrom`, `mac`, `parse_ip`, `print_ip`, `print_mac`, `checksum` |
 | Time | `uptime`, `uptime_ms`, `sleep`, `datetime`, `print_datetime`, `alarm_ms` |
 | Signals | `signal` |

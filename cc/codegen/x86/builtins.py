@@ -1109,6 +1109,19 @@ class BuiltinsMixin:
         self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
         self.ax_clear()
 
+    def builtin_sys_break(self, arguments: list[Node], /) -> None:
+        """Generate code for the sys_break(new_break) builtin.
+
+        Linux-style ``brk``.  Pass 0 to query the current break;
+        pass an absolute address to set it.  Emits
+        ``mov ebx, <new_break> / mov ah, SYS_SYS_BREAK / int 30h``.
+        Returns the resulting break in EAX (CF=0 always — caller
+        compares EAX to the requested value to detect OOM).
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="sys_break")
+        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
+        self._emit_syscall("SYS_BREAK")
+
     def builtin_unlink(
         self,
         arguments: list[Node],

@@ -133,6 +133,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "signal": frozenset({"ax", "bx", "cx"}),
         "sleep": frozenset({"ax", "cx"}),
         "strlen": frozenset({"ax", "cx", "di"}),
+        "sys_break": frozenset({"ax", "bx"}),
         "unlink": frozenset({"ax", "si"}),
         "uptime": frozenset({"ax"}),
         "uptime_ms": frozenset({"ax"}),
