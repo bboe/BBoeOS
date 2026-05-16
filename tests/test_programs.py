@@ -616,7 +616,7 @@ TESTS: list[ProgramTest] = [
     # half-buffer IRQ 5s, close.  Without -device sb16 the open returns -1.
     ProgramTest(
         "audio_open",
-        ["audio_open"],
+        ["audio_test open"],
         r"^audio_open: fd=\d+[\s\S]*audio_open: closed cleanly$",
         extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
         timeout=3.0,
@@ -626,7 +626,7 @@ TESTS: list[ProgramTest] = [
     # IRQ 5; final "closed" line confirms a clean exit.
     ProgramTest(
         "audio_tone",
-        ["audio_tone"],
+        ["audio_test tone"],
         r"audio_tone: write 5 returned 2048[\s\S]*audio_tone: closed$",
         extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
         timeout=5.0,
@@ -865,7 +865,7 @@ TESTS: list[ProgramTest] = [
     # backend keeps the SB16 wired up without spawning a host audio sink.
     ProgramTest(
         "play_midi",
-        ["play_midi"],
+        ["audio_test midi"],
         r"^play_midi: done$",
         extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
         timeout=3.0,
