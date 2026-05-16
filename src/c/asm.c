@@ -1306,6 +1306,23 @@ void handle_cmp() {
     }
 }
 
+/* ``cmpsb`` — compare byte at DS:[SI] with ES:[DI], advance both per
+   DF.  One-byte opcode 0xA6.  Used by cc.py's memcmp builtin under a
+   ``rep`` (alias ``repe`` / ``repz``) prefix; without this handler
+   the mnemonic falls through to handle_unknown_word, gets treated as
+   a label definition, and silently swallows the instruction's two
+   bytes — wrecking every subsequent jump's displacement. */
+void handle_cmpsb() {
+    emit_byte(0xA6);
+}
+
+/* ``cmpsw`` — word-sized variant; the operand-size prefix selects
+   between 16-bit and 32-bit operand widths against ``default_bits``. */
+void handle_cmpsw() {
+    emit_operand_size_prefix(16);
+    emit_byte(0xA7);
+}
+
 void handle_dec() {
     inc_dec_handler(1);
 }
@@ -1990,36 +2007,54 @@ void handle_test() {
 
 /* ``handle_unknown_word`` — the parse_mnemonic fallback for bare
    labels (NASM accepts labels without colons, e.g., ``USAGE db ...``).
-   Walks SI past the alphanumeric span, null-terminates the word in
-   place, adds the symbol on pass 1 (or validates it on pass 2) with
-   the ``.``-prefix local-scope distinction, advances SI past the
-   null, and reinvokes parse_directive on whatever remains.  Uses
-   ``push si`` / ``pop si`` around symbol_set / symbol_lookup so SI
-   survives those calls' own register use.  ``handle_unknown_word``
-   is reached via ``jmp`` from parse_mnemonic, so the whole body
-   (prologue, work, epilogue) runs in one call frame — cc.py's
-   ``push bp / pop bp / ret`` wraps cleanly. */
+   Walks SI past the alphanumeric span and peeks at the next token.
+   If the follower is a data-defining keyword that legitimately
+   accepts a bare label as its name (``db`` / ``dw`` / ``dd`` /
+   ``times``), the original word is treated as a label: null-
+   terminate it, add the symbol on pass 1 (or validate it on pass 2),
+   then reinvoke parse_directive on the keyword.  Otherwise the
+   original word is almost certainly an unknown mnemonic typo
+   (``repe cmpsb`` got silently swallowed before this check was
+   added, wrecking every subsequent jump displacement), so we
+   ``abort_unknown`` with the offending token. */
 void handle_unknown_word() {
     char *name_start = source_cursor;
     while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
         source_cursor += 1;
     }
-    if (source_cursor[0] == '\0') {
-        return;
+    char *name_end = source_cursor;
+    if (name_end[0] == '\0') {
+        source_cursor = name_start;
+        abort_unknown();
     }
-    char *end_pos = source_cursor;
-    source_cursor[0] = '\0';
+    while (source_cursor[0] == ' ' || source_cursor[0] == '\t') {
+        source_cursor += 1;
+    }
+    char *next_token = source_cursor;
+    int is_data_directive = 0;
+    if (match_word(STR_DB)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_DW)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_DD)) {
+        is_data_directive = 1;
+    } else if (match_word(STR_TIMES)) {
+        is_data_directive = 1;
+    }
+    source_cursor = next_token;
+    if (is_data_directive == 0) {
+        source_cursor = name_start;
+        abort_unknown();
+    }
+    name_end[0] = '\0';
     int is_local = 0;
     if (name_start[0] == '.') {
         is_local = 1;
     }
     source_cursor = name_start;
     define_label_here(is_local);
-    source_cursor = end_pos + 1;
-    skip_ws();
-    if (source_cursor[0] != '\0') {
-        parse_directive();
-    }
+    source_cursor = next_token;
+    parse_directive();
 }
 
 /* ``xchg r, r`` — uses the 90h+reg short form when one operand is
@@ -3670,6 +3705,8 @@ asm(
     "        dd STR_CLD, handle_cld\n"
     "        dd STR_CLI, handle_cli\n"
     "        dd STR_CMP, handle_cmp\n"
+    "        dd STR_CMPSB, handle_cmpsb\n"
+    "        dd STR_CMPSW, handle_cmpsw\n"
     "        dd STR_DEC, handle_dec\n"
     "        dd STR_DIV, handle_div\n"
     "        dd STR_IMUL, handle_imul\n"
@@ -3712,7 +3749,10 @@ asm(
     "        dd STR_PUSH, handle_push\n"
     "        dd STR_PUSHA, handle_pusha\n"
     "        dd STR_REP, handle_rep\n"
+    "        dd STR_REPE, handle_rep\n"
     "        dd STR_REPNE, handle_repne\n"
+    "        dd STR_REPNZ, handle_repne\n"
+    "        dd STR_REPZ, handle_rep\n"
     "        dd STR_RET, handle_ret\n"
     "        dd STR_SBB, handle_sbb\n"
     "        dd STR_SCASB, handle_scasb\n"
@@ -3741,6 +3781,8 @@ asm(
     "STR_CLD     db 'cld',0\n"
     "STR_CLI     db 'cli',0\n"
     "STR_CMP     db 'cmp',0\n"
+    "STR_CMPSB   db 'cmpsb',0\n"
+    "STR_CMPSW   db 'cmpsw',0\n"
     "STR_DEC     db 'dec',0\n"
     "STR_DIV     db 'div',0\n"
     "STR_DB      db 'db',0\n"
@@ -3794,7 +3836,10 @@ asm(
     "STR_PUSH    db 'push',0\n"
     "STR_PUSHA   db 'pusha',0\n"
     "STR_REP     db 'rep',0\n"
+    "STR_REPE    db 'repe',0\n"
     "STR_REPNE   db 'repne',0\n"
+    "STR_REPNZ   db 'repnz',0\n"
+    "STR_REPZ    db 'repz',0\n"
     "STR_RET     db 'ret',0\n"
     "STR_SBB     db 'sbb',0\n"
     "STR_SCASB   db 'scasb',0\n"
