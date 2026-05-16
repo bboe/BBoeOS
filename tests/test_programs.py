@@ -821,8 +821,8 @@ TESTS: list[ProgramTest] = [
     ProgramTest("grep_number", ["echo -e aaa\\nbbb\\naaa | grep -n aaa"], r"^1:aaa\r?\n3:aaa\r?\n\$"),
     ProgramTest("head_basic", ["seq 1 5 | head -n 2"], r"^1$\n^2$"),
     ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
-    ProgramTest("loop", ["loop"], r"aaaaa"),
-    ProgramTest("loop_array", ["loop_array"], r"abc"),
+    ProgramTest("loop", ["loop_test basic"], r"aaaaa"),
+    ProgramTest("loop_array", ["loop_test array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"arp\*"),
     ProgramTest("mkdir", ["mkdir tmpd", "ls"], r"tmpd/"),
     ProgramTest(
