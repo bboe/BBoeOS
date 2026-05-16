@@ -875,12 +875,19 @@ class BuiltinsMixin:
         ``read(fd, buffer, count)`` emits ``mov bx, <fd> /
         mov di, <buffer> / mov cx, <count> / mov ah, SYS_IO_READ /
         int 30h``.  Returns bytes read in AX (0 = EOF, -1 = error).
+
+        Argument loads are ordered by a topological pass over inter-arg
+        register dependencies (see :meth:`_emit_syscall_arg_moves`) so a
+        pinned-register variable referenced by one argument's expression
+        is not clobbered by another argument's load before it is read.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="read")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
-        self.emit_register_from_argument(argument=buffer_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self._emit_syscall_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.di_register, buffer_argument),
+            (self.target.count_register, count_argument),
+        ])
         self._emit_syscall("IO_READ")
         self.ax_clear()
 
@@ -897,17 +904,21 @@ class BuiltinsMixin:
     def builtin_recvfrom(self, arguments: list[Node], /) -> None:
         """Generate code for the recvfrom() builtin.
 
-        ``recvfrom(fd, buf, len, port)`` emits ``mov bx, <fd> /
-        mov di, <buf> / mov cx, <len> / mov dx, <port> /
-        mov ah, SYS_NET_RECVFROM / int 30h``.
-        Returns bytes received in AX (0 if no matching packet).
+        ``recvfrom(fd, buf, len, port)`` emits register setup followed
+        by ``mov ah, SYS_NET_RECVFROM / int 30h``.  Returns bytes
+        received in AX (0 if no matching packet).  Argument loads are
+        topologically scheduled by :meth:`_emit_syscall_arg_moves` so a
+        pinned-register variable referenced by any argument expression
+        is not clobbered before use.
         """
         self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
         fd_argument, buffer_argument, len_argument, port_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
-        self.emit_register_from_argument(argument=buffer_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=len_argument, register=self.target.count_register)
-        self.emit_register_from_argument(argument=port_argument, register=self.target.dx_register)
+        self._emit_syscall_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.di_register, buffer_argument),
+            (self.target.count_register, len_argument),
+            (self.target.dx_register, port_argument),
+        ])
         self._emit_syscall("NET_RECVFROM")
         self.ax_clear()
 
@@ -957,17 +968,20 @@ class BuiltinsMixin:
     def builtin_seek(self, arguments: list[Node], /) -> None:
         """Generate code for the seek() builtin.
 
-        ``seek(fd, offset, whence)`` emits ``mov bx, <fd> /
-        mov cx, <offset> / mov al, <whence> / mov ah, SYS_IO_SEEK /
-        int 30h``.  Returns the new absolute position in AX (clamped to
-        [0, file_size]) or -1 on bad fd / wrong type / unknown whence.
-        whence is SEEK_SET (0), SEEK_CUR (1), or SEEK_END (2).
+        ``seek(fd, offset, whence)`` emits register setup followed by
+        ``mov ah, SYS_IO_SEEK / int 30h``.  Returns the new absolute
+        position in AX (clamped to [0, file_size]) or -1 on bad fd /
+        wrong type / unknown whence.  whence is SEEK_SET (0),
+        SEEK_CUR (1), or SEEK_END (2).  Argument loads are
+        topologically scheduled by :meth:`_emit_syscall_arg_moves`.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="seek")
         fd_argument, offset_argument, whence_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
-        self.emit_register_from_argument(argument=offset_argument, register=self.target.count_register)
-        self.emit_register_from_argument(argument=whence_argument, register="al")
+        self._emit_syscall_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.count_register, offset_argument),
+            ("al", whence_argument),
+        ])
         self._emit_syscall("IO_SEEK")
         self.ax_clear()
 
@@ -978,14 +992,20 @@ class BuiltinsMixin:
         register setup and ``mov ah, SYS_NET_SENDTO / int 30h``.
         The 6th argument (dst_port) goes in BP (saved/restored).
         Returns bytes sent in AX, or -1 on error.
+
+        The first five argument loads are topologically scheduled by
+        :meth:`_emit_syscall_arg_moves` so a pinned-register variable
+        referenced by any expression is not clobbered before use.
         """
         self._check_argument_count(arguments=arguments, expected=6, name="sendto")
         fd_argument, buf_argument, len_argument, ip_argument, sport_argument, dport_argument = arguments
-        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
-        self.emit_si_from_argument(buf_argument)
-        self.emit_register_from_argument(argument=len_argument, register=self.target.count_register)
-        self.emit_register_from_argument(argument=ip_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=sport_argument, register=self.target.dx_register)
+        self._emit_syscall_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.si_register, buf_argument),
+            (self.target.count_register, len_argument),
+            (self.target.di_register, ip_argument),
+            (self.target.dx_register, sport_argument),
+        ])
         self.emit(f"        push {self.target.base_register}")
         if isinstance(dport_argument, Int):
             self.emit(f"        mov {self.target.base_register}, {dport_argument.value}")
@@ -1002,6 +1022,11 @@ class BuiltinsMixin:
         else:
             self.generate_expression(dport_argument)
             self.emit(f"        mov {self.target.base_register}, {self.target.acc}")
+        # fd → BX must be the LAST register setup so any pinned-to-BX
+        # variable referenced by any of the earlier argument expressions
+        # (including the dport expression above) is not clobbered before
+        # use.  Same rationale as builtin_read / builtin_write.
+        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
         self._emit_syscall("NET_SENDTO")
         self.emit(f"        pop {self.target.base_register}")
         # Normalize the CF error signal into AX = -1 so callers can

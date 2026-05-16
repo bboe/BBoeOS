@@ -32,7 +32,7 @@ def check_program(*, source: Path) -> tuple[bool, str]:
             "-fsyntax-only",
             "-include",
             str(HEADER),
-            "-I",
+            "-iquote",
             str(INCLUDE_DIR),
             str(source),
         ],

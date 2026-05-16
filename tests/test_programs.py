@@ -644,6 +644,7 @@ TESTS: list[ProgramTest] = [
         slow=True,
         timeout=_LARGE_FILE_TIMEOUT,
     ),
+    ProgramTest("cat_stdin", ["echo piped | cat"], r"^piped$"),
     ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
@@ -763,8 +764,11 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
+    ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
+    ProgramTest("head_basic", ["seq 1 5 | head -n 2"], r"^1$\n^2$"),
+    ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
     ProgramTest("loop", ["loop"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"arp\*"),
@@ -874,6 +878,8 @@ TESTS: list[ProgramTest] = [
     # block 0, where the straddle_dir test still finds a usable
     # boundary at 512 — longer names push past 492 and break it.
     ProgramTest("seek", ["seek"], r"^seek: OK$"),
+    ProgramTest("seq_basic", ["seq 3"], r"^1$\n^2$\n^3$"),
+    ProgramTest("seq_range", ["seq 5 7"], r"^5$\n^6$\n^7$"),
     # [shell:start] is printed exactly once per shell-load at the top of
     # main().  Three successive echo commands must all run inside the same
     # shell instance — confirming shell-survives-child — so the marker
@@ -919,7 +925,25 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         setup=_ext2_add_straddle_dir_filler,
     ),
+    ProgramTest(
+        "tail_file",
+        ["seq 1 5 | tee seqfile", "tail -n 2 seqfile"],
+        # Anchor on the tail command line so the tee output above can't
+        # false-positive — the buggy version printed "2\n3" but the
+        # upstream "1\n2\n3\n4\n5" from tee would still match a loose
+        # "^4$\n^5$" regex.
+        r"\$ tail -n 2 seqfile\r?\n4\r?\n5\r?\n\$",
+    ),
+    ProgramTest(
+        "tee_basic",
+        ["echo hello | tee teefile", "cat teefile"],
+        r"hello[\s\S]*hello",
+    ),
+    ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uptime", ["uptime"], r"\d+:\d{2}:\d{2}"),
+    ProgramTest("wc_lines", ["seq 1 7 | wc -l"], r"^7\s*$"),
+    ProgramTest("wc_default", ["seq 1 2 | wc"], r"^2\s+2\s+4\s*$"),
+    ProgramTest("yes_head", ["yes hi | head -n 3"], r"^hi$\n^hi$\n^hi$"),
 ]
 
 

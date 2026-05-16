@@ -9,7 +9,9 @@
 #ifndef BBOEOS_H
 #define BBOEOS_H
 
+#include <ctype.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +22,13 @@
 /* sys/stat.h declares fstat/mkdir with different signatures; redirect */
 #define fstat(fd) bboeos_fstat(fd)
 #define mkdir(name) bboeos_mkdir(name)
+
+/* Suppress our header-only libc stubs in src/include/ when compiling
+   under the host libc — the real <ctype.h>, <stdlib.h>, and <getopt.h>
+   declarations above take precedence and our stubs would conflict. */
+#define CTYPE_H
+#define GETOPT_H
+#define STRTOL_H
 
 /* --- Constants (from src/include/constants.asm) --- */
 

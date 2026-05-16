@@ -3102,3 +3102,130 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
             f"--- default ---\n{default_text[:500]}\n"
             f"--- user ---\n{user_text[:500]}"
         )
+
+
+def test_builtin_read_emits_fd_last() -> None:
+    """builtin_read must load `fd` into BX AFTER computing buf/count.
+
+    Otherwise: when `total` (or any var pinned to BX) is referenced by the
+    buf or count expression, the `mov bx, fd` clobbers it before use,
+    silently emitting `add edi, ebx` and `sub eax, ebx` that read the fd
+    value instead of total.
+
+    Regression caught while landing src/c/tail.c — passing `read(fd,
+    tail_buf + total, BUF - total)` inside a loop produced wrong reads at
+    offset `fd` instead of offset `total`.  builtin_write already orders
+    args this way; this test pins down the same property for read.
+
+    We use a tail.c-shaped source because the auto-pin allocator's
+    decision is sensitive to call mix and var ref counts; with the
+    walk-back logic and the second `read(fd, &overflow, 1)` call, `total`
+    lands on EBX, which is what makes the bug visible.
+    """
+    asm = _user(
+        """
+        #define BUF 65536
+        int parse_int(char *string) {
+            int value = 0;
+            int index = 0;
+            while (string[index] >= '0' && string[index] <= '9') {
+                value = value * 10 + (string[index] - '0');
+                index = index + 1;
+            }
+            return value;
+        }
+        char tail_buf[BUF];
+        int main(int argc, char *argv[]) {
+            int want = 10;
+            char *path = NULL;
+            int arg = 1;
+            while (arg < argc) {
+                char *a = argv[arg];
+                if (a[0] == '-' && a[1] == 'n' && a[2] == '\\0') {
+                    arg = arg + 1;
+                    if (arg >= argc) {
+                        die("tail: -n needs a number\\n");
+                    }
+                    want = parse_int(argv[arg]);
+                } else {
+                    path = a;
+                }
+                arg = arg + 1;
+            }
+            if (path == NULL) {
+                die("tail: pass a file\\n");
+            }
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) {
+                die("tail: open failed\\n");
+            }
+            int total = 0;
+            while (total < BUF) {
+                int n = read(fd, tail_buf + total, BUF - total);
+                if (n <= 0) {
+                    break;
+                }
+                total = total + n;
+            }
+            char overflow;
+            int extra = read(fd, &overflow, 1);
+            close(fd);
+            if (extra > 0) {
+                die("tail: file too large\\n");
+            }
+            int index = total;
+            int found = 0;
+            if (index > 0 && tail_buf[index - 1] == '\\n') {
+                index = index - 1;
+            }
+            while (index > 0 && found < want) {
+                index = index - 1;
+                if (tail_buf[index] == '\\n') {
+                    found = found + 1;
+                    if (found == want) {
+                        index = index + 1;
+                        break;
+                    }
+                }
+            }
+            int remaining = total - index;
+            if (remaining > 0) {
+                write(STDOUT, tail_buf + index, remaining);
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    # For each SYS_IO_READ syscall, walk back to find the argument-setup
+    # block and check that EBX is not written then read within it.
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_READ" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        last_ebx_write = -1
+        for offset, instruction in enumerate(block):
+            if instruction.startswith(("mov ebx,", "xor ebx,", "pop ebx")) and not instruction.startswith("pop ebx"):
+                last_ebx_write = offset
+        if last_ebx_write < 0:
+            continue
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if ", ebx" in instruction.split(";", 1)[0]]
+        assert not bad, (
+            "builtin_read clobbered EBX before reading it as a source operand. "
+            "If a pinned variable lives in EBX, this corrupts it. Offending "
+            "tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_READ; got asm:\n{asm}"

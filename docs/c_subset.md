@@ -82,9 +82,11 @@ Supported:
 | Postfix | `[]`, `()`, `.`, `->` |
 | Other | `sizeof(type)` and `sizeof(expr)`, casts |
 
-Not supported: `++`, `--`, the ternary `?:`, the comma operator (commas only
-separate function arguments). Idiomatic substitutes are `x += 1`, an `if`/`else`
-rewrite of the ternary, and a separate statement for the second comma operand.
+Not supported: `++`, `--`, the comma operator (commas only separate function
+arguments). Idiomatic substitutes are `x += 1` and a separate statement for the
+second comma operand.  The ternary `?:` IS supported (with a peephole that fuses
+guarded-update shapes like `x = cond ? x : y` into a tight `cmp / jcc / mov`
+sequence).
 
 The parser folds compile-time-constant subexpressions (`COLUMNS - 1` becomes a
 single `Int` node) and rewrites division/modulo by powers of two into
@@ -117,10 +119,10 @@ AST so the compiler can record metadata (calling convention overrides, register
 pinning) before the body is parsed. Recursion works.
 
 `main` is special: if its parameter list is `int argc, char *argv[]` the runtime
-reads them off the Linux SysV i386 startup frame the kernel writes onto the
-user stack before iretd — `argc` from `[esp]`, `argv` from `[esp+4]` (a real
-pointer into the kernel-supplied argv slot array). A `main` that takes no
-arguments is allowed.
+reads them off the Linux SysV i386 startup frame the kernel writes onto the user
+stack before iretd — `argc` from `[esp]`, `argv` from `[esp+4]` (a real pointer
+into the kernel-supplied argv slot array). A `main` that takes no arguments is
+allowed.
 
 Variadic user functions are not supported; the only variadic call site in the
 language is the builtin `printf`.
@@ -147,15 +149,34 @@ performance-critical or kernel-bridge functions:
 
 ## Preprocessor
 
-Token-level expansion only:
+Token-level expansion only.
 
 - `#include "<path>"` — double-quoted only; resolved relative to the source's
-  directory; recursive includes are detected and rejected.
-- `#define NAME tokens…` — object-like only; no function-like macros (no
-  `#define MAX(a, b) …`), no `#` stringification, no `##` token paste.
+  directory first, then against any search paths the CLI adds. `cc/cli.py` walks
+  up from the source looking for a sibling `include/` directory and adds it to
+  the search list, so `#include "strtol.h"` from `src/c/foo.c` finds
+  `src/include/strtol.h`.  Recursive includes are detected and rejected.
+- `#define NAME tokens…` — object-like macro.  Body extends to end of line;
+  replacement is token-level so the value is retokenized at the call site and
+  the call site's line number is used in errors.
+- `#define NAME(p1, p2, …) tokens…` — function-like macro.  Parens must
+  immediately follow the name (per C: `#define FOO (x)` is an object-like macro
+  whose value is `(x)`).  Arguments are pre-tokenized at definition time, then
+  re-stamped with the call-site's line at expansion.  See `src/include/macros.h`
+  for examples.
+- `#ifndef NAME` / `#endif` — conditional inclusion.  If `NAME` is already
+  defined when the `#ifndef` is seen, every line up to the matching `#endif` is
+  dropped (including any nested `#define` / `#include`).  Nests freely.
 
-Not supported: `#ifdef` / `#ifndef` / `#if` / `#else` / `#endif`, `#error`,
-`#warning`, `#pragma`, `<…>` system includes.
+Not supported (would each be a defined extension):
+
+- Stringification (`#x`), token pasting (`a ## b`), variadic macros (`...` /
+  `__VA_ARGS__`).
+- `#undef`.
+- `#ifdef`, `#if`, `#else`, `#elif` — only the `#ifndef` half of conditional
+  inclusion is implemented (sufficient for header guards).
+- `#error`, `#warning`, `#pragma`.
+- Angle-bracket includes (`<stdio.h>`).
 
 ## Literals
 
@@ -192,12 +213,13 @@ names** and emits inline syscall sequences for them. The authoritative list is
 
 | Group | Builtins |
 |-------|----------|
-| Console / I/O | `printf`, `putchar`, `getchar`, `read`, `write`, `strlen`, `die`, `exit` |
-| Filesystem | `open`, `close`, `unlink`, `rename`, `mkdir`, `rmdir`, `chmod`, `fstat` |
+| Console / I/O | `printf`, `putchar`, `getchar`, `read`, `write`, `strlen`, `die`, `exit`, `_exit` |
+| Filesystem | `open`, `close`, `unlink`, `rename`, `mkdir`, `rmdir`, `chmod`, `fstat`, `seek`, `dup`, `dup2` |
 | Memory | `memcpy`, `memcmp`, `memset`, `fill_block` |
 | Networking | `net_open`, `sendto`, `recvfrom`, `mac`, `parse_ip`, `print_ip`, `print_mac`, `checksum` |
-| Time | `uptime`, `uptime_ms`, `sleep`, `datetime`, `print_datetime` |
-| System | `exec`, `reboot`, `shutdown` |
+| Time | `uptime`, `uptime_ms`, `sleep`, `datetime`, `print_datetime`, `alarm_ms` |
+| Signals | `signal` |
+| System | `exec`, `reboot`, `shutdown`, `pipeline2` |
 | Video | `video_mode`, `set_palette_color` |
 | Kernel-only port I/O | `kernel_inb`, `kernel_inw`, `kernel_insw`, `kernel_outb`, `kernel_outw`, `kernel_outsw` |
 | Far memory access | `far_read8`, `far_read16`, `far_read32`, `far_write8`, `far_write16`, `far_write32` |
@@ -210,8 +232,13 @@ extra register-to-register move.
 
 Anything not in `BUILTIN_CLOBBERS` and not declared with `extern` is treated as
 a user-defined function and lowered to a `call _<name>`. Programs are
-single-file: there is no linker. To share helpers, `#include "shared.c"`
-directly from your source — every program is its own translation unit.
+single-file: there is no linker. Helpers are shared by putting the function
+definition (not just a prototype) in a header under `src/include/` and
+`#include`-ing it from each consumer — see `line_helpers.h`, `strtol.h`,
+`ctype.h`, `getopt.h` for the convention. Every program is its own translation
+unit, so each consumer inlines a private copy of the function body; when a real
+libc lands you swap the inlined definition for an `extern` declaration and the
+bodies disappear from each binary.
 
 ## Quick example
 
