@@ -600,18 +600,37 @@ _EXT2_ONLY = frozenset({"ext2"})
 
 
 TESTS: list[ProgramTest] = [
-    ProgramTest("alarm_cancel", ["alarm_cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
-    ProgramTest("alarm_coalesce", ["alarm_coalesce"], r"^COALESCE_OK count=(\d|1[0-2])$"),
-    ProgramTest("alarm_during_sleep", ["alarm_during_sleep"], r"^EINTR_OK elapsed=(4[0-9]|[5-9][0-9]|100)$"),
+    ProgramTest("alarm_cancel", ["alarm_test cancel"], r"^CANCEL_OK prev=(4[0-9]|50)$"),
+    ProgramTest("alarm_coalesce", ["alarm_test coalesce"], r"^COALESCE_OK count=(\d|1[0-2])$"),
+    ProgramTest("alarm_during_sleep", ["alarm_test during_sleep"], r"^EINTR_OK elapsed=(4[0-9]|[5-9][0-9]|100)$"),
     ProgramTest(
         "alarm_default_kill",
-        ["alarm_default_kill", "echo recovered"],
+        ["alarm_test default_kill", "echo recovered"],
         r"ARMING[\s\S]*\^A[\s\S]*recovered",
     ),
-    ProgramTest("alarm_nesting", ["alarm_nesting\n\x03"], r"^NESTED_OK$"),
-    ProgramTest("alarm_oneshot", ["alarm_oneshot"], r"^ALARM_OK$"),
-    ProgramTest("alarm_repeat", ["alarm_repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
+    ProgramTest("alarm_nesting", ["alarm_test nesting\n\x03"], r"^NESTED_OK$"),
+    ProgramTest("alarm_oneshot", ["alarm_test oneshot"], r"^ALARM_OK$"),
+    ProgramTest("alarm_repeat", ["alarm_test repeat"], r"^REPEAT_OK count=(8|9|1[0-2])$"),
     ProgramTest("arp", ["arp 10.0.2.2"], r"10\.0\.2\.2 is at [0-9A-F:]+", with_net=True),
+    # audio_open: open /dev/audio, sleep ~600 ms while SB16 fires several
+    # half-buffer IRQ 5s, close.  Without -device sb16 the open returns -1.
+    ProgramTest(
+        "audio_open",
+        ["audio_test open"],
+        r"^audio_open: fd=\d+[\s\S]*audio_open: closed cleanly$",
+        extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
+        timeout=3.0,
+    ),
+    # audio_tone: write 6 x 2048-byte chunks of a 1.1 kHz square wave to
+    # /dev/audio.  Each write should return 2048 once the ring drains via
+    # IRQ 5; final "closed" line confirms a clean exit.
+    ProgramTest(
+        "audio_tone",
+        ["audio_test tone"],
+        r"audio_tone: write 5 returned 2048[\s\S]*audio_tone: closed$",
+        extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
+        timeout=5.0,
+    ),
     # Maximum-BSS success case AND kmap-window smoke test.  bigbss
     # declares BIGBSS_PAGES (see tests/programs/bigbss_size.h) = 523,551 of
     # BSS at -m 2048 — large enough that ~half the frames sit
@@ -659,8 +678,8 @@ TESTS: list[ProgramTest] = [
         slow=True,
         timeout=60.0,
     ),
-    ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
-    ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
+    ProgramTest("bits", ["codegen_test bits"], r"^b-=  = 46$"),
+    ProgramTest("booltest", ["codegen_test bool"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest(
         "cat_large",
@@ -671,7 +690,7 @@ TESTS: list[ProgramTest] = [
         timeout=_LARGE_FILE_TIMEOUT,
     ),
     ProgramTest("cat_stdin", ["echo piped | cat"], r"^piped$"),
-    ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
+    ProgramTest("cftest", ["convention_test carry"], r"tick\(\) fired 3 times, remaining = 0"),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest(
@@ -793,8 +812,8 @@ TESTS: list[ProgramTest] = [
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
-    ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
-    ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
+    ProgramTest("fctest", ["convention_test regparm"], r"accumulate\(9\)    = 28"),
+    ProgramTest("gptest", ["fault_test gp", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("grep_basic", ["echo -e aaa\\nbbb\\naaa | grep aaa"], r"^aaa\r?\naaa\r?\n\$"),
     ProgramTest("grep_case", ["echo HELLO | grep -i hello"], r"^HELLO\r?\n\$"),
     ProgramTest("grep_inverse", ["echo -e aaa\\nbbb\\naaa | grep -v aaa"], r"^bbb\r?\n\$"),
@@ -802,8 +821,8 @@ TESTS: list[ProgramTest] = [
     ProgramTest("grep_number", ["echo -e aaa\\nbbb\\naaa | grep -n aaa"], r"^1:aaa\r?\n3:aaa\r?\n\$"),
     ProgramTest("head_basic", ["seq 1 5 | head -n 2"], r"^1$\n^2$"),
     ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
-    ProgramTest("loop", ["loop"], r"aaaaa"),
-    ProgramTest("loop_array", ["loop_array"], r"abc"),
+    ProgramTest("loop", ["loop_test basic"], r"aaaaa"),
+    ProgramTest("loop_array", ["loop_test array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"arp\*"),
     ProgramTest("mkdir", ["mkdir tmpd", "ls"], r"tmpd/"),
     ProgramTest(
@@ -837,8 +856,8 @@ TESTS: list[ProgramTest] = [
     # per-program PD, so page 0 is always unmapped).  The user-fault
     # kill path tears down the PD and respawns the shell; echo recovered
     # then runs to confirm the new shell works.
-    ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
-    ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
+    ProgramTest("nullderef", ["fault_test null", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
+    ProgramTest("okptest", ["fault_test kernel_buf", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # play_midi opens /dev/midi, queues a 1 s A4 tone on OPL voice 0, and exits.
     # The QEMU SB16 device exposes the OPL3 synth at 0x388/0x38A so opl_probe
@@ -846,7 +865,7 @@ TESTS: list[ProgramTest] = [
     # backend keeps the SB16 wired up without spawning a host audio sink.
     ProgramTest(
         "play_midi",
-        ["play_midi"],
+        ["audio_test midi"],
         r"^play_midi: done$",
         extra_qemu_args=["-audiodev", "none,id=a", "-device", "sb16,audiodev=a"],
         timeout=3.0,
