@@ -35,6 +35,8 @@ directories.
   per-program user-virt layout
 - [Syscall interface](syscalls.html) — the `INT 30h` syscall table with
   argument-register conventions
+- [POSIX compatibility](posix.html) — what BBoeOS implements, partially
+  implements, and skips from the POSIX userland / syscall / libc surface
 - [File structure](file_structure.html) — file-by-file breakdown of `src/` and
   the host-side build scripts
 - [Changelog](CHANGELOG.html) — detailed history of changes by version and date
