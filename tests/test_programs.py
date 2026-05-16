@@ -678,8 +678,8 @@ TESTS: list[ProgramTest] = [
         slow=True,
         timeout=60.0,
     ),
-    ProgramTest("bits", ["bits"], r"^b-=  = 46$"),
-    ProgramTest("booltest", ["booltest"], r"^sum      = 3$"),
+    ProgramTest("bits", ["codegen_test bits"], r"^b-=  = 46$"),
+    ProgramTest("booltest", ["codegen_test bool"], r"^sum      = 3$"),
     ProgramTest("cat", ["cat src/parse_ip.asm"], r"^parse_ip:"),
     ProgramTest(
         "cat_large",
