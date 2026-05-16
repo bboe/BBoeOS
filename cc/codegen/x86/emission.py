@@ -602,17 +602,53 @@ class EmissionMixin:
             # but the destination spans a wider slot (32-bit local or pinned
             # E-register), zero-extend so the upper bytes are clean.
             si_captured: str | None = None
+            # Order captures topologically so a capture whose source
+            # register is another capture's destination is emitted
+            # FIRST.  Without this, ``mov ecx, edi; mov edx, ecx`` (when
+            # both ECX and EDX are pinned destinations) reads the
+            # already-overwritten ECX into EDX.  We assume the
+            # underlying source registers are distinct (the prototype
+            # would be malformed otherwise), so no cycles can form —
+            # just a strict partial order.
+            pending = []
+            pinned_dest = {}
             for reg, arg in out_reg_captures:
                 if not isinstance(arg, AddressOf):
                     message = "out_register argument must be an address-of expression (&var)"
                     raise CompileError(message, line=statement.line)
+                dest_name = arg.var.name
+                dest_reg = self.pinned_register.get(dest_name) if dest_name in self.pinned_register else None
+                pending.append((reg, arg, dest_reg))
+                if dest_reg is not None:
+                    pinned_dest[dest_reg] = True
+            ordered = []
+            while pending:
+                progress = None
+                for index, (reg, _arg, dest_reg) in enumerate(pending):
+                    # Safe to emit if no OTHER pending capture's source
+                    # register equals this one's pinned destination.
+                    if dest_reg is None or not any(j != index and other_reg == dest_reg for j, (other_reg, _, _) in enumerate(pending)):
+                        progress = index
+                        break
+                if progress is None:
+                    message = "out_register captures form a register cycle"
+                    raise CompileError(message, line=statement.line)
+                ordered.append(pending.pop(progress))
+            for reg, arg, _dest_reg in ordered:
                 dest_name = arg.var.name
                 widened = self.target.widen_gp(reg)
                 if dest_name in self.pinned_register:
                     dest_reg = self.pinned_register[dest_name]
                     if dest_reg == reg:
                         pass
-                    elif dest_reg == widened:
+                    elif len(dest_reg) > len(reg):
+                        # Pinned destination is wider than the returned
+                        # register (e.g. ECX pinned, callee returned in
+                        # BX) — zero-extend so the upper bytes don't
+                        # carry pre-call garbage.  Covers both
+                        # ``dest_reg == widened`` and the cross-register
+                        # widening case where auto-pin landed on a
+                        # different E-register than ``widen_gp(reg)``.
                         self.emit(f"        movzx {dest_reg}, {reg}")
                     else:
                         self.emit(f"        mov {dest_reg}, {reg}")
@@ -2027,21 +2063,37 @@ class EmissionMixin:
             self.generate_call(statement, discard_return=True)
             self.ax_clear()
         elif isinstance(statement, DerefAssign):
-            if statement.pointer.name not in self.out_register_locals:
-                message = f"pointer dereference write to non-out_register variable '{statement.pointer.name}' not supported"
-                raise CompileError(message, line=statement.line)
-            reg = self.out_register_locals[statement.pointer.name]
-            self.generate_expression(statement.expr)
-            # Source defaults to the accumulator; if the out_register
-            # target is narrower (e.g. 16-bit ``dx`` against 32-bit
-            # ``eax``) take the matching low-width alias so NASM doesn't
-            # reject the size-mismatched ``mov dx, eax``.
-            source = self.target.acc
-            if len(reg) < len(source):
-                source = self.target.low_word(source)
-            if reg != source:
-                self.emit(f"        mov {reg}, {source}")
-            self.ax_clear()
+            if statement.pointer.name in self.out_register_locals:
+                reg = self.out_register_locals[statement.pointer.name]
+                self.generate_expression(statement.expr)
+                # Source defaults to the accumulator; if the out_register
+                # target is narrower (e.g. 16-bit ``dx`` against 32-bit
+                # ``eax``) take the matching low-width alias so NASM doesn't
+                # reject the size-mismatched ``mov dx, eax``.
+                source = self.target.acc
+                if len(reg) < len(source):
+                    source = self.target.low_word(source)
+                if reg != source:
+                    self.emit(f"        mov {reg}, {source}")
+                self.ax_clear()
+            else:
+                # Generic ``*holder = expr`` where *holder* is a plain
+                # pointer local/param.  Pointed-to width comes from
+                # stripping one ``*`` off holder's declared type — e.g.
+                # ``char**`` writes a 4-byte ``char*`` slot; ``char*``
+                # writes a 1-byte ``char``.
+                holder_type = self.variable_types.get(statement.pointer.name)
+                if not holder_type or not holder_type.endswith("*"):
+                    message = f"pointer dereference write to non-pointer variable '{statement.pointer.name}'"
+                    raise CompileError(message, line=statement.line)
+                pointee_type = holder_type[:-1]
+                self.generate_expression(statement.expr)
+                self._emit_load_var(statement.pointer.name, register=self.target.si_register)
+                if pointee_type in ("char", "uint8_t"):
+                    self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
+                else:
+                    self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+                self.ax_clear()
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
             self.ax_clear()

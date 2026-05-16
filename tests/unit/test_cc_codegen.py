@@ -505,6 +505,158 @@ def test_double_pointer_parameter_compiles() -> None:
     assert "f:" in asm, f"function emitted\n{asm}"
 
 
+def test_double_pointer_null_compare_classifies_as_pointer() -> None:
+    """``if (p != NULL)`` compiles when *p* is ``char**`` (regression).
+
+    Used to be rejected with ``NULL compared to non-pointer`` because
+    ``_type_of_operand`` only knew about ``char*`` and ``uint8_t*``.
+    """
+    src = """
+        void f(char **endptr) {
+            if (endptr != NULL) {
+                endptr[0] = 0;
+            }
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_double_pointer_pointer_arith_classifies_as_pointer() -> None:
+    """``base + offset`` (pointer + int) keeps pointer type for comparison.
+
+    Used to be rejected with ``pointer compared to non-pointer`` because
+    ``_type_of_operand`` unconditionally returned ``"integer"`` for any
+    ``BinaryOperation``.
+    """
+    src = """
+        void f(char *base, char *end) {
+            if (end == base + 2) {
+                end[0] = 0;
+            }
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_address_of_local_disqualifies_auto_pin() -> None:
+    """``&local`` keeps *local* in a frame slot instead of pinning to a register.
+
+    Regression for the auto-pin / address-of collision: previously a
+    high-ref local that also had its address taken would be auto-pinned
+    to a register, then ``_local_address`` rejected with ``no address
+    for 'name'`` when the AddressOf tried to look up its slot.
+    """
+    src = """
+        int consume(int *p);
+        int observe(int *q);
+
+        int worker() {
+            int value = 0;
+            consume(&value);
+            observe(&value);
+            return value;
+        }
+    """
+    asm = _kernel(src, bits=32)
+    assert "worker:" in asm
+    # The local must have a frame slot — look for any [ebp-N] or [bp-N]
+    # reference under worker's body that names value's address.
+    body = asm.split("worker:", 1)[1]
+    assert "[ebp-" in body or "[bp-" in body, f"expected frame-slot ref for &value\n{asm}"
+
+
+def test_out_register_captures_topologically_ordered() -> None:
+    """Topologically order out_register captures when one's source feeds another.
+
+    When two out_register captures form a chain — capture A's source
+    register is capture B's pinned destination — capture B must be
+    emitted before capture A so B's read isn't clobbered.
+
+    Regression for the fd_read_net page-fault: ne2k_receive returns
+    ``frame_pointer`` in EDI and ``packet_length`` in ECX.  After auto-
+    pin assigned ECX to frame_pointer and EDX to packet_length, the
+    naive in-order emission produced ``mov ecx, edi; mov edx, ecx``,
+    where the second move read the already-overwritten ECX.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int producer(int *first  __attribute__((out_register("edi"))),
+                     int *second __attribute__((out_register("ecx"))));
+
+        int consume(int a, int b);
+
+        int caller() {
+            int a;
+            int b;
+            producer(&a, &b);
+            return consume(a, b) + consume(a, b) + consume(a, b);
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("caller:", 1)[1]
+    call_index = body.find("call producer")
+    after_call = body[call_index:].splitlines()[1:5]
+    # The capture whose source (ECX) is the OTHER capture's destination
+    # must come first.  If both captures end up pinned and the order is
+    # wrong, the assertion below would still pass — so also check the
+    # second capture doesn't read from the first's pinned destination.
+    if any("mov ecx, edi" in line for line in after_call):
+        ecx_capture_index = next(i for i, line in enumerate(after_call) if "mov ecx, edi" in line)
+        edx_capture_index = next((i for i, line in enumerate(after_call) if "mov edx, ecx" in line), None)
+        assert edx_capture_index is None or edx_capture_index < ecx_capture_index, (
+            f"out_register captures emitted in wrong order — mov edx, ecx must precede mov ecx, edi:\n{asm}"
+        )
+
+
+def test_address_of_at_out_register_arg_still_allows_auto_pin() -> None:
+    """``&x`` at an ``out_register`` arg position is a fake address: *x* may still pin.
+
+    The disqualification above must NOT fire for out_register captures
+    — the callee writes the named register and the caller copies it
+    back to *x*, so *x* never needs a memory address.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int net_get(int *value __attribute__((out_register("cx"))));
+
+        int process() {
+            int inner_value;
+            if (net_get(&inner_value)) {
+                return inner_value;
+            }
+            return inner_value;
+        }
+    """,
+        bits=16,
+    )
+    # The pin should land — the capture move into the pinned register
+    # must appear (mov dx, cx or similar) rather than [bp-N], cx.
+    assert "mov dx, cx" in asm, f"expected pinned-register capture, got\n{asm}"
+
+
+def test_double_pointer_deref_assign_emits_indirect_store() -> None:
+    """``*endptr = value`` lowers to ``mov [reg], <acc>`` for plain pointer locals.
+
+    Regression for the DerefAssign path that used to reject any
+    non-out_register holder.  The holder is loaded into ESI and the
+    accumulator is stored through it.
+    """
+    src = """
+        void f(char **endptr, char *value __attribute__((in_register("di")))) {
+            *endptr = value;
+        }
+    """
+    asm = _kernel(src, bits=32)
+    body = asm.split("f:", 1)[1]
+    assert "mov esi, [" in body, f"expected holder load into ESI\n{asm}"
+    assert "mov [esi], eax" in body, f"expected store through ESI\n{asm}"
+
+
 @pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "src" / "c").glob("*.c")))
 @pytest.mark.parametrize("bits", [16, 32])
 def test_existing_programs_unchanged(source_path: Path, bits: int) -> None:
@@ -1918,7 +2070,13 @@ def test_out_register_callee_no_spill() -> None:
 
 
 def test_out_register_caller_captures_register_into_local() -> None:
-    """After the call, the named register is stored into the caller's local variable."""
+    """After the call, the named register flows into the caller's local.
+
+    ``entry`` auto-pins (two refs: the out_register capture and the
+    ``captured = entry`` read, against one call's clobber cost), so the
+    capture lands in the pinned register directly (`mov dx, si`).  If
+    the var doesn't pin, the capture falls back to a memory slot.
+    """
     asm = _kernel("""
         int *captured __attribute__((asm_name("captured")));
         __attribute__((carry_return)) int fd_alloc(int* entry __attribute__((out_register("si"))));
@@ -1929,14 +2087,14 @@ def test_out_register_caller_captures_register_into_local() -> None:
             captured = entry;
         }
     """)
-    assert "mov [bp-2], si" in asm
+    assert "mov dx, si" in asm, f"expected pinned capture mov dx, si\n{asm}"
 
 
 def test_out_register_caller_no_push() -> None:
     """Caller emits no push for an out_register argument — only call + capture.
 
-    The local ``entry`` is used (assigned to a global) so the capture's
-    ``mov [bp-2], si`` survives ``peephole_dead_temp_slots``.
+    ``entry`` auto-pins (two reads, one call's clobber cost), so the
+    capture lands in the pinned register directly.
     """
     asm = _kernel("""
         int *captured __attribute__((asm_name("captured")));
@@ -1951,12 +2109,12 @@ def test_out_register_caller_no_push() -> None:
             return 0;
         }
     """)
-    # The register capture happens right after the call, with no push before it.
     lines = [line.strip() for line in asm.splitlines()]
     call_idx = next(i for i, line in enumerate(lines) if line == "call fd_alloc")
     # No argument push immediately before the call.
     assert lines[call_idx - 1] != "push ax", "unexpected argument push before call fd_alloc"
-    assert lines[call_idx + 1] == "mov [bp-2], si"
+    # The capture is a register-to-register move into the pinned reg.
+    assert lines[call_idx + 1] == "mov dx, si", f"expected 'mov dx, si' capture, got '{lines[call_idx + 1]}'\n{asm}"
 
 
 def test_out_register_capture_not_destroyed_by_pinned_push_pop() -> None:
@@ -2027,8 +2185,14 @@ def test_out_register_capture_widens_into_local_32bit() -> None:
     """,
         bits=32,
     )
-    # The capture must zero-extend BX into EBX before the 4-byte spill.
-    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' for 16-bit out_register into 32-bit slot:\n{asm}"
+    # The capture must zero-extend BX into the pinned destination's
+    # wider form (EBX or whichever E-register auto-pin assigned).  Bare
+    # ``mov eX, bx`` is mixed-width and invalid; the movzx variant is
+    # required.
+    assert "movzx " in asm and ", bx" in asm, f"expected 'movzx eX, bx' for 16-bit out_register into 32-bit slot:\n{asm}"
+    assert "mov ebx, bx" not in asm and "mov edx, bx" not in asm and "mov ecx, bx" not in asm, (
+        f"raw 'mov eX, bx' is mixed-width and invalid:\n{asm}"
+    )
 
 
 def test_out_register_capture_widens_into_pinned_eregister_32bit() -> None:
@@ -2057,8 +2221,13 @@ def test_out_register_capture_widens_into_pinned_eregister_32bit() -> None:
     """,
         bits=32,
     )
-    assert "movzx ebx, bx" in asm, f"expected 'movzx ebx, bx' capture into pinned EBX:\n{asm}"
-    assert "mov ebx, bx" not in asm, f"raw 'mov ebx, bx' is mixed-width and invalid:\n{asm}"
+    # Capture must zero-extend BX into the pinned E-register destination
+    # (auto-pin may land on any of the safe E-regs).  Bare ``mov eX, bx``
+    # is mixed-width and invalid.
+    assert "movzx " in asm and ", bx" in asm, f"expected 'movzx eX, bx' capture into pinned E-register:\n{asm}"
+    assert "mov ebx, bx" not in asm and "mov edx, bx" not in asm and "mov ecx, bx" not in asm, (
+        f"raw 'mov eX, bx' is mixed-width and invalid:\n{asm}"
+    )
 
 
 def test_out_register_carry_return_condition() -> None:
@@ -2078,8 +2247,9 @@ def test_out_register_carry_return_condition() -> None:
     """)
     lines = [line.strip() for line in asm.splitlines()]
     call_idx = next(i for i, line in enumerate(lines) if line == "call fd_alloc")
-    # Capture happens before the branch.
-    assert lines[call_idx + 1] == "mov [bp-2], si"
+    # Capture happens before the branch; ``entry`` auto-pins so the
+    # destination is a register, not a memory slot.
+    assert lines[call_idx + 1] == "mov dx, si", f"expected 'mov dx, si' capture, got '{lines[call_idx + 1]}'\n{asm}"
     assert any(line.startswith(("jc", "jnc")) for line in lines[call_idx + 2 : call_idx + 5])
 
 
@@ -2143,7 +2313,10 @@ def test_out_register_prototype_registers_convention() -> None:
         target="kernel",
     )
     assert ok, f"Compilation failed:\n{output}"
-    assert "mov [bp-2], si" in output
+    # ``entry`` is referenced twice (the out_register capture and the
+    # ``captured = entry`` read), so it auto-pins and the capture lands
+    # in the pinned register directly rather than going through a frame slot.
+    assert "mov dx, si" in output, f"expected pinned capture mov dx, si\n{output}"
 
 
 def test_out_register_si_cleared_across_call() -> None:

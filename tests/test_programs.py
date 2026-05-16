@@ -905,6 +905,11 @@ TESTS: list[ProgramTest] = [
     # read call to consume.
     ProgramTest("sigint_test", ["sigint_test\n\x03"], r"^CAUGHT$"),
     ProgramTest("stackbomb", ["stackbomb", "echo recovered"], r"stackbomb: starting recursion[\s\S]*EXC0E[\s\S]*recovered"),
+    # Exercises cc.py's pointer-to-pointer support: strtol writes
+    # *endptr (a char**) so the caller can recover the tail past the
+    # parsed digits.  Verifies both the NULL classification fix and
+    # the DerefAssign codegen for plain char** locals.
+    ProgramTest("strtol_endptr", ["strtol_endptr"], r"^ENDPTR_OK value=42 tail=abc$"),
     # Confirms the user stack lives at the user/kernel boundary
     # (USER_STACK_TOP = KERNEL_VIRT_BASE).  ESP at iretd equals
     # USER_STACK_TOP, so the high byte is the high byte of

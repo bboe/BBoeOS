@@ -1857,6 +1857,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         other_uses: dict[str, int] = {}
         init_count: dict[str, int] = {}
         init_expr: dict[str, Node] = {}
+        address_taken: set[str] = set()
         comparison_operations = {"==", "!=", "<", "<=", ">", ">="}
 
         def collect_index_vars(node: Node) -> None:
@@ -1927,11 +1928,33 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if isinstance(node, IndexAssign):
                     count_visit(node.expr)
                 return
+            if isinstance(node, Call):
+                # ``&x`` at an ``out_register`` arg position is a fake
+                # address — the callee writes the named register and
+                # the caller captures it, so *x* doesn't need a memory
+                # address and stays eligible for auto-pin.  Count those
+                # args as a Var read (so the ref count reflects the
+                # captured write that follows the call) but skip the
+                # ``address_taken`` mark the generic AddressOf branch
+                # below would record.  Real-address args (anything else)
+                # fall through to that branch.
+                out_regs = self.out_register_params.get(node.name, {})
+                for index, arg in enumerate(node.args):
+                    if index in out_regs and isinstance(arg, AddressOf):
+                        count_visit(arg.var)
+                    else:
+                        count_visit(arg)
+                return
             if isinstance(node, AddressOf):
                 # ``&x`` computes an address, not a value read — pre-refactor
                 # AddressOf carried ``name`` as a plain str so the inner var
                 # never tallied; preserve that by skipping the generic walk's
-                # descent into ``var``.
+                # descent into ``var``.  Track the name so the candidate
+                # filter below can disqualify it: an auto-pinned register
+                # has no memory address, and keeping the slot in sync with
+                # the register across writes through the pointer would
+                # require spill+reload at every access.
+                address_taken.add(node.var.name)
                 return
             if isinstance(node, DerefAssign):
                 # ``*p = expr`` writes through a pointer — pre-refactor the
@@ -1982,6 +2005,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # initializer without shrinking the comparisons that follow
         # (those already work against AX).
         combined = [item for item in combined if not is_expression_temporary(item[0])]
+        # An auto-pinned register has no memory address; vars whose
+        # address is taken (``&x``) must live in a frame slot so
+        # ``_local_address`` can hand back a real pointer.
+        combined = [item for item in combined if item[0] not in address_taken]
         assignments: dict[str, str] = {}
         available = list(self.safe_pin_registers)
         for name, _ in combined:
