@@ -18,8 +18,13 @@ NASM-syntax assembly → `nasm` → flat binary.
 ## Invocation
 
 ```sh
-python3 cc.py <input.c> [<output.asm>] [--bits 16|32] [--target user|kernel]
+python3 cc.py [compile] <input.c> [<output.asm>] [--bits 16|32] [--target user|kernel] [--object]
+python3 cc.py pack-ccobj <input.bin> <input.lst> <output.ccobj>
 ```
+
+`compile` is the default subcommand and is inferred when no subcommand verb
+appears in argv, preserving the legacy `cc.py <input.c> [<output.asm>]`
+invocation.
 
 - `--bits 32` (default): emits 32-bit protected-mode assembly. `--bits 16` is
   for the bootloader stage.
@@ -27,6 +32,15 @@ python3 cc.py <input.c> [<output.asm>] [--bits 16|32] [--target user|kernel]
   08048000h`, including `constants.asm` and a BSS trailer.
 - `--target kernel`: emits bare assembly suitable for `%include` into the kernel
   blob — no `org`, no constants, no trailer.
+- `--object`: emit object-mode NASM intended for `nasm -f bin -l file.lst`
+  followed by `cc.py pack-ccobj` (see [Object-file emission
+  mode](#object-file-emission-mode) below).  Incompatible with `--target
+  kernel`.
+
+`pack-ccobj` is a separate subcommand that packages a NASM-assembled `.bin` +
+`.lst` pair into a `.ccobj` JSON object file consumable by the (still
+in-progress) `tools/ccld.py` linker.  See [Object-file emission
+mode](#object-file-emission-mode).
 
 Errors land on stderr as `<file>:<line>: error: <message>` and the process exits
 1.
@@ -117,6 +131,12 @@ int strcmp(const char *a, const char *b) {
 Forward declarations (a prototype with `;` instead of a body) are kept in the
 AST so the compiler can record metadata (calling convention overrides, register
 pinning) before the body is parsed. Recursion works.
+
+The `extern` keyword on a function declaration is accepted (and ignored —
+function declarations are extern by default in C). It exists for parity with C
+and because object-mode source files use `extern void foo(args);` to mark
+cross-translation-unit references explicitly, so the codegen knows to emit
+`CCREL_CALL` instead of `call` for that callee. In flat mode it is a no-op.
 
 `main` is special: if its parameter list is `int argc, char *argv[]` the runtime
 reads them off the Linux SysV i386 startup frame the kernel writes onto the user
@@ -239,6 +259,38 @@ definition (not just a prototype) in a header under `src/include/` and
 unit, so each consumer inlines a private copy of the function body; when a real
 libc lands you swap the inlined definition for an `extern` declaration and the
 bodies disappear from each binary.
+
+## Object-file emission mode
+
+`cc.py --object` emits NASM intended for assembly with `nasm -f bin -l file.lst`
+and packaging via `cc.py pack-ccobj`.  The resulting `.ccobj` is consumed by the
+(still in-progress) `tools/ccld.py` linker, which combines per-translation unit
+`.ccobj` files with a runtime archive to produce a flat binary.  Object mode is
+opt-in per program and entirely separate from `tools/libc/libbboeos.a` (the
+clang-built libc used by the Doom port) — the two link worlds do not
+interoperate.
+
+Differences from the default flat-binary mode:
+
+- Emits `section .text` / `section .rodata` / `section .data` / `section .bss`
+  instead of `org 08048000h`.
+- Emits `global <name>` before each defined function (so the linker can resolve
+  cross-translation-unit calls).
+- Emits `%include "ccobj_markers.inc"` for the `CCREL_*` marker macros (defined
+  in `src/include/`).  Calls to functions declared `extern` become `CCREL_CALL
+  <name>` macro invocations — raw bytes the linker will patch at link time.
+- Suppresses the flat-mode `_program_end:` label and `_bss_end equ` trailer; the
+  linker emits the final BSS trailer when producing the flat binary.
+
+Object mode does not yet support programs with non-zero BSS (`int big[1024];`
+and friends fail at compile time with `NotImplementedError`); BSS support lands
+when the runtime archive does (PR 3 of the broader design).  `--object` is
+incompatible with `--target kernel` — the kernel build doesn't link, so object
+files have nothing to do.
+
+The full design lives at
+`docs/superpowers/specs/2026-05-16-cc-object-files-design.md` (local-only spec
+branch).
 
 ## Quick example
 

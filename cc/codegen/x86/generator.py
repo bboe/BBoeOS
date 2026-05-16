@@ -204,6 +204,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._builtin_clobbers[name] |= extra
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
+        self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
         self.ax_is_byte: bool = False
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise

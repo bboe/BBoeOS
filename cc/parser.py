@@ -1082,9 +1082,12 @@ class Parser:
             if asm_register is not None:
                 message = "asm_register attribute is not valid on function definitions"
                 raise CompileError(message, line=line)
-            if is_extern:
-                message = "extern is not supported on functions; function declarations are extern by default"
-                raise CompileError(message, line=line)
+            # `extern` on a function declaration is accepted (no semantic
+            # change — function decls are extern by default in C).  We
+            # allow the keyword for parity with C and because object-mode
+            # source files use `extern void foo(args);` to mark
+            # cross-translation-unit references explicitly.
+            _ = is_extern  # keyword accepted; no effect on AST
             self.eat("LPAREN")
             parameters = self.parse_parameters()
             self.eat("RPAREN")

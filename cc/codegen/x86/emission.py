@@ -126,6 +126,8 @@ class EmissionMixin:
                     raise CompileError(message)
                 continue
             self.user_functions[function.name] = len(function.params)
+            if function.is_prototype:
+                self.extern_functions.add(function.name)
             if function.regparm_count > 0:
                 self.fastcall_functions.add(function.name)
             if function.carry_return:
@@ -632,11 +634,16 @@ class EmissionMixin:
                 # out by _is_tail_call_eligible) and no register restore
                 # (skipped above).  Function's own ``ret`` is elided at
                 # generate_function's epilogue.
-                self.emit(f"        jmp {name}")
+                if self.object_mode and name in self.extern_functions:
+                    self.emit(f"        CCREL_JMP {name}")
+                else:
+                    self.emit(f"        jmp {name}")
                 self.ax_clear()
                 return
             if name in self.inline_bodies:
                 self._emit_inline_body(name)
+            elif self.object_mode and name in self.extern_functions:
+                self.emit(f"        CCREL_CALL {name}")
             else:
                 self.emit(f"        call {name}")
             if stack_args:
