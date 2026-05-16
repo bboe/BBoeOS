@@ -690,7 +690,7 @@ TESTS: list[ProgramTest] = [
         timeout=_LARGE_FILE_TIMEOUT,
     ),
     ProgramTest("cat_stdin", ["echo piped | cat"], r"^piped$"),
-    ProgramTest("cftest", ["cftest"], r"tick\(\) fired 3 times, remaining = 0"),
+    ProgramTest("cftest", ["convention_test carry"], r"tick\(\) fired 3 times, remaining = 0"),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest(
@@ -812,7 +812,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
-    ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
+    ProgramTest("fctest", ["convention_test regparm"], r"accumulate\(9\)    = 28"),
     ProgramTest("gptest", ["fault_test gp", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("grep_basic", ["echo -e aaa\\nbbb\\naaa | grep aaa"], r"^aaa\r?\naaa\r?\n\$"),
     ProgramTest("grep_case", ["echo HELLO | grep -i hello"], r"^HELLO\r?\n\$"),
