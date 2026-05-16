@@ -1,8 +1,13 @@
-#include "ctype.h"
 #include "getopt.h"
 #include "line_helpers.h"
 
+char is_space[256];
+
 int main(int argc, char *argv[]) {
+    is_space[' '] = 1;
+    is_space['\t'] = 1;
+    is_space['\n'] = 1;
+    is_space['\r'] = 1;
     int show_lines = 0;
     int show_words = 0;
     int show_bytes = 0;
@@ -51,7 +56,7 @@ int main(int argc, char *argv[]) {
         int in_word = 0;
         int i = 0;
         while (i < line_length) {
-            if (isspace(buffer[i])) {
+            if (is_space[buffer[i] & 0xFF] != '\0') {
                 in_word = 0;
             } else if (!in_word) {
                 in_word = 1;
