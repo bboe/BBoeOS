@@ -148,6 +148,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         bits: int = 16,
         constant_values: dict[str, int] | None = None,
         defines: dict[str, str] | None = None,
+        object_mode: bool = False,
         target_mode: str = "user",
     ) -> None:
         """Initialize code generator state.
@@ -169,6 +170,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         by :meth:`_eval_local_array_size` to size stack-local arrays
         whose element counts are named constants.  When omitted or
         ``None`` the generator falls back to the empty mapping.
+
+        ``object_mode`` is True when the caller wants object-file-friendly
+        NASM (section directives, CCREL_* marker macros, no flat-binary org
+        or BSS trailer).  Default False preserves flat-binary emission.
 
         ``target_mode`` is either ``"user"`` (default, stand-alone program
         at ``PROGRAM_BASE``) or ``"kernel"`` (bare assembly for ``%include``
@@ -207,6 +212,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # in_register_params / out_register_params map function name → {param_index → register}.
         # Populated during the first pass over function definitions in generate().
         self.in_register_params: dict[str, dict[int, str]] = {}
+        self.object_mode: bool = object_mode
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}

@@ -1,0 +1,83 @@
+     1                                  ;; Hand-crafted object-mode .asm exercising every CCREL_* marker.
+     2                                  ;; Used by tests/test_ccobj.py to validate --pack-ccobj without
+     3                                  ;; depending on cc.py's --object emission.
+     4                                  ;;
+     5                                  ;; Regenerate the matching .lst and .bin with:
+     6                                  ;;     tests/data/ccobj/regen.sh
+     7                                  
+     8                                  %include "ccobj_markers.inc"
+     1                              <1> ;; ccobj_markers.inc — marker macros for cc.py --object output.
+     2                              <1> ;;
+     3                              <1> ;; Each macro emits a fixed instruction encoding followed by a 4-byte
+     4                              <1> ;; zero placeholder.  cc.py --pack-ccobj parses the NASM listing to
+     5                              <1> ;; recover (section, offset, symbol, type) tuples for the linker.
+     6                              <1> ;;
+     7                              <1> ;; NASM never needs to know the macro arg is unresolved — the macro
+     8                              <1> ;; emits raw bytes only.  The symbol name is recovered from the source
+     9                              <1> ;; column of the listing.
+    10                              <1> ;;
+    11                              <1> ;; Patch offset within each macro's emitted bytes is always +1
+    12                              <1> ;; (one byte of opcode, then the 4-byte placeholder).
+    13                              <1> 
+    14                              <1> %ifndef CCOBJ_MARKERS_INC
+    15                              <1> %define CCOBJ_MARKERS_INC
+    16                              <1> 
+    17                              <1> ;; rel32 relocations — patch site is opcode+1, value is
+    18                              <1> ;; symbol_address - (patch_site + 4).
+    19                              <1> %macro CCREL_CALL 1
+    20                              <1>     db 0xE8
+    21                              <1>     dd 0
+    22                              <1> %endmacro
+    23                              <1> 
+    24                              <1> %macro CCREL_JMP 1
+    25                              <1>     db 0xE9
+    26                              <1>     dd 0
+    27                              <1> %endmacro
+    28                              <1> 
+    29                              <1> ;; abs32 relocations — patch site is opcode+1, value is symbol_address.
+    30                              <1> %macro CCREL_MOVABS_LOAD_EAX 1   ; mov eax, [%1]
+    31                              <1>     db 0xA1
+    32                              <1>     dd 0
+    33                              <1> %endmacro
+    34                              <1> 
+    35                              <1> %macro CCREL_MOVABS_STORE_EAX 1  ; mov [%1], eax
+    36                              <1>     db 0xA3
+    37                              <1>     dd 0
+    38                              <1> %endmacro
+    39                              <1> 
+    40                              <1> %endif
+     9                                  
+    10                                  section .text
+    11                                  global main
+    12                                  global helper
+    13                                  
+    14                                  main:
+    15 00000000 6655                        push ebp
+    16 00000002 6689E5                      mov ebp, esp
+    17                                      CCREL_CALL die
+    20 00000005 E8                  <1>  db 0xE8
+    21 00000006 00000000            <1>  dd 0
+    18                                      CCREL_JMP _exit
+    25 0000000A E9                  <1>  db 0xE9
+    26 0000000B 00000000            <1>  dd 0
+    19                                  
+    20                                  helper:
+    21                                      CCREL_MOVABS_LOAD_EAX errno
+    31 0000000F A1                  <1>  db 0xA1
+    32 00000010 00000000            <1>  dd 0
+    22                                      CCREL_MOVABS_STORE_EAX errno
+    36 00000014 A3                  <1>  db 0xA3
+    37 00000015 00000000            <1>  dd 0
+    23 00000019 C3                          ret
+    24                                  
+    25                                  section .rodata
+    26                                  global format_string
+    27 00000000 68656C6C6F00            format_string: db "hello", 0
+    28                                  
+    29                                  section .data
+    30                                  global counter
+    31 00000000 2A000000                counter: dd 42
+    32                                  
+    33                                  section .bss
+    34                                  global scratch
+    35 00000000 <res 40h>               scratch: resd 16
