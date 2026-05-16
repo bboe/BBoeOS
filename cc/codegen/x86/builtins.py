@@ -587,13 +587,20 @@ class BuiltinsMixin:
         ``memcmp(a, b, 0)`` returns 0 without inspecting the buffers.
 
         Bytes are compared as ``unsigned char``; the difference fits in
-        ``[-255, +255]``.  AX, CX, DX, SI, DI are clobbered.
+        ``[-255, +255]``.  AX, CX, DX, SI, DI are clobbered.  Argument
+        loads are topologically scheduled by
+        :meth:`_emit_builtin_arg_moves` so a pinned-register variable
+        referenced by any argument's expression is not clobbered before
+        use (e.g. ``memcmp(line + start, pattern, n)`` where ``pattern``
+        lives in DI must load SI before DI).
         """
         self._check_argument_count(arguments=arguments, expected=3, name="memcmp")
         a_argument, b_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=a_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=b_argument, register=self.target.si_register)
-        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.di_register, a_argument),
+            (self.target.si_register, b_argument),
+            (self.target.count_register, count_argument),
+        ])
         label_index = self.new_label()
         # Default result = 0; covers both n==0 and all-bytes-equal paths.
         self.emit(f"        xor {self.target.acc}, {self.target.acc}")
@@ -616,13 +623,18 @@ class BuiltinsMixin:
 
         Emits ``mov di, <destination> / mov si, <source> / mov cx, <n>
         / cld / rep movsb``.  Byte-wise copy; caller's DI, SI, CX are
-        clobbered.
+        clobbered.  Argument loads are topologically scheduled by
+        :meth:`_emit_builtin_arg_moves` so a pinned-register variable
+        referenced by any argument's expression is not clobbered before
+        use.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="memcpy")
         destination_argument, source_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=destination_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=source_argument, register=self.target.si_register)
-        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.di_register, destination_argument),
+            (self.target.si_register, source_argument),
+            (self.target.count_register, count_argument),
+        ])
         self.emit("        cld")
         self.emit("        rep movsb")
         self.ax_clear()
@@ -633,12 +645,18 @@ class BuiltinsMixin:
         Emits ``mov di, <destination> / mov ax, <value> / mov cx, <count>
         / cld / rep stosb``.  Byte-wise fill; DI, AX, CX are clobbered.
         The value is loaded into AX; AL is used as the fill byte.
+        Argument loads are topologically scheduled by
+        :meth:`_emit_builtin_arg_moves` so a pinned-register variable
+        referenced by any argument's expression is not clobbered before
+        use.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="memset")
         destination_argument, value_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=destination_argument, register=self.target.di_register)
-        self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
-        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.di_register, destination_argument),
+            (self.target.acc, value_argument),
+            (self.target.count_register, count_argument),
+        ])
         self.emit("        cld")
         self.emit("        rep stosb")
         self.ax_clear()
@@ -877,13 +895,13 @@ class BuiltinsMixin:
         int 30h``.  Returns bytes read in AX (0 = EOF, -1 = error).
 
         Argument loads are ordered by a topological pass over inter-arg
-        register dependencies (see :meth:`_emit_syscall_arg_moves`) so a
+        register dependencies (see :meth:`_emit_builtin_arg_moves`) so a
         pinned-register variable referenced by one argument's expression
         is not clobbered by another argument's load before it is read.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="read")
         fd_argument, buffer_argument, count_argument = arguments
-        self._emit_syscall_arg_moves([
+        self._emit_builtin_arg_moves([
             (self.target.bx_register, fd_argument),
             (self.target.di_register, buffer_argument),
             (self.target.count_register, count_argument),
@@ -907,13 +925,13 @@ class BuiltinsMixin:
         ``recvfrom(fd, buf, len, port)`` emits register setup followed
         by ``mov ah, SYS_NET_RECVFROM / int 30h``.  Returns bytes
         received in AX (0 if no matching packet).  Argument loads are
-        topologically scheduled by :meth:`_emit_syscall_arg_moves` so a
+        topologically scheduled by :meth:`_emit_builtin_arg_moves` so a
         pinned-register variable referenced by any argument expression
         is not clobbered before use.
         """
         self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
         fd_argument, buffer_argument, len_argument, port_argument = arguments
-        self._emit_syscall_arg_moves([
+        self._emit_builtin_arg_moves([
             (self.target.bx_register, fd_argument),
             (self.target.di_register, buffer_argument),
             (self.target.count_register, len_argument),
@@ -973,11 +991,11 @@ class BuiltinsMixin:
         position in AX (clamped to [0, file_size]) or -1 on bad fd /
         wrong type / unknown whence.  whence is SEEK_SET (0),
         SEEK_CUR (1), or SEEK_END (2).  Argument loads are
-        topologically scheduled by :meth:`_emit_syscall_arg_moves`.
+        topologically scheduled by :meth:`_emit_builtin_arg_moves`.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="seek")
         fd_argument, offset_argument, whence_argument = arguments
-        self._emit_syscall_arg_moves([
+        self._emit_builtin_arg_moves([
             (self.target.bx_register, fd_argument),
             (self.target.count_register, offset_argument),
             ("al", whence_argument),
@@ -994,12 +1012,12 @@ class BuiltinsMixin:
         Returns bytes sent in AX, or -1 on error.
 
         The first five argument loads are topologically scheduled by
-        :meth:`_emit_syscall_arg_moves` so a pinned-register variable
+        :meth:`_emit_builtin_arg_moves` so a pinned-register variable
         referenced by any expression is not clobbered before use.
         """
         self._check_argument_count(arguments=arguments, expected=6, name="sendto")
         fd_argument, buf_argument, len_argument, ip_argument, sport_argument, dport_argument = arguments
-        self._emit_syscall_arg_moves([
+        self._emit_builtin_arg_moves([
             (self.target.bx_register, fd_argument),
             (self.target.si_register, buf_argument),
             (self.target.count_register, len_argument),

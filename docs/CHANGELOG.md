@@ -11,6 +11,20 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: extend topo arg-load scheduler to `memcmp`, `memcpy`, `memset`.**
+  The three string-op builtins each load three caller expressions into DI/SI/CX
+  (or DI/AX/CX) before emitting their `rep`-prefixed string instruction.  They
+  were still using sequential `emit_register_from_argument` calls, so when an
+  argument expression read from a register that an earlier load had just
+  overwritten, the second load aliased the first's destination.  Caught by `grep
+  -i` (`memcmp(line + start, pattern, n)` with `pattern` pinned to EDI → `mov
+  edi, eax; mov esi, edi` made SI point at the line buffer instead of the
+  pattern, so every line "matched" against itself).  Renamed the helper from
+  `_emit_syscall_arg_moves` to `_emit_builtin_arg_moves` since it is now used by
+  both syscall and string-op builtins, and moved it next to
+  `_emit_register_arg_moves` (its user-function-call sibling).  Regression
+  covered by `test_memcmp_topologically_orders_aliased_args` in
+  `tests/unit/test_cc_codegen.py`.
 - **cc.py pointer-to-pointer support.**  Six related fixes that together let
   `src/include/strtol.h` write back through `endptr` the way libc does. (1)
   `_type_of_operand` in `cc/codegen/base.py` now classifies `char**` /
@@ -47,7 +61,7 @@ time.
   `cc/codegen/x86/`: (1) `_emit_register_arg_single` and `_emit_push_arg` now
   emit `lea` (not `mov`) when a local stack array is passed as a function
   argument — mirrors the existing branch in `_try_direct_load`; (2)
-  `_emit_syscall_arg_moves` topologically orders argument loads for `read` /
+  `_emit_builtin_arg_moves` topologically orders argument loads for `read` /
   `recvfrom` / `seek` / `sendto` so a pinned-register variable named in any
   argument's expression is not clobbered by another argument's load before use.
   Spec at `docs/superpowers/specs/2026-05-15-common-utilities-design.md`.
