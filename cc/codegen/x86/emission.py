@@ -384,6 +384,43 @@ class EmissionMixin:
         # neither branch's variable-tracking is guaranteed.
         self.ax_clear()
 
+    def _generate_logical_value(self, expression: Node, /) -> None:
+        """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
+
+        cc.py used to handle short-circuit operators only in condition
+        position (inside ``if`` / ``while`` / ``? :`` heads), so any
+        expression-position use like ``int same = a && b;`` raised
+        ``unknown expression: LogicalAnd``.  This helper reuses the
+        existing :meth:`emit_condition_false_jump` /
+        :meth:`emit_condition_true_jump` short-circuit machinery to
+        leave the accumulator holding the C boolean value: 1 when the
+        operand evaluates true, 0 otherwise.
+
+        For ``&&`` we false-jump every leaf to a shared zero-label
+        (matching how condition-position lowering already works), then
+        fall through to set the accumulator to 1.  For ``||`` we
+        true-jump every leaf to a shared one-label, falling through to
+        set the accumulator to 0.
+        """
+        label_index = self.new_label()
+        end_label = f".lbool_{label_index}_end"
+        if isinstance(expression, LogicalAnd):
+            zero_label = f".lbool_{label_index}_zero"
+            self.emit_condition_false_jump(condition=expression, context="expr", fail_label=zero_label)
+            self.emit(f"        mov {self.target.acc}, 1")
+            self.emit(f"        jmp {end_label}")
+            self.emit(f"{zero_label}:")
+            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+        else:
+            one_label = f".lbool_{label_index}_one"
+            self.emit_condition_true_jump(condition=expression, context="expr", success_label=one_label)
+            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+            self.emit(f"        jmp {end_label}")
+            self.emit(f"{one_label}:")
+            self.emit(f"        mov {self.target.acc}, 1")
+        self.emit(f"{end_label}:")
+        self.ax_clear()
+
     def _has_tail_dispatch_shape(self, body: list[Node], /) -> bool:
         """``body[-1]`` is an ``If/else`` whose branches both tail-call.
 
@@ -1173,6 +1210,8 @@ class EmissionMixin:
             self.generate_index_member_index(expression)
         elif isinstance(expression, Conditional):
             self._generate_conditional(expression)
+        elif isinstance(expression, (LogicalAnd, LogicalOr)):
+            self._generate_logical_value(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
