@@ -20,7 +20,7 @@ speculative redesigns.
 
 **Size:** small.
 
-`_emit_syscall_arg_moves` (and `_emit_register_arg_moves` for user calls) breaks
+`_emit_builtin_arg_moves` (and `_emit_register_arg_moves` for user calls) breaks
 cycles by spilling a *simple Var* arg to AX and re-loading it from AX when
 emitted.  If the only candidate inside a cycle is a `BinaryOperation` (or any
 non-`Var` shape), both paths give up and raise.  No real-world syscall has

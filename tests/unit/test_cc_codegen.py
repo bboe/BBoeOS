@@ -1738,6 +1738,64 @@ def test_memcmp_returns_signed_difference() -> None:
     assert "sub eax, edx" in asm, f"Expected 'sub eax, edx' for signed lexical diff in:\n{asm}"
 
 
+def test_memcmp_topologically_orders_aliased_args() -> None:
+    """Memcmp must load SI before DI when arg ``b`` lives in DI.
+
+    Regression: ``memcmp(line + start, pattern, n)`` inside a loop where
+    ``pattern`` is a parameter pinned to EDI used to emit ``mov edi, eax
+    / mov esi, edi``, which made SI point at the freshly-written
+    line+start value — every comparison hit the buffer against itself
+    and returned 0 (equal), so every line "matched."  Caught while
+    landing src/c/grep.c.  builtin_memcmp now routes register loads
+    through _emit_builtin_arg_moves so the load order is topologically
+    safe.
+    """
+    asm = _kernel(
+        """
+        int line_matches(char *pattern, int pattern_length, char *line, int line_length) {
+            if (pattern_length > line_length) {
+                return 0;
+            }
+            int start = 0;
+            while (start <= line_length - pattern_length) {
+                if (memcmp(line + start, pattern, pattern_length) == 0) {
+                    return 1;
+                }
+                start += 1;
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "repe cmpsb":
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        edi_writes = [offset for offset, instruction in enumerate(block) if instruction.startswith(("mov edi,", "xor edi,"))]
+        if not edi_writes:
+            continue
+        first_edi_write = edi_writes[0]
+        tail = block[first_edi_write + 1 :]
+        bad = [instruction for instruction in tail if instruction == "mov esi, edi"]
+        assert not bad, (
+            "builtin_memcmp clobbered EDI before reading it as the source for ESI. "
+            "If a pinned variable lives in EDI, this loads the buffer against itself. "
+            "Offending tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one repe cmpsb; got asm:\n{asm}"
+
+
 def test_memset_emits_rep_stosb() -> None:
     """memset(dst, value, count) compiles to rep stosb."""
     asm = _kernel(

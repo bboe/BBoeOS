@@ -379,70 +379,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     stack.extend(item for item in child if isinstance(item, Node))
         return reads
 
-    def _emit_syscall_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
-        """Emit syscall-arg loads in a topologically safe order.
-
-        Each item is ``(target_register, ast_node)``.  The scheduler
-        picks an item whose target register is not read by any other
-        pending item, then emits it through
-        :meth:`emit_register_from_argument` (which handles every leaf
-        shape — pinned vars, memory scalars, expressions, address-of,
-        constants, etc.).  This prevents the
-        ``mov bx, fd; ... add edi, ebx`` class of bug where loading one
-        argument into BX would clobber a pinned variable that another
-        argument's expression still needs to read.
-
-        Cycles (e.g. two args whose sources and targets mutually swap)
-        would need a temp-register spill; in practice every syscall
-        builtin's argument shape is acyclic, so we raise
-        :class:`CompileError` rather than silently mis-compiling.
-        """
-        items = [
-            {"target": target, "arg": arg, "reads": self._collect_pinned_reads(arg), "spilled": False} for target, arg in register_args
-        ]
-        while items:
-            progress = None
-            for index, item in enumerate(items):
-                target = item["target"]
-                if not any(j != index and target in other["reads"] for j, other in enumerate(items)):
-                    progress = index
-                    break
-            if progress is None:
-                # Cycle break: spill a simple-Var arg whose value lives in
-                # a single pinned register to AX, then re-emit it from AX
-                # later.  This breaks the dependency edge "other items
-                # block me because they read MY source register" — once
-                # the value is also in AX, no one else's reads point at
-                # the now-stale register home.
-                spillable = next(
-                    (
-                        index
-                        for index, item in enumerate(items)
-                        if isinstance(item["arg"], Var)
-                        and item["arg"].name in self.pinned_register
-                        and item["reads"] == {self.pinned_register[item["arg"].name]}
-                        and not any(
-                            j != index and self.pinned_register[item["arg"].name] in other["reads"] for j, other in enumerate(items)
-                        )
-                    ),
-                    None,
-                )
-                if spillable is None:
-                    message = "syscall arg lowering hit an unbreakable cyclic register dependency"
-                    raise CompileError(message, line=getattr(items[0]["arg"], "line", None))
-                spilled = items[spillable]
-                source_register = next(iter(spilled["reads"]))
-                self.emit(f"        mov {self.target.acc}, {source_register}")
-                self.ax_clear()
-                spilled["spilled"] = True
-                spilled["reads"] = set()
-                continue
-            item = items.pop(progress)
-            if item["spilled"]:
-                self.emit(f"        mov {item['target']}, {self.target.acc}")
-            else:
-                self.emit_register_from_argument(argument=item["arg"], register=item["target"])
-
     def _arithmetic_element_size(self, var_name: str, /) -> int:
         """Return the element stride for pointer/array arithmetic on *var_name*.
 
@@ -1449,6 +1385,75 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.generate_expression(arg)
             self.emit(f"        push {self.target.acc}")
+
+    def _emit_builtin_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
+        """Emit builtin-arg loads in a topologically safe order.
+
+        Each item is ``(target_register, ast_node)``.  The scheduler
+        picks an item whose target register is not read by any other
+        pending item, then emits it through
+        :meth:`emit_register_from_argument` (which handles every leaf
+        shape — pinned vars, memory scalars, expressions, address-of,
+        constants, etc.).  This prevents the
+        ``mov bx, fd; ... add edi, ebx`` class of bug where loading one
+        argument into BX would clobber a pinned variable that another
+        argument's expression still needs to read.
+
+        Used by both syscall builtins (``read``, ``recvfrom``, etc.) and
+        string-op builtins (``memcmp``, ``memcpy``, ``memset``) — anywhere
+        multiple registers must be loaded from caller expressions before
+        a single emitted operation.
+
+        Cycles (e.g. two args whose sources and targets mutually swap)
+        would need a temp-register spill; in practice every builtin's
+        argument shape is acyclic, so we raise :class:`CompileError`
+        rather than silently mis-compiling.
+        """
+        items = [
+            {"target": target, "arg": arg, "reads": self._collect_pinned_reads(arg), "spilled": False} for target, arg in register_args
+        ]
+        while items:
+            progress = None
+            for index, item in enumerate(items):
+                target = item["target"]
+                if not any(j != index and target in other["reads"] for j, other in enumerate(items)):
+                    progress = index
+                    break
+            if progress is None:
+                # Cycle break: spill a simple-Var arg whose value lives in
+                # a single pinned register to AX, then re-emit it from AX
+                # later.  This breaks the dependency edge "other items
+                # block me because they read MY source register" — once
+                # the value is also in AX, no one else's reads point at
+                # the now-stale register home.
+                spillable = next(
+                    (
+                        index
+                        for index, item in enumerate(items)
+                        if isinstance(item["arg"], Var)
+                        and item["arg"].name in self.pinned_register
+                        and item["reads"] == {self.pinned_register[item["arg"].name]}
+                        and not any(
+                            j != index and self.pinned_register[item["arg"].name] in other["reads"] for j, other in enumerate(items)
+                        )
+                    ),
+                    None,
+                )
+                if spillable is None:
+                    message = "builtin arg lowering hit an unbreakable cyclic register dependency"
+                    raise CompileError(message, line=getattr(items[0]["arg"], "line", None))
+                spilled = items[spillable]
+                source_register = next(iter(spilled["reads"]))
+                self.emit(f"        mov {self.target.acc}, {source_register}")
+                self.ax_clear()
+                spilled["spilled"] = True
+                spilled["reads"] = set()
+                continue
+            item = items.pop(progress)
+            if item["spilled"]:
+                self.emit(f"        mov {item['target']}, {self.target.acc}")
+            else:
+                self.emit_register_from_argument(argument=item["arg"], register=item["target"])
 
     def _emit_register_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
         """Emit ``mov`` instructions that place args in target registers.
