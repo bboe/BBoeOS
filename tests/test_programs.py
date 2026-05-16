@@ -946,6 +946,16 @@ TESTS: list[ProgramTest] = [
         # "^4$\n^5$" regex.
         r"\$ tail -n 2 seqfile\r?\n4\r?\n5\r?\n\$",
     ),
+    ProgramTest("tail_stdin", ["seq 1 5 | tail -n 2"], r"^4\r?\n5\r?\n\$"),
+    # ~589 KB of input through the 64 KB ring forces eviction many times.
+    # If the ring eviction logic is wrong, the final 3 lines won't match.
+    ProgramTest(
+        "tail_stdin_overflow",
+        ["seq 1 100000 | tail -n 3"],
+        r"^99998\r?\n99999\r?\n100000\r?\n\$",
+        timeout=5.0,
+    ),
+    ProgramTest("tail_stdin_zero", ["seq 1 5 | tail -n 0; echo done"], r"^done\r?\n\$"),
     ProgramTest(
         "tee_basic",
         ["echo hello | tee teefile", "cat teefile"],
