@@ -762,6 +762,8 @@ TESTS: list[ProgramTest] = [
         ["argv_basename alpha bravo"],
         r"argc=3\nargv\[0\]=argv_basename\nargv\[1\]=alpha\nargv\[2\]=bravo\nargv\[argc\]=NULL",
     ),
+    ProgramTest("echo_basic", ["echo hello world"], r"^hello world\r?\n\$"),
+    ProgramTest("echo_dash_e", ["echo -e a\\nb\\tc"], r"^a\r?\nb\tc\r?\n\$"),
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
