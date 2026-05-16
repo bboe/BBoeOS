@@ -813,7 +813,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["fctest"], r"accumulate\(9\)    = 28"),
-    ProgramTest("gptest", ["gptest", "echo recovered"], r"EXC0D[\s\S]*recovered"),
+    ProgramTest("gptest", ["fault_test gp", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("grep_basic", ["echo -e aaa\\nbbb\\naaa | grep aaa"], r"^aaa\r?\naaa\r?\n\$"),
     ProgramTest("grep_case", ["echo HELLO | grep -i hello"], r"^HELLO\r?\n\$"),
     ProgramTest("grep_inverse", ["echo -e aaa\\nbbb\\naaa | grep -v aaa"], r"^bbb\r?\n\$"),
@@ -856,8 +856,8 @@ TESTS: list[ProgramTest] = [
     # per-program PD, so page 0 is always unmapped).  The user-fault
     # kill path tears down the PD and respawns the shell; echo recovered
     # then runs to confirm the new shell works.
-    ProgramTest("nullderef", ["nullderef", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
-    ProgramTest("okptest", ["okptest", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
+    ProgramTest("nullderef", ["fault_test null", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
+    ProgramTest("okptest", ["fault_test kernel_buf", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
     ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
     # play_midi opens /dev/midi, queues a 1 s A4 tone on OPL voice 0, and exits.
     # The QEMU SB16 device exposes the OPL3 synth at 0x388/0x38A so opl_probe
