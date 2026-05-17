@@ -193,10 +193,19 @@ class BuiltinsMixin:
         ``dup2(old_fd, target_fd)`` emits ``mov bx, <old> / mov dx, <target> /
         mov ah, SYS_IO_DUP2 / int 30h``.  Returns target on success or
         -1 on error (CF set).
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so EBX is loaded after any sibling whose evaluation scratches
+        it — e.g. ``dup2(old, get_target())`` where the user-function
+        Call would otherwise wipe EBX between the load and the syscall.
+        Same rationale as builtin_write.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="dup2")
-        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
-        self.emit_register_from_argument(argument=arguments[1], register=self.target.dx_register)
+        old_fd_argument, target_fd_argument = arguments
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, old_fd_argument),
+            (self.target.dx_register, target_fd_argument),
+        ])
         self._emit_syscall("IO_DUP2")
         self.ax_clear()
 
@@ -772,13 +781,22 @@ class BuiltinsMixin:
         Return value:
         - success: zero-extended 16-bit wait status (>= 0).
         - failure: -errno (negative).
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so ESI/EDI are loaded after any sibling whose evaluation
+        scratches them — e.g. ``pipeline2(cmds[i], argv, cmds[j],
+        argv)`` where the second Index lowering reuses ESI as
+        addressing scratch and would otherwise wipe the left_path
+        pointer.  Same rationale as builtin_write.
         """
         self._check_argument_count(arguments=arguments, expected=4, name="pipeline2")
         left_path, left_args, right_path, right_args = arguments
-        self.emit_si_from_argument(left_path)
-        self.emit_register_from_argument(argument=right_path, register=self.target.di_register)
-        self.emit_register_from_argument(argument=left_args, register=self.target.dx_register)
-        self.emit_register_from_argument(argument=right_args, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.si_register, left_path),
+            (self.target.di_register, right_path),
+            (self.target.dx_register, left_args),
+            (self.target.count_register, right_args),
+        ])
         self._emit_syscall("PIPELINE2")
         label_index = self.new_label()
         self.emit(f"        jc .pipeline2_failed_{label_index}")
@@ -1074,11 +1092,19 @@ class BuiltinsMixin:
         previous handler value in EAX.
 
         ABI: EBX = signum, ECX = handler.
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so EBX is loaded after any sibling whose evaluation scratches
+        it — e.g. ``signal(SIGINT, get_handler())`` where the
+        user-function Call would otherwise wipe EBX between the load
+        and the syscall.  Same rationale as builtin_write.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="signal")
         signum_argument, handler_argument = arguments
-        self.emit_register_from_argument(argument=signum_argument, register=self.target.bx_register)
-        self.emit_register_from_argument(argument=handler_argument, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, signum_argument),
+            (self.target.count_register, handler_argument),
+        ])
         self._emit_syscall("SYS_SIGNAL")
         self.ax_clear()
 

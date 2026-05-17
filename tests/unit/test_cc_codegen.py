@@ -3678,6 +3678,218 @@ def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
     assert found_at_least_one, f"test source must compile to at least one SYS_IO_WRITE; got asm:\n{asm}"
 
 
+def test_builtin_dup2_loads_bx_after_clobbering_sibling() -> None:
+    """dup2(old_fd, get_target()) must load EBX last.
+
+    Regression: builtin_dup2 used to load EBX=old_fd first, then
+    EDX=target_fd.  When ``target_fd`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel dup2 handler then saw garbage
+    in EBX.
+
+    Routing dup2's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_target() { return 5; }
+        int main() {
+            dup2(2, get_target());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # a user-function call in a sibling arg IS the bug we want to
+    # catch (caller-save scratching the already-loaded EBX), so the
+    # walk-back must span past it.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_DUP2" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the dup2 input
+        # ``mov ebx, <old_fd>``), nothing else in the setup block may
+        # write EBX — a user-function call between that load and the
+        # syscall would clobber EBX as caller-save scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_dup2 loaded EBX before a sibling call that clobbers it. "
+            "The dup2 syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_DUP2; got asm:\n{asm}"
+
+
+def test_builtin_pipeline2_loads_si_after_index_sibling() -> None:
+    """pipeline2(cmds[i], _, cmds[j], _) must load ESI last.
+
+    Regression: builtin_pipeline2 used to load ESI=left_path first
+    (via emit_si_from_argument), then EDI=right_path.  When
+    ``right_path`` is an Index expression like ``cmds[j]``, the
+    Index lowering reuses ESI as the base-address scratch — wiping
+    out the left_path pointer before the SYS_SYS_PIPELINE2 syscall
+    runs.  Same shape as the write(fd, names[i], strlen(names[i]))
+    bug that motivated PR #386.
+
+    The fix routes pipeline2's four arg loads through
+    :meth:`_emit_builtin_arg_moves`, whose scheduler defers the ESI
+    target until after sibling args whose lowering scratches ESI.
+    """
+    asm = _user(
+        """
+        int main() {
+            char *cmds[3];
+            char **argv = 0;
+            cmds[0] = "a"; cmds[1] = "b"; cmds[2] = "c";
+            int i = 0;
+            int j = 1;
+            pipeline2(cmds[i], argv, cmds[j], argv);
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_SYS_PIPELINE2" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # The fix's contract: after ESI is loaded with the final
+        # cmds[i] value (``mov esi, eax``), nothing else in the
+        # setup block may re-write ESI — the second Index lowering
+        # (for cmds[j]) must have completed already, including all
+        # its `lea esi, [ebp-...]` / `add esi, ...` scratch writes.
+        # Different shape from the write test (which catches
+        # post-load overwrites by a sibling builtin Call) because
+        # pipeline2's bug surfaces as a mid-sequence Index-lowering
+        # overwrite.
+        final_esi_load = -1
+        for offset, instruction in enumerate(block):
+            if instruction == "mov esi, eax":
+                final_esi_load = offset
+        if final_esi_load < 0:
+            continue
+        tail = block[final_esi_load + 1 :]
+        bad = [
+            instruction
+            for instruction in tail
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        assert not bad, (
+            "builtin_pipeline2 re-wrote ESI after loading the left_path "
+            "pointer.  In the buggy sequential order, cmds[j]'s Index "
+            "lowering scratches ESI between the ESI load and the syscall, "
+            "wiping the left_path pointer.  The topological scheduler must "
+            "emit the right_path Index lowering BEFORE the ESI=left_path "
+            "load.  Offending tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_PIPELINE2; got asm:\n{asm}"
+
+
+def test_builtin_signal_loads_bx_after_clobbering_sibling() -> None:
+    """signal(signum, get_handler()) must load EBX last.
+
+    Regression: builtin_signal used to load EBX=signum first, then
+    ECX=handler.  When ``handler`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel signal handler then saw
+    garbage in EBX as the signal number.
+
+    Routing signal's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_handler() { return 1; }
+        int main() {
+            signal(2, get_handler());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # the bug we want to surface is a sibling user-function call
+    # clobbering EBX after it's been loaded, so walk-back must
+    # cross past calls.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_SYS_SIGNAL" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the signal
+        # input ``mov ebx, <signum>``), nothing else in the setup
+        # block may write EBX — a user-function call between that
+        # load and the syscall would clobber EBX as caller-save
+        # scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_signal loaded EBX before a sibling call that clobbers it. "
+            "The signal syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_SIGNAL; got asm:\n{asm}"
+
+
 def test_builtin_sys_break_emits_break_syscall() -> None:
     """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
 
