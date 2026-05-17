@@ -292,6 +292,61 @@ The full design lives at
 `docs/superpowers/specs/2026-05-16-cc-object-files-design.md` (local-only spec
 branch).
 
+### Linker pipeline (`tools/ccld.py`)
+
+`cc.py --object` output is not directly executable.  The companion linker
+`tools/ccld.py` consumes one or more `.ccobj` files (plus optional `.ccar`
+archives) and produces the flat binary that `program_enter` loads at
+`PROGRAM_BASE`.
+
+Invocation:
+
+```sh
+tools/ccld.py --output bin/foo \
+              --base 0x08048000 \
+              build/runtime/_start.ccobj \
+              build/c/foo.ccobj \
+              build/runtime/libbboeruntime.ccar
+```
+
+Positional order matters: the linker concatenates each section (`text → rodata →
+data → BSS-trailer`) in input order, so an object that must land at offset 0 of
+`text` (typically `_start`) is passed first.  `.ccar` archives are scanned for
+symbols on demand — members are pulled in only when an unresolved extern matches
+a member's `provides` list, and pull-in iterates to fixed point so a pulled-in
+member can in turn drag in further members.  The final image is `text || rodata
+|| data || <bss_size:le32><B032:le16>`, with section starts aligned to the
+larger of the default per-section alignment and each contributing object's
+per-section `align` field.
+
+An optional `--emit-map <path>` writes a JSON symbol map (`{"symbols": {name:
+address, ...}}`) for debugging; the map records every global symbol's final
+absolute address (BSS symbols included).
+
+Hard-fail errors (written to stderr, exit 1):
+
+- Unresolved extern after archive pull-in
+- Multiple objects define the same global symbol
+- Relocation references an unknown symbol or unknown relocation type (only
+  `rel32` and `abs32` are recognised today)
+- `.ccobj` version field is not `1`, or required top-level keys are missing
+- A `rel32` displacement does not fit in a signed 32-bit integer
+- A `.ccar` member file referenced in the manifest is missing on disk
+
+### Archive packer (`tools/ccar.py`)
+
+```sh
+tools/ccar.py --output build/runtime/libbboeruntime.ccar \
+              build/runtime/*.ccobj
+```
+
+Writes a JSON manifest at `--output`; each member entry records the file's
+basename and its `provides` list (the global symbols it defines — local symbols
+are object-private and never appear).  Members must live in the same directory
+as the manifest: the linker resolves member paths as siblings of the manifest
+file, so packer and linker agree on layout without an absolute path baked into
+the archive.
+
 ## Quick example
 
 A minimal program:

@@ -137,7 +137,8 @@ def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
         check=True,
     )
 
-    data = json.loads(output.read_text())
+    with output.open() as file:
+        data = json.load(file)
 
     assert data["version"] == 1
     assert set(data["symbols"]) == {"main", "helper", "format_string", "counter", "scratch"}
@@ -202,7 +203,8 @@ def test_round_trip_c_to_ccobj(tmp_path: Path) -> None:
         check=True,
     )
 
-    data = json.loads(ccobj.read_text())
+    with ccobj.open() as file:
+        data = json.load(file)
     assert "main" in data["symbols"]
     assert data["symbols"]["main"]["binding"] == "global"
     assert data["symbols"]["main"]["section"] == "text"

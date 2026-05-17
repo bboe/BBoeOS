@@ -1,10 +1,4 @@
-"""cc.py pack-ccobj: package a NASM .bin + .lst into a .ccobj JSON.
-
-The .ccobj format is documented in
-docs/superpowers/specs/2026-05-16-cc-object-files-design.md § "Object
-file format".  Schema is version 1; new reloc types or section kinds
-bump the version.
-"""
+"""cc.py pack-ccobj: package a NASM .bin + .lst into a .ccobj JSON."""
 
 from __future__ import annotations
 
