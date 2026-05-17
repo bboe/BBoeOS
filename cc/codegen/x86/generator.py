@@ -1856,8 +1856,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.variable_types[name] = "function_pointer"
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
-                if declaration.type_name not in ("char", "int", "uint8_t") and not declaration.type_name.startswith("struct "):
-                    message = f"global array '{name}' must have element type 'char', 'int', 'uint8_t', or a struct type"
+                if (
+                    declaration.type_name not in self.GLOBAL_ARRAY_PRIMITIVE_TYPES
+                    and not declaration.type_name.startswith("struct ")
+                    and not declaration.type_name.endswith("*")
+                ):
+                    allowed = ", ".join(f"'{name}'" for name in sorted(self.GLOBAL_ARRAY_PRIMITIVE_TYPES))
+                    message = f"global array '{name}' must have element type {allowed}, a pointer, or a struct type"
                     raise CompileError(message, line=declaration.line)
                 if declaration.type_name in self.BYTE_TYPES:
                     self.global_byte_arrays.add(name)
