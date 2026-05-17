@@ -1251,12 +1251,15 @@ class Parser:
             return self._parse_pointer_suffix(pointer_bases[token[0]], max_stars=2)
         if token[0] == "UNSIGNED":
             self.eat()
-            if self.peek()[0] != "LONG":
-                following = self.peek()
-                message = f"expected 'long' after 'unsigned', got {following[1]!r}"
-                raise CompileError(message, line=token[2])
-            self.eat()
-            return "unsigned long"
+            following = self.peek()
+            if following[0] == "LONG":
+                self.eat()
+                return "unsigned long"
+            if following[0] == "INT":
+                self.eat()
+                return self._parse_pointer_suffix("unsigned int", max_stars=2)
+            message = f"expected 'int' or 'long' after 'unsigned', got {following[1]!r}"
+            raise CompileError(message, line=token[2])
         if token[0] == "LONG":
             message = "bare 'long' is not supported; use 'unsigned long'"
             raise CompileError(message, line=token[2])

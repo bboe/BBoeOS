@@ -240,7 +240,7 @@ class X86CodegenTarget(CodegenTarget):
         :class:`KeyError` for unknown types — callers handle struct,
         function_pointer, and array variants before reaching here.
         """
-        if name == "int" or "*" in name:
+        if name in {"int", "unsigned int"} or "*" in name:
             return self.int_size
         return self.type_sizes[name]
 
