@@ -1181,11 +1181,21 @@ class BuiltinsMixin:
         ``write(fd, buffer, count)`` emits ``mov bx, <fd> /
         mov si, <buffer> / mov cx, <count> / mov ah, SYS_IO_WRITE /
         int 30h``.  Returns bytes written in AX (-1 on error).
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so the buffer (ESI) is loaded after any sibling whose
+        evaluation uses ESI as addressing scratch — e.g.
+        ``write(STDOUT, names[i], strlen(names[i]))``, where the
+        ``strlen`` call internally re-lowers ``names[i]`` through ESI
+        and would otherwise erase the buffer pointer between the
+        ``mov esi, ...`` and the syscall.
         """
         self._check_argument_count(arguments=arguments, expected=3, name="write")
         fd_argument, buffer_argument, count_argument = arguments
-        self.emit_register_from_argument(argument=buffer_argument, register=self.target.si_register)
-        self.emit_register_from_argument(argument=count_argument, register=self.target.count_register)
-        self.emit_register_from_argument(argument=fd_argument, register=self.target.bx_register)
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.si_register, buffer_argument),
+            (self.target.count_register, count_argument),
+        ])
         self._emit_syscall("IO_WRITE")
         self.ax_clear()

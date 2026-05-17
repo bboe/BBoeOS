@@ -1405,18 +1405,75 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.generate_expression(arg)
             self.emit(f"        push {self.target.acc}")
 
+    def _estimate_scratch_clobbers(self, node: Node, /) -> set[str]:
+        """Return registers that *node*'s evaluation may clobber as scratch.
+
+        Distinct from :meth:`_collect_pinned_reads`, which tracks which
+        *pinned* register a node *reads*.  This tracks which registers
+        the lowering will *write* to internally on its way to leaving
+        the result in the accumulator.
+
+        Conservative — only models the clobbers that have actually been
+        observed to corrupt sibling argument loads.  The known one is
+        SI: a non-trivial ``Index`` expression with a non-constant base
+        ``mov``s into SI as the addressing scratch (see
+        :meth:`generate_expression`'s Index path), trashing any value
+        the surrounding builtin loaded earlier into SI for a different
+        argument.  ``Call`` arguments inherit their callee's documented
+        ``BUILTIN_CLOBBERS`` set so a builtin like ``strlen`` (clobbers
+        AX/CX/DI) blocks a sibling load into one of those registers
+        from being emitted first.
+        """
+        clobbers: set[str] = set()
+        stack: list[Node] = [node]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Index):
+                # Index lowering uses SI as the base-address scratch
+                # whenever the base isn't a compile-time constant — by
+                # far the most common shape.  Be conservative and
+                # always claim SI.
+                clobbers.add(self.target.si_register)
+            elif isinstance(current, Call):
+                builtin_clobbers = self._builtin_clobbers.get(current.name)
+                if builtin_clobbers is not None:
+                    # BUILTIN_CLOBBERS uses 16-bit names; widen so the
+                    # 32-bit scheduler comparisons line up with target
+                    # register names like ``esi`` / ``ecx``.
+                    clobbers.update(self.target.widen_gp(register) for register in builtin_clobbers)
+                # User functions / unknown callees: assume they trample
+                # everything except BP (the frame register).  Acc, BX,
+                # CX, DX, SI, DI are all fair game for the caller-save
+                # cdecl convention this compiler emits.
+                else:
+                    clobbers.update(
+                        getattr(self.target, register)
+                        for register in ("acc", "bx_register", "count_register", "dx_register", "si_register", "di_register")
+                    )
+            for slot in getattr(type(current), "__slots__", ()):
+                child = getattr(current, slot, None)
+                if isinstance(child, Node):
+                    stack.append(child)
+                elif isinstance(child, list):
+                    stack.extend(item for item in child if isinstance(item, Node))
+        return clobbers
+
     def _emit_builtin_arg_moves(self, register_args: list[tuple[str, Node]], /) -> None:
         """Emit builtin-arg loads in a topologically safe order.
 
         Each item is ``(target_register, ast_node)``.  The scheduler
-        picks an item whose target register is not read by any other
-        pending item, then emits it through
+        picks an item whose target register is (a) not read by any
+        other pending item, and (b) not clobbered as scratch by any
+        other pending item's evaluation, then emits it through
         :meth:`emit_register_from_argument` (which handles every leaf
         shape — pinned vars, memory scalars, expressions, address-of,
-        constants, etc.).  This prevents the
-        ``mov bx, fd; ... add edi, ebx`` class of bug where loading one
-        argument into BX would clobber a pinned variable that another
-        argument's expression still needs to read.
+        constants, etc.).  Constraint (a) prevents
+        ``mov bx, fd; ... add edi, ebx`` where loading one argument
+        into BX would clobber a pinned variable that another argument's
+        expression still needs to read.  Constraint (b) prevents
+        ``mov esi, names[i]; mov edi, strlen(names[i])`` where the
+        second arg's Index lowering reuses ESI as scratch and erases
+        the buffer pointer the surrounding builtin (``write``) needs.
 
         Used by both syscall builtins (``read``, ``recvfrom``, etc.) and
         string-op builtins (``memcmp``, ``memcpy``, ``memset``) — anywhere
@@ -1429,13 +1486,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         rather than silently mis-compiling.
         """
         items = [
-            {"target": target, "arg": arg, "reads": self._collect_pinned_reads(arg), "spilled": False} for target, arg in register_args
+            {
+                "target": target,
+                "arg": arg,
+                "reads": self._collect_pinned_reads(arg),
+                "scratch": self._estimate_scratch_clobbers(arg),
+                "spilled": False,
+            }
+            for target, arg in register_args
         ]
         while items:
             progress = None
             for index, item in enumerate(items):
                 target = item["target"]
-                if not any(j != index and target in other["reads"] for j, other in enumerate(items)):
+                read_blocked = any(j != index and target in other["reads"] for j, other in enumerate(items))
+                scratch_blocked = any(j != index and target in other["scratch"] for j, other in enumerate(items))
+                if not read_blocked and not scratch_blocked:
                     progress = index
                     break
             if progress is None:
