@@ -1282,7 +1282,7 @@ class Parser:
             following = self.peek()
             if following[0] == "LONG":
                 self.eat()
-                return "unsigned long"
+                return self._parse_pointer_suffix("unsigned long", max_stars=2)
             if following[0] == "INT":
                 self.eat()
                 return self._parse_pointer_suffix("unsigned int", max_stars=2)
