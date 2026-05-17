@@ -3436,6 +3436,56 @@ def test_user_file_scope_bss_globals() -> None:
     assert "_bss_end equ _program_end + 44" in asm, f"expected 4+32+8=44 BSS bytes:\n{asm}"
 
 
+def test_user_global_array_pointer_and_uint32_elements() -> None:
+    """Pointer-typed and uint32_t global arrays land in BSS as word-strided slots.
+
+    ``char *slots[N]`` and ``uint32_t counters[N]`` both follow the
+    existing word-stride codegen path; the file-scope allowlist accepts
+    pointer element types and uint32_t (alongside the original
+    char/int/uint8_t/struct).
+    """
+    ok, asm = _compile(
+        r"""
+        char *slots[4];
+        uint32_t counters[3];
+
+        int main() {
+            slots[0] = "hi";
+            slots[1] = 0;
+            counters[2] = 0xDEADBEEF;
+            char *p = slots[0];
+            uint32_t c = counters[2];
+            return c;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "_g_slots equ _program_end" in asm, f"slots missing from BSS:\n{asm}"
+    assert "_g_counters equ _program_end" in asm, f"counters missing from BSS:\n{asm}"
+    # 4 pointer slots (16 bytes) + 3 uint32 slots (12 bytes) = 28 bytes.
+    assert "_bss_end equ _program_end + 28" in asm, f"expected 16+12=28 BSS bytes:\n{asm}"
+
+
+def test_user_global_array_rejects_uint16_element() -> None:
+    """uint16_t global arrays are still rejected — the codegen has no halfword stride."""
+    ok, output = _compile(
+        r"""
+        uint16_t halfwords[4];
+
+        int main() {
+            halfwords[0] = 1;
+            return 0;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert not ok, "expected compile error"
+    assert "must have element type" in output, f"unexpected error:\n{output}"
+
+
 def test_user_include_directive_pulls_macro_and_helper() -> None:
     """``#include "..."`` exposes #define macros and helper functions.
 

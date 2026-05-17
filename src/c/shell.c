@@ -14,16 +14,14 @@
    *following* each segment into segment_ops[] (the last entry is
    OP_END).  Each segment is memcpy'd into input_buf one-at-a-time and
    dispatched (tokenize_argv splits input_buf in place into dispatch_argv,
-   handed straight to the exec() syscall).  cc.py global arrays only
-   support char/int/uint8_t/struct elements, hence offsets-not-pointers. */
+   handed straight to the exec() syscall). */
 char chain_buf[MAX_INPUT];
 
 /* Redirection state for one dispatch_buffer call.  parse_redirections
    fills these; apply_redirections consumes them.  Each filename is
    null-terminated and lives in redirect_names; the redirect entries
-   point in via byte offsets (cc.py arrays don't carry pointer-element
-   types end-to-end).  Operator kinds: IN = `<` ; OUT = `>` (truncate);
-   APPND = `>>` (append). */
+   point in via byte offsets.  Operator kinds: IN = `<` ; OUT = `>`
+   (truncate); APPND = `>>` (append). */
 #define MAX_REDIRECTS 3
 #define REDIRECT_OP_APPND 0
 #define REDIRECT_OP_IN    1
@@ -94,11 +92,11 @@ char segment_ops[MAX_SEGMENTS];
    the new program's stack frame via a kmap alias — building the
    Linux SysV i386 startup frame in place with no kernel-side
    scratch. */
-int  pipe_left_argv[MAX_ARGV_ENTRIES + 1];     /* cc.py: 32-bit ints = pointer-sized; stores char* values */
+char *pipe_left_argv[MAX_ARGV_ENTRIES + 1];
 char pipe_left_buf[MAX_INPUT];
 char pipe_left_name[MAX_INPUT];
 char pipe_left_path[MAX_PATH];
-int  pipe_right_argv[MAX_ARGV_ENTRIES + 1];
+char *pipe_right_argv[MAX_ARGV_ENTRIES + 1];
 char pipe_right_buf[MAX_INPUT];
 char pipe_right_name[MAX_INPUT];
 char pipe_right_path[MAX_PATH];
@@ -212,17 +210,16 @@ int delete_at_cursor(char *buf, int cursor, int end) {
    try_exec, both of which sort later in this file.  cc.py resolves
    forward refs silently; clang under -std=c99 needs them up front. */
 int expand_dollar_question(char *buffer, int max_len);
-int tokenize_argv(char *buf, int *argv_slots);
-int try_exec(char *name, int *argv);
+int tokenize_argv(char *buf, char **argv_slots);
+int try_exec(char *name, char **argv);
 
 /* dispatch_* scratch buffers — file-scope so they stay live for
    try_exec() without consuming user stack on every call.
-   dispatch_argv is the NULL-terminated char** array (stored as int
-   slots since cc.py globals don't accept char *[]) the kernel walks
+   dispatch_argv is the NULL-terminated char** array the kernel walks
    when staging the new program's user-stack argv frame; dispatch_bin
    holds the `bin/<name>` fallback path; dispatch_name holds the bare
    program name (no `bin/` prefix), used to build dispatch_bin. */
-int  dispatch_argv[MAX_ARGV_ENTRIES + 1];
+char *dispatch_argv[MAX_ARGV_ENTRIES + 1];
 char dispatch_bin[MAX_PATH];
 char dispatch_name[MAX_INPUT];
 
@@ -412,8 +409,8 @@ int find_top_level_pipe(char *segment) {
    under -std=c99 (test_cc_compatibility's reference build) requires
    explicit declarations. */
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
-int tokenize_argv(char *buf, int *argv_slots);
-int tokenize_pipeline_side(char *source, char *name_out, int *argv_slots);
+int tokenize_argv(char *buf, char **argv_slots);
+int tokenize_pipeline_side(char *source, char *name_out, char **argv_slots);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -662,7 +659,7 @@ int strcmp(const char *a, const char *b) {
    (the kernel hands the raw bytes through as argv strings).  argv[0]
    ends up pointing at the program name token (first whitespace-bounded
    chunk of buf). */
-int tokenize_argv(char *buf, int *argv_slots) {
+int tokenize_argv(char *buf, char **argv_slots) {
     int scan = 0;
     int argc = 0;
     while (1) {
@@ -675,7 +672,7 @@ int tokenize_argv(char *buf, int *argv_slots) {
         if (argc >= MAX_ARGV_ENTRIES) {
             return -1;
         }
-        argv_slots[argc] = (int)(buf + scan);
+        argv_slots[argc] = buf + scan;
         argc += 1;
         int in_single = 0;
         int in_double = 0;
@@ -701,7 +698,7 @@ int tokenize_argv(char *buf, int *argv_slots) {
    and tokenise the full source into argv_slots in place.  Mirrors what
    dispatch_buffer does for a single command.  Returns argc or -1 on
    overflow. */
-int tokenize_pipeline_side(char *source, char *name_out, int *argv_slots) {
+int tokenize_pipeline_side(char *source, char *name_out, char **argv_slots) {
     int scan = 0;
     int in_single = 0;
     int in_double = 0;
@@ -724,7 +721,7 @@ int tokenize_pipeline_side(char *source, char *name_out, int *argv_slots) {
     return tokenize_argv(source, argv_slots);
 }
 
-int try_exec(char *name, int *argv) {
+int try_exec(char *name, char **argv) {
     /* Returns:
          0 — file not found; last_exec_status unchanged.
          1 — file exists but is not executable; last_exec_status unchanged.

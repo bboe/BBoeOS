@@ -174,6 +174,14 @@ class CodeGeneratorBase:
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
+    #: Primitive element types accepted for file-scope arrays.  All are
+    #: byte-sized or word-sized so the global-array codegen's binary
+    #: byte-vs-word stride switch handles them; ``uint16_t`` is omitted
+    #: because the codegen has no halfword path.  Pointer (``*``) and
+    #: ``struct`` element types are accepted separately at the validation
+    #: site since both require different codegen treatment.
+    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "int", "uint32_t", "uint8_t"})
+
     #: Non-pointer scalar type names whose values are unsigned in
     #: comparisons.  Pointers are handled separately by
     #: :meth:`_is_unsigned_type` (any type ending in ``*`` is treated as
