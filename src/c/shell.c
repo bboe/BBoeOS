@@ -690,6 +690,29 @@ int tokenize_argv(char *buf, char **argv_slots) {
         }
     }
     argv_slots[argc] = 0;
+    /* Strip surrounding quote chars from each argv entry in place. */
+    int argv_index = 0;
+    while (argv_index < argc) {
+        char *token = argv_slots[argv_index];
+        int read_index = 0;
+        int write_index = 0;
+        int in_single = 0;
+        int in_double = 0;
+        while (token[read_index] != '\0') {
+            char character = token[read_index];
+            if (character == '\'' && in_double == 0) {
+                in_single = 1 - in_single;
+            } else if (character == '"' && in_single == 0) {
+                in_double = 1 - in_double;
+            } else {
+                token[write_index] = character;
+                write_index += 1;
+            }
+            read_index += 1;
+        }
+        token[write_index] = '\0';
+        argv_index += 1;
+    }
     return argc;
 }
 
@@ -699,26 +722,21 @@ int tokenize_argv(char *buf, char **argv_slots) {
    dispatch_buffer does for a single command.  Returns argc or -1 on
    overflow. */
 int tokenize_pipeline_side(char *source, char *name_out, char **argv_slots) {
-    int scan = 0;
-    int in_single = 0;
-    int in_double = 0;
-    while (source[scan] != '\0') {
-        if (source[scan] == '\'' && in_double == 0) {
-            in_single = 1 - in_single;
-        } else if (source[scan] == '"' && in_single == 0) {
-            in_double = 1 - in_double;
-        } else if (source[scan] == ' ' && in_single == 0 && in_double == 0) {
-            break;
-        }
-        scan += 1;
+    /* tokenize_argv strips quotes in place, so the post-tokenize
+       argv[0] is the basename with no surrounding quotes to copy. */
+    int argc = tokenize_argv(source, argv_slots);
+    if (argc <= 0) {
+        name_out[0] = '\0';
+        return argc;
     }
+    char *basename = argv_slots[0];
     int name_index = 0;
-    while (name_index < scan) {
-        name_out[name_index] = source[name_index];
+    while (basename[name_index] != '\0') {
+        name_out[name_index] = basename[name_index];
         name_index += 1;
     }
     name_out[name_index] = '\0';
-    return tokenize_argv(source, argv_slots);
+    return argc;
 }
 
 int try_exec(char *name, char **argv) {
