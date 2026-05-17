@@ -260,10 +260,15 @@ class EmissionMixin:
         i = 0
         while i < len(statements):
             statement = statements[i]
-            # Fuse simple printf() + exit() into die().
-            next_is_exit = i + 1 < len(statements) and (
-                statements[i + 1] == Call(args=[], name="exit") or isinstance(statements[i + 1], Return)
-            )
+            # Fuse simple printf() + exit() into die().  ``Return`` is
+            # deliberately NOT fused here: a non-main function's
+            # ``printf("err\n"); return -1;`` reports an error to a
+            # caller that branches on the return value — turning the
+            # whole pair into ``die(...)`` would never return and the
+            # caller's recovery path would silently disappear.  main's
+            # trailing ``printf+return`` is fused separately via
+            # ``fuse_trailing_printf``, which only runs for main.
+            next_is_exit = i + 1 < len(statements) and statements[i + 1] == Call(args=[], name="exit")
             if self._is_simple_printf(statement) and next_is_exit:
                 self.builtin_die(statement.args)
                 i += 2
