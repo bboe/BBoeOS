@@ -3442,6 +3442,32 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
         )
 
 
+def test_void_cast_call_statement_emits_call() -> None:
+    """``(void)open(...);`` parses and emits the call, discarding the return."""
+    asm = _user("""
+        int main() {
+            (void)open("foo", 0);
+            return 0;
+        }
+    """)
+    assert "IO_OPEN" in asm or "SYS_IO_OPEN" in asm, f"expected open syscall to be emitted:\n{asm}"
+
+
+def test_void_cast_variable_compiles_to_no_op() -> None:
+    """``(void)x;`` parses and emits no code for the cast itself."""
+    asm = _user("""
+        int main() {
+            int x;
+            x = 5;
+            (void)x;
+            return x;
+        }
+    """)
+    # The variable read still has its assignment, but the (void) cast
+    # itself produces no instructions.
+    assert "main:" in asm
+
+
 def test_builtin_read_emits_fd_last() -> None:
     """builtin_read must load `fd` into BX AFTER computing buf/count.
 

@@ -983,6 +983,23 @@ class Parser:
             expr = self.parse_expression()
             self.eat("SEMI")
             return DerefAssign(expr=expr, line=token[2], pointer=Var(line=token[2], name=name_token[1]))
+        if token[0] == "LPAREN" and self.peek(offset=1)[0] == "VOID" and self.peek(offset=2)[0] == "RPAREN":
+            # ``(void)expr;`` — evaluate *expr* for side effects only and
+            # discard the result.  Common in C to mark a value as
+            # deliberately unused; cc.py supports the call case (emit the
+            # call, discard the return) and the no-side-effect case (emit
+            # nothing).
+            self.eat("LPAREN")
+            self.eat("VOID")
+            self.eat("RPAREN")
+            if self.peek()[0] == "IDENT" and self.peek(offset=1)[0] == "LPAREN":
+                return self.parse_call_statement()
+            # Non-call expression: parse to consume the tokens, then
+            # discard.  Emits as an empty InlineAsm so the statement
+            # generator has a node to dispatch on but produces no code.
+            self.parse_expression()
+            self.eat("SEMI")
+            return InlineAsm(content="", line=token[2])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":

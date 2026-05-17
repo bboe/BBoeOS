@@ -2163,6 +2163,13 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, TailCall):
             self.generate_tail_call(statement)
+        elif isinstance(statement, InlineAsm):
+            # Empty / inline-asm statement (produced by ``(void)expr;``
+            # discard sites and any future statement-level asm escape).
+            # Splits on ``\n`` so multi-line content emits one ``emit``
+            # per line; empty content emits nothing.
+            for line in decode_string_escapes(statement.content).splitlines():
+                self.emit(line)
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)
