@@ -15,6 +15,8 @@
  *   03h ERROR_FAULT           -> EFAULT
  *   04h ERROR_INTERRUPTED     -> EINTR
  *   05h ERROR_INVALID         -> EINVAL
+ *   0Ah ERROR_IS_DIRECTORY    -> EISDIR
+ *   0Bh ERROR_NOT_DIRECTORY   -> ENOTDIR
  *   06h ERROR_NOT_EMPTY       -> ENOTEMPTY (mapped to EACCES; not in our errno.h)
  *   07h ERROR_NOT_EXECUTE     -> EACCES
  *   08h ERROR_NOT_FOUND       -> ENOENT
@@ -29,6 +31,8 @@ static int _errno_from_al(int al) {
         case ERROR_FAULT:          return EFAULT;
         case ERROR_INTERRUPTED:    return EINTR;
         case ERROR_INVALID:        return EINVAL;
+        case ERROR_IS_DIRECTORY:   return EISDIR;
+        case ERROR_NOT_DIRECTORY:  return ENOTDIR;
         case ERROR_NOT_EMPTY:      return EACCES;  /* no ENOTEMPTY in our errno.h */
         case ERROR_NOT_EXECUTE:    return EACCES;
         case ERROR_NOT_FOUND:      return ENOENT;
@@ -73,6 +77,27 @@ int close(int fd) {
         : "ebx");
     if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return -1; }
     return 0;
+}
+
+int getdents(int fd, void *buffer, int count) {
+    /* SYS_IO_GETDENTS: BX=fd, DI=buffer, CX=count; returns AX=bytes
+     * written (0 at EOF), CF=1 with AL=ERROR_* on failure
+     * (e.g. ERROR_NOT_DIRECTORY when fd is a regular file). */
+    unsigned int eax_out, cf;
+    __asm__ volatile (
+        "mov %[buffer], %%edi\n\t"
+        "mov %[len], %%ecx\n\t"
+        "mov %[fd], %%bx\n\t"
+        "mov $" SYSNUM_STR(SYS_IO_GETDENTS) ", %%ah\n\t"
+        "int $0x30\n\t"
+        "setc %b[cf]\n\t"
+        : "=a"(eax_out), [cf]"=&q"(cf)
+        : [buffer]"g"((unsigned int)buffer),
+          [len]   "g"((unsigned int)count),
+          [fd]    "g"((unsigned short)fd)
+        : "edi", "ecx", "ebx");
+    if (cf & 1) { errno = _errno_from_al(eax_out & 0xFF); return -1; }
+    return (int)eax_out;
 }
 
 int gettimeofday(struct timeval *tv, struct timezone *tz) {

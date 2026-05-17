@@ -27,7 +27,7 @@ CFLAGS  := --target=i386-pc-none-elf -m32 -march=i386 -mno-mmx -mno-sse -mno-sse
            -mno-implicit-float -fno-vectorize -fno-slp-vectorize \
            -ffreestanding -fno-pic -fno-stack-protector \
            -nostdlib -nostdinc -O2 -Wall -Wextra -Werror -Iinclude
-C_SRCS  := builtins.c ctype.c errno.c math.c signal.c stdio.c stdlib.c string.c syscall.c
+C_SRCS  := builtins.c ctype.c dirent.c errno.c math.c signal.c stdio.c stdlib.c string.c syscall.c
 OBJS     = $(C_SRCS:.c=.o) $(S_SRCS:.S=.o)
 S_SRCS  := _start.S setjmp.S
 

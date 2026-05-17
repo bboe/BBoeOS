@@ -652,14 +652,17 @@ int fd_read_pipe(int *result __attribute__((out_register("ax"))),
     }
 }
 
-// fd_seek: reposition the read/write cursor for a regular file fd.
-// Inputs: BX = fd, ECX = signed offset, AL = whence (SEEK_SET=0,
-// SEEK_CUR=1, SEEK_END=2).  Returns EAX = new absolute position
-// (clamped to [0, size]), CF set on bad fd / wrong type / unknown
-// whence.  Only FD_TYPE_FILE is seekable — sockets, console, and
-// directories all error.  We clamp rather than fail on out-of-range
-// because Doom's WAD reader sometimes seeks past EOF and expects the
-// next read to return 0 bytes (EOF semantics).
+// fd_seek: reposition the read/write cursor for a regular file or
+// directory fd.  Inputs: BX = fd, ECX = signed offset, AL = whence
+// (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2).  Returns EAX = new absolute
+// position (clamped to [0, size]), CF set on bad fd / wrong type /
+// unknown whence.  FD_TYPE_FILE supports the full set of whence
+// values; FD_TYPE_DIRECTORY supports SEEK_SET=0 (rewinddir) — broader
+// directory seeks clamp the same way file seeks do and are accepted,
+// but seekdir/telldir semantics aren't promised.  Sockets, consoles,
+// VGA, and the audio/midi devices all error.  We clamp rather than
+// fail on out-of-range because Doom's WAD reader sometimes seeks past
+// EOF and expects the next read to return 0 bytes (EOF semantics).
 __attribute__((carry_return))
 int fd_seek(int *result __attribute__((out_register("ax"))),
             int fd_num __attribute__((in_register("bx"))),
@@ -671,7 +674,7 @@ int fd_seek(int *result __attribute__((out_register("ax"))),
         *result = -1;
         return 0;
     }
-    if (entry->type != FD_TYPE_FILE) {
+    if (entry->type != FD_TYPE_FILE && entry->type != FD_TYPE_DIRECTORY) {
         *result = -1;
         return 0;
     }

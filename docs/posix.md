@@ -237,7 +237,7 @@ are both single-level under root.
 | `glob` / `globfree` | — | ❌ | ❌ | No shell-side or library-side globbing. |
 | `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `tools/libc` wrapper is a stub returning `-1`. |
 | `nftw` | — | ❌ | ❌ | One-level FS; programs walk the root directory directly. |
-| `opendir` / `readdir` / `closedir` / `rewinddir` | — | ❌ | ❌ | No libc wrapper yet; cc.py-built programs call `SYS_IO_GETDENTS` directly. |
+| `opendir` / `readdir` / `closedir` / `rewinddir` | `SYS_IO_GETDENTS` (14h) | ⚠️ | ❌ | Implemented in `tools/libc/dirent.c` for clang-built programs (e.g. `bin/hello`).  No `seekdir` / `telldir`; `struct dirent` exposes `d_ino`/`d_type`/`d_name` only.  cc.py-built shipped programs still call `SYS_IO_GETDENTS` directly. |
 | `pathconf` / `fpathconf` | — | ❌ | ❌ | `MAX_PATH = 64`, names ≤26 bytes — fixed at compile time. |
 | `realpath` | — | ❌ | ❌ | No symlinks to resolve and no working directory; all paths are already root-relative. |
 | `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `tools/libc` `rename()` is a stub. |
