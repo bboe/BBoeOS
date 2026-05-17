@@ -862,6 +862,17 @@ class Parser:
                     right=index,
                 )
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
+        if token[0] == "STAR":
+            # Unary deref: ``*p`` reads the value pointed at by *p*.
+            # Desugar to ``p[0]`` so the existing Index lowering handles
+            # the load (pointee-typed; same width / sign as ``p[0]``).
+            self.eat()
+            name_token = self.eat("IDENT")
+            return Index(
+                array=Var(line=line, name=name_token[1]),
+                index=Int(line=line, value=0),
+                line=line,
+            )
         if token[0] == "LPAREN":
             self.eat()
             # Pointer-cast or void-cast: `(<type>)expr`.  cc.py's type

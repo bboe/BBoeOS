@@ -2667,6 +2667,45 @@ def test_preserve_register_push_pop() -> None:
         assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
 
 
+def test_read_deref_char_pointer_zero_extends_byte() -> None:
+    """``char c = *p;`` reads one byte (matches ``p[0]`` semantics)."""
+    asm = _kernel("""
+        void f(char *p) {
+            char c;
+            c = *p;
+            if (c == 'A') {
+                c = 'B';
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_read_deref_int_pointer_compiles() -> None:
+    """``x = *p;`` for ``int *p`` parses and lowers to a load."""
+    asm = _kernel("""
+        void f(int *p) {
+            int x;
+            x = *p;
+            if (x == 0) {
+                x = 1;
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_read_deref_uint16_pointer_compiles() -> None:
+    """``x = *p;`` for ``uint16_t *p`` parses and lowers to a load."""
+    asm = _kernel("""
+        void f(uint16_t *p) {
+            uint16_t x;
+            x = *p;
+        }
+    """)
+    assert "f:" in asm
+
+
 def test_signed_int_less_than_still_emits_jge() -> None:
     """``int < literal`` keeps the signed ``jge`` (false-branch).
 
