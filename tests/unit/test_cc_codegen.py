@@ -3501,6 +3501,89 @@ def test_builtin_read_emits_fd_last() -> None:
     assert found_at_least_one, f"test source must compile to at least one SYS_IO_READ; got asm:\n{asm}"
 
 
+def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
+    """write(fd, names[i], strlen(names[i])) must load ESI last.
+
+    Regression: builtin_write used to load ESI=buffer, then ECX=count.
+    When ``count`` was ``strlen(names[i])`` the recursive lowering
+    re-evaluated the Index expression and re-used ESI as the
+    base-address scratch — overwriting the buffer pointer that was
+    just placed there.  The resulting ``write`` syscall pointed at the
+    ``names`` array's first slot every iteration, so ``ls`` (the
+    program that surfaced this in src/c/ls.c) printed the same name
+    repeated, garbled by length mismatches.
+
+    The fix routes write's three arg loads through
+    :meth:`_emit_builtin_arg_moves`, whose scheduler now also tracks
+    "this evaluation will scratch ESI" and defers the ESI-targeted
+    load until after sibling args whose lowering clobbers it.
+    """
+    asm = _user(
+        """
+        int main() {
+            char arena[16];
+            char *names[3];
+            arena[0] = 'a'; arena[1] = 'b'; arena[2] = 0;
+            arena[3] = 'c'; arena[4] = 'd'; arena[5] = 0;
+            arena[6] = 'e'; arena[7] = 'f'; arena[8] = 0;
+            names[0] = arena + 0;
+            names[1] = arena + 3;
+            names[2] = arena + 6;
+            int i = 0;
+            while (i < 3) {
+                write(STDOUT, names[i], strlen(names[i]));
+                putchar('\\n');
+                i = i + 1;
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_WRITE" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # The buffer load is the LAST instruction that writes ESI
+        # before the syscall.  After that, nothing else should write
+        # ESI — that would obliterate the buffer pointer before
+        # SYS_IO_WRITE reads it.
+        esi_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        if not esi_writes:
+            continue
+        last_esi_write = esi_writes[-1]
+        tail = block[last_esi_write + 1 :]
+        bad = [
+            instruction
+            for instruction in tail
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        assert not bad, (
+            "builtin_write clobbered ESI after loading the buffer pointer. "
+            "The syscall will dereference the wrong address. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_WRITE; got asm:\n{asm}"
+
+
 def test_builtin_sys_break_emits_break_syscall() -> None:
     """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
 
