@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 from cc import ast_nodes
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
+#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
+#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
+#: (both 4-byte unsigned); on the 32-bit target they are also both
+#: 4-byte, and the special-case load is harmless there.  Either
+#: spelling must trigger the long-pointee dispatch — otherwise
+#: ``uint32_t *p; x = p[0];`` silently reads only the low 16 bits on
+#: the 16-bit target while the ``unsigned long *`` form reads all
+#: four.
+_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
 Value = int | str | ast_nodes.AddressOf
 
 
@@ -234,6 +244,18 @@ class Builder:
     def _build_function(self, func: ast_nodes.Function) -> Function:
         out: list[Instruction] = []
         strings: list[tuple[str, str]] = []
+        # Pre-scan parameter and VarDecl types so the IR builder can
+        # detect expressions whose value type doesn't fit a plain ``int``
+        # temp (notably ``unsigned long``-pointee Index loads on the
+        # 16-bit target) and delegate them to the AST codegen via
+        # :class:`Block`.  Without this, an ``unsigned long *p; x =
+        # p[0]`` lowers to ``temp = p[0]; x = temp`` where ``temp`` is
+        # an int-typed slot — the long-store path then rejects ``Var
+        # temp`` with ``expected 'unsigned long' expression, got 'int'``.
+        self._var_types: dict[str, str] = {}
+        for parameter in func.params:
+            self._var_types[parameter.name] = parameter.type
+        self._collect_local_types(func.body)
         self._build_stmts(func.body, out, break_tgt=None, cont_tgt=None, strings=strings)
         return Function(ast_node=func, body=out, strings=strings)
 
@@ -267,8 +289,16 @@ class Builder:
                 # Array initializers are complex; delegate to existing codegen.
                 out.append(Block(node=stmt))
             case ast_nodes.Assign(name=name, expr=expr):
-                source = self._build_expr(expr, out, strings=strings)
-                out.append(Copy(destination=name, source=source))
+                # ``unsigned long`` destinations or long-pointee Index
+                # right-hand sides can't round-trip through an int-typed
+                # IR temp — let the AST codegen lower the whole
+                # assignment in one shot so the DX:AX (16-bit) / EAX
+                # (32-bit) shape is preserved end-to-end.
+                if self._var_types.get(name) == "unsigned long" or self._is_long_pointee_index(expr):
+                    out.append(Block(node=stmt))
+                else:
+                    source = self._build_expr(expr, out, strings=strings)
+                    out.append(Copy(destination=name, source=source))
             case ast_nodes.IndexAssign(array=ast_nodes.Var(name=base), index=index_node, expr=expr):
                 index_value = self._build_expr(index_node, out, strings=strings)
                 source = self._build_expr(expr, out, strings=strings)
@@ -292,8 +322,15 @@ class Builder:
                 assert cont_tgt is not None, "continue outside loop"
                 out.append(Jump(target=cont_tgt))
             case ast_nodes.Return(value=value):
-                v = self._build_expr(value, out, strings=strings) if value is not None else None
-                out.append(Return(value=v))
+                # A long-pointee Index in a return position must be
+                # produced in DX:AX (16-bit) / EAX (32-bit); the int-typed
+                # IR temp would truncate it.  Delegate the whole return
+                # to the AST codegen.
+                if value is not None and self._is_long_pointee_index(value):
+                    out.append(Block(node=stmt))
+                else:
+                    v = self._build_expr(value, out, strings=strings) if value is not None else None
+                    out.append(Return(value=v))
             case ast_nodes.InlineAsm(content=content):
                 out.append(InlineAsm(content=content))
             case _:
@@ -506,3 +543,38 @@ class Builder:
                 temp = self._tmp()
                 out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
                 return temp
+
+    def _collect_local_types(self, stmts: list[ast_nodes.Node]) -> None:
+        """Walk *stmts* and record every ``VarDecl`` name → type binding.
+
+        Nested blocks (``if`` / ``while`` / ``do``-``while``) are
+        recursed into so a long-typed local declared inside a branch
+        is still recognised when the IR builder lowers an Index in the
+        same branch.
+        """
+        for statement in stmts:
+            if isinstance(statement, ast_nodes.VarDecl):
+                self._var_types[statement.name] = statement.type_name
+            elif isinstance(statement, ast_nodes.If):
+                self._collect_local_types(statement.body)
+                if statement.else_body is not None:
+                    self._collect_local_types(statement.else_body)
+            elif isinstance(statement, (ast_nodes.While, ast_nodes.DoWhile)):
+                self._collect_local_types(statement.body)
+
+    def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
+        """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.
+
+        Used by ``_build_stmt`` / ``_build_expr`` to short-circuit the
+        normal ``temp = Index(...)`` lowering — those temps are int-typed
+        slots and would silently truncate a 32-bit pointee to the
+        target's native acc width.  Delegating to the AST codegen via
+        :class:`Block` preserves the full DX:AX (16-bit) / EAX (32-bit)
+        value.
+        """
+        if not isinstance(expression, ast_nodes.Index):
+            return False
+        if not isinstance(expression.array, ast_nodes.Var):
+            return False
+        base_type = self._var_types.get(expression.array.name)
+        return base_type in _LONG_POINTER_TYPES

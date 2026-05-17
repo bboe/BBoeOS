@@ -67,6 +67,16 @@ from cc.target import X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
+#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
+#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
+#: (both 4-byte unsigned); on the 32-bit target they are also both
+#: 4-byte, and the special-case load path is harmless there.  Either
+#: spelling must route through :meth:`generate_long_expression` so the
+#: full DX:AX (16-bit) / EAX (32-bit) value is loaded — otherwise the
+#: ``uint32_t *`` form silently reads only the low 16 bits on the
+#: 16-bit target.
+_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
 
 class EmissionMixin:
     """Emission dispatchers, mixed into :class:`X86CodeGenerator`.
@@ -868,16 +878,47 @@ class EmissionMixin:
             vname = expression.array.name
             index_expression = expression.index
             self._check_defined(vname, line=expression.line)
+            # Pointee / element width selects the load encoding.  For
+            # ``uint16_t *p`` on the 32-bit target ``mov eax, [esi]``
+            # would read 4 bytes; we must emit ``movzx eax, word [esi]``
+            # to read exactly the 2-byte element.  Constant-index
+            # offsets also scale by the pointee width, not the target
+            # int_size.  Byte loads stay on their dedicated fast path
+            # (``emit_byte_load_zx``) because that also clears AH.
+            is_byte = self._is_byte_var(vname)
+            if vname in self.array_labels:
+                pointee_size = self.target.int_size
+            else:
+                pointee_size = self._index_pointee_size(vname)
+            # 4-byte pointee on a 16-bit target needs DX:AX; that's the
+            # long-pointee case the IR routes through generate_long_expression
+            # — fall back to the historical full-acc load here and let the
+            # caller diagnose the type mismatch.  Otherwise, clamp the
+            # load width to min(pointee_size, int_size).
+            narrow_word = (not is_byte) and 1 < pointee_size < self.target.int_size
+
+            emitter = self
+
+            def _word_load(address: str) -> None:
+                # Use the 16-bit alias of acc (``ax`` on 32-bit) to emit
+                # ``movzx eax, word [...]``; on 16-bit acc is already 2
+                # bytes so a plain ``mov ax, [...]`` is correct.
+                if emitter.target.int_size > 2:
+                    emitter.emit(f"        movzx {emitter.target.acc}, word [{address}]")
+                else:
+                    emitter.emit(f"        mov {emitter.target.acc}, [{address}]")
+
             if isinstance(index_expression, Int) and vname in self.array_labels:
                 offset = index_expression.value * self.target.int_size
                 label = self.array_labels[vname]
-                if offset:
-                    self.emit(f"        mov {self.target.acc}, [{label}+{offset}]")
-                else:
-                    self.emit(f"        mov {self.target.acc}, [{label}]")
+                addr = f"{label}+{offset}" if offset else label
+                self.emit(f"        mov {self.target.acc}, [{addr}]")
             elif isinstance(index_expression, Int):
-                is_byte = self._is_byte_var(vname)
-                offset = index_expression.value * (1 if is_byte else self.target.int_size)
+                if is_byte:
+                    stride = 1
+                else:
+                    stride = pointee_size if narrow_word else self.target.int_size
+                offset = index_expression.value * stride
                 # Direct memory access for constant/aliased bases:
                 # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
                 const_base = self._resolve_constant(vname)
@@ -885,22 +926,23 @@ class EmissionMixin:
                     addr = f"{const_base}+{offset}" if offset else const_base
                     if is_byte:
                         self.emit_byte_load_zx(f"[{addr}]")
+                    elif narrow_word:
+                        _word_load(addr)
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                 else:
                     guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register=self.target.si_register)
                     si = self.target.si_register
+                    mem_inner = f"{si}+{offset}" if offset else si
                     if is_byte:
-                        mem = f"[{si}+{offset}]" if offset else f"[{si}]"
-                        self.emit_byte_load_zx(mem)
-                    elif offset:
-                        self.emit(f"        mov {self.target.acc}, [{si}+{offset}]")
+                        self.emit_byte_load_zx(f"[{mem_inner}]")
+                    elif narrow_word:
+                        _word_load(mem_inner)
                     else:
-                        self.emit(f"        mov {self.target.acc}, [{si}]")
+                        self.emit(f"        mov {self.target.acc}, [{mem_inner}]")
                     self._si_scratch_guard_end(guarded=guarded)
             else:
-                is_byte = self._is_byte_var(vname)
                 const_base = self._resolve_constant(vname)
                 if const_base is not None:
                     self.emit_constant_reference(vname)
@@ -913,6 +955,8 @@ class EmissionMixin:
                     )
                     if is_byte:
                         self.emit_byte_load_zx(f"[{addr}]")
+                    elif narrow_word:
+                        _word_load(addr)
                     else:
                         self.emit(f"        mov {self.target.acc}, [{addr}]")
                     self._si_scratch_guard_end(guarded=guarded)
@@ -921,6 +965,26 @@ class EmissionMixin:
                     guarded = self._si_scratch_guard_begin(vname)
                     self._emit_load_var(vname, register=self.target.si_register)
                     si = self.target.si_register
+                    # Index scaling: ``p[i]`` advances by sizeof(*p)
+                    # bytes per ``i``, so a narrow pointee (uint16_t* on
+                    # the 32-bit target) needs scale=2 not the acc's 4.
+                    if narrow_word:
+                        scale_size = pointee_size
+                    elif is_byte:
+                        scale_size = 1
+                    else:
+                        scale_size = self.target.int_size
+
+                    def _scale(register: str, /) -> None:
+                        if scale_size == 1:
+                            return
+                        if scale_size == 2:
+                            emitter.emit(f"        add {register}, {register}")
+                        elif scale_size == 4:
+                            emitter.emit(f"        shl {register}, 2")
+                        else:
+                            emitter.emit(f"        imul {register}, {register}, {scale_size}")
+
                     # If the index is a pinned variable and the access is
                     # byte-sized, load it without clobbering SI.
                     if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
@@ -931,17 +995,19 @@ class EmissionMixin:
                         # push/pop round-trip.
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self._emit_scale_int_index(self.target.acc)
+                            _scale(self.target.acc)
                         self.emit(f"        add {si}, {self.target.acc}")
                     else:
                         self.emit(f"        push {si}")
                         self.generate_expression(index_expression)
                         if not is_byte:
-                            self._emit_scale_int_index(self.target.acc)
+                            _scale(self.target.acc)
                         self.emit(f"        pop {si}")
                         self.emit(f"        add {si}, {self.target.acc}")
                     if is_byte:
                         self.emit_byte_load_zx(f"[{si}]")
+                    elif narrow_word:
+                        _word_load(si)
                     else:
                         self.emit(f"        mov {self.target.acc}, [{si}]")
                     self._si_scratch_guard_end(guarded=guarded)
@@ -1963,6 +2029,54 @@ class EmissionMixin:
         if isinstance(expression, Call) and expression.name == "datetime":
             self.generate_call(expression)
             return
+        if isinstance(expression, Index):
+            # ``unsigned long *p; ... = p[i];`` — read the 32-bit pointee
+            # into DX:AX (16-bit) / EAX (32-bit).  The base must be a
+            # plain pointer Var.  Constant and simple Var subscripts are
+            # supported; more complex index expressions fall through to
+            # the unsupported-shape error below.
+            base = expression.array
+            if isinstance(base, Var) and self.variable_types.get(base.name) in _LONG_POINTER_TYPES:
+                vname = base.name
+                self._check_defined(vname, line=expression.line)
+                guarded = self._si_scratch_guard_begin(vname)
+                self._emit_load_var(vname, register=self.target.si_register)
+                si = self.target.si_register
+                # Compute the byte offset from the start of the array.
+                index_expression = expression.index
+                if isinstance(index_expression, Int):
+                    offset = index_expression.value * 4
+                    base_address = f"{si}+{offset}" if offset else si
+                    if isinstance(self.target, X86CodegenTarget16):
+                        self.emit(f"        mov {self.target.acc}, [{base_address}]")
+                        self.emit(f"        mov {self.target.dx_register}, [{base_address}+2]")
+                    else:
+                        self.emit(f"        mov {self.target.acc}, [{base_address}]")
+                    self._si_scratch_guard_end(guarded=guarded)
+                    self.ax_is_byte = False
+                    self.ax_local = None
+                    return
+                # Non-constant index: scale by 4 then add to SI.
+                if isinstance(index_expression, (Var, Int)):
+                    self.generate_expression(index_expression)
+                    if self.target.int_size == 4:
+                        self.emit(f"        shl {self.target.acc}, 2")
+                    else:
+                        # 16-bit: scale=4 via two add-self operations.
+                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                        self.emit(f"        add {self.target.acc}, {self.target.acc}")
+                    self.emit(f"        add {si}, {self.target.acc}")
+                    if isinstance(self.target, X86CodegenTarget16):
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
+                        self.emit(f"        mov {self.target.dx_register}, [{si}+2]")
+                    else:
+                        self.emit(f"        mov {self.target.acc}, [{si}]")
+                    self._si_scratch_guard_end(guarded=guarded)
+                    self.ax_is_byte = False
+                    self.ax_local = None
+                    return
+                # Anything fancier (BinaryOperation index, etc.) falls
+                # through to the unsupported-shape error.
         if isinstance(expression, Var):
             vname = expression.name
             if self.variable_types.get(vname) != "unsigned long":
@@ -2049,7 +2163,19 @@ class EmissionMixin:
             self.emit("        ret")
             return
         if statement.value is not None:
-            self.generate_expression(statement.value)
+            # ``unsigned long *p; return p[0];`` — the pointee is 32
+            # bits, so produce the full DX:AX (16-bit) / EAX (32-bit)
+            # value via :meth:`generate_long_expression`.  Without this,
+            # :meth:`generate_expression` would load only the acc-width
+            # low bits and silently truncate the return value on 16-bit.
+            if (
+                isinstance(statement.value, Index)
+                and isinstance(statement.value.array, Var)
+                and self.variable_types.get(statement.value.array.name) in _LONG_POINTER_TYPES
+            ):
+                self.generate_long_expression(statement.value)
+            else:
+                self.generate_expression(statement.value)
         if self.frame_size > 0:
             self.emit(f"        mov {self.target.stack_register}, {self.target.base_register}")
         self.emit(f"        pop {self.target.base_register}")
