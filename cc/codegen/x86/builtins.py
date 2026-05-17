@@ -1092,11 +1092,19 @@ class BuiltinsMixin:
         previous handler value in EAX.
 
         ABI: EBX = signum, ECX = handler.
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so EBX is loaded after any sibling whose evaluation scratches
+        it — e.g. ``signal(SIGINT, get_handler())`` where the
+        user-function Call would otherwise wipe EBX between the load
+        and the syscall.  Same rationale as builtin_write.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="signal")
         signum_argument, handler_argument = arguments
-        self.emit_register_from_argument(argument=signum_argument, register=self.target.bx_register)
-        self.emit_register_from_argument(argument=handler_argument, register=self.target.count_register)
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, signum_argument),
+            (self.target.count_register, handler_argument),
+        ])
         self._emit_syscall("SYS_SIGNAL")
         self.ax_clear()
 

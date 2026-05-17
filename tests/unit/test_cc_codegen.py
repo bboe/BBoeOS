@@ -3822,6 +3822,74 @@ def test_builtin_pipeline2_loads_si_after_index_sibling() -> None:
     assert found_at_least_one, f"test source must compile to at least one SYS_SYS_PIPELINE2; got asm:\n{asm}"
 
 
+def test_builtin_signal_loads_bx_after_clobbering_sibling() -> None:
+    """signal(signum, get_handler()) must load EBX last.
+
+    Regression: builtin_signal used to load EBX=signum first, then
+    ECX=handler.  When ``handler`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel signal handler then saw
+    garbage in EBX as the signal number.
+
+    Routing signal's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_handler() { return 1; }
+        int main() {
+            signal(2, get_handler());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # the bug we want to surface is a sibling user-function call
+    # clobbering EBX after it's been loaded, so walk-back must
+    # cross past calls.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_SYS_SIGNAL" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the signal
+        # input ``mov ebx, <signum>``), nothing else in the setup
+        # block may write EBX — a user-function call between that
+        # load and the syscall would clobber EBX as caller-save
+        # scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_signal loaded EBX before a sibling call that clobbers it. "
+            "The signal syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_SIGNAL; got asm:\n{asm}"
+
+
 def test_builtin_sys_break_emits_break_syscall() -> None:
     """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
 
