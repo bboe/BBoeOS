@@ -34,6 +34,7 @@ from cc.ast_nodes import (
     Char,
     Conditional,
     Continue,
+    EnumDecl,
     If,
     Index,
     Int,
@@ -222,6 +223,17 @@ class CodeGeneratorBase:
         aliases, etc.).
         """
         self.NAMED_CONSTANT_VALUES: dict[str, int] = dict(constant_values) if constant_values else {}
+        # Per-translation-unit enum tables.  ``enum_decls`` is populated
+        # by the file-scope EnumDecl handler and indexed by enum tag so
+        # the switch exhaustiveness check can iterate the declared
+        # variant list.  ``enum_constants`` maps each variant identifier
+        # to its integer value; the parser also mirrors this so variant
+        # references fold to ``Int`` literals before reaching codegen,
+        # but the codegen-side copy lets ``_constant_expression`` and
+        # ``_check_defined`` resolve variant names that arrive via
+        # synthesized AST nodes (e.g. tests that build nodes directly).
+        self.enum_constants: dict[str, int] = {}
+        self.enum_decls: dict[str, EnumDecl] = {}
         self.target: CodegenTarget = target
         self.array_labels: dict[str, str] = {}
         self.array_sizes: dict[str, int] = {}
@@ -306,6 +318,8 @@ class CodeGeneratorBase:
         """Raise CompileError if a variable is not in scope."""
         if name in self.NAMED_CONSTANTS:
             return
+        if name in self.enum_constants:
+            return
         if name not in self.visible_vars:
             message = f"undefined variable: {name}"
             raise CompileError(message, line=line)
@@ -361,6 +375,8 @@ class CodeGeneratorBase:
         if isinstance(init, Var):
             if init.name in self.NAMED_CONSTANTS:
                 return init.name
+            if init.name in self.enum_constants:
+                return str(self.enum_constants[init.name])
             if init.name in self.constant_aliases:
                 return self.constant_aliases[init.name]
             if init.name in self.user_functions:

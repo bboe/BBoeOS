@@ -36,11 +36,14 @@ COMPARISON_OPERATORS = frozenset({"EQ", "GE", "GT", "LE", "LT", "NE"})
 
 KEYWORDS = frozenset({
     "break",
+    "case",
     "char",
     "const",
     "continue",
+    "default",
     "do",
     "else",
+    "enum",
     "extern",
     "if",
     "int",
@@ -48,6 +51,7 @@ KEYWORDS = frozenset({
     "return",
     "sizeof",
     "struct",
+    "switch",
     "uint8_t",
     "uint16_t",
     "uint32_t",
@@ -129,4 +133,4 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "CONST", "INT", "LONG", "STRUCT", "UINT16_T", "UINT32_T", "UINT8_T", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({"CHAR", "CONST", "ENUM", "INT", "LONG", "STRUCT", "UINT16_T", "UINT32_T", "UINT8_T", "UNSIGNED", "VOID"})

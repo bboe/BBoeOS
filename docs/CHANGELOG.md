@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `enum` declarations and `switch` / `case` / `default` with
+  exhaustiveness checking on enum discriminants.**  File-scope `enum NAME { A, B
+  = 5, C };` declares integer-valued constants (auto-incrementing from 0 or from
+  the last explicit value).  Variant identifiers fold to their integer values at
+  every use site, so existing constant-expression sites (array sizes, case
+  labels, global initializers) accept them as literals.  `switch (expression) {
+  case CONST: ... break; default: ...; }` lowers to a simple compare/jump chain
+  (no jump tables); `break` inside a switch jumps to the switch's exit and
+  coexists with `break` inside loops.  Fall-through between cases (no `break`)
+  matches standard C.  The payoff is exhaustiveness checking: when the
+  discriminant has an `enum NAME` type and the switch has no `default`, cc.py
+  errors if any variant is missing a `case` — adding a new enum variant later
+  flags every switch site that forgot to handle it.
 - **libc `<dirent.h>`: `opendir` / `readdir` / `closedir` / `rewinddir`.**  New
   `tools/libc/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
   (linking against `libbboeos.a`) can iterate directories with the POSIX API.

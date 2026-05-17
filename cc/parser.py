@@ -20,6 +20,7 @@ from cc.ast_nodes import (
     Continue,
     DerefAssign,
     DoWhile,
+    EnumDecl,
     Function,
     If,
     Index,
@@ -45,6 +46,8 @@ from cc.ast_nodes import (
     StructDecl,
     StructField,
     StructInit,
+    Switch,
+    SwitchCase,
     TailCall,
     Var,
     VarDecl,
@@ -71,6 +74,14 @@ class Parser:
         self.tokens = tokens
         self.position = 0
         self.struct_decls: dict[str, StructDecl] = {}
+        # File-scope ``enum NAME { ... };`` declarations.  ``enum_constants``
+        # maps each variant identifier to its integer value (used to fold
+        # variant names into ``Int`` nodes at parse time so case labels and
+        # nested enum initializers see them as compile-time constants).
+        # ``enum_decls`` retains the per-tag variant list so the codegen
+        # can run the switch exhaustiveness check later.
+        self.enum_constants: dict[str, int] = {}
+        self.enum_decls: dict[str, EnumDecl] = {}
 
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
         """Consume and return the current token, optionally checking its kind.
@@ -155,6 +166,24 @@ class Parser:
 
         """
         return self.tokens[self.position + offset]
+
+    @staticmethod
+    def _evaluate_constant_int(node: Node, /) -> int:
+        """Resolve *node* to a Python ``int`` at parse time, or raise.
+
+        ``parse_expression`` already runs :meth:`fold_binop` on every
+        binary operator it builds, so an expression composed entirely
+        of integer / char literals (including enum variant references,
+        which :meth:`parse_primary` substitutes to :class:`Int` leaves)
+        collapses to a single :class:`Int` before it reaches here.
+        Anything that hasn't folded down isn't a compile-time integer
+        constant — the caller wants ``enum`` initializers and ``case``
+        labels to be exactly that.
+        """
+        if isinstance(node, Int):
+            return node.value
+        message = "expected compile-time integer constant expression"
+        raise CompileError(message, line=node.line)
 
     def _parse_attribute(self, *, line: int) -> tuple[str, object]:
         """Consume a single ``__attribute__((name(args)))`` directive.
@@ -251,6 +280,46 @@ class Parser:
             return ("pinned_register", reg_token[1][1:-1])
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
+
+    def _parse_enum_declaration(self) -> EnumDecl:
+        """Parse ``enum NAME { A, B = 5, C, ... };`` at file scope.
+
+        Auto-incrementing values start at 0 and resume from the most
+        recently specified explicit value + 1.  Each variant identifier
+        is registered in :attr:`enum_constants` so subsequent references
+        anywhere in the translation unit fold to the corresponding
+        :class:`Int` literal in :meth:`parse_primary`.  Duplicate
+        variant names (in the same or a different enum) are rejected.
+        """
+        line = self.peek()[2]
+        self.eat("ENUM")
+        name_token = self.eat("IDENT")
+        name = name_token[1]
+        self.eat("LBRACE")
+        variants: list[tuple[str, int]] = []
+        next_value = 0
+        while self.peek()[0] != "RBRACE":
+            variant_token = self.eat("IDENT")
+            variant_name = variant_token[1]
+            if variant_name in self.enum_constants:
+                message = f"duplicate enum constant: {variant_name}"
+                raise CompileError(message, line=variant_token[2])
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                value_expression = self.parse_expression()
+                next_value = self._evaluate_constant_int(value_expression)
+            variants.append((variant_name, next_value))
+            self.enum_constants[variant_name] = next_value
+            next_value += 1
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        self.eat("SEMI")
+        decl = EnumDecl(line=line, name=name, variants=variants)
+        self.enum_decls[name] = decl
+        return decl
 
     def _parse_member_assignment(self) -> MemberAssign:
         """Parse ``name (. | ->) member = expr ;``."""
@@ -826,6 +895,12 @@ class Parser:
                     member_name=member_token[1],
                     object_name=token[1],
                 )
+            if token[1] in self.enum_constants:
+                # Enum variant used as a bare value: fold to its integer
+                # constant so downstream code (case labels, array sizes,
+                # constant_expression) sees a literal exactly like a
+                # ``#define``'d name would after preprocessing.
+                return Int(line=line, value=self.enum_constants[token[1]])
             return Var(line=line, name=token[1])
         if token[0] == "NOT":
             self.eat()
@@ -974,6 +1049,8 @@ class Parser:
                 value = self.parse_expression()
             self.eat("SEMI")
             return Return(line=token[2], value=value)
+        if token[0] == "SWITCH":
+            return self.parse_switch()
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "STAR":
@@ -1016,6 +1093,58 @@ class Parser:
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
+    def parse_switch(self) -> Node:
+        """Parse a ``switch (expr) { case CONST: ... default: ... }`` statement.
+
+        Each arm runs from its ``case`` / ``default`` label up to the
+        next label (or the closing ``}``).  ``break;`` inside an arm
+        jumps to the switch's end label (handled at codegen time);
+        omitting it falls through into the next arm's body, matching
+        standard C semantics.  ``case`` labels must be compile-time
+        integer constants (literals, char literals, enum variants, or
+        constant-folded expressions over those); duplicates across arms
+        are rejected by the codegen so the same name caught at parse
+        time twice still reaches the duplicate-value diagnostic.
+        """
+        token = self.eat("SWITCH")
+        self.eat("LPAREN")
+        discriminant = self.parse_expression()
+        self.eat("RPAREN")
+        self.eat("LBRACE")
+        cases: list[SwitchCase] = []
+        seen_values: set[int] = set()
+        seen_default = False
+        current: SwitchCase | None = None
+        while self.peek()[0] != "RBRACE":
+            if self.peek()[0] == "CASE":
+                case_token = self.eat("CASE")
+                value_expression = self.parse_expression()
+                value = self._evaluate_constant_int(value_expression)
+                self.eat("COLON")
+                if value in seen_values:
+                    message = f"duplicate case value: {value}"
+                    raise CompileError(message, line=case_token[2])
+                seen_values.add(value)
+                current = SwitchCase(body=[], line=case_token[2], value=value)
+                cases.append(current)
+            elif self.peek()[0] == "DEFAULT":
+                default_token = self.eat("DEFAULT")
+                self.eat("COLON")
+                if seen_default:
+                    message = "duplicate default in switch"
+                    raise CompileError(message, line=default_token[2])
+                seen_default = True
+                current = SwitchCase(body=[], line=default_token[2], value=None)
+                cases.append(current)
+            else:
+                if current is None:
+                    statement_token = self.peek()
+                    message = "switch body may not contain statements before the first case"
+                    raise CompileError(message, line=statement_token[2])
+                current.body.append(self.parse_statement())
+        self.eat("RBRACE")
+        return Switch(cases=cases, discriminant=discriminant, line=token[2])
+
     def parse_top_level_declaration(self) -> Node:
         """Parse a function definition, a file-scope variable / array, or a file-scope ``asm(...)``.
 
@@ -1027,6 +1156,8 @@ class Parser:
         line = self.peek()[2]
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return self._parse_struct_declaration()
+        if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
+            return self._parse_enum_declaration()
         if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
             self.eat("IDENT")
             self.eat("LPAREN")
@@ -1295,6 +1426,13 @@ class Parser:
             self.eat()
             tag_token = self.eat("IDENT")
             return self._parse_pointer_suffix(f"struct {tag_token[1]}", max_stars=1)
+        if token[0] == "ENUM":
+            # ``enum NAME`` as a type spelling — treated as ``int`` for
+            # storage and codegen but tagged so switch exhaustiveness
+            # checking can locate the declared variant list.
+            self.eat()
+            tag_token = self.eat("IDENT")
+            return self._parse_pointer_suffix(f"enum {tag_token[1]}", max_stars=1)
         message = f"expected type, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
