@@ -73,7 +73,8 @@ SYS_IO_GETDENTS 14h    ; BX=fd, DI=buffer, CX=count
 
 Errors:
 - Caller buffer too small for the next record → returns -1 / `ERROR_INVAL`
-  (matches Linux's `EINVAL`).
+  (matches Linux's `EINVAL`). Iteration state is unchanged — a subsequent
+  call with a larger buffer succeeds at the same position.
 - fd is not a directory → -1 / `ERROR_NOT_DIRECTORY` (mapped to `ENOTDIR` in
   libc).
 - Disk error → -1 / generic disk error.
@@ -87,6 +88,9 @@ offset 0:  uint32_t d_ino       // ext2 inode for ext2; start sector for bbfs
 offset 4:  uint16_t d_reclen    // bytes of THIS record incl. padding
 offset 6:  uint8_t  d_type      // DT_REG (8), DT_DIR (4), DT_UNKNOWN (0)
 offset 7:  char     d_name[]    // null-terminated, padded so next d_ino aligns 4
+
+// No d_off field — Linux includes one for seekdir/telldir resume; we don't
+// support either, so the field would be dead weight.
 ```
 
 `d_reclen = round_up(7 + namelen + 1, 4)`. Minimum 8 bytes (empty name + NUL).
@@ -404,15 +408,6 @@ dirent: ok".
 - **Renumbering the IO group.** Five syscalls (IOCTL/OPEN/READ/SEEK/WRITE) shift up by one. Any
   hand-written INT 30h call sites using the numeric constant (instead of
   the `SYS_*` symbol) break. Convention is symbolic; grep before merging.
-
-## Open questions
-
-1. **`d_off` in the wire record.** Linux includes it; we don't need it (we
-   don't support `seekdir`/`telldir`). Omit unless we later add positional
-   iteration. Recommendation: omit.
-2. **`getdents` semantics when caller buffer is too small for next record.**
-   Linux returns `EINVAL` and the iteration state is unchanged (next call
-   with bigger buffer succeeds). Match that. Recommendation: match Linux.
 
 ## Updating this document
 
