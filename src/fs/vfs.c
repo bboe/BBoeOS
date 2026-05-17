@@ -92,8 +92,7 @@ int (*vfs_delete_fn)(uint8_t *path __attribute__((in_register("esi")))) = bbfs_d
 int (*vfs_find_fn)(uint8_t *path __attribute__((in_register("esi")))) = bbfs_find;
 int (*vfs_mkdir_fn)(uint8_t *name __attribute__((in_register("esi")))) = bbfs_mkdir;
 int (*vfs_prepare_write_sec_fn)(struct fd *e __attribute__((in_register("esi")))) = bbfs_prepare_write_sec;
-int (*vfs_read_dir_fn)(struct fd *e __attribute__((in_register("esi"))),
-                       uint8_t *buf __attribute__((in_register("edi")))) = bbfs_read_dir;
+int (*vfs_read_dir_fn)(struct fd *e __attribute__((in_register("esi")))) = bbfs_read_dir;
 int (*vfs_read_sec_fn)(struct fd *e __attribute__((in_register("esi")))) = bbfs_read_sec;
 int (*vfs_rename_fn)(uint8_t *old __attribute__((in_register("esi"))),
                      uint8_t *new __attribute__((in_register("edi")))) = bbfs_rename;
@@ -187,10 +186,15 @@ int vfs_prepare_write_sec(struct fd *e __attribute__((in_register("esi")))) {
 }
 
 __attribute__((carry_return))
-int vfs_read_dir(struct fd *e __attribute__((in_register("esi"))),
-                 uint8_t *buf __attribute__((in_register("edi")))) {
-    __tail_call(vfs_read_dir_fn, e, buf);
+int vfs_read_dir(struct fd *e __attribute__((in_register("esi")))) {
+    __tail_call(vfs_read_dir_fn, e);
 }
+
+// Cursor/remaining cells consumed by dir_emit (see the asm block
+// below).  Each SYS_IO_GETDENTS syscall stamps these from the
+// user-supplied buffer + count before dispatching vfs_read_dir.
+uint8_t *dir_emit_cursor = 0;
+int      dir_emit_remaining = 0;
 
 __attribute__((carry_return))
 int vfs_read_sec(struct fd *e __attribute__((in_register("esi")))) {
@@ -226,5 +230,60 @@ asm("vfs_found_dir_off  dw 0\n"
     "vfs_found_mode     db 0\n"
     "vfs_found_size     dd 0\n"
     "vfs_found_type     db 0\n"
+    "\n"
+    ";; ----------------------------------------------------------------\n"
+    ";; dir_emit — kernel-side packer for Linux-style getdents records.\n"
+    ";; bbfs_read_dir and ext2_read_dir call this once per live entry.\n"
+    ";;\n"
+    ";; The caller's user-buffer state lives in two globals set up by\n"
+    ";; the SYS_IO_GETDENTS handler before vfs_read_dir is dispatched:\n"
+    ";;     dir_emit_cursor    — user-virt write pointer\n"
+    ";;     dir_emit_remaining — bytes still free in the user buffer\n"
+    ";; Globals avoid passing a context pointer through the fs vtable.\n"
+    ";; The kernel is single-threaded for fs ops, so the globals are\n"
+    ";; safe for the duration of one getdents syscall.\n"
+    ";;\n"
+    ";; Record layout (variable length, padded to 4-byte boundary):\n"
+    ";;     offset 0  uint32_t d_ino\n"
+    ";;     offset 4  uint16_t d_reclen\n"
+    ";;     offset 6  uint8_t  d_type\n"
+    ";;     offset 7  char     d_name[]  (null-terminated, padded)\n"
+    ";; reclen = (7 + namelen + 1 + 3) & ~3 = (namelen + 8) & ~3.\n"
+    ";;\n"
+    ";; Inputs:  AL=d_type, ECX=namelen (excluding NUL), EDX=ino,\n"
+    ";;          EDI=name pointer (kernel-readable).\n"
+    ";; Output:  CF=0 record written, cursor/remaining advanced.\n"
+    ";;          CF=1 buffer too small for record, state unchanged.\n"
+    ";; Clobbers EAX, EBX, ECX, EDX, EDI; preserves ESI.\n"
+    ";; ----------------------------------------------------------------\n"
+    "dir_emit:\n"
+    "        push esi\n"
+    "        ;; reclen = round_up(7 + namelen + 1, 4) = (namelen + 11) & ~3.\n"
+    "        ;; 7 = ino(4) + reclen(2) + type(1); +1 for the NUL terminator;\n"
+    "        ;; +3 is the round-up bias before masking to a 4-byte multiple.\n"
+    "        mov ebx, ecx\n"
+    "        add ebx, 11\n"
+    "        and ebx, ~3              ; ebx = reclen\n"
+    "        cmp ebx, [_g_dir_emit_remaining]\n"
+    "        ja .dir_emit_full\n"
+    "        mov esi, edi             ; src = name pointer\n"
+    "        mov edi, [_g_dir_emit_cursor]\n"
+    "        mov [edi], edx           ; d_ino\n"
+    "        mov [edi+4], bx          ; d_reclen\n"
+    "        mov [edi+6], al          ; d_type\n"
+    "        add edi, 7\n"
+    "        cld\n"
+    "        rep movsb                ; copy name bytes\n"
+    "        mov byte [edi], 0        ; NUL terminator\n"
+    "        add [_g_dir_emit_cursor], ebx\n"
+    "        sub [_g_dir_emit_remaining], ebx\n"
+    "        pop esi\n"
+    "        clc\n"
+    "        ret\n"
+    ".dir_emit_full:\n"
+    "        pop esi\n"
+    "        stc\n"
+    "        ret\n"
+    "\n"
     "%include \"fs/bbfs.asm\"\n"
     "%include \"fs/ext2.asm\"\n");

@@ -446,6 +446,25 @@ class BuiltinsMixin:
         self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
+    def builtin_getdents(self, arguments: list[Node], /) -> None:
+        """Generate code for the getdents() builtin.
+
+        ``getdents(fd, buffer, count)`` emits ``mov bx, <fd> /
+        mov di, <buffer> / mov cx, <count> / mov ah, SYS_IO_GETDENTS /
+        int 30h``.  Returns bytes written in AX (0 at EOF, -1 on error
+        with the error code in EAX).  Mirrors :meth:`builtin_read`'s
+        register convention since both go through the IO syscall group.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="getdents")
+        fd_argument, buffer_argument, count_argument = arguments
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.di_register, buffer_argument),
+            (self.target.count_register, count_argument),
+        ])
+        self._emit_syscall("IO_GETDENTS")
+        self.ax_clear()
+
     def builtin_kernel_inb(self, arguments: list[Node], /) -> None:
         """Generate code for inb(port). Reads one byte from an I/O port.
 

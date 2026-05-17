@@ -10,7 +10,7 @@
 ;;; bbfs_load:              DI=dest → CF (loads file using vfs_found_inode + vfs_found_size)
 ;;; bbfs_mkdir:             SI=name → AX=allocated sector, CF on error
 ;;; bbfs_prepare_write_sec: SI=fd_entry → sector_buffer ready, BX=offset; CF on err
-;;; bbfs_read_dir:          SI=fd_entry, DI=buf → AX=entry size or 0 at EOF; CF on error
+;;; bbfs_read_dir:          SI=fd_entry → loops emitting dirents via dir_emit; CF on disk error
 ;;; bbfs_read_sec:          SI=fd_entry → sector_buffer filled, BX=byte offset; CF on err
 ;;; bbfs_rename:            SI=old, DI=new → CF on error (AL=error code)
 ;;; bbfs_rmdir:             SI=name → CF on error (AL=error code)
@@ -385,42 +385,62 @@ bbfs_prepare_write_sec:
         ret
 
 bbfs_read_dir:
-        ;; Read the next non-empty bbfs directory entry into [DI]
-        ;; SI = FD entry pointer, DI = output buffer (DIRECTORY_ENTRY_SIZE bytes)
-        ;; Returns AX = DIRECTORY_ENTRY_SIZE if found, 0 at EOF, CF on error
+        ;; Iterate the directory at ESI=fd_entry, emitting Linux-style
+        ;; getdents records via dir_emit until EOF or the user buffer
+        ;; fills.  The user-buffer state lives in _g_dir_emit_cursor /
+        ;; _g_dir_emit_remaining; the caller (SYS_IO_GETDENTS handler)
+        ;; stamps them before dispatching here.
+        ;; Output: CF=1 on disk error, CF=0 otherwise (caller reads
+        ;; _g_dir_emit_remaining for bytes-written math).
         push ebx
         push ecx
         push edx
         push edi
-        .brd_next:
+        .brd_loop:
         mov ax, [esi+FD_OFFSET_POSITION]
         cmp ax, DIRECTORY_SECTORS * 512
         jae .brd_eof
-        mov ax, [esi+FD_OFFSET_POSITION+2]  ; inline fd_pos_to_sector
+        ;; inline fd_pos_to_sector
+        mov ax, [esi+FD_OFFSET_POSITION+2]
         movzx ebx, word [esi+FD_OFFSET_POSITION]
         shl ax, 7
         mov cx, bx
         shr cx, 9
         or ax, cx
         add ax, [esi+FD_OFFSET_START]    ; AX = absolute sector
-        and ebx, 01FFh                  ; EBX = byte offset within sector
+        and ebx, 01FFh                   ; EBX = byte offset within sector
         call read_sector
-        jc .brd_disk_err
-        mov eax, [sector_buffer]
-        cmp byte [eax+ebx], 0
-        jne .brd_found
-        add word [esi+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
-        jmp .brd_next
-        .brd_found:
-        push esi
-        mov esi, ebx
-        add esi, [sector_buffer]
-        mov ecx, DIRECTORY_ENTRY_SIZE
+        jc .brd_err
+        mov edi, [sector_buffer]
+        add edi, ebx                     ; EDI = entry start in sector_buffer
+        cmp byte [edi], 0
+        je .brd_skip                     ; empty slot — advance, retry
+        ;; Live entry — stage dir_emit args.
+        mov al, 8                        ; DT_REG default
+        test byte [edi+DIRECTORY_OFFSET_FLAGS], FLAG_DIRECTORY
+        jz .brd_type_done
+        mov al, 4                        ; DT_DIR
+        .brd_type_done:
+        ;; namelen via scasb (max DIRECTORY_NAME_LENGTH bytes)
+        push eax                         ; save d_type in AL
+        push edi                         ; save name pointer
+        xor eax, eax                     ; scan for NUL
+        mov ecx, DIRECTORY_NAME_LENGTH
         cld
-        rep movsb
-        pop esi
+        repne scasb
+        ;; iterations = DIRECTORY_NAME_LENGTH - ECX; namelen = iters - 1
+        neg ecx
+        add ecx, DIRECTORY_NAME_LENGTH - 1
+        pop edi                          ; EDI = name pointer
+        pop eax                          ; AL = d_type
+        ;; ino = zero-extended start_sector
+        movzx edx, word [edi+DIRECTORY_OFFSET_SECTOR]
+        call dir_emit
+        jc .brd_full
+        .brd_skip:
         add word [esi+FD_OFFSET_POSITION], DIRECTORY_ENTRY_SIZE
-        mov ax, DIRECTORY_ENTRY_SIZE
+        jmp .brd_loop
+        .brd_full:
         pop edi
         pop edx
         pop ecx
@@ -432,15 +452,13 @@ bbfs_read_dir:
         pop edx
         pop ecx
         pop ebx
-        xor ax, ax
         clc
         ret
-        .brd_disk_err:
+        .brd_err:
         pop edi
         pop edx
         pop ecx
         pop ebx
-        mov ax, -1
         stc
         ret
 

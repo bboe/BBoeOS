@@ -21,11 +21,12 @@ numbers are defined symbolically as `SYS_*` constants in
 | 11h   | io_dup       | BX = old_fd; AX = new fd, CF on error                                                                  |
 | 12h   | io_dup2      | BX = old_fd, DX = target_fd; AX = target (closes target first; if old == target, no-op), CF on error    |
 | 13h   | io_fstat     | Get file status, BX = fd; AL = mode, CX:DX = size     |
-| 14h   | io_ioctl     | Device control, BX = fd, AL = cmd, args in other regs per (fd_type, cmd); CF on err |
-| 15h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
-| 16h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err |
-| 17h   | io_seek      | Seek file fd, BX = fd, ECX = offset, AL = whence (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2); EAX = new position (clamped to [0, size]), CF on err |
-| 18h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
+| 14h   | io_getdents  | Read directory entries, BX = fd (must be directory), DI = buf, CX = count; AX = bytes written (0 at EOF); CF=1 + AL=ERROR_NOT_DIRECTORY if fd is not a directory; record layout below |
+| 15h   | io_ioctl     | Device control, BX = fd, AL = cmd, args in other regs per (fd_type, cmd); CF on err |
+| 16h   | io_open      | Open file, SI = filename, AL = flags, DL = mode; AX = fd, CF on err |
+| 17h   | io_read      | Read from fd, BX = fd, DI = buf, CX = count; AX = bytes, CF on err; CF=1 + AL=ERROR_IS_DIRECTORY when fd is a directory (use io_getdents) |
+| 18h   | io_seek      | Seek file fd, BX = fd, ECX = offset, AL = whence (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2); EAX = new position (clamped to [0, size]), CF on err |
+| 19h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
 | 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
@@ -70,3 +71,19 @@ When a syscall sets CF on return, AL holds one of these codes (symbolic names in
 | 07h | ERROR_NOT_EXECUTE     | File exists but is not executable (exec)                     |
 | 08h | ERROR_NOT_FOUND       | File not found                                               |
 | 09h | ERROR_PROTECTED       | File is protected (rename/chmod)                             |
+| 0Ah | ERROR_IS_DIRECTORY    | `io_read` called on a directory fd (use `io_getdents` instead) |
+| 0Bh | ERROR_NOT_DIRECTORY   | `io_getdents` called on a non-directory fd                   |
+
+## `io_getdents` record layout
+
+Each record is variable-length, packed back-to-back in the user buffer:
+
+| Offset | Size | Field    | Notes                                                |
+|-------:|-----:|----------|------------------------------------------------------|
+|      0 |    4 | d_ino    | bbfs: file's start sector; ext2: full 32-bit inode    |
+|      4 |    2 | d_reclen | byte count of THIS record incl. padding (advance by) |
+|      6 |    1 | d_type   | `DT_REG = 8`, `DT_DIR = 4`, `DT_UNKNOWN = 0`         |
+|      7 |    N | d_name   | null-terminated; record padded so next record's d_ino is 4-byte aligned |
+
+`d_reclen = round_up(7 + namelen + 1, 4)`.  Walk the buffer by adding `d_reclen`
+to the cursor; stop when `cursor == bytes_returned`.

@@ -99,6 +99,12 @@ void far_write32(int offset, int value);
 void far_write8(int offset, int value);
 /* Fill an 8x8 pixel tile at (col, row) with palette index color in VGA mode 13h */
 void fill_block(int fd, int col, int row, int color);
+/* Linux-style getdents(2): read variable-length directory records from a
+   directory fd into buffer.  Each record is uint32 d_ino, uint16 d_reclen,
+   uint8 d_type, then a NUL-terminated name padded to 4-byte alignment.
+   Returns the number of bytes written, 0 at end-of-directory, or -1 on
+   error (e.g. fd is not a directory). */
+int getdents(int fd, char *buffer, int count);
 /* Read NIC MAC address into buffer (no POSIX equivalent) */
 int mac(char *buffer);
 /* Open a socket: type is SOCK_RAW / SOCK_DGRAM, protocol is IPPROTO_UDP / IPPROTO_ICMP (0 for raw) */

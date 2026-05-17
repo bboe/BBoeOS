@@ -100,7 +100,7 @@ def _run_draw_session(
         ls_start = len(session.buffer)
         session.write_serial("ls bin\r")
         session.wait_for_substring(
-            b"uptime*",  # last filename alphabetically
+            b"uptime",  # last filename alphabetically
             start=ls_start,
             timeout=LS_TIMEOUT,
         )

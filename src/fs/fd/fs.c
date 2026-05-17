@@ -36,10 +36,6 @@ __attribute__((carry_return))
 int vfs_prepare_write_sec(int *byte_offset __attribute__((out_register("bx"))),
                           struct fd *entry __attribute__((in_register("esi"))));
 __attribute__((carry_return))
-int vfs_read_dir(int *bytes __attribute__((out_register("ax"))),
-                 struct fd *entry __attribute__((in_register("esi"))),
-                 uint8_t *buffer __attribute__((in_register("edi"))));
-__attribute__((carry_return))
 int vfs_read_sec(int *byte_offset __attribute__((out_register("bx"))),
                  struct fd *entry __attribute__((in_register("esi"))));
 
@@ -55,20 +51,21 @@ struct fd *fd_rw_descriptor_pointer;
 int fd_rw_done;
 int fd_rw_left;
 
-// fd_read_dir: forward to vfs_read_dir.  The asm version did
-// `movsx eax, ax` to sign-extend the 16-bit AX return; cc.py's
-// out_register("ax") capture into an `int` slot does the same.
+// fd_read_isdir: read() on a directory fd is illegal under POSIX —
+// callers must use SYS_IO_GETDENTS instead.  Returns -1 with the
+// errno mapped to EISDIR (via ERROR_IS_DIRECTORY).  Wired into
+// fd_ops[FD_TYPE_DIRECTORY].read so unmodified fread/read() callers
+// fail loudly instead of silently iterating raw bytes.
 __attribute__((carry_return))
-int fd_read_dir(int *result __attribute__((out_register("ax"))),
-                struct fd *entry __attribute__((in_register("esi"))),
-                uint8_t *buffer __attribute__((in_register("edi")))) {
-    int bytes;
-    if (!vfs_read_dir(&bytes, entry, buffer)) {
-        *result = -1;
-        return 0;
-    }
-    *result = bytes;
-    return 1;
+int fd_read_isdir(int *result __attribute__((out_register("ax"))),
+                  struct fd *entry __attribute__((in_register("esi"))),
+                  uint8_t *buffer __attribute__((in_register("edi"))),
+                  int count __attribute__((in_register("ecx")))) {
+    (void)entry;
+    (void)buffer;
+    (void)count;
+    *result = ERROR_IS_DIRECTORY;
+    return 0;
 }
 
 // fd_read_file: copy at most `count` bytes from the file at

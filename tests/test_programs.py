@@ -823,7 +823,7 @@ TESTS: list[ProgramTest] = [
     ProgramTest("head_default", ["seq 1 20 | head"], r"^1$\n^2$\n^3$\n^4$\n^5$\n^6$\n^7$\n^8$\n^9$\n^10$"),
     ProgramTest("loop", ["loop_test basic"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_test array"], r"abc"),
-    ProgramTest("ls", ["ls bin"], r"arp\*"),
+    ProgramTest("ls", ["ls bin"], r"^arp$"),
     ProgramTest("mkdir", ["mkdir tmpd", "ls"], r"tmpd/"),
     ProgramTest(
         "mkdir_ls_root",
