@@ -26,6 +26,7 @@ from cc.ast_nodes import (
     Conditional,
     DerefAssign,
     DoWhile,
+    EnumDecl,
     Function,
     If,
     Index,
@@ -46,6 +47,7 @@ from cc.ast_nodes import (
     String,
     StructDecl,
     StructInit,
+    Switch,
     Var,
     VarDecl,
     While,
@@ -772,6 +774,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if type_name in {"int", "unsigned int"} or "*" in type_name or type_name in self.target.type_sizes:
             return self.target.type_size(type_name)
         if type_name == "function_pointer":
+            return self.target.int_size
+        if type_name.startswith("enum "):
+            # ``enum NAME`` and ``enum NAME *`` are int-sized for storage —
+            # the variant set drives switch exhaustiveness, not layout.
             return self.target.int_size
         if type_name.startswith("struct "):
             tag = type_name[7:]
@@ -1777,6 +1783,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         for declaration in declarations:
             if isinstance(declaration, InlineAsm):
+                continue
+            if isinstance(declaration, EnumDecl):
+                # Register every variant as a named integer constant so
+                # any expression that references the bare variant name
+                # resolves to the literal value (the same path
+                # ``#define``'d names take after preprocessing).  The
+                # declared variant list is retained for the switch
+                # exhaustiveness check; storage for enum-typed locals
+                # uses the standard int slot.
+                self.enum_decls[declaration.name] = declaration
+                for variant_name, variant_value in declaration.variants:
+                    if variant_name in self.NAMED_CONSTANT_VALUES:
+                        message = f"enum constant '{variant_name}' shadows a kernel constant"
+                        raise CompileError(message, line=declaration.line)
+                    self.enum_constants[variant_name] = variant_value
+                    self.NAMED_CONSTANT_VALUES[variant_name] = variant_value
                 continue
             if isinstance(declaration, StructDecl):
                 # Build a packed field layout:
@@ -3194,6 +3216,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.scan_locals(statement.else_body, top_level=False)
             elif isinstance(statement, (DoWhile, While)):
                 self.scan_locals(statement.body, top_level=False)
+            elif isinstance(statement, Switch):
+                for case in statement.cases:
+                    self.scan_locals(case.body, top_level=False)
 
     def validate_body_comparisons(self, statements: list[Node], /) -> None:
         """Walk a function body, validating every comparison's operand types.

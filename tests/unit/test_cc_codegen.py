@@ -3376,6 +3376,118 @@ def test_user_brace_init_global_array_emits_dd_table() -> None:
     assert "_g_fib: dd 1, 1, 2, 3, 5, 8, 13, 21, 34, 55" in asm, f"missing brace-init dd table:\n{asm}"
 
 
+def test_user_enum_constants_fold_to_integer_literals() -> None:
+    """``enum E { A, B = 5, C };`` makes each variant a compile-time integer.
+
+    Auto-incrementing values resume from the most recent explicit
+    value + 1 (A=0, B=5, C=6).  References to a bare variant name
+    inline as that literal — verified by case-label compares using
+    the explicit numeric constants the user spelled at the enum
+    site, not 0/1/2.
+    """
+    asm = _user(
+        """
+        enum E { A, B = 5, C };
+        int main() {
+            int x;
+            x = B;
+            switch (x) {
+                case A: return 1;
+                case B: return 2;
+                case C: return 3;
+            }
+            return 99;
+        }
+        """,
+    )
+    assert "cmp ax, 5" in asm or "cmp dx, 5" in asm, f"expected case-B compare against 5:\n{asm}"
+    assert "cmp ax, 6" in asm or "cmp dx, 6" in asm, f"expected case-C compare against 6:\n{asm}"
+
+
+def test_user_enum_switch_covers_all_variants_compiles_and_dispatches_each() -> None:
+    """A switch that names every enum variant compiles and emits a compare per variant.
+
+    The exhaustiveness check should be a no-op when every declared
+    variant has a matching ``case``.  Positive complement to
+    :func:`test_user_enum_switch_exhaustiveness_rejects_missing_variant`
+    — together they pin both sides of the gate.  The asm assertion
+    inspects the dispatch chain by looking for a ``cmp`` against each
+    enum value (1, 2, 3 for ``A, B, C`` here) so a future refactor
+    that silently drops a variant from the compare chain still trips.
+    """
+    asm = _user(
+        """
+        enum E { A = 1, B, C };
+        int main() {
+            enum E x;
+            x = A;
+            int result;
+            switch (x) {
+                case A: result = 10; break;
+                case B: result = 20; break;
+                case C: result = 30; break;
+            }
+            return result;
+        }
+        """,
+    )
+    cmp_lines = [line for line in asm.splitlines() if line.lstrip().startswith("cmp ")]
+    for value in (1, 2, 3):
+        assert any(line.endswith(f", {value}") for line in cmp_lines), (
+            f"missing `cmp ..., {value}` for enum variant; cmp lines were:\n{cmp_lines}"
+        )
+
+
+def test_user_enum_switch_default_suppresses_exhaustiveness() -> None:
+    """A ``default:`` arm makes exhaustiveness vacuously satisfied.
+
+    Even though ``case C`` is omitted, the presence of ``default``
+    means the switch covers every possible discriminant value — the
+    exhaustiveness check is skipped.
+    """
+    _user(
+        """
+        enum E { A, B, C };
+        int main() {
+            enum E x;
+            x = A;
+            switch (x) {
+                case A: return 1;
+                case B: return 2;
+                default: return 99;
+            }
+        }
+        """,
+    )
+
+
+def test_user_enum_switch_exhaustiveness_rejects_missing_variant() -> None:
+    """Switch on enum without ``default`` errors if any variant is uncovered.
+
+    This is the headline feature: adding a new enum variant later
+    flags every switch site that forgot to handle it, at compile
+    time, instead of silently dispatching to a default branch (or
+    falling off the end).
+    """
+    ok, message = _compile(
+        """
+        enum E { A, B, C };
+        int main() {
+            enum E x;
+            x = A;
+            switch (x) {
+                case A: return 1;
+                case B: return 2;
+            }
+            return 99;
+        }
+        """,
+        target="user",
+    )
+    assert not ok, f"expected exhaustiveness error, compilation succeeded:\n{message}"
+    assert "switch on enum 'E' missing case for 'C'" in message, message
+
+
 def test_user_file_scope_asm_escape() -> None:
     """File-scope and statement-form ``asm(...)`` blocks emit verbatim.
 
@@ -3602,6 +3714,148 @@ def test_user_rejects_outw() -> None:
     )
     assert not ok, f"Expected user-mode kernel_outw() rejection; got asm:\n{output}"
     assert "outw" in output.lower() and "kernel" in output.lower(), f"Error should mention outw/kernel:\n{output}"
+
+
+def test_user_switch_break_inside_loop_exits_only_switch() -> None:
+    """``break`` inside a switch nested in a while loop exits the switch, not the loop.
+
+    The compiled output's switch end label is the only break target,
+    so the surrounding while loop's body resumes after the switch
+    and the loop runs to its own termination condition.
+    """
+    asm = _user(
+        """
+        int main() {
+            int i;
+            int seen;
+            i = 0;
+            seen = 0;
+            while (i < 5) {
+                switch (i) {
+                    case 1:
+                        seen = seen + 10;
+                        break;
+                    case 2:
+                        seen = seen + 20;
+                        break;
+                    default:
+                        seen = seen + 1;
+                }
+                i = i + 1;
+            }
+            return seen;
+        }
+        """,
+    )
+    # The break inside the switch must land at the switch's end label,
+    # not the while loop's end label.  Both labels exist; the jumps
+    # emitted for the two `break` statements must target the switch.
+    assert ".switch_" in asm and "_end" in asm, f"missing switch end label:\n{asm}"
+    assert ".while_" in asm and "_end" in asm, f"missing while end label:\n{asm}"
+    switch_break_lines = [line for line in asm.splitlines() if "jmp .switch_" in line and "_end" in line]
+    assert switch_break_lines, f"expected break to jump to switch end label:\n{asm}"
+    # The runtime answer is the dispositive proof break only exits the
+    # switch — 10 + 20 + 1 + 1 + 1 = 33; if break broke the loop too,
+    # we'd see something different (e.g. 10 = first hit then exit).
+    # We can't run it here, but the label discipline above is enough.
+
+
+def test_user_switch_fall_through_between_cases() -> None:
+    """Adjacent cases without ``break`` fall into the next arm's body.
+
+    ``case 1`` has no ``break``, so when the discriminant matches 1
+    the body for case 2 runs as well.  In the compiled output the
+    two case labels appear back-to-back with no intervening jump.
+    """
+    asm = _user(
+        """
+        int main() {
+            int x;
+            int sum;
+            x = 1;
+            sum = 0;
+            switch (x) {
+                case 1: sum = sum + 10;
+                case 2: sum = sum + 20;
+                default: sum = sum + 100;
+            }
+            return sum;
+        }
+        """,
+    )
+    # There should be no jmp out of case 1's body — it falls into case 2.
+    # Look for the case_0 label followed by a body and then the case_1
+    # label, without an intervening jmp-to-end between them.
+    lines = [line.strip() for line in asm.splitlines()]
+    case_indices = [index for index, line in enumerate(lines) if line.startswith(".switch_") and "_case_" in line]
+    assert len(case_indices) >= 2, f"expected at least two case labels:\n{asm}"
+    between = lines[case_indices[0] + 1 : case_indices[1]]
+    assert not any(line.startswith("jmp ") for line in between), (
+        f"unexpected jmp between adjacent cases (fall-through must not break):\n{between}"
+    )
+
+
+def test_user_switch_on_plain_int_skips_exhaustiveness() -> None:
+    """A non-enum-typed discriminant never triggers the exhaustiveness check.
+
+    Plain ``int`` switches with missing ``default:`` compile fine —
+    they're just compare/jump chains.  The exhaustiveness check is
+    intentionally restricted to enum-typed discriminants since that's
+    where the set of valid values is statically knowable.
+    """
+    _user(
+        """
+        int main() {
+            int x;
+            x = 7;
+            switch (x) {
+                case 1: return 10;
+                case 2: return 20;
+            }
+            return 99;
+        }
+        """,
+    )
+
+
+def test_user_switch_rejects_duplicate_case_values() -> None:
+    """Two ``case`` arms with the same constant value are rejected at parse time."""
+    ok, message = _compile(
+        """
+        int main() {
+            int x;
+            x = 0;
+            switch (x) {
+                case 1: return 10;
+                case 1: return 20;
+            }
+            return 99;
+        }
+        """,
+        target="user",
+    )
+    assert not ok, f"expected duplicate-case error, compilation succeeded:\n{message}"
+    assert "duplicate case value" in message, message
+
+
+def test_user_switch_rejects_non_constant_case_label() -> None:
+    """A ``case`` label that isn't a compile-time integer constant is rejected."""
+    ok, message = _compile(
+        """
+        int g;
+        int main() {
+            int x;
+            x = 0;
+            switch (x) {
+                case g: return 10;
+            }
+            return 99;
+        }
+        """,
+        target="user",
+    )
+    assert not ok, f"expected non-constant case error, compilation succeeded:\n{message}"
+    assert "compile-time integer constant" in message, message
 
 
 @pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "src" / "c").glob("*.c")))

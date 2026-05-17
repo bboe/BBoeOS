@@ -55,6 +55,8 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    Switch,
+    SwitchCase,
     TailCall,
     Var,
     VarDecl,
@@ -2238,6 +2240,9 @@ class EmissionMixin:
             self.generate_do_while(statement)
         elif isinstance(statement, If):
             self.generate_if(statement)
+        elif isinstance(statement, Switch):
+            self.ax_clear()
+            self.generate_switch(statement)
         elif isinstance(statement, While):
             self.ax_clear()
             self.generate_while(statement)
@@ -2299,6 +2304,104 @@ class EmissionMixin:
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)
+
+    def generate_switch(self, statement: Switch, /) -> None:
+        """Generate assembly for a ``switch`` statement (compare/jump chain).
+
+        Lowering is intentionally minimal — no jump table.  The
+        discriminant is evaluated into the accumulator once; each
+        ``case`` arm gets a label, and the prologue emits one
+        ``cmp acc, value`` / ``je arm_label`` pair per arm.  After the
+        compare chain control falls into the ``default`` arm (if any)
+        or jumps past the entire switch.  Each arm's body is then
+        emitted sequentially, so omitting ``break`` between adjacent
+        arms makes control flow straight into the next one — matching
+        standard C fall-through.
+
+        ``break`` inside the switch jumps to the switch's end label
+        because we push it onto :attr:`loop_end_labels`.  ``continue``
+        does *not* receive a switch entry, so it still applies to the
+        enclosing loop (as in C).
+
+        When the discriminant's static type is ``enum NAME`` and no
+        ``default`` arm exists, every variant declared for that enum
+        must appear as a ``case`` — missing variants raise a compile
+        error.  Adding a new enum variant later then flags every
+        switch site that forgot it, at compile time, which is the
+        whole motivation for fusing the two features.
+        """
+        line = statement.line
+        # Determine the discriminant's enum tag, if any, for the
+        # exhaustiveness check.  Only ``Var`` discriminants whose type
+        # was declared ``enum NAME`` qualify; arbitrary integer
+        # expressions (calls returning int, arithmetic, etc.) are
+        # treated as plain int — no check fires.
+        enum_tag: str | None = None
+        if isinstance(statement.discriminant, Var):
+            discriminant_type = self.variable_types.get(statement.discriminant.name)
+            if discriminant_type is not None and discriminant_type.startswith("enum "):
+                enum_tag = discriminant_type[5:]
+        default_case: SwitchCase | None = None
+        case_arms: list[SwitchCase] = []
+        for case in statement.cases:
+            if case.value is None:
+                default_case = case
+            else:
+                case_arms.append(case)
+        if enum_tag is not None and default_case is None:
+            declaration = self.enum_decls.get(enum_tag)
+            if declaration is None:
+                message = f"switch on undeclared enum '{enum_tag}'"
+                raise CompileError(message, line=line)
+            covered_values = {case.value for case in case_arms}
+            missing = [variant_name for variant_name, value in declaration.variants if value not in covered_values]
+            if missing:
+                missing_list = ", ".join(f"'{name}'" for name in missing)
+                # Match the spec's headline wording exactly so users searching for
+                # the error in the codebase find this site.
+                message = f"switch on enum '{enum_tag}' missing case for {missing_list}"
+                raise CompileError(message, line=line)
+        # Build the compare/jump chain via the existing condition
+        # machinery: each ``case CONST:`` is lowered as a synthetic
+        # ``discriminant == CONST`` true-jump.  Going through
+        # :meth:`emit_condition_true_jump` reuses the byte-vs-word /
+        # pinned-register / constant-alias handling already in place,
+        # and crucially re-emits the discriminant load before each
+        # compare so the per-arm load isn't elided by a peephole pass
+        # that assumes the accumulator is dead after the first ``je``.
+        label_index = self.new_label()
+        end_label = f".switch_{label_index}_end"
+        case_labels = [f".switch_{label_index}_case_{index}" for index, _ in enumerate(case_arms)]
+        default_label = f".switch_{label_index}_default" if default_case is not None else end_label
+        discriminant_line = statement.discriminant.line
+        for case, arm_label in zip(case_arms, case_labels, strict=True):
+            self.ax_clear()
+            condition = BinaryOperation(
+                left=statement.discriminant,
+                line=discriminant_line,
+                operation="==",
+                right=Int(line=discriminant_line, value=case.value),
+            )
+            self.emit_condition_true_jump(condition=condition, context="switch", success_label=arm_label)
+        self.emit(f"        jmp {default_label}")
+        # Push the end label onto the break-target stack so nested
+        # ``break`` statements jump out of the switch.  ``continue``
+        # falls through to whatever loop encloses the switch (if any)
+        # — we don't push a continue label here.
+        self.loop_end_labels.append(end_label)
+        try:
+            for case, arm_label in zip(case_arms, case_labels, strict=True):
+                self.emit(f"{arm_label}:")
+                self.ax_clear()
+                self.generate_body(case.body, scoped=True)
+            if default_case is not None:
+                self.emit(f"{default_label}:")
+                self.ax_clear()
+                self.generate_body(default_case.body, scoped=True)
+        finally:
+            self.loop_end_labels.pop()
+        self.emit(f"{end_label}:")
+        self.ax_clear()
 
     def generate_tail_call(self, statement: TailCall, /) -> None:
         """Generate a ``__tail_call`` tail-dispatch statement.

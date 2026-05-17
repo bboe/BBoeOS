@@ -131,6 +131,25 @@ class DoWhile(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class EnumDecl(Node):
+    """Enum type declaration ``enum NAME { A, B = 5, C, ... };`` at file scope.
+
+    Each variant is recorded as a ``(name, value)`` tuple in source
+    order.  Values auto-increment from 0 (or from the most recent
+    explicit value + 1).  Variants are registered as integer-valued
+    named constants so any subsequent expression that references the
+    bare variant name resolves to the corresponding integer literal —
+    the same path :class:`Var` references to ``#define`` constants
+    already take.  The variant list is also retained so the switch
+    exhaustiveness check can iterate over every value declared for a
+    given enum tag.
+    """
+
+    name: str
+    variants: list[tuple[str, int]]
+
+
+@dataclass(kw_only=True, slots=True)
 class Function(Node):
     """Function definition: name, parameter list, and body.
 
@@ -443,6 +462,44 @@ class String(Node):
     """String literal."""
 
     content: str
+
+
+@dataclass(kw_only=True, slots=True)
+class Switch(Node):
+    """``switch (discriminant) { case ...: ... default: ... }`` statement.
+
+    Lowering is a simple compare/jump chain (no jump table): each
+    ``case`` arm gets a label, the prologue emits ``cmp disc, value``
+    against each constant, jumps to the matching arm, and falls into
+    ``default`` (or past the switch's end label) if nothing matches.
+
+    When ``discriminant``'s static type is ``enum NAME`` and no
+    ``default`` arm is present, the codegen verifies that every variant
+    declared for that enum is named by some ``case``; missing variants
+    are reported as a compile error.  This is the headline reason
+    switch on enum exists in cc.py — adding a new enum variant later
+    flags every dispatch site that forgot it.
+    """
+
+    cases: list[SwitchCase]
+    discriminant: Node
+
+
+@dataclass(kw_only=True, slots=True)
+class SwitchCase(Node):
+    """A single ``case CONST: body...`` or ``default: body...`` arm of a switch.
+
+    ``value`` is the resolved integer constant for a ``case`` arm, or
+    ``None`` for the ``default`` arm.  ``body`` is the list of statements
+    associated with the arm; fall-through (no ``break``) is represented
+    by an arm that simply doesn't end in :class:`Break`, identical to
+    standard C — the codegen emits each arm's body sequentially, and a
+    missing ``break`` means control flows straight into the next arm's
+    body just as in a hand-written compare-and-jump chain.
+    """
+
+    body: list[Node]
+    value: int | None
 
 
 @dataclass(kw_only=True, slots=True)
