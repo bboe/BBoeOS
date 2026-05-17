@@ -172,24 +172,18 @@ class CodeGeneratorBase:
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
-    #: Type names whose values must be treated as unsigned in comparisons.
-    #: Pointers compare as offsets within a 16-bit segment (always
-    #: non-negative), so they're grouped with the unsigned ints.  ``int``
-    #: stays signed (the C subset's default integer type), ``char`` stays
-    #: signed by historical convention.
+    #: Non-pointer scalar type names whose values are unsigned in
+    #: comparisons.  Pointers are handled separately by
+    #: :meth:`_is_unsigned_type` (any type ending in ``*`` is treated as
+    #: unsigned because pointers compare as non-negative offsets).
+    #: ``int`` stays signed (the C subset's default integer type),
+    #: ``char`` stays signed by historical convention.
     UNSIGNED_TYPES: ClassVar[frozenset[str]] = frozenset({
         "uint8_t",
-        "uint8_t*",
         "uint16_t",
-        "uint16_t*",
         "uint32_t",
-        "uint32_t*",
         "unsigned int",
-        "unsigned int*",
         "unsigned long",
-        "char*",
-        "int*",
-        "void*",
     })
 
     def __init__(
@@ -495,7 +489,7 @@ class CodeGeneratorBase:
         return self._is_unsigned_operand(left) or self._is_unsigned_operand(right)
 
     def _is_unsigned_operand(self, node: Node, /) -> bool:
-        """Return True if *node*'s C type is in :attr:`UNSIGNED_TYPES`.
+        """Return True if *node*'s C type is unsigned for comparison.
 
         Conservative for shapes we don't recognise (struct member access,
         function calls, pointer dereferences) — falls back to signed,
@@ -506,12 +500,27 @@ class CodeGeneratorBase:
             # ``&x`` produces a pointer; pointers compare as unsigned offsets.
             return True
         if isinstance(node, Var):
-            return self.variable_types.get(node.name) in self.UNSIGNED_TYPES
+            return self._is_unsigned_type(self.variable_types.get(node.name))
         if isinstance(node, Index):
-            return self.variable_types.get(node.array.name) in self.UNSIGNED_TYPES
+            return self._is_unsigned_type(self.variable_types.get(node.array.name))
         if isinstance(node, BinaryOperation):
             return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
         return False
+
+    def _is_unsigned_type(self, type_name: str | None, /) -> bool:
+        """Return True if *type_name* compares as unsigned.
+
+        Pointers (any type spelled with a trailing ``*``) are unsigned —
+        they compare as non-negative offsets within the program's
+        address space.  Non-pointer scalars are checked against
+        :attr:`UNSIGNED_TYPES`.  ``None`` (unknown type) falls back to
+        signed.
+        """
+        if type_name is None:
+            return False
+        if type_name.endswith("*"):
+            return True
+        return type_name in self.UNSIGNED_TYPES
 
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.

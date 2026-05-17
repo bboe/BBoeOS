@@ -3177,6 +3177,58 @@ def test_unsigned_int_size_tracks_int_size_32bit() -> None:
     assert "mov eax, 4" in asm, f"expected sizeof(unsigned int)==4 in 32-bit mode\n{asm}"
 
 
+def test_unsigned_long_double_pointer_parses() -> None:
+    """``unsigned long **`` parameter type parses (parser regression check)."""
+    src = """
+        void f(unsigned long **slots __attribute__((in_register("di")))) {
+            slots[0] = slots[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_unsigned_long_pointer_parses() -> None:
+    """``unsigned long *`` parameter type parses and compiles."""
+    src = """
+        void f(unsigned long *p __attribute__((in_register("di")))) {
+            p[0] = 0;
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_unsigned_pointer_double_indirect_compares_unsigned() -> None:
+    """``int **`` (and other double-pointer types) compare as unsigned offsets.
+
+    Regression for the old hand-enumerated UNSIGNED_TYPES set, which
+    listed single-star pointer spellings but not double-star.  After the
+    pointer-by-suffix simplification, any type ending in ``*`` is
+    treated as unsigned by :meth:`_is_unsigned_type`.
+    """
+    src = """
+        int **p __attribute__((asm_name("p")));
+        int **q __attribute__((asm_name("q")));
+        int check() { return p < q; }
+    """
+    asm = _kernel(src)
+    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for int** comparison\n{asm}"
+    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for int** comparison\n{asm}"
+
+
+def test_unsigned_pointer_uint8_double_indirect_compares_unsigned() -> None:
+    """``uint8_t **`` comparison uses unsigned mnemonics (suffix-detected)."""
+    src = """
+        uint8_t **p __attribute__((asm_name("p")));
+        uint8_t **q __attribute__((asm_name("q")));
+        int check() { return p < q; }
+    """
+    asm = _kernel(src)
+    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for uint8_t** comparison\n{asm}"
+    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for uint8_t** comparison\n{asm}"
+
+
 def test_unsigned_uint16_t_greater_or_equal_emits_jae() -> None:
     """``uint16_t >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
     src = """
