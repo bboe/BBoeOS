@@ -93,6 +93,13 @@ offset 7:  char     d_name[]    // null-terminated, padded so next d_ino aligns 
 Maximum 264 bytes (255-char ext2 name + NUL, padded to align). Callers walk by
 adding `d_reclen` to the cursor; EOF when `getdents` returns 0.
 
+**Why not the 16-bit-truncated `d_ino` we have today?** The existing 32-byte
+entry already carries an ext2-inode-stuffed-into-`start_sector` field. We
+could keep that and call it `d_ino` in libc — zero kernel work. Rejected
+because ext2 images with >65535 inodes silently collide; the truncation is a
+latent footgun every time someone mounts a non-toy image. Going Linux-style
+removes it for free as a side effect of fixing the ext2 fake-bbfs synthesis.
+
 ### VFS contract change
 
 Add a `dir_emit(ctx, name, namelen, ino, type)` callback in asm. The
@@ -120,6 +127,13 @@ returns -1 with this error. The `fd_ops` table entry for `FD_TYPE_DIRECTORY`'s
 read slot goes from `fd_read_dir` to `fd_read_isdir` (or equivalent).
 
 libc maps `ERROR_IS_DIRECTORY` → `EISDIR` in `tools/libc/syscall.c`.
+
+**Why not keep `read()` returning the legacy 32-byte format alongside
+`getdents`?** It would let existing callers keep working without migration.
+Rejected because there's exactly one caller (`ls.c`) and the whole point of
+the refactor was to delete the bbfs-shaped synthesis path — keeping it
+alongside the new code defeats the motivation. With only one program to
+migrate, the cost of doing it right is one ≈30-line `ls.c` rewrite.
 
 ### ls.c rewrite
 
