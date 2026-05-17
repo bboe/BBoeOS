@@ -1,9 +1,10 @@
 # BBoeOS design specs
 
-This is an orphan branch (no shared history with `main`) used to publish
-design specs for review. The same files live on the local-only
-`local/specs-wip` branch for in-flight editing; this branch hosts the
-reviewable snapshots.
+This is an orphan branch (no shared history with `main`) where BBoeOS
+design specs live. Specs are written here directly — usually via `git
+mktree` + `git commit-tree` plumbing so the active feature worktree
+isn't disturbed, or via a dedicated `git worktree` checkout of this
+branch.
 
 Each spec is a self-contained brainstorming-output design doc. The
 matching implementation plan lives in the feature branch's PR description

@@ -178,11 +178,6 @@ int main(int argc, char *argv[]) {
         write(STDOUT, names[i], strlen(names[i]));
         if (types[i] == DT_DIR) {
             putchar('/');
-        } else if (types[i] == DT_REG) {
-            // The `*` execute suffix is currently driven by FLAG_EXECUTE,
-            // which getdents doesn't expose.  Options: (a) ship without the
-            // `*` suffix and stat() each entry; (b) extend the wire record
-            // with a flags byte.  Decision below.
         }
         putchar('\n');
     }
@@ -191,26 +186,24 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-**Open question: the `*` execute suffix.** Today `ls.c` prints `*` after
-executable files based on `FLAG_EXECUTE` in the raw entry. The Linux `d_type`
-field doesn't expose execute-ness (that's a permission bit, not a type).
-Three options:
+**The `*` execute suffix is dropped.** Today's `ls.c` prints `*` after
+executable files based on `FLAG_EXECUTE` in the raw 32-byte entry. The
+Linux `d_type` field deliberately doesn't expose execute-ness (that's a
+permission bit, not a type), and POSIX `ls` without `-F`/`-p` flags
+doesn't add suffixes. GNU `ls` only computes the execute indicator when
+`-F` or `--color` is active, in which case it `stat()`s each entry. We
+don't have a working `stat()` (the libc one is a stub returning -1) and
+adding `-F` to our `ls` is out of scope for this PR. Net effect: BBoeOS
+`ls` becomes more POSIX-conformant — just `/` after directories,
+nothing else. The execute indicator can come back when `stat()` lands
+and `-F` is implemented; that's a clean separate change.
 
-1. **Drop the `*` suffix.** Closest to POSIX — `ls` only adds suffixes with
-   `-F`/`-p` flags, which we don't support. Smallest change.
-2. **Add a flags byte to the wire record.** One extra byte per record carries
-   the FS-specific `FLAG_*` bits (for bbfs: FLAG_EXECUTE). ext2 fills in based
-   on `S_IXUSR`. Defeats the "type vs permission" Linux separation a bit but
-   stays cheap.
-3. **`stat()` each entry from `ls`.** Most faithful to POSIX; biggest cost.
-   Today `stat()` is a libc stub returning -1, so we'd need a working
-   `stat()` syscall first. Out of scope for this PR.
-
-**Recommended: option 1** — drop the suffix. The doc currently calls out
-"appends `*` to executables" as a BBoeOS-specific behavior; removing it is a
-small loss in visible behavior, but matches POSIX `ls` more closely and
-avoids polluting the wire format. The execute bit can come back if/when
-`stat()` lands.
+**Why not extend the wire record with a flags byte?** Considered and
+rejected. It would have let us keep the `*` without `stat()`, but
+defeats the "type vs permission" separation Linux deliberately put into
+`d_type`, and would carry FS-specific bits across the kernel↔user
+boundary that no portable code knows what to do with. Better to do it
+the way Linux does it (stat for permission queries) when we're ready.
 
 ### Tests
 
@@ -414,16 +407,17 @@ dirent: ok".
 
 ## Open questions
 
-1. **`*` execute suffix in `ls`.** Recommendation: drop in PR 1. Confirm.
-2. **`d_off` in the wire record.** Linux includes it; we don't need it (we
+1. **`d_off` in the wire record.** Linux includes it; we don't need it (we
    don't support `seekdir`/`telldir`). Omit unless we later add positional
    iteration. Recommendation: omit.
-3. **`getdents` semantics when caller buffer is too small for next record.**
+2. **`getdents` semantics when caller buffer is too small for next record.**
    Linux returns `EINVAL` and the iteration state is unchanged (next call
    with bigger buffer succeeds). Match that. Recommendation: match Linux.
 
 ## Updating this document
 
-If the design changes during implementation, update this file in the same
-commit on `local/specs-wip`. The feature PR rebases out the spec commits
-before merging.
+If the design changes during implementation, update this file in place on
+the `design-specs` branch (typically via `git mktree` + `git commit-tree`
+plumbing so the feature worktree stays clean). The feature branch shares
+no history with `design-specs`, so spec edits never need to be rebased
+out of a feature PR.
