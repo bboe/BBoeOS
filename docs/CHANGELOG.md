@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **libc `<dirent.h>`: `opendir` / `readdir` / `closedir` / `rewinddir`.**  New
+  `tools/libc/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
+  (linking against `libbboeos.a`) can iterate directories with the POSIX API.
+  Each `DIR` owns a 4 KB receive buffer and a single `struct dirent` (`d_ino` /
+  `d_type` / `d_name[256]`); subsequent `readdir` invalidates the previous
+  return.  `getdents(2)` wrapper added to `syscall.c` next to `read`/`write`.
+  Kernel `fd_seek` now accepts `FD_TYPE_DIRECTORY` so `rewinddir` (which calls
+  `lseek(fd, 0, SEEK_SET)`) succeeds; broader directory seeks clamp the same way
+  file seeks do (no `seekdir`/`telldir` semantics).  `EISDIR` / `ENOTDIR` join
+  the `ERROR_*` → errno mapping table.  The on-OS `hello` libc smoke test
+  exercises the new surface.
 - **POSIX directory iteration: `SYS_IO_GETDENTS` + Linux-style `dir_emit`.** New
   `SYS_IO_GETDENTS` (14h) returns variable-length records
   (`d_ino`/`d_reclen`/`d_type`/`d_name`) into a user buffer, packed back-to-back
