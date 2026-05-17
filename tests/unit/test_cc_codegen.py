@@ -3063,6 +3063,32 @@ def test_tail_call_wrong_fn_raises_error() -> None:
     assert "__tail_call" in error, f"Expected __tail_call error, got: {error}"
 
 
+def test_uint16_pointer_load_is_word() -> None:
+    """``uint16_t *p; r = p[0];`` loads exactly 2 bytes, not 4 (32-bit target regression).
+
+    Symptom: when the acc is 32-bit (``eax``), a bare ``mov eax, [esi]``
+    reads 4 bytes from the pointer target — but the pointee is 16 bits,
+    so the high two bytes belong to the adjacent uint16_t.  The fix
+    routes the load through ``movzx eax, word [esi]``.  On the 16-bit
+    target the acc width already matches the pointee, so this is a
+    32-bit-target-only test.
+    """
+    asm = _kernel(
+        """
+            void test(uint16_t *p __attribute__((in_register("di")))) {
+                uint16_t r = p[0];
+                (void)r;
+            }
+        """,
+        bits=32,
+    )
+    # Either ``movzx eax, word [esi]`` or ``mov ax, [esi]`` then ``movzx``
+    # would be acceptable — what's forbidden is a bare ``mov eax, [esi]``
+    # (which reads 4 bytes).
+    assert "mov eax, [esi]" not in asm, f"uint16_t* read must not use a 32-bit acc load (would read 4 bytes):\n{asm}"
+    assert "word" in asm, f"expected a ``word``-sized load for uint16_t*:\n{asm}"
+
+
 def test_uint16_t_size_is_always_two_bytes_16bit() -> None:
     """sizeof(uint16_t) == 2 in --bits 16 mode."""
     asm = _kernel("int f() { return sizeof(uint16_t); }", bits=16)
@@ -3186,6 +3212,47 @@ def test_unsigned_long_double_pointer_parses() -> None:
     """
     asm = _kernel(src)
     assert "f:" in asm
+
+
+def test_unsigned_long_pointer_load_is_dword_on_kernel() -> None:
+    """``unsigned long *p; return p[0];`` on the 16-bit kernel target loads all 32 bits into DX:AX.
+
+    Symptom: the Index emit path uses the target's native acc width
+    (``ax``, 16 bits), so the high 16 bits are dropped.  An
+    ``unsigned long`` pointee on the 16-bit target needs DX:AX (two
+    word loads at ``[si]`` and ``[si+2]``).
+    """
+    src = """
+        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
+            return p[0];
+        }
+    """
+    asm = _kernel(src, bits=16)
+    # The 16-bit code must load both halves: low into AX, high into DX.
+    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
+    # The high-word load is the distinguishing marker.
+    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
+
+
+def test_unsigned_long_pointer_load_type_check() -> None:
+    """``unsigned long x = p[0];`` with ``unsigned long *p`` compiles cleanly.
+
+    Symptom: the IR builder lowers the Index through an ``int`` temp,
+    then ``generate_long_expression`` rejects it with
+    ``expected 'unsigned long' expression, got 'int' variable '_ir_0'``.
+    The fix recognises a long-pointee Index at IR-build time and
+    delegates the assignment to the AST codegen path, which knows how
+    to produce a DX:AX value.
+    """
+    src = """
+        void test(unsigned long *p __attribute__((in_register("di")))) {
+            unsigned long x;
+            x = p[0];
+            (void)x;
+        }
+    """
+    asm = _kernel(src, bits=16)
+    assert "test:" in asm, f"expected function label, got:\n{asm}"
 
 
 def test_unsigned_long_pointer_parses() -> None:

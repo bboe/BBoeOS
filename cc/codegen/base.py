@@ -422,6 +422,37 @@ class CodeGeneratorBase:
             return (self.array_labels[expression.array.name], expression.index.value * 2)
         return None
 
+    def _index_pointee_size(self, name: str, /) -> int:
+        """Return the byte width of one element of ``name[i]``.
+
+        Inspects the recorded type of *name* (a pointer or array base)
+        and resolves the pointee / element width via
+        :meth:`target.type_size`.  Falls back to the target's native
+        integer width when the type is unknown (matching the historical
+        default — ``int*`` / a bare ``arr[i]`` of int-typed elements
+        loads a full word).
+
+        Byte-sized cases (``char`` / ``uint8_t`` pointee and byte arrays)
+        still route through :meth:`_is_byte_var` for the byte-load
+        fast path; this helper is consulted only when the load width is
+        a full machine word or wider.
+        """
+        if name in self.global_byte_arrays:
+            return 1
+        type_name = self.variable_types.get(name)
+        if type_name is None:
+            return self.target.int_size
+        # Pointer: strip one ``*`` to get the pointee type.
+        if type_name.endswith("*"):
+            pointee = type_name[:-1].rstrip()
+            try:
+                return self.target.type_size(pointee)
+            except KeyError:
+                return self.target.int_size
+        # Non-pointer scalar in indexed position is unusual but the
+        # historical path treats it as a word load; preserve that.
+        return self.target.int_size
+
     def _is_byte_eq(self, node: Node, /) -> bool:
         """Check if a node is ``byte_index == <something>``."""
         return isinstance(node, BinaryOperation) and node.operation == "==" and self._is_byte_index(node.left)
