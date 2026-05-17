@@ -768,7 +768,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         value-struct (``"struct TAG"``) by summing the declared field sizes.
         Raises ``CompileError`` for unknown types.
         """
-        if type_name == "int" or "*" in type_name or type_name in self.target.type_sizes:
+        if type_name in {"int", "unsigned int"} or "*" in type_name or type_name in self.target.type_sizes:
             return self.target.type_size(type_name)
         if type_name == "function_pointer":
             return self.target.int_size

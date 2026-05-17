@@ -2667,6 +2667,45 @@ def test_preserve_register_push_pop() -> None:
         assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
 
 
+def test_read_deref_char_pointer_zero_extends_byte() -> None:
+    """``char c = *p;`` reads one byte (matches ``p[0]`` semantics)."""
+    asm = _kernel("""
+        void f(char *p) {
+            char c;
+            c = *p;
+            if (c == 'A') {
+                c = 'B';
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_read_deref_int_pointer_compiles() -> None:
+    """``x = *p;`` for ``int *p`` parses and lowers to a load."""
+    asm = _kernel("""
+        void f(int *p) {
+            int x;
+            x = *p;
+            if (x == 0) {
+                x = 1;
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_read_deref_uint16_pointer_compiles() -> None:
+    """``x = *p;`` for ``uint16_t *p`` parses and lowers to a load."""
+    asm = _kernel("""
+        void f(uint16_t *p) {
+            uint16_t x;
+            x = *p;
+        }
+    """)
+    assert "f:" in asm
+
+
 def test_signed_int_less_than_still_emits_jge() -> None:
     """``int < literal`` keeps the signed ``jge`` (false-branch).
 
@@ -3109,6 +3148,35 @@ def test_unsigned_byte_global_less_than_emits_jb() -> None:
     assert "jge" not in asm, f"signed 'jge' must not appear for uint8_t comparison\n{asm}"
 
 
+def test_unsigned_int_compiles_and_uses_unsigned_compare() -> None:
+    """``unsigned int`` is an accepted type spelling and compares unsigned."""
+    asm = _kernel("""
+        void f() {
+            unsigned int x;
+            x = 5;
+            x = x + 1;
+            if (x < 10) {
+                x = 0;
+            }
+        }
+    """)
+    assert "f:" in asm
+    assert "jae" in asm or "jb " in asm, f"expected unsigned compare for unsigned int < 10\n{asm}"
+    assert "jge" not in asm and "jl " not in asm, f"signed compare must not appear for unsigned int\n{asm}"
+
+
+def test_unsigned_int_size_tracks_int_size_16bit() -> None:
+    """sizeof(unsigned int) == 2 in --bits 16 mode (matches int width)."""
+    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=16)
+    assert "mov ax, 2" in asm, f"expected sizeof(unsigned int)==2 in 16-bit mode\n{asm}"
+
+
+def test_unsigned_int_size_tracks_int_size_32bit() -> None:
+    """sizeof(unsigned int) == 4 in --bits 32 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(unsigned int)==4 in 32-bit mode\n{asm}"
+
+
 def test_unsigned_uint16_t_greater_or_equal_emits_jae() -> None:
     """``uint16_t >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
     src = """
@@ -3372,6 +3440,32 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
             f"--- default ---\n{default_text[:500]}\n"
             f"--- user ---\n{user_text[:500]}"
         )
+
+
+def test_void_cast_call_statement_emits_call() -> None:
+    """``(void)open(...);`` parses and emits the call, discarding the return."""
+    asm = _user("""
+        int main() {
+            (void)open("foo", 0);
+            return 0;
+        }
+    """)
+    assert "IO_OPEN" in asm or "SYS_IO_OPEN" in asm, f"expected open syscall to be emitted:\n{asm}"
+
+
+def test_void_cast_variable_compiles_to_no_op() -> None:
+    """``(void)x;`` parses and emits no code for the cast itself."""
+    asm = _user("""
+        int main() {
+            int x;
+            x = 5;
+            (void)x;
+            return x;
+        }
+    """)
+    # The variable read still has its assignment, but the (void) cast
+    # itself produces no instructions.
+    assert "main:" in asm
 
 
 def test_builtin_read_emits_fd_last() -> None:

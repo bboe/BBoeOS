@@ -184,6 +184,8 @@ class CodeGeneratorBase:
         "uint16_t*",
         "uint32_t",
         "uint32_t*",
+        "unsigned int",
+        "unsigned int*",
         "unsigned long",
         "char*",
         "int*",

@@ -862,6 +862,17 @@ class Parser:
                     right=index,
                 )
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
+        if token[0] == "STAR":
+            # Unary deref: ``*p`` reads the value pointed at by *p*.
+            # Desugar to ``p[0]`` so the existing Index lowering handles
+            # the load (pointee-typed; same width / sign as ``p[0]``).
+            self.eat()
+            name_token = self.eat("IDENT")
+            return Index(
+                array=Var(line=line, name=name_token[1]),
+                index=Int(line=line, value=0),
+                line=line,
+            )
         if token[0] == "LPAREN":
             self.eat()
             # Pointer-cast or void-cast: `(<type>)expr`.  cc.py's type
@@ -972,6 +983,23 @@ class Parser:
             expr = self.parse_expression()
             self.eat("SEMI")
             return DerefAssign(expr=expr, line=token[2], pointer=Var(line=token[2], name=name_token[1]))
+        if token[0] == "LPAREN" and self.peek(offset=1)[0] == "VOID" and self.peek(offset=2)[0] == "RPAREN":
+            # ``(void)expr;`` — evaluate *expr* for side effects only and
+            # discard the result.  Common in C to mark a value as
+            # deliberately unused; cc.py supports the call case (emit the
+            # call, discard the return) and the no-side-effect case (emit
+            # nothing).
+            self.eat("LPAREN")
+            self.eat("VOID")
+            self.eat("RPAREN")
+            if self.peek()[0] == "IDENT" and self.peek(offset=1)[0] == "LPAREN":
+                return self.parse_call_statement()
+            # Non-call expression: parse to consume the tokens, then
+            # discard.  Emits as an empty InlineAsm so the statement
+            # generator has a node to dispatch on but produces no code.
+            self.parse_expression()
+            self.eat("SEMI")
+            return InlineAsm(content="", line=token[2])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "ASSIGN":
@@ -1251,12 +1279,15 @@ class Parser:
             return self._parse_pointer_suffix(pointer_bases[token[0]], max_stars=2)
         if token[0] == "UNSIGNED":
             self.eat()
-            if self.peek()[0] != "LONG":
-                following = self.peek()
-                message = f"expected 'long' after 'unsigned', got {following[1]!r}"
-                raise CompileError(message, line=token[2])
-            self.eat()
-            return "unsigned long"
+            following = self.peek()
+            if following[0] == "LONG":
+                self.eat()
+                return "unsigned long"
+            if following[0] == "INT":
+                self.eat()
+                return self._parse_pointer_suffix("unsigned int", max_stars=2)
+            message = f"expected 'int' or 'long' after 'unsigned', got {following[1]!r}"
+            raise CompileError(message, line=token[2])
         if token[0] == "LONG":
             message = "bare 'long' is not supported; use 'unsigned long'"
             raise CompileError(message, line=token[2])
