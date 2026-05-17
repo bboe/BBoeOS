@@ -3678,6 +3678,73 @@ def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
     assert found_at_least_one, f"test source must compile to at least one SYS_IO_WRITE; got asm:\n{asm}"
 
 
+def test_builtin_dup2_loads_bx_after_clobbering_sibling() -> None:
+    """dup2(old_fd, get_target()) must load EBX last.
+
+    Regression: builtin_dup2 used to load EBX=old_fd first, then
+    EDX=target_fd.  When ``target_fd`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel dup2 handler then saw garbage
+    in EBX.
+
+    Routing dup2's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_target() { return 5; }
+        int main() {
+            dup2(2, get_target());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # a user-function call in a sibling arg IS the bug we want to
+    # catch (caller-save scratching the already-loaded EBX), so the
+    # walk-back must span past it.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_DUP2" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the dup2 input
+        # ``mov ebx, <old_fd>``), nothing else in the setup block may
+        # write EBX — a user-function call between that load and the
+        # syscall would clobber EBX as caller-save scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_dup2 loaded EBX before a sibling call that clobbers it. "
+            "The dup2 syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_DUP2; got asm:\n{asm}"
+
+
 def test_builtin_sys_break_emits_break_syscall() -> None:
     """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
 

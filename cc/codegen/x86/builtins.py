@@ -193,10 +193,19 @@ class BuiltinsMixin:
         ``dup2(old_fd, target_fd)`` emits ``mov bx, <old> / mov dx, <target> /
         mov ah, SYS_IO_DUP2 / int 30h``.  Returns target on success or
         -1 on error (CF set).
+
+        Argument loads are routed through :meth:`_emit_builtin_arg_moves`
+        so EBX is loaded after any sibling whose evaluation scratches
+        it — e.g. ``dup2(old, get_target())`` where the user-function
+        Call would otherwise wipe EBX between the load and the syscall.
+        Same rationale as builtin_write.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="dup2")
-        self.emit_register_from_argument(argument=arguments[0], register=self.target.bx_register)
-        self.emit_register_from_argument(argument=arguments[1], register=self.target.dx_register)
+        old_fd_argument, target_fd_argument = arguments
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, old_fd_argument),
+            (self.target.dx_register, target_fd_argument),
+        ])
         self._emit_syscall("IO_DUP2")
         self.ax_clear()
 
