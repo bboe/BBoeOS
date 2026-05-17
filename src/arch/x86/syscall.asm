@@ -109,6 +109,7 @@ syscall_handler:
         SYS_ENTRY SYS_IO_DUP,        .io_dup
         SYS_ENTRY SYS_IO_DUP2,       .io_dup2
         SYS_ENTRY SYS_IO_FSTAT,      .io_fstat
+        SYS_ENTRY SYS_IO_GETDENTS,   .io_getdents
         SYS_ENTRY SYS_IO_IOCTL,      .io_ioctl
         SYS_ENTRY SYS_IO_OPEN,       .io_open
         SYS_ENTRY SYS_IO_READ,       .io_read
@@ -285,6 +286,35 @@ syscall_handler:
         jc .iret_cf
         mov [esp + SYSCALL_SAVED_EDX], dx
         mov [esp + SYSCALL_SAVED_EDX + 4], cx
+        jmp .iret_cf
+
+        .io_getdents:
+        ;; BX = fd, EDI = user buffer, ECX = count.  Validate buffer,
+        ;; look up the fd, refuse if not a directory; otherwise stamp
+        ;; dir_emit state and dispatch into vfs_read_dir.  Returns
+        ;; AX = bytes written (0 at EOF), CF on error.
+        push ebx
+        mov ebx, edi
+        call access_ok
+        pop ebx
+        jc .io_rw_bad_pointer
+        call fd_lookup
+        jc .io_rw_bad_pointer                 ; bad fd: EAX=-1 + CF
+        cmp byte [esi + FD_OFFSET_TYPE], FD_TYPE_DIRECTORY
+        jne .io_getdents_not_dir
+        mov [_g_dir_emit_cursor], edi
+        mov [_g_dir_emit_remaining], ecx
+        push ecx                              ; original count for bytes-written math
+        call vfs_read_dir
+        pop ecx
+        jc .io_rw_bad_pointer                 ; disk error: EAX=-1 + CF
+        mov eax, ecx
+        sub eax, [_g_dir_emit_remaining]
+        clc
+        jmp .iret_cf_eax
+        .io_getdents_not_dir:
+        mov al, ERROR_NOT_DIRECTORY
+        stc
         jmp .iret_cf
 
         .io_ioctl:

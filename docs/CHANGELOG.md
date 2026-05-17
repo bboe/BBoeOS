@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **POSIX directory iteration: `SYS_IO_GETDENTS` + Linux-style `dir_emit`.** New
+  `SYS_IO_GETDENTS` (14h) returns variable-length records
+  (`d_ino`/`d_reclen`/`d_type`/`d_name`) into a user buffer, packed back-to-back
+  until full or EOF.  `bbfs_read_dir` and `ext2_read_dir` are rewritten around a
+  shared `dir_emit` callback (`src/fs/vfs.c`): ext2 no longer synthesizes a fake
+  bbfs-shaped record and preserves the full 32-bit inode and untruncated
+  filename.  `read()` on a directory fd now returns `ERROR_IS_DIRECTORY` (mapped
+  to `EISDIR` in libc) — callers must use `getdents`.  `ls.c` migrated to the
+  new syscall; output is now alphabetically sorted by `strcmp` and the non-POSIX
+  `*` execute suffix is dropped (POSIX `ls` only adds it with `-F`).  cc.py
+  gains a `getdents()` builtin mirroring `read()`'s register convention plus the
+  matching syscall-sequence and `NAMED_CONSTANTS` entries.  IO group shifts:
+  `IOCTL`/`OPEN`/`READ`/`SEEK`/`WRITE` move 14h..18h → 15h..19h.
 - **Userland common utilities (PR 3 of 3).**  Added `sort` (line-oriented
   bottom-up merge sort with `-r` / `-n` / `-u`).  Uses a new `sys_break()` C
   builtin that wraps `SYS_SYS_BREAK` (0xF0) to acquire a fixed 68 KB user heap

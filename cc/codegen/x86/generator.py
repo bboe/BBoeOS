@@ -101,6 +101,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "fill_block": frozenset({"ax", "bx", "cx", "dx"}),
         "fstat": frozenset({"ax", "bx", "cx", "dx"}),
         "getchar": frozenset({"ax"}),
+        "getdents": frozenset({"ax", "bx", "cx", "di"}),
         "kernel_inb": frozenset({"ax", "dx"}),
         "kernel_insw": frozenset({"ax", "cx", "di", "dx"}),
         "kernel_inw": frozenset({"ax", "dx"}),

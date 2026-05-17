@@ -640,18 +640,18 @@ ext2_mkdir:
         ret
 
 ext2_read_dir:
-        ;; Read the next non-empty ext2 directory entry in bbfs format into [EDI]
-        ;; ESI = FD entry pointer (FD_OFFSET_START = inode number, FD_OFFSET_SIZE = dir data size)
-        ;; EDI = output buffer (DIRECTORY_ENTRY_SIZE bytes), full 32-bit user pointer
-        ;; Returns AX = DIRECTORY_ENTRY_SIZE if found, 0 at EOF, CF on error
+        ;; Iterate the ext2 directory at ESI=fd_entry, emitting Linux-style
+        ;; getdents records via dir_emit until EOF or the user buffer fills.
+        ;; CF=1 on disk error.
         ;;
-        ;; Name is staged through ext2_rd_name (static buffer) because ext2_read_inode
-        ;; clobbers sector_buffer — which may alias the caller's output buffer EDI.
+        ;; Names are staged through ext2_rd_name (256-byte static buffer)
+        ;; because ext2_read_inode clobbers sector_buffer where the dirent
+        ;; bytes live.  Each iteration: read dirent → stage name → read
+        ;; inode for type → call dir_emit reading from ext2_rd_name.
         push ebx
         push ecx
         push edx
         push edi
-        mov [ext2_rd_outbuf], edi       ; save user buffer ptr across ext2_read_inode
         .erd_loop:
         ;; 32-bit EOF: pos >= size
         mov ax, [esi+FD_OFFSET_POSITION+2]
@@ -662,69 +662,56 @@ ext2_read_dir:
         cmp ax, [esi+FD_OFFSET_SIZE]
         jae .erd_eof
         .erd_not_eof:
-        call ext2_read_sec              ; ESI=fd_entry → sector_buffer filled, BX=byte offset
+        call ext2_read_sec              ; → sector_buffer filled, BX=byte offset
         jc .erd_err
         movzx ebx, bx
-        add ebx, [sector_buffer]        ; EBX = absolute pointer to dirent
-        ;; rec_len (used to advance position)
+        add ebx, [sector_buffer]        ; EBX = pointer to dirent
         mov dx, [ebx + EXT2_DIRENT_REC_LEN]
-        cmp dx, EXT2_DIRENT_NAME        ; < 8 is invalid
+        cmp dx, EXT2_DIRENT_NAME
         jb .erd_err
-        ;; inode (low 16 bits)
-        mov ax, [ebx + EXT2_DIRENT_INODE]
-        test ax, ax
-        jz .erd_skip                    ; deleted entry: advance and retry
-        ;; Save rec_len and inode across ext2_read_inode (which clobbers sector_buffer)
+        mov eax, [ebx + EXT2_DIRENT_INODE]   ; full 32-bit inode
+        test eax, eax
+        jz .erd_skip                    ; deleted entry
+        mov [ext2_rd_inode], eax
         mov [ext2_rd_rec_len], dx
-        mov [ext2_rd_inode], ax
-        ;; Stage name into ext2_rd_name static buffer (safe across ext2_read_inode)
+        ;; Stage name into ext2_rd_name (clamped to 255 chars).
         push esi
         movzx ecx, byte [ebx + EXT2_DIRENT_NAME_LEN]
-        cmp ecx, DIRECTORY_NAME_LENGTH - 1
+        cmp ecx, 255
         jbe .erd_namelen_ok
-        mov ecx, DIRECTORY_NAME_LENGTH - 1
+        mov ecx, 255
         .erd_namelen_ok:
-        lea esi, [ebx + EXT2_DIRENT_NAME]    ; ESI = entry name
+        mov [ext2_rd_namelen], ecx
+        lea esi, [ebx + EXT2_DIRENT_NAME]
         mov edi, ext2_rd_name
         cld
-        rep movsb                       ; copy name bytes to static buffer
-        mov byte [edi], 0               ; null-terminate
-        pop esi                         ; restore fd_entry pointer
-        ;; Read inode to get mode and size (clobbers sector_buffer, AX, BX, CX, DX)
+        rep movsb
+        mov byte [edi], 0
+        pop esi
+        ;; Look up the inode for the mode bits (DT_DIR vs DT_REG).
+        ;; ext2_read_inode takes a 16-bit inode in AX; we accept the
+        ;; truncation here since the kernel's ext2 path is 16-bit-inode
+        ;; throughout, even though the wire record carries 32 bits.
         mov ax, [ext2_rd_inode]
         call ext2_read_inode            ; EBX = pointer to inode in sector_buffer
         mov cx, [ebx+EXT2_INODE_MODE]
-        mov dx, [ebx+EXT2_INODE_SIZE_LO] ; read size before writes to output
-        ;; Compute flags
-        xor al, al
+        mov al, 8                       ; DT_REG default
         test cx, EXT2_S_IFDIR
-        jz .erd_check_exec
-        or al, FLAG_DIRECTORY
-        jmp .erd_set_flags      ; directories are never also marked executable
-        .erd_check_exec:
-        test cx, EXT2_S_IXUSR
-        jz .erd_set_flags
-        or al, FLAG_EXECUTE
-        .erd_set_flags:
-        ;; Copy name from static buffer to output [EDI+0..EDI+24]
-        push esi                        ; save fd_entry pointer
-        mov edi, [ext2_rd_outbuf]
-        mov esi, ext2_rd_name
-        mov ecx, DIRECTORY_NAME_LENGTH  ; copy all 25 bytes (name + null + padding)
-        rep movsb
-        pop esi                         ; restore fd_entry pointer
-        ;; Write flags, inode, size into output
-        mov edi, [ext2_rd_outbuf]
-        mov [edi+DIRECTORY_OFFSET_FLAGS], al
-        mov ax, [ext2_rd_inode]
-        mov [edi+DIRECTORY_OFFSET_SECTOR], ax
-        mov [edi+DIRECTORY_OFFSET_SIZE], dx
-        mov word [edi+DIRECTORY_OFFSET_SIZE+2], 0
-        ;; Advance position by rec_len
-        mov ax, [ext2_rd_rec_len]
-        add [esi+FD_OFFSET_POSITION], ax
+        jz .erd_have_type
+        mov al, 4                       ; DT_DIR
+        .erd_have_type:
+        ;; Stage dir_emit args: AL=type, ECX=namelen, EDX=ino, EDI=name pointer.
+        mov ecx, [ext2_rd_namelen]
+        mov edx, [ext2_rd_inode]
+        mov edi, ext2_rd_name
+        call dir_emit
+        jc .erd_full
+        ;; Success — advance by rec_len, continue.
+        movzx eax, word [ext2_rd_rec_len]
+        add [esi+FD_OFFSET_POSITION], eax
         adc word [esi+FD_OFFSET_POSITION+2], 0
-        mov ax, DIRECTORY_ENTRY_SIZE
+        jmp .erd_loop
+        .erd_full:
         pop edi
         pop edx
         pop ecx
@@ -732,8 +719,9 @@ ext2_read_dir:
         clc
         ret
         .erd_skip:
-        ;; Deleted entry: advance position by rec_len and retry
-        add [esi+FD_OFFSET_POSITION], dx
+        ;; Deleted entry — advance by rec_len, continue.
+        movzx eax, dx
+        add [esi+FD_OFFSET_POSITION], eax
         adc word [esi+FD_OFFSET_POSITION+2], 0
         jmp .erd_loop
         .erd_eof:
@@ -741,7 +729,6 @@ ext2_read_dir:
         pop edx
         pop ecx
         pop ebx
-        xor ax, ax
         clc
         ret
         .erd_err:
@@ -749,7 +736,6 @@ ext2_read_dir:
         pop edx
         pop ecx
         pop ebx
-        mov ax, -1
         stc
         ret
 
@@ -3297,9 +3283,9 @@ ext2_resolve_path:
         ext2_pws_ptrs          dw 0     ; ext2_prepare_write_sec: ptrs_per_blk
         ext2_pws_sec_in_blk    dw 0     ; ext2_prepare_write_sec: sector within block
         ext2_pws_sub_blk       dw 0     ; ext2_prepare_write_sec: sub-singly-indirect block
-        ext2_rd_inode          dw 0
-        ext2_rd_name           times DIRECTORY_NAME_LENGTH db 0
-        ext2_rd_outbuf         dd 0     ; user buffer (32-bit) saved across ext2_read_inode
+        ext2_rd_inode          dd 0     ; full 32-bit inode for the dirent (low 16 bits feed ext2_read_inode)
+        ext2_rd_name           times 256 db 0  ; ext2 filenames cap at 255 bytes + NUL
+        ext2_rd_namelen        dd 0     ; actual namelen of staged entry (excluding NUL)
         ext2_rd_rec_len        dw 0
         ext2_rde_blk_num       dw 0     ; ext2_remove_dir_entry: block number for multi-sector scan
         ext2_rde_cur_sec       dw 0     ; ext2_remove_dir_entry: sector within current block

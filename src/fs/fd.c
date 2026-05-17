@@ -109,8 +109,8 @@ int fd_ioctl_console();
 int fd_ioctl_midi();
 int fd_ioctl_vga();
 int fd_read_console();
-int fd_read_dir();
 int fd_read_file();
+int fd_read_isdir();
 int fd_read_net();
 int fd_read_pipe();
 int fd_write_audio();
@@ -146,7 +146,7 @@ struct fd_ops_entry fd_ops[12] = {
     { 0,               0 },                 // FD_TYPE_FREE (0)
     { 0,               fd_write_audio },    // FD_TYPE_AUDIO (1)
     { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (2)
-    { fd_read_dir,     0 },                 // FD_TYPE_DIRECTORY (3)
+    { fd_read_isdir,   0 },                 // FD_TYPE_DIRECTORY (3)
     { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (4)
     { 0,               0 },                 // FD_TYPE_ICMP (5)
     { 0,               fd_write_midi },     // FD_TYPE_MIDI (6)

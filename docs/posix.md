@@ -84,7 +84,7 @@ usage.
 | `id` | ❌ | Not shipped — BBoeOS has no users. |
 | `kill` | ❌ | Not shipped — there is no PID model; only the shell can spawn children via `SYS_SYS_PIPELINE2`. |
 | `ln` | ❌ | Not shipped — the FS has no hard or symbolic links. |
-| `ls` | ⚠️ | Appends `/` to dirs and `*` to executables.  No `-l`, `-a`, `-R`, `-1`, `-t`; no sort flags. |
+| `ls` | ⚠️ | Output is sorted alphabetically (POSIX default).  Appends `/` to dirs.  No `*` execute marker (POSIX `ls` adds it only with `-F`, and `stat()` is a libc stub).  No `-l`, `-a`, `-R`, `-1`, `-t`, `-F`. |
 | `mkdir` | ⚠️ | Creates one subdirectory under root only.  No `-p`, no `-m`. |
 | `more` | ❌ | Not shipped. |
 | `mv` | ⚠️ | Same-directory rename only — cannot move across directories (the FS is one level deep).  No `-f`, `-i`. |
@@ -206,21 +206,21 @@ Signal delivery](architecture.html#signal-delivery).
 | `dup2` | `SYS_IO_DUP2` (12h) | ✅ | ✅ | Linux semantics: `dup2(N, N)` is a no-op; otherwise the target fd is closed first. |
 | `fcntl` | — | ❌ | ❌ | No `F_GETFL`, `F_SETFL`, `F_GETFD`, `F_SETFD`, `F_DUPFD`, locks. |
 | `fstat` | `SYS_IO_FSTAT` (13h) | ⚠️ | ✅ | Returns only `(FLAG_*, size)`; no `struct stat` in full POSIX shape. |
-| `ioctl` | `SYS_IO_IOCTL` (14h) | ⚠️ | ✅ | Per-device command dispatch (console, VGA, audio, MIDI); no `F_SETFL`-style file-flag ioctls. |
+| `ioctl` | `SYS_IO_IOCTL` (15h) | ⚠️ | ✅ | Per-device command dispatch (console, VGA, audio, MIDI); no `F_SETFL`-style file-flag ioctls. |
 | `link` / `symlink` / `readlink` / `unlinkat` | — | ❌ | ❌ | No links of either kind. |
-| `lseek` | `SYS_IO_SEEK` (17h) | ⚠️ | ✅ | `SEEK_SET` / `SEEK_CUR` / `SEEK_END` on files; clamped to `[0, size]`.  Pipes / devices are unseekable (no `ESPIPE` — returns success with no movement). |
+| `lseek` | `SYS_IO_SEEK` (18h) | ⚠️ | ✅ | `SEEK_SET` / `SEEK_CUR` / `SEEK_END` on files; clamped to `[0, size]`.  Pipes / devices are unseekable (no `ESPIPE` — returns success with no movement). |
 | `mkfifo` / `mknod` | — | ❌ | ❌ | No named pipes, no device nodes. |
-| `open` | `SYS_IO_OPEN` (15h) | ⚠️ | ✅ | No `O_APPEND`, `O_EXCL`, `O_NONBLOCK`, `O_DIRECTORY`, `O_CLOEXEC`; `mode` arg ignored. |
+| `open` | `SYS_IO_OPEN` (16h) | ⚠️ | ✅ | No `O_APPEND`, `O_EXCL`, `O_NONBLOCK`, `O_DIRECTORY`, `O_CLOEXEC`; `mode` arg ignored. |
 | `pipe` | — | ❌ | ❌ | The kernel implements `FD_TYPE_PIPE_R` / `FD_TYPE_PIPE_W` but exposes them only through `SYS_SYS_PIPELINE2` (shell-only). |
 | `pread` / `pwrite` | — | ❌ | ❌ | No atomic offset-aware read/write. |
-| `read` | `SYS_IO_READ` (16h) | ✅ | ✅ | Works on files, directories (raw entries), pipes, console, network, devices. |
+| `read` | `SYS_IO_READ` (17h) | ✅ | ✅ | Works on files, pipes, console, network, devices.  On a directory fd, returns `ERROR_IS_DIRECTORY` (mapped to `EISDIR`) — use `getdents` to iterate. |
 | `readv` / `writev` | — | ❌ | ❌ | No scatter-gather I/O. |
 | `select` / `pselect` / `poll` | — | ❌ | ❌ | No multiplexed wait; ioctls return immediately when no data is available. |
 | `stat` / `lstat` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 | `sync` / `fsync` / `fdatasync` | — | ❌ | ❌ | Writes hit the disk on `close` via the dirty bit. |
 | `truncate` / `ftruncate` | — | ❌ | ❌ | |
 | `umask` | — | ❌ | ❌ | No mode bits. |
-| `write` | `SYS_IO_WRITE` (18h) | ✅ | ✅ | Same fd-type coverage as `read`. |
+| `write` | `SYS_IO_WRITE` (19h) | ✅ | ✅ | Same fd-type coverage as `read`. |
 
 ### Filesystem
 
@@ -233,10 +233,11 @@ are both single-level under root.
 | `chmod` | `SYS_FS_CHMOD` (00h) | ⚠️ | ✅ | Sets `FLAG_EXECUTE` / `FLAG_DIRECTORY` only.  No rwx, no setuid/setgid/sticky. |
 | `chown` / `fchown` / `lchown` | — | ❌ | ❌ | No ownership. |
 | `chroot` / `mount` / `umount` | — | ❌ | ❌ | |
+| `getdents` | `SYS_IO_GETDENTS` (14h) | ✅ | ✅ | Linux-shaped variable-length records (`d_ino`, `d_reclen`, `d_type`, `d_name`).  See `docs/syscalls.md` for the record layout. |
 | `glob` / `globfree` | — | ❌ | ❌ | No shell-side or library-side globbing. |
 | `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `tools/libc` wrapper is a stub returning `-1`. |
 | `nftw` | — | ❌ | ❌ | One-level FS; programs walk the root directory directly. |
-| `opendir` / `readdir` / `closedir` / `rewinddir` | — | ❌ | ❌ | Directories are read as raw files; programs decode the on-disk 32-byte entry layout themselves. |
+| `opendir` / `readdir` / `closedir` / `rewinddir` | — | ❌ | ❌ | No libc wrapper yet; cc.py-built programs call `SYS_IO_GETDENTS` directly. |
 | `pathconf` / `fpathconf` | — | ❌ | ❌ | `MAX_PATH = 64`, names ≤26 bytes — fixed at compile time. |
 | `realpath` | — | ❌ | ❌ | No symlinks to resolve and no working directory; all paths are already root-relative. |
 | `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `tools/libc` `rename()` is a stub. |
