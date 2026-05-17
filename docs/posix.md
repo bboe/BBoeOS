@@ -61,60 +61,55 @@ usage.
 
 | Utility | Status | Notes |
 |---------|:------:|-------|
-| `cat` | ⚠️ | Single file or stdin; no `-n`, `-v`, `-e`, `-A`; no multi-file concat. |
-| `chmod` | ⚠️ | `+x` / `-x` only — no octal modes, no rwx, no group/other bits (the FS has only `FLAG_EXECUTE` + `FLAG_DIRECTORY`). |
-| `cp` | ⚠️ | Single file to single destination; preserves the execute bit; no `-r`, `-p`, `-i`, no directory destinations. |
-| `date` | ⚠️ | Prints `YYYY-MM-DD HH:MM:SS` from the RTC.  No format string, no `-u`, no `-d`. |
-| `echo` | ⚠️ | Space-separated, newline-terminated.  No `-n`, no `-e` escape interpretation. |
-| `false` | ✅ | Exits 1. |
-| `head` | ⚠️ | Default 10 lines; supports `-n N`.  No `-c`, no multi-file. |
-| `ls` | ⚠️ | Appends `/` to dirs and `*` to executables.  No `-l`, `-a`, `-R`, `-1`, `-t`; no sort flags. |
-| `mkdir` | ⚠️ | Creates one subdirectory under root only.  No `-p`, no `-m`. |
-| `mv` | ⚠️ | Same-directory rename only — cannot move across directories (the FS is one level deep).  No `-f`, `-i`. |
-| `ping` | ⚠️ | ICMP echo; resolves names via the same DNS path as `dns`.  No `-c`, `-i`, `-W`, `-s` flags. |
-| `rm` | ⚠️ | Single file; refuses files with `FLAG_PROTECTED`.  No `-r`, `-f`, no globbing. |
-| `rmdir` | ✅ | Removes an empty subdirectory. |
-| `seq` | ⚠️ | GNU-style (POSIX has no `seq`).  `seq [start] end`; no step, no `-f`, no `-s`. |
-| `sleep` | ❌ | Not shipped as a program.  `sleep_forever` is a test fixture, not POSIX `sleep`.  Use `sleep_ms()` from `tools/libc` or `SYS_RTC_SLEEP` directly. |
-| `tail` | ⚠️ | Default 10 lines; supports `-n N`.  No `-c`, no `-f` (follow), no multi-file. |
-| `tee` | ⚠️ | Single output file; no `-a` (append), no multi-file fan-out. |
-| `true` | ✅ | Exits 0. |
-| `wc` | ⚠️ | Supports `-l`, `-w`, `-c`.  No multi-file summary line, no `-m` (chars). |
-| `yes` | ⚠️ | GNU-style (not in POSIX).  Repeats forever; no count limit. |
 | `awk` | ❌ | Not shipped. |
 | `basename` | ❌ | Not shipped. |
+| `cat` | ⚠️ | Single file or stdin; no `-n`, `-v`, `-e`, `-A`; no multi-file concat. |
+| `chmod` | ⚠️ | `+x` / `-x` only — no octal modes, no rwx, no group/other bits (the FS has only `FLAG_EXECUTE` + `FLAG_DIRECTORY`). |
 | `cmp` | ❌ | Not shipped. |
+| `cp` | ⚠️ | Single file to single destination; preserves the execute bit; no `-r`, `-p`, `-i`, no directory destinations. |
 | `cut` | ❌ | Not shipped. |
+| `date` | ⚠️ | Prints `YYYY-MM-DD HH:MM:SS` from the RTC.  No format string, no `-u`, no `-d`. |
 | `df` | ❌ | Not shipped. |
 | `diff` | ❌ | Not shipped. |
 | `dirname` | ❌ | Not shipped. |
 | `du` | ❌ | Not shipped. |
+| `echo` | ⚠️ | Space-separated, newline-terminated.  Supports `-n` (suppress trailing newline) and `-e` (interpret `\n \t \r \b \e \0 \\` escapes); no `\a`, `\v`, `\f`, `\xHH`, `\NNN`, or `\c`. |
 | `env` | ❌ | Not shipped — BBoeOS has no environment variables. |
 | `expr` | ❌ | Not shipped. |
+| `false` | ✅ | Exits 1. |
 | `find` | ❌ | Not shipped. |
 | `getopts` | ❌ | Not shipped (would need a shell that exposes argv to scripts; BBoeOS has neither shell scripts nor getopts). |
-| `grep` | ❌ | Not shipped. |
+| `grep` | ⚠️ | Single file or stdin; supports `-v` (invert), `-n` (line numbers), `-i` (case-insensitive).  Pattern is a literal substring — no BREs, EREs, anchors, `-E`, `-F`, `-r`, `-l`, `-c`, `-o`; no multi-file. |
+| `head` | ⚠️ | Default 10 lines; supports `-n N`.  No `-c`, no multi-file. |
 | `id` | ❌ | Not shipped — BBoeOS has no users. |
 | `kill` | ❌ | Not shipped — there is no PID model; only the shell can spawn children via `SYS_SYS_PIPELINE2`. |
 | `ln` | ❌ | Not shipped — the FS has no hard or symbolic links. |
-| `more` / `less` | ❌ | Not shipped. |
+| `ls` | ⚠️ | Appends `/` to dirs and `*` to executables.  No `-l`, `-a`, `-R`, `-1`, `-t`; no sort flags. |
+| `mkdir` | ⚠️ | Creates one subdirectory under root only.  No `-p`, no `-m`. |
+| `more` | ❌ | Not shipped. |
+| `mv` | ⚠️ | Same-directory rename only — cannot move across directories (the FS is one level deep).  No `-f`, `-i`. |
 | `nl` | ❌ | Not shipped. |
 | `od` | ❌ | Not shipped. |
 | `paste` | ❌ | Not shipped. |
-| `printenv` | ❌ | Not shipped — no environment variables. |
 | `ps` | ❌ | Not shipped — there is no process table exposed to userland; only the shell + up-to-two pipeline children exist. |
 | `pwd` | ❌ | Not shipped — there is no working directory; all paths are root-relative. |
+| `rm` | ⚠️ | Single file; refuses files with `FLAG_PROTECTED`.  No `-r`, `-f`, no globbing. |
+| `rmdir` | ✅ | Removes an empty subdirectory. |
 | `sed` | ❌ | Not shipped. |
-| `sort` | ❌ | Not shipped. |
+| `sleep` | ❌ | Not shipped as a program.  `sleep_forever` is a test fixture, not POSIX `sleep`.  Use `sleep_ms()` from `tools/libc` or `SYS_RTC_SLEEP` directly. |
+| `sort` | ⚠️ | Single file or stdin; supports `-r` (reverse), `-n` (numeric), `-u` (unique).  In-memory only (60 KB line buffer); no `-k`, `-t`, `-f`, `-b`, `-o`, `-m`; no multi-file. |
 | `split` | ❌ | Not shipped. |
 | `stty` | ❌ | Not shipped — there is no termios. |
-| `tar` | ❌ | Not shipped. |
+| `tail` | ⚠️ | Single file or stdin (ring-buffer mode); default 10 lines; supports `-n N`.  No `-c`, no `-f` (follow), no multi-file. |
+| `tee` | ⚠️ | Single output file; no `-a` (append), no multi-file fan-out. |
 | `touch` | ❌ | Not shipped — the FS has no mtime to update; cc.py-built programs can `> file` to create. |
-| `tr` | ❌ | Not shipped. |
+| `tr` | ⚠️ | Reads stdin only.  Two modes: `tr <set1> <set2>` (translate, expanded sets must be equal length) and `tr -d <set1>` (delete).  Supports `a-z`-style ranges in both sets; no character classes (`[:alpha:]`), no backslash escapes, no `-s` (squeeze), no `-c` (complement). |
+| `true` | ✅ | Exits 0. |
 | `tty` | ❌ | Not shipped — there is no /dev/tty abstraction. |
 | `umask` | ❌ | Not shipped — there are no mode bits. |
 | `uname` | ❌ | Not shipped. |
-| `uniq` | ❌ | Not shipped. |
+| `uniq` | ⚠️ | Single file or stdin; supports `-c` (prefix count) and `-d` (only duplicated runs).  Adjacent-run semantics (does not sort first).  No `-u`, `-i`, `-f`, `-s`. |
+| `wc` | ⚠️ | Supports `-l`, `-w`, `-c`.  No multi-file summary line, no `-m` (chars). |
 | `who` | ❌ | Not shipped — no users, no `utmp`. |
 | `xargs` | ❌ | Not shipped. |
 
@@ -126,25 +121,23 @@ semantics, equal precedence, left-associative), I/O redirection with `<`, `>`,
 `>>`, and a single `|` pipe between exactly two commands.  `$?` expands to the
 last command's exit status.
 
-The dispatch chain in `dispatch_buffer()` only recognises three builtins —
-everything else execs `bin/<name>`.
+The dispatch chain in `dispatch_buffer()` recognises three BBoeOS-specific
+builtins (`help`, `reboot`, `shutdown` — see [BBoeOS-specific
+extras](#bboeos-specific-extras)); everything else execs `bin/<name>`.
 
 | Builtin | Status | Notes |
 |---------|:------:|-------|
-| `help` | ⚠️ | BBoeOS-specific; prints `Commands: help reboot shutdown`. |
-| `reboot` | ⚠️ | BBoeOS-specific; triple-faults via the 8042 keyboard controller. |
-| `shutdown` | ⚠️ | BBoeOS-specific; tries APM / QEMU / Bochs hooks. |
+| `.` | ❌ | No shell scripts. |
+| `alias` / `unalias` | ❌ | No aliases. |
 | `cd` | ❌ | No per-process working directory. |
-| `pwd` | ❌ | No working directory to print. |
 | `exit` | ❌ | The shell never exits; `Ctrl+D` is a shortcut for `shutdown`. |
 | `export` / `set` / `unset` | ❌ | No environment, no shell variables (only the parser-level `$?`). |
-| `alias` / `unalias` | ❌ | No aliases. |
-| `read` | ❌ | No shell-script read; the line editor is for the interactive prompt only. |
-| `type` / `command` / `which` | ❌ | No name-lookup builtin. |
 | `jobs` / `fg` / `bg` / `wait` | ❌ | No job control, no backgrounding (`&`). |
-| `trap` | ❌ | No script-level signal handling. |
-| `source` / `.` | ❌ | No shell scripts. |
+| `pwd` | ❌ | No working directory to print. |
+| `read` | ❌ | No shell-script read; the line editor is for the interactive prompt only. |
 | `times` | ❌ | No per-process time accounting. |
+| `trap` | ❌ | No script-level signal handling. |
+| `type` / `command` | ❌ | No name-lookup builtin. |
 | `ulimit` | ❌ | No resource limits. |
 
 ## System calls and C library
@@ -164,17 +157,20 @@ pipes](architecture.html#cooperative-pipes-cmd1--cmd2).
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `_exit` | `SYS_SYS_EXIT` (F2h) | ✅ | ✅ | Reloads shell; child status returned only via `SYS_SYS_PIPELINE2`. |
-| `exit` | libc → `_exit` | ⚠️ | ⚠️ | Only via `tools/libc`; runs up to 8 `atexit` callbacks then `_exit`. |
-| `execve` | `SYS_SYS_EXEC` (F1h) | ⚠️ | ✅ | No `envp` (always empty); no path search (shell adds the `bin/` retry); recursive exec from a child rejected with `EINVAL`. |
-| `execv` / `execvp` / `execle` / … | — | ❌ | ❌ | Wrappers not provided; spell the argv array yourself and call `SYS_SYS_EXEC`. |
-| `fork` / `vfork` / `clone` | — | ❌ | ❌ | Not implemented; no plan to add.  Only the shell's `SYS_SYS_PIPELINE2` creates additional processes. |
-| `wait` / `waitpid` / `waitid` | — | ❌ | ❌ | `SYS_SYS_PIPELINE2` returns child 2's exit status to the shell, but there is no general wait API. |
-| `system` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 | `atexit` | libc | ⚠️ | ⚠️ | `tools/libc` only; 8 slots. |
+| `execv` / `execvp` / `execle` / … | — | ❌ | ❌ | Wrappers not provided; spell the argv array yourself and call `SYS_SYS_EXEC`. |
+| `execve` | `SYS_SYS_EXEC` (F1h) | ⚠️ | ✅ | No `envp` (always empty); no path search (shell adds the `bin/` retry); recursive exec from a child rejected with `EINVAL`. |
+| `exit` | libc → `_exit` | ⚠️ | ⚠️ | Only via `tools/libc`; runs up to 8 `atexit` callbacks then `_exit`. |
+| `fork` | — | ❌ | ❌ | Not implemented; no plan to add.  Only the shell's `SYS_SYS_PIPELINE2` creates additional processes. |
 | `getpid` / `getppid` | — | ❌ | ❌ | No PID model. |
+| `getrlimit` / `setrlimit` | — | ❌ | ❌ | No resource limits. |
+| `getrusage` | — | ❌ | ❌ | No per-process accounting. |
 | `getuid` / `geteuid` / `getgid` / `getegid` | — | ❌ | ❌ | No users. |
-| `setuid` / `setgid` / `setgroups` | — | ❌ | ❌ | No users. |
+| `nice` / `getpriority` / `setpriority` | — | ❌ | ❌ | No scheduler priorities; the kernel runs one userland program at a time. |
 | `setpgrp` / `setsid` / `getpgrp` | — | ❌ | ❌ | No process groups or sessions. |
+| `setuid` / `setgid` | — | ❌ | ❌ | No users. |
+| `system` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
+| `wait` / `waitpid` / `waitid` | — | ❌ | ❌ | `SYS_SYS_PIPELINE2` returns child 2's exit status to the shell, but there is no general wait API. |
 
 ### Signals
 
@@ -186,16 +182,15 @@ Signal delivery](architecture.html#signal-delivery).
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `signal` | `SYS_SYS_SIGNAL` (F6h) | ⚠️ | ✅ | Only three signums accepted (SIGINT, SIGPIPE, SIGALRM); bad signum → `EINVAL`. |
 | `alarm` | `SYS_RTC_ALARM` (30h) | ✅ | ✅ | Second-granularity wrapper around the ms-granularity syscall. |
-| `setitimer` | `SYS_RTC_ALARM` (30h) | ⚠️ | ✅ | First-fire + interval supported (POSIX `ITIMER_REAL` shape), but fires only `SIGALRM`. |
-| `sigreturn` (internal) | `SYS_SYS_SIGRETURN` (F7h) | ✅ | ✅ | Invoked by the vDSO trampoline, not by user code. |
-| `sigaction` | — | ❌ | ❌ | No `sa_mask`, no `SA_RESTART`, no `siginfo_t`. |
-| `sigprocmask` / `sigpending` / `sigsuspend` | — | ❌ | ❌ | No mask / pending / suspend semantics. |
+| All other POSIX signals (SIGHUP, SIGQUIT, SIGTERM, SIGCHLD, SIGUSR1/2, SIGBUS, SIGSEGV, SIGILL, SIGFPE, …) | — | ❌ | ❌ | Faults (#PF, #UD, #DE) `EXC0D`-trap and exit the program; they are not delivered as signals. |
+| Job-control signals (SIGSTOP / SIGCONT / SIGTSTP / SIGTTIN / SIGTTOU) | — | ❌ | ❌ | No job control. |
 | `kill` / `killpg` / `raise` | — | ❌ | ❌ | Only the kernel posts signals (SIGINT from Ctrl+C, SIGPIPE from broken pipe writes, SIGALRM from the timer). |
 | Real-time signals | — | ❌ | ❌ | No `SIGRTMIN`..`SIGRTMAX`, no queueing. |
-| Job-control signals (SIGSTOP / SIGCONT / SIGTSTP / SIGTTIN / SIGTTOU) | — | ❌ | ❌ | No job control. |
-| All other POSIX signals (SIGHUP, SIGQUIT, SIGTERM, SIGCHLD, SIGUSR1/2, SIGBUS, SIGSEGV, SIGILL, SIGFPE, …) | — | ❌ | ❌ | Faults (#PF, #UD, #DE) `EXC0D`-trap and exit the program; they are not delivered as signals. |
+| `setitimer` | `SYS_RTC_ALARM` (30h) | ⚠️ | ✅ | First-fire + interval supported (POSIX `ITIMER_REAL` shape), but fires only `SIGALRM`. |
+| `sigaction` | — | ❌ | ❌ | No `sa_mask`, no `SA_RESTART`, no `siginfo_t`. |
+| `signal` | `SYS_SYS_SIGNAL` (F6h) | ⚠️ | ✅ | Only three signums accepted (SIGINT, SIGPIPE, SIGALRM); bad signum → `EINVAL`. |
+| `sigprocmask` / `sigpending` / `sigsuspend` | — | ❌ | ❌ | No mask / pending / suspend semantics. |
 
 ### File I/O
 
@@ -205,25 +200,27 @@ Signal delivery](architecture.html#signal-delivery).
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `open` | `SYS_IO_OPEN` (15h) | ⚠️ | ✅ | No `O_APPEND`, `O_EXCL`, `O_NONBLOCK`, `O_DIRECTORY`, `O_CLOEXEC`; `mode` arg ignored. |
+| `access` / `faccessat` | — | ❌ | ❌ | No permission model to query. |
 | `close` | `SYS_IO_CLOSE` (10h) | ✅ | ✅ | Flushes the dirty bit so `fd_close` updates the on-disk size. |
-| `read` | `SYS_IO_READ` (16h) | ✅ | ✅ | Works on files, directories (raw entries), pipes, console, network, devices. |
-| `write` | `SYS_IO_WRITE` (18h) | ✅ | ✅ | Same fd-type coverage as `read`. |
-| `lseek` | `SYS_IO_SEEK` (17h) | ⚠️ | ✅ | `SEEK_SET` / `SEEK_CUR` / `SEEK_END` on files; clamped to `[0, size]`.  Pipes / devices are unseekable (no `ESPIPE` — returns success with no movement). |
 | `dup` | `SYS_IO_DUP` (11h) | ✅ | ✅ | Singleton devices (e.g. `/dev/vga`) refuse with an error. |
 | `dup2` | `SYS_IO_DUP2` (12h) | ✅ | ✅ | Linux semantics: `dup2(N, N)` is a no-op; otherwise the target fd is closed first. |
-| `ioctl` | `SYS_IO_IOCTL` (14h) | ⚠️ | ✅ | Per-device command dispatch (console, VGA, audio, MIDI); no `F_SETFL`-style file-flag ioctls. |
-| `fstat` | `SYS_IO_FSTAT` (13h) | ⚠️ | ✅ | Returns only `(FLAG_*, size)`; no `struct stat` in full POSIX shape. |
-| `stat` / `lstat` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 | `fcntl` | — | ❌ | ❌ | No `F_GETFL`, `F_SETFL`, `F_GETFD`, `F_SETFD`, `F_DUPFD`, locks. |
-| `pipe` / `pipe2` | — | ❌ | ❌ | The kernel implements `FD_TYPE_PIPE_R` / `FD_TYPE_PIPE_W` but exposes them only through `SYS_SYS_PIPELINE2` (shell-only). |
-| `mkfifo` / `mknod` | — | ❌ | ❌ | No named pipes, no device nodes. |
+| `fstat` | `SYS_IO_FSTAT` (13h) | ⚠️ | ✅ | Returns only `(FLAG_*, size)`; no `struct stat` in full POSIX shape. |
+| `ioctl` | `SYS_IO_IOCTL` (14h) | ⚠️ | ✅ | Per-device command dispatch (console, VGA, audio, MIDI); no `F_SETFL`-style file-flag ioctls. |
 | `link` / `symlink` / `readlink` / `unlinkat` | — | ❌ | ❌ | No links of either kind. |
-| `truncate` / `ftruncate` | — | ❌ | ❌ | |
+| `lseek` | `SYS_IO_SEEK` (17h) | ⚠️ | ✅ | `SEEK_SET` / `SEEK_CUR` / `SEEK_END` on files; clamped to `[0, size]`.  Pipes / devices are unseekable (no `ESPIPE` — returns success with no movement). |
+| `mkfifo` / `mknod` | — | ❌ | ❌ | No named pipes, no device nodes. |
+| `open` | `SYS_IO_OPEN` (15h) | ⚠️ | ✅ | No `O_APPEND`, `O_EXCL`, `O_NONBLOCK`, `O_DIRECTORY`, `O_CLOEXEC`; `mode` arg ignored. |
+| `pipe` | — | ❌ | ❌ | The kernel implements `FD_TYPE_PIPE_R` / `FD_TYPE_PIPE_W` but exposes them only through `SYS_SYS_PIPELINE2` (shell-only). |
+| `pread` / `pwrite` | — | ❌ | ❌ | No atomic offset-aware read/write. |
+| `read` | `SYS_IO_READ` (16h) | ✅ | ✅ | Works on files, directories (raw entries), pipes, console, network, devices. |
+| `readv` / `writev` | — | ❌ | ❌ | No scatter-gather I/O. |
+| `select` / `pselect` / `poll` | — | ❌ | ❌ | No multiplexed wait; ioctls return immediately when no data is available. |
+| `stat` / `lstat` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 | `sync` / `fsync` / `fdatasync` | — | ❌ | ❌ | Writes hit the disk on `close` via the dirty bit. |
-| `access` / `faccessat` | — | ❌ | ❌ | No permission model to query. |
+| `truncate` / `ftruncate` | — | ❌ | ❌ | |
 | `umask` | — | ❌ | ❌ | No mode bits. |
-| `select` / `pselect` / `poll` / `ppoll` / `epoll_*` | — | ❌ | ❌ | No multiplexed wait; ioctls return immediately when no data is available. |
+| `write` | `SYS_IO_WRITE` (18h) | ✅ | ✅ | Same fd-type coverage as `read`. |
 
 ### Filesystem
 
@@ -232,26 +229,30 @@ are both single-level under root.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `chmod` | `SYS_FS_CHMOD` (00h) | ⚠️ | ✅ | Sets `FLAG_EXECUTE` / `FLAG_DIRECTORY` only.  No rwx, no setuid/setgid/sticky. |
-| `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `tools/libc` wrapper is a stub returning `-1`. |
-| `rmdir` | `SYS_FS_RMDIR` (03h) | ✅ | ✅ | Returns `ERROR_NOT_EMPTY` (mapped to `EACCES` in libc, not `ENOTEMPTY`) if the directory is non-empty. |
-| `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `tools/libc` `rename()` is a stub. |
-| `unlink` / `remove` | `SYS_FS_UNLINK` (04h) | ⚠️ | ✅ | Files only; cannot unlink a directory; `tools/libc` `remove()` is a stub. |
-| `opendir` / `readdir` / `closedir` / `rewinddir` | — | ❌ | ❌ | Directories are read as raw files; programs decode the on-disk 32-byte entry layout themselves. |
 | `chdir` / `fchdir` / `getcwd` | — | ❌ | ❌ | No working directory. |
+| `chmod` | `SYS_FS_CHMOD` (00h) | ⚠️ | ✅ | Sets `FLAG_EXECUTE` / `FLAG_DIRECTORY` only.  No rwx, no setuid/setgid/sticky. |
 | `chown` / `fchown` / `lchown` | — | ❌ | ❌ | No ownership. |
 | `chroot` / `mount` / `umount` | — | ❌ | ❌ | |
+| `glob` / `globfree` | — | ❌ | ❌ | No shell-side or library-side globbing. |
+| `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `tools/libc` wrapper is a stub returning `-1`. |
+| `nftw` | — | ❌ | ❌ | One-level FS; programs walk the root directory directly. |
+| `opendir` / `readdir` / `closedir` / `rewinddir` | — | ❌ | ❌ | Directories are read as raw files; programs decode the on-disk 32-byte entry layout themselves. |
+| `pathconf` / `fpathconf` | — | ❌ | ❌ | `MAX_PATH = 64`, names ≤26 bytes — fixed at compile time. |
+| `realpath` | — | ❌ | ❌ | No symlinks to resolve and no working directory; all paths are already root-relative. |
+| `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `tools/libc` `rename()` is a stub. |
+| `rmdir` | `SYS_FS_RMDIR` (03h) | ✅ | ✅ | Returns `ERROR_NOT_EMPTY` (mapped to `EACCES` in libc, not `ENOTEMPTY`) if the directory is non-empty. |
 | `statvfs` / `fstatvfs` | — | ❌ | ❌ | |
+| `unlink` / `remove` | `SYS_FS_UNLINK` (04h) | ⚠️ | ✅ | Files only; cannot unlink a directory; `tools/libc` `remove()` is a stub. |
 
 ### Memory
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `brk` | `SYS_SYS_BREAK` (F0h) | ✅ | ✅ | No error path. |
-| `sbrk` | `SYS_SYS_BREAK` (F0h) | ✅ | ✅ | libc wrapper or do the math inline. |
 | `malloc` / `free` / `calloc` / `realloc` | libc | ⚠️ | ⚠️ | `tools/libc` only — real `sbrk`-backed free-list allocator with coalescing.  Shipped cc.py programs roll their own or stay statically sized. |
 | `mmap` | `SYS_VIDEO_MAP` (40h) | ⚠️ | ✅ | Maps the mode-13h VGA framebuffer (320×200×8bpp) at user-virt `0xB8000000`.  No file or anonymous mmap. |
-| `munmap` / `mprotect` / `mremap` / `mlock` / `madvise` | — | ❌ | ❌ | |
+| `munmap` / `mprotect` / `mlock` / `madvise` | — | ❌ | ❌ | |
+| `sbrk` | `SYS_SYS_BREAK` (F0h) | ✅ | ✅ | libc wrapper or do the math inline. |
 | `shm_open` / `shmget` / `shmat` / `shmdt` | — | ❌ | ❌ | No shared memory. |
 
 ### Time
@@ -262,13 +263,15 @@ timespec`.  `SYS_RTC_SLEEP` busy-waits and is interruptible by SIGINT or SIGALRM
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `time` | `SYS_RTC_DATETIME` (31h) | ⚠️ | ✅ | Bare `unsigned int` — no `time_t *` argument convention. |
-| `gettimeofday` | `SYS_RTC_MILLIS` (32h) | ⚠️ | ⚠️ | `tools/libc` wrapper returns monotonic ms-since-boot, *not* wall-clock; `tz` arg ignored. |
 | `clock_gettime` / `clock_settime` / `clock_getres` | — | ❌ | ❌ | No `clockid_t`, no `CLOCK_MONOTONIC` proper. |
+| `difftime` | — | ❌ | ❌ | |
+| `gettimeofday` | `SYS_RTC_MILLIS` (32h) | ⚠️ | ⚠️ | `tools/libc` wrapper returns monotonic ms-since-boot, *not* wall-clock; `tz` arg ignored. |
 | `nanosleep` / `clock_nanosleep` | — | ❌ | ❌ | Use `sleep_ms()` (libc) or `SYS_RTC_SLEEP` directly. |
-| `strftime` / `gmtime` / `localtime` / `mktime` / `asctime` / `ctime` | — | ❌ | ❌ | The vDSO `FUNCTION_PRINT_DATETIME` prints the canonical `YYYY-MM-DD HH:MM:SS` form. |
 | `setitimer` / `getitimer` | `SYS_RTC_ALARM` (30h) | ⚠️ | ✅ | First-fire + interval (ms) supported; only the `ITIMER_REAL` flavour exists. |
+| `strftime` / `gmtime` / `localtime` / `mktime` | — | ❌ | ❌ | The vDSO `FUNCTION_PRINT_DATETIME` prints the canonical `YYYY-MM-DD HH:MM:SS` form. |
+| `time` | `SYS_RTC_DATETIME` (31h) | ⚠️ | ✅ | Bare `unsigned int` — no `time_t *` argument convention. |
 | `times` | — | ❌ | ❌ | No per-process CPU accounting. |
+| `tzset` / `tzname` | — | ❌ | ❌ | No timezone database; the RTC is read as-is. |
 
 ### Networking
 
@@ -280,17 +283,17 @@ indirection.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `socket` | `SYS_NET_OPEN` (21h) | ⚠️ | ✅ | Only `SOCK_RAW` (proto 0 = ICMP) and `SOCK_DGRAM` (proto = `IPPROTO_UDP` or `IPPROTO_ICMP`); no address-family argument. |
-| `sendto` | `SYS_NET_SENDTO` (23h) | ⚠️ | ✅ | Custom register convention; UDP carries both ports, ICMP ignores them. |
-| `recvfrom` | `SYS_NET_RECVFROM` (22h) | ⚠️ | ✅ | Non-blocking peek — returns 0 when no datagram is available; kernel-side block-on-wait is a tracked followup. |
-| `close` | `SYS_IO_CLOSE` (10h) | ✅ | ✅ | Network fds close through the normal `io_close` path. |
 | `bind` / `listen` / `accept` / `connect` | — | ❌ | ❌ | UDP sockets bind implicitly on first `sendto`. |
-| `send` / `recv` / `sendmsg` / `recvmsg` | — | ❌ | ❌ | |
-| `getsockopt` / `setsockopt` / `shutdown` | — | ❌ | ❌ | |
-| `getsockname` / `getpeername` | — | ❌ | ❌ | |
-| TCP (`SOCK_STREAM`, listen/accept, SYN handshake) | — | ❌ | ❌ | UDP / ICMP only. |
+| `close` | `SYS_IO_CLOSE` (10h) | ✅ | ✅ | Network fds close through the normal `io_close` path. |
 | `getaddrinfo` / `gethostbyname` / `getnameinfo` | — | ❌ | ❌ | Use the standalone `dns` program. |
+| `getsockname` / `getpeername` | — | ❌ | ❌ | |
+| `getsockopt` / `setsockopt` / `shutdown` | — | ❌ | ❌ | |
 | `if_nametoindex` / SIOCGIFADDR / netlink | — | ❌ | ❌ | One NIC, fixed name. |
+| `recvfrom` | `SYS_NET_RECVFROM` (22h) | ⚠️ | ✅ | Non-blocking peek — returns 0 when no datagram is available; kernel-side block-on-wait is a tracked followup. |
+| `send` / `recv` / `sendmsg` / `recvmsg` | — | ❌ | ❌ | |
+| `sendto` | `SYS_NET_SENDTO` (23h) | ⚠️ | ✅ | Custom register convention; UDP carries both ports, ICMP ignores them. |
+| `socket` | `SYS_NET_OPEN` (21h) | ⚠️ | ✅ | Only `SOCK_RAW` (proto 0 = ICMP) and `SOCK_DGRAM` (proto = `IPPROTO_UDP` or `IPPROTO_ICMP`); no address-family argument. |
+| TCP (`SOCK_STREAM`, listen/accept, SYN handshake) | — | ❌ | ❌ | UDP / ICMP only. |
 
 ### Terminal / TTY
 
@@ -301,25 +304,28 @@ line discipline from userland.
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `isatty` / `ttyname` | — | ❌ | ❌ | |
-| `tcgetattr` / `tcsetattr` / `cfgetispeed` / `cfsetispeed` / `tcdrain` / `tcflush` / `tcsendbreak` | — | ❌ | ❌ | No termios at all. |
 | Pseudo-tty (`openpty`, `forkpty`, `/dev/pts/*`) | — | ❌ | ❌ | |
+| `tcgetattr` / `tcsetattr` / `cfgetispeed` / `cfsetispeed` / `tcdrain` / `tcflush` / `tcsendbreak` | — | ❌ | ❌ | No termios at all. |
 
 ### Standard I/O (stdio)
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + vDSO `FUNCTION_PRINTF` | ⚠️ | ✅ | The vDSO `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `tools/libc` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
-| `sprintf` / `snprintf` / `vsprintf` / `vsnprintf` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `tools/libc` only.  cc.py-built programs use vDSO `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
-| `fgets` / `getline` / `getdelim` | — | ❌ | ❌ | Not in `tools/libc`. |
-| `scanf` / `fscanf` / `vscanf` / `vfscanf` | — | ❌ | ❌ | |
-| `sscanf` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns 0. |
-| `perror` / `clearerr` | — | ❌ | ❌ | `strerror` exists in libc. |
-| `setvbuf` / `setbuf` | — | ❌ | ❌ | No buffered-IO modes. |
-| `tmpfile` / `tmpnam` / `mkstemp` | — | ❌ | ❌ | |
 | `feof` / `ferror` / `fflush` (no-op) | libc | ⚠️ | ⚠️ | `tools/libc` only; `fflush` is a no-op (no buffering to flush). |
+| `fgets` / `getline` / `getdelim` | — | ❌ | ❌ | Not in `tools/libc`. |
+| `fmemopen` / `open_memstream` | — | ❌ | ❌ | No memory-backed `FILE *`. |
+| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `tools/libc` only.  cc.py-built programs use vDSO `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
+| `freopen` / `ungetc` / `fileno` | — | ❌ | ❌ | Not in `tools/libc`. |
+| `perror` / `clearerr` | — | ❌ | ❌ | `strerror` exists in libc. |
+| `popen` / `pclose` | — | ❌ | ❌ | No general subprocess API; only the shell's `SYS_SYS_PIPELINE2`. |
+| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + vDSO `FUNCTION_PRINTF` | ⚠️ | ✅ | The vDSO `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `tools/libc` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
 | `remove` / `rename` (libc-layer) | libc (stubs) | ⚠️ | ⚠️ | `tools/libc` stubs — always return `-1`. |
 | `rewind` | libc (no-op) | ⚠️ | ⚠️ | `tools/libc` no-op (does not seek). |
+| `scanf` / `fscanf` / `vscanf` / `vfscanf` | — | ❌ | ❌ | |
+| `setvbuf` / `setbuf` | — | ❌ | ❌ | No buffered-IO modes. |
+| `sprintf` / `snprintf` / `vsprintf` / `vsnprintf` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
+| `sscanf` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns 0. |
+| `tmpfile` / `mkstemp` / `mkdtemp` | — | ❌ | ❌ | |
 
 ### String, ctype, stdlib
 
@@ -329,38 +335,45 @@ they are not reachable from cc.py-built shipped programs.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strcasecmp` / `strncasecmp` / `strchr` / `strrchr` / `strstr` / `strlen` / `strdup` / `strerror` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| Full `ctype.h` (`isalnum` / `isalpha` / `iscntrl` / `isdigit` / `isspace` / `islower` / `isupper` / `isprint` / `ispunct` / `isxdigit` / `tolower` / `toupper`) | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| `qsort` / `bsearch` | libc | ⚠️ | ⚠️ | `tools/libc` only (Sedgewick quicksort, recursive binary search). |
-| `strtol` / `strtoul` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| `atoi` / `atol` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
-| `atof` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `0.0`. |
 | `abs` / `labs` | libc | ⚠️ | ⚠️ | `abs` only; no `labs` / `llabs`. |
-| `rand` / `srand` | libc | ⚠️ | ⚠️ | LCG PRNG. |
+| `atof` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `0.0`. |
+| `atoi` / `atol` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
+| `div` / `ldiv` / `lldiv` | — | ❌ | ❌ | |
+| Full `ctype.h` (`isalnum` / `isalpha` / `iscntrl` / `isdigit` / `isspace` / `islower` / `isupper` / `isprint` / `ispunct` / `isxdigit` / `tolower` / `toupper`) | libc | ⚠️ | ⚠️ | `tools/libc` only. |
 | `getenv` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `NULL`.  No environment. |
-| `setenv` / `unsetenv` / `putenv` / `clearenv` | — | ❌ | ❌ | No environment. |
-| `system` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 | `locale` (`setlocale`, `LC_*`, collation, wide chars) | — | ❌ | ❌ | ASCII only. |
+| `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
+| `posix_memalign` / `aligned_alloc` | — | ❌ | ❌ | No alignment-aware allocator. |
+| `qsort` / `bsearch` | libc | ⚠️ | ⚠️ | `tools/libc` only (Sedgewick quicksort, recursive binary search). |
+| `rand` / `srand` | libc | ⚠️ | ⚠️ | LCG PRNG. |
+| `setenv` / `unsetenv` / `putenv` | — | ❌ | ❌ | No environment. |
+| `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strcasecmp` / `strncasecmp` / `strchr` / `strrchr` / `strstr` / `strlen` / `strdup` / `strerror` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
+| `strerror_r` / `strsignal` | — | ❌ | ❌ | Not in `tools/libc`. |
+| `strspn` / `strcspn` / `strpbrk` | — | ❌ | ❌ | Not in `tools/libc`. |
+| `strtod` / `strtof` | — | ❌ | ❌ | No floating-point string conversion (matches the `atof` stub). |
+| `strtok` / `strtok_r` | — | ❌ | ❌ | Not in `tools/libc`. |
+| `strtol` / `strtoul` | libc | ⚠️ | ⚠️ | `tools/libc` only. |
+| `strtoll` / `strtoull` | — | ❌ | ❌ | No 64-bit string conversion. |
+| `system` | libc (stub) | ⚠️ | ⚠️ | `tools/libc` stub — always returns `-1`. |
 
 ### Math
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `sin` / `cos` / `tan` / `atan2` / `sqrt` / `exp` / `log` / `log2` / `log10` / `pow` / `floor` / `ceil` / `fabs` (+ `f` variants) | libc | ⚠️ | ⚠️ | `tools/libc/math.c` — all implemented via x87 inline asm.  Float variants wrap the double form. |
 | `asin` / `acos` / `atan` / `sinh` / `cosh` / `tanh` / `expm1` / `log1p` / `cbrt` / `hypot` / `fmod` / `modf` / `frexp` / `ldexp` / `round` / `trunc` | — | ❌ | ❌ | Not in `tools/libc/math.c`. |
+| `sin` / `cos` / `tan` / `atan2` / `sqrt` / `exp` / `log` / `log2` / `log10` / `pow` / `floor` / `ceil` / `fabs` (+ `f` variants) | libc | ⚠️ | ⚠️ | `tools/libc/math.c` — all implemented via x87 inline asm.  Float variants wrap the double form. |
 
 ### Process IPC
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | Anonymous pipes (kernel side) | `FD_TYPE_PIPE_R` / `FD_TYPE_PIPE_W` | ⚠️ | ⚠️ | Implemented; exposed only via `SYS_SYS_PIPELINE2` (shell creates the pipe pair on behalf of `cmd1 | cmd2`). |
-| `pipe` / `pipe2` (user-callable) | — | ❌ | ❌ | |
 | Named pipes (`mkfifo`) | — | ❌ | ❌ | |
+| `pipe` (user-callable) | — | ❌ | ❌ | |
+| POSIX message queues (`mq_*`) | — | ❌ | ❌ | |
 | SysV message queues (`msgget` / `msgsnd` / `msgrcv`) | — | ❌ | ❌ | |
 | SysV semaphores (`semget` / `semop` / `semctl`) | — | ❌ | ❌ | |
 | SysV / POSIX shared memory | — | ❌ | ❌ | |
-| POSIX message queues (`mq_*`) | — | ❌ | ❌ | |
 
 ### Threading
 
@@ -369,10 +382,10 @@ beyond signal handlers (which run on the same stack via the vDSO trampoline).
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `pthread_create` / `pthread_join` / `pthread_detach` / `pthread_*` (all of it) | — | ❌ | ❌ | |
-| Mutexes / condition variables / barriers / rwlocks | — | ❌ | ❌ | |
 | Atomics / `stdatomic.h` | — | ❌ | ❌ | |
-| `clone` / `futex` (Linux-ism) | — | ❌ | ❌ | |
+| Mutexes / condition variables / barriers / rwlocks | — | ❌ | ❌ | |
+| POSIX semaphores (`sem_init` / `sem_wait` / `sem_post` / `sem_destroy`) | — | ❌ | ❌ | |
+| `pthread_create` / `pthread_join` / `pthread_detach` / `pthread_*` (all of it) | — | ❌ | ❌ | |
 
 ### Setjmp, errno, misc
 
@@ -384,34 +397,35 @@ fallback.  POSIX-distinct codes like `EBADF`, `EISDIR`, `ENOTDIR`, `ESPIPE`,
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
+| `abort` | libc | ⚠️ | ⚠️ | `tools/libc` only — exits 134. |
+| `assert` | libc | ⚠️ | ⚠️ | `tools/libc/assert.h` — `fprintf(stderr, …) + abort()`. |
+| `dlopen` / `dlsym` / `dlclose` | — | ❌ | ❌ | All code is statically compiled in. |
+| `errno` | libc | ⚠️ | ⚠️ | `tools/libc` only — see code list above. |
+| `getopt` | `src/include/getopt.h` | ⚠️ | ✅ | Header-only short-option parser used by `echo`, `grep`, `head`, `sort`, `tail`, `tr`, `uniq`, `wc`.  No combined flags (`-lw`), no value-attached form (`-nN`), no `--` sentinel, no argv permutation. |
+| `regex` (`regcomp` / `regexec`) | — | ❌ | ❌ | |
 | `setjmp` / `longjmp` | libc (asm) | ⚠️ | ⚠️ | `tools/libc/setjmp.S` — 6-slot `jmp_buf` (esp/ebp/eip + 3 callee-saved). |
 | `sigsetjmp` / `siglongjmp` | — | ❌ | ❌ | No signal mask to save. |
-| `assert` | libc | ⚠️ | ⚠️ | `tools/libc/assert.h` — `fprintf(stderr, …) + abort()`. |
-| `abort` | libc | ⚠️ | ⚠️ | `tools/libc` only — exits 134. |
-| `errno` | libc | ⚠️ | ⚠️ | `tools/libc` only — see code list above. |
-| `getopt` / `getopt_long` | — | ❌ | ❌ | Individual programs roll their own argv parsing. |
-| `regex` (`regcomp` / `regexec`) | — | ❌ | ❌ | |
-| `dlopen` / `dlsym` / `dlclose` | — | ❌ | ❌ | All code is statically compiled in. |
+| `sysconf` / `confstr` | — | ❌ | ❌ | No runtime configuration query API; limits are compile-time. |
 
 ## Filesystem metadata
 
 | Field | bbfs | ext2 | Notes |
 |-------|:----:|:----:|-------|
+| Execute bit | ✅ | ✅ | The only "permission" bit — `FLAG_EXECUTE`. |
+| Extended attributes / ACLs | ❌ | ❌ | |
 | File name (≤26 bytes) | ✅ | ✅ | Both filesystems store names in 27-byte slots. |
 | File size (32-bit) | ✅ | ✅ | |
 | File type (regular vs directory) | ✅ | ✅ | Tracked via `FLAG_DIRECTORY`. |
-| Execute bit | ✅ | ✅ | The only "permission" bit — `FLAG_EXECUTE`. |
+| Hard links | ❌ | ❌ | |
 | Inode number | ❌ | ✅ | The ext2 driver tracks inodes; bbfs has no inode concept. |
+| Link count (`nlink`) | ❌ | ❌ | |
+| Max path | ❌ | ❌ | Hard cap `MAX_PATH = 64`; only one `/` allowed (single-level subdirs under root). |
+| Mode bits (rwx ×3) | ❌ | ❌ | |
 | `mtime` / `atime` / `ctime` | ❌ | ❌ | |
 | Owner uid / gid | ❌ | ❌ | |
-| Mode bits (rwx ×3) | ❌ | ❌ | |
-| Link count (`nlink`) | ❌ | ❌ | |
-| Symbolic links | ❌ | ❌ | |
-| Hard links | ❌ | ❌ | |
-| Special files (block / char / FIFO / socket) | ❌ | ❌ | |
 | Sparse files | ❌ | ❌ | |
-| Extended attributes / ACLs | ❌ | ❌ | |
-| Max path | ❌ | ❌ | Hard cap `MAX_PATH = 64`; only one `/` allowed (single-level subdirs under root). |
+| Special files (block / char / FIFO / socket) | ❌ | ❌ | |
+| Symbolic links | ❌ | ❌ | |
 
 ## BBoeOS-specific extras
 
@@ -420,10 +434,13 @@ here so a porter knows they exist (and is not surprised by unfamiliar names in
 the source).
 
 - **Programs**: `asm` (self-hosted assembler), `edit` (modal text editor),
-  `draw` (40×25 VGA canvas), `arp` / `dns` (network diagnostics),
-  `pipe_producer` / `pipe_consumer` / `pipe_drain` / `pipe_spam` (pipeline test
-  fixtures), `recursive_exec_test`, `fd_helpers`, `exit_status`,
-  `sleep_forever`, `uptime`.
+  `draw` (40×25 VGA canvas), `arp` / `dns` / `ping` (network diagnostics), `seq`
+  (GNU-style counter), `yes` (traditional BSD repeater), `pipe_producer` /
+  `pipe_consumer` / `pipe_drain` / `pipe_spam` (pipeline test fixtures),
+  `recursive_exec_test`, `fd_helpers`, `exit_status`, `sleep_forever`, `uptime`.
+- **Shell builtins**: `help` (lists the BBoeOS-specific builtins), `reboot`
+  (triple-faults via the 8042 keyboard controller), `shutdown` (tries APM / QEMU
+  / Bochs hooks).
 - **Syscalls**: `SYS_VIDEO_MAP`, `SYS_NET_MAC`, `SYS_RTC_MILLIS`,
   `SYS_RTC_UPTIME`, `SYS_SYS_REBOOT`, `SYS_SYS_SHUTDOWN`, `SYS_SYS_PIPELINE2`.
 - **vDSO helpers**: `FUNCTION_PRINT_IP`, `FUNCTION_PRINT_MAC`,
