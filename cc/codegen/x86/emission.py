@@ -67,6 +67,16 @@ from cc.target import X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
+#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
+#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
+#: (both 4-byte unsigned); on the 32-bit target they are also both
+#: 4-byte, and the special-case load path is harmless there.  Either
+#: spelling must route through :meth:`generate_long_expression` so the
+#: full DX:AX (16-bit) / EAX (32-bit) value is loaded — otherwise the
+#: ``uint32_t *`` form silently reads only the low 16 bits on the
+#: 16-bit target.
+_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
 
 class EmissionMixin:
     """Emission dispatchers, mixed into :class:`X86CodeGenerator`.
@@ -2026,7 +2036,7 @@ class EmissionMixin:
             # supported; more complex index expressions fall through to
             # the unsupported-shape error below.
             base = expression.array
-            if isinstance(base, Var) and self.variable_types.get(base.name) == "unsigned long*":
+            if isinstance(base, Var) and self.variable_types.get(base.name) in _LONG_POINTER_TYPES:
                 vname = base.name
                 self._check_defined(vname, line=expression.line)
                 guarded = self._si_scratch_guard_begin(vname)
@@ -2161,7 +2171,7 @@ class EmissionMixin:
             if (
                 isinstance(statement.value, Index)
                 and isinstance(statement.value.array, Var)
-                and self.variable_types.get(statement.value.array.name) == "unsigned long*"
+                and self.variable_types.get(statement.value.array.name) in _LONG_POINTER_TYPES
             ):
                 self.generate_long_expression(statement.value)
             else:

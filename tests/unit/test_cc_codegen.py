@@ -3101,6 +3101,27 @@ def test_uint16_t_size_is_always_two_bytes_32bit() -> None:
     assert "mov eax, 2" in asm, f"expected sizeof(uint16_t)==2 in 32-bit mode\n{asm}"
 
 
+def test_uint32_pointer_load_is_dword_on_kernel() -> None:
+    """``uint32_t *p; return p[0];`` reads all 4 bytes on the 16-bit target.
+
+    Mirrors :func:`test_unsigned_long_pointer_load_is_dword_on_kernel`;
+    this is the same fix extended to the ``uint32_t`` spelling, which
+    is the same 4-byte unsigned type on the 16-bit target.  Without
+    the broadening, ``uint32_t *`` silently loaded only the low 16
+    bits while ``unsigned long *`` loaded all four.
+    """
+    src = """
+        uint32_t test(uint32_t *p __attribute__((in_register("di")))) {
+            return p[0];
+        }
+    """
+    asm = _kernel(src, bits=16)
+    # The 16-bit code must load both halves: low into AX, high into DX.
+    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
+    # The high-word load is the distinguishing marker.
+    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
+
+
 def test_uint32_t_size_is_always_four_bytes_16bit() -> None:
     """sizeof(uint32_t) == 4 in --bits 16 mode."""
     asm = _kernel("int f() { return sizeof(uint32_t); }", bits=16)

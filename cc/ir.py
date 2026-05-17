@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 from cc import ast_nodes
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
+#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
+#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
+#: (both 4-byte unsigned); on the 32-bit target they are also both
+#: 4-byte, and the special-case load is harmless there.  Either
+#: spelling must trigger the long-pointee dispatch — otherwise
+#: ``uint32_t *p; x = p[0];`` silently reads only the low 16 bits on
+#: the 16-bit target while the ``unsigned long *`` form reads all
+#: four.
+_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
 Value = int | str | ast_nodes.AddressOf
 
 
@@ -553,7 +563,7 @@ class Builder:
                 self._collect_local_types(statement.body)
 
     def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
-        """Return True if *expression* is ``base[i]`` whose pointee is ``unsigned long``.
+        """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.
 
         Used by ``_build_stmt`` / ``_build_expr`` to short-circuit the
         normal ``temp = Index(...)`` lowering — those temps are int-typed
@@ -567,4 +577,4 @@ class Builder:
         if not isinstance(expression.array, ast_nodes.Var):
             return False
         base_type = self._var_types.get(expression.array.name)
-        return base_type == "unsigned long*"
+        return base_type in _LONG_POINTER_TYPES
