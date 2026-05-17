@@ -25,6 +25,7 @@ from cc.ast_nodes import (
     Char,
     Conditional,
     DerefAssign,
+    DoubleIndex,
     DoWhile,
     EnumDecl,
     Function,
@@ -1435,11 +1436,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         stack: list[Node] = [node]
         while stack:
             current = stack.pop()
-            if isinstance(current, Index):
+            if isinstance(current, (Index, DoubleIndex)):
                 # Index lowering uses SI as the base-address scratch
                 # whenever the base isn't a compile-time constant — by
-                # far the most common shape.  Be conservative and
-                # always claim SI.
+                # far the most common shape.  DoubleIndex always
+                # parks the outer pointer in SI before the inner load.
+                # Be conservative and always claim SI.
                 clobbers.add(self.target.si_register)
             elif isinstance(current, Call):
                 builtin_clobbers = self._builtin_clobbers.get(current.name)

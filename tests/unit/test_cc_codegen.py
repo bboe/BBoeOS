@@ -3376,6 +3376,35 @@ def test_user_brace_init_global_array_emits_dd_table() -> None:
     assert "_g_fib: dd 1, 1, 2, 3, 5, 8, 13, 21, 34, 55" in asm, f"missing brace-init dd table:\n{asm}"
 
 
+def test_user_double_subscript_into_array_of_pointers() -> None:
+    """``arr[i][j]`` for ``char *arr[N]`` loads via the new DoubleIndex path.
+
+    Lowering: load the pointer with the existing Index path (Stage 1),
+    move it to SI, then byte-load from ``[si+j]`` for ``char *`` elements
+    (Stage 2).  The constant-index outer + variable-index inner case used
+    by the shell drops out as ``mov eax, [_g_pointers] / mov esi, eax /
+    add esi, eax / movzx eax, byte [esi]``.
+    """
+    ok, asm = _compile(
+        r"""
+        char *pointers[4];
+
+        int main() {
+            char first = pointers[0][0];
+            int i = 1;
+            char second = pointers[0][i];
+            return first + second;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"compile failed:\n{asm}"
+    assert "_g_pointers" in asm, f"missing _g_pointers reference:\n{asm}"
+    # Constant outer + constant inner: pointer load then byte load via [esi].
+    assert "movzx eax, byte [esi]" in asm, f"missing byte load for arr[0][0]:\n{asm}"
+
+
 def test_user_enum_constants_fold_to_integer_literals() -> None:
     """``enum E { A, B = 5, C };`` makes each variant a compile-time integer.
 

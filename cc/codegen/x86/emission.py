@@ -34,6 +34,7 @@ from cc.ast_nodes import (
     Conditional,
     Continue,
     DerefAssign,
+    DoubleIndex,
     DoWhile,
     Function,
     If,
@@ -1016,6 +1017,61 @@ class EmissionMixin:
                     # AX now holds the subscript result, not the index —
                     # invalidate the tracking that generate_expression set.
                     self.ax_clear()
+        elif isinstance(expression, DoubleIndex):
+            self.ax_clear()
+            vname = expression.array.name
+            self._check_defined(vname, line=expression.line)
+            # Stage 1: load name[outer_index] into AX via the existing
+            # Index path (handles constant-base, pinned-SI, byte vs word
+            # widths uniformly).  For ``char *foo[N]`` this is a 4-byte
+            # pointer load; for ``int *foo[N]`` likewise.
+            outer_load = Index(array=expression.array, index=expression.outer_index, line=expression.line)
+            self.generate_expression(outer_load)
+            # Stage 2: index into the pointer in AX.  Element width is
+            # the pointee of the outer-array's element type, which is
+            # what _index_pointee_size returns for *vname* (it inspects
+            # the recorded type and strips one ``*``).
+            si = self.target.si_register
+            self.emit(f"        mov {si}, {self.target.acc}")
+            inner_size = self._index_pointee_size(vname)
+            is_byte_inner = inner_size == 1
+            inner = expression.inner_index
+            if isinstance(inner, Int):
+                offset = inner.value * (1 if is_byte_inner else inner_size)
+                mem = f"{si}+{offset}" if offset else si
+                if is_byte_inner:
+                    self.emit_byte_load_zx(f"[{mem}]")
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{mem}]")
+            elif isinstance(inner, Var):
+                # Var load doesn't touch SI, so no push/pop round-trip.
+                self.generate_expression(inner)
+                if not is_byte_inner:
+                    if inner_size == self.target.int_size:
+                        self._emit_scale_int_index(self.target.acc)
+                    else:
+                        self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+                self.emit(f"        add {si}, {self.target.acc}")
+                if is_byte_inner:
+                    self.emit_byte_load_zx(f"[{si}]")
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{si}]")
+            else:
+                # General inner expression — preserve SI across evaluation.
+                self.emit(f"        push {si}")
+                self.generate_expression(inner)
+                if not is_byte_inner:
+                    if inner_size == self.target.int_size:
+                        self._emit_scale_int_index(self.target.acc)
+                    else:
+                        self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+                self.emit(f"        pop {si}")
+                self.emit(f"        add {si}, {self.target.acc}")
+                if is_byte_inner:
+                    self.emit_byte_load_zx(f"[{si}]")
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{si}]")
+            self.ax_clear()
         elif isinstance(expression, SizeofType):
             self.ax_clear()
             self.emit(f"        mov {self.target.acc}, {self._type_size(expression.type_name)}")
