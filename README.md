@@ -6,11 +6,11 @@ mktree` + `git commit-tree` plumbing so the active feature worktree
 isn't disturbed, or via a dedicated `git worktree` checkout of this
 branch.
 
-Each spec is a self-contained brainstorming-output design doc. The
-matching implementation plan lives in the feature branch's PR description
-(or as a separate spec entry if the plan grows complex).
+Each spec is a self-contained brainstorming-output design doc. When the
+implementation plan grows complex enough to need its own document, it
+lands here as `<date>-<topic>-plan.md` alongside the spec.
 
-## Specs
+## Specs and plans
 
 - [2026-05-15 — common utilities](./2026-05-15-common-utilities-design.md)
   — sort + sys_break + supporting cc.py changes. Landed across PRs #379–#382.
@@ -18,4 +18,5 @@ matching implementation plan lives in the feature branch's PR description
   — ELF emission, `extern` declarations, `ccld` / `ccar`. In progress.
 - [2026-05-16 — opendir / readdir](./2026-05-16-opendir-readdir-design.md)
   — POSIX directory iteration via Linux-style `getdents` + `<dirent.h>`.
-  Brainstorming complete; implementation pending.
+  Plan: [2026-05-16-opendir-readdir-plan.md](./2026-05-16-opendir-readdir-plan.md).
+  Status: design + plan complete; implementation pending.
