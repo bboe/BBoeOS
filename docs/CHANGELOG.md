@@ -11,6 +11,13 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `switch` on a `char` discriminant now accepts char-literal case
+  labels.**  `case 'A':` opposite a `char byte` discriminant previously failed
+  the comparison validator (`char compared to non-char`) because the parser's
+  constant-folding pass collapses every case-label expression to `Int`, losing
+  the `Char` classification.  `generate_switch` now wraps each case value back
+  in `Char` when the discriminant resolves to `char` via `_type_of_operand`, so
+  the synthetic `discriminant == case` compares emit cleanly.
 - **Self-hosted asm: `times N <branch>` now emits N copies instead of zero
   bytes.**  `src/c/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
   silently returned for every other payload — most painfully `times N jmp/jcc`

@@ -3984,6 +3984,63 @@ def test_user_switch_fall_through_between_cases() -> None:
     )
 
 
+def test_user_switch_on_char_discriminant_accepts_char_literal_cases() -> None:
+    """``switch (char_var) { case 'A': ... }`` compiles cleanly.
+
+    Regression: the parser's constant-folding pass (_evaluate_constant_int)
+    collapses every case-label expression to ``Int``, losing the ``Char``
+    classification.  The switch lowering then emits ``BinaryOperation``
+    nodes with ``Int(value=65)`` opposite the char discriminant, tripping
+    the comparison validator's char-vs-int check.  The fix detects a
+    char-typed discriminant in ``generate_switch`` and wraps each case
+    value as ``Char`` so the validator sees char-vs-char.
+    """
+    asm = _kernel(
+        """
+            int classify(char byte) {
+                switch (byte) {
+                    case 'A': return 1;
+                    case 'B': return 2;
+                    case 'C': return 3;
+                }
+                return 0;
+            }
+        """,
+        bits=32,
+    )
+    # Each case lowers to a compare against the literal's ordinal.
+    # Don't pin to a specific register since the param may be pinned
+    # into edx / al / ax depending on the calling convention; the
+    # important contract is that the integer literal value reaches
+    # a ``cmp`` operand.
+    assert ", 65" in asm, f"expected compare against 'A' (65):\n{asm}"
+    assert ", 66" in asm, f"expected compare against 'B' (66):\n{asm}"
+    assert ", 67" in asm, f"expected compare against 'C' (67):\n{asm}"
+
+
+def test_user_switch_on_char_pointer_dereference_accepts_char_literal_cases() -> None:
+    r"""``switch (p[i]) { case '\n': ... }`` works for ``char *p`` subscripts.
+
+    The discriminant is an Index expression on a ``char *`` pointer —
+    the validator classifies the load as ``char`` via _type_of_operand,
+    so the same Int→Char wrap must fire to clear the char-vs-int check.
+    """
+    asm = _kernel(
+        """
+            int leading(char *p) {
+                switch (p[0]) {
+                    case '\\n': return 1;
+                    case '\\t': return 2;
+                }
+                return 0;
+            }
+        """,
+        bits=32,
+    )
+    assert ", 10" in asm, f"expected compare against '\\n' (10):\n{asm}"
+    assert ", 9" in asm, f"expected compare against '\\t' (9):\n{asm}"
+
+
 def test_user_switch_on_plain_int_skips_exhaustiveness() -> None:
     """A non-enum-typed discriminant never triggers the exhaustiveness check.
 
