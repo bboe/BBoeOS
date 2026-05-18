@@ -92,6 +92,21 @@ class EmissionMixin:
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
 
+    def _emit_scale_index(self, register: str, /, *, scale: int) -> None:
+        """Multiply *register* by *scale* (1, 2, or 4) in place.
+
+        Scale 1 is a no-op (byte stride); 2 emits ``add reg, reg``; 4
+        emits ``shl reg, 2``.  Other widths fall back to ``imul``.
+        """
+        if scale == 1:
+            return
+        if scale == 2:
+            self.emit(f"        add {register}, {register}")
+        elif scale == 4:
+            self.emit(f"        shl {register}, 2")
+        else:
+            self.emit(f"        imul {register}, {register}, {scale}")
+
     def _emit_scale_int_index(self, register: str, /) -> None:
         """Multiply *register* by ``self.target.int_size`` (2 or 4) in place.
 
@@ -100,10 +115,7 @@ class EmissionMixin:
         doubles via ``add reg, reg``; 32-bit uses ``shl reg, 2`` so the
         4x stride lands in one instruction instead of two.
         """
-        if self.target.int_size == 4:
-            self.emit(f"        shl {register}, 2")
-        else:
-            self.emit(f"        add {register}, {register}")
+        self._emit_scale_index(register, scale=self.target.int_size)
 
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
@@ -957,8 +969,8 @@ class EmissionMixin:
                     guarded = self._si_scratch_guard_begin(vname)
                     addr = self._emit_constant_base_index_addr(
                         const_base=const_base,
+                        element_size=1 if is_byte else (pointee_size if narrow_word else self.target.int_size),
                         index=index_expression,
-                        is_byte=is_byte,
                         preserve_ax=False,
                     )
                     if is_byte:
@@ -1033,12 +1045,24 @@ class EmissionMixin:
             outer_load = Index(array=expression.array, index=expression.outer_index, line=expression.line)
             self.generate_expression(outer_load)
             # Stage 2: index into the pointer in AX.  Element width is
-            # the pointee of the outer-array's element type, which is
-            # what _index_pointee_size returns for *vname* (it inspects
-            # the recorded type and strips one ``*``).
+            # the pointee of the outer-array's element type — i.e.
+            # ``sizeof(*element)``.  For ``char *arr[N]`` the element
+            # type is ``"char*"`` so the inner stride is
+            # ``sizeof(char) == 1``.  ``_index_pointee_size`` is
+            # array-aware (returns sizeof(element)), so for DoubleIndex
+            # we strip the recorded element type's trailing ``*`` and
+            # consult ``target.type_size`` directly.
             si = self.target.si_register
             self.emit(f"        mov {si}, {self.target.acc}")
-            inner_size = self._index_pointee_size(vname)
+            element_type = self.variable_types.get(vname, "")
+            if element_type.endswith("*"):
+                pointee = element_type[:-1].rstrip()
+                try:
+                    inner_size = self.target.type_size(pointee)
+                except KeyError:
+                    inner_size = self.target.int_size
+            else:
+                inner_size = self.target.int_size
             is_byte_inner = inner_size == 1
             inner = expression.inner_index
             if isinstance(inner, Int):
@@ -1994,10 +2018,23 @@ class EmissionMixin:
         name = statement.array.name
         is_byte = self._is_byte_var(name)
         self._check_defined(name, line=statement.line)
+        # Pick element width.  Byte arrays / pointers stay on the byte
+        # fast path; otherwise consult ``_index_pointee_size`` so
+        # halfword (``uint16_t``) targets get a 2-byte store instead of
+        # the historical full ``int_size`` store that silently overwrote
+        # the next element.  Clamp to ``int_size`` because pointee
+        # widths > acc width are handled by ``generate_long_expression``.
+        if is_byte:
+            element_size = 1
+        else:
+            element_size = min(self._index_pointee_size(name), self.target.int_size)
+        is_halfword = element_size == 2 and element_size < self.target.int_size
+        store_width = "byte" if is_byte else ("word" if is_halfword else self.target.word_size)
+        store_acc = "al" if is_byte else ("ax" if is_halfword else self.target.acc)
         # Evaluate value into AX, then store at base+index.
         if isinstance(statement.index, Int) and isinstance(statement.expr, Int):
             # Both index and value are constants: direct store.
-            offset = statement.index.value * (1 if is_byte else self.target.int_size)
+            offset = statement.index.value * element_size
             const_base = self._resolve_constant(name)
             if const_base is not None:
                 addr = f"{const_base}+{offset}" if offset else const_base
@@ -2007,14 +2044,11 @@ class EmissionMixin:
                 self._emit_load_var(name, register=self.target.si_register)
                 si = self.target.si_register
                 addr = f"{si}+{offset}" if offset else si
-            if is_byte:
-                self.emit(f"        mov byte [{addr}], {statement.expr.value}")
-            else:
-                self.emit(f"        mov {self.target.word_size} [{addr}], {statement.expr.value}")
+            self.emit(f"        mov {store_width} [{addr}], {statement.expr.value}")
             self._si_scratch_guard_end(guarded=guarded)
         elif isinstance(statement.index, Int):
             # Constant index, variable value.
-            offset = statement.index.value * (1 if is_byte else self.target.int_size)
+            offset = statement.index.value * element_size
             self.generate_expression(statement.expr)
             const_base = self._resolve_constant(name)
             if const_base is not None:
@@ -2025,10 +2059,7 @@ class EmissionMixin:
                 self._emit_load_var(name, register=self.target.si_register)
                 si = self.target.si_register
                 addr = f"{si}+{offset}" if offset else si
-            if is_byte:
-                self.emit(f"        mov [{addr}], al")
-            else:
-                self.emit(f"        mov [{addr}], {self.target.acc}")
+            self.emit(f"        mov [{addr}], {store_acc}")
             self._si_scratch_guard_end(guarded=guarded)
         else:
             const_base = self._resolve_constant(name)
@@ -2038,14 +2069,11 @@ class EmissionMixin:
                 guarded = self._si_scratch_guard_begin(name)
                 addr = self._emit_constant_base_index_addr(
                     const_base=const_base,
+                    element_size=element_size,
                     index=statement.index,
-                    is_byte=is_byte,
                     preserve_ax=True,
                 )
-                if is_byte:
-                    self.emit(f"        mov [{addr}], al")
-                else:
-                    self.emit(f"        mov [{addr}], {self.target.acc}")
+                self.emit(f"        mov [{addr}], {store_acc}")
                 self._si_scratch_guard_end(guarded=guarded)
                 self.ax_clear()
             else:
@@ -2061,24 +2089,19 @@ class EmissionMixin:
                 # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):
                     self.generate_expression(statement.index)
-                    if not is_byte:
-                        self._emit_scale_int_index(self.target.acc)
+                    self._emit_scale_index(self.target.acc, scale=element_size)
                     self.emit(f"        add {si}, {self.target.acc}")
                 else:
                     self.emit(f"        push {si}")
                     self.generate_expression(statement.index)
-                    if not is_byte:
-                        self._emit_scale_int_index(self.target.acc)
+                    self._emit_scale_index(self.target.acc, scale=element_size)
                     self.emit(f"        pop {si}")
                     self.emit(f"        add {si}, {self.target.acc}")
                 self.emit(f"        pop {self.target.acc}")
                 # After pop, AX holds the value being stored, not the index —
                 # invalidate the ax_local tracking that generate_expression set.
                 self.ax_clear()
-                if is_byte:
-                    self.emit(f"        mov [{si}], al")
-                else:
-                    self.emit(f"        mov [{si}], {self.target.acc}")
+                self.emit(f"        mov [{si}], {store_acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
     def generate_long_expression(self, expression: Node, /) -> None:

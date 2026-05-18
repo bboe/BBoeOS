@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `uint16_t` arrays now generate correct halfword load/store.**  Local
+  `uint16_t arr[N]` declarations previously got a 4-byte stride and `mov dword`
+  stores — silently overwriting adjacent elements; file-scope `uint16_t g[N]`
+  was outright rejected because the codegen had no halfword path.  `uint16_t *p`
+  store had the same bug (load was already fixed).  The Index / IndexAssign
+  paths now thread an explicit `element_size` (1 / 2 / `int_size`) through the
+  address calculator and emit `mov word [...]` / `movzx eax, word [...]` with
+  stride-2 scaling for halfword targets; BSS reservations and initializer-data
+  directives also pick up the correct width (`resb 2*N`, `dw` cells).  Stride
+  for both local and file-scope primitive arrays is now derived from
+  `_type_size` instead of a binary byte-vs-int_size switch, so any future
+  element type just works.
 - **cc.py: `enum` declarations and `switch` / `case` / `default` with
   exhaustiveness checking on enum discriminants.**  File-scope `enum NAME { A, B
   = 5, C };` declares integer-valued constants (auto-incrementing from 0 or from
