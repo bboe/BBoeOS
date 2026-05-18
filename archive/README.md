@@ -24,12 +24,12 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |
-| dns     | 724            | 1189        | 1305      | +116  |
-| edit    | 2018           | 2659        | 3357      | +698  |
-| ls      | 135            | 439         | 839       | +400  |
+| dns     | 724            | 1189        | 1283      | +94   |
+| edit    | 2018           | 2659        | 3312      | +653  |
+| ls      | 135            | 439         | 792       | +353  |
 | mkdir   | 123            | 142         | 163       | +21   |
 | mv      | 217            | 242         | 270       | +28   |
-| ping    | 1034           | 1230        | 1543      | +313  |
+| ping    | 1034           | 1230        | 1531      | +301  |
 | uptime  | 50             | 67          | 102       | +35   |
 
 **arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
@@ -39,34 +39,33 @@ used to reach into the shared `BUFFER` / `BUFFER+N` window at user-virt
 the asm now declares its own `recv_buf times 128 db 0` in the program's data
 section.  Two structural wins from 32-bit: the 6-byte MAC copy (was 3×
 ``movsw``) collapses to ``movsd + movsw``, and the sender-IP match (was two
-2-byte ``mov ax, [..]; cmp ax, [..]``) collapses to a single 4-byte compare.
-The delta swung negative because the asm now carries the 128-byte receive
-buffer inline while the C side still places `receive_buffer` in BSS (counted in
-the kernel bss-size trailer, not the .bin size); cc.py pays per-byte ``movzx``
+2-byte ``mov ax, [..]; cmp ax, [..]``) collapses to a single 4-byte compare. The
+delta swung negative because the asm now carries the 128-byte receive buffer
+inline while the C side still places `receive_buffer` in BSS (counted in the
+kernel bss-size trailer, not the .bin size); cc.py pays per-byte ``movzx``
 zero-extends on the EtherType / opcode checks but those are now small relative
 to the 128-byte buffer the asm carries in its image.
 
 **chmod (+53):** The assembly version walks the mode argument with `lodsb` (1
 byte per character read); the C version reloads the base pointer and indexes for
-each character check.  The 32-bit asm uses 4-byte argv pointer slots on the user stack
-(``[esp+4]`` for argv[1], ``[esp+8]`` for argv[2]); cc.py's 32-bit codegen for the per-character
-check sequence carries proportionally more byte-load + zero-extend overhead than
-16-bit, so the delta inflates from +25 to +53.
+each character check.  The 32-bit asm uses 4-byte argv pointer slots on the user
+stack (``[esp+4]`` for argv[1], ``[esp+8]`` for argv[2]); cc.py's 32-bit codegen
+for the per-character check sequence carries proportionally more byte-load +
+zero-extend overhead than 16-bit, so the delta inflates from +25 to +53.
 
 **dns (+116):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals; the
 assembly version reused `SECTOR_BUFFER` and `BUFFER`, but with `BUFFER` retired
-(see the arp note) the asm now declares its own `rr_name_buf` and `cname_buf`
-as two 128-byte arrays in the program's data section.  Most of the delta comes
-from `decode_domain` and `encode_domain` carrying full stack-frame overhead
-(push bp / mov bp,sp / pop bp / ret per call) and passing arguments via the
-stack (their callers pass complex expressions, so the register calling
-convention doesn't kick in); `skip_name` is simple enough that cc.py routes its
-arguments through registers.  The assembly version uses register calling
-conventions with no frame setup for every helper.  The C compiler also generates
-word-sized loads with `xor ah,ah` zero-extension for every byte read, whereas
-the assembly version uses `lodsb` / `stosb` / `rep movsb` for compact
-byte-oriented loops.
+(see the arp note) the asm now declares its own `rr_name_buf` and `cname_buf` as
+two 128-byte arrays in the program's data section.  Most of the delta comes from
+`decode_domain` and `encode_domain` carrying full stack-frame overhead (push bp
+/ mov bp,sp / pop bp / ret per call) and passing arguments via the stack (their
+callers pass complex expressions, so the register calling convention doesn't
+kick in); `skip_name` is simple enough that cc.py routes its arguments through
+registers.  The assembly version uses register calling conventions with no frame
+setup for every helper.  The C compiler also generates word-sized loads with
+`xor ah,ah` zero-extension for every byte read, whereas the assembly version
+uses `lodsb` / `stosb` / `rep movsb` for compact byte-oriented loops.
 
 The 32-bit asm widens dns_query.asm / encode_domain.asm helpers to ESI/EDI plus
 dns_base / dns_socket_fd / domain_arg / rr_name_ptr to ``dd 0`` (cc.py 32-bit
@@ -76,8 +75,8 @@ eax`` (the 16-bit form added a 16-bit offset to a 16-bit base; the 32-bit form
 needs the zero-extend because [dns_base] is now a 32-bit linear address).  Δ
 landed at +116 — cc.py's 32-bit codegen still pays the ``movzx`` zero-extend
 cost on every byte read in the answer-walking loop (which the asm avoids), but
-the asm version now carries 256 bytes of decode-target buffers inline that the
-C version keeps in BSS, so the asm-side image grew enough to outweigh those
+the asm version now carries 256 bytes of decode-target buffers inline that the C
+version keeps in BSS, so the asm-side image grew enough to outweigh those
 per-byte differences.
 
 **edit (+670):** Restored from git history (retired during the pmode merge

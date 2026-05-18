@@ -36,6 +36,33 @@ time.
   and `ping` adopt the new API and drop their userspace `sleep(1)` /
   `sleep(1000)` polling loops.
 
+- **cc.py: liveness-driven register sharing for auto-pinned locals.**  The
+  auto-pin allocator now consults a backward-dataflow liveness analyzer
+  (`cc/codegen/liveness.py`) and lets candidates that ran out of fresh registers
+  share an already-pinned register when their live ranges don't overlap any name
+  currently holding that register.  Concrete shapes that benefit: locals
+  declared in different switch case bodies, in disjoint if/then-else arms, or
+  sequenced one-after-the-other across function-body phases (e.g., `ls.c`'s
+  `arena_used` (gather phase) sharing `edx` with `i` (sort phase)).
+  `can_auto_pin`'s pool-size gate now counts unique registers rather than unique
+  names so the gate trips only when every register slot is occupied, and
+  `_pinned_registers_to_save` deduplicates via `set` so push/pop pairs around
+  clobbering calls stay balanced under sharing.  Marginal win on top of the
+  per-function `peephole_dead_temp_slots` fix above: kernel.bin -40 bytes, user
+  programs -267 bytes (-307 total); largest individual wins on tail (-74), ls
+  (-47), asm (-32), wc (-28), tr (-26), shell (-19), sort (-19), dns (-16).
+
+- **cc.py: scope `peephole_dead_temp_slots` per function.**  Fixes a latent
+  conflation bug in the dead-IR-temp-slot dropper: it scanned the entire emitted
+  asm for `[bp-N]` reads, but `[bp-N]` is frame-local, so a real local read of
+  slot N in one function would keep a provably-dead IR-temp store at slot N in
+  every other function.  Splitting the pass on top-level function labels lets
+  every function evaluate its own read set independently.  Net win across the
+  shipped image: kernel.bin -576 bytes, user programs -2048 bytes (-2624 total);
+  largest individual wins on asm (-1071), shell (-309), sort (-186), grep (-79),
+  head (-77), tail (-77), echo (-48), edit (-45), tr (-42), uniq (-31), wc
+  (-31).
+
 - **cc.py: hoist memory-scalar switch discriminant before dispatch chain.** When
   the switch discriminant is a memory-backed scalar (file-scope global, unpinned
   local) and the switch has 2+ arms, `generate_switch` now emits a single load

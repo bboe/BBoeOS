@@ -55,6 +55,7 @@ from cc.ast_nodes import (
     While,
 )
 from cc.codegen.base import CodeGeneratorBase
+from cc.codegen.liveness import LivenessAnalysisError, LivenessAnalyzer
 from cc.codegen.x86.builtins import BuiltinsMixin
 from cc.codegen.x86.emission import EmissionMixin
 from cc.codegen.x86.jumps import (
@@ -1785,11 +1786,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         low_word = self.target.low_word
         normalised_clobbers = frozenset(low_word(register) for register in clobbers)
-        return sorted(
+        # Dedup via ``set``: liveness-driven sharing maps several names
+        # to the same register, and emitting push/pop pairs once per
+        # name would unbalance the stack.
+        return sorted({
             register
             for register in self.pinned_register.values()
             if low_word(register) in normalised_clobbers and low_word(register) != "ax"
-        )
+        })
 
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
@@ -2151,9 +2155,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         combined = [item for item in combined if item[0] not in address_taken]
         assignments: dict[str, str] = {}
         available = list(self.safe_pin_registers)
+        # ``register_holders``: register name -> list of pinned-var names
+        # already assigned to that register.  Populated in the
+        # primary loop below and read by the sharing pass that
+        # follows it.
+        register_holders: dict[str, list[str]] = {}
+        deferred_for_sharing: list[tuple[str, int]] = []
         for name, _ in combined:
             if not available:
-                break
+                deferred_for_sharing.append((name, counts.get(name, 0)))
+                continue
             non_bp = [register for register in available if register != "bp"]
             best_other = min(non_bp, key=lambda register: self.register_clobber_counts.get(register, 0)) if non_bp else None
             # Decide BP vs the cheapest non-BP register when both are
@@ -2170,13 +2181,43 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             elif best_other is not None:
                 chosen = best_other
             else:
-                break
+                deferred_for_sharing.append((name, counts.get(name, 0)))
+                continue
             refs = counts.get(name, 0)
             if refs > self.register_clobber_counts.get(chosen, 0):
                 assignments[name] = chosen
                 available.remove(chosen)
+                register_holders.setdefault(chosen, []).append(name)
             else:
+                # Candidate didn't beat its matched register's
+                # clobber cost; the original logic broke out of the
+                # loop here because every later candidate was lower
+                # priority.  Mirror that with a single break.
                 break
+        # Sharing pass: liveness-driven reuse of already-taken
+        # registers for candidates whose live ranges don't overlap
+        # any name on the register.  Skipped when the analyzer can't
+        # safely speak about *body* (raises ``LivenessAnalysisError``
+        # for a node it doesn't model); we fall through with the
+        # candidate left unpinned rather than risk a miscompile.
+        if deferred_for_sharing and register_holders:
+            try:
+                analyzer = LivenessAnalyzer(body=body, parameters=parameters)
+                interference = analyzer.interference()
+            except LivenessAnalysisError:
+                interference = None
+            if interference is not None:
+                for name, refs in deferred_for_sharing:
+                    neighbours = interference.get(name, set())
+                    candidate_registers = [
+                        register for register, holders in register_holders.items() if all(holder not in neighbours for holder in holders)
+                    ]
+                    if not candidate_registers:
+                        continue
+                    chosen = min(candidate_registers, key=lambda register: self.register_clobber_counts.get(register, 0))
+                    if refs > self.register_clobber_counts.get(chosen, 0):
+                        assignments[name] = chosen
+                        register_holders[chosen].append(name)
         return assignments
 
     def _try_direct_load(self, *, argument: Node, register: str, optimize_zero: bool = False) -> bool:
@@ -2416,7 +2457,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     def can_auto_pin(self, *, following_statement: Node | None, statement: VarDecl) -> bool:
         """Decide whether *statement* should be auto-pinned to a register."""
-        if len(self.pinned_register) >= len(self.safe_pin_registers):
+        # The pool-size gate trips only when the candidate's chosen
+        # register would be a *new* occupant: liveness-driven sharing
+        # reuses an already-pinned register, so a candidate whose
+        # register is already among ``pinned_register.values()`` is a
+        # share, not a fresh allocation.
+        candidate_register = self.auto_pin_candidates.get(statement.name)
+        is_share = candidate_register is not None and candidate_register in self.pinned_register.values()
+        if not is_share and len(set(self.pinned_register.values())) >= len(self.safe_pin_registers):
             return False
         init = statement.init
         if init is None:
