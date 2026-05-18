@@ -13,19 +13,21 @@
 // matching those constants.
 
 struct pipe {
-    uint32_t blocked_reader;             // 0x000  struct program_state*
-    uint32_t blocked_writer;             // 0x004
-    uint8_t buffer[4076];                // 0x008  size must match PIPE_BUFFER_BYTES in constants.asm
-    uint16_t count;                      // 0xFF4
-    uint16_t head;                       // 0xFF6
-    uint8_t in_use;                      // 0xFF8
-    uint8_t reader_fd_open;              // 0xFF9
-    uint16_t tail;                       // 0xFFA
-    uint8_t writer_fd_open;              // 0xFFC
-    uint8_t pad_after_writer_fd_open[3]; // 0xFFD  align struct to PIPE_SIZE (one frame)
-};                                       // total 0x1000
+    uint32_t blocked_reader; // 0x000  struct program_state*
+    uint32_t blocked_writer; // 0x004
+    uint8_t buffer
+        [4076];     // 0x008  size must match PIPE_BUFFER_BYTES in constants.asm
+    uint16_t count; // 0xFF4
+    uint16_t head;  // 0xFF6
+    uint8_t in_use; // 0xFF8
+    uint8_t reader_fd_open; // 0xFF9
+    uint16_t tail;          // 0xFFA
+    uint8_t writer_fd_open; // 0xFFC
+    uint8_t pad_after_writer_fd_open
+        [3]; // 0xFFD  align struct to PIPE_SIZE (one frame)
+}; // total 0x1000
 
-struct pipe pipe_pool[4];  // size must match MAX_PIPES in constants.asm
+struct pipe pipe_pool[4]; // size must match MAX_PIPES in constants.asm
 
 int pipe_alloc() {
     int i;

@@ -59,7 +59,7 @@ void midi_emit(int delay, int bank, int register_index, int value) {
 }
 
 void mode_midi() {
-    midi_fd = open("/dev/midi", 1);                 /* O_WRONLY */
+    midi_fd = open("/dev/midi", 1); /* O_WRONLY */
     if (midi_fd < 0) {
         printf("play_midi: open returned %d (no OPL3?)\n", midi_fd);
         return;
@@ -67,13 +67,13 @@ void mode_midi() {
 
     /* Operator 0 (carrier-side under additive C0=01): mult=1, sustained. */
     midi_emit(0, 0, 0x20, 0x01);
-    midi_emit(0, 0, 0x40, 0x10);        /* total level: medium-loud */
-    midi_emit(0, 0, 0x60, 0xF0);        /* fast attack, slow decay */
-    midi_emit(0, 0, 0x80, 0x77);        /* max sustain, fast release */
+    midi_emit(0, 0, 0x40, 0x10); /* total level: medium-loud */
+    midi_emit(0, 0, 0x60, 0xF0); /* fast attack, slow decay */
+    midi_emit(0, 0, 0x80, 0x77); /* max sustain, fast release */
 
     /* Operator 1 (modulator slot, simple patch). */
     midi_emit(0, 0, 0x23, 0x01);
-    midi_emit(0, 0, 0x43, 0x00);        /* max output */
+    midi_emit(0, 0, 0x43, 0x00); /* max output */
     midi_emit(0, 0, 0x63, 0xF0);
     midi_emit(0, 0, 0x83, 0x77);
 
@@ -101,7 +101,7 @@ void mode_midi() {
 }
 
 void mode_open() {
-    int fd = open("/dev/audio", 1);                 /* O_WRONLY */
+    int fd = open("/dev/audio", 1); /* O_WRONLY */
     if (fd < 0) {
         printf("audio_open: open returned %d (no SB16?)\n", fd);
         return;
@@ -120,7 +120,7 @@ void mode_open() {
 }
 
 void mode_tone() {
-    int fd = open("/dev/audio", 1);                 /* O_WRONLY */
+    int fd = open("/dev/audio", 1); /* O_WRONLY */
     if (fd < 0) {
         printf("audio_tone: open returned %d (no SB16?)\n", fd);
         return;

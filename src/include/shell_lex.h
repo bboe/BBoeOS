@@ -44,8 +44,8 @@ enum TokenKind {
     TOKEN_WORD,
 };
 
-int lex_line(char *input, int *kinds_out, int *offsets_out,
-             char *words_out, int max_tokens, int max_word_bytes) {
+int lex_line(char *input, int *kinds_out, int *offsets_out, char *words_out,
+             int max_tokens, int max_word_bytes) {
     int scan = 0;
     int token_count = 0;
     int word_write = 0;
@@ -130,10 +130,9 @@ int lex_line(char *input, int *kinds_out, int *offsets_out,
                 continue;
             }
             if (in_single == 0 && in_double == 0) {
-                if (character == ' ' || character == '\t'
-                    || character == ';' || character == '|'
-                    || character == '&' || character == '<'
-                    || character == '>') {
+                if (character == ' ' || character == '\t' || character == ';' ||
+                    character == '|' || character == '&' || character == '<' ||
+                    character == '>') {
                     break;
                 }
             }

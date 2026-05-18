@@ -20,7 +20,8 @@
 
 #include <stdint.h>
 
-static uint64_t udiv64_inner(uint64_t numerator, uint64_t denominator, uint64_t *remainder_out) {
+static uint64_t udiv64_inner(uint64_t numerator, uint64_t denominator,
+                             uint64_t *remainder_out) {
     /* Returns quotient and stores the remainder in *remainder_out.
      * Both signed and unsigned wrappers route through this — keeping
      * the bit-walk in one place avoids two near-identical copies. */
@@ -62,7 +63,8 @@ int64_t __divdi3(int64_t numerator, int64_t denominator) {
      * exactly what (sign-fix outside, unsigned divide inside) gives us. */
     int negate = (numerator < 0) ^ (denominator < 0);
     uint64_t un = numerator < 0 ? (uint64_t)(-numerator) : (uint64_t)numerator;
-    uint64_t ud = denominator < 0 ? (uint64_t)(-denominator) : (uint64_t)denominator;
+    uint64_t ud =
+        denominator < 0 ? (uint64_t)(-denominator) : (uint64_t)denominator;
     uint64_t remainder;
     uint64_t quotient = udiv64_inner(un, ud, &remainder);
     return negate ? -(int64_t)quotient : (int64_t)quotient;
@@ -72,7 +74,8 @@ int64_t __moddi3(int64_t numerator, int64_t denominator) {
     /* Sign of remainder follows the numerator (C99 6.5.5). */
     int negate = numerator < 0;
     uint64_t un = numerator < 0 ? (uint64_t)(-numerator) : (uint64_t)numerator;
-    uint64_t ud = denominator < 0 ? (uint64_t)(-denominator) : (uint64_t)denominator;
+    uint64_t ud =
+        denominator < 0 ? (uint64_t)(-denominator) : (uint64_t)denominator;
     uint64_t remainder;
     udiv64_inner(un, ud, &remainder);
     return negate ? -(int64_t)remainder : (int64_t)remainder;

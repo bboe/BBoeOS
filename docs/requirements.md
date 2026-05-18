@@ -50,6 +50,15 @@ above plus `qemu-system-i386`.
 
 Tests under `tests/unit/` use **`pytest`** (`pip install pytest`).
 
+## Development
+
+The repository uses **`pre-commit`** for lint and format hooks; install it via
+`pip install pre-commit` then `pre-commit install`.  Formatting C sources is
+handled by **`clang-format`** (configured by `.clang-format`) — pre-commit pulls
+the pinned wheel automatically, so no separate install is required for the hook.
+To run clang-format outside of pre-commit, `pip install clang-format` gets the
+same binary the hook uses.
+
 The libc tests need **`clang`**:
 
 - `tests/unit/test_libbboeos.py` runs clang in its host-native default mode to

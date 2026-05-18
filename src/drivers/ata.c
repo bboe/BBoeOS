@@ -38,7 +38,8 @@ void ata_init() {
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
     kernel_outb(0x3F6, 0);
-    while ((kernel_inb(0x1F7) & 0x80) != 0) {}
+    while ((kernel_inb(0x1F7) & 0x80) != 0) {
+    }
 }
 
 // Issue a one-sector ATA command.  Programs drive/LBA/count/command
@@ -49,13 +50,13 @@ void ata_issue(int lba __attribute__((in_register("ax"))),
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("edx")))
-{
+    __attribute__((preserve_register("edx"))) {
     int saved_lba;
     saved_lba = lba & 0xFFFF;
-    while ((kernel_inb(0x1F7) & 0x80) != 0) {}
-    kernel_outb(0x1F6, 0xE0);          // master + LBA mode
-    kernel_outb(0x1F2, 1);             // sector count = 1
+    while ((kernel_inb(0x1F7) & 0x80) != 0) {
+    }
+    kernel_outb(0x1F6, 0xE0); // master + LBA mode
+    kernel_outb(0x1F2, 1);    // sector count = 1
     kernel_outb(0x1F3, saved_lba & 0xFF);
     kernel_outb(0x1F4, (saved_lba >> 8) & 0xFF);
     kernel_outb(0x1F5, 0);
@@ -65,7 +66,7 @@ void ata_issue(int lba __attribute__((in_register("ax"))),
 // Forward decl: ata_read_sector and ata_write_sector come before
 // ata_wait_drq alphabetically and need its signature.
 int ata_wait_drq() __attribute__((carry_return))
-    __attribute__((preserve_register("edx")));
+__attribute__((preserve_register("edx")));
 
 // AX = LBA → sector_buffer filled.  Returns 1 on success / 0 on
 // error (CF=0/CF=1 to asm callers respectively).  cc.py's
@@ -73,14 +74,12 @@ int ata_wait_drq() __attribute__((carry_return))
 // (``if (foo())`` over ``if (!foo())``) — the branch emission for
 // the negated form is buggy at the time of writing.
 int ata_read_sector(int lba __attribute__((in_register("ax"))))
-    __attribute__((carry_return))
-    __attribute__((preserve_register("eax")))
+    __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx")))
-    __attribute__((preserve_register("edi")))
-{
-    ata_issue(lba, 0x20);                            // ATA_CMD_READ
+    __attribute__((preserve_register("edi"))) {
+    ata_issue(lba, 0x20); // ATA_CMD_READ
     if (ata_wait_drq()) {
         kernel_insw(0x1F0, sector_buffer, 256);
         return 1;
@@ -96,14 +95,19 @@ int ata_read_sector(int lba __attribute__((in_register("ax"))))
 // convention (CF=0 ok, CF=1 err) is preserved verbatim for callers
 // reached via the asm calling shape.
 int ata_wait_drq() __attribute__((carry_return))
-    __attribute__((preserve_register("edx")))
-{
+__attribute__((preserve_register("edx"))) {
     uint8_t status;
     while (1) {
         status = kernel_inb(0x1F7);
-        if ((status & 0x80) != 0) { continue; }      // BSY — keep polling
-        if ((status & 0x01) != 0) { return 0; }      // ERR → CF=1
-        if ((status & 0x08) != 0) { return 1; }      // DRQ → CF=0
+        if ((status & 0x80) != 0) {
+            continue;
+        } // BSY — keep polling
+        if ((status & 0x01) != 0) {
+            return 0;
+        } // ERR → CF=1
+        if ((status & 0x08) != 0) {
+            return 1;
+        } // DRQ → CF=0
         // BSY=0, DRQ=0, ERR=0 — keep polling
     }
 }
@@ -111,21 +115,23 @@ int ata_wait_drq() __attribute__((carry_return))
 // AX = LBA, sector_buffer holds the bytes.  Same return shape as
 // ata_read_sector.
 int ata_write_sector(int lba __attribute__((in_register("ax"))))
-    __attribute__((carry_return))
-    __attribute__((preserve_register("eax")))
+    __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx")))
-    __attribute__((preserve_register("esi")))
-{
+    __attribute__((preserve_register("esi"))) {
     uint8_t status;
-    ata_issue(lba, 0x30);                            // ATA_CMD_WRITE
+    ata_issue(lba, 0x30); // ATA_CMD_WRITE
     if (ata_wait_drq()) {
         kernel_outsw(0x1F0, sector_buffer, 256);
         while (1) {
             status = kernel_inb(0x1F7);
-            if ((status & 0x80) != 0) { continue; }
-            if ((status & 0x01) != 0) { return 0; }
+            if ((status & 0x80) != 0) {
+                continue;
+            }
+            if ((status & 0x01) != 0) {
+                return 0;
+            }
             return 1;
         }
     }

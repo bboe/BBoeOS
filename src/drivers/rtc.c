@@ -54,9 +54,15 @@ uint8_t rtc_bcd_to_bin(uint8_t bcd __attribute__((in_register("ax")))) {
 
 // Returns 1 if `year` is a Gregorian leap year, 0 otherwise.
 int rtc_is_leap_year(int year) {
-    if ((year & 3) != 0) { return 0; }       // not divisible by 4
-    if ((year % 100) != 0) { return 1; }     // div by 4, not by 100 → leap
-    if ((year % 400) != 0) { return 0; }     // div by 100, not by 400 → not leap
+    if ((year & 3) != 0) {
+        return 0;
+    } // not divisible by 4
+    if ((year % 100) != 0) {
+        return 1;
+    } // div by 4, not by 100 → leap
+    if ((year % 400) != 0) {
+        return 0;
+    } // div by 100, not by 400 → not leap
     return 1;
 }
 
@@ -81,16 +87,16 @@ void rtc_read_date_internal(int *cx __attribute__((out_register("cx"))),
 asm("rtc_read_date_internal:\n"
     "    push eax\n"
     "    call rtc_wait_steady\n"
-    "    mov al, 0x32\n"   // CMOS_CENTURY
+    "    mov al, 0x32\n" // CMOS_CENTURY
     "    call rtc_read\n"
     "    mov ch, al\n"
-    "    mov al, 0x09\n"   // CMOS_YEAR
+    "    mov al, 0x09\n" // CMOS_YEAR
     "    call rtc_read\n"
     "    mov cl, al\n"
-    "    mov al, 0x08\n"   // CMOS_MONTH
+    "    mov al, 0x08\n" // CMOS_MONTH
     "    call rtc_read\n"
     "    mov dh, al\n"
-    "    mov al, 0x07\n"   // CMOS_DAY
+    "    mov al, 0x07\n" // CMOS_DAY
     "    call rtc_read\n"
     "    mov dl, al\n"
     "    pop eax\n"
@@ -100,11 +106,9 @@ asm("rtc_read_date_internal:\n"
 // 1970-01-01 UTC, valid through 2106-02-07.  CF clear (never errors).
 // Preserves EBX/ECX/ESI; clobbers EAX/EDX (the trailing imuls leave
 // junk in EDX, which every caller treats as scratch anyway).
-uint32_t rtc_read_epoch()
-    __attribute__((preserve_register("ebx")))
-    __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("esi")))
-{
+uint32_t rtc_read_epoch() __attribute__((preserve_register("ebx")))
+__attribute__((preserve_register("ecx")))
+__attribute__((preserve_register("esi"))) {
     int cx;
     int dx;
     int year;
@@ -159,13 +163,13 @@ uint32_t rtc_read_epoch()
 asm("rtc_read_time_internal:\n"
     "    push eax\n"
     "    call rtc_wait_steady\n"
-    "    mov al, 0x04\n"   // CMOS_HOURS
+    "    mov al, 0x04\n" // CMOS_HOURS
     "    call rtc_read\n"
     "    mov ch, al\n"
-    "    mov al, 0x02\n"   // CMOS_MINUTES
+    "    mov al, 0x02\n" // CMOS_MINUTES
     "    call rtc_read\n"
     "    mov cl, al\n"
-    "    mov al, 0x00\n"   // CMOS_SECONDS
+    "    mov al, 0x00\n" // CMOS_SECONDS
     "    call rtc_read\n"
     "    mov dh, al\n"
     "    pop eax\n"
@@ -189,13 +193,13 @@ asm("rtc_sleep_ms:\n"
     "    push ecx\n"
     "    push edx\n"
     "    mov eax, ecx\n"
-    "    add eax, MS_PER_TICK - 1\n"           // round up to whole ticks
+    "    add eax, MS_PER_TICK - 1\n" // round up to whole ticks
     "    xor edx, edx\n"
     "    mov ebx, MS_PER_TICK\n"
     "    div ebx\n"
     "    test eax, eax\n"
     "    jnz .rsm_have_ticks\n"
-    "    mov eax, 1\n"           // always wait at least one tick
+    "    mov eax, 1\n" // always wait at least one tick
     ".rsm_have_ticks:\n"
     "    mov ebx, eax\n"
     "    sti\n"

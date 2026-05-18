@@ -25,10 +25,10 @@
 
 #include "program_state.h"
 
-#define KB_BUFFER_SIZE  16      // power of 2; mask = KB_BUFFER_SIZE - 1
-#define PS2_DATA        0x60
-#define PS2_IRQ1_MASK   0xFD    // ~(1 << 1): clear bit 1 to unmask IRQ 1
-#define PS2_PIC1_DATA   0x21    // PIC1 IMR (PIC remapped to 0x20-0x27)
+#define KB_BUFFER_SIZE 16 // power of 2; mask = KB_BUFFER_SIZE - 1
+#define PS2_DATA 0x60
+#define PS2_IRQ1_MASK 0xFD // ~(1 << 1): clear bit 1 to unmask IRQ 1
+#define PS2_PIC1_DATA 0x21 // PIC1 IMR (PIC remapped to 0x20-0x27)
 
 // BBKEY_* — positional keyboard codes pushed into the per-fd event
 // ring (16-bit each, packed as ((pressed << 16) | code) into the
@@ -40,73 +40,73 @@
 // cc.py's preprocessor doesn't share an include path with the
 // userspace clang toolchain so this header can't be a single
 // source of truth.
-#define BBKEY_RESERVED      0
-#define BBKEY_LSHIFT        1
-#define BBKEY_RSHIFT        2
-#define BBKEY_LCTRL         3
-#define BBKEY_RCTRL         4
-#define BBKEY_LALT          5
-#define BBKEY_RALT          6
-#define BBKEY_CAPSLOCK      7
-#define BBKEY_UP            8
-#define BBKEY_DOWN          9
-#define BBKEY_LEFT          10
-#define BBKEY_RIGHT         11
-#define BBKEY_ESC           12
-#define BBKEY_BACKSPACE     13
-#define BBKEY_TAB           14
-#define BBKEY_ENTER         15
-#define BBKEY_SPACE         16
-#define BBKEY_A             17
-#define BBKEY_B             18
-#define BBKEY_C             19
-#define BBKEY_D             20
-#define BBKEY_E             21
-#define BBKEY_F             22
-#define BBKEY_G             23
-#define BBKEY_H             24
-#define BBKEY_I             25
-#define BBKEY_J             26
-#define BBKEY_K             27
-#define BBKEY_L             28
-#define BBKEY_M             29
-#define BBKEY_N             30
-#define BBKEY_O             31
-#define BBKEY_P             32
-#define BBKEY_Q             33
-#define BBKEY_R             34
-#define BBKEY_S             35
-#define BBKEY_T             36
-#define BBKEY_U             37
-#define BBKEY_V             38
-#define BBKEY_W             39
-#define BBKEY_X             40
-#define BBKEY_Y             41
-#define BBKEY_Z             42
-#define BBKEY_0             43
-#define BBKEY_1             44
-#define BBKEY_2             45
-#define BBKEY_3             46
-#define BBKEY_4             47
-#define BBKEY_5             48
-#define BBKEY_6             49
-#define BBKEY_7             50
-#define BBKEY_8             51
-#define BBKEY_9             52
-#define BBKEY_GRAVE         53
-#define BBKEY_MINUS         54
-#define BBKEY_EQUALS        55
-#define BBKEY_LBRACKET      56
-#define BBKEY_RBRACKET      57
-#define BBKEY_BACKSLASH     58
-#define BBKEY_SEMICOLON     59
-#define BBKEY_APOSTROPHE    60
-#define BBKEY_COMMA         61
-#define BBKEY_PERIOD        62
-#define BBKEY_SLASH         63
-#define BBKEY_KP_STAR       64
-#define BBKEY_PGUP          65
-#define BBKEY_PGDN          66
+#define BBKEY_RESERVED 0
+#define BBKEY_LSHIFT 1
+#define BBKEY_RSHIFT 2
+#define BBKEY_LCTRL 3
+#define BBKEY_RCTRL 4
+#define BBKEY_LALT 5
+#define BBKEY_RALT 6
+#define BBKEY_CAPSLOCK 7
+#define BBKEY_UP 8
+#define BBKEY_DOWN 9
+#define BBKEY_LEFT 10
+#define BBKEY_RIGHT 11
+#define BBKEY_ESC 12
+#define BBKEY_BACKSPACE 13
+#define BBKEY_TAB 14
+#define BBKEY_ENTER 15
+#define BBKEY_SPACE 16
+#define BBKEY_A 17
+#define BBKEY_B 18
+#define BBKEY_C 19
+#define BBKEY_D 20
+#define BBKEY_E 21
+#define BBKEY_F 22
+#define BBKEY_G 23
+#define BBKEY_H 24
+#define BBKEY_I 25
+#define BBKEY_J 26
+#define BBKEY_K 27
+#define BBKEY_L 28
+#define BBKEY_M 29
+#define BBKEY_N 30
+#define BBKEY_O 31
+#define BBKEY_P 32
+#define BBKEY_Q 33
+#define BBKEY_R 34
+#define BBKEY_S 35
+#define BBKEY_T 36
+#define BBKEY_U 37
+#define BBKEY_V 38
+#define BBKEY_W 39
+#define BBKEY_X 40
+#define BBKEY_Y 41
+#define BBKEY_Z 42
+#define BBKEY_0 43
+#define BBKEY_1 44
+#define BBKEY_2 45
+#define BBKEY_3 46
+#define BBKEY_4 47
+#define BBKEY_5 48
+#define BBKEY_6 49
+#define BBKEY_7 50
+#define BBKEY_8 51
+#define BBKEY_9 52
+#define BBKEY_GRAVE 53
+#define BBKEY_MINUS 54
+#define BBKEY_EQUALS 55
+#define BBKEY_LBRACKET 56
+#define BBKEY_RBRACKET 57
+#define BBKEY_BACKSLASH 58
+#define BBKEY_SEMICOLON 59
+#define BBKEY_APOSTROPHE 60
+#define BBKEY_COMMA 61
+#define BBKEY_PERIOD 62
+#define BBKEY_SLASH 63
+#define BBKEY_KP_STAR 64
+#define BBKEY_PGUP 65
+#define BBKEY_PGDN 66
 
 // Ring buffer: single-producer (IRQ context, IF=0) /
 // single-consumer (main loop) so head and tail don't need atomics.
@@ -128,21 +128,19 @@ uint8_t ps2_head;
 // CapsLock land above 0x3A and get filtered out before the table is
 // read).  Sorted by suffix: shift before unshift.
 char ps2_map_shift[59] = {
-    0,    0x1B, '!',  '@',  '#',  '$',  '%',  '^',  '&',  '*',
-    '(',  ')',  '_',  '+',  0x08, 0x09, 'Q',  'W',  'E',  'R',
-    'T',  'Y',  'U',  'I',  'O',  'P',  '{',  '}',  0x0D, 0,
-    'A',  'S',  'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',
-    '"',  '~',  0,    '|',  'Z',  'X',  'C',  'V',  'B',  'N',
-    'M',  '<',  '>',  '?',  0,    '*',  0,    ' ',  0,
+    0,   0x1B, '!',  '@',  '#',  '$', '%', '^', '&', '*', '(', ')',
+    '_', '+',  0x08, 0x09, 'Q',  'W', 'E', 'R', 'T', 'Y', 'U', 'I',
+    'O', 'P',  '{',  '}',  0x0D, 0,   'A', 'S', 'D', 'F', 'G', 'H',
+    'J', 'K',  'L',  ':',  '"',  '~', 0,   '|', 'Z', 'X', 'C', 'V',
+    'B', 'N',  'M',  '<',  '>',  '?', 0,   '*', 0,   ' ', 0,
 };
 
 char ps2_map_unshift[59] = {
-    0,    0x1B, '1',  '2',  '3',  '4',  '5',  '6',  '7',  '8',
-    '9',  '0',  '-',  '=',  0x08, 0x09, 'q',  'w',  'e',  'r',
-    't',  'y',  'u',  'i',  'o',  'p',  '[',  ']',  0x0D, 0,
-    'a',  's',  'd',  'f',  'g',  'h',  'j',  'k',  'l',  ';',
-    0x27, '`',  0,    '\\', 'z',  'x',  'c',  'v',  'b',  'n',
-    'm',  ',',  '.',  '/',  0,    '*',  0,    ' ',  0,
+    0,   0x1B, '1',  '2',  '3',  '4', '5', '6',  '7', '8', '9', '0',
+    '-', '=',  0x08, 0x09, 'q',  'w', 'e', 'r',  't', 'y', 'u', 'i',
+    'o', 'p',  '[',  ']',  0x0D, 0,   'a', 's',  'd', 'f', 'g', 'h',
+    'j', 'k',  'l',  ';',  0x27, '`', 0,   '\\', 'z', 'x', 'c', 'v',
+    'b', 'n',  'm',  ',',  '.',  '/', 0,   '*',  0,   ' ', 0,
 };
 
 // Set-1 scancode -> BBKEY positional code.  Mirrors ps2_map_unshift
@@ -260,7 +258,9 @@ void ps2_drain() {
 char ps2_getc() {
     uint8_t head;
     char byte;
-    if (ps2_head == ps2_tail) { return '\0'; }
+    if (ps2_head == ps2_tail) {
+        return '\0';
+    }
     head = ps2_head;
     byte = ps2_buf[head];
     ps2_head = (head + 1) & (KB_BUFFER_SIZE - 1);
@@ -292,7 +292,10 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
 
     // Extended-key prefix: stash the flag and wait for the next byte
     // (arrow keys, RCtrl, RAlt, etc. all arrive as 0xE0 + scancode).
-    if (scancode == 0xE0) { ps2_extended = 1; return; }
+    if (scancode == 0xE0) {
+        ps2_extended = 1;
+        return;
+    }
 
     if ((scancode & 0x80) == 0) {
         pressed = 1;
@@ -306,23 +309,34 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
         ps2_extended = 0;
         // Map the recognised extended scancodes to BBKEY codes.
         // Discard everything else (Home, End, PgUp, PgDn, Ins, Del).
-        if (code == 0x48) { bbkey = BBKEY_UP; }
-        else if (code == 0x50) { bbkey = BBKEY_DOWN; }
-        else if (code == 0x4D) { bbkey = BBKEY_RIGHT; }
-        else if (code == 0x4B) { bbkey = BBKEY_LEFT; }
-        else if (code == 0x1D) { bbkey = BBKEY_RCTRL; ps2_ctrl = pressed; }
-        else if (code == 0x38) { bbkey = BBKEY_RALT; }
-        else if (code == 0x49) { bbkey = BBKEY_PGUP; }
-        else if (code == 0x51) { bbkey = BBKEY_PGDN; }
-        if (bbkey == 0) { return; }
+        if (code == 0x48) {
+            bbkey = BBKEY_UP;
+        } else if (code == 0x50) {
+            bbkey = BBKEY_DOWN;
+        } else if (code == 0x4D) {
+            bbkey = BBKEY_RIGHT;
+        } else if (code == 0x4B) {
+            bbkey = BBKEY_LEFT;
+        } else if (code == 0x1D) {
+            bbkey = BBKEY_RCTRL;
+            ps2_ctrl = pressed;
+        } else if (code == 0x38) {
+            bbkey = BBKEY_RALT;
+        } else if (code == 0x49) {
+            bbkey = BBKEY_PGUP;
+        } else if (code == 0x51) {
+            bbkey = BBKEY_PGDN;
+        }
+        if (bbkey == 0) {
+            return;
+        }
         /* Shift+PgUp / Shift+PgDn are scrollback hotkeys.  Handle them
            in text mode only; in graphics mode, fall through to the
            regular event-broadcast path so a fullscreen program can
            still use them.  Press only (releases are noise).  We do
            NOT emit any cooked byte for these. */
-        if (pressed != 0 && ps2_shift != 0
-            && vga_current_mode == 0x03
-            && (bbkey == BBKEY_PGUP || bbkey == BBKEY_PGDN)) {
+        if (pressed != 0 && ps2_shift != 0 && vga_current_mode == 0x03 &&
+            (bbkey == BBKEY_PGUP || bbkey == BBKEY_PGDN)) {
             if (bbkey == BBKEY_PGUP) {
                 vga_scrollback_up(24);
             } else {
@@ -334,10 +348,23 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
         // Cooked path: emit ANSI CSI sequence on press only (arrows
         // only — RCtrl / RAlt aren't cooked-visible, same as on Linux).
         if (pressed != 0) {
-            if (bbkey == BBKEY_UP)         { ps2_putc('\x1B'); ps2_putc('['); ps2_putc('A'); }
-            else if (bbkey == BBKEY_DOWN)  { ps2_putc('\x1B'); ps2_putc('['); ps2_putc('B'); }
-            else if (bbkey == BBKEY_RIGHT) { ps2_putc('\x1B'); ps2_putc('['); ps2_putc('C'); }
-            else if (bbkey == BBKEY_LEFT)  { ps2_putc('\x1B'); ps2_putc('['); ps2_putc('D'); }
+            if (bbkey == BBKEY_UP) {
+                ps2_putc('\x1B');
+                ps2_putc('[');
+                ps2_putc('A');
+            } else if (bbkey == BBKEY_DOWN) {
+                ps2_putc('\x1B');
+                ps2_putc('[');
+                ps2_putc('B');
+            } else if (bbkey == BBKEY_RIGHT) {
+                ps2_putc('\x1B');
+                ps2_putc('[');
+                ps2_putc('C');
+            } else if (bbkey == BBKEY_LEFT) {
+                ps2_putc('\x1B');
+                ps2_putc('[');
+                ps2_putc('D');
+            }
         }
         ps2_broadcast_event((pressed << 16) | bbkey);
         return;
@@ -345,10 +372,14 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
 
     // Regular key.  F-keys (0x3B–0x44) sit above the table boundary;
     // discard rather than read past the array.
-    if (code >= 0x3B) { return; }
+    if (code >= 0x3B) {
+        return;
+    }
 
     bbkey = ps2_scancode_to_bbkey[code];
-    if (bbkey == 0) { return; }
+    if (bbkey == 0) {
+        return;
+    }
 
     // Modifier latch updates happen for both press and release so
     // the cooked path's shift / ctrl folding stays in sync with what
@@ -502,7 +533,9 @@ void ps2_putc(char byte __attribute__((in_register("ax")))) {
     }
     tail = ps2_tail;
     next = (tail + 1) & (KB_BUFFER_SIZE - 1);
-    if (next == ps2_head) { return; }
+    if (next == ps2_head) {
+        return;
+    }
     ps2_buf[tail] = byte;
     ps2_tail = next;
 }

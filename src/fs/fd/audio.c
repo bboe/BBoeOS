@@ -45,9 +45,9 @@ void fd_close_audio() {
 void fd_ioctl_audio();
 
 asm("fd_ioctl_audio:\n"
-    "        cmp al, 0x00\n"                        // AUDIO_IOCTL_QUERY
+    "        cmp al, 0x00\n" // AUDIO_IOCTL_QUERY
     "        jne .fd_ioctl_audio_bad\n"
-    "        movzx eax, byte [_g_sb16_present]\n"   // zero-extend so high AX is clean
+    "        movzx eax, byte [_g_sb16_present]\n" // zero-extend so high AX is clean
     "        clc\n"
     "        ret\n"
     ".fd_ioctl_audio_bad:\n"
@@ -66,9 +66,9 @@ asm("fd_ioctl_audio:\n"
 // if IRQ 5 advances it between the read and the head update — that's
 // safe, since `tail` only ever increases (more free space, never less),
 // so the snapshot is always a conservative lower bound on free space.
-__attribute__((carry_return))
-int fd_write_audio(int *bytes_written __attribute__((out_register("ax"))),
-                   int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write_audio(int *bytes_written __attribute__((out_register("ax"))),
+               int count __attribute__((in_register("ecx")))) {
     int written;
     uint32_t head;
     uint32_t tail;
@@ -97,7 +97,8 @@ int fd_write_audio(int *bytes_written __attribute__((out_register("ax"))),
         }
         index = 0;
         while (index < chunk) {
-            audio_ring_kvirt[(head + index) & AUDIO_RING_MASK] = fd_write_buffer[written + index];
+            audio_ring_kvirt[(head + index) & AUDIO_RING_MASK] =
+                fd_write_buffer[written + index];
             index = index + 1;
         }
         // Single dword store — atomic on x86, so the IRQ either sees

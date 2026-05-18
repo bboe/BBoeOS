@@ -6,9 +6,12 @@
 /* Standard VGA 16-colour palette (6-bit R/G/B), entries 0..14.  Matches
    the kernel's vga_default_palette exactly, so setting background_color_index
    to N makes the background look identical to a trail tile at palette index N. */
-char background_blue[]  = {0, 42,  0, 42,  0, 42,  0, 42, 21, 63, 21, 63, 21, 63, 21};
-char background_green[] = {0,  0, 42, 42,  0,  0, 21, 42, 21, 21, 63, 63, 21, 21, 63};
-char background_red[]   = {0,  0,  0,  0, 42, 42, 42, 42, 21, 21, 21, 21, 63, 63, 63};
+char background_blue[] = {0,  42, 0,  42, 0,  42, 0, 42,
+                          21, 63, 21, 63, 21, 63, 21};
+char background_green[] = {0,  0,  42, 42, 0,  0,  21, 42,
+                           21, 21, 63, 63, 21, 21, 63};
+char background_red[] = {0,  0,  0,  0,  42, 42, 42, 42,
+                         21, 21, 21, 21, 63, 63, 63};
 
 /* Forward declaration so trail_step (sorted alphabetically) can call
    trail_wrap defined below it. */
@@ -54,7 +57,10 @@ int main() {
     int column = 0;
     int row = 0;
     int trail_palette_index = 1;
-    set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+    set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX,
+                      background_red[background_color_index],
+                      background_green[background_color_index],
+                      background_blue[background_color_index]);
     fill_block(vga_fd, column, row, CURSOR_PALETTE_INDEX);
     while (character != 'q') {
         character = getchar();
@@ -68,15 +74,25 @@ int main() {
         } else if (character == 'w') {
             row = (row + ROWS - 1) % ROWS;
         } else if (character == 'i') {
-            trail_palette_index = trail_step(trail_palette_index, -1, background_color_index);
+            trail_palette_index =
+                trail_step(trail_palette_index, -1, background_color_index);
         } else if (character == 'o') {
-            trail_palette_index = trail_step(trail_palette_index, 1, background_color_index);
+            trail_palette_index =
+                trail_step(trail_palette_index, 1, background_color_index);
         } else if (character == 'j') {
-            background_color_index = background_step(background_color_index, -1, trail_palette_index);
-            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+            background_color_index = background_step(background_color_index, -1,
+                                                     trail_palette_index);
+            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX,
+                              background_red[background_color_index],
+                              background_green[background_color_index],
+                              background_blue[background_color_index]);
         } else if (character == 'k') {
-            background_color_index = background_step(background_color_index, 1, trail_palette_index);
-            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX, background_red[background_color_index], background_green[background_color_index], background_blue[background_color_index]);
+            background_color_index =
+                background_step(background_color_index, 1, trail_palette_index);
+            set_palette_color(vga_fd, BACKGROUND_PALETTE_INDEX,
+                              background_red[background_color_index],
+                              background_green[background_color_index],
+                              background_blue[background_color_index]);
         }
         fill_block(vga_fd, column, row, CURSOR_PALETTE_INDEX);
     }

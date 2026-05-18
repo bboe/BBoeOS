@@ -12,20 +12,20 @@
  * caller. */
 
 struct dirent {
-    ino_t         d_ino;
+    ino_t d_ino;
     unsigned char d_type;
-    char          d_name[256];
+    char d_name[256];
 };
 
-#define DT_DIR      4
-#define DT_REG      8
-#define DT_UNKNOWN  0
+#define DT_DIR 4
+#define DT_REG 8
+#define DT_UNKNOWN 0
 
 typedef struct DIR DIR;
 
-int            closedir(DIR *directory);
-DIR           *opendir(const char *path);
+int closedir(DIR *directory);
+DIR *opendir(const char *path);
 struct dirent *readdir(DIR *directory);
-void           rewinddir(DIR *directory);
+void rewinddir(DIR *directory);
 
 #endif

@@ -18,7 +18,7 @@ int main(int argc, char *argv[]) {
         int cursor = 0;
         while (cursor < bytes) {
             int reclen = buffer[cursor + 4] + (buffer[cursor + 5] << 8);
-            int type   = buffer[cursor + 6];
+            int type = buffer[cursor + 6];
             char *name = buffer + cursor + 7;
             printf("type=%d name=%s\n", type, name);
             cursor = cursor + reclen;

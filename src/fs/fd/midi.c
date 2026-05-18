@@ -29,25 +29,26 @@ extern uint32_t system_ticks;
 void opl_silence_all();
 void opl_write(int bank, int reg, int value);
 
-#define MIDI_COMMAND_BYTES  6
-#define MIDI_DRAIN_PER_TICK 16   // bound on per-ISR work
-#define MIDI_RING_SIZE      256
+#define MIDI_COMMAND_BYTES 6
+#define MIDI_DRAIN_PER_TICK 16 // bound on per-ISR work
+#define MIDI_RING_SIZE 256
 
 struct midi_event {
-    uint8_t  _pad;
-    uint8_t  bank;
-    uint8_t  reg;
+    uint8_t _pad;
+    uint8_t bank;
+    uint8_t reg;
     uint32_t tick_due;
-    uint8_t  value;
+    uint8_t value;
 };
 
-uint8_t  midi_head;          // next slot to consume
+uint8_t midi_head; // next slot to consume
 asm("midi_head equ _g_midi_head");
 struct midi_event midi_ring[MIDI_RING_SIZE];
 asm("midi_ring equ _g_midi_ring");
-uint8_t  midi_tail;          // next slot to produce
+uint8_t midi_tail; // next slot to produce
 asm("midi_tail equ _g_midi_tail");
-uint32_t midi_virtual_clock; // PIT ticks; per-fd but stored globally because single-instance
+uint32_t
+    midi_virtual_clock; // PIT ticks; per-fd but stored globally because single-instance
 asm("midi_virtual_clock equ _g_midi_virtual_clock");
 
 // Forward declarations for the helpers fd_write_midi calls.  Functions
@@ -116,9 +117,9 @@ asm("fd_ioctl_midi:\n"
 // full, return early — the bytes already consumed count toward the
 // returned bytes_written, the rest is the userland's problem on next
 // write.  AX = bytes consumed (multiple of 6), CF clear.
-__attribute__((carry_return))
-int fd_write_midi(int *bytes_written __attribute__((out_register("ax"))),
-                  int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write_midi(int *bytes_written __attribute__((out_register("ax"))),
+              int count __attribute__((in_register("ecx")))) {
     int bank;
     int consumed;
     int delay;
@@ -130,7 +131,8 @@ int fd_write_midi(int *bytes_written __attribute__((out_register("ax"))),
         if (midi_ring_full()) {
             break;
         }
-        delay = fd_write_buffer[consumed] | (fd_write_buffer[consumed + 1] << 8);
+        delay =
+            fd_write_buffer[consumed] | (fd_write_buffer[consumed + 1] << 8);
         bank = fd_write_buffer[consumed + 2];
         reg = fd_write_buffer[consumed + 3];
         value = fd_write_buffer[consumed + 4];

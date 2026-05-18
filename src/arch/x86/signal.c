@@ -143,11 +143,11 @@ asm("signal_dispatch_kill:\n"
 // pushad slots (their values now live in the sigcontext) by `add esp, 32`,
 // and iretd.
 asm("signal_dispatch_user:\n"
-    "        mov ebp, eax\n"                        // stash handler — EAX gets clobbered below
-    "        mov edi, [esp + 44]\n"                 // user ESP
-    "        sub edi, 52\n"                         // sigcontext base
+    "        mov ebp, eax\n"        // stash handler — EAX gets clobbered below
+    "        mov edi, [esp + 44]\n" // user ESP
+    "        sub edi, 52\n"         // sigcontext base
     "        mov dword [edi + 0], FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET\n"
-    "        mov [edi + 4], edx\n"                  // signum from caller (SIGINT or SIGALRM)
+    "        mov [edi + 4], edx\n" // signum from caller (SIGINT or SIGALRM)
     // Bulk-copy the 8 pushad slots from kernel stack to sigcontext + 8.
     // EBX stashes the sigcontext base across rep movsd (which advances
     // edi past the destination); we restore it for the IRET-frame rewrite.
@@ -158,14 +158,14 @@ asm("signal_dispatch_user:\n"
     "        cld\n"
     "        rep movsd\n"
     // edi is now at sigcontext + 40; fill the iret-frame triplet.
-    "        mov eax, [esp + 32]\n"                 // iret EIP -> saved_eip
+    "        mov eax, [esp + 32]\n" // iret EIP -> saved_eip
     "        mov [edi + 0], eax\n"
-    "        mov eax, [esp + 40]\n"                 // iret EFLAGS
+    "        mov eax, [esp + 40]\n" // iret EFLAGS
     "        mov [edi + 4], eax\n"
-    "        mov eax, [esp + 44]\n"                 // original user ESP
+    "        mov eax, [esp + 44]\n" // original user ESP
     "        mov [edi + 8], eax\n"
-    "        mov [esp + 32], ebp\n"                 // iret EIP <- handler (from EBP stash)
-    "        mov [esp + 44], ebx\n"                 // iret ESP <- sigcontext base
+    "        mov [esp + 32], ebp\n" // iret EIP <- handler (from EBP stash)
+    "        mov [esp + 44], ebx\n" // iret ESP <- sigcontext base
     // Load current_program_state once (ECX was clobbered by rep movsd above).
     "        mov ecx, [current_program_state]\n"
     "        mov byte [ecx + PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER], 1\n"
@@ -179,7 +179,7 @@ asm("signal_dispatch_user:\n"
     ".signal_dispatch_user_clear_alarm:\n"
     "        mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     ".signal_dispatch_user_iret:\n"
-    "        add esp, 32\n"                         // drop pushad slots
+    "        add esp, 32\n" // drop pushad slots
     "        iretd\n");
 
 // signal_resume_after_handler — service SYS_SYS_SIGRETURN.  Restore the
@@ -233,20 +233,20 @@ asm("signal_dispatch_user:\n"
 // The function never returns to its caller.  .sys_sigreturn jumps here
 // rather than calling — we own the popad and iretd.
 asm("signal_resume_after_handler:\n"
-    "        mov edi, [esp + 44]\n"                 // user ESP = sigcontext_base + 4
-    "        mov eax, [edi + 36]\n"                 // saved_eip
+    "        mov edi, [esp + 44]\n" // user ESP = sigcontext_base + 4
+    "        mov eax, [edi + 36]\n" // saved_eip
     "        cmp eax, PROGRAM_BASE\n"
     "        jb  .signal_resume_corrupt\n"
     "        cmp eax, KERNEL_VIRT_BASE\n"
     "        jae .signal_resume_corrupt\n"
-    "        mov eax, [edi + 44]\n"                 // saved_esp
+    "        mov eax, [edi + 44]\n" // saved_esp
     "        cmp eax, PROGRAM_BASE\n"
     "        jb  .signal_resume_corrupt\n"
     "        cmp eax, KERNEL_VIRT_BASE\n"
     "        ja  .signal_resume_corrupt\n"
-    "        mov eax, [edi + 36]\n"                 // saved_eip
-    "        mov [esp + 32], eax\n"                 // iret EIP
-    "        mov eax, [edi + 40]\n"                 // saved_eflags
+    "        mov eax, [edi + 36]\n" // saved_eip
+    "        mov [esp + 32], eax\n" // iret EIP
+    "        mov eax, [edi + 40]\n" // saved_eflags
     // Sanitize before reloading into the iret frame: the user controls
     // every bit of saved_eflags via the on-stack sigcontext, so without
     // masking a handler could return with IOPL=3 (ring-3 in/out) or
@@ -255,9 +255,9 @@ asm("signal_resume_after_handler:\n"
     // interruptible.
     "        and eax, USER_EFLAGS_MASK\n"
     "        or  eax, EFLAGS_IF_BIT\n"
-    "        mov [esp + 40], eax\n"                 // iret EFLAGS
-    "        mov eax, [edi + 44]\n"                 // saved_esp
-    "        mov [esp + 44], eax\n"                 // iret ESP
+    "        mov [esp + 40], eax\n" // iret EFLAGS
+    "        mov eax, [edi + 44]\n" // saved_esp
+    "        mov [esp + 44], eax\n" // iret ESP
     // Bulk-copy 8 pushad slots from sigcontext+4 (saved_edi) to kernel
     // stack pushad area at esp+0..28.  Order matches pushad: EDI, ESI,
     // EBP, ESP_pushad, EBX, EDX, ECX, EAX top-to-bottom in both layouts.

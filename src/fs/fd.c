@@ -48,21 +48,21 @@ struct fd {
 // fd_lookup is forward-declared because fd_close calls it but the
 // helpers are emitted in alphabetical order below (fd_close lands
 // before fd_lookup).
-__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
-int fd_lookup(int fd_num __attribute__((in_register("bx"))),
-              struct fd *entry __attribute__((out_register("esi"))));
+__attribute__((carry_return)) __attribute__((preserve_register("ecx"))) int
+fd_lookup(int fd_num __attribute__((in_register("bx"))),
+          struct fd *entry __attribute__((out_register("esi"))));
 
 // fs/vfs.asm: writes the fd's final position back into the directory
 // entry as the file size.  Used by fd_close on writable file fds.
-__attribute__((carry_return))
-int vfs_update_size(struct fd *entry __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int
+vfs_update_size(struct fd *entry __attribute__((in_register("esi"))));
 
 // fs/vfs.asm: locates a file (vfs_find) or creates one (vfs_create);
 // both populate the vfs_found_* cluster and return CF clear on success.
-__attribute__((carry_return))
-int vfs_find(uint8_t *path __attribute__((in_register("esi"))));
-__attribute__((carry_return))
-int vfs_create(uint8_t *path __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int vfs_find(uint8_t *path
+                                           __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int
+vfs_create(uint8_t *path __attribute__((in_register("esi"))));
 
 // vfs.asm globals populated by vfs_find / vfs_create.  Read by
 // fd_open after the call to populate the new fd entry.  ``size`` is
@@ -138,23 +138,22 @@ uint8_t opl3_present __attribute__((asm_name("_g_opl3_present")));
 // from fd_open's /dev/audio branch.  sb16_close tears down; called
 // from fd_close when the entry type is FD_TYPE_AUDIO.  Both are
 // stubbed in early tasks and filled in tasks 7 and 10.
-__attribute__((carry_return))
-int sb16_open();
+__attribute__((carry_return)) int sb16_open();
 void sb16_close();
 
 struct fd_ops_entry fd_ops[12] = {
-    { 0,               0 },                 // FD_TYPE_FREE (0)
-    { 0,               fd_write_audio },    // FD_TYPE_AUDIO (1)
-    { fd_read_console, fd_write_console },  // FD_TYPE_CONSOLE (2)
-    { fd_read_isdir,   0 },                 // FD_TYPE_DIRECTORY (3)
-    { fd_read_file,    fd_write_file },     // FD_TYPE_FILE (4)
-    { 0,               0 },                 // FD_TYPE_ICMP (5)
-    { 0,               fd_write_midi },     // FD_TYPE_MIDI (6)
-    { fd_read_net,     fd_write_net },      // FD_TYPE_NET (7)
-    { fd_read_pipe,    0 },                 // FD_TYPE_PIPE_R (8)
-    { 0,               fd_write_pipe },     // FD_TYPE_PIPE_W (9)
-    { 0,               0 },                 // FD_TYPE_UDP (10)
-    { 0,               0 },                 // FD_TYPE_VGA (11)
+    {0, 0},                              // FD_TYPE_FREE (0)
+    {0, fd_write_audio},                 // FD_TYPE_AUDIO (1)
+    {fd_read_console, fd_write_console}, // FD_TYPE_CONSOLE (2)
+    {fd_read_isdir, 0},                  // FD_TYPE_DIRECTORY (3)
+    {fd_read_file, fd_write_file},       // FD_TYPE_FILE (4)
+    {0, 0},                              // FD_TYPE_ICMP (5)
+    {0, fd_write_midi},                  // FD_TYPE_MIDI (6)
+    {fd_read_net, fd_write_net},         // FD_TYPE_NET (7)
+    {fd_read_pipe, 0},                   // FD_TYPE_PIPE_R (8)
+    {0, fd_write_pipe},                  // FD_TYPE_PIPE_W (9)
+    {0, 0},                              // FD_TYPE_UDP (10)
+    {0, 0},                              // FD_TYPE_VGA (11)
 };
 
 // fd_ioctl dispatch table — one ioctl entry per FD_TYPE_*.  A 0 slot
@@ -168,18 +167,18 @@ struct fd_ioctl_op {
 };
 
 struct fd_ioctl_op fd_ioctl_ops[12] = {
-    { 0 },                  // FD_TYPE_FREE (0)
-    { fd_ioctl_audio },     // FD_TYPE_AUDIO (1)
-    { fd_ioctl_console },   // FD_TYPE_CONSOLE (2)
-    { 0 },                  // FD_TYPE_DIRECTORY (3)
-    { 0 },                  // FD_TYPE_FILE (4)
-    { 0 },                  // FD_TYPE_ICMP (5)
-    { fd_ioctl_midi },      // FD_TYPE_MIDI (6)
-    { 0 },                  // FD_TYPE_NET (7)
-    { 0 },                  // FD_TYPE_PIPE_R (8)
-    { 0 },                  // FD_TYPE_PIPE_W (9)
-    { 0 },                  // FD_TYPE_UDP (10)
-    { fd_ioctl_vga },       // FD_TYPE_VGA (11)
+    {0},                // FD_TYPE_FREE (0)
+    {fd_ioctl_audio},   // FD_TYPE_AUDIO (1)
+    {fd_ioctl_console}, // FD_TYPE_CONSOLE (2)
+    {0},                // FD_TYPE_DIRECTORY (3)
+    {0},                // FD_TYPE_FILE (4)
+    {0},                // FD_TYPE_ICMP (5)
+    {fd_ioctl_midi},    // FD_TYPE_MIDI (6)
+    {0},                // FD_TYPE_NET (7)
+    {0},                // FD_TYPE_PIPE_R (8)
+    {0},                // FD_TYPE_PIPE_W (9)
+    {0},                // FD_TYPE_UDP (10)
+    {fd_ioctl_vga},     // FD_TYPE_VGA (11)
 };
 
 // fd_table_base: return a pointer to the fd table inside the running
@@ -203,9 +202,9 @@ asm("fd_write_buffer equ _g_fd_write_buffer");
 
 // fd_alloc: linear scan for the first FD_TYPE_FREE slot.  AX = fd
 // number, ESI = entry pointer; CF set if the table is full.
-__attribute__((carry_return))
-int fd_alloc(int *fd_num __attribute__((out_register("ax"))),
-             struct fd *entry __attribute__((out_register("esi")))) {
+__attribute__((carry_return)) int
+fd_alloc(int *fd_num __attribute__((out_register("ax"))),
+         struct fd *entry __attribute__((out_register("esi")))) {
     int i;
     struct fd *cursor;
     cursor = fd_table_base();
@@ -229,8 +228,8 @@ int fd_alloc(int *fd_num __attribute__((out_register("ax"))),
 // directory entry via vfs_update_size; then every fd type zeros its
 // slot (FD_TYPE_FREE = 0 by virtue of position 0 being the type
 // field).  CF set if the fd was already free / out of range.
-__attribute__((carry_return))
-int fd_close(int fd_num __attribute__((in_register("bx")))) {
+__attribute__((carry_return)) int fd_close(int fd_num
+                                           __attribute__((in_register("bx")))) {
     struct fd *entry;
     if (!fd_lookup(fd_num, &entry)) {
         return 0;
@@ -286,9 +285,10 @@ void fd_close_pipe(struct fd *entry) {
 // Copies the source fd's entry to the new slot and resets dirty=0 on
 // the destination.  Singleton-opener types (VGA/AUDIO/MIDI) refuse
 // dup with ERROR_INVALID — their per-open state is exclusive.
-__attribute__((carry_return))
-int fd_dup(int *result __attribute__((out_register("ax"))),
-           int old_fd __attribute__((in_register("bx")))) {
+__attribute__((carry_return)) int fd_dup(int *result
+                                         __attribute__((out_register("ax"))),
+                                         int old_fd
+                                         __attribute__((in_register("bx")))) {
     struct fd *source;
     struct fd *destination;
     int new_fd;
@@ -297,7 +297,8 @@ int fd_dup(int *result __attribute__((out_register("ax"))),
         *result = -1;
         return 0;
     }
-    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO ||
+        source->type == FD_TYPE_MIDI) {
         *result = -1;
         return 0;
     }
@@ -326,17 +327,18 @@ int fd_dup(int *result __attribute__((out_register("ax"))),
 // was at target first (respecting dirty).  If old == target, returns
 // target unchanged (Linux semantics).  AX = target on success; CF set
 // on error (bad old_fd, singleton-opener type, or out-of-range target).
-__attribute__((carry_return))
-int fd_dup2(int *result __attribute__((out_register("ax"))),
-            int old_fd __attribute__((in_register("bx"))),
-            int target_fd __attribute__((in_register("dx")))) {
+__attribute__((carry_return)) int
+fd_dup2(int *result __attribute__((out_register("ax"))),
+        int old_fd __attribute__((in_register("bx"))),
+        int target_fd __attribute__((in_register("dx")))) {
     struct fd *source;
     struct fd *destination;
     if (!fd_lookup(old_fd, &source)) {
         *result = -1;
         return 0;
     }
-    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO || source->type == FD_TYPE_MIDI) {
+    if (source->type == FD_TYPE_VGA || source->type == FD_TYPE_AUDIO ||
+        source->type == FD_TYPE_MIDI) {
         *result = -1;
         return 0;
     }
@@ -370,11 +372,11 @@ int fd_dup2(int *result __attribute__((out_register("ax"))),
 // DerefAssign emission.
 // CF set if the fd is invalid.  PIPE_R/PIPE_W also return CF set —
 // pipes have no file metadata; the fd is valid but unsupported here.
-__attribute__((carry_return))
-int fd_fstat(int *mode __attribute__((out_register("ax"))),
-             int *size_high __attribute__((out_register("cx"))),
-             int *size_low __attribute__((out_register("dx"))),
-             int fd_num __attribute__((in_register("bx")))) {
+__attribute__((carry_return)) int
+fd_fstat(int *mode __attribute__((out_register("ax"))),
+         int *size_high __attribute__((out_register("cx"))),
+         int *size_low __attribute__((out_register("dx"))),
+         int fd_num __attribute__((in_register("bx")))) {
     struct fd *entry;
     if (!fd_lookup(fd_num, &entry)) {
         return 0;
@@ -419,16 +421,15 @@ void fd_init() {
 // see the user's CX / DL / DX intact in fd_ioctl_vga.  Error path:
 // ``stc; ret`` with AX left at whatever the syscall layer preserved
 // (matching the asm version's contract).
-__attribute__((carry_return))
-__attribute__((preserve_register("ecx")))
-__attribute__((preserve_register("edx")))
-int fd_ioctl(int cmd __attribute__((in_register("ax"))),
-             int fd_num __attribute__((in_register("bx")))) {
+__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
+__attribute__((preserve_register("edx"))) int
+fd_ioctl(int cmd __attribute__((in_register("ax"))),
+         int fd_num __attribute__((in_register("bx")))) {
     struct fd *entry;
     struct fd_ioctl_op *op;
     int (*handler)(int c __attribute__((in_register("ax"))),
                    struct fd *e __attribute__((in_register("esi"))))
-                   __attribute__((pinned_register("ebx")));
+        __attribute__((pinned_register("ebx")));
     if (!fd_lookup(fd_num, &entry)) {
         return 0;
     }
@@ -447,11 +448,10 @@ int fd_ioctl(int cmd __attribute__((in_register("ax"))),
 // fd_read, fd_write — can keep CX/DL/DX live across the lookup; that
 // matters for VGA ioctls (DL=mode/color, CL/CH=row/col) and
 // console writes that latch CX through to the per-type handler.
-__attribute__((carry_return))
-__attribute__((preserve_register("ecx")))
-__attribute__((preserve_register("edx")))
-int fd_lookup(int fd_num __attribute__((in_register("bx"))),
-              struct fd *entry __attribute__((out_register("esi")))) {
+__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
+__attribute__((preserve_register("edx"))) int
+fd_lookup(int fd_num __attribute__((in_register("bx"))),
+          struct fd *entry __attribute__((out_register("esi")))) {
     struct fd *cursor;
     if (fd_num >= FD_MAX) {
         return 0;
@@ -472,10 +472,10 @@ int fd_lookup(int fd_num __attribute__((in_register("bx"))),
 // O_CREAT is set, vfs_create makes a fresh entry.  The new fd's
 // fields come from the vfs_found_* cluster, except O_TRUNC zeros
 // the size so a subsequent write rebuilds the file from scratch.
-__attribute__((carry_return))
-int fd_open(int *result __attribute__((out_register("ax"))),
-            uint8_t *name __attribute__((in_register("esi"))),
-            int flags __attribute__((in_register("ax")))) {
+__attribute__((carry_return)) int
+fd_open(int *result __attribute__((out_register("ax"))),
+        uint8_t *name __attribute__((in_register("esi"))),
+        int flags __attribute__((in_register("ax")))) {
     int fd_num;
     struct fd *entry;
     if (memcmp(name, "/dev/vga", 9) == 0) {
@@ -580,7 +580,7 @@ int fd_open(int *result __attribute__((out_register("ax"))),
     entry->directory_offset = vfs_found_dir_off;
     if ((flags & O_TRUNC) != 0) {
         entry->size = 0;
-        entry->dirty = 1;  // truncate is a write that must flush size=0 on close
+        entry->dirty = 1; // truncate is a write that must flush size=0 on close
     }
     *result = fd_num;
     return 1;
@@ -592,11 +592,11 @@ int fd_open(int *result __attribute__((out_register("ax"))),
 // them just before the tail-jump.  Error path matches the asm-side
 // contract: AX = -1, CF set.  The handler's own AX/CF flow back
 // through the tail-jump unchanged.
-__attribute__((carry_return))
-int fd_read(int *result __attribute__((out_register("ax"))),
-            int fd_num __attribute__((in_register("bx"))),
-            uint8_t *buffer __attribute__((in_register("edi"))),
-            int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_read(int *result __attribute__((out_register("ax"))),
+        int fd_num __attribute__((in_register("bx"))),
+        uint8_t *buffer __attribute__((in_register("edi"))),
+        int count __attribute__((in_register("ecx")))) {
     struct fd *entry;
     struct fd_ops_entry *ops;
     int (*handler)(struct fd *e __attribute__((in_register("esi"))),
@@ -619,11 +619,11 @@ int fd_read(int *result __attribute__((out_register("ax"))),
 // into the user buffer at EDI.  Blocks (via kernel_yield_read) when
 // the buffer is empty and the write end is still open.  Returns 0
 // (EOF) when the writer end is fully closed and the buffer is drained.
-__attribute__((carry_return))
-int fd_read_pipe(int *result __attribute__((out_register("ax"))),
-                 struct fd *entry __attribute__((in_register("esi"))),
-                 uint8_t *buffer __attribute__((in_register("edi"))),
-                 int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_read_pipe(int *result __attribute__((out_register("ax"))),
+             struct fd *entry __attribute__((in_register("esi"))),
+             uint8_t *buffer __attribute__((in_register("edi"))),
+             int count __attribute__((in_register("ecx")))) {
     struct pipe *p;
     int bytes_read;
     if (count == 0) {
@@ -663,11 +663,11 @@ int fd_read_pipe(int *result __attribute__((out_register("ax"))),
 // VGA, and the audio/midi devices all error.  We clamp rather than
 // fail on out-of-range because Doom's WAD reader sometimes seeks past
 // EOF and expects the next read to return 0 bytes (EOF semantics).
-__attribute__((carry_return))
-int fd_seek(int *result __attribute__((out_register("ax"))),
-            int fd_num __attribute__((in_register("bx"))),
-            int offset __attribute__((in_register("ecx"))),
-            int whence __attribute__((in_register("ax")))) {
+__attribute__((carry_return)) int
+fd_seek(int *result __attribute__((out_register("ax"))),
+        int fd_num __attribute__((in_register("bx"))),
+        int offset __attribute__((in_register("ecx"))),
+        int whence __attribute__((in_register("ax")))) {
     struct fd *entry;
     int new_position;
     if (!fd_lookup(fd_num, &entry)) {
@@ -704,11 +704,11 @@ int fd_seek(int *result __attribute__((out_register("ax"))),
 // fd_write_buffer first (fd_lookup overwrites ESI with the entry
 // pointer); the per-type handlers read fd_write_buffer to fetch the
 // source bytes.  Error path: AX = -1, CF set, same as fd_read.
-__attribute__((carry_return))
-int fd_write(int *result __attribute__((out_register("ax"))),
-             int fd_num __attribute__((in_register("bx"))),
-             uint8_t *source __attribute__((in_register("esi"))),
-             int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write(int *result __attribute__((out_register("ax"))),
+         int fd_num __attribute__((in_register("bx"))),
+         uint8_t *source __attribute__((in_register("esi"))),
+         int count __attribute__((in_register("ecx")))) {
     struct fd *entry;
     struct fd_ops_entry *ops;
     int (*handler)(struct fd *e __attribute__((in_register("esi"))),
@@ -737,10 +737,10 @@ int fd_write(int *result __attribute__((out_register("ax"))),
 // the writer before this return reaches userspace; SIG_IGN lets the
 // -1 (EPIPE) return surface to the caller.  Otherwise returns the
 // full `count` once all bytes are in.
-__attribute__((carry_return))
-int fd_write_pipe(int *result __attribute__((out_register("ax"))),
-                  struct fd *entry __attribute__((in_register("esi"))),
-                  int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write_pipe(int *result __attribute__((out_register("ax"))),
+              struct fd *entry __attribute__((in_register("esi"))),
+              int count __attribute__((in_register("ecx")))) {
     struct pipe *p;
     int bytes_written;
     int total;

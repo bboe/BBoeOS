@@ -10,9 +10,10 @@
 #define WAIT_H
 
 #define WEXITSTATUS(status) (((status) >> 8) & 0xFF)
-#define WIFCRASHED(status)  (((status) & 0x7F) == 0x7F)
-#define WIFEXITED(status)   (((status) & 0x7F) == 0)
-#define WIFSIGNALED(status) (((status) & 0x7F) != 0 && ((status) & 0x7F) != 0x7F)
-#define WTERMSIG(status)    ((status) & 0x7F)
+#define WIFCRASHED(status) (((status) & 0x7F) == 0x7F)
+#define WIFEXITED(status) (((status) & 0x7F) == 0)
+#define WIFSIGNALED(status)                                                    \
+    (((status) & 0x7F) != 0 && ((status) & 0x7F) != 0x7F)
+#define WTERMSIG(status) ((status) & 0x7F)
 
 #endif

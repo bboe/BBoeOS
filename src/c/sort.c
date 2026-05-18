@@ -6,15 +6,16 @@
    [0x0F000, 0x10000)  line_pointers      (1024 entries x 4 bytes = 4 KB)
    [0x10000, 0x11000)  scratch_pointers   (1024 entries x 4 bytes = 4 KB)
 */
-#define DATA_CAPACITY   0xF000
-#define HEAP_SIZE       0x11000
-#define MAX_LINES       1024
+#define DATA_CAPACITY 0xF000
+#define HEAP_SIZE 0x11000
+#define MAX_LINES 1024
 
 /* Forward declarations — clang requires them since main() is sorted
    alphabetically and lands ahead of the helpers it calls.  cc.py's
    whole-file pre-pass resolves these without prototypes. */
 int compare_lines(char *left, char *right, int numeric, int reverse);
-void merge_pass(char **source, char **destination, int line_count, int run_width, int numeric, int reverse);
+void merge_pass(char **source, char **destination, int line_count,
+                int run_width, int numeric, int reverse);
 int numeric_compare(char *left, char *right);
 int strcmp(const char *left, const char *right);
 
@@ -73,7 +74,8 @@ int main(int argc, char *argv[]) {
     }
     char *data_buffer = heap_base;
     char **line_pointers = (char **)(heap_base + DATA_CAPACITY);
-    char **scratch_pointers = (char **)(heap_base + DATA_CAPACITY + MAX_LINES * sizeof(char *));
+    char **scratch_pointers =
+        (char **)(heap_base + DATA_CAPACITY + MAX_LINES * sizeof(char *));
     int position = 0;
     int line_count = 0;
     int in_line = 0;
@@ -81,7 +83,8 @@ int main(int argc, char *argv[]) {
         if (position >= DATA_CAPACITY) {
             die("sort: input too large\n");
         }
-        int bytes_read = read(fd, data_buffer + position, DATA_CAPACITY - position);
+        int bytes_read =
+            read(fd, data_buffer + position, DATA_CAPACITY - position);
         if (bytes_read < 0) {
             die("sort: read failed\n");
         }
@@ -119,7 +122,8 @@ int main(int argc, char *argv[]) {
     char **destination = scratch_pointers;
     int run_width = 1;
     while (run_width < line_count) {
-        merge_pass(source, destination, line_count, run_width, numeric, reverse);
+        merge_pass(source, destination, line_count, run_width, numeric,
+                   reverse);
         char **swap = source;
         source = destination;
         destination = swap;
@@ -128,7 +132,8 @@ int main(int argc, char *argv[]) {
     int output_index = 0;
     while (output_index < line_count) {
         if (unique && output_index > 0) {
-            if (compare_lines(source[output_index - 1], source[output_index], numeric, reverse) == 0) {
+            if (compare_lines(source[output_index - 1], source[output_index],
+                              numeric, reverse) == 0) {
                 output_index += 1;
                 continue;
             }
@@ -142,7 +147,8 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void merge_pass(char **source, char **destination, int line_count, int run_width, int numeric, int reverse) {
+void merge_pass(char **source, char **destination, int line_count,
+                int run_width, int numeric, int reverse) {
     int start = 0;
     while (start < line_count) {
         int middle = start + run_width;
@@ -157,7 +163,8 @@ void merge_pass(char **source, char **destination, int line_count, int run_width
         int right_index = middle;
         int output_index = start;
         while (left_index < middle && right_index < end) {
-            if (compare_lines(source[left_index], source[right_index], numeric, reverse) <= 0) {
+            if (compare_lines(source[left_index], source[right_index], numeric,
+                              reverse) <= 0) {
                 destination[output_index] = source[left_index];
                 left_index += 1;
             } else {

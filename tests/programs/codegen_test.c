@@ -41,31 +41,31 @@ int main(int argc, char *argv[]) {
 }
 
 void mode_bits() {
-    int a = 61680;  /* 0xF0F0 */
-    int b = 4080;   /* 0x0FF0 */
-    printf("and  = %u\n", a & b);    /* 0x00F0 =   240 */
-    printf("or   = %u\n", a | b);    /* 0xFFF0 = 65520 */
-    printf("xor  = %u\n", a ^ b);    /* 0xFF00 = 65280 */
+    int a = 61680;                     /* 0xF0F0 */
+    int b = 4080;                      /* 0x0FF0 */
+    printf("and  = %u\n", a & b);      /* 0x00F0 =   240 */
+    printf("or   = %u\n", a | b);      /* 0xFFF0 = 65520 */
+    printf("xor  = %u\n", a ^ b);      /* 0xFF00 = 65280 */
     printf("not  = %u\n", ~a & 65535); /* 0x0F0F =  3855 */
-    printf("shl  = %u\n", 1 << 8);   /* 0x0100 =   256 */
+    printf("shl  = %u\n", 1 << 8);     /* 0x0100 =   256 */
     printf("shr  = %u\n", 65280 >> 4); /* 0x0FF0 = 4080 */
 
-    int x = 15;        /* 0x000F */
-    x |= 240;          /* |= 0x00F0 → 0x00FF = 255 */
+    int x = 15; /* 0x000F */
+    x |= 240;   /* |= 0x00F0 → 0x00FF = 255 */
     printf("|=   = %u\n", x);
-    x &= 204;          /* &= 0x00CC → 0x00CC = 204 */
+    x &= 204; /* &= 0x00CC → 0x00CC = 204 */
     printf("&=   = %u\n", x);
-    x ^= 255;          /* ^= 0x00FF → 0x0033 = 51 */
+    x ^= 255; /* ^= 0x00FF → 0x0033 = 51 */
     printf("^=   = %u\n", x);
-    x <<= 4;           /* shl 4 → 0x0330 = 816 */
+    x <<= 4; /* shl 4 → 0x0330 = 816 */
     printf("<<=  = %u\n", x);
-    x >>= 2;           /* shr 2 → 0x00CC = 204 */
+    x >>= 2; /* shr 2 → 0x00CC = 204 */
     printf(">>=  = %u\n", x);
 
     int y = 50;
-    y %= 13;           /* 50 % 13 = 11 */
+    y %= 13; /* 50 % 13 = 11 */
     printf("%%=   = %u\n", y);
-    y -= 5;            /* 11 - 5 = 6 (exercises ``sub word [mem], imm8``) */
+    y -= 5; /* 11 - 5 = 6 (exercises ``sub word [mem], imm8``) */
     printf("-=   = %u\n", y);
 
     /* Memory-allocated counter — forces cc.py to emit the
@@ -75,13 +75,13 @@ void mode_bits() {
        the next op must reload from memory. */
     counter = 100;
     printf("g=   = %u\n", counter);
-    counter += 5;      /* 105 — ``add word [mem], imm8`` */
+    counter += 5; /* 105 — ``add word [mem], imm8`` */
     printf("g+=  = %u\n", counter);
-    counter |= 16;     /* 105 | 16 = 121 — ``or word [mem], imm8`` */
+    counter |= 16; /* 105 | 16 = 121 — ``or word [mem], imm8`` */
     printf("g|=  = %u\n", counter);
-    counter &= 63;     /* 121 & 63 = 57 — ``and word [mem], imm8`` */
+    counter &= 63; /* 121 & 63 = 57 — ``and word [mem], imm8`` */
     printf("g&=  = %u\n", counter);
-    counter ^= 32;     /* 57 ^ 32 = 25 — ``xor word [mem], imm8`` */
+    counter ^= 32; /* 57 ^ 32 = 25 — ``xor word [mem], imm8`` */
     printf("g^=  = %u\n", counter);
 
     /* uint8_t global — exercises the byte-width variants via
@@ -90,15 +90,15 @@ void mode_bits() {
        collapsing to ``inc|dec byte [mem]``. */
     bcounter = 100;
     printf("b=   = %u\n", bcounter);
-    bcounter += 7;     /* 107 — ``add byte [mem], imm8`` */
+    bcounter += 7; /* 107 — ``add byte [mem], imm8`` */
     printf("b+=  = %u\n", bcounter);
-    bcounter |= 16;    /* 123 — ``or byte [mem], imm8`` */
+    bcounter |= 16; /* 123 — ``or byte [mem], imm8`` */
     printf("b|=  = %u\n", bcounter);
-    bcounter &= 63;    /* 59  — ``and byte [mem], imm8`` */
+    bcounter &= 63; /* 59  — ``and byte [mem], imm8`` */
     printf("b&=  = %u\n", bcounter);
-    bcounter ^= 8;     /* 51  — ``xor byte [mem], imm8`` */
+    bcounter ^= 8; /* 51  — ``xor byte [mem], imm8`` */
     printf("b^=  = %u\n", bcounter);
-    bcounter -= 5;     /* 46  — ``sub byte [mem], imm8`` */
+    bcounter -= 5; /* 46  — ``sub byte [mem], imm8`` */
     printf("b-=  = %u\n", bcounter);
 }
 
@@ -107,18 +107,18 @@ void mode_bool() {
     int b = 7;
     int c = 12;
 
-    int eq_true  = (a == b);          /* 1 */
-    int eq_false = (a == c);          /* 0 */
-    int ne_true  = (a != c);          /* 1 */
-    int ne_false = (a != b);          /* 0 */
-    int lt_true  = (a < c);           /* 1 */
-    int lt_false = (c < a);           /* 0 */
-    int le_true  = (a <= b);          /* 1 */
-    int le_false = (c <= a);          /* 0 */
-    int gt_true  = (c > a);           /* 1 */
-    int gt_false = (a > c);           /* 0 */
-    int ge_true  = (a >= b);          /* 1 */
-    int ge_false = (a >= c);          /* 0 */
+    int eq_true = (a == b);  /* 1 */
+    int eq_false = (a == c); /* 0 */
+    int ne_true = (a != c);  /* 1 */
+    int ne_false = (a != b); /* 0 */
+    int lt_true = (a < c);   /* 1 */
+    int lt_false = (c < a);  /* 0 */
+    int le_true = (a <= b);  /* 1 */
+    int le_false = (c <= a); /* 0 */
+    int gt_true = (c > a);   /* 1 */
+    int gt_false = (a > c);  /* 0 */
+    int ge_true = (a >= b);  /* 1 */
+    int ge_false = (a >= c); /* 0 */
 
     printf("eq_true  = %u\n", eq_true);
     printf("eq_false = %u\n", eq_false);
@@ -135,7 +135,7 @@ void mode_bool() {
 
     /* Arithmetic on the boolean result: ``a == b`` must actually be
        ``1`` (not 0) for the sum to come out right. */
-    int sum = (a == b) + (c > a) + (a != c);  /* 3 */
+    int sum = (a == b) + (c > a) + (a != c); /* 3 */
     printf("sum      = %u\n", sum);
 }
 

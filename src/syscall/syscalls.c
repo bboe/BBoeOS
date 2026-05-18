@@ -32,31 +32,31 @@ struct fd {
 
 // fs/fd.c: returns AX = fd number, ESI = entry pointer, CF set on
 // failure.
-__attribute__((carry_return))
-int fd_alloc(int *fd_num __attribute__((out_register("ax"))),
-             struct fd *entry __attribute__((out_register("esi"))));
-__attribute__((carry_return)) __attribute__((preserve_register("ecx")))
-int fd_lookup(int fd_num __attribute__((in_register("bx"))),
-              struct fd *entry __attribute__((out_register("esi"))));
+__attribute__((carry_return)) int
+fd_alloc(int *fd_num __attribute__((out_register("ax"))),
+         struct fd *entry __attribute__((out_register("esi"))));
+__attribute__((carry_return)) __attribute__((preserve_register("ecx"))) int
+fd_lookup(int fd_num __attribute__((in_register("bx"))),
+          struct fd *entry __attribute__((out_register("esi"))));
 
 // Network plumbing.  All four return CF set on error.
-__attribute__((carry_return))
-int udp_receive(uint8_t *payload __attribute__((out_register("edi"))),
-                int *length __attribute__((out_register("ecx"))));
-__attribute__((carry_return))
-int udp_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
-             int source_port __attribute__((in_register("edi"))),
-             int dest_port __attribute__((in_register("edx"))),
-             uint8_t *payload __attribute__((in_register("esi"))),
-             int length __attribute__((in_register("ecx"))));
-__attribute__((carry_return))
-int icmp_receive(uint8_t *payload __attribute__((out_register("edi"))),
-                 int *length __attribute__((out_register("ecx"))));
-__attribute__((carry_return))
-int ip_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
-            uint8_t protocol __attribute__((in_register("ax"))),
-            uint8_t *payload __attribute__((in_register("esi"))),
-            int length __attribute__((in_register("ecx"))));
+__attribute__((carry_return)) int
+udp_receive(uint8_t *payload __attribute__((out_register("edi"))),
+            int *length __attribute__((out_register("ecx"))));
+__attribute__((carry_return)) int
+udp_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
+         int source_port __attribute__((in_register("edi"))),
+         int dest_port __attribute__((in_register("edx"))),
+         uint8_t *payload __attribute__((in_register("esi"))),
+         int length __attribute__((in_register("ecx"))));
+__attribute__((carry_return)) int
+icmp_receive(uint8_t *payload __attribute__((out_register("edi"))),
+             int *length __attribute__((out_register("ecx"))));
+__attribute__((carry_return)) int
+ip_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
+        uint8_t protocol __attribute__((in_register("ax"))),
+        uint8_t *payload __attribute__((in_register("esi"))),
+        int length __attribute__((in_register("ecx"))));
 
 // drivers/ne2k.c file-scope globals.  extern names the symbols
 // without emitting storage; the actual bytes live in ne2k.c.  The
@@ -68,9 +68,11 @@ extern uint8_t *net_receive_buffer;
 
 // sys_net_mac: copy the 6-byte cached MAC into the caller's buffer at
 // EDI.  CF set if no NIC was ever probed (net_present stays zero).
-__attribute__((carry_return))
-int sys_net_mac(uint8_t *out __attribute__((in_register("edi")))) {
-    if (net_present == 0) { return 0; }
+__attribute__((carry_return)) int
+sys_net_mac(uint8_t *out __attribute__((in_register("edi")))) {
+    if (net_present == 0) {
+        return 0;
+    }
     memcpy(out, mac_address, 6);
     return 1;
 }
@@ -79,18 +81,24 @@ int sys_net_mac(uint8_t *out __attribute__((in_register("edi")))) {
 //   AL = type (SOCK_RAW=0, SOCK_DGRAM=1)
 //   DL = protocol (IPPROTO_ICMP / IPPROTO_UDP for SOCK_DGRAM; 0 for raw)
 // On success AX = fd, CF clear.  On failure AX = -1, CF set.
-__attribute__((carry_return))
-int sys_net_open(int *result_fd __attribute__((out_register("ax"))),
-                 int sock_type __attribute__((in_register("ax"))),
-                 int protocol __attribute__((in_register("dx")))) {
+__attribute__((carry_return)) int
+sys_net_open(int *result_fd __attribute__((out_register("ax"))),
+             int sock_type __attribute__((in_register("ax"))),
+             int protocol __attribute__((in_register("dx")))) {
     int fd_num;
     struct fd *entry;
     int type;
     int proto;
     type = sock_type & 0xFF;
     proto = protocol & 0xFF;
-    if (net_present == 0) { *result_fd = -1; return 0; }
-    if (!fd_alloc(&fd_num, &entry)) { *result_fd = -1; return 0; }
+    if (net_present == 0) {
+        *result_fd = -1;
+        return 0;
+    }
+    if (!fd_alloc(&fd_num, &entry)) {
+        *result_fd = -1;
+        return 0;
+    }
     if (type == SOCK_DGRAM) {
         if (proto == IPPROTO_ICMP) {
             entry->type = FD_TYPE_ICMP;
@@ -109,31 +117,45 @@ int sys_net_open(int *result_fd __attribute__((out_register("ax"))),
 // against the caller's local port (passed in DX, host byte order); ICMP
 // hands every received packet through.  Always returns CF clear; AX =
 // bytes copied (0 if nothing matched).
-__attribute__((carry_return))
-int sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
-                     int fd_num __attribute__((in_register("bx"))),
-                     uint8_t *user_buffer __attribute__((in_register("edi"))),
-                     int max_bytes __attribute__((in_register("ecx"))),
-                     int local_port __attribute__((in_register("dx")))) {
+__attribute__((carry_return)) int
+sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
+                 int fd_num __attribute__((in_register("bx"))),
+                 uint8_t *user_buffer __attribute__((in_register("edi"))),
+                 int max_bytes __attribute__((in_register("ecx"))),
+                 int local_port __attribute__((in_register("dx")))) {
     struct fd *entry;
     uint8_t *payload;
     int payload_length;
     int dest_port;
     uint8_t *receive_buffer;
-    if (!fd_lookup(fd_num, &entry)) { *bytes_copied = 0; return 1; }
+    if (!fd_lookup(fd_num, &entry)) {
+        *bytes_copied = 0;
+        return 1;
+    }
     if (entry->type == FD_TYPE_UDP) {
-        if (!udp_receive(&payload, &payload_length)) { *bytes_copied = 0; return 1; }
+        if (!udp_receive(&payload, &payload_length)) {
+            *bytes_copied = 0;
+            return 1;
+        }
         // UDP dest port lives at net_receive_buffer+36 (big-endian).
         receive_buffer = net_receive_buffer;
         dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
-        if (dest_port != (local_port & 0xFFFF)) { *bytes_copied = 0; return 1; }
+        if (dest_port != (local_port & 0xFFFF)) {
+            *bytes_copied = 0;
+            return 1;
+        }
     } else if (entry->type == FD_TYPE_ICMP) {
-        if (!icmp_receive(&payload, &payload_length)) { *bytes_copied = 0; return 1; }
+        if (!icmp_receive(&payload, &payload_length)) {
+            *bytes_copied = 0;
+            return 1;
+        }
     } else {
         *bytes_copied = 0;
         return 1;
     }
-    if (payload_length > max_bytes) { payload_length = max_bytes; }
+    if (payload_length > max_bytes) {
+        payload_length = max_bytes;
+    }
     memcpy(user_buffer, payload, payload_length);
     *bytes_copied = payload_length;
     return 1;
@@ -145,26 +167,32 @@ int sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
 // slot value (dst_port for UDP) — the dispatcher pre-loads it from
 // [esp+8].  AX on success = bytes_sent; CF set on error (bad fd,
 // unsupported type, send failure).
-__attribute__((carry_return))
-int sys_net_sendto(int *bytes_sent __attribute__((out_register("ax"))),
-                   int dst_port __attribute__((in_register("ax"))),
-                   int fd_num __attribute__((in_register("bx"))),
-                   uint8_t *payload __attribute__((in_register("esi"))),
-                   int payload_length __attribute__((in_register("ecx"))),
-                   uint8_t *dest_ip __attribute__((in_register("edi"))),
-                   int source_port __attribute__((in_register("dx")))) {
+__attribute__((carry_return)) int
+sys_net_sendto(int *bytes_sent __attribute__((out_register("ax"))),
+               int dst_port __attribute__((in_register("ax"))),
+               int fd_num __attribute__((in_register("bx"))),
+               uint8_t *payload __attribute__((in_register("esi"))),
+               int payload_length __attribute__((in_register("ecx"))),
+               uint8_t *dest_ip __attribute__((in_register("edi"))),
+               int source_port __attribute__((in_register("dx")))) {
     struct fd *entry;
-    if (!fd_lookup(fd_num, &entry)) { *bytes_sent = 0; return 0; }
+    if (!fd_lookup(fd_num, &entry)) {
+        *bytes_sent = 0;
+        return 0;
+    }
     if (entry->type == FD_TYPE_UDP) {
-        if (!udp_send(dest_ip, source_port, dst_port & 0xFFFF, payload, payload_length)) {
-            *bytes_sent = 0; return 0;
+        if (!udp_send(dest_ip, source_port, dst_port & 0xFFFF, payload,
+                      payload_length)) {
+            *bytes_sent = 0;
+            return 0;
         }
         *bytes_sent = payload_length;
         return 1;
     }
     if (entry->type == FD_TYPE_ICMP) {
         if (!ip_send(dest_ip, IPPROTO_ICMP, payload, payload_length)) {
-            *bytes_sent = 0; return 0;
+            *bytes_sent = 0;
+            return 0;
         }
         *bytes_sent = payload_length;
         return 1;

@@ -23,7 +23,8 @@ int set2_next() {
     if (set2_input[i] == '\0') {
         return -1;
     }
-    if (set2_input[i + 1] == '-' && set2_input[i + 2] != '\0' && set2_input[i] <= set2_input[i + 2]) {
+    if (set2_input[i + 1] == '-' && set2_input[i + 2] != '\0' &&
+        set2_input[i] <= set2_input[i + 2]) {
         int start = set2_input[i] & 0xFF;
         int end = set2_input[i + 2] & 0xFF;
         set2_pos = i + 3;
@@ -75,7 +76,8 @@ int main(int argc, char *argv[]) {
     while (set1_input[i] != '\0') {
         int start = set1_input[i] & 0xFF;
         int end;
-        if (set1_input[i + 1] == '-' && set1_input[i + 2] != '\0' && set1_input[i] <= set1_input[i + 2]) {
+        if (set1_input[i + 1] == '-' && set1_input[i + 2] != '\0' &&
+            set1_input[i] <= set1_input[i + 2]) {
             end = set1_input[i + 2] & 0xFF;
             i += 3;
         } else {

@@ -121,7 +121,7 @@ int parse_ip(const char *string, char *buffer);
    frame in place with no intermediate kernel buffer.  Returns
    right_path's wait status on success or a negative ERROR_* code on
    error.  Caller must be the shell (slot_a). */
-int pipeline2(const char *left_path,  char *const left_argv[],
+int pipeline2(const char *left_path, char *const left_argv[],
               const char *right_path, char *const right_argv[]);
 /* Print epoch as YYYY-MM-DD HH:MM:SS (no POSIX equivalent) */
 void print_datetime(unsigned long epoch);
@@ -138,7 +138,8 @@ int recvfrom(int fd, char *buffer, int length, int port);
    error.  POSIX's lseek takes off_t; BBoeOS uses int and returns int. */
 int seek(int fd, int offset, int whence);
 /* Send UDP datagram (BBoeOS-specific) */
-int sendto(int fd, const char *buffer, int length, const char *ip, int src_port, int dst_port);
+int sendto(int fd, const char *buffer, int length, const char *ip, int src_port,
+           int dst_port);
 /* Program VGA DAC register `index` to 6-bit RGB (r, g, b each 0..63) */
 void set_palette_color(int fd, int index, int r, int g, int b);
 /* Register handler for SIGINT, SIGPIPE, or SIGALRM. */

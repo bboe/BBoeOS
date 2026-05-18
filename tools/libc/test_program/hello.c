@@ -45,7 +45,8 @@ static void exercise_dirent(void) {
         recount = recount + 1;
     }
     if (count != recount) {
-        printf("[bboeos libc] FAIL: rewinddir count mismatch %d vs %d\n", count, recount);
+        printf("[bboeos libc] FAIL: rewinddir count mismatch %d vs %d\n", count,
+               recount);
         _exit(1);
     }
     if (closedir(directory) != 0) {
@@ -53,7 +54,8 @@ static void exercise_dirent(void) {
         _exit(1);
     }
     if (opendir("nonexistent_path_xyz") != NULL) {
-        printf("[bboeos libc] FAIL: opendir on missing path returned non-NULL\n");
+        printf(
+            "[bboeos libc] FAIL: opendir on missing path returned non-NULL\n");
         _exit(1);
     }
     printf("[bboeos libc] dirent: %d entries, rewind ok\n", count);
