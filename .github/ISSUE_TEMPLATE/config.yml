@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/bboe/BBoeOS/security/advisories/new
+    about: >
+      Please do not open a public issue for security vulnerabilities. Use
+      GitHub's private vulnerability reporting instead. See SECURITY.md for
+      scope and expectations.
+  - name: Contribution policy
+    url: https://github.com/bboe/BBoeOS/blob/main/CONTRIBUTING.md
+    about: >
+      BBoeOS is a personal hobby project and external contributions are
+      accepted only occasionally. Please read CONTRIBUTING.md (including the
+      copyright assignment requirement) before opening a pull request.
