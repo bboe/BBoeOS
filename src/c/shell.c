@@ -757,45 +757,56 @@ int main() {
         int end = 0;
         while (1) {
             char character = getchar();
-            if (character == '\x01') {
+            /* break inside a case exits the switch; arms that need to
+             * leave the outer line-editor loop (Ctrl-C cancel, Ctrl-L
+             * reprompt, Enter submit) jump to line_done instead. */
+            switch (character) {
+            case '\x01':
                 /* Ctrl-A: beginning of line */
                 if (cursor > 0) {
                     cursor_back(cursor);
                     cursor = 0;
                 }
-            } else if (character == '\x02') {
+                break;
+            case '\x02':
                 /* Ctrl-B: cursor left */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor -= 1;
                 }
-            } else if (character == '\x03') {
+                break;
+            case '\x03':
                 /* Ctrl-C: cancel line */
                 putchar('\n');
                 end = 0;
                 history_view = 0;
-                break;
-            } else if (character == '\x04') {
+                goto line_done;
+            case '\x04':
                 /* Ctrl-D: shutdown (returns here only on APM failure) */
                 shutdown();
-            } else if (character == '\x05') {
+                break;
+            case '\x05':
                 /* Ctrl-E: end of line */
                 write(STDOUT, buf + cursor, end - cursor);
                 cursor = end;
-            } else if (character == '\x06') {
+                break;
+            case '\x06':
                 /* Ctrl-F: cursor right */
                 if (cursor < end) {
                     putchar(buf[cursor]);
                     cursor += 1;
                 }
-            } else if (character == '\b' || character == '\x7F') {
+                break;
+            case '\b':
+            case '\x7F':
                 /* Backspace / DEL */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor -= 1;
                     end = delete_at_cursor(buf, cursor, end);
                 }
-            } else if (character == '\x0B') {
+                break;
+            case '\x0B':
                 /* Ctrl-K: kill to end of line */
                 if (cursor < end) {
                     int span = end - cursor;
@@ -816,68 +827,82 @@ int main() {
                     cursor_back(span);
                     end = cursor;
                 }
-            } else if (character == '\x0C') {
+                break;
+            case '\x0C':
                 /* Ctrl-L: clear screen and reprompt */
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
                 history_view = 0;
-                break;
-            } else if (character == '\x0E') {
+                goto line_done;
+            case '\x0E':
                 /* Ctrl-N: history down (alias of Down arrow). */
                 end = history_down(buf, cursor, end);
                 cursor = end;
-            } else if (character == '\x10') {
+                break;
+            case '\x10':
                 /* Ctrl-P: history up (alias of Up arrow). */
                 end = history_up(buf, cursor, end);
                 cursor = end;
-            } else if (character == '\n') {
+                break;
+            case '\n':
                 /* Enter — fd_read_console normalises CR → LF on input
                  * (PS/2 Enter scancode and serial-terminal CR both
                  * land here as LF). */
                 putchar('\n');
-                break;
-            } else if (character == '\x19') {
+                goto line_done;
+            case '\x19':
                 /* Ctrl-Y: yank from kill buffer */
-                int yank_index = 0;
-                while (yank_index < kill_len) {
-                    if (end >= MAX_INPUT) {
-                        visual_bell();
-                        break;
+                {
+                    int yank_index = 0;
+                    while (yank_index < kill_len) {
+                        if (end >= MAX_INPUT) {
+                            visual_bell();
+                            break;
+                        }
+                        end =
+                            insert_char(buf, cursor, end, kill_buf[yank_index]);
+                        cursor += 1;
+                        yank_index += 1;
                     }
-                    end = insert_char(buf, cursor, end, kill_buf[yank_index]);
-                    cursor += 1;
-                    yank_index += 1;
                 }
-            } else if (character == '\x1B') {
+                break;
+            case '\x1B':
                 /* CSI escape — consume "[" + parameter bytes + final.
                    Recognised: [A (Up) and [B (Down) for history recall.
                    Other CSI codes (including xterm modified arrows
                    like [1;2A from Shift+Up on serial) are silently
                    discarded so the line editor stays untouched. */
-                char escape_next = getchar();
-                if (escape_next == '[') {
-                    char final_byte = getchar();
-                    while (final_byte >= '0' && final_byte <= '?') {
-                        final_byte = getchar();
-                    }
-                    if (final_byte == 'A') {
-                        end = history_up(buf, cursor, end);
-                        cursor = end;
-                    } else if (final_byte == 'B') {
-                        end = history_down(buf, cursor, end);
-                        cursor = end;
+                {
+                    char escape_next = getchar();
+                    if (escape_next == '[') {
+                        char final_byte = getchar();
+                        while (final_byte >= '0' && final_byte <= '?') {
+                            final_byte = getchar();
+                        }
+                        if (final_byte == 'A') {
+                            end = history_up(buf, cursor, end);
+                            cursor = end;
+                        } else if (final_byte == 'B') {
+                            end = history_down(buf, cursor, end);
+                            cursor = end;
+                        }
                     }
                 }
-            } else if (character >= ' ') {
+                break;
+            default:
                 /* Printable char — insert at cursor */
-                if (end >= MAX_INPUT) {
-                    visual_bell();
-                } else {
-                    end = insert_char(buf, cursor, end, character);
-                    cursor += 1;
+                if (character >= ' ') {
+                    if (end >= MAX_INPUT) {
+                        visual_bell();
+                    } else {
+                        end = insert_char(buf, cursor, end, character);
+                        cursor += 1;
+                    }
                 }
+                break;
             }
         }
+    line_done:
         buf[end] = 0;
         /* Push to history before dispatch.  Skip empty lines and
            consecutive duplicates (bash default).  Reset history_view

@@ -11,6 +11,16 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **shell line editor: `else if` chain → `switch`.**  Converts the 13+
+  control-code dispatch in `src/c/shell.c`'s main line-editor loop to a `switch
+  (character)`.  The three arms that previously used `break;` to exit the outer
+  `while (1)` loop (Ctrl-C cancel, Ctrl-L reprompt, Enter submit) now `goto
+  line_done;` instead.  Backspace and DEL share a fall-through case.
+  Case-locals (`yank_index` / `escape_next` / `final_byte`) live inside `{ }`
+  blocks within their case bodies, made possible by the compound-statement
+  support added in the same release.  Behaviour unchanged (test_programs.py,
+  test_pipeline_*, test_scrollback all pass).
+
 - **cc.py: `{ }` compound statements.**  Standard C blocks now parse at any
   statement position, not just as the body of `if` / `while` / `for` / `do` /
   `switch` / function.  New `Compound` AST node; parser branches on `LBRACE` in
@@ -20,9 +30,7 @@ time.
   parent's instruction stream; every body-recursion scanner (`scan_locals`,
   auto-pin candidate collect, function-pointer-vars collect, IR
   `_collect_local_types`) now recurses into `Compound` bodies the same way it
-  does for `If` / `While` / `Switch`.  Unblocks `edit.c`'s line-editor switch
-  conversion (memory-tracked) and lets shell.c drop the case-local hoists added
-  in PR #409.
+  does for `If` / `While` / `Switch`.
 
 - **cc.py: `goto` and labelled statements.**  Standard C `label:` and `goto
   label;` syntax now parses, lowers, and emits a NASM-local `.user_<label>`
