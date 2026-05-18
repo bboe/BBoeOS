@@ -182,8 +182,7 @@ def _load_json_dict(*, expected_version: int, format_name: str, path: Path) -> d
         sys.exit(f"ccld: {path}: invalid {format_name} JSON ({error})")
     if not isinstance(payload, dict):
         sys.exit(f"ccld: {path}: top-level value is not a JSON object")
-    actual_version = payload.get("version")
-    if actual_version != expected_version:
+    if (actual_version := payload.get("version")) != expected_version:
         sys.exit(f"ccld: {path}: unsupported .{format_name} version {actual_version!r} (expected {expected_version})")
     return payload
 
@@ -359,8 +358,7 @@ def _validate_relocation_entry(*, index: int, path: Path, relocation: dict, sect
     symbol = relocation.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         sys.exit(f"ccld: {path}: relocation #{index}: `symbol` must be a non-empty string")
-    relocation_type = relocation.get("type")
-    if relocation_type not in KNOWN_RELOCATION_TYPES:
+    if (relocation_type := relocation.get("type")) not in KNOWN_RELOCATION_TYPES:
         sys.exit(f"ccld: {path}: relocation #{index}: unknown type {relocation_type!r} (expected one of {KNOWN_RELOCATION_TYPES})")
 
 

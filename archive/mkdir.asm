@@ -53,4 +53,3 @@ MESSAGE_EXISTS        db `Already exists\n`
 MESSAGE_EXISTS_LENGTH equ $ - MESSAGE_EXISTS
 MESSAGE_USAGE         db `Usage: mkdir <name>\n`
 MESSAGE_USAGE_LENGTH  equ $ - MESSAGE_USAGE
-

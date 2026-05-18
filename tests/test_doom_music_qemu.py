@@ -94,8 +94,7 @@ def _measure_wav(*, wav_path: Path) -> dict:
         sys.exit(message)
     channels = struct.unpack("<H", raw[22:24])[0]
     rate = struct.unpack("<I", raw[24:28])[0]
-    bits_per_sample = struct.unpack("<H", raw[34:36])[0]
-    if bits_per_sample != 16:
+    if (bits_per_sample := struct.unpack("<H", raw[34:36])[0]) != 16:
         message = f"unexpected sample width: {bits_per_sample} bits"
         sys.exit(message)
     bytes_per_frame = channels * 2

@@ -131,4 +131,3 @@ https://www.contributor-covenant.org/version/2/1/code_of_conduct.html [Mozilla
 CoC]: https://github.com/mozilla/diversity [FAQ]:
 https://www.contributor-covenant.org/faq [translations]:
 https://www.contributor-covenant.org/translations
-

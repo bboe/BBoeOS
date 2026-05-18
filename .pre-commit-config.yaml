@@ -1,10 +1,33 @@
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  # Ruff version.
-  rev: v0.15.13
+  rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794  # v0.15.13
   hooks:
     # Run the linter.
     - id: ruff-check
       args: [ --fix ]
     # Run the formatter.
     - id: ruff-format
+- repo: https://github.com/MarcoGorelli/auto-walrus
+  rev: ba0661836089a532a710f68713a3e3e53f7f0113  # 0.3.4
+  hooks:
+    - id: auto-walrus
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
+  hooks:
+    - id: check-added-large-files
+    - id: check-case-conflict
+    - id: check-executables-have-shebangs
+    - id: check-merge-conflict
+    - id: check-shebang-scripts-are-executable
+    - id: check-toml
+    - id: check-vcs-permalinks
+    - id: check-yaml
+    - id: detect-private-key
+    - id: end-of-file-fixer
+    - id: mixed-line-ending
+      args: [--fix=no]
+    - id: name-tests-test
+      args: [--pytest-test-first]
+      files: ^tests/unit/.*\.py$
+    - id: no-commit-to-branch
+    - id: trailing-whitespace

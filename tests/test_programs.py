@@ -168,8 +168,7 @@ def _bbfs_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     """
     names = _bbfs_bin_entry_names(image=image)
     used = sum(1 for name in names if name is not None)
-    fillers_needed = _BBFS_DIRECTORY_MAX_ENTRIES - used - 1
-    if fillers_needed >= 0:
+    if (fillers_needed := _BBFS_DIRECTORY_MAX_ENTRIES - used - 1) >= 0:
         add_empty_files(
             image_path=str(image),
             names=[f"_pad{filler_index:02d}" for filler_index in range(fillers_needed)],

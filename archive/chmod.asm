@@ -73,4 +73,3 @@ main:
         MESSAGE_PROTECTED_LENGTH equ $ - MESSAGE_PROTECTED
         MESSAGE_USAGE     db `Usage: chmod [+x|-x] <file>\n`
         MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
-

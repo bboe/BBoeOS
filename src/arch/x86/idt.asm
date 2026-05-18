@@ -380,4 +380,3 @@ idt_set_gate32:
         pop eax
         pop edi
         ret
-

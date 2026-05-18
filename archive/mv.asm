@@ -86,4 +86,3 @@ main:
         MESSAGE_TOO_LONG_LENGTH equ $ - MESSAGE_TOO_LONG
         MESSAGE_USAGE     db `Usage: mv <oldname> <newname>\n`
         MESSAGE_USAGE_LENGTH equ $ - MESSAGE_USAGE
-
