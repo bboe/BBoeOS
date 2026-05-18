@@ -175,11 +175,11 @@ asm("rtc_read_time_internal:\n"
     "    pop eax\n"
     "    ret");
 
-// rtc_sleep_ms: ECX = milliseconds.  Busy-waits at least ECX ms.
+// rtc_sleep_ms: ECX = milliseconds.  Sleeps at least ECX ms with
 // 1 ms granularity (one PIT tick).  Preserves all registers.
 // Syscall handlers enter with IF=0 (INT clears it), so we sti
-// inside — IRQ 0 must fire for the tick counter to advance.
-// pushf/popf around the body keeps the caller's IF intact.
+// inside — IRQ 0 must fire for the tick counter to advance and to
+// wake `hlt`.  pushf/popf around the body keeps the caller's IF intact.
 // Returns CF=0 on success (full sleep completed).
 // Returns CF=1 (any AL) when interrupted by a pending signal
 // (PENDING_SIGINT or PENDING_SIGALRM in current_program_state); the
@@ -213,6 +213,11 @@ asm("rtc_sleep_ms:\n"
     "    jne .rsm_eintr\n"
     "    cmp byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM], 0\n"
     "    jne .rsm_eintr\n"
+    // IF=1 from the sti above; hlt parks the CPU until any IRQ
+    // fires.  PIT IRQ 0 fires every MS_PER_TICK ms (currently 1 ms),
+    // so we wake at least once per tick to re-check the deadline,
+    // and any signal-setting IRQ wakes us immediately.
+    "    hlt\n"
     "    call rtc_tick_read\n"
     "    cmp eax, ebx\n"
     "    jb .rsm_wait\n"

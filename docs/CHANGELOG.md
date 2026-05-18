@@ -11,6 +11,12 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Idle CPU: blocking syscalls park on `hlt`.**  `rtc_sleep_ms`
+  (`drivers/rtc.c`) and `fd_read_console` (`fs/fd/console.c`) now `hlt` between
+  checks instead of busy-spinning.  PS/2 IRQ 1 wakes a console reader
+  immediately; PIT IRQ 0 at 1 kHz bounds wakeup latency for serial-only input
+  and for the sleep deadline to 1 ms.  Signal-pending re-check is unchanged —
+  Ctrl+C and SIGALRM still surface as `ERROR_INTERRUPTED` on the next wake.
 - **`SYS_NET_SETSOCKOPT` (24h) with `SO_RCVTIMEO`.**  New syscall storing
   per-socket options on the fd entry; currently supports `SO_RCVTIMEO` (value =
   milliseconds, 0 disables blocking). `sys_net_recvfrom` reads the per-fd
