@@ -31,6 +31,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Break,
     Call,
+    Char,
     Conditional,
     Continue,
     DerefAssign,
@@ -2458,13 +2459,20 @@ class EmissionMixin:
         case_labels = [f".switch_{label_index}_case_{index}" for index, _ in enumerate(case_arms)]
         default_label = f".switch_{label_index}_default" if default_case is not None else end_label
         discriminant_line = statement.discriminant.line
+        # If the discriminant classifies as char, lower each case
+        # label as a Char rather than Int so the comparison validator
+        # sees char-vs-char.  The parser's constant-folding pass
+        # collapses every case-label expression to Int (Char-ness is
+        # only preserved on bare ``'x'`` literals reachable from
+        # ``parse_primary``), so the wrap has to happen here.
+        case_label_node = Char if self._type_of_operand(statement.discriminant) == "char" else Int
         for case, arm_label in zip(case_arms, case_labels, strict=True):
             self.ax_clear()
             condition = BinaryOperation(
                 left=statement.discriminant,
                 line=discriminant_line,
                 operation="==",
-                right=Int(line=discriminant_line, value=case.value),
+                right=case_label_node(line=discriminant_line, value=case.value),
             )
             self.emit_condition_true_jump(condition=condition, context="switch", success_label=arm_label)
         self.emit(f"        jmp {default_label}")
