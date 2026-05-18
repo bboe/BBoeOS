@@ -3535,6 +3535,104 @@ def test_user_brace_init_global_array_emits_dd_table() -> None:
     assert "_g_fib: dd 1, 1, 2, 3, 5, 8, 13, 21, 34, 55" in asm, f"missing brace-init dd table:\n{asm}"
 
 
+def test_user_compound_statement_at_function_scope_compiles() -> None:
+    """A bare ``{ ... }`` is a valid statement at function scope.
+
+    Standard C allows compound statements anywhere a statement may
+    appear.  cc.py previously only accepted ``{`` after if/while/for/
+    do/switch headers; adding parser support for the standalone form
+    lets a block introduce a fresh scope for case-local declarations
+    and other patterns the existing tree had to hoist around.
+    """
+    asm = _user(
+        """
+        int main() {
+            int outer;
+            outer = 1;
+            {
+                int inner;
+                inner = 2;
+                outer = outer + inner;
+            }
+            return outer;
+        }
+        """,
+    )
+    # Both declarations land in the function's frame; the block body
+    # generates the same instructions it would inline.
+    assert "_f_main:" in asm or "main:" in asm, f"expected main: label:\n{asm}"
+
+
+def test_user_compound_statement_empty_compiles() -> None:
+    """``{ }`` with no statements is a no-op block that still compiles."""
+    asm = _user(
+        """
+        int main() {
+            { }
+            return 0;
+        }
+        """,
+    )
+    assert "main:" in asm or "_f_main:" in asm, f"expected main label:\n{asm}"
+
+
+def test_user_compound_statement_inside_switch_case_scopes_locals() -> None:
+    """``case X: { int t = ...; }`` lets a case body declare its own locals.
+
+    Without compound-statement support the case body would have to
+    hoist locals to function scope (the workaround used by shell.c's
+    pre-conversion line editor).  With the new node, the locals stay
+    case-local in source even if the frame slot is function-wide.
+    """
+    asm = _user(
+        """
+        int main() {
+            int discriminant;
+            int result;
+            discriminant = 1;
+            result = 0;
+            switch (discriminant) {
+            case 1:
+                {
+                    int local_to_case;
+                    local_to_case = 10;
+                    result = result + local_to_case;
+                }
+                break;
+            default:
+                result = -1;
+                break;
+            }
+            return result;
+        }
+        """,
+    )
+    # The successful compile is the test; the case-local block must
+    # not error out in the parser the way it did before.
+    assert ".switch_" in asm, f"expected switch labels:\n{asm}"
+
+
+def test_user_compound_statement_nested_compiles() -> None:
+    """``{ { ... } }`` nests without depth limit (within reason)."""
+    asm = _user(
+        """
+        int main() {
+            int value;
+            value = 0;
+            {
+                {
+                    {
+                        value = 42;
+                    }
+                }
+            }
+            return value;
+        }
+        """,
+    )
+    assert "main:" in asm or "_f_main:" in asm, f"expected main label:\n{asm}"
+
+
 def test_user_double_subscript_into_array_of_pointers() -> None:
     """``arr[i][j]`` for ``char *arr[N]`` loads via the new DoubleIndex path.
 

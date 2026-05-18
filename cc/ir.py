@@ -329,6 +329,8 @@ class Builder:
             case ast_nodes.Break():
                 assert break_tgt is not None, "break outside loop"
                 out.append(Jump(target=break_tgt))
+            case ast_nodes.Compound(body=body):
+                self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             case ast_nodes.Continue():
                 assert cont_tgt is not None, "continue outside loop"
                 out.append(Jump(target=cont_tgt))
@@ -579,8 +581,11 @@ class Builder:
                 self._collect_local_types(statement.body)
                 if statement.else_body is not None:
                     self._collect_local_types(statement.else_body)
-            elif isinstance(statement, (ast_nodes.While, ast_nodes.DoWhile)):
+            elif isinstance(statement, (ast_nodes.Compound, ast_nodes.DoWhile, ast_nodes.While)):
                 self._collect_local_types(statement.body)
+            elif isinstance(statement, ast_nodes.Switch):
+                for case in statement.cases:
+                    self._collect_local_types(case.body)
 
     def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
         """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.

@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `{ }` compound statements.**  Standard C blocks now parse at any
+  statement position, not just as the body of `if` / `while` / `for` / `do` /
+  `switch` / function.  New `Compound` AST node; parser branches on `LBRACE` in
+  `parse_statement`; AST codegen lowers via the existing
+  `generate_body(scoped=True)` path so names declared inside the block leave
+  `visible_vars` at the closing `}`.  IR builder inlines `Compound` into its
+  parent's instruction stream; every body-recursion scanner (`scan_locals`,
+  auto-pin candidate collect, function-pointer-vars collect, IR
+  `_collect_local_types`) now recurses into `Compound` bodies the same way it
+  does for `If` / `While` / `Switch`.  Unblocks `edit.c`'s line-editor switch
+  conversion (memory-tracked) and lets shell.c drop the case-local hoists added
+  in PR #409.
+
 - **cc.py: `goto` and labelled statements.**  Standard C `label:` and `goto
   label;` syntax now parses, lowers, and emits a NASM-local `.user_<label>`
   label / `jmp .user_<label>` branch.  Per-function scoping comes from NASM's

@@ -94,6 +94,20 @@ class Call(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class Compound(Node):
+    """``{ statements... }`` — a block introducing a fresh local scope.
+
+    Used at function scope and inside switch-case bodies to give
+    case-local declarations a real scope (cc.py's frame-slot allocator
+    still hoists every local to a function-wide slot, but the parser
+    and codegen treat names declared inside the block as block-scoped
+    so the compiler diagnoses cross-block name reuse appropriately).
+    """
+
+    body: list[Node]
+
+
+@dataclass(kw_only=True, slots=True)
 class Conditional(Node):
     """Ternary conditional expression ``condition ? then_expr : else_expr``.
 

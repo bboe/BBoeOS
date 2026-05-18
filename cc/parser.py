@@ -16,6 +16,7 @@ from cc.ast_nodes import (
     Break,
     Call,
     Char,
+    Compound,
     Conditional,
     Continue,
     DerefAssign,
@@ -1046,6 +1047,13 @@ class Parser:
         token = self.peek()
         if token[0] in TYPE_TOKENS:
             return self.parse_variable_declaration()
+        if token[0] == "LBRACE":
+            self.eat("LBRACE")
+            body: list[Node] = []
+            while self.peek()[0] != "RBRACE":
+                body.append(self.parse_statement())
+            self.eat("RBRACE")
+            return Compound(body=body, line=token[2])
         if token[0] == "IF":
             return self.parse_if()
         if token[0] == "BREAK":
