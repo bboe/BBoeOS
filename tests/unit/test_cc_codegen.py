@@ -4190,6 +4190,46 @@ def test_user_rejects_outw() -> None:
     assert "outw" in output.lower() and "kernel" in output.lower(), f"Error should mention outw/kernel:\n{output}"
 
 
+def test_user_switch_always_exit_case_body_skips_end_jump() -> None:
+    """A case body whose last statement is ``return`` / ``goto`` emits no fall-through ``jmp .end``.
+
+    cc.py already lets a user-written ``return X;`` lower to
+    ``jmp FUNCTION_EXIT`` and ``goto X;`` lower to ``jmp .user_X`` —
+    those exits make any trailing fall-through jump dead.  This test
+    pins that no extra ``jmp .switch_*_end`` is emitted in either
+    arm's body when the body already always-exits.
+    """
+    asm = _user(
+        """
+        int main() {
+            char character;
+            int value;
+            character = '\x03';
+            value = 0;
+            switch (character) {
+            case '\x03':
+                value = 1;
+                goto done;
+            case '\x04':
+                return 99;
+            default:
+                value = -1;
+            }
+            done:
+            return value;
+        }
+        """,
+    )
+    lines = asm.splitlines()
+    case_0_index = next(index for index, line in enumerate(lines) if line.strip() == ".switch_0_case_0:")
+    case_1_index = next(index for index, line in enumerate(lines) if line.strip() == ".switch_0_case_1:")
+    default_index = next(index for index, line in enumerate(lines) if ".switch_0_default" in line and line.strip().endswith(":"))
+    case_0_body = lines[case_0_index + 1 : case_1_index]
+    case_1_body = lines[case_1_index + 1 : default_index]
+    assert not any("jmp .switch_0_end" in line for line in case_0_body), f"case 0 (goto-exit) emitted dead `jmp .end`:\n{case_0_body}"
+    assert not any("jmp .switch_0_end" in line for line in case_1_body), f"case 1 (return-exit) emitted dead `jmp .end`:\n{case_1_body}"
+
+
 def test_user_switch_break_inside_loop_exits_only_switch() -> None:
     """``break`` inside a switch nested in a while loop exits the switch, not the loop.
 
@@ -4232,6 +4272,48 @@ def test_user_switch_break_inside_loop_exits_only_switch() -> None:
     # switch — 10 + 20 + 1 + 1 + 1 = 33; if break broke the loop too,
     # we'd see something different (e.g. 10 = first hit then exit).
     # We can't run it here, but the label discipline above is enough.
+
+
+def test_user_switch_dispatch_hoists_memory_discriminant_into_register() -> None:
+    """Multi-arm switch over a memory-backed scalar loads it once before the chain.
+
+    Without the hoist, every case-compare emits ``cmp byte [addr], imm``
+    (5-7 bytes on x86-32) and the same address is dereferenced N times.
+    With the hoist, a single ``mov al, [addr]`` precedes the dispatch
+    chain and each compare becomes ``cmp al, imm`` (2-3 bytes).
+    Self-paying for N >= 2 arms.
+
+    Uses a file-scope global as the discriminant so the value is
+    guaranteed memory-backed (no auto-pin candidate selection drama).
+    """
+    asm = _user(
+        """
+        char g_character;
+        int main() {
+            g_character = '\x01';
+            int result;
+            result = 0;
+            switch (g_character) {
+            case '\x01': result = 1; break;
+            case '\x02': result = 2; break;
+            case '\x05': result = 5; break;
+            case '\x06': result = 6; break;
+            default: result = -1;
+            }
+            return result;
+        }
+        """,
+    )
+    lines = asm.splitlines()
+    # The dispatch chain must NOT repeat `cmp byte [_g_character]` per arm.
+    # At most one memory-dereferenced cmp may appear (or zero if the hoist
+    # always emits a load+register-cmp sequence).
+    memory_cmps = [line for line in lines if "cmp byte [_g_character]" in line]
+    assert len(memory_cmps) <= 1, f"expected hoisted discriminant load, got {len(memory_cmps)} memory cmps:\n{memory_cmps}"
+    # And a register-form `cmp al, imm` (or eax / similar) must appear at
+    # least N-1 times for an N-arm dispatch (N=4 here).
+    register_cmps = [line for line in lines if line.strip().startswith(("cmp al,", "cmp eax,", "cmp ax,"))]
+    assert len(register_cmps) >= 3, f"expected at least 3 register cmps after hoist, got {len(register_cmps)}:\n{register_cmps}"
 
 
 def test_user_switch_fall_through_between_cases() -> None:
