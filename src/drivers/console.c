@@ -102,55 +102,62 @@ void put_character(char byte __attribute__((in_register("ax"))))
         if (p1 == 0) { p1 = 1; }
         p2 = ansi_params[1];
         p3 = ansi_params[2];
-        if (byte == '@') {
-            // Write character at cursor, no advance.
-            vga_write_attribute(p1 & 0xFF, ansi_fg);
-        } else if (byte == 'A') {
-            // Cursor up
-            vga_get_cursor(&dx_packed);
-            dx_packed = dx_packed & 0xFFFF;
-            row = (dx_packed >> 8) & 0xFF;
-            col = dx_packed & 0xFF;
-            row = row - p1;
-            if (row < 0) { row = 0; }
-            vga_set_cursor((row << 8) | col);
-        } else if (byte == 'C') {
-            // Cursor forward (no row wrap)
-            vga_get_cursor(&dx_packed);
-            dx_packed = dx_packed & 0xFFFF;
-            row = (dx_packed >> 8) & 0xFF;
-            col = (dx_packed & 0xFF) + p1;
-            vga_set_cursor((row << 8) | (col & 0xFF));
-        } else if (byte == 'D') {
-            // Cursor back (with row wrap)
-            vga_get_cursor(&dx_packed);
-            dx_packed = dx_packed & 0xFFFF;
-            row = (dx_packed >> 8) & 0xFF;
-            col = dx_packed & 0xFF;
-            linear = row * 80 + col - p1;
-            row = linear / 80;
-            col = linear % 80;
-            vga_set_cursor((row << 8) | (col & 0xFF));
-        } else if (byte == 'H') {
-            // Cursor position: row;col (1-indexed)
-            row = (p1 - 1) & 0xFF;
-            if (p2 == 0) { p2 = 1; }
-            col = (p2 - 1) & 0xFF;
-            vga_set_cursor((row << 8) | col);
-        } else if (byte == 'm') {
-            // SGR
-            if (ansi_params[0] == 0) {
-                ansi_fg = 7;
-                vga_set_bg(0);
-            } else if (ansi_params[0] == 38) {
-                if (p2 == 5) {
-                    ansi_fg = p3 & 0xFF;
+        switch (byte) {
+            case '@':
+                // Write character at cursor, no advance.
+                vga_write_attribute(p1 & 0xFF, ansi_fg);
+                break;
+            case 'A':
+                // Cursor up
+                vga_get_cursor(&dx_packed);
+                dx_packed = dx_packed & 0xFFFF;
+                row = (dx_packed >> 8) & 0xFF;
+                col = dx_packed & 0xFF;
+                row = row - p1;
+                if (row < 0) { row = 0; }
+                vga_set_cursor((row << 8) | col);
+                break;
+            case 'C':
+                // Cursor forward (no row wrap)
+                vga_get_cursor(&dx_packed);
+                dx_packed = dx_packed & 0xFFFF;
+                row = (dx_packed >> 8) & 0xFF;
+                col = (dx_packed & 0xFF) + p1;
+                vga_set_cursor((row << 8) | (col & 0xFF));
+                break;
+            case 'D':
+                // Cursor back (with row wrap)
+                vga_get_cursor(&dx_packed);
+                dx_packed = dx_packed & 0xFFFF;
+                row = (dx_packed >> 8) & 0xFF;
+                col = dx_packed & 0xFF;
+                linear = row * 80 + col - p1;
+                row = linear / 80;
+                col = linear % 80;
+                vga_set_cursor((row << 8) | (col & 0xFF));
+                break;
+            case 'H':
+                // Cursor position: row;col (1-indexed)
+                row = (p1 - 1) & 0xFF;
+                if (p2 == 0) { p2 = 1; }
+                col = (p2 - 1) & 0xFF;
+                vga_set_cursor((row << 8) | col);
+                break;
+            case 'm':
+                // SGR
+                if (ansi_params[0] == 0) {
+                    ansi_fg = 7;
+                    vga_set_bg(0);
+                } else if (ansi_params[0] == 38) {
+                    if (p2 == 5) {
+                        ansi_fg = p3 & 0xFF;
+                    }
+                } else if (ansi_params[0] == 48) {
+                    if (p2 == 5) {
+                        vga_set_bg(p3 & 0xFF);
+                    }
                 }
-            } else if (ansi_params[0] == 48) {
-                if (p2 == 5) {
-                    vga_set_bg(p3 & 0xFF);
-                }
-            }
+                break;
         }
         return;
     }

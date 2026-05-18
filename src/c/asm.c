@@ -569,17 +569,22 @@ void emit_alu_binop(int rfield) {
     int type2 = (packed_operand >> 8) & 0xFF;
     int register2_id = packed_operand & 0xFF;
     int value2 = parse_operand_value;
-    if (type2 == 0) {
-        emit_sized(op_rr, size1);
-        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-    } else if (type2 == 2) {
-        emit_sized_mem(op_rr | 2, size1);
-        emit_modrm_direct(register1_id, value2);
-    } else if (type2 == 3) {
-        emit_sized_mem(op_rr | 2, size1);
-        emit_indexed_mem(register1_id, register2_id, value2);
-    } else {
-        emit_alu_reg_imm(op_rr, register1_id, size1, value2);
+    switch (type2) {
+        case 0:
+            emit_sized(op_rr, size1);
+            emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
+            break;
+        case 2:
+            emit_sized_mem(op_rr | 2, size1);
+            emit_modrm_direct(register1_id, value2);
+            break;
+        case 3:
+            emit_sized_mem(op_rr | 2, size1);
+            emit_indexed_mem(register1_id, register2_id, value2);
+            break;
+        default:
+            emit_alu_reg_imm(op_rr, register1_id, size1, value2);
+            break;
     }
 }
 
@@ -919,12 +924,16 @@ void emit_dword(int value) {
    ``emit_byte`` / ``emit_word`` directly). */
 __attribute__((regparm(1)))
 void emit_sized_imm(int value, int size) {
-    if (size == 8) {
-        emit_byte(value & 0xFF);
-    } else if (size == 32) {
-        emit_dword(value);
-    } else {
-        emit_word(value);
+    switch (size) {
+        case 8:
+            emit_byte(value & 0xFF);
+            break;
+        case 32:
+            emit_dword(value);
+            break;
+        default:
+            emit_word(value);
+            break;
     }
 }
 
@@ -1743,12 +1752,16 @@ void handle_movzx() {
     } else {
         emit_word(0xB60F);
     }
-    if (type2 == 0) {
-        emit_byte(0xC0 | (register1_id << 3) | register2_id);
-    } else if (type2 == 2) {
-        emit_modrm_direct(register1_id, value2);
-    } else {
-        emit_indexed_mem(register1_id, register2_id, value2);
+    switch (type2) {
+        case 0:
+            emit_byte(0xC0 | (register1_id << 3) | register2_id);
+            break;
+        case 2:
+            emit_modrm_direct(register1_id, value2);
+            break;
+        default:
+            emit_indexed_mem(register1_id, register2_id, value2);
+            break;
     }
 }
 
@@ -2495,27 +2508,36 @@ void parse_db() {
                 if (c == '\\') {
                     source_cursor += 1;
                     char esc = source_cursor[0];
-                    if (esc == 'n') {
-                        emit_byte('\n');
-                    } else if (esc == '0') {
-                        emit_byte('\0');
-                    } else if (esc == 't') {
-                        emit_byte('\t');
-                    } else if (esc == 'r') {
-                        emit_byte('\r');
-                    } else if (esc == 'e') {
-                        emit_byte('\e');
-                    } else if (esc == '\\') {
-                        emit_byte('\\');
-                    } else if (esc == 'x') {
-                        source_cursor += 1;
-                        int hi = hex_digit(source_cursor[0]);
-                        source_cursor += 1;
-                        int lo = hex_digit(source_cursor[0]);
-                        emit_byte((hi << 4) | lo);
-                    } else {
-                        emit_byte('\\');
-                        emit_byte(esc);
+                    switch (esc) {
+                        case 'n':
+                            emit_byte('\n');
+                            break;
+                        case '0':
+                            emit_byte('\0');
+                            break;
+                        case 't':
+                            emit_byte('\t');
+                            break;
+                        case 'r':
+                            emit_byte('\r');
+                            break;
+                        case 'e':
+                            emit_byte('\e');
+                            break;
+                        case '\\':
+                            emit_byte('\\');
+                            break;
+                        case 'x':
+                            source_cursor += 1;
+                            int hi = hex_digit(source_cursor[0]);
+                            source_cursor += 1;
+                            int lo = hex_digit(source_cursor[0]);
+                            emit_byte((hi << 4) | lo);
+                            break;
+                        default:
+                            emit_byte('\\');
+                            emit_byte(esc);
+                            break;
                     }
                     source_cursor += 1;
                 } else {
@@ -3357,16 +3379,22 @@ int parse_atom() {
         if (c == '\\') {
             source_cursor += 1;
             char esc = source_cursor[0];
-            if (esc == 'n') {
-                value = '\n';
-            } else if (esc == '0') {
-                value = '\0';
-            } else if (esc == 't') {
-                value = '\t';
-            } else if (esc == 'r') {
-                value = '\r';
-            } else {
-                value = esc;
+            switch (esc) {
+                case 'n':
+                    value = '\n';
+                    break;
+                case '0':
+                    value = '\0';
+                    break;
+                case 't':
+                    value = '\t';
+                    break;
+                case 'r':
+                    value = '\r';
+                    break;
+                default:
+                    value = esc;
+                    break;
             }
         } else {
             value = c;
