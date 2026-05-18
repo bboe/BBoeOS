@@ -104,19 +104,18 @@ main:
         int 30h
         jc .timeout
 
-        ;; Poll recvfrom until we see an ICMP echo reply
-        mov ebp, 0FFFFh
-        .poll:
+        ;; Blocking recvfrom with 1 sec timeout
         mov ebx, [socket_fd]
         mov edi, recv_buffer
         mov ecx, 128
         xor dx, dx
+        mov esi, 1000          ; timeout_ms (1 sec)
         mov ah, SYS_NET_RECVFROM
         int 30h
         test eax, eax
-        jz .poll_next
+        jz .timeout
         cmp byte [recv_buffer], 0       ; ICMP type 0 = echo reply
-        jne .poll_next
+        jne .timeout
         ;; Got reply — RTT = now_ms - start_ms (full 32-bit)
         mov ah, SYS_RTC_MILLIS
         int 30h
@@ -124,11 +123,6 @@ main:
         and eax, 0xFFFF
         or eax, edx
         sub eax, [start_ms]
-        jmp .print_reply
-        .poll_next:
-        dec ebp
-        jnz .poll
-        jmp .timeout
 
         .print_reply:
         push eax                ; Save ms delta
@@ -149,10 +143,6 @@ main:
         call FUNCTION_WRITE_STDOUT
 
         .next:
-        ;; Sleep ~1 second between pings
-        mov ecx, 1000
-        mov ah, SYS_RTC_SLEEP
-        int 30h
         dec byte [count]
         jnz .loop
 

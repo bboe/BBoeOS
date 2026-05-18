@@ -52,20 +52,16 @@ dns_query:
         int 30h
         jc .err_close
 
-        ;; Poll for response
-        mov esi, 0FFFFh
-        .poll:
+        ;; Blocking recv with 5 sec timeout
         mov ebx, [dns_socket_fd]
         mov edi, SECTOR_BUFFER ; Receive into separate buffer
         mov ecx, 512
         mov dx, 1024           ; Filter on our source port
+        mov esi, 5000          ; timeout_ms (5 sec)
         mov ah, SYS_NET_RECVFROM
         int 30h
         test eax, eax
-        jnz .got_response
-        dec esi
-        jnz .poll
-        jmp .err_close
+        jz .err_close
 
         .got_response:
         ;; Close socket before processing response
