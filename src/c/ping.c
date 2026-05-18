@@ -68,7 +68,7 @@ int resolve_dns(char *domain, char *target, char *query, char *ip) {
     int received = 0;
     int tries = 30000;
     while (tries) {
-        received = recvfrom(fd, query, 512, 1024);
+        received = recvfrom(fd, query, 512, 1024, 0);
         if (received > 0) {
             break;
         }
@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
         int got = 0;
         int tries = 30000;
         while (tries) {
-            int n = recvfrom(fd, packet_buffer, 128, 0);
+            int n = recvfrom(fd, packet_buffer, 128, 0, 1000);
             if (n > 0 && packet_buffer[0] == '\0') {
                 got = 1;
                 break;
@@ -158,7 +158,6 @@ int main(int argc, char *argv[]) {
         } else {
             printf("Request timed out\n");
         }
-        sleep(1000);
         seq += 1;
         count -= 1;
     }
