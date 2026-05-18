@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: If you use BBoeOS in academic work, please cite it as below.
+title: BBoeOS
+abstract: >
+  A minimal x86 hobby operating system featuring a real-mode bootloader, a
+  paged 32-bit protected-mode kernel, ring-3 userland, a shell, a VFS with
+  bbfs and ext2 backends, an NE2000 networking stack, a self-hosted
+  assembler, and a custom C subset compiler.
+authors:
+  - family-names: Boe
+    given-names: Bryce
+    email: bbzbryce@gmail.com
+type: software
+license: AGPL-3.0-only
+repository-code: https://github.com/bboe/BBoeOS
+url: https://github.com/bboe/BBoeOS
+version: 0.11.0
+date-released: 2026-05-10
+keywords:
+  - operating-system
+  - x86
+  - kernel
+  - hobby-os
+  - nasm
+  - assembly
+  - self-hosted-compiler
