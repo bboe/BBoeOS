@@ -220,6 +220,13 @@ class Function(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class Goto(Node):
+    """``goto label;`` unconditional jump to a labelled statement in the same function."""
+
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class If(Node):
     """``if (cond) { body } [else { else_body }]`` statement."""
 
@@ -323,6 +330,29 @@ class Char(Int):
 
 
 @dataclass(kw_only=True, slots=True)
+class Label(Node):
+    """``name:`` labelled statement — branch target for :class:`Goto`."""
+
+    name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class LogicalAnd(Node):
+    """Short-circuit ``left && right`` expression."""
+
+    left: Node
+    right: Node
+
+
+@dataclass(kw_only=True, slots=True)
+class LogicalOr(Node):
+    """Short-circuit ``left || right`` expression."""
+
+    left: Node
+    right: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class MemberAccess(Node):
     """Member access expression: ``ptr->field`` or ``obj.field``.
 
@@ -364,22 +394,6 @@ class MemberIndex(Node):
     index: Node
     member_name: str
     object_name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class LogicalAnd(Node):
-    """Short-circuit ``left && right`` expression."""
-
-    left: Node
-    right: Node
-
-
-@dataclass(kw_only=True, slots=True)
-class LogicalOr(Node):
-    """Short-circuit ``left || right`` expression."""
-
-    left: Node
-    right: Node
 
 
 @dataclass(kw_only=True, slots=True)

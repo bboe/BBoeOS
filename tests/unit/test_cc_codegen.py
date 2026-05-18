@@ -3787,6 +3787,193 @@ def test_user_global_array_accepts_uint16_element() -> None:
     assert "mov word [_g_halfwords]" in output, f"expected halfword store:\n{output}"
 
 
+def test_user_goto_backward_jump_re_enters_block() -> None:
+    """``label: ...; goto label;`` backward-jumps to the label.
+
+    The compiled output must contain both the label definition and a
+    branch (peephole may fuse cmp+jmp into je/jl/etc.) targeting it.
+    """
+    asm = _user(
+        """
+        int main() {
+            int counter;
+            counter = 0;
+            again:
+            counter = counter + 1;
+            if (counter < 3) {
+                goto again;
+            }
+            return counter;
+        }
+        """,
+    )
+    branch_prefixes = ("jmp ", "je ", "jne ", "jl ", "jle ", "jg ", "jge ", "jc ", "jnc ", "ja ", "jae ", "jb ", "jbe ")
+    label_lines = [line.strip() for line in asm.splitlines() if line.strip().endswith(":") and "again" in line]
+    assert label_lines, f"expected user label `again` in output:\n{asm}"
+    target_name = label_lines[0].rstrip(":")
+    branch_lines = [
+        line for line in asm.splitlines() if target_name in line and any(line.strip().startswith(prefix) for prefix in branch_prefixes)
+    ]
+    assert branch_lines, f"expected branch to user label {target_name!r}:\n{asm}"
+
+
+def test_user_goto_forward_jump_emits_label_and_branch() -> None:
+    """Forward ``goto`` emits a branch to a later-defined label.
+
+    Use a conditional goto so the peephole can't collapse the jump as
+    dead code; the label must still appear after the goto in source
+    order.
+    """
+    asm = _user(
+        """
+        int g;
+        int main() {
+            if (g == 0) {
+                goto finish;
+            }
+            g = 99;
+            finish:
+            return g;
+        }
+        """,
+    )
+    lines = asm.splitlines()
+    label_index = next(
+        (index for index, line in enumerate(lines) if line.strip() == ".user_finish:"),
+        None,
+    )
+    branch_index = next(
+        (index for index, line in enumerate(lines) if ".user_finish" in line and not line.strip().endswith(":")),
+        None,
+    )
+    assert label_index is not None, f"expected `.user_finish:` label:\n{asm}"
+    assert branch_index is not None, f"expected branch to `.user_finish`:\n{asm}"
+    assert branch_index < label_index, f"forward goto: branch must precede label:\n{asm}"
+
+
+def test_user_goto_in_helper_function_uses_ir_path() -> None:
+    """``goto`` inside a non-main helper compiles via the IR builder.
+
+    Helper functions go through ir.Builder (main keeps the AST path).
+    The IR path must emit ``.user_<name>`` labels and jumps identical
+    in shape to the AST path so cross-function code generation stays
+    consistent.
+    """
+    asm = _user(
+        """
+        int helper(int seed) {
+            int value;
+            value = seed;
+            top:
+            value = value + 1;
+            if (value < seed + 3) {
+                goto top;
+            }
+            return value;
+        }
+
+        int main() {
+            return helper(0);
+        }
+        """,
+    )
+    assert ".user_top:" in asm, f"expected helper's label `.user_top:`:\n{asm}"
+    assert any(".user_top" in line and not line.strip().endswith(":") for line in asm.splitlines()), (
+        f"expected branch to `.user_top`:\n{asm}"
+    )
+
+
+def test_user_goto_nasm_assembles_cleanly() -> None:
+    """A program using ``goto`` produces NASM-valid output.
+
+    The ``.user_<name>`` label prefix relies on NASM local-label
+    scoping (a leading ``.`` makes the label local to the preceding
+    global label, which is the function name).  Cross-function reuse
+    of the same label name must therefore assemble without error.
+    """
+    _compile_and_assemble(
+        """
+        int helper(int n) {
+            again:
+            n = n - 1;
+            if (n > 0) {
+                goto again;
+            }
+            return n;
+        }
+
+        int main() {
+            int counter;
+            counter = helper(5);
+            again:
+            counter = counter + 1;
+            if (counter < 3) {
+                goto again;
+            }
+            return counter;
+        }
+        """,
+    )
+
+
+def test_user_goto_out_of_nested_loop_lands_outside() -> None:
+    """``goto done;`` from inside a switch inside a while exits both.
+
+    Demonstrates the kernel-side cleanup-chain motivator: a
+    deeply-nested control-flow point can jump straight to a
+    function-level label.  Verifies the goto target and the label
+    both exist and that the label appears after the loop's end label
+    in source order.
+    """
+    asm = _user(
+        """
+        int main() {
+            int index;
+            index = 0;
+            while (index < 10) {
+                switch (index) {
+                    case 3:
+                        goto done;
+                    default:
+                        index = index + 1;
+                }
+            }
+            done:
+            return index;
+        }
+        """,
+    )
+    # Peephole may fuse cmp+jmp into a conditional jump (je / jne / etc.)
+    # so accept any jump-family instruction targeting the user label.
+
+    def _is_branch_to_done(line: str) -> bool:
+        if "done" not in line:
+            return False
+        return "jmp" in line or line.strip().startswith(("je ", "jne ", "jc ", "jnc "))
+
+    assert any(_is_branch_to_done(line) for line in asm.splitlines()), f"missing branch to `done`:\n{asm}"
+    assert any(line.strip().endswith(":") and "done" in line for line in asm.splitlines()), f"missing `done:` label:\n{asm}"
+
+
+def test_user_goto_undefined_label_raises() -> None:
+    """``goto missing;`` without a matching label is a compile error.
+
+    The diagnostic must reference the missing label name so the user
+    can locate it.
+    """
+    ok, message = _compile(
+        """
+        int main() {
+            goto nowhere;
+            return 0;
+        }
+        """,
+        target="user",
+    )
+    assert not ok, f"expected undefined-label error, compilation succeeded:\n{message}"
+    assert "nowhere" in message, message
+
+
 def test_user_include_directive_pulls_macro_and_helper() -> None:
     """``#include "..."`` exposes #define macros and helper functions.
 

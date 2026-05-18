@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `goto` and labelled statements.**  Standard C `label:` and `goto
+  label;` syntax now parses, lowers, and emits a NASM-local `.user_<label>`
+  label / `jmp .user_<label>` branch.  Per-function scoping comes from NASM's
+  leading-dot local-label rule (scoped to the preceding non-local label, i.e.
+  the function name), so two functions may reuse the same label without
+  collision.  Both the AST codegen path (`main`) and the IR-builder path
+  (helpers) handle the new nodes; `Goto`/`Label` round-trip through
+  `ir.Jump`/`ir.Label`.  Compile-time diagnostics for undefined targets (`goto
+  X` with no `X:`) and duplicate labels in the same function.  Unblocks
+  kernel-side asm-to-C conversion of partial-allocation cleanup chains (the
+  `goto err_free_pd;` shape) — which is the dominant control-flow pattern in
+  `sys/exec.asm` and similar.
+
 - **Switch-conversion follow-ups to PR #393 / #394.**  Mechanical refactor of
   the remaining no-caveat `else if` chains the enum+switch landing left behind:
   the ANSI CSI dispatch in `src/drivers/console.c` (6-way on terminator byte),
@@ -18,10 +31,10 @@ time.
   `src/c/asm.c`, the `emit_sized_imm` 3-way `size` dispatch, and both
   backslash-escape handlers (string + char literal).  Pure readability win — no
   byte-level behavior change (test_asm.py reassembles every program in static/
-  against NASM byte-for-byte and confirms identity).  Char discriminants
-  switch on the underlying ``char`` variable directly — the
-  ``_type_of_operand``-driven Char-wrap in ``generate_switch`` (companion fix)
-  handles the case-label classification automatically.
+  against NASM byte-for-byte and confirms identity).  Char discriminants switch
+  on the underlying ``char`` variable directly — the ``_type_of_operand``-driven
+  Char-wrap in ``generate_switch`` (companion fix) handles the case-label
+  classification automatically.
 - **Self-hosted asm: `times N <branch>` now emits N copies instead of zero
   bytes.**  `src/c/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
   silently returned for every other payload — most painfully `times N jmp/jcc`

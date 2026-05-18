@@ -38,6 +38,7 @@ from cc.ast_nodes import (
     DoubleIndex,
     DoWhile,
     Function,
+    Goto,
     If,
     Index,
     IndexAssign,
@@ -47,6 +48,7 @@ from cc.ast_nodes import (
     IndexMemberIndexAssign,
     InlineAsm,
     Int,
+    Label,
     LogicalAnd,
     LogicalOr,
     MemberAccess,
@@ -1545,6 +1547,11 @@ class EmissionMixin:
         self.current_carry_return = function.carry_return
         self.current_function_is_main = name == "main"
         self.current_function_is_naked = function.naked
+        # Per-function user-label bookkeeping for the AST codegen path.
+        # The IR path validates inside ir.Builder; main() and other AST-
+        # path functions validate here after generate_body completes.
+        self.user_labels_defined: dict[str, int] = {}
+        self.user_labels_referenced: dict[str, int] = {}
         self.elide_frame = name == "main"
         # Frame-elide criteria for non-main functions.  The bp frame
         # becomes dead weight whenever the body makes no BP-relative
@@ -1883,6 +1890,11 @@ class EmissionMixin:
                 self._generate_tail_dispatch_if(body[-1])
             else:
                 self.generate_body(body)
+
+        for label_name, ref_line in self.user_labels_referenced.items():
+            if label_name not in self.user_labels_defined:
+                message = f"goto target '{label_name}' has no matching label in function '{name}'"
+                raise CompileError(message, line=ref_line)
 
         if name == "main":
             # Implicit fall-off end of main: default the exit code to 0
@@ -2320,6 +2332,19 @@ class EmissionMixin:
                 message = "continue outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_continue_labels[-1]}")
+        elif isinstance(statement, Goto):
+            self.user_labels_referenced.setdefault(statement.name, statement.line)
+            self.emit(f"        jmp .user_{statement.name}")
+        elif isinstance(statement, Label):
+            if statement.name in self.user_labels_defined:
+                message = f"duplicate label '{statement.name}'"
+                raise CompileError(message, line=statement.line)
+            self.user_labels_defined[statement.name] = statement.line
+            # A label is a basic-block boundary: any prior fall-through
+            # AX / SI tracking is invalid on the jump-arrival path.
+            self.ax_clear()
+            self.si_local = None
+            self.emit(f".user_{statement.name}:")
         elif isinstance(statement, DoWhile):
             self.ax_clear()
             self.generate_do_while(statement)
