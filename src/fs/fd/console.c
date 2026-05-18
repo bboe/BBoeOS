@@ -17,6 +17,11 @@
 // keyboard ring buffer is empty.
 char ps2_getc();
 
+// drivers/serial.c — non-blocking read from the COM1 RX ring (filled
+// by pmode_irq4_handler in entry.asm).  Returns 0 with ZF set if the
+// ring is empty.  Same contract as ps2_getc.
+char serial_getc();
+
 // drivers/vga.c — scrollback state and auto-exit helpers.
 void vga_scrollback_down(int rows);
 int vga_scrollback_is_active();
@@ -48,25 +53,13 @@ asm("fd_ioctl_console:\n"
     "        ret\n"
 
     ".fd_ioctl_console_try_getc:\n"
-    "        sti\n"           // let IRQ 1 fire so the PS/2 ring populates
+    "        sti\n"           // let IRQ 1 / IRQ 4 fire so the rings populate
     "        call ps2_getc\n" // AL = char or 0
-    "        movzx eax, al\n"
     "        test al, al\n"
-    "        jnz .fd_ioctl_console_done\n"
-    // PS/2 ring empty — try the serial LSR (port 0x3FD bit 0 = data ready).
-    "        push edx\n"
-    "        mov dx, 0x3FD\n"
-    "        in al, dx\n"
-    "        test al, 0x01\n"
-    "        jz .fd_ioctl_console_serial_empty\n"
-    "        mov dx, 0x3F8\n"
-    "        in al, dx\n"
+    "        jnz .fd_ioctl_console_got_byte\n"
+    "        call serial_getc\n" // PS/2 empty — try the COM1 ring
+    ".fd_ioctl_console_got_byte:\n"
     "        movzx eax, al\n"
-    "        pop edx\n"
-    "        jmp .fd_ioctl_console_done\n"
-    ".fd_ioctl_console_serial_empty:\n"
-    "        pop edx\n"
-    "        xor eax, eax\n"
     "        jmp .fd_ioctl_console_done\n"
 
     ".fd_ioctl_console_try_get_event:\n"
@@ -88,19 +81,13 @@ asm("fd_ioctl_console:\n"
     "        jmp .fd_ioctl_console_done\n"
     ".fd_ioctl_console_event_empty:\n"
     "        pop ebx\n"
-    "        push edx\n"
-    "        mov dx, 0x3FD\n"
-    "        in al, dx\n"
-    "        test al, 0x01\n"
-    "        jz .fd_ioctl_console_serial_empty_event\n"
-    "        mov dx, 0x3F8\n"
-    "        in al, dx\n"
+    "        call serial_getc\n"
+    "        test al, al\n"
+    "        jz .fd_ioctl_console_done_zero\n"
     "        movzx eax, al\n"
     "        or eax, 0x100\n" // pressed=1
-    "        pop edx\n"
     "        jmp .fd_ioctl_console_done\n"
-    ".fd_ioctl_console_serial_empty_event:\n"
-    "        pop edx\n"
+    ".fd_ioctl_console_done_zero:\n"
     "        xor eax, eax\n"
 
     ".fd_ioctl_console_done:\n"
@@ -130,10 +117,10 @@ int signal_any_pending();
 // 0x04 (ERROR_INTERRUPTED) if either PENDING_SIGINT or PENDING_SIGALRM
 // in current_program_state is set before a byte arrives.  The syscall
 // handler entered with IF=0 (the INT 30h gate clears it) so we sti
-// once before the polling loop to let IRQ 1 fire and the keyboard
-// ring populate; the loop then `hlt`s between checks so an idle shell
-// burns no CPU.  PS/2 IRQ 1 wakes us immediately; for serial input
-// (no IRQ wired) the PIT tick at 1 kHz bounds wakeup latency to 1 ms.
+// once before the polling loop to let IRQ 1 / IRQ 4 fire and the two
+// input rings populate; the loop then `hlt`s between checks so an
+// idle shell burns no CPU.  PS/2 IRQ 1 and COM1 IRQ 4 each wake us
+// immediately on keystroke.
 __attribute__((carry_return)) int
 fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                 uint8_t *destination __attribute__((in_register("edi"))),
@@ -156,8 +143,8 @@ fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
         if (byte != '\0') {
             break;
         }
-        if ((kernel_inb(0x3FD) & 0x01) != 0) {
-            byte = kernel_inb(0x3F8);
+        byte = serial_getc();
+        if (byte != '\0') {
             if (byte == '\x03') {
                 // Serial Ctrl+C — set the flag so the next IRQ epilogue
                 // (or this same syscall's epilogue, after we return)

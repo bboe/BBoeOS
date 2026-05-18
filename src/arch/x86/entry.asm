@@ -26,6 +26,8 @@
 ;;; ------------------------------------------------------------------------
 
         PMODE_IRQ0_VECTOR       equ 0x20        ; matches the pic_remap master base
+        PMODE_IRQ3_VECTOR       equ 0x23
+        PMODE_IRQ4_VECTOR       equ 0x24
         PMODE_IRQ5_VECTOR       equ 0x25
         PMODE_IRQ6_VECTOR       equ 0x26
 
@@ -115,6 +117,60 @@ pmode_irq0_handler:
 
 .pmode_irq0_after_alarm:
         call midi_drain_due
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
+        SIGNAL_TAIL_CHECK
+        iretd
+
+pmode_irq3_handler:
+        ;; NE2000 RX (and any other NIC interrupt source — we only
+        ;; enable IMR.PRX, so PRX is the only bit that should ever
+        ;; be set).  The handler's job is to wake a hlt-parked
+        ;; sys_net_recvfrom; the actual ring drain happens later in
+        ;; process context via ne2k_receive.  Clear ISR by writing
+        ;; 0xFF so the next packet triggers a fresh edge.
+        ;;
+        ;; ne2k_receive runs only under syscall context with IF=0
+        ;; (the INT 30h gate clears it), so this handler never
+        ;; preempts a NIC-page switch and the steady-state NIC
+        ;; command-register page is 0 — port 0x307 therefore
+        ;; resolves to ISR, not the page-1 CURR register.
+        pushad
+        mov al, 0xFF
+        out 0x307, al
+        mov al, PIC_EOI
+        out PIC1_CMD_PORT, al
+        SIGNAL_TAIL_CHECK
+        iretd
+
+pmode_irq4_handler:
+        ;; COM1 received-data-ready.  Drain every byte currently in
+        ;; the UART RX FIFO into serial_ring via serial_putc — the
+        ;; 8259 is in edge-triggered mode, so if we stopped after one
+        ;; byte while DR is still asserted, the next byte would never
+        ;; generate a fresh edge and would sit in the FIFO until the
+        ;; line dropped (i.e. effectively be lost on the test driver's
+        ;; line-at-a-time sends).  fd_read_console drains serial_ring
+        ;; from process context; the handler's job is to wake a
+        ;; hlt-parked reader immediately on keystroke (instead of
+        ;; within one PIT tick of polling 0x3FD).
+        ;;
+        ;; pushad envelope: serial_putc is a cc.py C body that uses
+        ;; ECX as scratch; IRQ 4 can fire at any user-mode boundary,
+        ;; so anything the C body touches has to be saved.
+        pushad
+.pmode_irq4_drain:
+        ;; 0x3FD / 0x3F8 are > 0xFF, so the immediate `in al, port`
+        ;; form truncates the constant; use the DX-indirect form.
+        mov dx, 0x3FD                       ; LSR
+        in al, dx
+        test al, 0x01                       ; DR (data ready)
+        jz .pmode_irq4_drained
+        mov dx, 0x3F8                       ; DATA
+        in al, dx
+        call serial_putc
+        jmp .pmode_irq4_drain
+.pmode_irq4_drained:
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
         SIGNAL_TAIL_CHECK
@@ -797,11 +853,25 @@ protected_mode_entry:
         call fdc_init
         call ps2_init
         call sb16_init
+        call serial_init
         call vfs_init
         ;; Probe the NE2000 NIC and bring it up if present.  CF set =
         ;; no NIC, which is fine — net programs surface that via a
         ;; "no NIC" message rather than halting the kernel.
         call network_initialize
+        jc .skip_ne2k_irq
+        ;; NIC came up: install pmode_irq3_handler at vector 0x23 and
+        ;; unmask IRQ 3 on PIC1 so an incoming packet wakes a
+        ;; hlt-parked sys_net_recvfrom immediately (instead of within
+        ;; one PIT tick).  ne2k_init has already enabled IMR.PRX so
+        ;; the NIC will assert the line on a received packet.
+        mov eax, pmode_irq3_handler
+        mov bl, PMODE_IRQ3_VECTOR
+        call idt_set_gate32
+        in al, PIC1_DATA_PORT
+        and al, 0F7h                    ; clear bit 3 (unmask IRQ 3)
+        out PIC1_DATA_PORT, al
+.skip_ne2k_irq:
 
         call vga_clear_screen
 

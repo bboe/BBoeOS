@@ -81,13 +81,15 @@ Use `./add_file.py <file>` to add files to the image. Use `./add_file.py -d
 ### Networking
 
 NE2000 ISA NIC driver at I/O base `0x300`. Requires QEMU `-netdev user,id=net0
--device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. Polled mode (no interrupts).
-Networking buffers (`net_receive_buffer` / `net_transmit_buffer`, 1.5 KB used
-inside a 4 KB frame each) are allocated dynamically by `network_initialize` from
-the bitmap allocator on a successful NIC probe; sessions booted without a NIC
-(or without the QEMU `-device ne2k_isa` flag) never spend the two frames.  asm
-callers load the kernel-virt pointers indirectly: `mov edi,
-[net_receive_buffer]`.
+-device ne2k_isa,netdev=net0,irq=3,iobase=0x300`. IRQ 3 wakes a hlt-parked
+`sys_net_recvfrom`; `pmode_irq3_handler` (in `entry.asm`) just acks `ISR.PRX`
+and EOIs PIC1, while the RX ring drain stays in process context inside
+`ne2k_receive` (called from the recvfrom poll loop). Networking buffers
+(`net_receive_buffer` / `net_transmit_buffer`, 1.5 KB used inside a 4 KB frame
+each) are allocated dynamically by `network_initialize` from the bitmap
+allocator on a successful NIC probe; sessions booted without a NIC (or without
+the QEMU `-device ne2k_isa` flag) never spend the two frames.  asm callers load
+the kernel-virt pointers indirectly: `mov edi, [net_receive_buffer]`.
 
 ### Serial Console
 
@@ -102,9 +104,9 @@ native VGA driver calls (`vga_set_cursor`, `vga_teletype`,
 post-protected-mode-flip.  `put_string` lives in `drivers/console.asm`.  The MBR
 does no string output; on boot it's BIOS text mode until the post-MBR path
 initialises the console driver.  Input from both PS/2 (`drivers/ps2.asm`, IRQ 1)
-and COM1 (`drivers/serial.asm`, polled in `fd_read_console`) feeds the same fd-0
-console.  Serial terminals send `0x7F` (DEL) for backspace, which is handled
-alongside `0x08`.
+and COM1 (`drivers/serial.c`, IRQ 4 → `serial_ring`, drained in
+`fd_read_console`) feeds the same fd-0 console.  Serial terminals send `0x7F`
+(DEL) for backspace, which is handled alongside `0x08`.
 
 ### Syscall Interface (INT 30h)
 

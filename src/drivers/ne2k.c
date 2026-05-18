@@ -1,4 +1,4 @@
-// ne2k.c — NE2000 ISA NIC driver (polled mode).
+// ne2k.c — NE2000 ISA NIC driver (polled RX drain, IRQ 3 wake).
 //
 // Replaces drivers/ne2k.asm.  Same caller-facing surface:
 //
@@ -87,7 +87,11 @@ void ne2k_init() {
     kernel_outb(0x300 + 0x0C, 0x04); // RCR: accept broadcast.
     kernel_outb(0x300 + 0x0D, 0);    // TCR: normal (no loopback).
     kernel_outb(0x300 + 0x07, 0xFF); // ISR: clear pending.
-    kernel_outb(0x300 + 0x0F, 0);    // IMR: no IRQs (polled).
+    kernel_outb(0x300 + 0x0F, 0x01); // IMR: PRX (RX done) only; wakes
+                                     // hlt-parked sys_net_recvfrom via
+                                     // pmode_irq3_handler in entry.asm.
+                                     // Packet drain still happens in
+                                     // process context via ne2k_receive.
     kernel_outb(0x300, 0x22);        // Page 0, start, abort DMA.
 }
 
