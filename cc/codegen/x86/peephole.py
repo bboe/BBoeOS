@@ -145,6 +145,38 @@ class Peepholer:
             return line[: line.index(":")]
         return None
 
+    def _iter_function_chunks(self) -> list[list[str]]:
+        """Split ``self.lines`` into per-function sub-lists.
+
+        A function chunk starts at a top-level label (``name:`` at
+        column zero, where ``name`` is an identifier — NOT a NASM
+        local label like ``.if_0:``) and ends at the line before the
+        next top-level label.  Anything before the first top-level
+        label (file-scope directives, ``%include``, top-of-file
+        comments) lands in a leading chunk so downstream filtering
+        still gets to see it; whatever ordering the peephole produces
+        is preserved.
+
+        Per-function scoping matters for passes whose analysis is
+        intrinsically frame-local — ``[bp-N]`` reads in function A
+        say nothing about ``[bp-N]`` in function B because each
+        function has its own stack frame.
+        """
+        chunks: list[list[str]] = [[]]
+        for line in self.lines:
+            stripped = line.strip()
+            is_function_label = (
+                line == stripped
+                and stripped.endswith(":")
+                and not stripped.startswith(".")
+                and len(stripped) > 1
+                and (stripped[0].isalpha() or stripped[0] == "_")
+            )
+            if is_function_label and chunks[-1]:
+                chunks.append([])
+            chunks[-1].append(line)
+        return chunks
+
     def _reads_acc(self, line: str, /) -> bool:
         """Return True if *line* reads AX / AL / AH (any width).
 
@@ -449,29 +481,36 @@ class Peepholer:
         reads of a word slot land at ``[bp-N+1]`` and would be missed
         by a bare-form regex, so any ``[bp-N...]`` operand counts as
         a read of slot N.
+
+        Scoping is per-function: ``[bp-N]`` in function A and ``[bp-N]``
+        in function B reference different physical slots, so each
+        function's read set is collected independently and consulted
+        only when filtering writes inside that same function.
         """
         base_register = self.target.base_register
         slot_pattern = re.compile(rf"\[{base_register}-(\d+)(?:[+\-][^\]]+)?\]")
         store_pattern = re.compile(rf"^mov \[{base_register}-(\d+)\],")
-        # Collect every slot that's READ anywhere.  For ``mov [bp-N], <src>``
-        # the destination ``[bp-N]`` is a write — skip past the closing
-        # ``]`` before scanning the rest for reads.  Other instructions
-        # treat any ``[bp-N...]`` reference as a read.
-        read_slots: set[int] = set()
-        for line in self.lines:
-            stripped = line.strip()
-            scan_start = 0
-            if store_pattern.match(stripped):
-                scan_start = stripped.index("]") + 1
-            read_slots.update(int(match.group(1)) for match in slot_pattern.finditer(stripped, scan_start))
-        # Drop writes whose slot is never read.
         result: list[str] = []
-        for line in self.lines:
-            stripped = line.strip()
-            store_match = store_pattern.match(stripped)
-            if store_match is not None and int(store_match.group(1)) not in read_slots:
-                continue
-            result.append(line)
+        for function_lines in self._iter_function_chunks():
+            # Collect every slot READ within this function.  For ``mov
+            # [bp-N], <src>`` the destination ``[bp-N]`` is a write —
+            # skip past the closing ``]`` before scanning the rest for
+            # reads.  Other instructions treat any ``[bp-N...]`` operand
+            # as a read.
+            read_slots: set[int] = set()
+            for line in function_lines:
+                stripped = line.strip()
+                scan_start = 0
+                if store_pattern.match(stripped):
+                    scan_start = stripped.index("]") + 1
+                read_slots.update(int(match.group(1)) for match in slot_pattern.finditer(stripped, scan_start))
+            # Drop writes whose slot is never read inside this function.
+            for line in function_lines:
+                stripped = line.strip()
+                store_match = store_pattern.match(stripped)
+                if store_match is not None and int(store_match.group(1)) not in read_slots:
+                    continue
+                result.append(line)
         self.lines = result
 
     def peephole_dead_test_after_sbb(self) -> None:

@@ -19,6 +19,17 @@ time.
   and `ping` adopt the new API and drop their userspace `sleep(1)` /
   `sleep(1000)` polling loops.
 
+- **cc.py: scope `peephole_dead_temp_slots` per function.**  Fixes a latent
+  conflation bug in the dead-IR-temp-slot dropper: it scanned the entire emitted
+  asm for `[bp-N]` reads, but `[bp-N]` is frame-local, so a real local read of
+  slot N in one function would keep a provably-dead IR-temp store at slot N in
+  every other function.  Splitting the pass on top-level function labels lets
+  every function evaluate its own read set independently.  Net win across the
+  shipped image: kernel.bin -576 bytes, user programs -2048 bytes (-2624 total);
+  largest individual wins on asm (-1071), shell (-309), sort (-186), grep (-79),
+  head (-77), tail (-77), echo (-48), edit (-45), tr (-42), uniq (-31), wc
+  (-31).
+
 - **cc.py: hoist memory-scalar switch discriminant before dispatch chain.** When
   the switch discriminant is a memory-backed scalar (file-scope global, unpinned
   local) and the switch has 2+ arms, `generate_switch` now emits a single load

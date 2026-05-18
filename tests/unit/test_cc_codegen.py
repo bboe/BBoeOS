@@ -2477,6 +2477,41 @@ def test_peephole_dead_temp_slot_dropped() -> None:
     assert "        mov [bp-2], ax" not in out, f"dead temp-slot store survived: {out}"
 
 
+def test_peephole_dead_temp_slot_dropped_across_functions() -> None:
+    """A dead store in ``g`` is dropped even when ``f`` reads the same offset.
+
+    ``[bp-N]`` is function-local — slot N in ``f`` and slot N in ``g`` are
+    different physical slots.  The dead-temp-slot pass must scope its
+    read-detection per function or it conflates them and keeps writes
+    that are provably dead inside their own frame.
+    """
+    out = _peephole_run([
+        "f:",
+        "        push bp",
+        "        mov bp, sp",
+        "        mov [bp-4], ax",
+        "        cmp word [bp-4], 5",
+        "        pop bp",
+        "        ret",
+        "g:",
+        "        push bp",
+        "        mov bp, sp",
+        "        sub sp, 4",
+        "        mov ax, dx",
+        "        mov [bp-4], ax",
+        "        mov sp, bp",
+        "        pop bp",
+        "        ret",
+    ])
+    # f's [bp-4] is read by ``cmp`` and must survive; g's [bp-4] is
+    # dead inside g's frame and must be dropped.  Without per-function
+    # scoping the pass conflates the two and keeps both writes
+    # (possibly in fused form like ``mov [bp-4],dx``).
+    bp_minus_4_writes = [line for line in out if "[bp-4]" in line and "mov" in line and "cmp" not in line]
+    # Expect exactly one write to [bp-4]: f's live one.
+    assert len(bp_minus_4_writes) == 1, f"expected only f's live [bp-4] write, got {bp_minus_4_writes}:\n{out}"
+
+
 def test_peephole_dead_temp_slot_kept_when_read() -> None:
     """A live temp slot survives the peephole.
 
