@@ -106,6 +106,17 @@ make_os.sh            Build script
 See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for a detailed history of changes
 by version and date.
 
+## License
+
+BBoeOS is © 2026 Bryce Boe and is licensed under the GNU Affero General Public
+License v3.0 — see [`LICENSE`](LICENSE) for the full text and
+[`COPYRIGHT`](COPYRIGHT) for the copyright notice.  This is a personal hobby
+project and external contributions are accepted only occasionally; when
+accepted, they require copyright assignment to the maintainer under the terms of
+the [Copyright Assignment Agreement](COPYRIGHT_ASSIGNMENT.md).  See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor workflow and
+[`SECURITY.md`](SECURITY.md) for the private vulnerability reporting process.
+
 ## Resources
 
 * https://neosmart.net/wiki/mbr-boot-process/
