@@ -128,7 +128,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "putchar": frozenset({"ax"}),
         "read": frozenset({"ax", "bx", "cx", "di"}),
         "reboot": frozenset({"ax"}),
-        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx"}),
+        "recvfrom": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "rename": frozenset({"ax", "di", "si"}),
         "rmdir": frozenset({"ax", "si"}),
         "seek": frozenset({"ax", "bx", "cx"}),

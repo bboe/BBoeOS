@@ -959,20 +959,23 @@ class BuiltinsMixin:
     def builtin_recvfrom(self, arguments: list[Node], /) -> None:
         """Generate code for the recvfrom() builtin.
 
-        ``recvfrom(fd, buf, len, port)`` emits register setup followed
-        by ``mov ah, SYS_NET_RECVFROM / int 30h``.  Returns bytes
-        received in AX (0 if no matching packet).  Argument loads are
-        topologically scheduled by :meth:`_emit_builtin_arg_moves` so a
-        pinned-register variable referenced by any argument expression
-        is not clobbered before use.
+        ``recvfrom(fd, buf, len, port, timeout_ms)`` emits register
+        setup followed by ``mov ah, SYS_NET_RECVFROM / int 30h``.
+        Returns bytes received in AX (0 if no matching packet and the
+        timeout elapsed, or immediately if timeout_ms == 0).  Argument
+        loads are topologically scheduled by
+        :meth:`_emit_builtin_arg_moves` so a pinned-register variable
+        referenced by any argument expression is not clobbered before
+        use.
         """
-        self._check_argument_count(arguments=arguments, expected=4, name="recvfrom")
-        fd_argument, buffer_argument, len_argument, port_argument = arguments
+        self._check_argument_count(arguments=arguments, expected=5, name="recvfrom")
+        fd_argument, buffer_argument, len_argument, port_argument, timeout_argument = arguments
         self._emit_builtin_arg_moves([
             (self.target.bx_register, fd_argument),
             (self.target.di_register, buffer_argument),
             (self.target.count_register, len_argument),
             (self.target.dx_register, port_argument),
+            (self.target.si_register, timeout_argument),
         ])
         self._emit_syscall("NET_RECVFROM")
         self.ax_clear()
