@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **edit.c line editor: `else if` chain → `switch`.**  Converts the 13+
+  control-code dispatch in `src/c/edit.c`'s main edit loop to a `switch
+  (character)`.  No break-from-loop arms (all exits use `return 0;` from the
+  Ctrl+Q dirty=0 path), so no `goto` needed. Backspace+DEL and `\r`+`\n` share
+  fall-through cases.  Case bodies with locals (`int c`, `int target_col`, `int
+  found_nl`, `int save_fd`+chunk-write helpers, `int kill_index`, `int i`) keep
+  their declarations inside `{ }` blocks within their case — possible thanks to
+  the compound-statement support that landed in PR #410. The printable-ASCII
+  range check (`' ' <= c <= '~'`) stays inside the `default:` arm since switch
+  can't range-match.  Combined with the interleaved-switch optimisation from PR
+  #421, `src/c/edit.c` shrinks by 9 bytes vs the pre-refactor else-if chain
+  (3312 → 3303).
+
 - **cc.py: interleaved switch dispatch with pinned-discriminant promotion.**
   When every case body in a `switch` always-exits (no body-to-body
   fall-through), the auto-pin allocator now ranks the discriminant by case-arm
