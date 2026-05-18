@@ -1,6 +1,6 @@
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794  # v0.15.13
+  rev: v0.15.13  # v0.15.13
   hooks:
     # Run the linter.
     - id: ruff-check
@@ -8,16 +8,16 @@ repos:
     # Run the formatter.
     - id: ruff-format
 - repo: https://github.com/MarcoGorelli/auto-walrus
-  rev: ba0661836089a532a710f68713a3e3e53f7f0113  # 0.3.4
+  rev: 0.4.1  # 0.3.4
   hooks:
     - id: auto-walrus
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: dd18dad857d6133e90bbe478f4f2f22ec0030269  # v22.1.5
+  rev: v22.1.5  # v22.1.5
   hooks:
     - id: clang-format
       exclude: ^(tools/doom/|static/)
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
+  rev: v6.0.0  # v6.0.0
   hooks:
     - id: check-added-large-files
     - id: check-case-conflict
