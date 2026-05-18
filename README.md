@@ -1,5 +1,11 @@
 # BBoeOS
 
+<p>
+  <a href="https://github.com/bboe/BBoeOS/actions/workflows/test.yml"><img src="https://github.com/bboe/BBoeOS/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3"></a>
+  <a href="https://cla-assistant.io/bboe/BBoeOS"><img src="https://cla-assistant.io/readme/badge/bboe/BBoeOS" alt="CLA assistant"></a>
+</p>
+
 ![bboeos demo](docs/gifs/demo.gif)
 
 A minimal x86 operating system: a real-mode bootloader hands off to a paged
