@@ -132,7 +132,7 @@ void print_mac(const char *buffer);
 /* Warm-reboot the machine via the keyboard controller (no return) */
 void reboot(void) __attribute__((noreturn));
 /* Receive UDP datagram filtered by port (BBoeOS-specific) */
-int recvfrom(int fd, char *buffer, int length, int port);
+int recvfrom(int fd, char *buffer, int length, int port, int timeout_ms);
 /* Reposition file fd's read cursor; whence is SEEK_SET / SEEK_CUR / SEEK_END.
    Returns the new absolute position (clamped to [0, file_size]) or -1 on
    error.  POSIX's lseek takes off_t; BBoeOS uses int and returns int. */
