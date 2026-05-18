@@ -878,6 +878,12 @@ TESTS: list[ProgramTest] = [
     # AL = ERROR_INVALID (5), and the builtin wraps that as -(5) = -5.
     ProgramTest("recursive_exec_test", ["recursive_exec_test"], r"rc=-5"),
     ProgramTest(
+        "recv_nonblock_test",
+        ["recv_nonblock_test"],
+        r"^OK$",
+        with_net=True,
+    ),
+    ProgramTest(
         "rename",
         ["cp src/parse_ip.asm out.asm", "mv out.asm renamed.asm", "cat renamed.asm"],
         r"^parse_ip:",
