@@ -42,6 +42,13 @@ dns_query:
         jc .err
         mov [dns_socket_fd], eax
 
+        ;; setsockopt(fd, SO_RCVTIMEO, 5000) — 5 sec blocking recv
+        mov ebx, [dns_socket_fd]
+        mov al, SO_RCVTIMEO
+        mov ecx, 5000
+        mov ah, SYS_NET_SETSOCKOPT
+        int 30h
+
         ;; Send UDP query to DNS server
         mov ebx, [dns_socket_fd]
         mov esi, SECTOR_BUFFER
@@ -52,20 +59,15 @@ dns_query:
         int 30h
         jc .err_close
 
-        ;; Poll for response
-        mov esi, 0FFFFh
-        .poll:
+        ;; Blocking recv (kernel uses fd's SO_RCVTIMEO = 5000 ms)
         mov ebx, [dns_socket_fd]
-        mov edi, SECTOR_BUFFER ; Receive into separate buffer
+        mov edi, SECTOR_BUFFER
         mov ecx, 512
         mov dx, 1024           ; Filter on our source port
         mov ah, SYS_NET_RECVFROM
         int 30h
         test eax, eax
-        jnz .got_response
-        dec esi
-        jnz .poll
-        jmp .err_close
+        jz .err_close
 
         .got_response:
         ;; Close socket before processing response
