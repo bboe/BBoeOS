@@ -11,15 +11,27 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: hoist memory-scalar switch discriminant before dispatch chain.** When
+  the switch discriminant is a memory-backed scalar (file-scope global, unpinned
+  local) and the switch has 2+ arms, `generate_switch` now emits a single load
+  into the accumulator before the dispatch chain so each compare lowers to `cmp
+  al, imm` / `cmp eax, imm` (2-3 bytes) instead of `cmp byte [addr], imm` / `cmp
+  dword [addr], imm` (5-7 bytes).  Self-paying for any switch with 2+ arms;
+  pinned-register discriminants take the existing register fast path and skip
+  the hoist.  Concrete win on `src/c/edit.c`'s 14-arm line-editor switch
+  (introduced in PR #412): -67 bytes.  Also pins a regression test that cases
+  whose bodies always-exit via `return` / `goto` don't emit a dead fall-through
+  `jmp .switch_*_end`.
+
 - **shell line editor: `else if` chain → `switch`.**  Converts the 13+
   control-code dispatch in `src/c/shell.c`'s main line-editor loop to a `switch
   (character)`.  The three arms that previously used `break;` to exit the outer
   `while (1)` loop (Ctrl-C cancel, Ctrl-L reprompt, Enter submit) now `goto
-  line_done;` instead.  Backspace and DEL share a fall-through case.
-  Case-locals (`yank_index` / `escape_next` / `final_byte`) live inside `{ }`
-  blocks within their case bodies, made possible by the compound-statement
-  support added in the same release.  Behaviour unchanged (test_programs.py,
-  test_pipeline_*, test_scrollback all pass).
+  line_done;` instead.  Backspace and DEL share a fall-through case. Case-locals
+  (`yank_index` / `escape_next` / `final_byte`) live inside `{ }` blocks within
+  their case bodies, made possible by the compound-statement support added in
+  the same release.  Behaviour unchanged (test_programs.py, test_pipeline_*,
+  test_scrollback all pass).
 
 - **cc.py: `{ }` compound statements.**  Standard C blocks now parse at any
   statement position, not just as the body of `if` / `while` / `for` / `do` /

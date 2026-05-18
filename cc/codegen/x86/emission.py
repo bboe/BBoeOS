@@ -2494,10 +2494,31 @@ class EmissionMixin:
         # only preserved on bare ``'x'`` literals reachable from
         # ``parse_primary``), so the wrap has to happen here.
         case_label_node = Char if self._type_of_operand(statement.discriminant) == "char" else Int
+        # Hoist a memory-backed scalar discriminant into AX before the
+        # dispatch chain when there are 2+ arms.  Without the hoist,
+        # ``emit_comparison``'s "memory scalar compared to constant"
+        # fast path emits ``cmp byte [addr], imm`` for every arm —
+        # 5-7 bytes each.  With the discriminant resident in AX (and
+        # ``ax_local`` set to its name so generate_expression skips a
+        # reload), every arm becomes a 2-3 byte ``cmp al, imm`` /
+        # ``cmp eax, imm``.  Self-paying for N >= 2 arms.  Pinned-
+        # register discriminants already get the register form via the
+        # pinned fast path, so no hoist needed for them.
+        self.ax_clear()
+        discriminant = statement.discriminant
+        hoist_eligible = (
+            len(case_arms) >= 2
+            and isinstance(discriminant, Var)
+            and self._is_memory_scalar(discriminant.name)
+            and discriminant.name not in self.pinned_register
+            and discriminant.name not in self.variable_arrays
+            and self.variable_types.get(discriminant.name) != "unsigned long"
+        )
+        if hoist_eligible:
+            self.generate_expression(discriminant)
         for case, arm_label in zip(case_arms, case_labels, strict=True):
-            self.ax_clear()
             condition = BinaryOperation(
-                left=statement.discriminant,
+                left=discriminant,
                 line=discriminant_line,
                 operation="==",
                 right=case_label_node(line=discriminant_line, value=case.value),
