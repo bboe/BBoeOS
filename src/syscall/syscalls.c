@@ -136,8 +136,11 @@ asm("kernel_hlt_idle:\n"
 // if nothing matched, non-zero on match).  If timeout_ms > 0, blocks
 // — halting the CPU between PIT ticks via kernel_hlt_idle — until a
 // matching packet arrives or the deadline (rtc_tick_read() +
-// timeout_ms) is reached, whichever comes first.  Always returns CF
-// clear; AX = bytes copied (0 on timeout or no match).
+// timeout_ms) is reached, whichever comes first.  Non-matching UDP
+// packets (wrong destination port) still count against the wall-clock
+// deadline: each iteration that does not return a successful read checks
+// rtc_tick_read() >= deadline before re-polling or sleeping.  Always
+// returns CF clear; AX = bytes copied (0 on timeout or no match).
 __attribute__((carry_return)) int
 sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                  int fd_num __attribute__((in_register("bx"))),
@@ -145,13 +148,13 @@ sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                  int max_bytes __attribute__((in_register("ecx"))),
                  int local_port __attribute__((in_register("dx"))),
                  int timeout_ms __attribute__((in_register("esi")))) {
+    uint32_t deadline;
+    int dest_port;
     struct fd *entry;
+    int had_packet;
+    int have_deadline;
     uint8_t *payload;
     int payload_length;
-    int dest_port;
-    uint8_t *receive_buffer;
-    uint32_t deadline;
-    int have_deadline;
     if (!fd_lookup(fd_num, &entry)) {
         *bytes_copied = 0;
         return 1;
@@ -163,11 +166,13 @@ sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
     have_deadline = 0;
     deadline = 0;
     while (1) {
+        had_packet = 0;
         if (entry->type == FD_TYPE_UDP) {
             if (udp_receive(&payload, &payload_length)) {
+                had_packet = 1;
                 // UDP dest port lives at net_receive_buffer+36 (big-endian).
-                receive_buffer = net_receive_buffer;
-                dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
+                dest_port =
+                    (net_receive_buffer[36] << 8) | net_receive_buffer[37];
                 if (dest_port == (local_port & 0xFFFF)) {
                     if (payload_length > max_bytes) {
                         payload_length = max_bytes;
@@ -176,12 +181,11 @@ sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                     *bytes_copied = payload_length;
                     return 1;
                 }
-                // Non-matching UDP packet: drop and re-poll without
-                // counting it against the deadline budget.
-                continue;
+                // Non-matching UDP packet: fall through to deadline check.
             }
         } else {
             if (icmp_receive(&payload, &payload_length)) {
+                had_packet = 1;
                 if (payload_length > max_bytes) {
                     payload_length = max_bytes;
                 }
@@ -202,7 +206,9 @@ sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
             *bytes_copied = 0;
             return 1;
         }
-        kernel_hlt_idle();
+        if (!had_packet) {
+            kernel_hlt_idle();
+        }
     }
 }
 
