@@ -32,6 +32,7 @@ from cc.ast_nodes import (
     Break,
     Call,
     Char,
+    Compound,
     Conditional,
     Continue,
     DerefAssign,
@@ -2327,6 +2328,8 @@ class EmissionMixin:
                 message = "break outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
+        elif isinstance(statement, Compound):
+            self.generate_body(statement.body, scoped=True)
         elif isinstance(statement, Continue):
             if not self.loop_continue_labels:
                 message = "continue outside of a loop"

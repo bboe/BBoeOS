@@ -23,6 +23,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Call,
     Char,
+    Compound,
     Conditional,
     DerefAssign,
     DoubleIndex,
@@ -1973,8 +1974,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     collect(statement.body, top_level=False)
                     if statement.else_body is not None:
                         collect(statement.else_body, top_level=False)
-                elif isinstance(statement, (DoWhile, While)):
+                elif isinstance(statement, (Compound, DoWhile, While)):
                     collect(statement.body, top_level=False)
+                elif isinstance(statement, Switch):
+                    for case in statement.cases:
+                        collect(case.body, top_level=False)
 
         collect(body, top_level=True)
 
@@ -2457,8 +2461,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     collect_function_pointer_vars(stmt.body)
                     if stmt.else_body:
                         collect_function_pointer_vars(stmt.else_body)
-                elif isinstance(stmt, (DoWhile, While)):
+                elif isinstance(stmt, (Compound, DoWhile, While)):
                     collect_function_pointer_vars(stmt.body)
+                elif isinstance(stmt, Switch):
+                    for case in stmt.cases:
+                        collect_function_pointer_vars(case.body)
 
         collect_function_pointer_vars(body)
         # File-scope function_pointer globals are visible from every
@@ -3232,6 +3239,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             elif isinstance(statement, Switch):
                 for case in statement.cases:
                     self.scan_locals(case.body, top_level=False)
+            elif isinstance(statement, Compound):
+                self.scan_locals(statement.body, top_level=False)
 
     def validate_body_comparisons(self, statements: list[Node], /) -> None:
         """Walk a function body, validating every comparison's operand types.
