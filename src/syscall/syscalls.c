@@ -1,4 +1,4 @@
-// syscalls.c — INT 30h handler bodies for the four non-trivial net_*
+// syscalls.c — INT 30h handler bodies for the five non-trivial net_*
 // syscalls.  The dispatcher (`syscall_handler`, `.iret_cf`, the dispatch
 // table, `.check_shell`) and every other handler stay in
 // `arch/x86/syscall.asm` because the trivial cases are 2-4 lines each
@@ -11,6 +11,7 @@
 //   sys_net_recvfrom    — fd-type dispatch into udp_receive / icmp_receive
 //                         + UDP destination-port filter + payload memcpy
 //   sys_net_sendto      — fd-type dispatch into udp_send / ip_send
+//   sys_net_setsockopt  — store a per-socket option on the fd entry
 //
 // Each is called from the dispatcher with a plain `call sys_net_X; jmp
 // .iret_cf`.  The return convention is cc.py's `carry_return` (return 1
@@ -22,12 +23,16 @@
 // pre-loads it before the call, so the C body names it as a regular
 // `in_register("ax")` parameter.
 
-// fd table layout: only `type` and `flags` are touched here; the rest
-// of the entry is opaque padding cc.py doesn't need to know about.
+// fd table layout: matches the FD_OFFSET_* constants in
+// include/constants.asm.  Fields not used in this file are opaque
+// padding that cc.py doesn't need to know about; only type, flags, and
+// recv_timeout_ms are touched here.
 struct fd {
     uint8_t type;
     uint8_t flags;
-    uint8_t _rest[30];
+    uint8_t _pad0[50];
+    uint32_t recv_timeout_ms;
+    uint8_t _rest[8];
 };
 
 // fs/fd.c: returns AX = fd number, ESI = entry pointer, CF set on
@@ -38,6 +43,20 @@ fd_alloc(int *fd_num __attribute__((out_register("ax"))),
 __attribute__((carry_return)) __attribute__((preserve_register("ecx"))) int
 fd_lookup(int fd_num __attribute__((in_register("bx"))),
           struct fd *entry __attribute__((out_register("esi"))));
+
+// kernel_hlt_idle — enable interrupts, halt until the next IRQ, then
+// disable interrupts again.  Used by sys_net_recvfrom's wait loop so
+// the CPU sleeps between PIT ticks instead of busy-spinning.  The
+// surrounding syscall handler entered with IF=0 (interrupt gate), so
+// we restore that state on return.
+void kernel_hlt_idle();
+asm("kernel_hlt_idle:\n"
+    "    sti\n"
+    "    hlt\n"
+    "    cli\n"
+    "    ret\n");
+
+uint32_t rtc_tick_read();
 
 // Network plumbing.  All four return CF set on error.
 __attribute__((carry_return)) int
@@ -116,7 +135,14 @@ sys_net_open(int *result_fd __attribute__((out_register("ax"))),
 // sys_net_recvfrom: dispatch by fd type.  UDP filters incoming packets
 // against the caller's local port (passed in DX, host byte order); ICMP
 // hands every received packet through.  Always returns CF clear; AX =
-// bytes copied (0 if nothing matched).
+// bytes copied (0 if nothing matched / timeout).
+//
+// Reads entry->recv_timeout_ms (default 0 = non-blocking).  When
+// non-zero the kernel loops on sti;hlt;cli via kernel_hlt_idle() until
+// a packet matches or the deadline passes (system_ticks >=
+// start + recv_timeout_ms).  Non-matching UDP packets count against the
+// wall-clock deadline, not a packets-seen budget.  AX = 0 on no-match
+// or timeout; AX = bytes on success.  CF clear in all cases.
 __attribute__((carry_return)) int
 sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                  int fd_num __attribute__((in_register("bx"))),
@@ -127,38 +153,66 @@ sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
     uint8_t *payload;
     int payload_length;
     int dest_port;
-    uint8_t *receive_buffer;
+    uint32_t timeout_ms;
+    uint32_t deadline;
+    int have_deadline;
+    int had_packet;
     if (!fd_lookup(fd_num, &entry)) {
         *bytes_copied = 0;
         return 1;
     }
-    if (entry->type == FD_TYPE_UDP) {
-        if (!udp_receive(&payload, &payload_length)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-        // UDP dest port lives at net_receive_buffer+36 (big-endian).
-        receive_buffer = net_receive_buffer;
-        dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
-        if (dest_port != (local_port & 0xFFFF)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-    } else if (entry->type == FD_TYPE_ICMP) {
-        if (!icmp_receive(&payload, &payload_length)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-    } else {
+    if (entry->type != FD_TYPE_UDP && entry->type != FD_TYPE_ICMP) {
         *bytes_copied = 0;
         return 1;
     }
-    if (payload_length > max_bytes) {
-        payload_length = max_bytes;
+    timeout_ms = entry->recv_timeout_ms;
+    have_deadline = 0;
+    deadline = 0;
+    while (1) {
+        had_packet = 0;
+        if (entry->type == FD_TYPE_UDP) {
+            if (udp_receive(&payload, &payload_length)) {
+                had_packet = 1;
+                dest_port =
+                    (net_receive_buffer[36] << 8) | net_receive_buffer[37];
+                if (dest_port == (local_port & 0xFFFF)) {
+                    if (payload_length > max_bytes) {
+                        payload_length = max_bytes;
+                    }
+                    memcpy(user_buffer, payload, payload_length);
+                    *bytes_copied = payload_length;
+                    return 1;
+                }
+                // Non-matching UDP packet: still counts against the
+                // wall-clock deadline (fall through to deadline check).
+            }
+        } else {
+            if (icmp_receive(&payload, &payload_length)) {
+                had_packet = 1;
+                if (payload_length > max_bytes) {
+                    payload_length = max_bytes;
+                }
+                memcpy(user_buffer, payload, payload_length);
+                *bytes_copied = payload_length;
+                return 1;
+            }
+        }
+        if (timeout_ms == 0) {
+            *bytes_copied = 0;
+            return 1;
+        }
+        if (!have_deadline) {
+            deadline = rtc_tick_read() + timeout_ms;
+            have_deadline = 1;
+        }
+        if (rtc_tick_read() >= deadline) {
+            *bytes_copied = 0;
+            return 1;
+        }
+        if (!had_packet) {
+            kernel_hlt_idle();
+        }
     }
-    memcpy(user_buffer, payload, payload_length);
-    *bytes_copied = payload_length;
-    return 1;
 }
 
 // sys_net_sendto: dispatch by fd type.  UDP wraps the payload in
@@ -198,5 +252,39 @@ sys_net_sendto(int *bytes_sent __attribute__((out_register("ax"))),
         return 1;
     }
     *bytes_sent = 0;
+    return 0;
+}
+
+// sys_net_setsockopt: store a per-socket option on the fd entry.
+// BX = fd, AL = option_name (SO_RCVTIMEO=1), ECX = value.
+// On success AX = 0, CF clear.  On error AX = -1, CF set:
+//   - bad fd
+//   - fd is not a socket (must be UDP / ICMP / NET)
+//   - unknown option_name
+//   - negative value (defensive — SO_RCVTIMEO is unsigned ms)
+__attribute__((carry_return)) int
+sys_net_setsockopt(int *result __attribute__((out_register("ax"))),
+                   int fd_num __attribute__((in_register("bx"))),
+                   int option_name __attribute__((in_register("ax"))),
+                   int value __attribute__((in_register("ecx")))) {
+    struct fd *entry;
+    if (!fd_lookup(fd_num, &entry)) {
+        *result = -1;
+        return 0;
+    }
+    if (entry->type != FD_TYPE_UDP && entry->type != FD_TYPE_ICMP) {
+        *result = -1;
+        return 0;
+    }
+    if ((option_name & 0xFF) == SO_RCVTIMEO) {
+        if (value < 0) {
+            *result = -1;
+            return 0;
+        }
+        entry->recv_timeout_ms = (uint32_t)value;
+        *result = 0;
+        return 1;
+    }
+    *result = -1;
     return 0;
 }

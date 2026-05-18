@@ -39,6 +39,7 @@
         %assign FD_OFFSET_FLAGS 1       ; offset of flags field within FD entry
         %assign FD_OFFSET_MODE 16       ; offset of mode field (file permission flags)
         %assign FD_OFFSET_POSITION 8         ; offset of pos field within FD entry (32-bit)
+        %assign FD_OFFSET_RECV_TIMEOUT_MS 52    ; uint32 ms; 0 = non-blocking
         %assign FD_OFFSET_SIZE 4        ; offset of size field within FD entry (32-bit)
         %assign FD_OFFSET_START 2       ; offset of start_sec field within FD entry
         %assign FD_OFFSET_TYPE 0        ; offset of type field within FD entry
@@ -166,6 +167,7 @@
         %assign SB16_DSP_READ_STATUS  0x22E   ; referenced from asm IRQ 5 handler
         %assign SOCK_DGRAM 1
         %assign SOCK_RAW 0
+        %assign SO_RCVTIMEO 1
         ;; Per-program scheduling state.  Sorted strict-alphabetical;
         ;; STATE_RUNNING is intentionally last so BSS zero-init gives
         ;; STATE_BLOCKED_READ — a "not runnable" default — for fresh slots.
@@ -207,6 +209,7 @@
         %assign SYS_NET_OPEN 21h
         %assign SYS_NET_RECVFROM 22h
         %assign SYS_NET_SENDTO 23h
+        %assign SYS_NET_SETSOCKOPT 24h
         %assign SYS_RTC_ALARM 30h       ; EBX=ms_until_first (0=cancel), ECX=ms_interval (0=one-shot); returns EAX=ms remaining on prior alarm
         %assign SYS_RTC_DATETIME 31h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_MILLIS 32h      ; returns EAX = milliseconds since boot

@@ -29,8 +29,9 @@ numbers are defined symbolically as `SYS_*` constants in
 | 19h   | io_write     | Write to fd, BX = fd, SI = buf, CX = count; AX = bytes, CF on err |
 | 20h   | net_mac      | Read cached MAC, DI = 6-byte buffer, CF if no NIC      |
 | 21h   | net_open     | Open socket, AL = type (SOCK_RAW=0, SOCK_DGRAM=1), DL = protocol (IPPROTO_UDP=17, IPPROTO_ICMP=1; 0 for raw); AX = fd, CF if no NIC or table full |
-| 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); AX=bytes (0=none), CF err |
+| 22h   | net_recvfrom | Recv datagram via fd (UDP or ICMP): BX=fd, DI=buf, CX=len, DX=port (UDP) or ignored (ICMP); reads per-fd SO_RCVTIMEO (0 = non-blocking, >0 = blocks up to that many ms); AX=bytes (0=none), CF err |
 | 23h   | net_sendto   | Send datagram via fd: BX=fd, SI=buf, CX=len, DI=IP; UDP also uses DX=src port, BP=dst port (ignored for ICMP); AX=bytes, CF err |
+| 24h   | net_setsockopt | Set socket option: BX=fd, AL=option_name (SO_RCVTIMEO=1), ECX=value; returns AX=0 on success, -1 on bad fd / wrong fd type / unknown option / negative value, CF err |
 | 30h   | rtc_alarm    | Arm/disarm interval timer. EBX = ms_until_first_fire (0 = cancel), ECX = ms_interval (0 = one-shot). EAX = ms remaining on prior alarm (0 if none). CF clear, no error path. Fires SIGALRM via SIGNAL_TAIL_CHECK. |
 | 31h   | rtc_datetime | Get wall-clock time, EAX = unsigned seconds since 1970-01-01 UTC |
 | 32h   | rtc_millis   | Get milliseconds since boot, EAX = ms (wraps at ~49.7 days)      |

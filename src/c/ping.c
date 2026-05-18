@@ -122,6 +122,7 @@ int main(int argc, char *argv[]) {
     if (fd < 0) {
         die("Socket error\n");
     }
+    setsockopt(fd, SO_RCVTIMEO, 1000);
 
     int seq = 1;
     int count = 4;
@@ -138,18 +139,8 @@ int main(int argc, char *argv[]) {
 
         int start_time = uptime_ms();
         sendto(fd, packet_buffer, 16, target_ip, 0, 0);
-        /* ~32k tries fits signed 16-bit (our C subset compares signed)
-           and is plenty for the local ring to surface a reply. */
-        int got = 0;
-        int tries = 30000;
-        while (tries) {
-            int n = recvfrom(fd, packet_buffer, 128, 0);
-            if (n > 0 && packet_buffer[0] == '\0') {
-                got = 1;
-                break;
-            }
-            tries -= 1;
-        }
+        int n = recvfrom(fd, packet_buffer, 128, 0);
+        int got = (n > 0 && packet_buffer[0] == '\0');
         if (got) {
             int duration = uptime_ms() - start_time;
             printf("Reply from ");
@@ -158,7 +149,6 @@ int main(int argc, char *argv[]) {
         } else {
             printf("Request timed out\n");
         }
-        sleep(1000);
         seq += 1;
         count -= 1;
     }

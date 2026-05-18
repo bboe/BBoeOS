@@ -52,6 +52,13 @@ main:
         jc .sock_err
         mov [socket_fd], eax
 
+        ;; setsockopt(fd, SO_RCVTIMEO, 1000) — 1 sec blocking recv
+        mov ebx, [socket_fd]
+        mov al, SO_RCVTIMEO
+        mov ecx, 1000
+        mov ah, SYS_NET_SETSOCKOPT
+        int 30h
+
         mov byte [count], PING_COUNT
         .loop:
         ;; Build ICMP echo request: 8-byte header + 8-byte payload
@@ -104,9 +111,7 @@ main:
         int 30h
         jc .timeout
 
-        ;; Poll recvfrom until we see an ICMP echo reply
-        mov ebp, 0FFFFh
-        .poll:
+        ;; Blocking recv (kernel uses fd's SO_RCVTIMEO = 1000 ms)
         mov ebx, [socket_fd]
         mov edi, recv_buffer
         mov ecx, 128
@@ -114,9 +119,9 @@ main:
         mov ah, SYS_NET_RECVFROM
         int 30h
         test eax, eax
-        jz .poll_next
+        jz .timeout
         cmp byte [recv_buffer], 0       ; ICMP type 0 = echo reply
-        jne .poll_next
+        jne .timeout
         ;; Got reply — RTT = now_ms - start_ms (full 32-bit)
         mov ah, SYS_RTC_MILLIS
         int 30h
@@ -124,11 +129,6 @@ main:
         and eax, 0xFFFF
         or eax, edx
         sub eax, [start_ms]
-        jmp .print_reply
-        .poll_next:
-        dec ebp
-        jnz .poll
-        jmp .timeout
 
         .print_reply:
         push eax                ; Save ms delta
@@ -149,10 +149,6 @@ main:
         call FUNCTION_WRITE_STDOUT
 
         .next:
-        ;; Sleep ~1 second between pings
-        mov ecx, 1000
-        mov ah, SYS_RTC_SLEEP
-        int 30h
         dec byte [count]
         jnz .loop
 

@@ -1092,6 +1092,27 @@ class BuiltinsMixin:
         self.emit(f".ok_{label_index}:")
         self.ax_clear()
 
+    def builtin_setsockopt(self, arguments: list[Node], /) -> None:
+        """Generate code for the setsockopt() builtin.
+
+        ``setsockopt(fd, option_name, value)`` emits register setup
+        followed by ``mov ah, SYS_NET_SETSOCKOPT / int 30h``.  Returns
+        0 in AX on success, -1 on error (bad fd, wrong fd type,
+        unknown option, negative value).  Argument loads are
+        topologically scheduled by :meth:`_emit_builtin_arg_moves` so
+        a pinned-register variable referenced by any argument
+        expression is not clobbered before use.
+        """
+        self._check_argument_count(arguments=arguments, expected=3, name="setsockopt")
+        fd_argument, option_argument, value_argument = arguments
+        self._emit_builtin_arg_moves([
+            (self.target.bx_register, fd_argument),
+            (self.target.acc, option_argument),
+            (self.target.count_register, value_argument),
+        ])
+        self._emit_syscall("NET_SETSOCKOPT")
+        self.ax_clear()
+
     def builtin_shutdown(self, arguments: list[Node], /) -> None:
         """Generate code for the shutdown() builtin.
 

@@ -134,6 +134,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         "seek": frozenset({"ax", "bx", "cx"}),
         "sendto": frozenset({"ax", "bx", "cx", "di", "dx", "si"}),
         "set_palette_color": frozenset({"ax", "bx", "cx", "dx"}),
+        "setsockopt": frozenset({"ax", "bx", "cx"}),
         "shutdown": frozenset({"ax"}),
         "signal": frozenset({"ax", "bx", "cx"}),
         "sleep": frozenset({"ax", "cx"}),
