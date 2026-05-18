@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from cc import ast_nodes
+from cc.errors import CompileError
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
 #: Pointer types whose pointee is a 4-byte unsigned integer.  On the
@@ -256,7 +257,17 @@ class Builder:
         for parameter in func.params:
             self._var_types[parameter.name] = parameter.type
         self._collect_local_types(func.body)
+        # Per-function user-label bookkeeping: definitions collected as
+        # ``Label`` nodes are lowered; references collected as ``Goto``
+        # nodes are lowered.  Validated after the body completes so
+        # forward references resolve naturally.
+        self._user_labels_defined: dict[str, int] = {}
+        self._user_labels_referenced: dict[str, int] = {}
         self._build_stmts(func.body, out, break_tgt=None, cont_tgt=None, strings=strings)
+        for name, line in self._user_labels_referenced.items():
+            if name not in self._user_labels_defined:
+                message = f"goto target '{name}' has no matching label in function '{func.name}'"
+                raise CompileError(message, line=line)
         return Function(ast_node=func, body=out, strings=strings)
 
     def _build_stmts(
@@ -321,6 +332,15 @@ class Builder:
             case ast_nodes.Continue():
                 assert cont_tgt is not None, "continue outside loop"
                 out.append(Jump(target=cont_tgt))
+            case ast_nodes.Goto(name=name):
+                self._user_labels_referenced.setdefault(name, stmt.line)
+                out.append(Jump(target=f".user_{name}"))
+            case ast_nodes.Label(name=name):
+                if name in self._user_labels_defined:
+                    message = f"duplicate label '{name}'"
+                    raise CompileError(message, line=stmt.line)
+                self._user_labels_defined[name] = stmt.line
+                out.append(Label(name=f".user_{name}"))
             case ast_nodes.Return(value=value):
                 # A long-pointee Index in a return position must be
                 # produced in DX:AX (16-bit) / EAX (32-bit); the int-typed

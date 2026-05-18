@@ -23,6 +23,7 @@ from cc.ast_nodes import (
     DoWhile,
     EnumDecl,
     Function,
+    Goto,
     If,
     Index,
     IndexAssign,
@@ -32,6 +33,7 @@ from cc.ast_nodes import (
     IndexMemberIndexAssign,
     InlineAsm,
     Int,
+    Label,
     LogicalAnd,
     LogicalOr,
     MemberAccess,
@@ -1056,6 +1058,11 @@ class Parser:
             return Continue(line=token[2])
         if token[0] == "DO":
             return self.parse_do_while()
+        if token[0] == "GOTO":
+            self.eat("GOTO")
+            name_token = self.eat("IDENT")
+            self.eat("SEMI")
+            return Goto(line=token[2], name=name_token[1])
         if token[0] == "RETURN":
             self.eat("RETURN")
             value = None
@@ -1093,6 +1100,10 @@ class Parser:
             return InlineAsm(content="", line=token[2])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
+            if next_kind == "COLON":
+                self.eat("IDENT")
+                self.eat("COLON")
+                return Label(line=token[2], name=token[1])
             if next_kind == "ASSIGN":
                 return self.parse_assignment()
             if next_kind in COMPOUND_ASSIGN_OPERATORS:

@@ -45,6 +45,7 @@ KEYWORDS = frozenset({
     "else",
     "enum",
     "extern",
+    "goto",
     "if",
     "int",
     "long",
