@@ -213,7 +213,7 @@
         %assign SYS_RTC_ALARM 30h       ; EBX=ms_until_first (0=cancel), ECX=ms_interval (0=one-shot); returns EAX=ms remaining on prior alarm
         %assign SYS_RTC_DATETIME 31h    ; returns EAX = unsigned epoch seconds (1970-01-01 UTC)
         %assign SYS_RTC_MILLIS 32h      ; returns EAX = milliseconds since boot
-        %assign SYS_RTC_SLEEP 33h       ; ECX=milliseconds: busy-wait via the PIT tick counter
+        %assign SYS_RTC_SLEEP 33h       ; ECX=milliseconds: hlt-park; PIT IRQ 0 wakes to re-check the deadline
         %assign SYS_RTC_UPTIME 34h      ; returns EAX = seconds since boot
 
         %assign SYS_VIDEO_MAP    40h    ; (none); returns EAX = user-virt of mode-13h FB, CF on OOM
