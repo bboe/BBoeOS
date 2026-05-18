@@ -3,7 +3,7 @@ line-length = 140
 lint.ignore = ["COM812", "CPY001", "D203", "D211", "D213", "PLR0913", "S101", "T201"]
 lint.select = ["ALL"]
 preview = true
-target-version = "py312"
+target-version = "py313"
 
 [lint.per-file-ignores]
 "add_file.py" = ["C901", "PLR0914", "S404", "S603"]

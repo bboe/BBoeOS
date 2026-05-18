@@ -541,8 +541,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         clobbered by the base load.  Prefers direct addressing when
         the base is a constant (no guard needed).
         """
-        direct = self._byte_index_direct(node)
-        if direct is not None:
+        if (direct := self._byte_index_direct(node)) is not None:
             return (f"byte [{direct}]", False)
         vname = node.array.name
         offset = node.index.value

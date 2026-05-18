@@ -37,7 +37,7 @@ _DEBUGFS = shutil.which("debugfs") or "debugfs"
 
 
 @contextmanager
-def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str, None, None]:
+def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str]:
     """Extract the ext2 partition to a temp file, yield its path, splice it back.
 
     Yields

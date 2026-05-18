@@ -784,8 +784,7 @@ class CodeGeneratorBase:
         the code needs to distinguish compile-time-constant bases from
         runtime variables.
         """
-        alias = self.constant_aliases.get(name)
-        if alias is not None:
+        if (alias := self.constant_aliases.get(name)) is not None:
             return alias
         if name in self.NAMED_CONSTANTS:
             return name
@@ -929,8 +928,7 @@ class CodeGeneratorBase:
         symbol (see :attr:`NAMED_CONSTANT_INCLUDES`), queue the include
         for emission at output time.
         """
-        include = self.NAMED_CONSTANT_INCLUDES.get(name)
-        if include is not None:
+        if (include := self.NAMED_CONSTANT_INCLUDES.get(name)) is not None:
             self.required_includes.add(include)
 
     def fuse_trailing_printf(self, body: list[Node], /) -> list[Node]:

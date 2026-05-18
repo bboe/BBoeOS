@@ -135,8 +135,7 @@ def paragraph_indent_and_text(*, paragraph: list[str]) -> tuple[str, str, str]:
     every wrapped line.  Continuation lines are stripped before joining.
     """
     first = paragraph[0]
-    list_match = LIST_RE.match(first)
-    if list_match:
+    if list_match := LIST_RE.match(first):
         indent_first = list_match.group(1) + list_match.group(2) + list_match.group(3)
         indent_rest = " " * len(indent_first)
         text_parts = [list_match.group(4), *(continuation.strip() for continuation in paragraph[1:])]

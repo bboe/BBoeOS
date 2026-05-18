@@ -36,8 +36,8 @@ the user half holds the program's text, BSS, stack, and a shared vDSO page.
 
 * `e2fsprogs` — only when building with `--ext2`
 * `nasm` — assembler
-* `python3` — runs `add_file.py`, `cc.py`, and the `tests/` harness (stdlib
-  only)
+* `python3` (3.13+) — runs `add_file.py`, `cc.py`, and the `tests/` harness
+  (stdlib only)
 * `qemu-system-i386` — to boot the OS
 
 macOS: `brew install e2fsprogs nasm qemu`.  Ubuntu: `sudo apt-get install -y

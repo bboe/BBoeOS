@@ -16,8 +16,9 @@ Always required:
 - **POSIX shell utilities** — `cat`, `dd`, `dirname`, `find`, `mkdir`, `printf`,
   `rm`, `sed`, `sort`, `tr`, `wc`. All are part of the macOS and Linux base
   systems.
-- **`python3`** — runs `cc.py` (the C-subset compiler) and `add_file.py` (the
-  host-side image writer). Standard library only — no `pip install` step needed.
+- **`python3`** (3.13+) — runs `cc.py` (the C-subset compiler) and `add_file.py`
+  (the host-side image writer). Standard library only — no `pip install` step
+  needed.
 
 Required only when building with `--ext2`:
 
