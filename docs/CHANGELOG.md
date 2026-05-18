@@ -19,6 +19,22 @@ time.
   and `ping` adopt the new API and drop their userspace `sleep(1)` /
   `sleep(1000)` polling loops.
 
+- **cc.py: liveness-driven register sharing for auto-pinned locals.**  The
+  auto-pin allocator now consults a backward-dataflow liveness analyzer
+  (`cc/codegen/liveness.py`) and lets candidates that ran out of fresh registers
+  share an already-pinned register when their live ranges don't overlap any name
+  currently holding that register.  Concrete shapes that benefit: locals
+  declared in different switch case bodies, in disjoint if/then-else arms, or
+  sequenced one-after-the-other across function-body phases (e.g., `ls.c`'s
+  `arena_used` (gather phase) sharing `edx` with `i` (sort phase)).
+  `can_auto_pin`'s pool-size gate now counts unique registers rather than unique
+  names so the gate trips only when every register slot is occupied, and
+  `_pinned_registers_to_save` deduplicates via `set` so push/pop pairs around
+  clobbering calls stay balanced under sharing.  Marginal win on top of the
+  per-function `peephole_dead_temp_slots` fix above: kernel.bin -40 bytes, user
+  programs -267 bytes (-307 total); largest individual wins on tail (-74), ls
+  (-47), asm (-32), wc (-28), tr (-26), shell (-19), sort (-19), dns (-16).
+
 - **cc.py: scope `peephole_dead_temp_slots` per function.**  Fixes a latent
   conflation bug in the dead-IR-temp-slot dropper: it scanned the entire emitted
   asm for `[bp-N]` reads, but `[bp-N]` is frame-local, so a real local read of

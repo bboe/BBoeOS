@@ -17,6 +17,7 @@ from cc.ast_nodes import (
     Compound,
     If,
     Int,
+    Param,
     Return,
     Switch,
     SwitchCase,
@@ -175,3 +176,23 @@ def test_liveness_nested_blocks_interfere_with_outer_when_overlapping() -> None:
     ]
     interference = LivenessAnalyzer(body=body).interference()
     assert "inner" in interference.get("outer", set()), f"outer/inner overlap should interfere:\n{interference}"
+
+
+def test_liveness_parameter_interferes_with_unrelated_unused_parameter() -> None:
+    """Two parameters where only one is used: both reserved at entry interfere.
+
+    ``int f(int a, int b) { return a; }`` — ``a`` is live at the
+    function entry edge.  Because ``b`` is also defined at the
+    synthetic ENTRY, the def-vs-live rule says ``b`` interferes with
+    ``a``.  This is the conservative direction: the allocator can
+    never share the slot holding the caller-passed value of ``b``
+    with the slot holding ``a``, even when ``b`` is otherwise unused
+    in the body.
+    """
+    body = [Return(line=1, value=_var("a"))]
+    parameters = [
+        Param(in_register=None, is_array=False, name="a", out_register=None, type="int"),
+        Param(in_register=None, is_array=False, name="b", out_register=None, type="int"),
+    ]
+    interference = LivenessAnalyzer(body=body, parameters=parameters).interference()
+    assert "a" in interference.get("b", set()), f"unused param b should interfere with used param a:\n{interference}"

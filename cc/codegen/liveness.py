@@ -325,6 +325,19 @@ class LivenessAnalyzer:
         self.statements[statement_id] = StatementInfo()
         return statement_id
 
+    def _new_id_for_entry(self) -> int:
+        """Allocate a statement id for the synthetic ENTRY pseudo-statement.
+
+        Mirrors :meth:`_new_id` but takes no AST node — ENTRY has no
+        corresponding source-level statement; it only carries
+        ``definitions`` (the parameter set) and a single successor edge
+        into the real body entry.
+        """
+        statement_id = self._next_id
+        self._next_id += 1
+        self.statements[statement_id] = StatementInfo()
+        return statement_id
+
     def _number_statement(self, statement: Node) -> None:
         """Recursively assign ids to *statement* and any nested statements."""
         if id(statement) in self.node_to_id:
@@ -440,10 +453,21 @@ class LivenessAnalyzer:
         if self._analyzed:
             return self.statements
         self._collect_labels(self.body)
-        self._build_control_flow_graph(self.body, fallthrough=EXIT_ID)
+        body_entry = self._build_control_flow_graph(self.body, fallthrough=EXIT_ID)
         for statement_id, label in self._pending_gotos:
             target = self.labels.get(label, EXIT_ID)
             self.statements[statement_id].successors = [target]
+        # Synthetic ENTRY: parameters are defined here so liveness sees
+        # them as live-out at the function entry edge.  Without this, a
+        # parameter only used (never re-assigned) would never appear in
+        # any ``definitions`` set, and so wouldn't interfere with body
+        # locals that are also live at the same program point — leading
+        # the allocator to share a register between a parameter and an
+        # unrelated body local.
+        entry_id = self._new_id_for_entry()
+        entry_info = self.statements[entry_id]
+        entry_info.definitions = {parameter.name for parameter in self.parameters}
+        entry_info.successors = [body_entry]
         self._fixed_point()
         self._analyzed = True
         return self.statements
