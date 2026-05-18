@@ -11,13 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
-- **cc.py: `switch` on a `char` discriminant now accepts char-literal case
-  labels.**  `case 'A':` opposite a `char byte` discriminant previously failed
-  the comparison validator (`char compared to non-char`) because the parser's
-  constant-folding pass collapses every case-label expression to `Int`, losing
-  the `Char` classification.  `generate_switch` now wraps each case value back
-  in `Char` when the discriminant resolves to `char` via `_type_of_operand`, so
-  the synthetic `discriminant == case` compares emit cleanly.
+- **Switch-conversion follow-ups to PR #393 / #394.**  Mechanical refactor of
+  the remaining no-caveat `else if` chains the enum+switch landing left behind:
+  the ANSI CSI dispatch in `src/drivers/console.c` (6-way on terminator byte),
+  the `emit_alu_binop` 4-way `type2` dispatch and 3-way `type2` dispatch in
+  `src/c/asm.c`, the `emit_sized_imm` 3-way `size` dispatch, and both
+  backslash-escape handlers (string + char literal).  Pure readability win — no
+  byte-level behavior change (test_asm.py reassembles every program in static/
+  against NASM byte-for-byte and confirms identity).  Char discriminants
+  switch on the underlying ``char`` variable directly — the
+  ``_type_of_operand``-driven Char-wrap in ``generate_switch`` (companion fix)
+  handles the case-label classification automatically.
 - **Self-hosted asm: `times N <branch>` now emits N copies instead of zero
   bytes.**  `src/c/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
   silently returned for every other payload — most painfully `times N jmp/jcc`
