@@ -584,8 +584,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self,
         *,
         const_base: str,
+        element_size: int | None = None,
         index: Node,
-        is_byte: bool,
+        is_byte: bool | None = None,
         preserve_ax: bool,
     ) -> str:
         """Set up ``[CONST + disp + si]`` addressing for a constant-base index.
@@ -601,10 +602,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         :meth:`_select_auto_pin_candidates` reads via
         ``index_uses`` to keep heavily-subscripted vars off BP.
 
+        Callers pass *element_size* (the stride in bytes — 1 for byte
+        arrays, 2 for ``uint16_t``, 4 for full-int / pointer-target on
+        32-bit, etc.) which drives both the displacement folding and
+        the index-register scaling.  The legacy *is_byte* alias is kept
+        for callers that haven't been migrated; it maps to
+        ``element_size = 1`` (byte) or ``int_size`` (full word).
+
         When *preserve_ax* is True, any path that evaluates the index
         through AX pushes/pops AX so the caller's value survives.
         """
-        element_size = 1 if is_byte else self.target.int_size
+        if element_size is None:
+            element_size = 1 if is_byte else self.target.int_size
+        is_byte = element_size == 1
         displacement = 0
         if isinstance(index, BinaryOperation) and index.operation in ("+", "-") and isinstance(index.right, Int):
             sign = 1 if index.operation == "+" else -1
@@ -624,18 +634,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             base_register = self.pinned_register[index.name]
         elif isinstance(index, Var) and index.name in self.pinned_register:
             self.emit(f"        mov {si}, {self.pinned_register[index.name]}")
-            if not is_byte:
-                self._emit_scale_int_index(si)
+            self._emit_scale_index(si, scale=element_size)
         elif isinstance(index, Var) and self._is_memory_scalar(index.name) and not self._is_byte_scalar(index.name):
             self.emit(f"        mov {si}, [{self._local_address(index.name)}]")
-            if not is_byte:
-                self._emit_scale_int_index(si)
+            self._emit_scale_index(si, scale=element_size)
         else:
             if preserve_ax:
                 self.emit(f"        push {self.target.acc}")
             self.generate_expression(index)
-            if not is_byte:
-                self._emit_scale_int_index(self.target.acc)
+            self._emit_scale_index(self.target.acc, scale=element_size)
             self.emit(f"        mov {si}, {self.target.acc}")
             if preserve_ax:
                 self.emit(f"        pop {self.target.acc}")
@@ -695,12 +702,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 continue
             is_byte = declaration.type_name in self.BYTE_TYPES
             is_struct = declaration.type_name.startswith("struct ")
-            if is_struct:
-                stride = self._type_size(declaration.type_name)
-            elif is_byte:
-                stride = 1
-            else:
-                stride = self.target.int_size
+            # Stride is sizeof(element) for every shape: structs sum
+            # field widths, ``char`` / ``uint8_t`` resolve to 1,
+            # ``uint16_t`` to 2, pointer / ``int`` / ``uint32_t`` to
+            # ``int_size``.  Unifies what used to be a binary
+            # byte-vs-int_size switch that silently miscompiled
+            # ``uint16_t`` globals.
+            stride = self._type_size(declaration.type_name)
             if is_struct and declaration.init is not None:
                 struct_name = declaration.type_name[len("struct ") :]
                 layout = self.struct_layouts[struct_name]
@@ -724,7 +732,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 for line in lines[1:]:
                     self.emit(f"        {line}")
             elif declaration.init is not None:
-                directive = "db" if is_byte else int_directive
+                # Match the data-cell width to the element width:
+                # ``db`` for byte, ``dw`` for halfword (``uint16_t``),
+                # ``dd`` / ``dw`` for full-int (``int_directive``).
+                if is_byte:
+                    directive = "db"
+                elif stride == 2 and stride < self.target.int_size:
+                    directive = "dw"
+                else:
+                    directive = int_directive
                 rendered = [
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
                     for element in declaration.init.elements
@@ -3201,11 +3217,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             elif isinstance(statement, ArrayDecl):
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
-                stride = (
-                    self._type_size(statement.type_name)
-                    if statement.type_name.startswith("struct ")
-                    else (1 if statement.type_name in self.BYTE_TYPES else self.target.int_size)
-                )
+                stride = self._type_size(statement.type_name)
                 byte_count = self._eval_local_array_size(statement.size, stride=stride) if statement.size is not None else None
                 if byte_count is not None:
                     self.allocate_local(statement.name, size=byte_count)

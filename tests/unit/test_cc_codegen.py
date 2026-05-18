@@ -3089,6 +3089,165 @@ def test_uint16_pointer_load_is_word() -> None:
     assert "word" in asm, f"expected a ``word``-sized load for uint16_t*:\n{asm}"
 
 
+def test_uint16_t_global_array_accepted_and_halfword() -> None:
+    """File-scope ``uint16_t arr[N]`` is allowed and uses halfword load/store.
+
+    Previously rejected by the GLOBAL_ARRAY_PRIMITIVE_TYPES allowlist
+    because the codegen had no halfword path.
+    """
+    asm = _kernel(
+        """
+            uint16_t g[4];
+            uint16_t f() {
+                g[1] = 0x2222;
+                return g[1];
+            }
+        """,
+        bits=32,
+    )
+    assert "_g_g" in asm, f"expected global symbol _g_g:\n{asm}"
+    assert "mov dword" not in asm, f"global uint16_t store must not be dword:\n{asm}"
+    assert "mov word [_g_g+2]" in asm, f"expected halfword store at stride 2:\n{asm}"
+    assert "movzx eax, word [_g_g+2]" in asm, f"expected halfword load:\n{asm}"
+
+
+def test_uint16_t_global_array_bss_size_uses_halfword_stride() -> None:
+    """``uint16_t g[N];`` reserves ``N*2`` bytes in BSS, not ``N*int_size``."""
+    asm = _kernel(
+        """
+            uint16_t g[8];
+            int f() { return 0; }
+        """,
+        bits=32,
+    )
+    assert "_g_g: resb 16" in asm, f"expected 8*2=16-byte BSS reservation:\n{asm}"
+
+
+def test_uint16_t_global_array_initialized_uses_dw_directive() -> None:
+    """``uint16_t g[3] = {1,2,3};`` lays out as ``dw`` cells, not ``dd``."""
+    asm = _kernel(
+        """
+            uint16_t g[3] = {0x1111, 0x2222, 0x3333};
+            uint16_t f() { return g[1]; }
+        """,
+        bits=32,
+    )
+    assert "_g_g: dw " in asm, f"expected halfword initializer directive:\n{asm}"
+    assert "_g_g: dd " not in asm, f"must not lay out uint16_t as dd cells:\n{asm}"
+
+
+def test_uint16_t_global_array_variable_index_load_scales_by_two() -> None:
+    """``uint16_t g[N]; return g[i];`` scales the var index by 2, not int_size.
+
+    The global-base, variable-index load path threads ``element_size``
+    through ``_emit_constant_base_index_addr`` so ``[_g_g+esi]`` is
+    indexed with ``esi = i*2``, not ``i*4``.
+    """
+    asm = _kernel(
+        """
+            uint16_t g[8];
+            uint16_t f(int i) {
+                return g[i];
+            }
+        """,
+        bits=32,
+    )
+    assert "shl esi, 2" not in asm, f"must not scale by 4 for uint16_t global:\n{asm}"
+    assert "shl eax, 2" not in asm, f"must not scale by 4 for uint16_t global:\n{asm}"
+    assert "movzx eax, word [_g_g" in asm, f"expected halfword load:\n{asm}"
+
+
+def test_uint16_t_local_array_load_const_index_is_halfword() -> None:
+    """``uint16_t arr[N]; return arr[k];`` must load exactly 2 bytes (not 4).
+
+    The 32-bit acc (``eax``) load would read 4 bytes — clobbering the
+    next element's low half into the high half of the result.
+    """
+    asm = _kernel(
+        """
+            uint16_t f() {
+                uint16_t arr[4];
+                arr[0] = 0x1111;
+                arr[1] = 0x2222;
+                return arr[1];
+            }
+        """,
+        bits=32,
+    )
+    assert "movzx eax, word [esi+2]" in asm, f"expected halfword load at stride 2:\n{asm}"
+    assert "mov eax, [esi+4]" not in asm, f"must not load 4 bytes at uint16_t stride 4:\n{asm}"
+
+
+def test_uint16_t_local_array_store_const_index_is_halfword() -> None:
+    """``uint16_t arr[N]; arr[k] = v;`` for local arrays must stride by 2 and store ``word``.
+
+    Regression: cc.py's local-array codegen had a binary byte-vs-word
+    switch — anything not ``char`` / ``uint8_t`` got ``int_size`` stride
+    and a full-width store, silently miscompiling ``uint16_t`` arrays
+    (stride 4, ``mov dword``) and overwriting adjacent elements.
+    """
+    asm = _kernel(
+        """
+            void f() {
+                uint16_t arr[4];
+                arr[0] = 0x1111;
+                arr[1] = 0x2222;
+                arr[2] = 0x3333;
+            }
+        """,
+        bits=32,
+    )
+    assert "mov dword" not in asm, f"uint16_t store must not use mov dword:\n{asm}"
+    assert "mov word [esi], 4369" in asm, f"expected halfword store at arr[0]:\n{asm}"
+    assert "mov word [esi+2], 8738" in asm, f"expected halfword store at arr[1] (stride 2):\n{asm}"
+    assert "mov word [esi+4], 13107" in asm, f"expected halfword store at arr[2]:\n{asm}"
+    assert "sub esp, 8" in asm, f"expected 8-byte (4*2) stack reservation:\n{asm}"
+
+
+def test_uint16_t_local_array_variable_index_scales_by_two() -> None:
+    """``arr[i]`` for uint16_t arrays scales index by 2, not int_size."""
+    asm = _kernel(
+        """
+            uint16_t f(int i) {
+                uint16_t arr[8];
+                arr[i] = 0x4242;
+                return arr[i];
+            }
+        """,
+        bits=32,
+    )
+    # Scaling: i*2 must use ``add eax, eax`` (shift-by-1), never ``shl eax, 2``.
+    assert "shl eax, 2" not in asm, f"uint16_t arr[i] must not scale by 4:\n{asm}"
+    # Halfword store: the register form ``mov [si], ax`` is the 2-byte
+    # store (NASM infers width from the ``ax`` operand).  What's
+    # forbidden is the full-width ``mov [si], eax`` (would clobber the
+    # adjacent element).
+    assert "mov [esi], ax" in asm, f"expected halfword store via ax:\n{asm}"
+    assert "mov [esi], eax" not in asm, f"must not use 4-byte store for uint16_t:\n{asm}"
+    assert "movzx eax, word [esi" in asm, f"expected halfword load:\n{asm}"
+
+
+def test_uint16_t_pointer_store_is_halfword() -> None:
+    """``uint16_t *p; p[i] = v;`` stores exactly 2 bytes (not 4).
+
+    Companion to :func:`test_uint16_pointer_load_is_word` — the load
+    path was fixed for ``uint16_t*`` but the store path kept the binary
+    byte-vs-word switch, silently overwriting the adjacent element.
+    """
+    asm = _kernel(
+        """
+            void f(uint16_t *p) {
+                p[0] = 0x1111;
+                p[1] = 0x2222;
+            }
+        """,
+        bits=32,
+    )
+    assert "mov dword" not in asm, f"uint16_t* store must not use mov dword:\n{asm}"
+    assert "mov word [esi], 4369" in asm, f"expected halfword store at p[0]:\n{asm}"
+    assert "mov word [esi+2], 8738" in asm, f"expected halfword store at p[1]:\n{asm}"
+
+
 def test_uint16_t_size_is_always_two_bytes_16bit() -> None:
     """sizeof(uint16_t) == 2 in --bits 16 mode."""
     asm = _kernel("int f() { return sizeof(uint16_t); }", bits=16)
@@ -3609,22 +3768,23 @@ def test_user_global_array_pointer_and_uint32_elements() -> None:
     assert "_bss_end equ _program_end + 28" in asm, f"expected 16+12=28 BSS bytes:\n{asm}"
 
 
-def test_user_global_array_rejects_uint16_element() -> None:
-    """uint16_t global arrays are still rejected — the codegen has no halfword stride."""
+def test_user_global_array_accepts_uint16_element() -> None:
+    """uint16_t global arrays compile and use the halfword codegen path."""
     ok, output = _compile(
         r"""
         uint16_t halfwords[4];
 
         int main() {
-            halfwords[0] = 1;
+            halfwords[0] = 0xAABB;
             return 0;
         }
         """,
         target="user",
         bits=32,
     )
-    assert not ok, "expected compile error"
-    assert "must have element type" in output, f"unexpected error:\n{output}"
+    assert ok, f"unexpected compile error:\n{output}"
+    assert "mov dword" not in output, f"uint16_t global must not store dword:\n{output}"
+    assert "mov word [_g_halfwords]" in output, f"expected halfword store:\n{output}"
 
 
 def test_user_include_directive_pulls_macro_and_helper() -> None:

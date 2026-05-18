@@ -176,13 +176,13 @@ class CodeGeneratorBase:
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
     BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
 
-    #: Primitive element types accepted for file-scope arrays.  All are
-    #: byte-sized or word-sized so the global-array codegen's binary
-    #: byte-vs-word stride switch handles them; ``uint16_t`` is omitted
-    #: because the codegen has no halfword path.  Pointer (``*``) and
-    #: ``struct`` element types are accepted separately at the validation
-    #: site since both require different codegen treatment.
-    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "int", "uint32_t", "uint8_t"})
+    #: Primitive element types accepted for file-scope arrays.  Byte
+    #: types (``char`` / ``uint8_t``) use the byte path; ``uint16_t``
+    #: uses the halfword path; the rest use the full-int path.  Pointer
+    #: (``*``) and ``struct`` element types are accepted separately at
+    #: the validation site since both require different codegen
+    #: treatment.
+    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "int", "uint16_t", "uint32_t", "uint8_t"})
 
     #: Non-pointer scalar type names whose values are unsigned in
     #: comparisons.  Pointers are handled separately by
@@ -469,7 +469,20 @@ class CodeGeneratorBase:
         type_name = self.variable_types.get(name)
         if type_name is None:
             return self.target.int_size
-        # Pointer: strip one ``*`` to get the pointee type.
+        # Array context: element width is sizeof(declared element type).
+        # Pointer-element arrays (e.g. ``char *names[N]``) share the
+        # recorded type string with pointer parameters (``char *p``)
+        # since the parser stores ``"T*"`` for both, so the array vs
+        # pointer distinction has to come from
+        # :attr:`variable_arrays` / :attr:`local_stack_arrays`.  For
+        # array-of-T*, ``type_size("T*")`` correctly returns
+        # ``int_size``; for array-of-uint16_t it returns 2.
+        if name in self.variable_arrays or name in self.local_stack_arrays:
+            try:
+                return self.target.type_size(type_name)
+            except KeyError:
+                return self.target.int_size
+        # Pointer-to-T context: subscript reads sizeof(T).
         if type_name.endswith("*"):
             pointee = type_name[:-1].rstrip()
             try:
