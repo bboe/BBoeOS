@@ -20,3 +20,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   — POSIX directory iteration via Linux-style `getdents` + `<dirent.h>`.
   Plan: [2026-05-16-opendir-readdir-plan.md](./2026-05-16-opendir-readdir-plan.md).
   Status: design + plan complete; implementation pending.
+- [2026-05-18 — blocking recvfrom](./2026-05-18-blocking-recvfrom-design.md)
+  — add `timeout_ms` to `SYS_NET_RECVFROM`; kernel-side `hlt`-loop
+  wait instead of userspace `sleep(1)` polling. Design approved;
+  plan + implementation pending.
