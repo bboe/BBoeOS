@@ -21,7 +21,9 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   Plan: [2026-05-16-opendir-readdir-plan.md](./2026-05-16-opendir-readdir-plan.md).
   Status: design + plan complete; implementation pending.
 - [2026-05-18 — blocking recvfrom](./2026-05-18-blocking-recvfrom-design.md)
-  — add `timeout_ms` to `SYS_NET_RECVFROM`; kernel-side `hlt`-loop
-  wait instead of userspace `sleep(1)` polling.
+  — `SO_RCVTIMEO` via a new `SYS_NET_SETSOCKOPT` syscall; kernel-side
+  `hlt`-loop wait keyed on the per-fd timeout.  Replaces an earlier
+  same-day design that put `timeout_ms` on the `recvfrom` argument
+  list (PR #411, closed pre-merge).
   Plan: [2026-05-18-blocking-recvfrom-plan.md](./2026-05-18-blocking-recvfrom-plan.md).
   Status: design + plan complete; implementation pending.
