@@ -118,8 +118,9 @@ syscall_handler:
         SYS_ENTRY SYS_NET_MAC,       .net_mac
         SYS_ENTRY SYS_NET_OPEN,      .net_open
         SYS_ENTRY SYS_NET_RECVFROM,  .net_recvfrom
-        SYS_ENTRY SYS_NET_SENDTO,    .net_sendto
-        SYS_ENTRY SYS_RTC_ALARM,     .rtc_alarm
+        SYS_ENTRY SYS_NET_SENDTO,       .net_sendto
+        SYS_ENTRY SYS_NET_SETSOCKOPT,  .net_setsockopt
+        SYS_ENTRY SYS_RTC_ALARM,       .rtc_alarm
         SYS_ENTRY SYS_RTC_DATETIME,  .rtc_datetime
         SYS_ENTRY SYS_RTC_MILLIS,    .rtc_millis
         SYS_ENTRY SYS_RTC_SLEEP,     .rtc_sleep
@@ -431,6 +432,11 @@ syscall_handler:
         jc .net_bad_pointer
         mov eax, [esp + 8]              ; saved EBP — low 16 = dst_port
         call sys_net_sendto
+        jmp .iret_cf
+
+        .net_setsockopt:
+        ;; BX = fd, AL = option_name, ECX = value.
+        call sys_net_setsockopt
         jmp .iret_cf
 
         .net_bad_pointer:

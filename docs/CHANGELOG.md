@@ -11,6 +11,14 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **`SYS_NET_SETSOCKOPT` (24h) with `SO_RCVTIMEO`.**  New syscall storing
+  per-socket options on the fd entry; currently supports `SO_RCVTIMEO` (value =
+  milliseconds, 0 disables blocking). `sys_net_recvfrom` reads the per-fd
+  timeout each call and blocks kernel-side via `sti; hlt; cli` (draining the NIC
+  each PIT tick) until a matching packet arrives or the deadline elapses.  `dns`
+  and `ping` adopt the new API and drop their userspace `sleep(1)` /
+  `sleep(1000)` polling loops.
+
 - **cc.py: hoist memory-scalar switch discriminant before dispatch chain.** When
   the switch discriminant is a memory-backed scalar (file-scope global, unpinned
   local) and the switch has 2+ arms, `generate_switch` now emits a single load

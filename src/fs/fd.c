@@ -42,7 +42,8 @@ struct fd {
     uint8_t event_tail;
     uint8_t dirty;
     uint8_t event_buf[32];
-    uint8_t _rest[12];
+    uint32_t recv_timeout_ms;
+    uint8_t _rest[8];
 };
 
 // fd_lookup is forward-declared because fd_close calls it but the

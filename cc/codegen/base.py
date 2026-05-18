@@ -130,6 +130,7 @@ class CodeGeneratorBase:
         "SIGPIPE",
         "SOCK_DGRAM",
         "SOCK_RAW",
+        "SO_RCVTIMEO",
         "STATE_RUNNING",
         "STDERR",
         "STDIN",
