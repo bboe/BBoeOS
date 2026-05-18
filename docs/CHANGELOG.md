@@ -56,6 +56,11 @@ time.
   directive shape (`db` / `dw` / `dd` / any mnemonic) gets repeated correctly.
   New `static/times_branch_sm.asm` fixture pins the behavior under
   `tests/test_asm.py`.
+- **Blocking `SYS_NET_RECVFROM` with kernel-side timeout.**  `recvfrom` now
+  accepts an ESI=timeout_ms argument (0 preserves previous non-blocking
+  behavior; >0 blocks kernel-side via `hlt` until a matching packet arrives or
+  the deadline elapses).  AX returns 0 on timeout.  `dns.c` and `ping.c` drop
+  their userspace `sleep` polling loops in favor of clean kernel blocking.
 - **cc.py: `uint16_t` arrays now generate correct halfword load/store.**  Local
   `uint16_t arr[N]` declarations previously got a 4-byte stride and `mov dword`
   stores — silently overwriting adjacent elements; file-scope `uint16_t g[N]`
