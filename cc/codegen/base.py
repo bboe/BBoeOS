@@ -34,6 +34,7 @@ from cc.ast_nodes import (
     Char,
     Conditional,
     Continue,
+    DoubleIndex,
     EnumDecl,
     If,
     Index,
@@ -838,6 +839,15 @@ class CodeGeneratorBase:
             if variable_type == "char*" and name in self.variable_arrays:
                 return "pointer"
             if variable_type in ("char", "char*"):
+                return "char"
+            return "integer"
+        if isinstance(node, DoubleIndex):
+            # ``name[outer][inner]`` for ``T *name[N]`` yields the
+            # pointee type of ``T*`` — that's ``char`` for ``char *foo[]``,
+            # ``integer`` for ``int *foo[]`` / ``uint*_t *foo[]``.
+            name = node.array.name
+            variable_type = self.variable_types.get(name)
+            if variable_type == "char*":
                 return "char"
             return "integer"
         if isinstance(node, Var):

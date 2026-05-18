@@ -123,6 +123,22 @@ class DerefAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class DoubleIndex(Node):
+    """Chained subscript ``name[outer][inner]``.
+
+    Used when *name* is an array of pointers (``char *foo[N]``,
+    ``uint8_t *bar[N]``, etc.).  The outer subscript loads a pointer
+    from the array, the inner subscript indexes into the pointee.
+    Codegen consults :meth:`_index_pointee_size` to size the inner
+    load.  Assignment to a double-subscript LHS is not (yet) supported.
+    """
+
+    array: Var
+    outer_index: Node
+    inner_index: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class DoWhile(Node):
     """``do { body } while (cond);`` loop."""
 

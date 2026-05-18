@@ -19,6 +19,7 @@ from cc.ast_nodes import (
     Conditional,
     Continue,
     DerefAssign,
+    DoubleIndex,
     DoWhile,
     EnumDecl,
     Function,
@@ -871,6 +872,19 @@ class Parser:
                         line=line,
                         member_name=member_name,
                         name=token[1],
+                    )
+                if self.peek()[0] == "LBRACKET":
+                    # Chained subscript: ``name[outer][inner]`` for an
+                    # array of pointers.  No third ``[`` (triple subscript)
+                    # — codegen only handles one level of pointer chase.
+                    self.eat("LBRACKET")
+                    inner_index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return DoubleIndex(
+                        array=Var(line=line, name=token[1]),
+                        outer_index=index,
+                        inner_index=inner_index,
+                        line=line,
                     )
                 return Index(array=Var(line=line, name=token[1]), index=index, line=line)
             if self.peek()[0] in ("DOT", "ARROW"):

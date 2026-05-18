@@ -1,32 +1,46 @@
+#include "shell_lex.h"
 #include "wait.h"
 
 #define HISTORY_SIZE 16
-#define MAX_SEGMENTS 32
-#define OP_AND  2
-#define OP_END  0
-#define OP_OR   3
-#define OP_SEMI 1
+#define MAX_TOKENS MAX_INPUT
 
-/* Tokenized command chain: a single line may contain multiple commands
-   joined by `;`, `&&`, or `||`.  parse_chain() splits chain_buf in
-   place by replacing operator chars with NUL, fills segment_offsets[]
-   with byte offsets into chain_buf, and writes the operator type
-   *following* each segment into segment_ops[] (the last entry is
-   OP_END).  Each segment is memcpy'd into input_buf one-at-a-time and
-   dispatched (tokenize_argv splits input_buf in place into dispatch_argv,
-   handed straight to the exec() syscall). */
-char chain_buf[MAX_INPUT];
+/* The line lexer (shell_lex.h) writes its output into these three
+   parallel arrays at the top of every dispatch.  token_kinds carries
+   the TOKEN_* stream (terminated by TOKEN_EOF); token_word_offsets
+   carries the byte offset into word_buffer for each TOKEN_WORD entry;
+   word_buffer is the packed null-terminated word storage that argv
+   pointers and redirect filenames index into.  Sized to MAX_INPUT so
+   the worst-case all-one-character input still fits. */
+int token_kinds[MAX_TOKENS];
+int token_word_offsets[MAX_TOKENS];
+char word_buffer[MAX_INPUT];
 
-/* Redirection state for one dispatch_buffer call.  parse_redirections
-   fills these; apply_redirections consumes them.  Each filename is
+/* Per-command scratch for $? expansion.  Built fresh for each command
+   from the WORD tokens that belong to it; argv pointers (and redirect
+   filename pointers) hand into this buffer rather than word_buffer so
+   $? substitution can grow words without disturbing the lex output.
+   Sized 2× MAX_INPUT — each $? expands from 2 bytes to at most 4 (one
+   sign byte plus up to three digits), so doubling the input bound is a
+   safe ceiling. */
+char expanded_buffer[MAX_INPUT * 2];
+
+/* Redirection state for one command.  Filled while walking a command's
+   tokens; consumed by apply_redirections.  Each filename is
    null-terminated and lives in redirect_names; the redirect entries
    point in via byte offsets.  Operator kinds: IN = `<` ; OUT = `>`
-   (truncate); APPND = `>>` (append). */
+   (truncate); APPND = `>>` (append).  ``NONE`` is the
+   default-uninitialised value — it should never reach
+   apply_redirections; if a fourth operator (e.g. heredoc `<<`,
+   fd-explicit `2>`) lands it has to be added to the enum so the
+   switch in apply_redirections trips the exhaustiveness check. */
 #define MAX_REDIRECTS 3
-#define REDIRECT_OP_APPND 0
-#define REDIRECT_OP_IN    1
-#define REDIRECT_OP_NONE  2
-#define REDIRECT_OP_OUT   3
+
+enum RedirectOp {
+    REDIRECT_OP_APPND,
+    REDIRECT_OP_IN,
+    REDIRECT_OP_NONE,
+    REDIRECT_OP_OUT,
+};
 
 int redirect_count;
 char redirect_names[192];  /* MAX_REDIRECTS * MAX_PATH = 3 * 64 */
@@ -49,12 +63,12 @@ int history_count;
 int history_view;
 
 /* Live input line buffer — the line editor writes characters here as
-   the user types; after Enter the line is copied into chain_buf for
-   chain parsing and then memcpy'd back into input_buf one segment at
-   a time for dispatch.  Used to live at the static user-data frame
-   (USER_DATA_BASE+0x500 = 0x1500, named BUFFER) shared by every
-   program, but the EXEC_ARG handoff was the only cross-program use
-   and is gone — so this is now plain shell-private .bss. */
+   the user types; after Enter the whole line is handed straight to
+   lex_line, which fills the token arrays above for the dispatch walk.
+   Used to live at the static user-data frame (USER_DATA_BASE+0x500 =
+   0x1500, named BUFFER) shared by every program, but the EXEC_ARG
+   handoff was the only cross-program use and is gone — so this is now
+   plain shell-private .bss. */
 char input_buf[MAX_INPUT];
 
 /* Ctrl-K kill buffer.  File-scope so it lands in the program's BSS;
@@ -64,7 +78,7 @@ char kill_buf[MAX_INPUT];
 
 /* Wait status of the most recently exec()'d child.  Written by
    try_exec() on a successful exec; read by the dispatch loop and
-   expand_dollar_question() to expose $? to the user. */
+   expand_word() to expose $? to the user. */
 int last_exec_status;
 
 /* Snapshot of the live edit line taken on the first Up keypress.
@@ -73,55 +87,26 @@ int last_exec_status;
 char saved_line[MAX_INPUT];
 int saved_line_length;
 
-int segment_offsets[MAX_SEGMENTS];
-char segment_ops[MAX_SEGMENTS];
-
 /* Scratch buffers for the pipeline parser (`cmd1 | cmd2`).  File-scope
    so that (a) cc.py passes their addresses correctly on function calls
    and (b) they live in BSS without consuming additional user stack.
-   pipe_left_buf / pipe_right_buf hold the trimmed command tokens;
    pipe_left_name / pipe_right_name hold the bare basenames (for
    building the bin/-prefixed path);
    pipe_left_path / pipe_right_path hold the bin/-prefixed paths;
-   pipe_left_argv / pipe_right_argv are NULL-terminated char**
-   arrays pointing into the matching pipe_*_buf (which tokenize_argv
-   has split in place by replacing whitespace runs with NULs).  Passed
-   through SYS_SYS_PIPELINE2 to the kernel, which validates each array
-   under the shell's PD and then, during each child's PD build, reads
-   the strings back through the shell's mappings and writes them into
-   the new program's stack frame via a kmap alias — building the
-   Linux SysV i386 startup frame in place with no kernel-side
-   scratch. */
+   pipe_left_argv / pipe_right_argv are NULL-terminated char** arrays
+   pointing into expanded_buffer (the per-command $?-expanded word
+   scratch).  Passed through SYS_SYS_PIPELINE2 to the kernel, which
+   validates each array under the shell's PD and then, during each
+   child's PD build, reads the strings back through the shell's
+   mappings and writes them into the new program's stack frame via a
+   kmap alias — building the Linux SysV i386 startup frame in place
+   with no kernel-side scratch. */
 char *pipe_left_argv[MAX_ARGV_ENTRIES + 1];
-char pipe_left_buf[MAX_INPUT];
 char pipe_left_name[MAX_INPUT];
 char pipe_left_path[MAX_PATH];
 char *pipe_right_argv[MAX_ARGV_ENTRIES + 1];
-char pipe_right_buf[MAX_INPUT];
 char pipe_right_name[MAX_INPUT];
 char pipe_right_path[MAX_PATH];
-
-/* contains_redirect_token — return non-zero if `s` has an unquoted
-   `<`, `>`, or `>>`.  Used to reject pipe + redirect on the same
-   side (v1 limitation). */
-int contains_redirect_token(char *s) {
-    int i = 0;
-    int in_single = 0;
-    int in_double = 0;
-    while (s[i] != '\0') {
-        if (s[i] == '\'' && in_double == 0) {
-            in_single = 1 - in_single;
-        } else if (s[i] == '"' && in_single == 0) {
-            in_double = 1 - in_double;
-        } else if (in_single == 0 && in_double == 0) {
-            if (s[i] == '<' || s[i] == '>') {
-                return 1;
-            }
-        }
-        i += 1;
-    }
-    return 0;
-}
 
 /* Forward decl: apply_redirections calls restore_redirections on the
    error-rollback path; restore_redirections sorts after apply in
@@ -139,7 +124,7 @@ int apply_redirections() {
     int index = 0;
     while (index < redirect_count) {
         int target = redirect_targets[index];
-        int op = redirect_ops[index];
+        enum RedirectOp op = redirect_ops[index];
         char *path = redirect_names + (index * MAX_PATH);
         /* Save target only once (later same-target redirects reuse the
            same save — bash "last wins" semantics; the earlier file is
@@ -154,12 +139,25 @@ int apply_redirections() {
             saved_fds[target] = saved;
         }
         int flags;
-        if (op == REDIRECT_OP_IN) {
+        switch (op) {
+        case REDIRECT_OP_IN:
             flags = O_RDONLY;
-        } else if (op == REDIRECT_OP_OUT) {
+            break;
+        case REDIRECT_OP_OUT:
             flags = O_WRONLY | O_CREAT | O_TRUNC;
-        } else {
+            break;
+        case REDIRECT_OP_APPND:
+            /* Open without O_TRUNC; the post-open seek below moves to
+               EOF so writes append. */
             flags = O_WRONLY | O_CREAT;
+            break;
+        case REDIRECT_OP_NONE:
+            /* NONE is the unset sentinel — build_command_argv only
+               writes IN/OUT/APPND, so NONE here is a producer bug. */
+            printf("internal: NONE redirect op reached apply_redirections\n");
+            last_exec_status = 1 << 8;
+            restore_redirections();
+            return -1;
         }
         int new_fd = open(path, flags);
         if (new_fd < 0) {
@@ -184,6 +182,133 @@ int apply_redirections() {
     return 0;
 }
 
+/* build_bin_path — produce ``bin/<name>`` in *path_out* (capacity
+   MAX_PATH), used by execute_pipeline to feed pipeline2 the
+   bin/-prefixed paths the kernel exec layer expects.  Truncates names
+   that would not fit. */
+void build_bin_path(char *name, char *path_out) {
+    path_out[0] = 'b';
+    path_out[1] = 'i';
+    path_out[2] = 'n';
+    path_out[3] = '/';
+    int i = 0;
+    while (name[i] != '\0' && i < MAX_PATH - 5) {
+        path_out[4 + i] = name[i];
+        i += 1;
+    }
+    path_out[4 + i] = '\0';
+}
+
+/* Forward decl: build_command_argv calls expand_word, which sorts
+   later. */
+int expand_word(char *src, char *dst, int max_len);
+
+/* build_command_argv — walk tokens [start, end) (one command's worth)
+   and materialise its argv into *argv_out* with words drawn from
+   *expanded_out* (a per-command slice of expanded_buffer that this
+   function packs).  Returns the new write cursor inside expanded_out
+   on success, or -1 on:
+     - any TOKEN_REDIRECT_* when ``allow_redirects`` is zero,
+     - argv overflow (> MAX_ARGV_ENTRIES),
+     - redirect overflow (> MAX_REDIRECTS),
+     - missing filename after a redirect operator,
+     - $? expansion overflow,
+     - command-name (>= MAX_PATH bytes) used by the bin/ fallback.
+
+   When ``allow_redirects`` is nonzero, REDIRECT_* + WORD pairs append
+   to the redirect_* globals.  When zero, the v1 pipeline limitation
+   rejects them.  Returns the *next byte index inside expanded_out
+   that is free* (caller-relative).  Sets *argc_out* to the argv count
+   (excluding the NULL terminator). */
+int build_command_argv(int start, int end, char **argv_out, int *argc_out,
+                       char *expanded_out, int expanded_max, int allow_redirects) {
+    int argc = 0;
+    int write = 0;
+    int token_index = start;
+    while (token_index < end) {
+        enum TokenKind kind = token_kinds[token_index];
+        switch (kind) {
+        case TOKEN_WORD:
+            if (argc >= MAX_ARGV_ENTRIES) {
+                printf("too many arguments\n");
+                return -1;
+            }
+            char *word_src = word_buffer + token_word_offsets[token_index];
+            int word_written = expand_word(word_src, expanded_out + write,
+                                           expanded_max - write);
+            if (word_written < 0) {
+                printf("$? expansion exceeded buffer\n");
+                return -1;
+            }
+            argv_out[argc] = expanded_out + write;
+            argc += 1;
+            write += word_written + 1;   /* skip past the NUL */
+            token_index += 1;
+            break;
+        case TOKEN_REDIRECT_IN:
+        case TOKEN_REDIRECT_OUT:
+        case TOKEN_REDIRECT_APPEND:
+            if (allow_redirects == 0) {
+                printf("shell: pipes cannot combine with < > >>\n");
+                return -1;
+            }
+            if (redirect_count >= MAX_REDIRECTS) {
+                printf("too many redirections\n");
+                return -1;
+            }
+            if (token_index + 1 >= end || token_kinds[token_index + 1] != TOKEN_WORD) {
+                printf("redirection syntax error\n");
+                return -1;
+            }
+            int op;
+            int target_fd;
+            switch (kind) {
+            case TOKEN_REDIRECT_IN:
+                op = REDIRECT_OP_IN;
+                target_fd = 0;
+                break;
+            case TOKEN_REDIRECT_OUT:
+                op = REDIRECT_OP_OUT;
+                target_fd = 1;
+                break;
+            case TOKEN_REDIRECT_APPEND:
+                op = REDIRECT_OP_APPND;
+                target_fd = 1;
+                break;
+            default:
+                /* Outer switch already filtered to these three. */
+                op = REDIRECT_OP_NONE;
+                target_fd = 0;
+                break;
+            }
+            char *name_src = word_buffer + token_word_offsets[token_index + 1];
+            char *destination = redirect_names + (redirect_count * MAX_PATH);
+            int name_written = expand_word(name_src, destination, MAX_PATH);
+            if (name_written < 0) {
+                printf("redirect filename too long\n");
+                return -1;
+            }
+            redirect_ops[redirect_count] = op;
+            redirect_targets[redirect_count] = target_fd;
+            redirect_count += 1;
+            token_index += 2;
+            break;
+        case TOKEN_AND:
+        case TOKEN_EOF:
+        case TOKEN_OR:
+        case TOKEN_PIPE:
+        case TOKEN_SEMI:
+            /* Segment / pipeline terminators are consumed by the caller;
+               reaching one here means the loop bounds were wrong. */
+            printf("internal: unexpected token in command\n");
+            return -1;
+        }
+    }
+    argv_out[argc] = 0;
+    *argc_out = argc;
+    return write;
+}
+
 int cursor_back(int count) {
     if (count > 0) {
         printf("\e[%dD", count);
@@ -206,103 +331,215 @@ int delete_at_cursor(char *buf, int cursor, int end) {
     return end;
 }
 
-/* Forward decls: dispatch_buffer calls expand_dollar_question and
-   try_exec, both of which sort later in this file.  cc.py resolves
-   forward refs silently; clang under -std=c99 needs them up front. */
-int expand_dollar_question(char *buffer, int max_len);
-int tokenize_argv(char *buf, char **argv_slots);
+/* Forward decl: dispatch_command calls try_exec, which sorts later. */
 int try_exec(char *name, char **argv);
 
 /* dispatch_* scratch buffers — file-scope so they stay live for
    try_exec() without consuming user stack on every call.
-   dispatch_argv is the NULL-terminated char** array the kernel walks
-   when staging the new program's user-stack argv frame; dispatch_bin
-   holds the `bin/<name>` fallback path; dispatch_name holds the bare
-   program name (no `bin/` prefix), used to build dispatch_bin. */
+   dispatch_argv is the NULL-terminated char** array (built from
+   already-expanded words in expanded_buffer) handed to exec(); the
+   kernel walks it under the shell's PD when staging the new program's
+   user-stack argv frame.  dispatch_bin holds the `bin/<name>` fallback
+   path. */
 char *dispatch_argv[MAX_ARGV_ENTRIES + 1];
 char dispatch_bin[MAX_PATH];
-char dispatch_name[MAX_INPUT];
 
-void dispatch_buffer(char *buf) {
-    /* Run a single command sitting in input_buf.  The Linux-style argv
-       layout requires argv[0] to be the program name; we extract that
-       name into dispatch_name (used for the bin/-prefixed retry below),
-       expand any $? in the args portion, then tokenise the whole buf
-       in place into dispatch_argv (NULL-terminated char** array).  The
-       array is handed to exec(), which forwards it to the kernel; the
-       kernel walks it under the shell's PD, copies the strings into
-       per-side argv scratch, and writes a Linux SysV i386 startup
-       frame (argc / argv pointers / NULL / empty envp) onto the new
-       program's user stack before iretd.  Updates last_exec_status so
-       that chain operators (&&, ||) and subsequent $? expansions see
-       the result. */
-    int scan = 0;
-    while (buf[scan] != '\0' && buf[scan] != ' ') {
-        dispatch_name[scan] = buf[scan];
-        scan += 1;
-    }
-    dispatch_name[scan] = '\0';
-    if (buf[scan] == ' ') {
-        if (expand_dollar_question(buf + scan + 1, MAX_INPUT - (scan + 1)) < 0) {
-            printf("$? expansion exceeded MAX_INPUT\n");
-            last_exec_status = 1 << 8;
-            return;
-        }
-    }
-    int argc = tokenize_argv(buf, dispatch_argv);
-    if (argc < 0) {
-        printf("too many arguments\n");
-        last_exec_status = 1 << 8;
-        return;
-    }
+void dispatch_command(int argc, char **argv) {
+    /* Run a single already-tokenised, $?-expanded command.  Updates
+       last_exec_status so that chain operators (&&, ||) and subsequent
+       $? expansions see the result.  argv[0] is the program name; the
+       caller has already applied any redirects via apply_redirections. */
     if (argc == 0) {
         return;
     }
-    if (strcmp(dispatch_name, "help") == 0) {
+    char *name = argv[0];
+    if (strcmp(name, "help") == 0) {
         printf("Commands: help reboot shutdown\n");
         last_exec_status = 0;
-    } else if (strcmp(dispatch_name, "reboot") == 0) {
-        reboot();
-    } else if (strcmp(dispatch_name, "shutdown") == 0) {
+        return;
+    } else if (strcmp(name, "reboot") == 0) {
+        reboot();   /* noreturn */
+    } else if (strcmp(name, "shutdown") == 0) {
         shutdown();
         printf("APM shutdown failed\n");
         last_exec_status = 1 << 8;
-    } else {
-        int result = try_exec(dispatch_name, dispatch_argv);
-        if (result == 1) {
-            last_exec_status = 126 << 8;   /* bash: not executable */
-            printf("not executable\n");
-        } else if (result == 0) {
-            /* Not found in root — retry inside bin/ */
-            dispatch_bin[0] = 'b';
-            dispatch_bin[1] = 'i';
-            dispatch_bin[2] = 'n';
-            dispatch_bin[3] = '/';
-            int copy_index = 0;
-            while (dispatch_name[copy_index] != '\0' && copy_index < MAX_PATH - 5) {
-                dispatch_bin[4 + copy_index] = dispatch_name[copy_index];
-                copy_index += 1;
-            }
-            dispatch_bin[4 + copy_index] = '\0';
-            int bin_result = try_exec(dispatch_bin, dispatch_argv);
-            if (bin_result == 1) {
-                last_exec_status = 126 << 8;
-                printf("not executable\n");
-            } else if (bin_result == 0) {
-                last_exec_status = 127 << 8;
-                printf("unknown command\n");
-            }
-        }
+        return;
+    }
+    int result = try_exec(name, argv);
+    if (result == 1) {
+        last_exec_status = 126 << 8;   /* bash: not executable */
+        printf("not executable\n");
+        return;
+    }
+    if (result != 0) {
+        return;
+    }
+    /* Not found in root — retry inside bin/ */
+    dispatch_bin[0] = 'b';
+    dispatch_bin[1] = 'i';
+    dispatch_bin[2] = 'n';
+    dispatch_bin[3] = '/';
+    int copy_index = 0;
+    while (name[copy_index] != '\0' && copy_index < MAX_PATH - 5) {
+        dispatch_bin[4 + copy_index] = name[copy_index];
+        copy_index += 1;
+    }
+    dispatch_bin[4 + copy_index] = '\0';
+    int bin_result = try_exec(dispatch_bin, argv);
+    if (bin_result == 1) {
+        last_exec_status = 126 << 8;
+        printf("not executable\n");
+    } else if (bin_result == 0) {
+        last_exec_status = 127 << 8;
+        printf("unknown command\n");
     }
 }
 
-int expand_dollar_question(char *buffer, int max_len) {
-    /* In-place replace every "$?" in buffer with the decimal representation
-       of the bash-shaped last status:
-         normal exit  -> WEXITSTATUS  (bits 15..8 of last_exec_status)
-         signal kill  -> 128 + WTERMSIG (low 7 bits)
-       Returns the new length, or -1 if the expansion would exceed max_len.
-       Decoding uses the POSIX-shaped macros from include/wait.h. */
+/* Forward decl: execute_line calls execute_pipeline, which sorts
+   later. */
+void execute_pipeline(int start, int end);
+
+/* execute_line — top-level driver.  Lex *line* once, then walk the
+   token stream by segment (everything between SEMI/AND/OR or EOF),
+   honoring && / || short-circuit against last_exec_status.  Each
+   non-skipped segment is handed to execute_pipeline. */
+void execute_line(char *line) {
+    int token_count = lex_line(line, token_kinds, token_word_offsets,
+                               word_buffer, MAX_TOKENS, sizeof(word_buffer));
+    if (token_count < 0) {
+        printf("line too complex\n");
+        last_exec_status = 1 << 8;
+        return;
+    }
+    int chain_op = TOKEN_SEMI;   /* First segment runs unconditionally. */
+    int token_index = 0;
+    while (token_kinds[token_index] != TOKEN_EOF) {
+        int segment_start = token_index;
+        while (token_kinds[token_index] != TOKEN_EOF
+               && token_kinds[token_index] != TOKEN_SEMI
+               && token_kinds[token_index] != TOKEN_AND
+               && token_kinds[token_index] != TOKEN_OR) {
+            token_index += 1;
+        }
+        int segment_end = token_index;
+        int run = 1;
+        if (chain_op == TOKEN_AND) {
+            run = (last_exec_status == 0);
+        } else if (chain_op == TOKEN_OR) {
+            run = (last_exec_status != 0);
+        }
+        if (run && segment_end > segment_start) {
+            execute_pipeline(segment_start, segment_end);
+        }
+        if (token_kinds[token_index] == TOKEN_EOF) {
+            break;
+        }
+        chain_op = token_kinds[token_index];
+        token_index += 1;
+    }
+}
+
+/* execute_pipeline — run tokens [start, end) as a single pipeline.
+   Splits on TOKEN_PIPE: one command falls through to dispatch_command
+   with redirects; two commands call pipeline2 (redirects on either
+   side are rejected per the v1 limitation).  More than two commands
+   are rejected.  Updates last_exec_status. */
+void execute_pipeline(int start, int end) {
+    int first_pipe = -1;
+    int pipe_count = 0;
+    int token_index = start;
+    while (token_index < end) {
+        if (token_kinds[token_index] == TOKEN_PIPE) {
+            if (first_pipe < 0) {
+                first_pipe = token_index;
+            }
+            pipe_count += 1;
+        }
+        token_index += 1;
+    }
+    if (pipe_count > 1) {
+        printf("shell: pipelines support only one |\n");
+        last_exec_status = 1 << 8;
+        return;
+    }
+    if (pipe_count == 0) {
+        /* Single command — redirects allowed. */
+        redirect_count = 0;
+        int argc;
+        int written = build_command_argv(start, end, dispatch_argv, &argc,
+                                         expanded_buffer, sizeof(expanded_buffer), 1);
+        if (written < 0) {
+            last_exec_status = 1 << 8;
+            return;
+        }
+        if (argc == 0) {
+            return;
+        }
+        if (apply_redirections() == 0) {
+            dispatch_command(argc, dispatch_argv);
+            restore_redirections();
+        }
+        return;
+    }
+    /* Two-command pipeline.  Left tokens [start, first_pipe),
+       right tokens (first_pipe, end).  Redirects rejected on
+       either side. */
+    redirect_count = 0;
+    int left_argc;
+    int left_written = build_command_argv(start, first_pipe,
+                                          pipe_left_argv, &left_argc,
+                                          expanded_buffer, sizeof(expanded_buffer) / 2, 0);
+    if (left_written < 0) {
+        last_exec_status = 1 << 8;
+        return;
+    }
+    int right_argc;
+    int right_written = build_command_argv(first_pipe + 1, end,
+                                           pipe_right_argv, &right_argc,
+                                           expanded_buffer + sizeof(expanded_buffer) / 2,
+                                           sizeof(expanded_buffer) / 2, 0);
+    if (right_written < 0) {
+        last_exec_status = 1 << 8;
+        return;
+    }
+    if (left_argc == 0 || right_argc == 0) {
+        printf("shell: pipeline side is empty\n");
+        last_exec_status = 1 << 8;
+        return;
+    }
+    /* Copy the unprefixed names (argv[0]) into pipe_*_name and build
+       the bin/-prefixed paths the kernel needs. */
+    int copy_index = 0;
+    while (pipe_left_argv[0][copy_index] != '\0' && copy_index < MAX_INPUT - 1) {
+        pipe_left_name[copy_index] = pipe_left_argv[0][copy_index];
+        copy_index += 1;
+    }
+    pipe_left_name[copy_index] = '\0';
+    copy_index = 0;
+    while (pipe_right_argv[0][copy_index] != '\0' && copy_index < MAX_INPUT - 1) {
+        pipe_right_name[copy_index] = pipe_right_argv[0][copy_index];
+        copy_index += 1;
+    }
+    pipe_right_name[copy_index] = '\0';
+    build_bin_path(pipe_left_name, pipe_left_path);
+    build_bin_path(pipe_right_name, pipe_right_path);
+    int rc = pipeline2(pipe_left_path, pipe_left_argv,
+                       pipe_right_path, pipe_right_argv);
+    if (rc < 0) {
+        write(STDOUT, "shell: pipeline failed\n", 23);
+        last_exec_status = -rc;
+    } else {
+        last_exec_status = rc;
+    }
+}
+
+/* expand_word — copy *src* into *dst* (capacity *max_len* including
+   the trailing NUL), replacing every literal ``$?`` with the bash-
+   shaped last-exit-status digits.  Returns the destination length
+   (excluding NUL), or -1 if the expansion would overflow.  Used by
+   build_command_argv to materialise per-command argv entries into
+   expanded_buffer. */
+int expand_word(char *src, char *dst, int max_len) {
     int bash_status;
     if (WIFEXITED(last_exec_status)) {
         bash_status = WEXITSTATUS(last_exec_status);
@@ -322,85 +559,31 @@ int expand_dollar_question(char *buffer, int max_len) {
             n = n / 10;
         }
     }
-    /* Reverse digits in place. */
-    int i = 0;
-    int j = digit_count - 1;
-    while (i < j) {
-        char tmp = digits[i];
-        digits[i] = digits[j];
-        digits[j] = tmp;
-        i = i + 1;
-        j = j - 1;
-    }
-    /* Walk buffer, replace each $? with digits[0..digit_count). */
     int read_index = 0;
-    int len = strlen(buffer);
-    while (read_index < len - 1) {
-        if (buffer[read_index] == '$' && buffer[read_index + 1] == '?') {
-            int growth = digit_count - 2;
-            if (len + growth >= max_len) {
+    int write_index = 0;
+    while (src[read_index] != '\0') {
+        if (src[read_index] == '$' && src[read_index + 1] == '?') {
+            if (write_index + digit_count >= max_len) {
                 return -1;
             }
-            /* Shift tail right by growth (could be -1, 0, 1, 2). */
-            if (growth > 0) {
-                int tail_index = len;
-                while (tail_index > read_index + 2) {
-                    buffer[tail_index + growth] = buffer[tail_index];
-                    tail_index = tail_index - 1;
-                }
-                buffer[read_index + 2 + growth] = buffer[read_index + 2];
-            } else if (growth < 0) {
-                /* Shift tail left. */
-                int tail_index = read_index + 2;
-                while (tail_index <= len) {
-                    buffer[tail_index + growth] = buffer[tail_index];
-                    tail_index = tail_index + 1;
-                }
+            int reverse_index = digit_count - 1;
+            while (reverse_index >= 0) {
+                dst[write_index] = digits[reverse_index];
+                write_index += 1;
+                reverse_index -= 1;
             }
-            int digit_index = 0;
-            while (digit_index < digit_count) {
-                buffer[read_index + digit_index] = digits[digit_index];
-                digit_index = digit_index + 1;
-            }
-            len = len + growth;
-            read_index = read_index + digit_count;
+            read_index += 2;
         } else {
-            read_index = read_index + 1;
+            if (write_index >= max_len - 1) {
+                return -1;
+            }
+            dst[write_index] = src[read_index];
+            write_index += 1;
+            read_index += 1;
         }
     }
-    buffer[len] = '\0';
-    return len;
-}
-
-/* find_top_level_pipe — scan `segment` for a `|` outside of quoted
-   regions that is NOT part of a `||` operator.  Returns the byte
-   offset of the first lone `|`, or -1 if none is present.  Returns
-   -2 if a second lone `|` is present (rejects double pipelines). */
-int find_top_level_pipe(char *segment) {
-    int i = 0;
-    int in_single = 0;
-    int in_double = 0;
-    int first = -1;
-    while (segment[i] != '\0') {
-        if (segment[i] == '\'' && in_double == 0) {
-            in_single = 1 - in_single;
-        } else if (segment[i] == '"' && in_single == 0) {
-            in_double = 1 - in_double;
-        } else if (segment[i] == '|' && in_single == 0 && in_double == 0) {
-            /* Skip `||` — that is a chain operator already handled. */
-            if (segment[i + 1] == '|') {
-                i += 2;
-                continue;
-            }
-            if (first < 0) {
-                first = i;
-            } else {
-                return -2;
-            }
-        }
-        i += 1;
-    }
-    return first;
+    dst[write_index] = '\0';
+    return write_index;
 }
 
 /* Forward declarations: history_down / history_up are defined here in
@@ -409,8 +592,6 @@ int find_top_level_pipe(char *segment) {
    under -std=c99 (test_cc_compatibility's reference build) requires
    explicit declarations. */
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
-int tokenize_argv(char *buf, char **argv_slots);
-int tokenize_pipeline_side(char *source, char *name_out, char **argv_slots);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -453,8 +634,8 @@ int history_up(char *buf, int cursor, int end) {
     return replace_line(buf, cursor, end, entry, strlen(entry));
 }
 
-int insert_char(char *buf, int cursor, int end, char ch) {
-    /* Shift buf[cursor..end) right one slot, write ch at cursor, redraw
+int insert_char(char *buf, int cursor, int end, char character) {
+    /* Shift buf[cursor..end) right one slot, write character at cursor, redraw
        tail, and reposition cursor.  Returns the new end index. Caller
        guarantees end < MAX_INPUT. */
     int shift = end;
@@ -462,144 +643,13 @@ int insert_char(char *buf, int cursor, int end, char ch) {
         buf[shift] = buf[shift - 1];
         shift -= 1;
     }
-    buf[cursor] = ch;
+    buf[cursor] = character;
     end += 1;
     write(STDOUT, buf + cursor, end - cursor);
     cursor_back(end - cursor - 1);
     return end;
 }
 
-int parse_chain(char *line) {
-    /* Tokenize `line` in place: replace operator chars with NUL, fill
-       segments[]/segment_ops[].  Returns segment count, or -1 if the
-       line has more than MAX_SEGMENTS segments.  Leading whitespace
-       between operators is trimmed; trailing whitespace within a
-       segment is left to the existing first-space split. */
-    int count = 0;
-    int i = 0;
-    int len = strlen(line);
-    while (line[i] == ' ') {
-        i += 1;
-    }
-    segment_offsets[count] = i;
-    while (i < len) {
-        if (line[i] == ';') {
-            line[i] = '\0';
-            segment_ops[count] = OP_SEMI;
-            count += 1;
-            if (count >= MAX_SEGMENTS) {
-                return -1;
-            }
-            i += 1;
-            while (line[i] == ' ') {
-                i += 1;
-            }
-            segment_offsets[count] = i;
-        } else if (line[i] == '&' && line[i + 1] == '&') {
-            line[i] = '\0';
-            line[i + 1] = '\0';
-            segment_ops[count] = OP_AND;
-            count += 1;
-            if (count >= MAX_SEGMENTS) {
-                return -1;
-            }
-            i += 2;
-            while (line[i] == ' ') {
-                i += 1;
-            }
-            segment_offsets[count] = i;
-        } else if (line[i] == '|' && line[i + 1] == '|') {
-            line[i] = '\0';
-            line[i + 1] = '\0';
-            segment_ops[count] = OP_OR;
-            count += 1;
-            if (count >= MAX_SEGMENTS) {
-                return -1;
-            }
-            i += 2;
-            while (line[i] == ' ') {
-                i += 1;
-            }
-            segment_offsets[count] = i;
-        } else {
-            i += 1;
-        }
-    }
-    segment_ops[count] = OP_END;
-    return count + 1;
-}
-
-int parse_redirections(char *segment) {
-    /* Scan `segment` for `>>`, `>`, `<` tokens; for each, capture the
-       following whitespace-delimited filename into redirect_names and
-       overwrite the operator+filename region with spaces so the
-       remaining text dispatches normally.  Returns 0 on success or -1
-       on syntax error (missing filename, filename too long, more than
-       MAX_REDIRECTS).  Sets redirect_count. */
-    redirect_count = 0;
-    int i = 0;
-    int len = strlen(segment);
-    while (i < len) {
-        char ch = segment[i];
-        int op = REDIRECT_OP_NONE;
-        int op_length = 0;
-        int target_fd = 0;
-        if (ch == '>' && i + 1 < len && segment[i + 1] == '>') {
-            op = REDIRECT_OP_APPND;
-            op_length = 2;
-            target_fd = 1;
-        } else if (ch == '>') {
-            op = REDIRECT_OP_OUT;
-            op_length = 1;
-            target_fd = 1;
-        } else if (ch == '<') {
-            op = REDIRECT_OP_IN;
-            op_length = 1;
-            target_fd = 0;
-        } else {
-            i = i + 1;
-            continue;
-        }
-        if (redirect_count >= MAX_REDIRECTS) {
-            return -1;
-        }
-        int token_start = i;
-        int scan = i + op_length;
-        while (scan < len && segment[scan] == ' ') {
-            scan = scan + 1;
-        }
-        if (scan == len || segment[scan] == '>' || segment[scan] == '<') {
-            return -1;
-        }
-        int name_start = scan;
-        while (scan < len && segment[scan] != ' '
-               && segment[scan] != '>' && segment[scan] != '<') {
-            scan = scan + 1;
-        }
-        int name_length = scan - name_start;
-        if (name_length >= MAX_PATH) {
-            return -1;
-        }
-        char *destination = redirect_names + (redirect_count * MAX_PATH);
-        int copy_index = 0;
-        while (copy_index < name_length) {
-            destination[copy_index] = segment[name_start + copy_index];
-            copy_index = copy_index + 1;
-        }
-        destination[name_length] = '\0';
-        redirect_ops[redirect_count] = op;
-        redirect_targets[redirect_count] = target_fd;
-        redirect_count = redirect_count + 1;
-        /* Blank the operator+filename region in the segment. */
-        int blank_index = token_start;
-        while (blank_index < scan) {
-            segment[blank_index] = ' ';
-            blank_index = blank_index + 1;
-        }
-        i = scan;
-    }
-    return 0;
-}
 
 int replace_line(char *buf, int cursor, int end, char *new_content, int new_length) {
     /* Erase the current input area on screen by stepping cursor back
@@ -648,95 +698,6 @@ int strcmp(const char *a, const char *b) {
         }
         index += 1;
     }
-}
-
-/* tokenize_argv — split `buf` in place on whitespace runs (replacing
-   the first space of each run with a NUL), filling argv_slots[0..argc-1]
-   with pointers to each token and writing argv_slots[argc] = NULL.
-   Returns argc on success, or -1 if argc would exceed MAX_ARGV_ENTRIES.
-   Single- and double-quoted runs are treated as part of a single
-   token; the quote characters themselves are left in place for now
-   (the kernel hands the raw bytes through as argv strings).  argv[0]
-   ends up pointing at the program name token (first whitespace-bounded
-   chunk of buf). */
-int tokenize_argv(char *buf, char **argv_slots) {
-    int scan = 0;
-    int argc = 0;
-    while (1) {
-        while (buf[scan] == ' ') {
-            scan += 1;
-        }
-        if (buf[scan] == '\0') {
-            break;
-        }
-        if (argc >= MAX_ARGV_ENTRIES) {
-            return -1;
-        }
-        argv_slots[argc] = buf + scan;
-        argc += 1;
-        int in_single = 0;
-        int in_double = 0;
-        while (buf[scan] != '\0') {
-            if (buf[scan] == '\'' && in_double == 0) {
-                in_single = 1 - in_single;
-            } else if (buf[scan] == '"' && in_single == 0) {
-                in_double = 1 - in_double;
-            } else if (buf[scan] == ' ' && in_single == 0 && in_double == 0) {
-                buf[scan] = '\0';
-                scan += 1;
-                break;
-            }
-            scan += 1;
-        }
-    }
-    argv_slots[argc] = 0;
-    /* Strip surrounding quote chars from each argv entry in place. */
-    int argv_index = 0;
-    while (argv_index < argc) {
-        char *token = argv_slots[argv_index];
-        int read_index = 0;
-        int write_index = 0;
-        int in_single = 0;
-        int in_double = 0;
-        while (token[read_index] != '\0') {
-            char character = token[read_index];
-            if (character == '\'' && in_double == 0) {
-                in_single = 1 - in_single;
-            } else if (character == '"' && in_single == 0) {
-                in_double = 1 - in_double;
-            } else {
-                token[write_index] = character;
-                write_index += 1;
-            }
-            read_index += 1;
-        }
-        token[write_index] = '\0';
-        argv_index += 1;
-    }
-    return argc;
-}
-
-/* tokenize_pipeline_side — for one half of a pipeline (`cmd1` or `cmd2`),
-   copy the bare basename out of `source` into `name_out` (NUL-terminated)
-   and tokenise the full source into argv_slots in place.  Mirrors what
-   dispatch_buffer does for a single command.  Returns argc or -1 on
-   overflow. */
-int tokenize_pipeline_side(char *source, char *name_out, char **argv_slots) {
-    /* tokenize_argv strips quotes in place, so the post-tokenize
-       argv[0] is the basename with no surrounding quotes to copy. */
-    int argc = tokenize_argv(source, argv_slots);
-    if (argc <= 0) {
-        name_out[0] = '\0';
-        return argc;
-    }
-    char *basename = argv_slots[0];
-    int name_index = 0;
-    while (basename[name_index] != '\0') {
-        name_out[name_index] = basename[name_index];
-        name_index += 1;
-    }
-    name_out[name_index] = '\0';
-    return argc;
 }
 
 int try_exec(char *name, char **argv) {
@@ -789,46 +750,46 @@ int main() {
         int cursor = 0;
         int end = 0;
         while (1) {
-            char ch = getchar();
-            if (ch == '\x01') {
+            char character = getchar();
+            if (character == '\x01') {
                 /* Ctrl-A: beginning of line */
                 if (cursor > 0) {
                     cursor_back(cursor);
                     cursor = 0;
                 }
-            } else if (ch == '\x02') {
+            } else if (character == '\x02') {
                 /* Ctrl-B: cursor left */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor -= 1;
                 }
-            } else if (ch == '\x03') {
+            } else if (character == '\x03') {
                 /* Ctrl-C: cancel line */
                 putchar('\n');
                 end = 0;
                 history_view = 0;
                 break;
-            } else if (ch == '\x04') {
+            } else if (character == '\x04') {
                 /* Ctrl-D: shutdown (returns here only on APM failure) */
                 shutdown();
-            } else if (ch == '\x05') {
+            } else if (character == '\x05') {
                 /* Ctrl-E: end of line */
                 write(STDOUT, buf + cursor, end - cursor);
                 cursor = end;
-            } else if (ch == '\x06') {
+            } else if (character == '\x06') {
                 /* Ctrl-F: cursor right */
                 if (cursor < end) {
                     putchar(buf[cursor]);
                     cursor += 1;
                 }
-            } else if (ch == '\b' || ch == '\x7F') {
+            } else if (character == '\b' || character == '\x7F') {
                 /* Backspace / DEL */
                 if (cursor > 0) {
                     cursor_back(1);
                     cursor -= 1;
                     end = delete_at_cursor(buf, cursor, end);
                 }
-            } else if (ch == '\x0B') {
+            } else if (character == '\x0B') {
                 /* Ctrl-K: kill to end of line */
                 if (cursor < end) {
                     int span = end - cursor;
@@ -849,27 +810,27 @@ int main() {
                     cursor_back(span);
                     end = cursor;
                 }
-            } else if (ch == '\x0C') {
+            } else if (character == '\x0C') {
                 /* Ctrl-L: clear screen and reprompt */
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 end = 0;
                 history_view = 0;
                 break;
-            } else if (ch == '\x0E') {
+            } else if (character == '\x0E') {
                 /* Ctrl-N: history down (alias of Down arrow). */
                 end = history_down(buf, cursor, end);
                 cursor = end;
-            } else if (ch == '\x10') {
+            } else if (character == '\x10') {
                 /* Ctrl-P: history up (alias of Up arrow). */
                 end = history_up(buf, cursor, end);
                 cursor = end;
-            } else if (ch == '\n') {
+            } else if (character == '\n') {
                 /* Enter — fd_read_console normalises CR → LF on input
                  * (PS/2 Enter scancode and serial-terminal CR both
                  * land here as LF). */
                 putchar('\n');
                 break;
-            } else if (ch == '\x19') {
+            } else if (character == '\x19') {
                 /* Ctrl-Y: yank from kill buffer */
                 int yank_index = 0;
                 while (yank_index < kill_len) {
@@ -881,7 +842,7 @@ int main() {
                     cursor += 1;
                     yank_index += 1;
                 }
-            } else if (ch == '\x1B') {
+            } else if (character == '\x1B') {
                 /* CSI escape — consume "[" + parameter bytes + final.
                    Recognised: [A (Up) and [B (Down) for history recall.
                    Other CSI codes (including xterm modified arrows
@@ -901,12 +862,12 @@ int main() {
                         cursor = end;
                     }
                 }
-            } else if (ch >= ' ') {
+            } else if (character >= ' ') {
                 /* Printable char — insert at cursor */
                 if (end >= MAX_INPUT) {
                     visual_bell();
                 } else {
-                    end = insert_char(buf, cursor, end, ch);
+                    end = insert_char(buf, cursor, end, character);
                     cursor += 1;
                 }
             }
@@ -933,131 +894,12 @@ int main() {
         if (end == 0) {
             continue;
         }
-        /* Tokenize the line into chained segments (`;`, `&&`, `||`),
-           then dispatch each in input_buf one-at-a-time.  chain_buf holds
-           the parsed copy so per-segment $? expansion in input_buf does
-           not corrupt segments not yet processed. */
-        memcpy(chain_buf, buf, end + 1);
-        int n_segments = parse_chain(chain_buf);
-        if (n_segments < 0) {
-            printf("too many commands in chain\n");
-            continue;
-        }
-        int seg_index = 0;
-        while (seg_index < n_segments) {
-            int run = 1;
-            if (seg_index > 0) {
-                int prev_op = segment_ops[seg_index - 1];
-                if (prev_op == OP_AND) {
-                    run = (last_exec_status == 0);
-                } else if (prev_op == OP_OR) {
-                    run = (last_exec_status != 0);
-                }
-            }
-            char *segment = chain_buf + segment_offsets[seg_index];
-            if (run && segment[0] != '\0') {
-                int seg_len = strlen(segment);
-                memcpy(buf, segment, seg_len + 1);
-                /* Pipeline check: detect `cmd1 | cmd2` before touching
-                   redirection globals.  parse_chain already consumed `||`
-                   as OP_OR, so any remaining lone `|` is a pipe operator. */
-                int pipe_at = find_top_level_pipe(buf);
-                if (pipe_at == -2) {
-                    write(STDOUT, "shell: pipelines support only one |\n", 36);
-                    last_exec_status = 1 << 8;
-                } else if (pipe_at >= 0) {
-                    /* Copy left side into pipe_left_buf and trim trailing
-                       spaces. */
-                    int pi = 0;
-                    while (pi < pipe_at) {
-                        pipe_left_buf[pi] = buf[pi];
-                        pi += 1;
-                    }
-                    while (pi > 0 && pipe_left_buf[pi - 1] == ' ') {
-                        pi -= 1;
-                    }
-                    pipe_left_buf[pi] = 0;
-                    /* Copy right side into pipe_right_buf, skip leading
-                       spaces. */
-                    pi = pipe_at + 1;
-                    while (buf[pi] == ' ') {
-                        pi += 1;
-                    }
-                    int rj = 0;
-                    while (buf[pi] != '\0') {
-                        pipe_right_buf[rj] = buf[pi];
-                        pi += 1;
-                        rj += 1;
-                    }
-                    pipe_right_buf[rj] = 0;
-                    /* Reject redirect on either side (v1 limitation). */
-                    if (contains_redirect_token(pipe_left_buf) != 0 ||
-                        contains_redirect_token(pipe_right_buf) != 0) {
-                        write(STDOUT, "shell: pipes cannot combine with < > >>\n", 40);
-                        last_exec_status = 1 << 8;
-                    } else {
-                        /* Tokenise each pipeline side in place: name is
-                           copied out for the bin/-prefixed path build,
-                           pipe_*_argv is filled with pointers into the
-                           NUL-split pipe_*_buf so the kernel can walk
-                           them as char** under the shell's PD when
-                           staging each child's user-stack argv frame.
-                           argv[0] is always the program name. */
-                        int la = tokenize_pipeline_side(pipe_left_buf,  pipe_left_name,  pipe_left_argv);
-                        int ra = tokenize_pipeline_side(pipe_right_buf, pipe_right_name, pipe_right_argv);
-                        if (la < 0 || ra < 0) {
-                            write(STDOUT, "shell: too many pipeline arguments\n", 35);
-                            last_exec_status = 1 << 8;
-                        } else {
-                        /* Build bin/-prefixed paths into pipe_left_path and
-                           pipe_right_path.  Mirror dispatch_buffer's
-                           dispatch_bin assembly. */
-                        pipe_left_path[0] = 'b';
-                        pipe_left_path[1] = 'i';
-                        pipe_left_path[2] = 'n';
-                        pipe_left_path[3] = '/';
-                        int ci = 0;
-                        while (pipe_left_name[ci] != '\0' && ci < MAX_PATH - 5) {
-                            pipe_left_path[4 + ci] = pipe_left_name[ci];
-                            ci += 1;
-                        }
-                        pipe_left_path[4 + ci] = 0;
-                        pipe_right_path[0] = 'b';
-                        pipe_right_path[1] = 'i';
-                        pipe_right_path[2] = 'n';
-                        pipe_right_path[3] = '/';
-                        ci = 0;
-                        while (pipe_right_name[ci] != '\0' && ci < MAX_PATH - 5) {
-                            pipe_right_path[4 + ci] = pipe_right_name[ci];
-                            ci += 1;
-                        }
-                        pipe_right_path[4 + ci] = 0;
-                        int rc = pipeline2(pipe_left_path, pipe_left_argv,
-                                           pipe_right_path, pipe_right_argv);
-                        if (rc < 0) {
-                            write(STDOUT, "shell: pipeline failed\n", 23);
-                            last_exec_status = -rc;
-                        } else {
-                            last_exec_status = rc;
-                        }
-                        }
-                    }
-                } else {
-                /* Strip redirections out of buf and into the redirect_*
-                   globals BEFORE dispatch_buffer's first-space split looks
-                   at the cmd name.  Parse errors short-circuit dispatch. */
-                if (parse_redirections(buf) < 0) {
-                    printf("redirection syntax error\n");
-                    last_exec_status = 1 << 8;
-                } else if (apply_redirections() == 0) {
-                    dispatch_buffer(buf);
-                    restore_redirections();
-                }
-                /* On apply_redirections failure last_exec_status is set; nothing
-                   to restore (apply rolls back its own saves on the failure path). */
-                }
-            }
-            seg_index += 1;
-        }
+        /* Drive the whole line through the lex/parse/execute pipeline.
+           execute_line walks the token stream once: it segments on
+           SEMI/AND/OR (honouring && / || short-circuit), splits each
+           segment on PIPE (max one pipe per segment), expands $? per
+           word, applies redirects on single-command segments, and
+           updates last_exec_status. */
+        execute_line(buf);
     }
 }
