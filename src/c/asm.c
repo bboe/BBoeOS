@@ -2634,14 +2634,16 @@ void parse_directive() {
         skip_ws();
         int count = resolve_value();
         skip_ws();
-        if (match_word(STR_DB) == 0) {
-            return;
-        }
-        skip_ws();
+        /* Re-dispatch the payload N times via parse_directive itself,
+           so every directive shape works (db/dw/dd/mnemonic incl.
+           branches whose size resolves on a later pass).  Previously
+           this fast-pathed db only and silently elided every other
+           form — most painfully ``times N jmp/jcc`` which emitted zero
+           bytes while the line reported OK. */
         char *saved = source_cursor;
-        while (count != 0) {
+        while (count > 0) {
             source_cursor = saved;
-            parse_db();
+            parse_directive();
             count -= 1;
         }
         return;
