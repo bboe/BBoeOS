@@ -29,15 +29,15 @@
 extern uint8_t *sector_buffer;
 
 #define SECTOR_CACHE_SIZE 8
-#define SECTOR_BYTES      512
+#define SECTOR_BYTES 512
 
 struct sector_cache_entry {
     uint32_t sector;
     uint32_t last_used;
-    uint8_t  valid;
-    uint8_t  _pad0;
-    uint8_t  _pad1;
-    uint8_t  _pad2;
+    uint8_t valid;
+    uint8_t _pad0;
+    uint8_t _pad1;
+    uint8_t _pad2;
 };
 
 struct sector_cache_entry sector_cache_metadata[SECTOR_CACHE_SIZE];
@@ -52,22 +52,20 @@ asm("sector_cache_tick equ _g_sector_cache_tick");
 // disk_read_sector / disk_write_sector live in fs/block.asm.  Same
 // AX = sector ABI as the public read_sector / write_sector below;
 // CF reflects success.
-__attribute__((carry_return))
-__attribute__((preserve_register("eax")))
+__attribute__((carry_return)) __attribute__((preserve_register("eax")))
 __attribute__((preserve_register("ebx")))
 __attribute__((preserve_register("ecx")))
 __attribute__((preserve_register("edx")))
 __attribute__((preserve_register("esi")))
-__attribute__((preserve_register("edi")))
-int disk_read_sector(int sec __attribute__((in_register("ax"))));
-__attribute__((carry_return))
-__attribute__((preserve_register("eax")))
+__attribute__((preserve_register("edi"))) int
+disk_read_sector(int sec __attribute__((in_register("ax"))));
+__attribute__((carry_return)) __attribute__((preserve_register("eax")))
 __attribute__((preserve_register("ebx")))
 __attribute__((preserve_register("ecx")))
 __attribute__((preserve_register("edx")))
 __attribute__((preserve_register("esi")))
-__attribute__((preserve_register("edi")))
-int disk_write_sector(int sec __attribute__((in_register("ax"))));
+__attribute__((preserve_register("edi"))) int
+disk_write_sector(int sec __attribute__((in_register("ax"))));
 
 // sector_cache_init: allocate the 4 KB cache data frame and store
 // its kernel-virt at sector_cache_data.  Hard-stop on OOM; the bitmap
@@ -90,14 +88,13 @@ asm("sector_cache_init:\n"
 // On a hit, copies cache → sector_buffer (no disk syscall).  On a
 // miss, calls disk_read_sector and inserts the result into the LRU
 // slot (or whatever invalid entry we have).
-__attribute__((carry_return))
-__attribute__((preserve_register("eax")))
+__attribute__((carry_return)) __attribute__((preserve_register("eax")))
 __attribute__((preserve_register("ebx")))
 __attribute__((preserve_register("ecx")))
 __attribute__((preserve_register("edx")))
 __attribute__((preserve_register("esi")))
-__attribute__((preserve_register("edi")))
-int read_sector(int sec __attribute__((in_register("ax")))) {
+__attribute__((preserve_register("edi"))) int
+read_sector(int sec __attribute__((in_register("ax")))) {
     int i;
     int lru;
     int cached_valid;
@@ -110,8 +107,7 @@ int read_sector(int sec __attribute__((in_register("ax")))) {
         cached_valid = sector_cache_metadata[i].valid;
         cached_sector = sector_cache_metadata[i].sector;
         if (cached_valid != 0 && cached_sector == sec) {
-            memcpy(sector_buffer,
-                   sector_cache_data + i * SECTOR_BYTES,
+            memcpy(sector_buffer, sector_cache_data + i * SECTOR_BYTES,
                    SECTOR_BYTES);
             sector_cache_metadata[i].last_used = sector_cache_tick;
             return 1;
@@ -132,9 +128,7 @@ int read_sector(int sec __attribute__((in_register("ax")))) {
         }
         i = i + 1;
     }
-    memcpy(sector_cache_data + lru * SECTOR_BYTES,
-           sector_buffer,
-           SECTOR_BYTES);
+    memcpy(sector_cache_data + lru * SECTOR_BYTES, sector_buffer, SECTOR_BYTES);
     sector_cache_metadata[lru].sector = sec;
     sector_cache_metadata[lru].last_used = sector_cache_tick;
     sector_cache_metadata[lru].valid = 1;
@@ -146,14 +140,13 @@ int read_sector(int sec __attribute__((in_register("ax")))) {
 // insert on write — only sectors a previous read brought into the
 // cache get refreshed; writing to a non-cached sector doesn't
 // pollute the LRU.
-__attribute__((carry_return))
-__attribute__((preserve_register("eax")))
+__attribute__((carry_return)) __attribute__((preserve_register("eax")))
 __attribute__((preserve_register("ebx")))
 __attribute__((preserve_register("ecx")))
 __attribute__((preserve_register("edx")))
 __attribute__((preserve_register("esi")))
-__attribute__((preserve_register("edi")))
-int write_sector(int sec __attribute__((in_register("ax")))) {
+__attribute__((preserve_register("edi"))) int
+write_sector(int sec __attribute__((in_register("ax")))) {
     int i;
     int cached_valid;
     uint32_t cached_sector;
@@ -166,8 +159,7 @@ int write_sector(int sec __attribute__((in_register("ax")))) {
         cached_valid = sector_cache_metadata[i].valid;
         cached_sector = sector_cache_metadata[i].sector;
         if (cached_valid != 0 && cached_sector == sec) {
-            memcpy(sector_cache_data + i * SECTOR_BYTES,
-                   sector_buffer,
+            memcpy(sector_cache_data + i * SECTOR_BYTES, sector_buffer,
                    SECTOR_BYTES);
             sector_cache_metadata[i].last_used = sector_cache_tick;
             return 1;

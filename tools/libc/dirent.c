@@ -23,15 +23,18 @@
 int getdents(int fd, void *buffer, int count);
 
 struct DIR {
-    int            fd;
-    int            buffer_bytes;
-    int            buffer_cursor;
-    struct dirent  entry;
-    unsigned char  buffer[4096];
+    int fd;
+    int buffer_bytes;
+    int buffer_cursor;
+    struct dirent entry;
+    unsigned char buffer[4096];
 };
 
 int closedir(DIR *directory) {
-    if (directory == NULL) { errno = EINVAL; return -1; }
+    if (directory == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     int result = close(directory->fd);
     free(directory);
     return result;
@@ -39,7 +42,8 @@ int closedir(DIR *directory) {
 
 DIR *opendir(const char *path) {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
+    if (fd < 0)
+        return NULL;
     DIR *directory = malloc(sizeof *directory);
     if (directory == NULL) {
         close(fd);
@@ -54,8 +58,10 @@ DIR *opendir(const char *path) {
 
 struct dirent *readdir(DIR *directory) {
     if (directory->buffer_cursor >= directory->buffer_bytes) {
-        int bytes = getdents(directory->fd, directory->buffer, (int)sizeof directory->buffer);
-        if (bytes <= 0) return NULL;
+        int bytes = getdents(directory->fd, directory->buffer,
+                             (int)sizeof directory->buffer);
+        if (bytes <= 0)
+            return NULL;
         directory->buffer_bytes = bytes;
         directory->buffer_cursor = 0;
     }
@@ -64,7 +70,7 @@ struct dirent *readdir(DIR *directory) {
     unsigned short d_reclen;
     memcpy(&d_ino, record + 0, sizeof d_ino);
     memcpy(&d_reclen, record + 4, sizeof d_reclen);
-    directory->entry.d_ino  = (ino_t)d_ino;
+    directory->entry.d_ino = (ino_t)d_ino;
     directory->entry.d_type = record[6];
     /* Names from the wire are always NUL-terminated and <= 255 chars,
      * so strcpy into d_name[256] is safe.  If the kernel ever lifts
@@ -75,7 +81,8 @@ struct dirent *readdir(DIR *directory) {
 }
 
 void rewinddir(DIR *directory) {
-    if (directory == NULL) return;
+    if (directory == NULL)
+        return;
     lseek(directory->fd, 0, SEEK_SET);
     directory->buffer_bytes = 0;
     directory->buffer_cursor = 0;

@@ -19,10 +19,10 @@
    by strcmp.  48 root entries × 25 bytes max gives ~1200 bytes of
    arena worst case; the 2048-byte allocation has headroom. */
 
-#define ARENA_BYTES    2048
-#define BUFFER_BYTES   4096
-#define DT_DIR         4
-#define MAX_ENTRIES    64
+#define ARENA_BYTES 2048
+#define BUFFER_BYTES 4096
+#define DT_DIR 4
+#define MAX_ENTRIES 64
 
 int strcmp(const char *a, const char *b) {
     int index = 0;
@@ -50,9 +50,9 @@ int main(int argc, char *argv[]) {
     char buffer[BUFFER_BYTES];
     char arena[ARENA_BYTES];
     char *names[MAX_ENTRIES];
-    char  is_dir[MAX_ENTRIES];
-    int   arena_used = 0;
-    int   count = 0;
+    char is_dir[MAX_ENTRIES];
+    int arena_used = 0;
+    int count = 0;
 
     while (1) {
         int bytes = getdents(fd, buffer, BUFFER_BYTES);
@@ -62,11 +62,11 @@ int main(int argc, char *argv[]) {
         int cursor = 0;
         while (cursor < bytes) {
             int reclen = buffer[cursor + 4] + (buffer[cursor + 5] << 8);
-            int type   = buffer[cursor + 6];
-            char *src  = buffer + cursor + 7;
-            int   len  = strlen(src) + 1;
+            int type = buffer[cursor + 6];
+            char *src = buffer + cursor + 7;
+            int len = strlen(src) + 1;
             memcpy(arena + arena_used, src, len);
-            names[count]  = arena + arena_used;
+            names[count] = arena + arena_used;
             is_dir[count] = (type == DT_DIR);
             arena_used = arena_used + len;
             count = count + 1;
@@ -82,17 +82,17 @@ int main(int argc, char *argv[]) {
     int i = 1;
     while (i < count) {
         char *key_name = names[i];
-        char  key_dir  = is_dir[i];
-        int   j = i - 1;
+        char key_dir = is_dir[i];
+        int j = i - 1;
         while (j >= 0) {
             if (strcmp(names[j], key_name) <= 0) {
                 break;
             }
-            names[j + 1]  = names[j];
+            names[j + 1] = names[j];
             is_dir[j + 1] = is_dir[j];
             j = j - 1;
         }
-        names[j + 1]  = key_name;
+        names[j + 1] = key_name;
         is_dir[j + 1] = key_dir;
         i = i + 1;
     }

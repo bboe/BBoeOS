@@ -23,30 +23,28 @@ unsigned int alarm(unsigned int seconds) {
 
 unsigned int alarm_ms(unsigned int delay_ms, unsigned int interval_ms) {
     unsigned int eax_out;
-    __asm__ volatile (
-        "mov %[delay], %%ebx\n\t"
-        "mov %[interval], %%ecx\n\t"
-        "mov $" SYSNUM_STR(SYS_RTC_ALARM) ", %%ah\n\t"
-        "int $0x30\n\t"
-        : "=a"(eax_out)
-        : [delay]"g"(delay_ms),
-          [interval]"g"(interval_ms)
-        : "ebx", "ecx");
+    __asm__ volatile("mov %[delay], %%ebx\n\t"
+                     "mov %[interval], %%ecx\n\t"
+                     "mov $" SYSNUM_STR(SYS_RTC_ALARM) ", %%ah\n\t"
+                                                       "int $0x30\n\t"
+                     : "=a"(eax_out)
+                     : [delay] "g"(delay_ms), [interval] "g"(interval_ms)
+                     : "ebx", "ecx");
     return eax_out;
 }
 
 sighandler_t signal(int signum, sighandler_t handler) {
     unsigned int eax_out;
     unsigned int cf;
-    __asm__ volatile (
+    __asm__ volatile(
         "mov %[handler], %%ecx\n\t"
         "mov %[signum], %%ebx\n\t"
         "mov $" SYSNUM_STR(SYS_SYS_SIGNAL) ", %%ah\n\t"
-        "int $0x30\n\t"
-        "setc %b[cf]\n\t"
-        : "=a"(eax_out), [cf]"=&q"(cf)
-        : [signum]"g"((unsigned int)signum),
-          [handler]"g"((unsigned int)handler)
+                                           "int $0x30\n\t"
+                                           "setc %b[cf]\n\t"
+        : "=a"(eax_out), [cf] "=&q"(cf)
+        : [signum] "g"((unsigned int)signum), [handler] "g"(
+                                                  (unsigned int)handler)
         : "ebx", "ecx");
     if (cf & 1) {
         errno = EINVAL;

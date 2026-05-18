@@ -1,0 +1,23 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+AlignConsecutiveMacros: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+PointerAlignment: Right
+SpacesInParentheses: false
+SpaceAfterCStyleCast: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+ReflowComments: false

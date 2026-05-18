@@ -46,7 +46,8 @@ int main(int argc, char *argv[]) {
         }
         int strip_newline = current[line_length - 1] == '\n' ? 1 : 0;
         int current_length = line_length - strip_newline;
-        if (has_previous && previous_length == current_length && memcmp(previous, current, current_length) == 0) {
+        if (has_previous && previous_length == current_length &&
+            memcmp(previous, current, current_length) == 0) {
             run_count += 1;
         } else {
             if (has_previous && (!dups_only || run_count > 1)) {

@@ -71,22 +71,22 @@ uint8_t vga_scrollback_snapshot_attr[80 * 25];
 // 16-entry default DAC palette (6-bit R, G, B per entry).  Restored on
 // every mode switch so mode-13h programs can freely modify the DAC.
 uint8_t vga_default_palette[48] = {
-     0,  0,  0,    //  0 black
-     0,  0, 42,    //  1 dark blue
-     0, 42,  0,    //  2 dark green
-     0, 42, 42,    //  3 dark cyan
-    42,  0,  0,    //  4 dark red
-    42,  0, 42,    //  5 dark magenta
-    42, 21,  0,    //  6 brown
-    42, 42, 42,    //  7 light gray
-    21, 21, 21,    //  8 dark gray
-    21, 21, 63,    //  9 bright blue
-    21, 63, 21,    // 10 bright green
-    21, 63, 63,    // 11 bright cyan
-    63, 21, 21,    // 12 bright red
-    63, 21, 63,    // 13 bright magenta
-    63, 63, 21,    // 14 yellow
-    63, 63, 63,    // 15 white
+    0,  0,  0,  //  0 black
+    0,  0,  42, //  1 dark blue
+    0,  42, 0,  //  2 dark green
+    0,  42, 42, //  3 dark cyan
+    42, 0,  0,  //  4 dark red
+    42, 0,  42, //  5 dark magenta
+    42, 21, 0,  //  6 brown
+    42, 42, 42, //  7 light gray
+    21, 21, 21, //  8 dark gray
+    21, 21, 63, //  9 bright blue
+    21, 63, 21, // 10 bright green
+    21, 63, 63, // 11 bright cyan
+    63, 21, 21, // 12 bright red
+    63, 21, 63, // 13 bright magenta
+    63, 63, 21, // 14 yellow
+    63, 63, 63, // 15 white
 };
 
 // VGA mode register tables for vga_set_mode.  Each entry: 1 mode-id +
@@ -94,38 +94,138 @@ uint8_t vga_default_palette[48] = {
 // 61 bytes.  Two entries: mode 0x03 (text) and mode 0x13 (graphics).
 uint8_t vga_mode_table[122] = {
     // ----- Mode 03h: 80x25 16-colour text, 400 scan lines ---------------
-    0x03,                                             // mode ID
-    0x67,                                             // Misc Output
+    0x03, // mode ID
+    0x67, // Misc Output
     // Sequencer regs 1..4
-    0x00, 0x03, 0x05, 0x02,
+    0x00,
+    0x03,
+    0x05,
+    0x02,
     // CRTC regs 0x00..0x18
-    0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F,
-    0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
-    0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3,
+    0x5F,
+    0x4F,
+    0x50,
+    0x82,
+    0x55,
+    0x81,
+    0xBF,
+    0x1F,
+    0x00,
+    0x4F,
+    0x0D,
+    0x0E,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x9C,
+    0x8E,
+    0x8F,
+    0x28,
+    0x1F,
+    0x96,
+    0xB9,
+    0xA3,
     0xFF,
     // Graphics Controller regs 0..8
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x10,
+    0x0E,
+    0x00,
+    0xFF,
     // Attribute Controller regs 0x00..0x14
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
-    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
-    0x0C, 0x00, 0x0F, 0x08, 0x00,
+    0x00,
+    0x01,
+    0x02,
+    0x03,
+    0x04,
+    0x05,
+    0x14,
+    0x07,
+    0x38,
+    0x39,
+    0x3A,
+    0x3B,
+    0x3C,
+    0x3D,
+    0x3E,
+    0x3F,
+    0x0C,
+    0x00,
+    0x0F,
+    0x08,
+    0x00,
 
     // ----- Mode 13h: 320x200 256-colour ---------------------------------
-    0x13,                                             // mode ID
-    0x63,                                             // Misc Output
+    0x13, // mode ID
+    0x63, // Misc Output
     // Sequencer regs 1..4
-    0x01, 0x0F, 0x00, 0x0E,
+    0x01,
+    0x0F,
+    0x00,
+    0x0E,
     // CRTC regs 0x00..0x18
-    0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F,
-    0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x9C, 0x8E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3,
+    0x5F,
+    0x4F,
+    0x50,
+    0x82,
+    0x54,
+    0x80,
+    0xBF,
+    0x1F,
+    0x00,
+    0x41,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x9C,
+    0x8E,
+    0x8F,
+    0x28,
+    0x40,
+    0x96,
+    0xB9,
+    0xA3,
     0xFF,
     // Graphics Controller regs 0..8
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x40,
+    0x05,
+    0x0F,
+    0xFF,
     // Attribute Controller regs 0x00..0x14
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-    0x41, 0x00, 0x0F, 0x00, 0x00,
+    0x00,
+    0x01,
+    0x02,
+    0x03,
+    0x04,
+    0x05,
+    0x06,
+    0x07,
+    0x08,
+    0x09,
+    0x0A,
+    0x0B,
+    0x0C,
+    0x0D,
+    0x0E,
+    0x0F,
+    0x41,
+    0x00,
+    0x0F,
+    0x00,
+    0x00,
 };
 
 // vga_set_mode walks `vga_mode_table` until ESI hits this end marker.
@@ -144,13 +244,13 @@ asm("_g_vga_mode_table_end equ _g_vga_mode_table + 122");
 void fd_ioctl_vga();
 
 asm("fd_ioctl_vga:\n"
-    "        test byte [esi+1], 0x01\n"         // FD_OFFSET_FLAGS, O_WRONLY
+    "        test byte [esi+1], 0x01\n" // FD_OFFSET_FLAGS, O_WRONLY
     "        jz .fd_ioctl_vga_bad\n"
-    "        cmp al, 0x00\n"                    // VGA_IOCTL_FILL_BLOCK
+    "        cmp al, 0x00\n" // VGA_IOCTL_FILL_BLOCK
     "        je .fd_ioctl_vga_fill\n"
-    "        cmp al, 0x01\n"                    // VGA_IOCTL_MODE
+    "        cmp al, 0x01\n" // VGA_IOCTL_MODE
     "        je .fd_ioctl_vga_mode\n"
-    "        cmp al, 0x02\n"                    // VGA_IOCTL_SET_PALETTE
+    "        cmp al, 0x02\n" // VGA_IOCTL_SET_PALETTE
     "        je .fd_ioctl_vga_set_palette\n"
     ".fd_ioctl_vga_bad:\n"
     "        stc\n"
@@ -180,7 +280,7 @@ asm("fd_ioctl_vga:\n"
     "        mov al, dl\n"
     "        cmp al, [_g_vga_current_mode]\n"
     "        je .fd_ioctl_vga_mode_already\n"
-    "        call vga_set_mode\n"               // CF=1 on unsupported
+    "        call vga_set_mode\n" // CF=1 on unsupported
     "        jc .fd_ioctl_vga_mode_done\n"
     "        mov [_g_vga_current_mode], al\n"
     ".fd_ioctl_vga_mode_already:\n"
@@ -212,7 +312,7 @@ asm("vga_clear_screen:\n"
     "        push edi\n"
 
     "        mov edi, DIRECT_MAP_BASE + 0xB8000\n"
-    "        mov ax, 0x0720\n"            // 0x07 attribute, 0x20 ' '
+    "        mov ax, 0x0720\n" // 0x07 attribute, 0x20 ' '
     "        mov ecx, 80 * 25\n"
     "        cld\n"
     "        rep stosw\n"
@@ -234,8 +334,7 @@ void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx")))
-    __attribute__((preserve_register("edi")))
-{
+    __attribute__((preserve_register("edi"))) {
     int row;
     int col;
     int base;
@@ -272,8 +371,7 @@ void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
 // 0x3D4/0x3D5, then divmod by VGA_COLS to split into row/col.
 void vga_get_cursor(int *dx_out __attribute__((out_register("dx"))))
     __attribute__((preserve_register("ebx")))
-    __attribute__((preserve_register("ecx")))
-{
+    __attribute__((preserve_register("ecx"))) {
     uint8_t high;
     uint8_t low;
     int linear;
@@ -305,10 +403,10 @@ asm("vga_reset_text_mode:\n"
     "        je .vga_reset_text_mode_done\n"
     "        push eax\n"
     "        mov al, VIDEO_MODE_TEXT_80x25\n"
-    "        call vga_set_mode\n"                    // also clears the framebuffer
+    "        call vga_set_mode\n" // also clears the framebuffer
     "        mov byte [_g_vga_current_mode], VIDEO_MODE_TEXT_80x25\n"
     "        pop eax\n"
-    "        call vga_clear_screen\n"                // homes the cursor
+    "        call vga_clear_screen\n" // homes the cursor
     "    .vga_reset_text_mode_done:\n"
     "        ret");
 
@@ -337,7 +435,7 @@ asm("vga_scroll_up:\n"
     "        mov esi, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov ecx, 80\n"
     ".vga_scroll_up_ring_push:\n"
-    "        mov ax, [esi]\n"        /* ax = char (al) | attr (ah) */
+    "        mov ax, [esi]\n" /* ax = char (al) | attr (ah) */
     "        mov [edi], al\n"
     "        mov [edx], ah\n"
     "        add esi, 2\n"
@@ -406,9 +504,10 @@ void vga_scrollback_down(int rows) {
         while (row < 25) {
             col = 0;
             while (col < 80) {
-                far_write16(0xFF8B8000 + (row * 80 + col) * 2,
-                            vga_scrollback_snapshot_char[row * 80 + col]
-                            | (vga_scrollback_snapshot_attr[row * 80 + col] << 8));
+                far_write16(
+                    0xFF8B8000 + (row * 80 + col) * 2,
+                    vga_scrollback_snapshot_char[row * 80 + col] |
+                        (vga_scrollback_snapshot_attr[row * 80 + col] << 8));
                 col = col + 1;
             }
             row = row + 1;
@@ -451,21 +550,23 @@ void vga_scrollback_render(int offset) {
         col = 0;
         while (col < 80) {
             if (virtual_index < 0) {
-                cell = 0x0720;          /* blank with default attribute */
+                cell = 0x0720; /* blank with default attribute */
             } else if (virtual_index < vga_scrollback_valid) {
                 /* Ring entry: oldest-valid is at (head - valid) mod N,
                    newest-valid is at (head - 1) mod N. */
-                ring_index = (vga_scrollback_head - vga_scrollback_valid + virtual_index)
-                             % SCROLLBACK_ROWS;
+                ring_index = (vga_scrollback_head - vga_scrollback_valid +
+                              virtual_index) %
+                             SCROLLBACK_ROWS;
                 if (ring_index < 0) {
                     ring_index = ring_index + SCROLLBACK_ROWS;
                 }
-                cell = vga_scrollback_ring_char[ring_index * 80 + col]
-                       | (vga_scrollback_ring_attr[ring_index * 80 + col] << 8);
+                cell = vga_scrollback_ring_char[ring_index * 80 + col] |
+                       (vga_scrollback_ring_attr[ring_index * 80 + col] << 8);
             } else {
                 snapshot_index = virtual_index - vga_scrollback_valid;
-                cell = vga_scrollback_snapshot_char[snapshot_index * 80 + col]
-                       | (vga_scrollback_snapshot_attr[snapshot_index * 80 + col] << 8);
+                cell = vga_scrollback_snapshot_char[snapshot_index * 80 + col] |
+                       (vga_scrollback_snapshot_attr[snapshot_index * 80 + col]
+                        << 8);
             }
             far_write16(0xFF8B8000 + (row * 80 + col) * 2, cell);
             col = col + 1;
@@ -489,7 +590,8 @@ void vga_scrollback_up(int rows) {
             while (col < 80) {
                 cell = far_read16(0xFF8B8000 + (row * 80 + col) * 2);
                 vga_scrollback_snapshot_char[row * 80 + col] = cell & 0xFF;
-                vga_scrollback_snapshot_attr[row * 80 + col] = (cell >> 8) & 0xFF;
+                vga_scrollback_snapshot_attr[row * 80 + col] =
+                    (cell >> 8) & 0xFF;
                 col = col + 1;
             }
             row = row + 1;
@@ -500,7 +602,7 @@ void vga_scrollback_up(int rows) {
         new_offset = vga_scrollback_valid;
     }
     if (new_offset == vga_scrollback_offset) {
-        return;     /* already at the top */
+        return; /* already at the top */
     }
     vga_scrollback_offset = new_offset;
     vga_scrollback_render(new_offset);
@@ -511,11 +613,10 @@ void vga_scrollback_up(int rows) {
 // keep palette latched / video unblanked) and the colour byte to 0x3C0.
 void vga_set_bg(uint8_t color __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax")))
-    __attribute__((preserve_register("edx")))
-{
-    kernel_inb(0x3DA);                 // reset AC flip-flop
-    kernel_outb(0x3C0, 0x11 | 0x20);   // AC index = overscan + PAS
-    kernel_outb(0x3C0, color);         // colour value
+    __attribute__((preserve_register("edx"))) {
+    kernel_inb(0x3DA);               // reset AC flip-flop
+    kernel_outb(0x3C0, 0x11 | 0x20); // AC index = overscan + PAS
+    kernel_outb(0x3C0, color);       // colour value
 }
 
 // drivers/console.c declares this with ``__attribute__((in_register("dx")))``.
@@ -523,8 +624,7 @@ void vga_set_bg(uint8_t color __attribute__((in_register("ax"))))
 void vga_set_cursor(int row_col __attribute__((in_register("dx"))))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("edx")))
-{
+    __attribute__((preserve_register("edx"))) {
     uint8_t row;
     uint8_t col;
     int linear;
@@ -555,7 +655,7 @@ asm("vga_set_mode:\n"
     "        push esi\n"
     "        push edi\n"
 
-    "        mov ah, al\n"                       // save requested mode
+    "        mov ah, al\n" // save requested mode
 
     "        mov esi, _g_vga_mode_table\n"
     ".vga_set_mode_find:\n"
@@ -563,7 +663,7 @@ asm("vga_set_mode:\n"
     "        jae .vga_set_mode_unsupported\n"
     "        cmp byte [esi], ah\n"
     "        je .vga_set_mode_found\n"
-    "        add esi, 61\n"                      // VGA_MODE_ENTRY_SIZE
+    "        add esi, 61\n" // VGA_MODE_ENTRY_SIZE
     "        jmp .vga_set_mode_find\n"
 
     ".vga_set_mode_unsupported:\n"
@@ -571,7 +671,7 @@ asm("vga_set_mode:\n"
     "        jmp .vga_set_mode_done\n"
 
     ".vga_set_mode_found:\n"
-    "        inc esi\n"                          // skip mode-ID byte
+    "        inc esi\n" // skip mode-ID byte
 
     // 1. Misc Output
     "        mov dx, 0x3C2\n"
@@ -647,7 +747,7 @@ asm("vga_set_mode:\n"
 
     // 8. Attribute Controller regs 0x00..0x14 (21 values)
     "        mov dx, 0x3DA\n"
-    "        in al, dx\n"                        // reset AC flip-flop
+    "        in al, dx\n" // reset AC flip-flop
 
     "        mov cx, 21\n"
     "        xor bx, bx\n"
@@ -670,10 +770,10 @@ asm("vga_set_mode:\n"
     //     populates DAC entries 0-7 / 20 / 56-63; mode 13 indexes the
     //     DAC directly so leftover BIOS state would alias colours.
     "        mov esi, _g_vga_default_palette\n"
-    "        mov dx, 0x3C8\n"                   // DAC write-address
+    "        mov dx, 0x3C8\n" // DAC write-address
     "        xor al, al\n"
     "        out dx, al\n"
-    "        inc dx\n"                          // 0x3C9 = DAC data
+    "        inc dx\n" // 0x3C9 = DAC data
     "        mov cx, 16 * 3\n"
     "        cld\n"
     ".vga_set_mode_dac:\n"
@@ -714,8 +814,7 @@ void vga_set_palette_color(int index_r __attribute__((in_register("cx"))),
                            int g_b __attribute__((in_register("dx"))))
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
-    __attribute__((preserve_register("edx")))
-{
+    __attribute__((preserve_register("edx"))) {
     uint8_t index;
     uint8_t r;
     uint8_t g;
@@ -756,15 +855,15 @@ asm("vga_teletype:\n"
 
     // Normal character: stash char/attr, fetch cursor, compute
     // linear FB offset, write the cell, advance.
-    "        mov cl, al\n"                       // char
-    "        mov ch, [ansi_fg]\n"                // attribute (bare name → equ shim from console.c, or asm-side global if swapped)
-    "        call vga_get_cursor\n"              // DH=row, DL=col
+    "        mov cl, al\n"        // char
+    "        mov ch, [ansi_fg]\n" // attribute (bare name → equ shim from console.c, or asm-side global if swapped)
+    "        call vga_get_cursor\n" // DH=row, DL=col
 
     "        movzx eax, dh\n"
-    "        imul eax, eax, 80\n"                // row * 80
+    "        imul eax, eax, 80\n" // row * 80
     "        movzx ebx, dl\n"
     "        add eax, ebx\n"
-    "        shl eax, 1\n"                       // byte offset
+    "        shl eax, 1\n" // byte offset
     "        add eax, DIRECT_MAP_BASE + 0xB8000\n"
     "        mov edi, eax\n"
 

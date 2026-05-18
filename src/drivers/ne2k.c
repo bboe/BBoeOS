@@ -30,9 +30,9 @@
 //   DATA             = +0x10   remote DMA data port (16-bit)
 //   RESET            = +0x1F   write-on-read triggers full reset
 
-#define NE2K_RX_START 0x46    // RX ring start page (after 6 TX pages)
-#define NE2K_RX_STOP  0x80    // RX ring end page (one past last)
-#define NE2K_TX_PAGE  0x40    // TX buffer start page
+#define NE2K_RX_START 0x46 // RX ring start page (after 6 TX pages)
+#define NE2K_RX_STOP 0x80  // RX ring end page (one past last)
+#define NE2K_TX_PAGE 0x40  // TX buffer start page
 
 uint8_t mac_address[6];
 uint8_t net_present;
@@ -61,14 +61,14 @@ asm("net_transmit_buffer equ _g_net_transmit_buffer");
 void ne2k_init() {
     int i;
 
-    kernel_outb(0x300, 0x21);              // Page 0, stop, abort DMA.
-    kernel_outb(0x300 + 0x01, NE2K_RX_START);   // PSTART
-    kernel_outb(0x300 + 0x02, NE2K_RX_STOP);    // PSTOP
-    kernel_outb(0x300 + 0x03, NE2K_RX_START);   // BOUNDARY
-    kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);    // TPSR
+    kernel_outb(0x300, 0x21);                 // Page 0, stop, abort DMA.
+    kernel_outb(0x300 + 0x01, NE2K_RX_START); // PSTART
+    kernel_outb(0x300 + 0x02, NE2K_RX_STOP);  // PSTOP
+    kernel_outb(0x300 + 0x03, NE2K_RX_START); // BOUNDARY
+    kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);  // TPSR
 
-    kernel_outb(0x300, 0x61);                   // Page 1, stop, abort DMA.
-    kernel_outb(0x300 + 0x07, NE2K_RX_START + 1);   // CURR
+    kernel_outb(0x300, 0x61);                     // Page 1, stop, abort DMA.
+    kernel_outb(0x300 + 0x07, NE2K_RX_START + 1); // CURR
 
     // Program PAR0..PAR5 with the MAC we read in ne2k_probe.
     i = 0;
@@ -83,12 +83,12 @@ void ne2k_init() {
         i = i + 1;
     }
 
-    kernel_outb(0x300, 0x21);              // Page 0.
-    kernel_outb(0x300 + 0x0C, 0x04);       // RCR: accept broadcast.
-    kernel_outb(0x300 + 0x0D, 0);          // TCR: normal (no loopback).
-    kernel_outb(0x300 + 0x07, 0xFF);       // ISR: clear pending.
-    kernel_outb(0x300 + 0x0F, 0);          // IMR: no IRQs (polled).
-    kernel_outb(0x300, 0x22);              // Page 0, start, abort DMA.
+    kernel_outb(0x300, 0x21);        // Page 0.
+    kernel_outb(0x300 + 0x0C, 0x04); // RCR: accept broadcast.
+    kernel_outb(0x300 + 0x0D, 0);    // TCR: normal (no loopback).
+    kernel_outb(0x300 + 0x07, 0xFF); // ISR: clear pending.
+    kernel_outb(0x300 + 0x0F, 0);    // IMR: no IRQs (polled).
+    kernel_outb(0x300, 0x22);        // Page 0, start, abort DMA.
 }
 
 // Probe and reset the NIC, read the MAC PROM into mac_address.
@@ -112,29 +112,29 @@ int ne2k_probe() __attribute__((carry_return)) {
         timeout = timeout - 1;
     }
     if (timeout == 0) {
-        return 0;                      // No NIC.
+        return 0; // No NIC.
     }
 
-    kernel_outb(0x300 + 0x07, 0xFF);   // Acknowledge all interrupts.
-    kernel_outb(0x300, 0x21);          // Page 0, stop, abort DMA.
+    kernel_outb(0x300 + 0x07, 0xFF); // Acknowledge all interrupts.
+    kernel_outb(0x300, 0x21);        // Page 0, stop, abort DMA.
 
     // Verify NIC presence by reading CR back.  Mask off page-select bits.
     if ((kernel_inb(0x300) & 0x3F) != 0x21) {
         return 0;
     }
 
-    kernel_outb(0x300 + 0x0E, 0x49);   // DCR: word-wide DMA, 4-byte FIFO.
-    kernel_outb(0x300 + 0x0A, 0);      // RBCR0
-    kernel_outb(0x300 + 0x0B, 0);      // RBCR1
-    kernel_outb(0x300 + 0x0C, 0x20);   // RCR: monitor mode (no RX during probe).
-    kernel_outb(0x300 + 0x0D, 0x02);   // TCR: internal loopback.
+    kernel_outb(0x300 + 0x0E, 0x49); // DCR: word-wide DMA, 4-byte FIFO.
+    kernel_outb(0x300 + 0x0A, 0);    // RBCR0
+    kernel_outb(0x300 + 0x0B, 0);    // RBCR1
+    kernel_outb(0x300 + 0x0C, 0x20); // RCR: monitor mode (no RX during probe).
+    kernel_outb(0x300 + 0x0D, 0x02); // TCR: internal loopback.
 
     // Set up a 32-byte remote-DMA read from PROM offset 0.
-    kernel_outb(0x300 + 0x08, 0);      // RSAR0
-    kernel_outb(0x300 + 0x09, 0);      // RSAR1
-    kernel_outb(0x300 + 0x0A, 0x20);   // RBCR0 = 32
-    kernel_outb(0x300 + 0x0B, 0);      // RBCR1
-    kernel_outb(0x300, 0x0A);          // CR: start + remote read DMA
+    kernel_outb(0x300 + 0x08, 0);    // RSAR0
+    kernel_outb(0x300 + 0x09, 0);    // RSAR1
+    kernel_outb(0x300 + 0x0A, 0x20); // RBCR0 = 32
+    kernel_outb(0x300 + 0x0B, 0);    // RBCR1
+    kernel_outb(0x300, 0x0A);        // CR: start + remote read DMA
 
     // Word-mode DMA: each PROM byte is the low byte of a 16-bit read.
     i = 0;
@@ -151,7 +151,8 @@ int ne2k_probe() __attribute__((carry_return)) {
     }
 
     // Wait for remote DMA complete (RDC bit in ISR), then ack.
-    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {}
+    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {
+    }
     kernel_outb(0x300 + 0x07, 0x40);
     return 1;
 }
@@ -162,9 +163,9 @@ int ne2k_probe() __attribute__((carry_return)) {
 // register return (EDI = net_receive_buffer pointer, ECX = packet
 // length, CF = packet-available) via out_register parameters and
 // carry_return so C callers see it as a normal function.
-__attribute__((carry_return))
-int ne2k_receive(uint8_t *frame_pointer __attribute__((out_register("edi"))),
-                 int *length __attribute__((out_register("ecx"))));
+__attribute__((carry_return)) int
+ne2k_receive(uint8_t *frame_pointer __attribute__((out_register("edi"))),
+             int *length __attribute__((out_register("ecx"))));
 
 asm("ne2k_receive:\n"
     "        push eax\n"
@@ -172,90 +173,90 @@ asm("ne2k_receive:\n"
     "        push edx\n"
     "        push esi\n"
 
-    "        mov dx, 0x300\n"           // CR
-    "        mov al, 0x62\n"            // Page 1, start, abort DMA
+    "        mov dx, 0x300\n" // CR
+    "        mov al, 0x62\n"  // Page 1, start, abort DMA
     "        out dx, al\n"
-    "        mov dx, 0x307\n"           // CURR (page 1)
+    "        mov dx, 0x307\n" // CURR (page 1)
     "        in al, dx\n"
-    "        mov bl, al\n"              // BL = CURR
-    "        mov dx, 0x300\n"           // CR
-    "        mov al, 0x22\n"            // Page 0, start, abort DMA
+    "        mov bl, al\n"    // BL = CURR
+    "        mov dx, 0x300\n" // CR
+    "        mov al, 0x22\n"  // Page 0, start, abort DMA
     "        out dx, al\n"
 
     // Next read page = BOUNDARY + 1, wrapping at PSTOP.
-    "        mov dx, 0x303\n"           // BOUNDARY
+    "        mov dx, 0x303\n" // BOUNDARY
     "        in al, dx\n"
     "        inc al\n"
-    "        cmp al, 0x80\n"            // NE2K_RX_STOP
+    "        cmp al, 0x80\n" // NE2K_RX_STOP
     "        jb .ne2k_recv_no_wrap\n"
-    "        mov al, 0x46\n"            // NE2K_RX_START
+    "        mov al, 0x46\n" // NE2K_RX_START
     ".ne2k_recv_no_wrap:\n"
     "        cmp al, bl\n"
     "        je .ne2k_recv_empty\n"
-    "        mov bh, al\n"              // BH = read page
+    "        mov bh, al\n" // BH = read page
 
     // Read the 4-byte ring-buffer header via remote DMA.
-    "        mov dx, 0x308\n"           // RSAR0
+    "        mov dx, 0x308\n" // RSAR0
     "        xor al, al\n"
     "        out dx, al\n"
-    "        mov dx, 0x309\n"           // RSAR1
+    "        mov dx, 0x309\n" // RSAR1
     "        mov al, bh\n"
     "        out dx, al\n"
-    "        mov dx, 0x30A\n"           // RBCR0
+    "        mov dx, 0x30A\n" // RBCR0
     "        mov al, 4\n"
     "        out dx, al\n"
-    "        mov dx, 0x30B\n"           // RBCR1
+    "        mov dx, 0x30B\n" // RBCR1
     "        xor al, al\n"
     "        out dx, al\n"
-    "        mov dx, 0x300\n"           // CR
-    "        mov al, 0x0A\n"            // Start + remote read DMA
+    "        mov dx, 0x300\n" // CR
+    "        mov al, 0x0A\n"  // Start + remote read DMA
     "        out dx, al\n"
 
-    "        mov dx, 0x310\n"           // Data
-    "        in ax, dx\n"               // AL = status, AH = next page
+    "        mov dx, 0x310\n" // Data
+    "        in ax, dx\n"     // AL = status, AH = next page
     "        mov bl, ah\n"
-    "        in ax, dx\n"               // AX = total length (incl 4-byte header)
+    "        in ax, dx\n" // AX = total length (incl 4-byte header)
     "        sub ax, 4\n"
-    "        movzx ecx, ax\n"           // ECX = frame length
+    "        movzx ecx, ax\n" // ECX = frame length
 
-    "        mov dx, 0x307\n"           // ISR
+    "        mov dx, 0x307\n" // ISR
     ".ne2k_recv_wait_hdr:\n"
     "        in al, dx\n"
-    "        test al, 0x40\n"           // RDC
+    "        test al, 0x40\n" // RDC
     "        jz .ne2k_recv_wait_hdr\n"
     "        mov al, 0x40\n"
     "        out dx, al\n"
 
     // Frame data: round count up to even, then word-mode DMA into net_receive_buffer.
-    "        push ecx\n"                // Save real length for ECX return.
+    "        push ecx\n" // Save real length for ECX return.
     "        mov eax, ecx\n"
     "        inc eax\n"
     "        and eax, 0xFFFE\n"
     "        mov ecx, eax\n"
 
-    "        mov dx, 0x308\n"           // RSAR0
-    "        mov al, 4\n"               // skip 4-byte header
+    "        mov dx, 0x308\n" // RSAR0
+    "        mov al, 4\n"     // skip 4-byte header
     "        out dx, al\n"
-    "        mov dx, 0x309\n"           // RSAR1
+    "        mov dx, 0x309\n" // RSAR1
     "        mov al, bh\n"
     "        out dx, al\n"
-    "        mov dx, 0x30A\n"           // RBCR0
+    "        mov dx, 0x30A\n" // RBCR0
     "        mov al, cl\n"
     "        out dx, al\n"
-    "        mov dx, 0x30B\n"           // RBCR1
+    "        mov dx, 0x30B\n" // RBCR1
     "        mov al, ch\n"
     "        out dx, al\n"
-    "        mov dx, 0x300\n"           // CR
+    "        mov dx, 0x300\n" // CR
     "        mov al, 0x0A\n"
     "        out dx, al\n"
 
-    "        shr ecx, 1\n"              // word count
+    "        shr ecx, 1\n" // word count
     "        mov edi, [net_receive_buffer]\n"
     "        mov dx, 0x310\n"
     "        cld\n"
     "        rep insw\n"
 
-    "        mov dx, 0x307\n"           // ISR
+    "        mov dx, 0x307\n" // ISR
     ".ne2k_recv_wait_pkt:\n"
     "        in al, dx\n"
     "        test al, 0x40\n"
@@ -264,16 +265,16 @@ asm("ne2k_receive:\n"
     "        out dx, al\n"
 
     // BOUNDARY = next_page - 1, wrapping at PSTART (≡ PSTOP-1 below PSTART).
-    "        mov al, bl\n"              // BL holds next page from header
+    "        mov al, bl\n" // BL holds next page from header
     "        dec al\n"
-    "        cmp al, 0x46\n"            // NE2K_RX_START
+    "        cmp al, 0x46\n" // NE2K_RX_START
     "        jae .ne2k_recv_bndy_ok\n"
-    "        mov al, 0x7F\n"            // NE2K_RX_STOP - 1
+    "        mov al, 0x7F\n" // NE2K_RX_STOP - 1
     ".ne2k_recv_bndy_ok:\n"
-    "        mov dx, 0x303\n"           // BOUNDARY
+    "        mov dx, 0x303\n" // BOUNDARY
     "        out dx, al\n"
 
-    "        pop ecx\n"                 // Restore frame length.
+    "        pop ecx\n" // Restore frame length.
     "        mov edi, [net_receive_buffer]\n"
     "        clc\n"
     "        pop esi\n"
@@ -295,12 +296,10 @@ asm("ne2k_receive:\n"
 // frames to the 60-byte minimum (NIC adds a 4-byte FCS for 64 on-wire).
 int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
               int length __attribute__((in_register("ecx"))))
-    __attribute__((carry_return))
-    __attribute__((preserve_register("eax")))
+    __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx")))
-    __attribute__((preserve_register("esi")))
-{
+    __attribute__((preserve_register("esi"))) {
     int dma_count;
     uint8_t isr;
     int timeout;
@@ -308,29 +307,30 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
     if (length < 60) {
         length = 60;
     }
-    dma_count = (length + 1) & 0xFFFE;     // Round up to even (word DMA).
+    dma_count = (length + 1) & 0xFFFE; // Round up to even (word DMA).
 
-    kernel_outb(0x300 + 0x08, 0);                 // RSAR0
-    kernel_outb(0x300 + 0x09, NE2K_TX_PAGE);      // RSAR1
-    kernel_outb(0x300 + 0x0A, dma_count & 0xFF);          // RBCR0
-    kernel_outb(0x300 + 0x0B, (dma_count >> 8) & 0xFF);   // RBCR1
-    kernel_outb(0x300, 0x12);              // CR: start + remote write DMA.
+    kernel_outb(0x300 + 0x08, 0);                       // RSAR0
+    kernel_outb(0x300 + 0x09, NE2K_TX_PAGE);            // RSAR1
+    kernel_outb(0x300 + 0x0A, dma_count & 0xFF);        // RBCR0
+    kernel_outb(0x300 + 0x0B, (dma_count >> 8) & 0xFF); // RBCR1
+    kernel_outb(0x300, 0x12); // CR: start + remote write DMA.
 
     kernel_outsw(0x300 + 0x10, frame, dma_count >> 1);
 
-    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {}     // RDC
-    kernel_outb(0x300 + 0x07, 0x40);                      // Ack RDC.
+    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {
+    } // RDC
+    kernel_outb(0x300 + 0x07, 0x40); // Ack RDC.
 
-    kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);              // TPSR
-    kernel_outb(0x300 + 0x05, length & 0xFF);             // TBCR0
-    kernel_outb(0x300 + 0x06, (length >> 8) & 0xFF);      // TBCR1
-    kernel_outb(0x300, 0x26);              // CR: start, transmit.
+    kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);         // TPSR
+    kernel_outb(0x300 + 0x05, length & 0xFF);        // TBCR0
+    kernel_outb(0x300 + 0x06, (length >> 8) & 0xFF); // TBCR1
+    kernel_outb(0x300, 0x26);                        // CR: start, transmit.
 
     timeout = 0xFFFF;
     isr = 0;
     while (timeout > 0) {
         isr = kernel_inb(0x300 + 0x07);
-        if ((isr & 0x0A) != 0) {           // PTX (0x02) or TXE (0x08)
+        if ((isr & 0x0A) != 0) { // PTX (0x02) or TXE (0x08)
             break;
         }
         timeout = timeout - 1;
@@ -341,9 +341,9 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
         // pending state and can decide how to recover.
         return 0;
     }
-    kernel_outb(0x300 + 0x07, 0x0A);       // Ack PTX | TXE.
+    kernel_outb(0x300 + 0x07, 0x0A); // Ack PTX | TXE.
     if ((isr & 0x08) != 0) {
-        return 0;                          // TX error reported.
+        return 0; // TX error reported.
     }
     return 1;
 }

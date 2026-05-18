@@ -40,16 +40,16 @@ int vga_scrollback_is_active();
 void fd_ioctl_console();
 
 asm("fd_ioctl_console:\n"
-    "        cmp al, 0x00\n"                    // CONSOLE_IOCTL_TRY_GETC
+    "        cmp al, 0x00\n" // CONSOLE_IOCTL_TRY_GETC
     "        je .fd_ioctl_console_try_getc\n"
-    "        cmp al, 0x01\n"                    // CONSOLE_IOCTL_TRY_GET_EVENT
+    "        cmp al, 0x01\n" // CONSOLE_IOCTL_TRY_GET_EVENT
     "        je .fd_ioctl_console_try_get_event\n"
     "        stc\n"
     "        ret\n"
 
     ".fd_ioctl_console_try_getc:\n"
-    "        sti\n"                              // let IRQ 1 fire so the PS/2 ring populates
-    "        call ps2_getc\n"                    // AL = char or 0
+    "        sti\n"           // let IRQ 1 fire so the PS/2 ring populates
+    "        call ps2_getc\n" // AL = char or 0
     "        movzx eax, al\n"
     "        test al, al\n"
     "        jnz .fd_ioctl_console_done\n"
@@ -96,7 +96,7 @@ asm("fd_ioctl_console:\n"
     "        mov dx, 0x3F8\n"
     "        in al, dx\n"
     "        movzx eax, al\n"
-    "        or eax, 0x100\n"                    // pressed=1
+    "        or eax, 0x100\n" // pressed=1
     "        pop edx\n"
     "        jmp .fd_ioctl_console_done\n"
     ".fd_ioctl_console_serial_empty_event:\n"
@@ -132,10 +132,10 @@ int signal_any_pending();
 // continuously — the syscall handler entered with IF=0 (the INT 30h gate
 // clears it) so we sti once before the polling loop to let IRQ 1 fire
 // and the keyboard ring populate.
-__attribute__((carry_return))
-int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
-                    uint8_t *destination __attribute__((in_register("edi"))),
-                    int max_bytes __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
+                uint8_t *destination __attribute__((in_register("edi"))),
+                int max_bytes __attribute__((in_register("ecx")))) {
     char byte;
     if (max_bytes == 0) {
         *bytes_read = 0;
@@ -181,9 +181,9 @@ int fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
 // Write `count` bytes from fd_write_buffer through put_character (which
 // handles ANSI parsing + serial mirror + screen write).  Always returns
 // CF clear; AX = bytes written = count.
-__attribute__((carry_return))
-int fd_write_console(int *bytes_written __attribute__((out_register("ax"))),
-                     int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write_console(int *bytes_written __attribute__((out_register("ax"))),
+                 int count __attribute__((in_register("ecx")))) {
     int index;
     index = 0;
     while (index < count) {

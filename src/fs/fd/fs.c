@@ -30,14 +30,14 @@ struct fd {
 // filesystem backend (bbfs / ext2).  All take ESI = fd_entry; the
 // sector-cache helpers also return BX = byte offset within the
 // freshly cached 512-byte sector_buffer.
-__attribute__((carry_return))
-int vfs_commit_write_sec(struct fd *entry __attribute__((in_register("esi"))));
-__attribute__((carry_return))
-int vfs_prepare_write_sec(int *byte_offset __attribute__((out_register("bx"))),
-                          struct fd *entry __attribute__((in_register("esi"))));
-__attribute__((carry_return))
-int vfs_read_sec(int *byte_offset __attribute__((out_register("bx"))),
-                 struct fd *entry __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int
+vfs_commit_write_sec(struct fd *entry __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int
+vfs_prepare_write_sec(int *byte_offset __attribute__((out_register("bx"))),
+                      struct fd *entry __attribute__((in_register("esi"))));
+__attribute__((carry_return)) int
+vfs_read_sec(int *byte_offset __attribute__((out_register("bx"))),
+             struct fd *entry __attribute__((in_register("esi"))));
 
 // fs/fd.c file-scope global; fd_write stashes the user buffer
 // pointer here before jumping to this handler.
@@ -56,11 +56,11 @@ int fd_rw_left;
 // errno mapped to EISDIR (via ERROR_IS_DIRECTORY).  Wired into
 // fd_ops[FD_TYPE_DIRECTORY].read so unmodified fread/read() callers
 // fail loudly instead of silently iterating raw bytes.
-__attribute__((carry_return))
-int fd_read_isdir(int *result __attribute__((out_register("ax"))),
-                  struct fd *entry __attribute__((in_register("esi"))),
-                  uint8_t *buffer __attribute__((in_register("edi"))),
-                  int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_read_isdir(int *result __attribute__((out_register("ax"))),
+              struct fd *entry __attribute__((in_register("esi"))),
+              uint8_t *buffer __attribute__((in_register("edi"))),
+              int count __attribute__((in_register("ecx")))) {
     (void)entry;
     (void)buffer;
     (void)count;
@@ -72,11 +72,11 @@ int fd_read_isdir(int *result __attribute__((out_register("ax"))),
 // `entry`'s current position into `destination`.  Bumps
 // `entry->position` by the bytes actually copied.  Returns AX =
 // bytes copied (0 at EOF), CF set on disk error.
-__attribute__((carry_return))
-int fd_read_file(int *result __attribute__((out_register("ax"))),
-                 struct fd *entry __attribute__((in_register("esi"))),
-                 uint8_t *destination __attribute__((in_register("edi"))),
-                 int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_read_file(int *result __attribute__((out_register("ax"))),
+             struct fd *entry __attribute__((in_register("esi"))),
+             uint8_t *destination __attribute__((in_register("edi"))),
+             int count __attribute__((in_register("ecx")))) {
     int byte_offset;
     int chunk;
     int remaining;
@@ -103,7 +103,8 @@ int fd_read_file(int *result __attribute__((out_register("ax"))),
         memcpy(destination + fd_rw_done, sector_buffer + byte_offset, chunk);
         fd_rw_done = fd_rw_done + chunk;
         fd_rw_left = fd_rw_left - chunk;
-        fd_rw_descriptor_pointer->position = fd_rw_descriptor_pointer->position + chunk;
+        fd_rw_descriptor_pointer->position =
+            fd_rw_descriptor_pointer->position + chunk;
     }
     *result = fd_rw_done;
     return 1;
@@ -114,10 +115,10 @@ int fd_read_file(int *result __attribute__((out_register("ax"))),
 // sector_buffer / vfs_commit_write_sec.  Bumps `entry->position`
 // by the bytes written.  Returns AX = bytes written, CF set on
 // disk error.
-__attribute__((carry_return))
-int fd_write_file(int *result __attribute__((out_register("ax"))),
-                  struct fd *entry __attribute__((in_register("esi"))),
-                  int count __attribute__((in_register("ecx")))) {
+__attribute__((carry_return)) int
+fd_write_file(int *result __attribute__((out_register("ax"))),
+              struct fd *entry __attribute__((in_register("esi"))),
+              int count __attribute__((in_register("ecx")))) {
     int byte_offset;
     int chunk;
     fd_rw_descriptor_pointer = entry;
@@ -132,14 +133,16 @@ int fd_write_file(int *result __attribute__((out_register("ax"))),
         if (chunk > fd_rw_left) {
             chunk = fd_rw_left;
         }
-        memcpy(sector_buffer + byte_offset, fd_write_buffer + fd_rw_done, chunk);
+        memcpy(sector_buffer + byte_offset, fd_write_buffer + fd_rw_done,
+               chunk);
         if (!vfs_commit_write_sec(fd_rw_descriptor_pointer)) {
             *result = -1;
             return 0;
         }
         fd_rw_done = fd_rw_done + chunk;
         fd_rw_left = fd_rw_left - chunk;
-        fd_rw_descriptor_pointer->position = fd_rw_descriptor_pointer->position + chunk;
+        fd_rw_descriptor_pointer->position =
+            fd_rw_descriptor_pointer->position + chunk;
     }
     *result = fd_rw_done;
     return 1;

@@ -148,8 +148,7 @@ int source_buffer_valid;
    si`` (or a no-op when the target IS SI), writes as ``mov si, ...``,
    ``source_cursor += 1`` folds to ``inc si``, and
    ``source_cursor[0]`` compiles to ``mov al, [si]``. */
-__attribute__((asm_register("si")))
-char *source_cursor;
+__attribute__((asm_register("si"))) char *source_cursor;
 int source_fd;
 char *source_name;
 char source_prefix[32];
@@ -160,94 +159,64 @@ int symbol_count;
    ``user_functions`` registry regardless of source order, but clang
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
-__attribute__((regparm(1)))
-int apply_binary(int lhs, int op, int rhs);
+__attribute__((regparm(1))) int apply_binary(int lhs, int op, int rhs);
 void define_macro();
-__attribute__((regparm(1)))
-void emit_address_disp(int disp);
-__attribute__((regparm(1)))
-void emit_address_size_prefix(int size);
-__attribute__((regparm(1)))
-void emit_alu_reg_imm(int op_rr, int reg, int size, int imm);
-__attribute__((regparm(1)))
-int emit_alu_mem_imm(int rfield);
-__attribute__((regparm(1)))
-void emit_byte(int value);
-__attribute__((regparm(1)))
-void emit_dword(int value);
-__attribute__((regparm(1)))
-void emit_indexed_mem(int reg_field, int rm_reg_id, int disp);
-__attribute__((regparm(1)))
-void emit_modrm_direct(int reg, int disp);
-__attribute__((regparm(1)))
-void emit_modrm_disp(int modrm, int disp);
-__attribute__((regparm(1)))
-void emit_operand_size_prefix(int size);
-__attribute__((regparm(1)))
-void emit_sized(int base, int size);
-__attribute__((regparm(1)))
-void emit_sized_mem(int base, int size);
-__attribute__((regparm(1)))
-void emit_word(int value);
-__attribute__((regparm(1)))
-void expand_macro(int idx);
+__attribute__((regparm(1))) void emit_address_disp(int disp);
+__attribute__((regparm(1))) void emit_address_size_prefix(int size);
+__attribute__((regparm(1))) void emit_alu_reg_imm(int op_rr, int reg, int size,
+                                                  int imm);
+__attribute__((regparm(1))) int emit_alu_mem_imm(int rfield);
+__attribute__((regparm(1))) void emit_byte(int value);
+__attribute__((regparm(1))) void emit_dword(int value);
+__attribute__((regparm(1))) void emit_indexed_mem(int reg_field, int rm_reg_id,
+                                                  int disp);
+__attribute__((regparm(1))) void emit_modrm_direct(int reg, int disp);
+__attribute__((regparm(1))) void emit_modrm_disp(int modrm, int disp);
+__attribute__((regparm(1))) void emit_operand_size_prefix(int size);
+__attribute__((regparm(1))) void emit_sized(int base, int size);
+__attribute__((regparm(1))) void emit_sized_mem(int base, int size);
+__attribute__((regparm(1))) void emit_word(int value);
+__attribute__((regparm(1))) void expand_macro(int idx);
 int find_macro();
 void flush_output();
-__attribute__((regparm(1)))
-void inc_dec_handler(int rfield);
+__attribute__((regparm(1))) void inc_dec_handler(int rfield);
 void include_pop();
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int is_ident_char(int c);
-__attribute__((regparm(1)))
-int make_modrm_reg_reg_impl(int register_id, int rm);
-__attribute__((regparm(1)))
-int match_seg_ds_es(int ds_opcode, int es_opcode);
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int match_word(char *keyword);
-__attribute__((regparm(1)))
-void mem_op_reg_emit(int opcode);
-__attribute__((regparm(1)))
-int op_precedence(int op);
-__attribute__((regparm(1)))
-int open_file_ro(char *path);
+__attribute__((regparm(1))) __attribute__((carry_return)) int
+is_ident_char(int c);
+__attribute__((regparm(1))) int make_modrm_reg_reg_impl(int register_id,
+                                                        int rm);
+__attribute__((regparm(1))) int match_seg_ds_es(int ds_opcode, int es_opcode);
+__attribute__((regparm(1))) __attribute__((carry_return)) int
+match_word(char *keyword);
+__attribute__((regparm(1))) void mem_op_reg_emit(int opcode);
+__attribute__((regparm(1))) int op_precedence(int op);
+__attribute__((regparm(1))) int open_file_ro(char *path);
 int parse_atom();
 int parse_creg();
 void parse_directive();
-__attribute__((regparm(1)))
-int parse_expression(int min_prec);
+__attribute__((regparm(1))) int parse_expression(int min_prec);
 void parse_line();
 void parse_mnemonic();
 int parse_operand();
 int parse_register();
-__attribute__((carry_return))
-int peek_label_target();
+__attribute__((carry_return)) int peek_label_target();
 int read_line();
 int read_source_sector();
-__attribute__((regparm(1)))
-int reg_to_rm(int register_id);
+__attribute__((regparm(1))) int reg_to_rm(int register_id);
 int resolve_label();
 int resolve_value();
 void run_pass1();
 void run_pass2();
 void scan_ident_dot();
-__attribute__((regparm(1)))
-void shift_handler(int modrm_base);
+__attribute__((regparm(1))) void shift_handler(int modrm_base);
 void skip_comma();
 void skip_ws();
-__attribute__((regparm(1)))
-void symbol_add_constant(int value);
-__attribute__((regparm(1)))
-int symbol_lookup(int scope);
-__attribute__((regparm(1)))
-void symbol_set(int value, int scope);
-__attribute__((regparm(1)))
-void symbol_set_global(int value);
-__attribute__((regparm(1)))
-void symbol_set_local(int value);
-__attribute__((regparm(1)))
-void unary_f6f7(int modrm_base);
+__attribute__((regparm(1))) void symbol_add_constant(int value);
+__attribute__((regparm(1))) int symbol_lookup(int scope);
+__attribute__((regparm(1))) void symbol_set(int value, int scope);
+__attribute__((regparm(1))) void symbol_set_global(int value);
+__attribute__((regparm(1))) void symbol_set_local(int value);
+__attribute__((regparm(1))) void unary_f6f7(int modrm_base);
 
 /* Two-instruction trampoline reached via ``jmp abort_unknown`` (not
    ``call``) from dozens of handler sites.  Stashes the offending
@@ -280,8 +249,7 @@ void abort_unknown_impl() {
    cc.py's byte-compound-``-``-assign split emits (``sub al, [mem] /
    sbb ah, 0``).  No r,r / [mem] / mem-dst forms — the self-host
    never needs them. */
-__attribute__((regparm(1)))
-void adc_sbb_handler(int modrm_base) {
+__attribute__((regparm(1))) void adc_sbb_handler(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     skip_comma();
@@ -300,8 +268,7 @@ void adc_sbb_handler(int modrm_base) {
    so ``do_pass`` and ``include_pop`` share one inline-asm block
    instead of each open-coding the 3-instruction SYS_IO_CLOSE
    sequence.  Inlined at both call sites via always_inline. */
-__attribute__((always_inline))
-void close_source() {
+__attribute__((always_inline)) void close_source() {
     asm("mov ebx, [_g_source_fd]\n"
         "mov ah, SYS_IO_CLOSE\n"
         "call syscall");
@@ -336,8 +303,7 @@ void compute_source_prefix() {
    so ``global_scope`` tracks the enclosing label for subsequent locals.
    Callers arrange ``source_cursor`` = name (SI-pinned ABI shared with
    every ``symbol_*`` entry point). */
-__attribute__((regparm(1)))
-void define_label_here(int is_local) {
+__attribute__((regparm(1))) void define_label_here(int is_local) {
     if (pass == 1) {
         if (is_local) {
             symbol_set_local(current_address);
@@ -515,8 +481,7 @@ void do_pass() {
    bits=16, disp32 under bits=32.  Used by the accumulator-direct
    ``moffs`` short forms (A0 / A1 / A2 / A3) whose address field
    follows the bare opcode with no ModR/M byte. */
-__attribute__((regparm(1)))
-void emit_address_disp(int disp) {
+__attribute__((regparm(1))) void emit_address_disp(int disp) {
     if (default_bits == 32) {
         emit_dword(disp);
     } else {
@@ -530,8 +495,7 @@ void emit_address_disp(int disp) {
    the emit site calls this right before the opcode so the prefix
    lands ahead of any 0x66 operand-size prefix and the opcode
    itself. */
-__attribute__((regparm(1)))
-void emit_address_size_prefix(int size) {
+__attribute__((regparm(1))) void emit_address_size_prefix(int size) {
     if (size != 16 && size != 32) {
         return;
     }
@@ -540,8 +504,7 @@ void emit_address_size_prefix(int size) {
     }
 }
 
-__attribute__((regparm(1)))
-void emit_alu_binop(int rfield) {
+__attribute__((regparm(1))) void emit_alu_binop(int rfield) {
     skip_ws();
     int op_rr = rfield << 3;
     if (source_cursor[0] == '[') {
@@ -569,22 +532,17 @@ void emit_alu_binop(int rfield) {
     int type2 = (packed_operand >> 8) & 0xFF;
     int register2_id = packed_operand & 0xFF;
     int value2 = parse_operand_value;
-    switch (type2) {
-        case 0:
-            emit_sized(op_rr, size1);
-            emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
-            break;
-        case 2:
-            emit_sized_mem(op_rr | 2, size1);
-            emit_modrm_direct(register1_id, value2);
-            break;
-        case 3:
-            emit_sized_mem(op_rr | 2, size1);
-            emit_indexed_mem(register1_id, register2_id, value2);
-            break;
-        default:
-            emit_alu_reg_imm(op_rr, register1_id, size1, value2);
-            break;
+    if (type2 == 0) {
+        emit_sized(op_rr, size1);
+        emit_byte(make_modrm_reg_reg_impl(register2_id, register1_id));
+    } else if (type2 == 2) {
+        emit_sized_mem(op_rr | 2, size1);
+        emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 3) {
+        emit_sized_mem(op_rr | 2, size1);
+        emit_indexed_mem(register1_id, register2_id, value2);
+    } else {
+        emit_alu_reg_imm(op_rr, register1_id, size1, value2);
     }
 }
 
@@ -597,8 +555,8 @@ void emit_alu_binop(int rfield) {
      - r16, imm8:    83 /r ib (sign-extended)
      - AX, imm16:    05+op_rr / 0D / 25 / 2D / 35 / 3D short form
      - r16, imm16:   81 /r iw */
-__attribute__((regparm(1)))
-void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
+__attribute__((regparm(1))) void emit_alu_reg_imm(int op_rr, int reg, int size,
+                                                  int imm) {
     int modrm_base = 0xC0 | op_rr;
     if (size == 8) {
         if (reg == 0) {
@@ -664,8 +622,7 @@ void emit_alu_reg_imm(int op_rr, int reg, int size, int imm) {
    emitted, 0 when the cursor didn't start with either keyword — the
    caller then falls back to the register-taking ``emit_alu_binop``
    path.  Expects the caller to have skipped leading whitespace. */
-__attribute__((regparm(1)))
-int emit_alu_mem_imm(int rfield) {
+__attribute__((regparm(1))) int emit_alu_mem_imm(int rfield) {
     int size;
     if (match_word(STR_BYTE)) {
         size = 8;
@@ -733,8 +690,7 @@ int emit_alu_mem_imm(int rfield) {
    trash the live cursor.  ``flush_output`` already preserves SI
    around its own body, so the inner ``flush_output()`` call
    inside our push/pop bracket composes cleanly. */
-__attribute__((regparm(1)))
-void emit_byte(int value) {
+__attribute__((regparm(1))) void emit_byte(int value) {
     if (pass == 2) {
         asm("push esi");
         output_buffer[output_position] = value;
@@ -758,8 +714,8 @@ void emit_byte(int value) {
    must be encoded as ``[ebp+0]`` with mod=01 disp8=0.  Every disp
    that doesn't fit in a signed byte widens to disp32 (vs disp16
    in 16-bit addressing). */
-__attribute__((regparm(1)))
-void emit_indexed_mem(int reg_field, int rm_reg_id, int disp) {
+__attribute__((regparm(1))) void emit_indexed_mem(int reg_field, int rm_reg_id,
+                                                  int disp) {
     if (parse_operand_address_size != 32) {
         int modrm = (reg_field << 3) | reg_to_rm(rm_reg_id);
         emit_modrm_disp(modrm, disp);
@@ -803,8 +759,7 @@ void emit_indexed_mem(int reg_field, int rm_reg_id, int disp) {
    field is 101 and the disp is 32-bit.  Used by lgdt / lidt,
    handle_mov's direct-memory branches, and any future caller
    encoding a plain ``[disp]`` memory operand. */
-__attribute__((regparm(1)))
-void emit_modrm_direct(int reg, int disp) {
+__attribute__((regparm(1))) void emit_modrm_direct(int reg, int disp) {
     if (default_bits == 32) {
         emit_byte((reg << 3) | 0x05);
         emit_dword(disp);
@@ -818,8 +773,7 @@ void emit_modrm_direct(int reg, int disp) {
    displacement magnitude.  ``modrm`` is the mod=00 base (rm / reg
    fields already set); the helper ORs in 0x40 for disp8 and 0x80
    for disp16.  Used by every ``[reg+disp]`` memory-operand emit. */
-__attribute__((regparm(1)))
-void emit_modrm_disp(int modrm, int disp) {
+__attribute__((regparm(1))) void emit_modrm_disp(int modrm, int disp) {
     /* Truncate to the addressing width (16-bit) so a disp whose high
        bits exceed 0xFFFF still narrows to its on-the-wire encoding —
        NASM treats ``[0x100000+si]`` as ``[si]`` because the disp16
@@ -848,8 +802,7 @@ void emit_modrm_disp(int modrm, int disp) {
    ``disp`` emits ``modrm | 0x40`` followed by the low byte.  Unlike
    ``emit_modrm_disp``, no disp16 fallback — the asm sources these
    handlers see never exceed ±128. */
-__attribute__((regparm(1)))
-void emit_modrm_disp8(int rm, int disp) {
+__attribute__((regparm(1))) void emit_modrm_disp8(int rm, int disp) {
     if (disp == 0) {
         emit_byte(rm);
     } else {
@@ -863,8 +816,7 @@ void emit_modrm_disp8(int rm, int disp) {
    default bits=16 mode a 32-bit operand acquires the prefix; under
    bits=32 a 16-bit operand does.  Used by ``emit_sized`` and every
    hand-written protected mode-encoding site that used to emit 0x66 directly. */
-__attribute__((regparm(1)))
-void emit_operand_size_prefix(int size) {
+__attribute__((regparm(1))) void emit_operand_size_prefix(int size) {
     if (size != 16 && size != 32) {
         return;
     }
@@ -879,8 +831,7 @@ void emit_operand_size_prefix(int size) {
    Sizes that differ from ``default_bits`` get the 0x66 operand-size
    prefix in front, so the same 16/32 opcode body assembles both
    widths depending on the current [bits N] mode. */
-__attribute__((regparm(1)))
-void emit_sized(int base, int size) {
+__attribute__((regparm(1))) void emit_sized(int base, int size) {
     if (size == 8) {
         emit_byte(base);
         return;
@@ -896,8 +847,7 @@ void emit_sized(int base, int size) {
    the opcode.  Every memory-operand emit site uses this instead of
    ``emit_sized`` so instructions like ``mov eax, [esp]`` assemble
    identically to NASM across both bits modes. */
-__attribute__((regparm(1)))
-void emit_sized_mem(int base, int size) {
+__attribute__((regparm(1))) void emit_sized_mem(int base, int size) {
     emit_operand_size_prefix(size);
     emit_address_size_prefix(parse_operand_address_size);
     if (size == 8) {
@@ -910,8 +860,7 @@ void emit_sized_mem(int base, int size) {
 /* Emit a little-endian dword — the 32-bit companion to ``emit_word``.
    Used by the protected mode-specific paths that widen imm16 / disp16 to
    imm32 / disp32 behind a 0x66 operand-size prefix. */
-__attribute__((regparm(1)))
-void emit_dword(int value) {
+__attribute__((regparm(1))) void emit_dword(int value) {
     emit_byte(value);
     emit_byte(value >> 8);
     emit_byte(value >> 16);
@@ -922,18 +871,13 @@ void emit_dword(int value) {
    word otherwise.  Used for the ``[mem], imm`` tail shared by two of
    ``handle_mov``'s branches (the other imm tails already fit
    ``emit_byte`` / ``emit_word`` directly). */
-__attribute__((regparm(1)))
-void emit_sized_imm(int value, int size) {
-    switch (size) {
-        case 8:
-            emit_byte(value & 0xFF);
-            break;
-        case 32:
-            emit_dword(value);
-            break;
-        default:
-            emit_word(value);
-            break;
+__attribute__((regparm(1))) void emit_sized_imm(int value, int size) {
+    if (size == 8) {
+        emit_byte(value & 0xFF);
+    } else if (size == 32) {
+        emit_dword(value);
+    } else {
+        emit_word(value);
     }
 }
 
@@ -943,8 +887,7 @@ void emit_sized_imm(int value, int size) {
    ``mov ax, value ; call emit_word``.  ``emit_byte`` masks to a byte on
    store, so no ``& 0xFF`` guard is needed before passing the raw
    value. */
-__attribute__((regparm(1)))
-void emit_word(int value) {
+__attribute__((regparm(1))) void emit_word(int value) {
     emit_byte(value);
     emit_byte(value >> 8);
 }
@@ -964,8 +907,7 @@ void emit_word(int value) {
    peek is relative to the body's ``push ax``, so cc.py's fastcall
    prologue (``push bp / mov bp, sp / sub sp, 2 / mov [bp-2], ax``)
    sits further up the stack and doesn't affect the offset. */
-__attribute__((regparm(1)))
-void encode_rel8_jump(int opcode) {
+__attribute__((regparm(1))) void encode_rel8_jump(int opcode) {
     skip_ws();
     int bx = jump_index;
     jump_index += 1;
@@ -1050,8 +992,7 @@ void encode_rel8_jump(int opcode) {
    are silently dropped), the expanded line is written into
    ``line_buffer``, and ``parse_line`` is re-invoked to process it
    as if it had been the current source line. */
-__attribute__((regparm(1)))
-void expand_macro(int idx) {
+__attribute__((regparm(1))) void expand_macro(int idx) {
     /* Snapshot source_cursor into a non-SI-pinned local BEFORE any
        indexed global access — cc.py uses SI as scratch for computing
        ``macro_*[idx]`` addresses, which would clobber the SI-pinned
@@ -1073,7 +1014,9 @@ void expand_macro(int idx) {
             pos += 1;
             cursor += 1;
         }
-        while (pos > macro_arg_starts[i] && (macro_args_text[pos - 1] == ' ' || macro_args_text[pos - 1] == '\t')) {
+        while (pos > macro_arg_starts[i] &&
+               (macro_args_text[pos - 1] == ' ' ||
+                macro_args_text[pos - 1] == '\t')) {
             pos -= 1;
         }
         macro_args_text[pos] = '\0';
@@ -1254,7 +1197,8 @@ void handle_cmp() {
         int packed_register2 = parse_register();
         if (packed_register2 >= 0) {
             emit_sized(0x38, size1);
-            emit_byte(make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
+            emit_byte(
+                make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
             return;
         }
         if (source_cursor[0] == '[') {
@@ -1289,7 +1233,8 @@ void handle_cmp() {
     } else if (imm >= -128 && imm <= 127) {
         opcode = 0x83;
         is_imm8 = 1;
-    } else if (size1 == 16 && ((imm & 0xFF80) == 0 || (imm & 0xFF80) == 0xFF80)) {
+    } else if (size1 == 16 &&
+               ((imm & 0xFF80) == 0 || (imm & 0xFF80) == 0xFF80)) {
         /* NASM-equivalent shrink: any imm whose low 16 bits sign-extend
            cleanly from a byte compresses to the 0x83 imm8 form.
            Covers ``cmp word [...], 65535`` (low 16 = 0xFFFF) and
@@ -1752,16 +1697,12 @@ void handle_movzx() {
     } else {
         emit_word(0xB60F);
     }
-    switch (type2) {
-        case 0:
-            emit_byte(0xC0 | (register1_id << 3) | register2_id);
-            break;
-        case 2:
-            emit_modrm_direct(register1_id, value2);
-            break;
-        default:
-            emit_indexed_mem(register1_id, register2_id, value2);
-            break;
+    if (type2 == 0) {
+        emit_byte(0xC0 | (register1_id << 3) | register2_id);
+    } else if (type2 == 2) {
+        emit_modrm_direct(register1_id, value2);
+    } else {
+        emit_indexed_mem(register1_id, register2_id, value2);
     }
 }
 
@@ -1984,7 +1925,8 @@ void handle_test() {
         int packed_register2 = parse_register();
         if (packed_register2 >= 0) {
             emit_sized(0x84, size1);
-            emit_byte(make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
+            emit_byte(
+                make_modrm_reg_reg_impl(packed_register2 & 0xFF, register1_id));
         } else {
             int imm = resolve_value();
             if (size1 == 8) {
@@ -2032,7 +1974,8 @@ void handle_test() {
    ``abort_unknown`` with the offending token. */
 void handle_unknown_word() {
     char *name_start = source_cursor;
-    while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
+    while (source_cursor[0] != ' ' && source_cursor[0] != '\t' &&
+           source_cursor[0] != '\0') {
         source_cursor += 1;
     }
     char *name_end = source_cursor;
@@ -2110,16 +2053,15 @@ void handle_xor() {
    replaces the CF-return ABI the retired asm used.  4 call sites
    in ``parse_db``'s ``\x..`` escape handler and ``parse_number``'s
    hex-prefix / hex-suffix loops. */
-__attribute__((regparm(1)))
-int hex_digit(int c) {
+__attribute__((regparm(1))) int hex_digit(int c) {
     if (c >= 48 && c <= 57) {
-        return c - 48;      /* '0'..'9' → 0..9 */
+        return c - 48; /* '0'..'9' → 0..9 */
     }
     if (c >= 65 && c <= 70) {
-        return c - 55;      /* 'A'..'F' → 10..15 */
+        return c - 55; /* 'A'..'F' → 10..15 */
     }
     if (c >= 97 && c <= 102) {
-        return c - 87;      /* 'a'..'f' → 10..15 */
+        return c - 87; /* 'a'..'f' → 10..15 */
     }
     return -1;
 }
@@ -2132,8 +2074,7 @@ int hex_digit(int c) {
    the /r constant (0 inc, 1 dec); the helper shifts it into position
    and ORs it into every register / modrm byte that carries the
    inc-vs-dec distinction. */
-__attribute__((regparm(1)))
-void inc_dec_handler(int rfield) {
+__attribute__((regparm(1))) void inc_dec_handler(int rfield) {
     skip_ws();
     int packed_operand = parse_operand();
     int type = (packed_operand >> 8) & 0xFF;
@@ -2226,13 +2167,10 @@ void include_push() {
    our purposes; label-scan loops add it via an explicit ``|| c == '.'``
    next to the call.  ``regparm(1)`` + ``carry_return`` so cc.py lowers
    ``if (is_ident_char(c))`` to ``mov ax, c ; call is_ident_char ; jc/jnc``. */
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int is_ident_char(int c) {
-    return (c >= 'a' && c <= 'z')
-            || (c >= 'A' && c <= 'Z')
-            || (c >= '0' && c <= '9')
-            || c == '_';
+__attribute__((regparm(1))) __attribute__((carry_return)) int
+is_ident_char(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
 }
 
 /* Refill SOURCE_BUFFER from the current source_fd via
@@ -2262,8 +2200,7 @@ int load_src_sector() {
    ``peek_label_target``).  ``last_symbol_index`` carries the
    hit/miss signal (0xFFFF on miss) so both callers can branch on it
    without a separate return code. */
-__attribute__((regparm(1)))
-int lookup_ident_here(int advance) {
+__attribute__((regparm(1))) int lookup_ident_here(int advance) {
     char *name_start = source_cursor;
     scan_ident_dot();
     char *end_pos = source_cursor;
@@ -2313,8 +2250,8 @@ int main(int argc, char *argv[]) {
    AX, rm on stack; returns ``0xC0 | (reg << 3) | rm`` in AX.
    Previous legacy ``make_modrm_reg_reg`` thunk (AL/BL in, modrm out)
    retired with its ~7 inline-asm callers. */
-__attribute__((regparm(1)))
-int make_modrm_reg_reg_impl(int register_id, int rm) {
+__attribute__((regparm(1))) int make_modrm_reg_reg_impl(int register_id,
+                                                        int rm) {
     register_id &= 0xFF;
     rm &= 0xFF;
     return 0xC0 | (register_id << 3) | rm;
@@ -2326,20 +2263,21 @@ int make_modrm_reg_reg_impl(int register_id, int rm) {
    pop ds = 0x1F, pop es = 0x07).  On match ``source_cursor``
    advances past the token and the helper returns 1; on miss it
    leaves the cursor alone and returns 0. */
-__attribute__((regparm(1)))
-int match_seg_ds_es(int ds_opcode, int es_opcode) {
+__attribute__((regparm(1))) int match_seg_ds_es(int ds_opcode, int es_opcode) {
     /* Boundary check on source_cursor[2] — without it ``push esi`` /
        ``push edi`` greedily match ``es`` / ``ds`` and emit the segment
        opcode instead of a register push.  cc.py's auto-spill of an
        asm_register("si") global emits ``push esi`` around inline-asm
        blocks; before this guard the assembler turned that into
        ``push es`` (0x06) and the corresponding pop into ``pop es``. */
-    if (source_cursor[0] == 'd' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
+    if (source_cursor[0] == 'd' && source_cursor[1] == 's' &&
+        !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(ds_opcode);
         return 1;
     }
-    if (source_cursor[0] == 'e' && source_cursor[1] == 's' && !is_ident_char(source_cursor[2])) {
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's' &&
+        !is_ident_char(source_cursor[2])) {
         source_cursor += 2;
         emit_byte(es_opcode);
         return 1;
@@ -2361,9 +2299,8 @@ int match_seg_ds_es(int ds_opcode, int es_opcode) {
    ``dw`` / ``dd``), parse_mnemonic (instruction dispatch), and
    the callers that specialize on ``STR_EQU`` / ``STR_SHORT`` /
    ``STR_WORD``. */
-__attribute__((regparm(1)))
-__attribute__((carry_return))
-int match_word(char *keyword) {
+__attribute__((regparm(1))) __attribute__((carry_return)) int
+match_word(char *keyword) {
     char *saved = source_cursor;
     while (keyword[0] != '\0') {
         char s = source_cursor[0];
@@ -2390,8 +2327,7 @@ int match_word(char *keyword) {
    ``<opcode> <modrm(mod=00, reg=src, rm=110)> <disp16>``.  Bad
    structure (missing ``]`` or a non-register source) calls
    abort_unknown (which never returns). */
-__attribute__((regparm(1)))
-void mem_op_reg_emit(int opcode) {
+__attribute__((regparm(1))) void mem_op_reg_emit(int opcode) {
     source_cursor += 1;
     int disp = resolve_value();
     if (source_cursor[0] != ']') {
@@ -2412,9 +2348,8 @@ void mem_op_reg_emit(int opcode) {
    has no C analogue cc.py emits, so this tiny wrapper pairs with
    ``mnemonic_keyword_at`` to let ``parse_mnemonic`` stay pure C.
    Inlined at its single call site — no body overhead. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void mnemonic_dispatch_at(int index) {
+__attribute__((regparm(1))) __attribute__((always_inline)) void
+mnemonic_dispatch_at(int index) {
     asm("shl eax, 3\n"
         "mov ebx, mnemonic_table\n"
         "add ebx, eax\n"
@@ -2427,9 +2362,8 @@ void mnemonic_dispatch_at(int index) {
    past the terminator.  Compact naked-asm body because cc.py has
    no syntax for reading a pointer out of a packed data table;
    factoring this out keeps ``parse_mnemonic`` pure C. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-char *mnemonic_keyword_at(int index) {
+__attribute__((regparm(1))) __attribute__((always_inline)) char *
+mnemonic_keyword_at(int index) {
     asm("shl eax, 3\n"
         "mov ebx, mnemonic_table\n"
         "add ebx, eax\n"
@@ -2441,9 +2375,8 @@ char *mnemonic_keyword_at(int index) {
    pointer via regparm(1) EAX; the body threads it into ESI for the
    syscall.  Inlined at both call sites via always_inline; the
    internal ``.ofr_ok`` label gets per-site uniquified. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-int open_file_ro(char *path) {
+__attribute__((regparm(1))) __attribute__((always_inline)) int
+open_file_ro(char *path) {
     asm("mov esi, eax\n"
         "mov al, O_RDONLY\n"
         "mov ah, SYS_IO_OPEN\n"
@@ -2459,8 +2392,7 @@ int open_file_ro(char *path) {
    PROGRAM_BASE = 0x08048000 and label addresses no longer fit in
    16 bits).  Comma-separated operand list; each operand evaluates
    via resolve_value. */
-__attribute__((regparm(1)))
-void parse_d_values(int wide) {
+__attribute__((regparm(1))) void parse_d_values(int wide) {
     skip_ws();
     while (1) {
         int value = resolve_value();
@@ -2508,36 +2440,27 @@ void parse_db() {
                 if (c == '\\') {
                     source_cursor += 1;
                     char esc = source_cursor[0];
-                    switch (esc) {
-                        case 'n':
-                            emit_byte('\n');
-                            break;
-                        case '0':
-                            emit_byte('\0');
-                            break;
-                        case 't':
-                            emit_byte('\t');
-                            break;
-                        case 'r':
-                            emit_byte('\r');
-                            break;
-                        case 'e':
-                            emit_byte('\e');
-                            break;
-                        case '\\':
-                            emit_byte('\\');
-                            break;
-                        case 'x':
-                            source_cursor += 1;
-                            int hi = hex_digit(source_cursor[0]);
-                            source_cursor += 1;
-                            int lo = hex_digit(source_cursor[0]);
-                            emit_byte((hi << 4) | lo);
-                            break;
-                        default:
-                            emit_byte('\\');
-                            emit_byte(esc);
-                            break;
+                    if (esc == 'n') {
+                        emit_byte('\n');
+                    } else if (esc == '0') {
+                        emit_byte('\0');
+                    } else if (esc == 't') {
+                        emit_byte('\t');
+                    } else if (esc == 'r') {
+                        emit_byte('\r');
+                    } else if (esc == 'e') {
+                        emit_byte('\e');
+                    } else if (esc == '\\') {
+                        emit_byte('\\');
+                    } else if (esc == 'x') {
+                        source_cursor += 1;
+                        int hi = hex_digit(source_cursor[0]);
+                        source_cursor += 1;
+                        int lo = hex_digit(source_cursor[0]);
+                        emit_byte((hi << 4) | lo);
+                    } else {
+                        emit_byte('\\');
+                        emit_byte(esc);
                     }
                     source_cursor += 1;
                 } else {
@@ -2591,7 +2514,8 @@ void parse_directive() {
         if (matched_assign) {
             skip_ws();
             char *name = source_cursor;
-            while (source_cursor[0] != ' ' && source_cursor[0] != '\t' && source_cursor[0] != '\0') {
+            while (source_cursor[0] != ' ' && source_cursor[0] != '\t' &&
+                   source_cursor[0] != '\0') {
                 source_cursor += 1;
             }
             if (source_cursor[0] == '\0') {
@@ -2924,11 +2848,11 @@ int parse_operand() {
         int packed_register = parse_register();
         if (packed_register >= 0) {
             op1_size = (packed_register >> 8) & 0xFF;
-            return packed_register & 0xFF;           /* type=0 (reg), reg in low byte */
+            return packed_register & 0xFF; /* type=0 (reg), reg in low byte */
         }
         int imm = resolve_value();
         parse_operand_value = imm;
-        return 1 << 8;                  /* type=1 (imm) */
+        return 1 << 8; /* type=1 (imm) */
     }
     /* Memory operand starting at ``[``.  Default addressing size
        matches the current bits mode; gets bumped to 32 below if the
@@ -2937,7 +2861,8 @@ int parse_operand() {
     source_cursor += 1;
     skip_ws();
     /* ``[es:...]`` segment override: emit 0x26 prefix, skip past. */
-    if (source_cursor[0] == 'e' && source_cursor[1] == 's' && source_cursor[2] == ':') {
+    if (source_cursor[0] == 'e' && source_cursor[1] == 's' &&
+        source_cursor[2] == ':') {
         emit_byte(0x26);
         source_cursor += 3;
         skip_ws();
@@ -2968,7 +2893,7 @@ int parse_operand() {
             source_cursor += 1;
         }
         parse_operand_value = disp;
-        return (3 << 8) | register_id;          /* type=3 (reg+disp) */
+        return (3 << 8) | register_id; /* type=3 (reg+disp) */
     }
     /* Not ``[reg...]``: could be ``[disp]`` or ``[disp+reg]``.
        Scan forward to ``]`` (or NUL), then scan backwards over
@@ -3047,7 +2972,7 @@ int parse_operand() {
         source_cursor += 1;
     }
     parse_operand_value = disp;
-    return 2 << 8;                      /* type=2 (direct mem) */
+    return 2 << 8; /* type=2 (direct mem) */
 }
 
 /* Linear scan over ``register_table`` (4 bytes per entry: 2 chars,
@@ -3141,8 +3066,7 @@ int parse_creg() {
    than `&`, `^`, `|`.  All operators are left-associative (the
    precedence-climbing loop in `parse_expression` re-enters with
    `prec + 1` to enforce that). */
-__attribute__((regparm(1)))
-int op_precedence(int op) {
+__attribute__((regparm(1))) int op_precedence(int op) {
     if (op == '*' || op == '/') {
         return 5;
     }
@@ -3161,8 +3085,7 @@ int op_precedence(int op) {
     return -1;
 }
 
-__attribute__((regparm(1)))
-int apply_binary(int lhs, int op, int rhs) {
+__attribute__((regparm(1))) int apply_binary(int lhs, int op, int rhs) {
     if (op == '+') {
         return lhs + rhs;
     }
@@ -3192,8 +3115,7 @@ int apply_binary(int lhs, int op, int rhs) {
    recursive call uses ``prec + 1`` to make every operator
    left-associative (e.g., ``a - b - c`` = ``(a - b) - c``, matching
    both C and NASM). */
-__attribute__((regparm(1)))
-int parse_expression(int min_prec) {
+__attribute__((regparm(1))) int parse_expression(int min_prec) {
     int lhs = parse_atom();
     while (1) {
         skip_ws();
@@ -3219,8 +3141,7 @@ int parse_expression(int min_prec) {
    with ``advance = 0`` so source_cursor stays on the name.
    ``last_symbol_index`` is reset by ``symbol_lookup`` (so the explicit
    pre-clear retired with the refactor). */
-__attribute__((carry_return))
-int peek_label_target() {
+__attribute__((carry_return)) int peek_label_target() {
     peek_label_value = lookup_ident_here(0);
     if (last_symbol_index == 0xFFFF) {
         return 0;
@@ -3272,8 +3193,7 @@ int read_line() {
    function so ``load_src_sector``'s C body can receive the result
    via the standard return-in-AX convention — cc.py has no syntax
    for binding an inline ``call syscall``'s AX return to a C local. */
-__attribute__((always_inline))
-int read_source_sector() {
+__attribute__((always_inline)) int read_source_sector() {
     asm("mov ebx, [_g_source_fd]\n"
         "mov edi, _g_source_buffer\n"
         "mov ecx, 512\n"
@@ -3292,8 +3212,7 @@ int read_source_sector() {
    reg_to_rm``; AX arrives with AH carrying whatever junk the
    caller didn't zero, so the body masks to a byte before the
    switch to match the old AL-only comparison semantics. */
-__attribute__((regparm(1)))
-int reg_to_rm(int register_id) {
+__attribute__((regparm(1))) int reg_to_rm(int register_id) {
     register_id &= 0xFF;
     if (register_id == 3) {
         return 7;
@@ -3379,22 +3298,16 @@ int parse_atom() {
         if (c == '\\') {
             source_cursor += 1;
             char esc = source_cursor[0];
-            switch (esc) {
-                case 'n':
-                    value = '\n';
-                    break;
-                case '0':
-                    value = '\0';
-                    break;
-                case 't':
-                    value = '\t';
-                    break;
-                case 'r':
-                    value = '\r';
-                    break;
-                default:
-                    value = esc;
-                    break;
+            if (esc == 'n') {
+                value = '\n';
+            } else if (esc == '0') {
+                value = '\0';
+            } else if (esc == 't') {
+                value = '\t';
+            } else if (esc == 'r') {
+                value = '\r';
+            } else {
+                value = esc;
             }
         } else {
             value = c;
@@ -3500,8 +3413,7 @@ void scan_ident_dot() {
    (short D0/D1 form) or imm8 shift count (C0/C1 imm8 form).  The two
    handlers share one body; ``modrm_base`` carries the /r field (0xE0
    for shl, 0xE8 for shr). */
-__attribute__((regparm(1)))
-void shift_handler(int modrm_base) {
+__attribute__((regparm(1))) void shift_handler(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     skip_comma();
@@ -3550,8 +3462,7 @@ void skip_ws() {
    SYMBOL_NAME_LENGTH (value, type=0, scope byte).  Overflow jumps
    to die_symbol_overflow — silently corrupting past the table
    would clobber whichever BSS global cc.py emits next. */
-__attribute__((regparm(1)))
-void symbol_add(int value, int scope) {
+__attribute__((regparm(1))) void symbol_add(int value, int scope) {
     if (symbol_count >= SYMBOL_MAX) {
         die_symbol_overflow();
     }
@@ -3587,8 +3498,7 @@ void symbol_add(int value, int scope) {
    relocation step).  Delegates the add / update logic to
    symbol_set, then rewrites the type byte.  Takes value via
    regparm(1); source_cursor supplies the name via its SI pin. */
-__attribute__((regparm(1)))
-void symbol_add_constant(int value) {
+__attribute__((regparm(1))) void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
     symbol_table[last_symbol_index].type = 1;
 }
@@ -3599,8 +3509,7 @@ void symbol_add_constant(int value) {
    Name pointer is ``source_cursor`` (SI-pinned).  On hit: returns
    AX = value, sets ``last_symbol_index`` to the entry index.  On
    miss: returns AX = 0, sets ``last_symbol_index`` = 0xFFFF. */
-__attribute__((regparm(1)))
-int symbol_lookup(int scope) {
+__attribute__((regparm(1))) int symbol_lookup(int scope) {
     int count = symbol_count;
     int index = 0;
     char *saved = source_cursor;
@@ -3646,8 +3555,7 @@ int symbol_lookup(int scope) {
    if the name exists in the table, overwrites the value word in
    place; otherwise appends via symbol_add and caches the new
    entry's index in last_symbol_index. */
-__attribute__((regparm(1)))
-void symbol_set(int value, int scope) {
+__attribute__((regparm(1))) void symbol_set(int value, int scope) {
     symbol_lookup(scope);
     if (last_symbol_index == 0xFFFF) {
         symbol_add(value, scope);
@@ -3663,17 +3571,15 @@ void symbol_set(int value, int scope) {
    identical "global" / "local" dispatches in ``handle_unknown_word``
    and ``parse_line`` don't need to open-code BX-setup ``call
    symbol_set`` inline. */
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_set_global(int value) {
+__attribute__((regparm(1))) __attribute__((always_inline)) void
+symbol_set_global(int value) {
     asm("push dword 0xFFFF\n"
         "call symbol_set\n"
         "add esp, 4");
 }
 
-__attribute__((regparm(1)))
-__attribute__((always_inline))
-void symbol_set_local(int value) {
+__attribute__((regparm(1))) __attribute__((always_inline)) void
+symbol_set_local(int value) {
     asm("push dword [_g_global_scope]\n"
         "call symbol_set\n"
         "add esp, 4");
@@ -3684,8 +3590,7 @@ void symbol_set_local(int value) {
    by a register-mode ModR/M byte whose /r field is baked into
    ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
    div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
-__attribute__((regparm(1)))
-void unary_f6f7(int modrm_base) {
+__attribute__((regparm(1))) void unary_f6f7(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();
     int opcode = 0xF7;
@@ -3697,16 +3602,18 @@ void unary_f6f7(int modrm_base) {
     emit_byte(modrm_base | (packed_register & 0xFF));
 }
 
-asm(
-    "\n"
+asm("\n"
     "\n"
     "        ;; Memory layout.  The assembler's scratch buffers live past\n"
     "        ;; _program_end (cc.py tail sentinel).  The symbol table and\n"
-    "        ;; jump-size table live in the program's own BSS (``symbol_table``\n"
+    "        ;; jump-size table live in the program's own BSS "
+    "(``symbol_table``\n"
     "        ;; and ``jump_sizes``).  Named constants are ``#define``d in\n"
-    "        ;; src/c/asm_layout.h and bridged into NASM ``%define``s by cc.py.\n"
+    "        ;; src/c/asm_layout.h and bridged into NASM ``%define``s by "
+    "cc.py.\n"
     "\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     ";;; Every function in the assembler — main, the pass driver, the\n"
     ";;; read / include / emit / resolve / symbol / parse / handler\n"
     ";;; families — lives in cc.py-emitted C with an inline-asm body\n"
@@ -3718,13 +3625,16 @@ asm(
     ";;; syscall wrapper (name collides with libc so it stays here to\n"
     ";;; keep clang happy), the mnemonic and register data tables, and\n"
     ";;; the STR_* keyword strings.\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     "\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     ";;; Mnemonic table: pairs of (name_ptr, handler_ptr), terminated by 0.\n"
     ";;; Pmode pointers are 32 bits, so each entry is 8 bytes — index *= 8\n"
     ";;; in mnemonic_keyword_at / mnemonic_dispatch_at.\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     "mnemonic_table:\n"
     "        dd STR_AAM, handle_aam\n"
     "        dd STR_ADC, handle_adc\n"
@@ -3905,24 +3815,29 @@ asm(
     "        db 'di', 7, 16\n"
     "        db 0                   ; terminator\n"
     "\n"
-    ";;; -----------------------------------------------------------------------\n"
-    ";;; Syscall wrapper.  Pmode runs flat: every segment register selects the\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
+    ";;; Syscall wrapper.  Pmode runs flat: every segment register selects "
+    "the\n"
     ";;; same GDT data segment, so the old ES-save-and-restore dance retired\n"
     ";;; with the 16-bit port.  Kept as a file-scope asm label (not a C\n"
     ";;; function) because ``syscall`` is a reserved libc symbol and clang's\n"
     ";;; syntax check rejects a user definition; renaming would touch every\n"
     ";;; ``call syscall`` site in the inline-asm bodies.\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     "syscall:\n"
     "        int 30h\n"
     "        ret\n"
     "\n"
-    ";;; -----------------------------------------------------------------------\n"
+    ";;; "
+    "-----------------------------------------------------------------------\n"
     ";;; Mutable state lives as cc.py-emitted ``_g_<name>:`` cells after\n"
     ";;; this inline-asm block (see the C declarations at the top of\n"
     ";;; src/c/asm.c).  cc.py emits a ``_program_end:`` sentinel at the\n"
     ";;; very end of the output and lays out every file-scope global —\n"
     ";;; including the four scratch arrays (line_buffer, output_buffer,\n"
     ";;; source_buffer, include_source_save) — in BSS past it.\n"
-    ";;; -----------------------------------------------------------------------\n"
-);
+    ";;; "
+    "-----------------------------------------------------------------------"
+    "\n");

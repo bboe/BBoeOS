@@ -10,7 +10,8 @@ void fold_to_lower(char *destination, char *source, int length) {
     }
 }
 
-int line_matches(char *pattern, int pattern_length, char *line, int line_length) {
+int line_matches(char *pattern, int pattern_length, char *line,
+                 int line_length) {
     if (pattern_length > line_length) {
         return 0;
     }
@@ -71,14 +72,16 @@ int main(int argc, char *argv[]) {
             break;
         }
         line_number += 1;
-        int strip_newline = (line_length > 0 && buffer[line_length - 1] == '\n') ? 1 : 0;
+        int strip_newline =
+            (line_length > 0 && buffer[line_length - 1] == '\n') ? 1 : 0;
         int match_length = line_length - strip_newline;
         char *haystack = buffer;
         if (ignore_case) {
             fold_to_lower(folded, buffer, match_length);
             haystack = folded;
         }
-        int matched = line_matches(pattern, pattern_length, haystack, match_length);
+        int matched =
+            line_matches(pattern, pattern_length, haystack, match_length);
         if (matched == invert) {
             continue;
         }

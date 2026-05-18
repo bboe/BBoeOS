@@ -242,6 +242,25 @@ def test_ifndef_unterminated_raises() -> None:
         preprocess(source)
 
 
+def test_line_continuation_in_define_body() -> None:
+    r"""A ``#define`` body may span physical lines via ``\``-newline splicing."""
+    source = "#define ADD(a, b) \\\n    ((a) + (b))\nint r = ADD(2, 3);\n"
+    tokens = _expand(source)
+    numbers = [text for kind, text in tokens if kind == "NUMBER"]
+    assert numbers == ["2", "3"]
+
+
+def test_line_continuation_preserves_line_numbers() -> None:
+    """Splicing leaves blank physical lines so post-splice tokens keep their line."""
+    source = "int a = 1; \\\n2;\nint b = 9;\n"
+    processed, _defines, _function_defines = preprocess(source)
+    tokens = tokenize(processed)
+    line_for = {text: line for _kind, text, line in tokens}
+    assert line_for["a"] == 1
+    assert line_for["2"] == 1
+    assert line_for["b"] == 3
+
+
 def test_nested_function_like_expansion() -> None:
     """A macro body that calls another macro is fully expanded in one pass."""
     source = "#define A(x) B(x)\n#define B(x) ((x) + 1)\nint q = A(5);\n"

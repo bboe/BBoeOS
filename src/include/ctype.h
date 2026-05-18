@@ -17,10 +17,8 @@
 #define CTYPE_H
 
 int isspace(char character) {
-    return character == ' '
-        || character == '\t'
-        || character == '\n'
-        || character == '\r';
+    return character == ' ' || character == '\t' || character == '\n' ||
+           character == '\r';
 }
 
 int tolower(char character) {

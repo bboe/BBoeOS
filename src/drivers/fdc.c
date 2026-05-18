@@ -61,20 +61,19 @@ void fdc_wait_irq();
 // src/arch/x86/kernel.asm — cc.py doesn't resolve NASM equ symbols
 // inside C expressions, so this is a manual link.  Keep in sync.
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
-    __attribute__((preserve_register("eax")))
-{
+    __attribute__((preserve_register("eax"))) {
     int phys;
     phys = sector_buffer - 0xFF800000;
-    kernel_outb(0x0A, 0x06);                       // mask channel 2
-    kernel_outb(0x0C, 0);                          // clear flip-flop
-    kernel_outb(0x04, phys & 0xFF);                // addr low
-    kernel_outb(0x04, (phys >> 8) & 0xFF);         // addr high
-    kernel_outb(0x0C, 0);                          // clear flip-flop again
-    kernel_outb(0x05, (512 - 1) & 0xFF);           // count low
-    kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF);    // count high
-    kernel_outb(0x0B, mode);                       // DMA mode
-    kernel_outb(0x81, (phys >> 16) & 0xFF);        // page
-    kernel_outb(0x0A, 0x02);                       // unmask channel 2
+    kernel_outb(0x0A, 0x06);                    // mask channel 2
+    kernel_outb(0x0C, 0);                       // clear flip-flop
+    kernel_outb(0x04, phys & 0xFF);             // addr low
+    kernel_outb(0x04, (phys >> 8) & 0xFF);      // addr high
+    kernel_outb(0x0C, 0);                       // clear flip-flop again
+    kernel_outb(0x05, (512 - 1) & 0xFF);        // count low
+    kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF); // count high
+    kernel_outb(0x0B, mode);                    // DMA mode
+    kernel_outb(0x81, (phys >> 16) & 0xFF);     // page
+    kernel_outb(0x0A, 0x02);                    // unmask channel 2
 }
 
 // Drain the 7 result bytes (ST0, ST1, ST2, C, H, R, N) — ignored.
@@ -93,15 +92,15 @@ void fdc_init() {
     uint8_t mask;
 
     fdc_install_irq();
-    mask = kernel_inb(0x21);                  // PIC1_DATA_PORT
-    kernel_outb(0x21, mask & 0xBF);           // clear bit 6 (unmask IRQ 6)
+    mask = kernel_inb(0x21);        // PIC1_DATA_PORT
+    kernel_outb(0x21, mask & 0xBF); // clear bit 6 (unmask IRQ 6)
 
     fdc_irq_flag = 0;
 
     // Reset: clear DOR, then raise RESET_NOT with DMA+IRQ + drive 0.
-    kernel_outb(0x3F2, 0);                    // FDC_DOR
-    kernel_outb(0x3F2, 0x0C);                 // RESET_NOT | DMA_IRQ
-    fdc_wait_irq();                           // controller signals ready
+    kernel_outb(0x3F2, 0);    // FDC_DOR
+    kernel_outb(0x3F2, 0x0C); // RESET_NOT | DMA_IRQ
+    fdc_wait_irq();           // controller signals ready
 
     // Drain 4 polling interrupts (one per drive slot on 82077AA).
     fdc_sense_interrupt();
@@ -110,10 +109,10 @@ void fdc_init() {
     fdc_sense_interrupt();
 
     // Data rate 500 Kbps for 1.44 MB.
-    kernel_outb(0x3F7, 0);                    // FDC_CCR
+    kernel_outb(0x3F7, 0); // FDC_CCR
 
     // SPECIFY: SRT/HUT don't matter on QEMU; HLT=1, ND=0 (DMA).
-    fdc_send(0x03);                           // CMD_SPECIFY
+    fdc_send(0x03); // CMD_SPECIFY
     fdc_send(0xDF);
     fdc_send(0x02);
 }
@@ -140,8 +139,8 @@ asm("fdc_install_irq:\n"
 asm("fdc_irq6_handler:\n"
     "    pushad\n"
     "    mov byte [_g_fdc_irq_flag], 1\n"
-    "    mov al, 0x20\n"           // PIC_EOI
-    "    out 0x20, al\n"           // PIC1_CMD_PORT
+    "    mov al, 0x20\n" // PIC_EOI
+    "    out 0x20, al\n" // PIC1_CMD_PORT
     "    SIGNAL_TAIL_CHECK\n"
     "    iretd");
 
@@ -156,25 +155,25 @@ asm("fdc_issue_read_write:\n"
     "    push ebx\n"
     "    push ecx\n"
     "    push edx\n"
-    "    mov bh, al\n"             // stash command
-    "    call fdc_send\n"          // command
+    "    mov bh, al\n"    // stash command
+    "    call fdc_send\n" // command
     "    mov al, dh\n"
     "    shl al, 2\n"
-    "    call fdc_send\n"          // HDS = (head<<2) | drive(0)
+    "    call fdc_send\n" // HDS = (head<<2) | drive(0)
     "    mov al, ch\n"
-    "    call fdc_send\n"          // C
+    "    call fdc_send\n" // C
     "    mov al, dh\n"
-    "    call fdc_send\n"          // H
+    "    call fdc_send\n" // H
     "    mov al, cl\n"
-    "    call fdc_send\n"          // R (1-based sector)
-    "    mov al, 2\n"              // FDC_SECTOR_SIZE_CODE
-    "    call fdc_send\n"          // N
+    "    call fdc_send\n" // R (1-based sector)
+    "    mov al, 2\n"     // FDC_SECTOR_SIZE_CODE
+    "    call fdc_send\n" // N
     "    mov al, cl\n"
-    "    call fdc_send\n"          // EOT = R → 1-sector transfer
-    "    mov al, 0x1B\n"           // FDC_GAP3
-    "    call fdc_send\n"          // GPL
+    "    call fdc_send\n" // EOT = R → 1-sector transfer
+    "    mov al, 0x1B\n"  // FDC_GAP3
+    "    call fdc_send\n" // GPL
     "    mov al, 0xFF\n"
-    "    call fdc_send\n"          // DTL (ignored when N>0)
+    "    call fdc_send\n" // DTL (ignored when N>0)
     "    pop edx\n"
     "    pop ecx\n"
     "    pop ebx\n"
@@ -193,12 +192,12 @@ asm("fdc_lba_to_chs_internal:\n"
     "    push eax\n"
     "    push ebx\n"
     "    xor dx, dx\n"
-    "    mov bx, 18\n"             // FDC_SECTORS_PER_TRACK
+    "    mov bx, 18\n" // FDC_SECTORS_PER_TRACK
     "    div bx\n"
     "    mov cl, dl\n"
-    "    inc cl\n"                 // 1-based sector
+    "    inc cl\n" // 1-based sector
     "    xor dx, dx\n"
-    "    mov bx, 2\n"              // FDC_HEADS
+    "    mov bx, 2\n" // FDC_HEADS
     "    div bx\n"
     "    mov ch, al\n"
     "    mov dh, dl\n"
@@ -215,15 +214,15 @@ asm("fdc_motor_start:\n"
     "    push eax\n"
     "    push ecx\n"
     "    push edx\n"
-    "    mov dx, 0x3F2\n"          // FDC_DOR
-    "    mov al, 0x1C\n"           // MOTOR_0 | RESET_NOT | DMA_IRQ
+    "    mov dx, 0x3F2\n" // FDC_DOR
+    "    mov al, 0x1C\n"  // MOTOR_0 | RESET_NOT | DMA_IRQ
     "    out dx, al\n"
     "    mov ecx, 500\n"
     "    call rtc_sleep_ms\n"
     "    mov byte [_g_fdc_irq_flag], 0\n"
-    "    mov al, 0x07\n"           // CMD_RECALIBRATE
+    "    mov al, 0x07\n" // CMD_RECALIBRATE
     "    call fdc_send\n"
-    "    xor al, al\n"             // drive 0
+    "    xor al, al\n" // drive 0
     "    call fdc_send\n"
     "    call fdc_wait_irq\n"
     "    call fdc_sense_interrupt\n"
@@ -237,12 +236,10 @@ asm("fdc_motor_start:\n"
 // no error path; failures hang in fdc_wait_irq, matching the asm).
 // cc.py's carry_return convention: return 1 → CF clear (success).
 int fdc_read_sector(int lba __attribute__((in_register("ax"))))
-    __attribute__((carry_return))
-    __attribute__((preserve_register("eax")))
+    __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("edx")))
-{
+    __attribute__((preserve_register("edx"))) {
     int cx;
     int dx;
 
@@ -251,9 +248,9 @@ int fdc_read_sector(int lba __attribute__((in_register("ax"))))
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(0x46);                      // DMA_MODE_READ
+    fdc_dma_setup(0x46); // DMA_MODE_READ
     fdc_irq_flag = 0;
-    fdc_issue_read_write(0xE6, cx, dx);       // CMD_READ
+    fdc_issue_read_write(0xE6, cx, dx); // CMD_READ
     fdc_wait_irq();
     fdc_drain_result();
     return 1;
@@ -267,7 +264,7 @@ asm("fdc_recv:\n"
     "    mov dx, 0x3F4\n"
     "    in al, dx\n"
     "    and al, 0xC0\n"
-    "    cmp al, 0xC0\n"            // RQM=1, DIO=1 (host reads)
+    "    cmp al, 0xC0\n" // RQM=1, DIO=1 (host reads)
     "    jne .fdc_recv_wait\n"
     "    mov dx, 0x3F5\n"
     "    in al, dx\n"
@@ -278,13 +275,13 @@ asm("fdc_recv:\n"
 asm("fdc_seek:\n"
     "    push eax\n"
     "    mov byte [_g_fdc_irq_flag], 0\n"
-    "    mov al, 0x0F\n"           // CMD_SEEK
+    "    mov al, 0x0F\n" // CMD_SEEK
     "    call fdc_send\n"
     "    mov al, dh\n"
     "    shl al, 2\n"
-    "    call fdc_send\n"          // HDS
+    "    call fdc_send\n" // HDS
     "    mov al, ch\n"
-    "    call fdc_send\n"          // cylinder
+    "    call fdc_send\n" // cylinder
     "    call fdc_wait_irq\n"
     "    call fdc_sense_interrupt\n"
     "    pop eax\n"
@@ -298,12 +295,12 @@ asm("fdc_send:\n"
     "    push edx\n"
     "    mov ah, al\n"
     ".fdc_send_wait:\n"
-    "    mov dx, 0x3F4\n"           // FDC_MSR
+    "    mov dx, 0x3F4\n" // FDC_MSR
     "    in al, dx\n"
-    "    and al, 0xC0\n"            // MSR_RQM | MSR_DIO
-    "    cmp al, 0x80\n"            // RQM=1, DIO=0 (host writes)
+    "    and al, 0xC0\n" // MSR_RQM | MSR_DIO
+    "    cmp al, 0x80\n" // RQM=1, DIO=0 (host writes)
     "    jne .fdc_send_wait\n"
-    "    mov dx, 0x3F5\n"           // FDC_DATA
+    "    mov dx, 0x3F5\n" // FDC_DATA
     "    mov al, ah\n"
     "    out dx, al\n"
     "    pop edx\n"
@@ -313,9 +310,9 @@ asm("fdc_send:\n"
 // Issue a sense-interrupt and discard ST0/PCN.  Used during reset
 // and after every SEEK / RECAL.
 void fdc_sense_interrupt() {
-    fdc_send(0x08);  // CMD_SENSE_INT
-    fdc_recv();      // ST0
-    fdc_recv();      // PCN
+    fdc_send(0x08); // CMD_SENSE_INT
+    fdc_recv();     // ST0
+    fdc_recv();     // PCN
 }
 
 // Block until IRQ 6 sets fdc_irq_flag.  pushf/sti envelope keeps
@@ -333,12 +330,10 @@ asm("fdc_wait_irq:\n"
 
 // AX = LBA, sector_buffer → disk.  Same return shape as read.
 int fdc_write_sector(int lba __attribute__((in_register("ax"))))
-    __attribute__((carry_return))
-    __attribute__((preserve_register("eax")))
+    __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
-    __attribute__((preserve_register("edx")))
-{
+    __attribute__((preserve_register("edx"))) {
     int cx;
     int dx;
 
@@ -347,9 +342,9 @@ int fdc_write_sector(int lba __attribute__((in_register("ax"))))
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(0x4A);                      // DMA_MODE_WRITE
+    fdc_dma_setup(0x4A); // DMA_MODE_WRITE
     fdc_irq_flag = 0;
-    fdc_issue_read_write(0xC5, cx, dx);       // CMD_WRITE
+    fdc_issue_read_write(0xC5, cx, dx); // CMD_WRITE
     fdc_wait_irq();
     fdc_drain_result();
     return 1;

@@ -56,8 +56,8 @@ void mode_kernel_buf() {
        in src/c/asm.c hasn't grown setcc support yet — capturing CF via
        a ``jnc`` branch keeps this assemblable by both NASM and the
        self-host. */
-    asm("mov ebx, 1\n"                                  /* fd = STDOUT */
-        "mov esi, KERNEL_VIRT_BASE\n"                   /* bad user pointer */
+    asm("mov ebx, 1\n"                /* fd = STDOUT */
+        "mov esi, KERNEL_VIRT_BASE\n" /* bad user pointer */
         "mov ecx, 16\n"
         "mov ah, SYS_IO_WRITE\n"
         "int 30h\n"

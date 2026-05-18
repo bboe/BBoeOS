@@ -62,11 +62,11 @@
 // above 315) so ring index masking stays a single AND, while still
 // absorbing one tick of producer/consumer phase jitter without ever
 // silence-padding the half.
-#define AUDIO_DMA_SIZE  630     // total DMA buffer (two halves)
-#define AUDIO_HALF_SIZE 315     // one DMA half = one Doom tick
-#define AUDIO_RING_SIZE 512     // software ring (must be power of two)
-#define AUDIO_RING_MASK 511     // = AUDIO_RING_SIZE - 1
-#define AUDIO_SILENCE   0x80    // 8-bit unsigned PCM midpoint
+#define AUDIO_DMA_SIZE 630  // total DMA buffer (two halves)
+#define AUDIO_HALF_SIZE 315 // one DMA half = one Doom tick
+#define AUDIO_RING_SIZE 512 // software ring (must be power of two)
+#define AUDIO_RING_MASK 511 // = AUDIO_RING_SIZE - 1
+#define AUDIO_SILENCE 0x80  // 8-bit unsigned PCM midpoint
 
 uint8_t sb16_present;
 asm("sb16_present equ _g_sb16_present");
@@ -120,10 +120,10 @@ asm("audio_wakeup equ _g_audio_wakeup");
 // strict-alphabetical order without per-pair shuffling.  cc.py's
 // codegen accepts the same attribute syntax on a forward decl as
 // on the definition.
-int  sb16_dsp_read();
+int sb16_dsp_read();
 void sb16_dsp_out(int byte);
 void sb16_dsp_wait_write();
-int  sb16_probe();
+int sb16_probe();
 void sb16_reset_delay();
 
 // sb16_close: per-/dev/audio-close teardown.  Pause the DSP, exit
@@ -134,11 +134,11 @@ void sb16_reset_delay();
 // re-zeros them.
 void sb16_close() {
     int mask;
-    sb16_dsp_out(0xD0);                     // pause 8-bit DMA
-    sb16_dsp_out(0xDA);                     // exit auto-init 8-bit
-    sb16_dsp_out(0xD3);                     // speaker off
-    kernel_outb(0x0A, 0x05);                // mask 8237 channel 1
-    mask = kernel_inb(0x21);                // mask IRQ 5 on PIC1
+    sb16_dsp_out(0xD0);      // pause 8-bit DMA
+    sb16_dsp_out(0xDA);      // exit auto-init 8-bit
+    sb16_dsp_out(0xD3);      // speaker off
+    kernel_outb(0x0A, 0x05); // mask 8237 channel 1
+    mask = kernel_inb(0x21); // mask IRQ 5 on PIC1
     kernel_outb(0x21, mask | 0x20);
 }
 
@@ -179,7 +179,7 @@ asm("sb16_init:\n"
     "        test eax, eax\n"
     "        jz .sb16_init_no_card\n"
     "        call frame_alloc\n"
-    "        jc .sb16_init_no_card\n"        // OOM at boot - degrade to "absent"
+    "        jc .sb16_init_no_card\n" // OOM at boot - degrade to "absent"
     "        mov [_g_audio_buffer_phys], eax\n"
     "        add eax, DIRECT_MAP_BASE\n"
     "        mov [_g_audio_buffer_kvirt], eax\n"
@@ -206,8 +206,7 @@ asm("sb16_init:\n"
 // 0x1C (8-bit auto-init PCM) with count = AUDIO_HALF_SIZE - 1 so the
 // DSP fires IRQ 5 at each half boundary.  Speaker on, unmask IRQ 5.
 // Always succeeds when sb16_present is true.  Returns AX = 1, CF clear.
-__attribute__((carry_return))
-int sb16_open() {
+__attribute__((carry_return)) int sb16_open() {
     int i;
     int mask;
     int phys;
@@ -227,11 +226,11 @@ int sb16_open() {
     audio_filling_half = 0;
     audio_wakeup = 0;
     mask = kernel_inb(0x21);
-    kernel_outb(0x21, mask & 0xDF);         // unmask IRQ 5 on PIC1
-    sb16_dsp_out(0xD1);                     // speaker on
-    sb16_dsp_out(0x41);                     // set output sample rate
-    sb16_dsp_out(0x2B);                     // 11025 = 0x2B11; high byte first
-    sb16_dsp_out(0x11);                     // low byte
+    kernel_outb(0x21, mask & 0xDF); // unmask IRQ 5 on PIC1
+    sb16_dsp_out(0xD1);             // speaker on
+    sb16_dsp_out(0x41);             // set output sample rate
+    sb16_dsp_out(0x2B);             // 11025 = 0x2B11; high byte first
+    sb16_dsp_out(0x11);             // low byte
     // 8237 mode byte 0x59 = 01 0 1 10 01:
     //   bits 7-6 = 01 single transfer
     //   bit 5    = 0  address increment
@@ -242,15 +241,15 @@ int sb16_open() {
     //   bits 1-0 = 01 channel 1
     phys = audio_buffer_phys;
     dma_count = AUDIO_DMA_SIZE - 1;
-    kernel_outb(0x0A, 0x05);                            // mask channel 1
-    kernel_outb(0x0C, 0);                               // clear flip-flop
-    kernel_outb(0x0B, 0x59);                            // single + inc + auto-init + read + ch 1
-    kernel_outb(0x02, phys & 0xFF);                     // address low
-    kernel_outb(0x02, (phys >> 8) & 0xFF);              // address high
-    kernel_outb(0x83, (phys >> 16) & 0xFF);             // page register for ch 1
-    kernel_outb(0x03, dma_count & 0xFF);                // count low
-    kernel_outb(0x03, (dma_count >> 8) & 0xFF);         // count high
-    kernel_outb(0x0A, 0x01);                            // unmask channel 1
+    kernel_outb(0x0A, 0x05);        // mask channel 1
+    kernel_outb(0x0C, 0);           // clear flip-flop
+    kernel_outb(0x0B, 0x59);        // single + inc + auto-init + read + ch 1
+    kernel_outb(0x02, phys & 0xFF); // address low
+    kernel_outb(0x02, (phys >> 8) & 0xFF);      // address high
+    kernel_outb(0x83, (phys >> 16) & 0xFF);     // page register for ch 1
+    kernel_outb(0x03, dma_count & 0xFF);        // count low
+    kernel_outb(0x03, (dma_count >> 8) & 0xFF); // count high
+    kernel_outb(0x0A, 0x01);                    // unmask channel 1
     // Classic-DSP auto-init recipe: 0x48 sets the block transfer size
     // (count - 1, so the DSP fires IRQ 5 every AUDIO_HALF_SIZE bytes);
     // 0x1C then starts auto-init 8-bit PCM playback with NO further
@@ -258,10 +257,10 @@ int sb16_open() {
     // Sending count bytes after 0x1C (as 0x14 expects) feeds them to
     // the DSP as fresh commands and silently breaks playback.
     dma_count = AUDIO_HALF_SIZE - 1;
-    sb16_dsp_out(0x48);                                 // set block size
-    sb16_dsp_out(dma_count & 0xFF);                     // block count low
-    sb16_dsp_out((dma_count >> 8) & 0xFF);              // block count high
-    sb16_dsp_out(0x1C);                                 // 8-bit auto-init PCM output (no args)
+    sb16_dsp_out(0x48);                    // set block size
+    sb16_dsp_out(dma_count & 0xFF);        // block count low
+    sb16_dsp_out((dma_count >> 8) & 0xFF); // block count high
+    sb16_dsp_out(0x1C); // 8-bit auto-init PCM output (no args)
     return 1;
 }
 

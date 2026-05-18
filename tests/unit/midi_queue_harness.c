@@ -44,9 +44,9 @@ uint32_t system_ticks;
 #define HARNESS_MAX_RECORDS 4096
 
 struct harness_io_record {
-    int is_inb;       /* 1 when this slot recorded a kernel_inb call */
+    int is_inb; /* 1 when this slot recorded a kernel_inb call */
     int port;
-    int value;        /* outb value; for inb, the (always-zero) returned byte */
+    int value; /* outb value; for inb, the (always-zero) returned byte */
 };
 
 static struct harness_io_record harness_records[HARNESS_MAX_RECORDS];

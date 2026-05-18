@@ -205,8 +205,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* Move cursor to cursor_line/cursor_column (1-based ANSI). */
-        printf("\e[%d;%dH",
-               cursor_line - view_line + 1,
+        printf("\e[%d;%dH", cursor_line - view_line + 1,
                cursor_column - view_column + 1);
 
         /* ---- Get input ---- */
@@ -348,7 +347,8 @@ int main(int argc, char *argv[]) {
                 if (cursor_line >= view_line + 24) {
                     view_line = cursor_line - 23;
                 }
-                while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
+                while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE &&
+                       edit_buffer[gap_end] != '\n') {
                     gap_move_right();
                     cursor_column += 1;
                     target_col -= 1;
@@ -368,7 +368,8 @@ int main(int argc, char *argv[]) {
                 }
                 if (found_nl) {
                     /* Walk back to the start of the previous line. */
-                    while (gap_start > 0 && edit_buffer[gap_start - 1] != '\n') {
+                    while (gap_start > 0 &&
+                           edit_buffer[gap_start - 1] != '\n') {
                         gap_move_left();
                     }
                     cursor_line -= 1;
@@ -376,7 +377,8 @@ int main(int argc, char *argv[]) {
                     if (cursor_line < view_line) {
                         view_line = cursor_line;
                     }
-                    while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
+                    while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE &&
+                           edit_buffer[gap_end] != '\n') {
                         gap_move_right();
                         cursor_column += 1;
                         target_col -= 1;

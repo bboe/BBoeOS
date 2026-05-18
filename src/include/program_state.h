@@ -16,27 +16,27 @@
 */
 
 struct program_state {
-    uint32_t alarm_deadline;       // 0x000
-    uint32_t alarm_interval;       // 0x004
-    uint32_t current_pipe;         // 0x008  struct pipe* or NULL
-    uint8_t fd_table[512];         // 0x00C .. 0x20C (FD_MAX × FD_ENTRY_SIZE)
-    uint8_t in_signal_handler;     // 0x20C
-    uint8_t pad_after_handler[3];  // 0x20D
-    uint32_t kernel_stack_top;     // 0x210  per-slot kernel stack top (a/b/c)
-    uint32_t pd_phys;              // 0x214
-    uint8_t pending_sigalrm;       // 0x218
-    uint8_t pending_sigint;        // 0x219
-    uint8_t pending_sigpipe;       // 0x21A
-    uint8_t pad_after_pending[1];  // 0x21B
-    uint32_t program_break;        // 0x21C
-    uint32_t program_break_min;    // 0x220
-    uint32_t saved_esp;            // 0x224  parked kernel ESP while not current
-    uint32_t sigalrm_handler;      // 0x228
-    uint32_t sigint_handler;       // 0x22C
-    uint32_t sigpipe_handler;      // 0x230
-    uint8_t state;                 // 0x234  STATE_*
-    uint8_t pad_after_state[3];    // 0x235
-    uint32_t wait_status;          // 0x238  parked exit code while STATE_EXITED
-};                                 // total 0x23C = 572 bytes
+    uint32_t alarm_deadline;      // 0x000
+    uint32_t alarm_interval;      // 0x004
+    uint32_t current_pipe;        // 0x008  struct pipe* or NULL
+    uint8_t fd_table[512];        // 0x00C .. 0x20C (FD_MAX × FD_ENTRY_SIZE)
+    uint8_t in_signal_handler;    // 0x20C
+    uint8_t pad_after_handler[3]; // 0x20D
+    uint32_t kernel_stack_top;    // 0x210  per-slot kernel stack top (a/b/c)
+    uint32_t pd_phys;             // 0x214
+    uint8_t pending_sigalrm;      // 0x218
+    uint8_t pending_sigint;       // 0x219
+    uint8_t pending_sigpipe;      // 0x21A
+    uint8_t pad_after_pending[1]; // 0x21B
+    uint32_t program_break;       // 0x21C
+    uint32_t program_break_min;   // 0x220
+    uint32_t saved_esp;           // 0x224  parked kernel ESP while not current
+    uint32_t sigalrm_handler;     // 0x228
+    uint32_t sigint_handler;      // 0x22C
+    uint32_t sigpipe_handler;     // 0x230
+    uint8_t state;                // 0x234  STATE_*
+    uint8_t pad_after_state[3];   // 0x235
+    uint32_t wait_status;         // 0x238  parked exit code while STATE_EXITED
+}; // total 0x23C = 572 bytes
 
 extern struct program_state *current_program_state;

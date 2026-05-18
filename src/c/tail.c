@@ -15,7 +15,8 @@ void run_file_mode(char *path, int want) {
     }
     int total = 0;
     while (total < TAIL_BUFFER_BYTES) {
-        int bytes_read = read(fd, tail_buffer + total, TAIL_BUFFER_BYTES - total);
+        int bytes_read =
+            read(fd, tail_buffer + total, TAIL_BUFFER_BYTES - total);
         if (bytes_read <= 0) {
             break;
         }
@@ -75,7 +76,8 @@ void run_stdin_mode(int want) {
             int next_tail = (tail + 1) % TAIL_BUFFER_BYTES;
             if (has_bytes && next_tail == head) {
                 if (queue_count > 0) {
-                    head = (newline_positions[queue_head] + 1) % TAIL_BUFFER_BYTES;
+                    head =
+                        (newline_positions[queue_head] + 1) % TAIL_BUFFER_BYTES;
                     queue_head = (queue_head + 1) % queue_capacity;
                     queue_count -= 1;
                 } else {
@@ -85,7 +87,8 @@ void run_stdin_mode(int want) {
             tail_buffer[tail] = byte;
             if (byte == '\n') {
                 if (queue_count == queue_capacity) {
-                    head = (newline_positions[queue_head] + 1) % TAIL_BUFFER_BYTES;
+                    head =
+                        (newline_positions[queue_head] + 1) % TAIL_BUFFER_BYTES;
                     queue_head = (queue_head + 1) % queue_capacity;
                     queue_count -= 1;
                 }

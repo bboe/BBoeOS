@@ -43,9 +43,9 @@ enum RedirectOp {
 };
 
 int redirect_count;
-char redirect_names[192];  /* MAX_REDIRECTS * MAX_PATH = 3 * 64 */
+char redirect_names[192]; /* MAX_REDIRECTS * MAX_PATH = 3 * 64 */
 char redirect_ops[MAX_REDIRECTS];
-char redirect_targets[MAX_REDIRECTS];  /* target fd: 0 (stdin) or 1 (stdout) */
+char redirect_targets[MAX_REDIRECTS]; /* target fd: 0 (stdin) or 1 (stdout) */
 
 /* saved_fds[target] = saved-fd-number from dup(target) before the
    redirect was applied, or -1 if no save was taken.  Indexed by
@@ -221,7 +221,8 @@ int expand_word(char *src, char *dst, int max_len);
    that is free* (caller-relative).  Sets *argc_out* to the argv count
    (excluding the NULL terminator). */
 int build_command_argv(int start, int end, char **argv_out, int *argc_out,
-                       char *expanded_out, int expanded_max, int allow_redirects) {
+                       char *expanded_out, int expanded_max,
+                       int allow_redirects) {
     int argc = 0;
     int write = 0;
     int token_index = start;
@@ -242,7 +243,7 @@ int build_command_argv(int start, int end, char **argv_out, int *argc_out,
             }
             argv_out[argc] = expanded_out + write;
             argc += 1;
-            write += word_written + 1;   /* skip past the NUL */
+            write += word_written + 1; /* skip past the NUL */
             token_index += 1;
             break;
         case TOKEN_REDIRECT_IN:
@@ -256,7 +257,8 @@ int build_command_argv(int start, int end, char **argv_out, int *argc_out,
                 printf("too many redirections\n");
                 return -1;
             }
-            if (token_index + 1 >= end || token_kinds[token_index + 1] != TOKEN_WORD) {
+            if (token_index + 1 >= end ||
+                token_kinds[token_index + 1] != TOKEN_WORD) {
                 printf("redirection syntax error\n");
                 return -1;
             }
@@ -358,7 +360,7 @@ void dispatch_command(int argc, char **argv) {
         last_exec_status = 0;
         return;
     } else if (strcmp(name, "reboot") == 0) {
-        reboot();   /* noreturn */
+        reboot(); /* noreturn */
     } else if (strcmp(name, "shutdown") == 0) {
         shutdown();
         printf("APM shutdown failed\n");
@@ -367,7 +369,7 @@ void dispatch_command(int argc, char **argv) {
     }
     int result = try_exec(name, argv);
     if (result == 1) {
-        last_exec_status = 126 << 8;   /* bash: not executable */
+        last_exec_status = 126 << 8; /* bash: not executable */
         printf("not executable\n");
         return;
     }
@@ -411,14 +413,14 @@ void execute_line(char *line) {
         last_exec_status = 1 << 8;
         return;
     }
-    int chain_op = TOKEN_SEMI;   /* First segment runs unconditionally. */
+    int chain_op = TOKEN_SEMI; /* First segment runs unconditionally. */
     int token_index = 0;
     while (token_kinds[token_index] != TOKEN_EOF) {
         int segment_start = token_index;
-        while (token_kinds[token_index] != TOKEN_EOF
-               && token_kinds[token_index] != TOKEN_SEMI
-               && token_kinds[token_index] != TOKEN_AND
-               && token_kinds[token_index] != TOKEN_OR) {
+        while (token_kinds[token_index] != TOKEN_EOF &&
+               token_kinds[token_index] != TOKEN_SEMI &&
+               token_kinds[token_index] != TOKEN_AND &&
+               token_kinds[token_index] != TOKEN_OR) {
             token_index += 1;
         }
         int segment_end = token_index;
@@ -466,8 +468,9 @@ void execute_pipeline(int start, int end) {
         /* Single command — redirects allowed. */
         redirect_count = 0;
         int argc;
-        int written = build_command_argv(start, end, dispatch_argv, &argc,
-                                         expanded_buffer, sizeof(expanded_buffer), 1);
+        int written =
+            build_command_argv(start, end, dispatch_argv, &argc,
+                               expanded_buffer, sizeof(expanded_buffer), 1);
         if (written < 0) {
             last_exec_status = 1 << 8;
             return;
@@ -486,18 +489,18 @@ void execute_pipeline(int start, int end) {
        either side. */
     redirect_count = 0;
     int left_argc;
-    int left_written = build_command_argv(start, first_pipe,
-                                          pipe_left_argv, &left_argc,
-                                          expanded_buffer, sizeof(expanded_buffer) / 2, 0);
+    int left_written =
+        build_command_argv(start, first_pipe, pipe_left_argv, &left_argc,
+                           expanded_buffer, sizeof(expanded_buffer) / 2, 0);
     if (left_written < 0) {
         last_exec_status = 1 << 8;
         return;
     }
     int right_argc;
-    int right_written = build_command_argv(first_pipe + 1, end,
-                                           pipe_right_argv, &right_argc,
-                                           expanded_buffer + sizeof(expanded_buffer) / 2,
-                                           sizeof(expanded_buffer) / 2, 0);
+    int right_written =
+        build_command_argv(first_pipe + 1, end, pipe_right_argv, &right_argc,
+                           expanded_buffer + sizeof(expanded_buffer) / 2,
+                           sizeof(expanded_buffer) / 2, 0);
     if (right_written < 0) {
         last_exec_status = 1 << 8;
         return;
@@ -510,21 +513,23 @@ void execute_pipeline(int start, int end) {
     /* Copy the unprefixed names (argv[0]) into pipe_*_name and build
        the bin/-prefixed paths the kernel needs. */
     int copy_index = 0;
-    while (pipe_left_argv[0][copy_index] != '\0' && copy_index < MAX_INPUT - 1) {
+    while (pipe_left_argv[0][copy_index] != '\0' &&
+           copy_index < MAX_INPUT - 1) {
         pipe_left_name[copy_index] = pipe_left_argv[0][copy_index];
         copy_index += 1;
     }
     pipe_left_name[copy_index] = '\0';
     copy_index = 0;
-    while (pipe_right_argv[0][copy_index] != '\0' && copy_index < MAX_INPUT - 1) {
+    while (pipe_right_argv[0][copy_index] != '\0' &&
+           copy_index < MAX_INPUT - 1) {
         pipe_right_name[copy_index] = pipe_right_argv[0][copy_index];
         copy_index += 1;
     }
     pipe_right_name[copy_index] = '\0';
     build_bin_path(pipe_left_name, pipe_left_path);
     build_bin_path(pipe_right_name, pipe_right_path);
-    int rc = pipeline2(pipe_left_path, pipe_left_argv,
-                       pipe_right_path, pipe_right_argv);
+    int rc = pipeline2(pipe_left_path, pipe_left_argv, pipe_right_path,
+                       pipe_right_argv);
     if (rc < 0) {
         write(STDOUT, "shell: pipeline failed\n", 23);
         last_exec_status = -rc;
@@ -591,7 +596,8 @@ int expand_word(char *src, char *dst, int max_len) {
    after them.  cc.py resolves these forward references silently; clang
    under -std=c99 (test_cc_compatibility's reference build) requires
    explicit declarations. */
-int replace_line(char *buf, int cursor, int end, char *new_content, int new_length);
+int replace_line(char *buf, int cursor, int end, char *new_content,
+                 int new_length);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -650,8 +656,8 @@ int insert_char(char *buf, int cursor, int end, char character) {
     return end;
 }
 
-
-int replace_line(char *buf, int cursor, int end, char *new_content, int new_length) {
+int replace_line(char *buf, int cursor, int end, char *new_content,
+                 int new_length) {
     /* Erase the current input area on screen by stepping cursor back
        to col 0 of input, overprinting end with spaces, stepping back,
        then writing new_content.  Returns new_length so the caller can
@@ -879,7 +885,8 @@ int main() {
         if (end > 0) {
             int previous_slot = (history_count - 1) % HISTORY_SIZE;
             int is_duplicate = 0;
-            if (history_count > 0 && strcmp(buf, history + (previous_slot * MAX_INPUT)) == 0) {
+            if (history_count > 0 &&
+                strcmp(buf, history + (previous_slot * MAX_INPUT)) == 0) {
                 is_duplicate = 1;
             }
             if (is_duplicate == 0) {

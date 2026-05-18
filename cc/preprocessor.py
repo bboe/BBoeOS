@@ -1,4 +1,4 @@
-"""C preprocessor: ``#define`` / ``#include`` / ``#ifndef`` handling.
+r"""C preprocessor: ``#define`` / ``#include`` / ``#ifndef`` handling.
 
 Two ``#define`` shapes are supported:
 
@@ -48,6 +48,12 @@ Out of scope for this version:
 
 Only the double-quoted ``#include "..."`` form is recognised — the
 angle-bracket form (``<stdio.h>``) is not.
+
+C translation phase 2 (``\``-newline splicing) is applied to the
+whole source before directive scanning, so a ``#define`` body — or
+any other line — may continue across physical lines.  Each spliced
+join leaves a blank physical line in its place so downstream line
+numbers match the original source.
 """
 
 from __future__ import annotations
@@ -178,6 +184,36 @@ def _parse_function_define(
     return tuple(raw_params), body_tokens
 
 
+def _splice_line_continuations(source: str) -> str:
+    r"""C translation phase 2: drop every ``\`` immediately before a newline.
+
+    Two physical lines joined this way become one logical line.  A blank
+    physical line is appended for every join so downstream line numbers
+    still match the original source — tokens on the spliced tail are
+    attributed to where the logical line started (the same shift the
+    ``#define`` / ``#ifndef`` directives already accept).
+    """
+    if "\\\n" not in source and "\\\r\n" not in source:
+        return source
+    lines = source.splitlines(keepends=True)
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        current = lines[index]
+        joined = 0
+        while True:
+            stripped = current.rstrip("\r\n")
+            if not stripped.endswith("\\") or index + 1 >= len(lines):
+                break
+            current = stripped[:-1] + lines[index + 1]
+            index += 1
+            joined += 1
+        output.append(current)
+        output.extend(["\n"] * joined)
+        index += 1
+    return "".join(output)
+
+
 def apply_defines(
     *,
     defines: dict[str, str],
@@ -297,6 +333,7 @@ def preprocess(
     """
     if include_base is None:
         include_base = Path()
+    source = _splice_line_continuations(source)
     defines: dict[str, str] = {}
     function_defines: dict[str, tuple[tuple[str, ...], list[tuple[str, str, int]]]] = {}
     output_lines: list[str] = []

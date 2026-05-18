@@ -95,7 +95,8 @@ void mode_cancel() {
 void mode_coalesce() {
     signal(SIGALRM, coalesce_handler);
     alarm_ms(1, 1);
-    while (alarm_count < 8) {}
+    while (alarm_count < 8) {
+    }
     if (alarm_count >= 8 && alarm_count <= 12) {
         printf("COALESCE_OK count=%d\n", alarm_count);
     } else {
@@ -128,7 +129,8 @@ void mode_during_sleep() {
     if (alarm_count == 1 && sleep_cf == 1 && elapsed >= 40 && elapsed <= 100) {
         printf("EINTR_OK elapsed=%d\n", elapsed);
     } else {
-        printf("EINTR_BAD count=%d cf=%d elapsed=%d\n", alarm_count, sleep_cf, elapsed);
+        printf("EINTR_BAD count=%d cf=%d elapsed=%d\n", alarm_count, sleep_cf,
+               elapsed);
     }
 }
 
