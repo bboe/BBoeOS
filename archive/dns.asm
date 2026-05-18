@@ -215,7 +215,7 @@ decode_domain:
 
         MESSAGE_CNAME db ` is a CNAME for `
         MESSAGE_CNAME_LENGTH equ $ - MESSAGE_CNAME
-        MESSAGE_DNS_ERROR db `DNS query failed\n`
+        MESSAGE_DNS_ERROR db `dns: no response\n`
         MESSAGE_DNS_ERROR_LENGTH equ $ - MESSAGE_DNS_ERROR
         MESSAGE_ELLIPSIS db `...\n`
         MESSAGE_ELLIPSIS_LENGTH equ $ - MESSAGE_ELLIPSIS

@@ -404,7 +404,7 @@ syscall_handler:
         jmp .iret_cf
 
         .net_recvfrom:
-        ;; BX = fd, EDI = buffer, ECX = count, DX = port.
+        ;; BX = fd, EDI = buffer, ECX = count, DX = port, ESI = timeout_ms.
         push ebx
         mov ebx, edi
         call access_ok

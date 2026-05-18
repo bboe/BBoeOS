@@ -138,18 +138,8 @@ int main(int argc, char *argv[]) {
 
         int start_time = uptime_ms();
         sendto(fd, packet_buffer, 16, target_ip, 0, 0);
-        /* ~32k tries fits signed 16-bit (our C subset compares signed)
-           and is plenty for the local ring to surface a reply. */
-        int got = 0;
-        int tries = 30000;
-        while (tries) {
-            int n = recvfrom(fd, packet_buffer, 128, 0, 1000);
-            if (n > 0 && packet_buffer[0] == '\0') {
-                got = 1;
-                break;
-            }
-            tries -= 1;
-        }
+        int n = recvfrom(fd, packet_buffer, 128, 0, 1000);
+        int got = (n > 0 && packet_buffer[0] == '\0');
         if (got) {
             int duration = uptime_ms() - start_time;
             printf("Reply from ");
