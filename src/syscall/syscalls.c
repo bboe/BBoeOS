@@ -39,6 +39,10 @@ __attribute__((carry_return)) __attribute__((preserve_register("ecx"))) int
 fd_lookup(int fd_num __attribute__((in_register("bx"))),
           struct fd *entry __attribute__((out_register("esi"))));
 
+// drivers/rtc.c: atomically read system_ticks into EAX; preserves all
+// other registers.
+uint32_t rtc_tick_read();
+
 // Network plumbing.  All four return CF set on error.
 __attribute__((carry_return)) int
 udp_receive(uint8_t *payload __attribute__((out_register("edi"))),
@@ -113,52 +117,93 @@ sys_net_open(int *result_fd __attribute__((out_register("ax"))),
     return 1;
 }
 
-// sys_net_recvfrom: dispatch by fd type.  UDP filters incoming packets
-// against the caller's local port (passed in DX, host byte order); ICMP
-// hands every received packet through.  Always returns CF clear; AX =
-// bytes copied (0 if nothing matched).
+// kernel_hlt_idle — enable interrupts, halt until the next IRQ, then
+// disable interrupts again.  Used by sys_net_recvfrom's wait loop so
+// the CPU sleeps between PIT ticks instead of busy-spinning.  The
+// surrounding syscall handler entered with IF=0 (interrupt gate), so
+// we restore that state on return.
+void kernel_hlt_idle();
+asm("kernel_hlt_idle:\n"
+    "    sti\n"
+    "    hlt\n"
+    "    cli\n"
+    "    ret\n");
+
+// sys_net_recvfrom: dispatch by fd type with optional blocking.  UDP
+// filters incoming packets against the caller's local port (passed in
+// DX, host byte order); ICMP hands every received packet through.
+// If timeout_ms == 0, returns immediately after the first poll (AX = 0
+// if nothing matched, non-zero on match).  If timeout_ms > 0, blocks
+// — halting the CPU between PIT ticks via kernel_hlt_idle — until a
+// matching packet arrives or the deadline (rtc_tick_read() +
+// timeout_ms) is reached, whichever comes first.  Always returns CF
+// clear; AX = bytes copied (0 on timeout or no match).
 __attribute__((carry_return)) int
 sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                  int fd_num __attribute__((in_register("bx"))),
                  uint8_t *user_buffer __attribute__((in_register("edi"))),
                  int max_bytes __attribute__((in_register("ecx"))),
-                 int local_port __attribute__((in_register("dx")))) {
+                 int local_port __attribute__((in_register("dx"))),
+                 int timeout_ms __attribute__((in_register("esi")))) {
     struct fd *entry;
     uint8_t *payload;
     int payload_length;
     int dest_port;
     uint8_t *receive_buffer;
+    uint32_t deadline;
+    int have_deadline;
     if (!fd_lookup(fd_num, &entry)) {
         *bytes_copied = 0;
         return 1;
     }
-    if (entry->type == FD_TYPE_UDP) {
-        if (!udp_receive(&payload, &payload_length)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-        // UDP dest port lives at net_receive_buffer+36 (big-endian).
-        receive_buffer = net_receive_buffer;
-        dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
-        if (dest_port != (local_port & 0xFFFF)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-    } else if (entry->type == FD_TYPE_ICMP) {
-        if (!icmp_receive(&payload, &payload_length)) {
-            *bytes_copied = 0;
-            return 1;
-        }
-    } else {
+    if (entry->type != FD_TYPE_UDP && entry->type != FD_TYPE_ICMP) {
         *bytes_copied = 0;
         return 1;
     }
-    if (payload_length > max_bytes) {
-        payload_length = max_bytes;
+    have_deadline = 0;
+    deadline = 0;
+    while (1) {
+        if (entry->type == FD_TYPE_UDP) {
+            if (udp_receive(&payload, &payload_length)) {
+                // UDP dest port lives at net_receive_buffer+36 (big-endian).
+                receive_buffer = net_receive_buffer;
+                dest_port = (receive_buffer[36] << 8) | receive_buffer[37];
+                if (dest_port == (local_port & 0xFFFF)) {
+                    if (payload_length > max_bytes) {
+                        payload_length = max_bytes;
+                    }
+                    memcpy(user_buffer, payload, payload_length);
+                    *bytes_copied = payload_length;
+                    return 1;
+                }
+                // Non-matching UDP packet: drop and re-poll without
+                // counting it against the deadline budget.
+                continue;
+            }
+        } else {
+            if (icmp_receive(&payload, &payload_length)) {
+                if (payload_length > max_bytes) {
+                    payload_length = max_bytes;
+                }
+                memcpy(user_buffer, payload, payload_length);
+                *bytes_copied = payload_length;
+                return 1;
+            }
+        }
+        if (timeout_ms == 0) {
+            *bytes_copied = 0;
+            return 1;
+        }
+        if (!have_deadline) {
+            deadline = rtc_tick_read() + (uint32_t)timeout_ms;
+            have_deadline = 1;
+        }
+        if (rtc_tick_read() >= deadline) {
+            *bytes_copied = 0;
+            return 1;
+        }
+        kernel_hlt_idle();
     }
-    memcpy(user_buffer, payload, payload_length);
-    *bytes_copied = payload_length;
-    return 1;
 }
 
 // sys_net_sendto: dispatch by fd type.  UDP wraps the payload in
