@@ -318,12 +318,20 @@ void fdc_sense_interrupt() {
 // Block until IRQ 6 sets fdc_irq_flag.  pushf/sti envelope keeps
 // the caller's IF intact while ensuring IRQ 6 fires inside an
 // IF=0 syscall context.
+// IF=1 from the sti above; hlt parks the CPU until any IRQ fires.
+// FDC IRQ 6 sets _g_fdc_irq_flag and wakes us; any other IRQ just
+// retries the check.  cli before the test so the flag read and the
+// hlt cannot race with the IRQ handler.
 asm("fdc_wait_irq:\n"
     "    pushf\n"
-    "    sti\n"
     ".fdc_wait_irq_loop:\n"
+    "    cli\n"
     "    cmp byte [_g_fdc_irq_flag], 0\n"
-    "    je .fdc_wait_irq_loop\n"
+    "    jne .fdc_wait_irq_done\n"
+    "    sti\n"
+    "    hlt\n"
+    "    jmp .fdc_wait_irq_loop\n"
+    ".fdc_wait_irq_done:\n"
     "    mov byte [_g_fdc_irq_flag], 0\n"
     "    popf\n"
     "    ret");
