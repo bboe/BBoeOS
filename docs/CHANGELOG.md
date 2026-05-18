@@ -11,6 +11,14 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Self-hosted asm: `times N <branch>` now emits N copies instead of zero
+  bytes.**  `src/c/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
+  silently returned for every other payload — most painfully `times N jmp/jcc`
+  (and any other instruction whose size resolves on a later pass).  The handler
+  now re-dispatches the payload through `parse_directive` itself, so every
+  directive shape (`db` / `dw` / `dd` / any mnemonic) gets repeated correctly.
+  New `static/times_branch_sm.asm` fixture pins the behavior under
+  `tests/test_asm.py`.
 - **cc.py: `uint16_t` arrays now generate correct halfword load/store.**  Local
   `uint16_t arr[N]` declarations previously got a 4-byte stride and `mov dword`
   stores — silently overwriting adjacent elements; file-scope `uint16_t g[N]`
