@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **NE2000 IRQ 3 + COM1 IRQ 4 wake.**  The NIC now enables `IMR.PRX` and the
+  UART enables `IER.RDA` (with `MCR.OUT2` set so the IRQ reaches the PIC); new
+  `pmode_irq3_handler` / `pmode_irq4_handler` stubs in `entry.asm` ack the
+  source and EOI PIC1.  IRQ 3 just wakes a hlt-parked `sys_net_recvfrom`; the RX
+  ring drain stays in process context inside `ne2k_receive`.  IRQ 4 drains the
+  full UART FIFO into a 128-byte `serial_ring` (the 8259 is edge-triggered, so
+  stopping after one byte while `DR` is still asserted would silently lose the
+  rest of the FIFO).  `fd_read_console` and the console `try_getc` /
+  `try_get_event` ioctls drain `serial_ring` via the new `serial_getc` instead
+  of polling `LSR`.  Replaces the PIT-tick (≤1 ms) wakeup latency on both paths
+  with the actual edge.
 - **Idle CPU: blocking syscalls park on `hlt`.**  `rtc_sleep_ms`
   (`drivers/rtc.c`) and `fd_read_console` (`fs/fd/console.c`) now `hlt` between
   checks instead of busy-spinning.  PS/2 IRQ 1 wakes a console reader
