@@ -128,10 +128,12 @@ int signal_any_pending();
 // clear (return 1) with AX = 1 on success, or CF clear (return 1) with
 // AX = 0 if max_bytes was 0.  Returns CF set (return 0) with AX =
 // 0x04 (ERROR_INTERRUPTED) if either PENDING_SIGINT or PENDING_SIGALRM
-// in current_program_state is set before a byte arrives.  Polls
-// continuously — the syscall handler entered with IF=0 (the INT 30h gate
-// clears it) so we sti once before the polling loop to let IRQ 1 fire
-// and the keyboard ring populate.
+// in current_program_state is set before a byte arrives.  The syscall
+// handler entered with IF=0 (the INT 30h gate clears it) so we sti
+// once before the polling loop to let IRQ 1 fire and the keyboard
+// ring populate; the loop then `hlt`s between checks so an idle shell
+// burns no CPU.  PS/2 IRQ 1 wakes us immediately; for serial input
+// (no IRQ wired) the PIT tick at 1 kHz bounds wakeup latency to 1 ms.
 __attribute__((carry_return)) int
 fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
                 uint8_t *destination __attribute__((in_register("edi"))),
@@ -169,6 +171,7 @@ fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
             }
             break;
         }
+        asm("hlt");
     }
     if (byte == '\r') {
         byte = '\n';
