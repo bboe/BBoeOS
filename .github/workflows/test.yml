@@ -13,7 +13,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.filter.outputs.docs_only }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: filter
@@ -60,9 +60,9 @@ jobs:
       - name: Note docs-only no-op
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Docs-only change; ${{ matrix.suite }} marked passing without running."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: needs.changes.outputs.docs_only != 'true'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
         with:
           key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
