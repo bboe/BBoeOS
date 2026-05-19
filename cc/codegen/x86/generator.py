@@ -49,7 +49,7 @@ from cc.ast_nodes import (
     Param,
     String,
     StructDecl,
-    StructInit,
+    StructInitializer,
     Switch,
     Var,
     VarDecl,
@@ -870,10 +870,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 layout = self.struct_layouts[struct_name]
                 lines: list[str] = []
                 for element in declaration.init.elements:
-                    assert isinstance(element, StructInit)
+                    assert isinstance(element, StructInitializer)
+                    assert element.positional is not None
                     for i, (field_name, info) in enumerate(layout.items()):
                         field_size = info.field_size
-                        value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
+                        value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
                         if field_size == 1:
                             lines.append(f"db {value}")
                         elif field_size == 2:
@@ -969,8 +970,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for element in elements:
             if isinstance(element, String):
                 continue
-            if isinstance(element, StructInit):
-                for field in element.fields:
+            if isinstance(element, StructInitializer):
+                assert element.positional is not None
+                for field in element.positional:
                     if self._constant_expression(field) is None:
                         message = "struct initializer fields must be constants"
                         raise CompileError(message, line=field.line)
@@ -1005,8 +1007,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=expression.line)
-            if object_name not in self.global_scalars:
-                message = "dot member access on local struct values is not yet supported; use a pointer and '->'"
+            if object_name in self.global_scalars:
+                base_operand = self._local_address(object_name)
+            elif object_name in self.locals:
+                frame_offset = self.locals[object_name]
+                base_operand = f"ebp-{frame_offset}"
+            else:
+                message = f"undefined variable '{object_name}'"
                 raise CompileError(message, line=expression.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
@@ -1021,21 +1028,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             field_size = info.field_size
             element_size = info.element_size
             is_array_field = field_size != element_size
-            base_symbol = self._local_address(object_name)
             self.ax_clear()
             if is_array_field:
-                # Array field: yield the field address as an immediate.
-                if offset:
-                    self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+                if object_name in self.global_scalars:
+                    # Global: load address as immediate (label arithmetic).
+                    if offset:
+                        self.emit(f"        mov {self.target.acc}, {base_operand}+{offset}")
+                    else:
+                        self.emit(f"        mov {self.target.acc}, {base_operand}")
+                # Local: use lea against the frame base.
+                elif offset:
+                    self.emit(f"        lea {self.target.acc}, [{base_operand}+{offset}]")
                 else:
-                    self.emit(f"        mov {self.target.acc}, {base_symbol}")
+                    self.emit(f"        lea {self.target.acc}, [{base_operand}]")
                 self.ax_clear()
                 return
             allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
             if field_size not in allowed_sizes:
                 message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=expression.line)
-            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
@@ -1108,9 +1120,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Generate code for ``&obj.field``.
 
         Bitfield members have no addressable storage and are always rejected
-        with a :class:`~cc.errors.CompileError`.  Non-bitfield members on
-        local struct values are not yet supported (dot-access on locals is
-        unimplemented); file-scope struct globals yield ``_g_obj + offset``.
+        with a :class:`~cc.errors.CompileError`.  Both file-scope struct
+        globals (``_g_obj + offset`` via ``mov``) and local struct values
+        (``[ebp-N+offset]`` via ``lea``) are supported.
         """
         object_name = expression.object_name
         struct_type = self.variable_types.get(object_name)
@@ -1135,16 +1147,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             message = f"cannot take address of bitfield '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        # Non-bitfield: emit the field address.  Only file-scope struct globals
-        # are supported; local struct values require a pointer indirection.
-        if object_name not in self.global_scalars:
-            message = "cannot take address of member on local struct value; use a pointer and '->'"
-            raise CompileError(message, line=expression.line)
-        base_symbol = self._local_address(object_name)
-        if offset := info.byte_offset:
-            self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+        # Non-bitfield: emit the field address.
+        if object_name in self.global_scalars:
+            base_label = self._local_address(object_name)
+            if info.byte_offset:
+                self.emit(f"        lea {self.target.acc}, [{base_label}+{info.byte_offset}]")
+            else:
+                self.emit(f"        lea {self.target.acc}, [{base_label}]")
+        elif object_name in self.locals:
+            frame_offset = self.locals[object_name]
+            if info.byte_offset:
+                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}+{info.byte_offset}]")
+            else:
+                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}]")
         else:
-            self.emit(f"        mov {self.target.acc}, {base_symbol}")
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=expression.line)
         self.ax_clear()
 
     def generate_member_assign(self, statement: MemberAssign, /) -> None:
@@ -1162,8 +1180,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=statement.line)
-            if object_name not in self.global_scalars:
-                message = "dot member assign on local struct values is not yet supported; use a pointer and '->'"
+            if object_name in self.global_scalars:
+                base_operand = self._local_address(object_name)
+            elif object_name in self.locals:
+                frame_offset = self.locals[object_name]
+                base_operand = f"ebp-{frame_offset}"
+            else:
+                message = f"undefined variable '{object_name}'"
                 raise CompileError(message, line=statement.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
@@ -1176,8 +1199,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             info = layout[statement.member_name]
             offset = info.byte_offset
             field_size = info.field_size
-            base_symbol = self._local_address(object_name)
-            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
             if info.bit_width is not None:
                 if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
                     self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
@@ -1341,19 +1363,39 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         Tuple shape: ``(const_base, struct_size, field_offset, field_size, element_size)``.
 
-        Validates that *name* is a global array of a known struct type and
-        that *member_name* is a declared field.  Raises :exc:`CompileError`
+        ``const_base`` is a NASM operand fragment usable as the base inside a
+        memory reference: a label string (e.g. ``_g_arr``) for globals, or a
+        frame-relative expression (e.g. ``ebp-12``) for local stack arrays.
+
+        Validates that *name* is a global or local array of a known struct type
+        and that *member_name* is a declared field.  Raises :exc:`CompileError`
         for unknown names or fields.
         """
-        declaration = self.global_arrays.get(name)
-        if declaration is None:
-            message = f"'{name}' is not a global struct array"
+        if name in self.global_arrays:
+            declaration = self.global_arrays[name]
+            type_name = declaration.type_name
+            if not type_name.startswith("struct "):
+                message = f"'{name}' element type '{type_name}' is not a struct"
+                raise CompileError(message, line=line)
+            tag = type_name[7:]
+            const_base = self._resolve_constant(name)
+            assert const_base is not None
+        elif name in self.local_stack_arrays:
+            type_name = self.variable_types.get(name, "")
+            if not type_name.startswith("struct "):
+                message = f"'{name}' is not a local struct array"
+                raise CompileError(message, line=line)
+            tag = type_name[7:]
+            frame_offset = self.locals[name]
+            if self.elide_frame:
+                const_base = f"_l_{name}"
+            elif frame_offset > 0:
+                const_base = f"{self.target.base_register}-{frame_offset}"
+            else:
+                const_base = f"{self.target.base_register}+{-frame_offset}"
+        else:
+            message = f"'{name}' is not a struct array"
             raise CompileError(message, line=line)
-        type_name = declaration.type_name
-        if not type_name.startswith("struct "):
-            message = f"'{name}' element type '{type_name}' is not a struct"
-            raise CompileError(message, line=line)
-        tag = type_name[7:]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
@@ -1361,8 +1403,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if member_name not in layout:
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
-        const_base = self._resolve_constant(name)
-        assert const_base is not None
         struct_size = self._type_size(type_name)
         info = layout[member_name]
         return const_base, struct_size, info.byte_offset, info.field_size, info.element_size

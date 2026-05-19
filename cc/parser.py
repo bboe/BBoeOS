@@ -51,7 +51,7 @@ from cc.ast_nodes import (
     String,
     StructDecl,
     StructField,
-    StructInit,
+    StructInitializer,
     Switch,
     SwitchCase,
     TailCall,
@@ -418,13 +418,46 @@ class Parser:
         self.struct_decls[name] = decl
         return decl
 
-    def _parse_struct_init(self) -> Node:
+    def _parse_designated_struct_initializer(self) -> StructInitializer:
+        """Parse ``{ 0 }`` zero-init or ``{ .field = expr, ... }`` designated init."""
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        fields: dict[str, Node] = {}
+        if self.peek()[0] == "NUMBER" and self.peek()[1] == "0":
+            # Zero-init shorthand: { 0 }.  Must be followed immediately by RBRACE.
+            self.eat("NUMBER")
+            if self.peek()[0] != "RBRACE":
+                message = f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
+                raise SyntaxError(message)
+        else:
+            # Designated: { .field = expr, ... }.  At least one entry required.
+            while self.peek()[0] != "RBRACE":
+                if self.peek()[0] != "DOT":
+                    message = (
+                        f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
+                    )
+                    raise SyntaxError(message)
+                self.eat("DOT")
+                field_name = self.eat("IDENT")[1]
+                self.eat("ASSIGN")
+                field_value = self.parse_expression()
+                if field_name in fields:
+                    message = f"duplicate initializer for field '{field_name}' at line {self.peek()[2]}"
+                    raise SyntaxError(message)
+                fields[field_name] = field_value
+                if self.peek()[0] == "COMMA":
+                    self.eat("COMMA")
+        self.eat("RBRACE")
+        return StructInitializer(designated=fields, line=line)
+
+    def _parse_positional_struct_initializer(self) -> Node:
         """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
 
-        Fields are positional.  Trailing commas are accepted.
+        Used only for array-of-struct elements; ``{ 0 }`` and designated
+        forms are not accepted here.  Trailing commas are accepted.
 
         Returns:
-            A ``StructInit`` node.
+            A ``StructInitializer`` with ``positional`` populated.
 
         """
         line = self.peek()[2]
@@ -437,7 +470,7 @@ class Parser:
             else:
                 break
         self.eat("RBRACE")
-        return StructInit(fields=fields, line=line)
+        return StructInitializer(line=line, positional=fields)
 
     def _parse_tail_call(self) -> Node:
         """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.
@@ -493,8 +526,9 @@ class Parser:
         """Parse a brace-enclosed array initializer.
 
         Each element may itself be a brace-enclosed struct initializer
-        ``{a, b, ...}``, in which case it is returned as a ``StructInit``
-        node.  Trailing commas are accepted.
+        ``{a, b, ...}``, in which case it is returned as a
+        ``StructInitializer`` node with ``positional`` populated.
+        Trailing commas are accepted.
 
         Returns:
             An AST node for the array initializer.
@@ -505,7 +539,7 @@ class Parser:
         elems = []
         while self.peek()[0] != "RBRACE":
             if self.peek()[0] == "LBRACE":
-                elems.append(self._parse_struct_init())
+                elems.append(self._parse_positional_struct_initializer())
             else:
                 elems.append(self.parse_expression())
             if self.peek()[0] == "COMMA":
@@ -1424,7 +1458,12 @@ class Parser:
         init: Node | None = None
         if self.peek()[0] == "ASSIGN":
             self.eat("ASSIGN")
-            init = self.parse_array_init() if is_array else self.parse_expression()
+            if is_array:
+                init = self.parse_array_init()
+            elif self.peek()[0] == "LBRACE":
+                init = self._parse_designated_struct_initializer()
+            else:
+                init = self.parse_expression()
         self.eat("SEMI")
         if is_extern and init is not None:
             message = "extern declarations may not have an initializer"
@@ -1556,7 +1595,12 @@ class Parser:
         init = None
         if self.peek()[0] == "ASSIGN":
             self.eat("ASSIGN")
-            init = self.parse_array_init() if is_array else self.parse_expression()
+            if is_array:
+                init = self.parse_array_init()
+            elif self.peek()[0] == "LBRACE":
+                init = self._parse_designated_struct_initializer()
+            else:
+                init = self.parse_expression()
         self.eat("SEMI")
         if is_array:
             return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
