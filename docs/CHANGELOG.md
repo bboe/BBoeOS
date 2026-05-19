@@ -11,20 +11,31 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
-- **cc.py: bitfield struct members.** `uint8_t name : N;` declares an
-  N-bit (1..8) bitfield within a packed `uint8_t` storage byte;
-  `uint8_t : N;` is an anonymous padding bitfield that consumes bits
-  without becoming an addressable name.  Consecutive bitfields pack
-  LSB-first into a single byte run; a run's total must be ≤ 8 bits.
-  Reads emit `mov` + optional `shr` + optional `and` then zero-extend;
-  writes use read-modify-write with a one-instruction peephole for
-  literal-0/1 stores on 1-bit fields.  `&bitfield` is rejected at
-  compile time.  `sizeof(struct)` accounts for bitfield-run packing.
-  Internally, `struct_layouts` migrated from a positional 3-tuple to a
-  `FieldInfo` namedtuple so future layout-attribute additions don't
-  ripple through every consumer.  Bonus: `&global_struct.field`
-  (non-bitfield) now compiles to an LEA; previously this was a parse
-  error.
+- **cc.py: multi-translation-unit programs end-to-end.**  `make_os.sh` now reads
+  an optional `<name>.deps` sidecar next to `tests/programs/
+  <name>.c` (or `src/c/<name>.c`); each helper source listed there is
+  compiled with `cc.py --object`, packed, and threaded into the same `ccld`
+  invocation that links `<name>.ccobj`.  Sources mentioned in a `.deps` are
+  excluded from the auto-discovered program lists, so the helper does not also
+  build as its own program.  `tests/programs/ multitu_demo.c` +
+  `multitu_demo_helper.c` exercise the pipeline end- to-end and are checked by
+  `tests/test_programs.py` under the `multitu_demo` entry.  Cross-TU calls stick
+  to zero-arg shapes for now; multi-arg crossings still mismatch cc.py's
+  intra-TU regparm convention against the caller's cdecl assumption (see
+  `docs/cc_future_work.md`).
+
+- **cc.py: bitfield struct members.** `uint8_t name : N;` declares an N-bit
+  (1..8) bitfield within a packed `uint8_t` storage byte; `uint8_t : N;` is an
+  anonymous padding bitfield that consumes bits without becoming an addressable
+  name.  Consecutive bitfields pack LSB-first into a single byte run; a run's
+  total must be ≤ 8 bits. Reads emit `mov` + optional `shr` + optional `and`
+  then zero-extend; writes use read-modify-write with a one-instruction peephole
+  for literal-0/1 stores on 1-bit fields.  `&bitfield` is rejected at compile
+  time.  `sizeof(struct)` accounts for bitfield-run packing. Internally,
+  `struct_layouts` migrated from a positional 3-tuple to a `FieldInfo`
+  namedtuple so future layout-attribute additions don't ripple through every
+  consumer.  Bonus: `&global_struct.field` (non-bitfield) now compiles to an
+  LEA; previously this was a parse error.
 
 - **edit.c line editor: `else if` chain → `switch`.**  Converts the 13+
   control-code dispatch in `src/c/edit.c`'s main edit loop to a `switch

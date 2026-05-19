@@ -853,6 +853,14 @@ TESTS: list[ProgramTest] = [
         filesystems=_EXT2_ONLY,
         setup=_ext2_add_multi_sector_dir_filler,
     ),
+    # Multi-translation-unit smoke test: tests/programs/multitu_demo.c
+    # declares two functions that live in multitu_demo_helper.c (linked
+    # in via the multitu_demo.deps sidecar).  cc.py --object emits
+    # CCREL_CALL relocations for each cross-TU call; ccld resolves them
+    # against the helper's globally-bound symbols.  A regression that
+    # broke the linker's cross-object rel32 patching would either fail
+    # the build or land at a non-3+4+35 sum here.
+    ProgramTest("multitu_demo", ["multitu_demo"], r"^multitu_demo: 42$"),
     ProgramTest("mv", ["mkdir tmpe", "mv tmpe tmpf", "ls"], r"tmpf/"),
     # Writing to virt 0 raises #PF (PTE[0] is not-present in every
     # per-program PD, so page 0 is always unmapped).  The user-fault
