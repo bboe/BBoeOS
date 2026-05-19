@@ -240,14 +240,16 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        if (character == '\x01') {
+        switch (character) {
+        case '\x01':
             /* Ctrl+A: move to beginning of line.  Shift chars from the
                pre-gap side over the gap until we hit a newline. */
             while (gap_start > 0 && edit_buffer[gap_start - 1] != '\n') {
                 gap_move_left();
             }
             cursor_column = 0;
-        } else if (character == '\x02') {
+            break;
+        case '\x02':
             /* Ctrl+B: cursor left one character. */
             if (gap_start > 0) {
                 int c = gap_move_left();
@@ -263,13 +265,15 @@ int main(int argc, char *argv[]) {
                     cursor_column -= 1;
                 }
             }
-        } else if (character == '\x05') {
+            break;
+        case '\x05':
             /* Ctrl+E: move to end of line. */
             while (gap_end < EDIT_BUFFER_SIZE && edit_buffer[gap_end] != '\n') {
                 gap_move_right();
                 cursor_column += 1;
             }
-        } else if (character == '\x06') {
+            break;
+        case '\x06':
             /* Ctrl+F: cursor right one character. */
             if (gap_end < EDIT_BUFFER_SIZE) {
                 int c = gap_move_right();
@@ -283,7 +287,9 @@ int main(int argc, char *argv[]) {
                     cursor_column += 1;
                 }
             }
-        } else if (character == '\b' || character == '\x7F') {
+            break;
+        case '\b':
+        case '\x7F':
             /* Backspace / DEL: delete the char before the cursor. */
             if (gap_start > 0) {
                 char c = edit_buffer[gap_start - 1];
@@ -301,24 +307,29 @@ int main(int argc, char *argv[]) {
                     cursor_column -= 1;
                 }
             }
-        } else if (character == '\x0B') {
+            break;
+        case '\x0B':
             /* Ctrl+K: kill from cursor through end of line.  Overflow
                past the kill buffer silently drops the tail. */
-            int kill_index = 0;
-            while (gap_end < EDIT_BUFFER_SIZE) {
-                char c = edit_buffer[gap_end];
-                gap_end += 1;
-                dirty = 1;
-                if (kill_index < EDIT_KILL_BUFFER_SIZE) {
-                    edit_kill_buffer[kill_index] = c;
-                    kill_index += 1;
+            {
+                int kill_index = 0;
+                while (gap_end < EDIT_BUFFER_SIZE) {
+                    char c = edit_buffer[gap_end];
+                    gap_end += 1;
+                    dirty = 1;
+                    if (kill_index < EDIT_KILL_BUFFER_SIZE) {
+                        edit_kill_buffer[kill_index] = c;
+                        kill_index += 1;
+                    }
+                    if (c == '\n') {
+                        break;
+                    }
                 }
-                if (c == '\n') {
-                    break;
-                }
+                kill_length = kill_index;
             }
-            kill_length = kill_index;
-        } else if (character == '\r' || character == '\n') {
+            break;
+        case '\r':
+        case '\n':
             /* Enter: insert newline at cursor. */
             if (gap_start < gap_end) {
                 edit_buffer[gap_start] = '\n';
@@ -330,31 +341,35 @@ int main(int argc, char *argv[]) {
                     view_line = cursor_line - 23;
                 }
             }
-        } else if (character == '\x0E') {
+            break;
+        case '\x0E':
             /* Ctrl+N: move down one line, staying as close to the
                original column as the target line allows. */
-            int target_col = cursor_column;
-            int found_nl = 0;
-            while (gap_end < EDIT_BUFFER_SIZE) {
-                if (gap_move_right() == '\n') {
-                    found_nl = 1;
-                    break;
+            {
+                int target_col = cursor_column;
+                int found_nl = 0;
+                while (gap_end < EDIT_BUFFER_SIZE) {
+                    if (gap_move_right() == '\n') {
+                        found_nl = 1;
+                        break;
+                    }
+                }
+                if (found_nl) {
+                    cursor_line += 1;
+                    cursor_column = 0;
+                    if (cursor_line >= view_line + 24) {
+                        view_line = cursor_line - 23;
+                    }
+                    while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE &&
+                           edit_buffer[gap_end] != '\n') {
+                        gap_move_right();
+                        cursor_column += 1;
+                        target_col -= 1;
+                    }
                 }
             }
-            if (found_nl) {
-                cursor_line += 1;
-                cursor_column = 0;
-                if (cursor_line >= view_line + 24) {
-                    view_line = cursor_line - 23;
-                }
-                while (target_col > 0 && gap_end < EDIT_BUFFER_SIZE &&
-                       edit_buffer[gap_end] != '\n') {
-                    gap_move_right();
-                    cursor_column += 1;
-                    target_col -= 1;
-                }
-            }
-        } else if (character == '\x10') {
+            break;
+        case '\x10':
             /* Ctrl+P: move up one line. */
             if (cursor_line > 0) {
                 int target_col = cursor_column;
@@ -385,73 +400,86 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
-        } else if (character == '\x11') {
+            break;
+        case '\x11':
             /* Ctrl+Q: quit; require a second Ctrl+Q when dirty. */
             if (!dirty) {
                 video_mode(vga_fd, VIDEO_MODE_TEXT_80x25);
                 return 0;
             }
             confirm_quit = 1;
-        } else if (character == '\x13') {
+            break;
+        case '\x13':
             /* Ctrl+S: save via open(O_WRONLY|O_CREAT|O_TRUNC) + write
                in 512-byte chunks built from the gap buffer. */
-            int save_fd = open(filename, O_WRONLY + O_CREAT + O_TRUNC, 0);
-            if (save_fd < 0) {
-                status_message = "Cannot create file (directory full?)";
-            } else {
-                int total_length = EDIT_BUFFER_SIZE - (gap_end - gap_start);
-                int logical_offset = 0;
-                int write_err = 0;
-                while (logical_offset < total_length) {
-                    int chunk_size = MIN(total_length - logical_offset, 512);
-                    int i = 0;
-                    while (i < chunk_size) {
-                        sector[i] = buffer_character_at(logical_offset + i);
-                        i += 1;
-                    }
-                    if (write(save_fd, sector, chunk_size) < 0) {
-                        write_err = 1;
-                        break;
-                    }
-                    logical_offset += chunk_size;
-                }
-                close(save_fd);
-                if (write_err) {
-                    status_message = "Write error";
+            {
+                int save_fd = open(filename, O_WRONLY + O_CREAT + O_TRUNC, 0);
+                if (save_fd < 0) {
+                    status_message = "Cannot create file (directory full?)";
                 } else {
-                    dirty = 0;
-                    status_message = "Saved.";
+                    int total_length = EDIT_BUFFER_SIZE - (gap_end - gap_start);
+                    int logical_offset = 0;
+                    int write_err = 0;
+                    while (logical_offset < total_length) {
+                        int chunk_size =
+                            MIN(total_length - logical_offset, 512);
+                        int i = 0;
+                        while (i < chunk_size) {
+                            sector[i] = buffer_character_at(logical_offset + i);
+                            i += 1;
+                        }
+                        if (write(save_fd, sector, chunk_size) < 0) {
+                            write_err = 1;
+                            break;
+                        }
+                        logical_offset += chunk_size;
+                    }
+                    close(save_fd);
+                    if (write_err) {
+                        status_message = "Write error";
+                    } else {
+                        dirty = 0;
+                        status_message = "Saved.";
+                    }
                 }
             }
-        } else if (character == '\x19') {
+            break;
+        case '\x19':
             /* Ctrl+Y: yank the kill buffer at the cursor. */
-            int i = 0;
-            while (i < kill_length) {
+            {
+                int i = 0;
+                while (i < kill_length) {
+                    if (gap_start < gap_end) {
+                        char c = edit_kill_buffer[i];
+                        edit_buffer[gap_start] = c;
+                        gap_start += 1;
+                        dirty = 1;
+                        if (c == '\n') {
+                            cursor_line += 1;
+                            cursor_column = 0;
+                            if (cursor_line >= view_line + 24) {
+                                view_line = cursor_line - 23;
+                            }
+                        } else {
+                            cursor_column += 1;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            break;
+        default:
+            /* Printable ASCII: insert at cursor.  Switch can't range-
+               match, so the ' '..'~' check stays in this arm. */
+            if (character >= ' ' && character <= '~') {
                 if (gap_start < gap_end) {
-                    char c = edit_kill_buffer[i];
-                    edit_buffer[gap_start] = c;
+                    edit_buffer[gap_start] = character;
                     gap_start += 1;
                     dirty = 1;
-                    if (c == '\n') {
-                        cursor_line += 1;
-                        cursor_column = 0;
-                        if (cursor_line >= view_line + 24) {
-                            view_line = cursor_line - 23;
-                        }
-                    } else {
-                        cursor_column += 1;
-                    }
+                    cursor_column += 1;
                 }
-                i += 1;
             }
-        } else if (character >= ' ' && character <= '~') {
-            /* Printable ASCII: insert at cursor. */
-            if (gap_start < gap_end) {
-                edit_buffer[gap_start] = character;
-                gap_start += 1;
-                dirty = 1;
-                cursor_column += 1;
-            }
+            break;
         }
     }
 }
