@@ -229,8 +229,19 @@ class EmissionMixin:
             for decl in file_scope_asm:
                 for line in decode_string_escapes(decl.content).splitlines():
                     self.emit(line)
+        # In object mode each data category lands in its own section so
+        # the linker can place them independently.  ``_emit_global_storage``
+        # itself handles the ``section .data`` switch when it has anything
+        # to emit (it can short-circuit before emitting anything when no
+        # initialized globals exist, which is why the switch lives inside
+        # the helper rather than out here).  Strings → .rodata; local
+        # array literals → .rodata (read-only constant pool); zero-init
+        # globals + elided locals → .bss via ``_emit_bss_trailer``.
         self._emit_global_storage()
         if self.strings:
+            if self.object_mode:
+                self.emit()
+                self.emit("section .rodata")
             self.emit(";; --- string literals ---")
             for label, content in self.strings:
                 self.emit(f"{label}: db `{content}\\0`")
@@ -238,6 +249,9 @@ class EmissionMixin:
             code = "\n".join(self.lines)
             live = [(label, elements) for label, elements in self.arrays if label in code]
             if live:
+                if self.object_mode and not self.strings:
+                    self.emit()
+                    self.emit("section .rodata")
                 self.emit(";; --- array data ---")
                 int_directive = "dd" if self.target.int_size == 4 else "dw"
                 for label, elements in live:
@@ -1918,15 +1932,36 @@ class EmissionMixin:
                 # always stays 4 bytes (``dd``) regardless of mode;
                 # byte-scalar locals always stay 1 byte (``db``);
                 # local stack arrays reserve their full byte count.
+                #
+                # In flat mode these cells are emitted inline at the
+                # tail of the function (zeros sit in .text under
+                # ``org 08048000h`` and the program loader skips them).
+                # In object mode they instead get collected into
+                # ``self.elided_local_bss_vars`` and laid down later in
+                # ``section .bss`` via ``resb`` reservations, so the
+                # .text section stays code-only and the linker can
+                # pack .text from multiple objects without dragging
+                # zero pads between them.
                 int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
                 for vname in sorted(self.locals):
                     if vname in self.local_stack_arrays:
                         byte_count = self.local_stack_arrays[vname]
-                        self.emit(f"_l_{vname}: times {byte_count} db 0")
+                        if self.object_mode:
+                            self.elided_local_bss_vars.append((vname, str(byte_count)))
+                        else:
+                            self.emit(f"_l_{vname}: times {byte_count} db 0")
                     elif self.variable_types.get(vname) == "unsigned long":
-                        self.emit(f"_l_{vname}: dd 0")
+                        if self.object_mode:
+                            self.elided_local_bss_vars.append((vname, "4"))
+                        else:
+                            self.emit(f"_l_{vname}: dd 0")
                     elif vname in self.byte_scalar_locals:
-                        self.emit(f"_l_{vname}: db 0")
+                        if self.object_mode:
+                            self.elided_local_bss_vars.append((vname, "1"))
+                        else:
+                            self.emit(f"_l_{vname}: db 0")
+                    elif self.object_mode:
+                        self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
                     else:
                         self.emit(f"_l_{vname}: {int_directive}")
         elif ir_body is not None:
