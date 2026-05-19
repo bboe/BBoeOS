@@ -27,23 +27,35 @@ find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
     python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
 done
 
-# Build the vDSO blob (FUNCTION_TABLE + shared_* helpers).  The kernel
-# binary embeds it via incbin at the `vdso_image` label and copies it
-# to virtual FUNCTION_TABLE (0x00010000) at boot via `vdso_install`.
-# vdso.asm also emits build/vdso.map (NASM `[map symbols]`); the helper
-# script below turns that into vdso_pointers.bin — the 52-byte
-# FUNCTION_POINTER_TABLE values that vdso_install copies to offset
-# 0x800 of the vDSO page at boot.  Kept out of vdso.bin to avoid ~900
-# bytes of zero padding in kernel.bin.
+# Build the libc blob (FUNCTION_TABLE + shared_* helpers).  Lives at
+# lib/libbboeos on the disk image; vdso_install reads it from disk at
+# boot, copies it into a freshly-allocated frame, and maps that frame
+# (with PTE_SHARED) at user-virt FUNCTION_TABLE (0x00010000) in every
+# per-program PD.  Layout of libbboeos.bin matches the in-memory page:
+# trampolines + helper bodies + sigreturn at offsets 0..~0x466,
+# zero-padded to offset 0x800, then the 13-entry FUNCTION_POINTER_TABLE
+# (52 bytes).
 mkdir -p build
-nasm -f bin -i src/include/ -o vdso.bin src/vdso/vdso.asm
+nasm -f bin -i src/include/ -o build/vdso.bin src/vdso/vdso.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
-python3 tools/gen_vdso_pointers.py build/vdso.map vdso_pointers.bin
+python3 tools/gen_vdso_pointers.py build/vdso.map build/vdso_pointers.bin
 if [ $? -ne 0 ]; then
     exit 1
 fi
+# Concatenate the two halves at their final on-page offsets.  The
+# pointer table sits at offset 0x800 (FUNCTION_POINTER_TABLE -
+# FUNCTION_TABLE, see src/include/constants.asm).
+python3 -c "
+import struct
+import sys
+vdso = open('build/vdso.bin', 'rb').read()
+pointers = open('build/vdso_pointers.bin', 'rb').read()
+assert len(vdso) <= 0x800, f'vdso.bin {len(vdso)} bytes; would overlap pointer table at 0x800'
+image = vdso + b'\\x00' * (0x800 - len(vdso)) + pointers
+open('build/libbboeos', 'wb').write(image)
+" || exit 1
 
 # Two-pass build: assemble kernel.bin first, measure its sector count,
 # then pass that as -DKERNEL_SECTORS=N when assembling boot.bin so the
@@ -213,6 +225,12 @@ for name in $PROGRAMS; do
     PROGRAM_PATHS="$PROGRAM_PATHS $PBUILD/$name"
 done
 ./add_file.py -x -d bin --image "$IMAGE" $PROGRAM_PATHS || exit 1
+
+# Shared-library blob — vdso_install reads `lib/libbboeos` from disk
+# at boot and maps it (with PTE_SHARED) at user-virt FUNCTION_TABLE
+# (0x00010000) in every per-program PD.
+./add_file.py --mkdir --image "$IMAGE" lib || exit 1
+./add_file.py -d lib --image "$IMAGE" build/libbboeos || exit 1
 
 # Static reference files used by cat / cp / asm tests.
 ./add_file.py --mkdir --image "$IMAGE" src || exit 1

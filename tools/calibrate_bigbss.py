@@ -44,7 +44,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HEADER_PATH = REPO_ROOT / "tests" / "programs" / "bigbss_size.h"
-DEFINE_PATTERN = re.compile(r"^(#define BIGBSS_PAGES )(\d+)\s*$", re.MULTILINE)
+DEFINE_PATTERN = re.compile(r"^(#define BIGBSS_PAGES )(\d+)[ \t]*(?=\r?\n|$)", re.MULTILINE)
 
 
 def _bracket(*, start: int) -> tuple[int, int]:
