@@ -44,6 +44,8 @@ from cc.ast_nodes import (
     MemberIndex,
     Node,
     Param,
+    PointerDereference,
+    PointerDereferenceAssign,
     Program,
     Return,
     SizeofType,
@@ -1027,10 +1029,29 @@ class Parser:
                 )
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "STAR":
-            # Unary deref: ``*p`` reads the value pointed at by *p*.
-            # Desugar to ``p[0]`` so the existing Index lowering handles
-            # the load (pointee-typed; same width / sign as ``p[0]``).
+            # Unary dereference.  Two shapes:
+            #
+            # 1. ``*p`` (operand is a plain IDENT) — desugar to ``p[0]``
+            #    so the existing Index lowering handles the load
+            #    (pointee-typed; same width / sign as ``p[0]``).
+            # 2. ``*(T *)expr`` — operand starts with a cast.  Wrap the
+            #    cast as a :class:`PointerDereference` whose ``target_type``
+            #    picks the load width.  This is the port-IO bridge
+            #    idiom ``*(uint8_t *)&s`` for byte-sized bitfield structs.
             self.eat()
+            if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] in TYPE_TOKENS:
+                operand = self.parse_primary()
+                if not isinstance(operand, Cast):
+                    message = "expected pointer cast after '*'"
+                    raise CompileError(message, line=line)
+                cast_type = operand.target_type.rstrip()
+                if not cast_type.endswith("*"):
+                    message = f"expected pointer type in '*(T *)expr', got '{cast_type}'"
+                    raise CompileError(message, line=line)
+                # Strip the trailing ``*`` (plus any whitespace before it)
+                # to get the pointee type that selects the load width.
+                pointee_type = cast_type[:-1].rstrip()
+                return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
             name_token = self.eat("IDENT")
             return Index(
                 array=Var(line=line, name=name_token[1]),
@@ -1154,6 +1175,28 @@ class Parser:
             return self.parse_while()
         if token[0] == "STAR":
             self.eat("STAR")
+            # ``*(T *)expr = value;`` — cast-then-assign through an
+            # arbitrary pointer.  Symmetric with the read-side
+            # :class:`PointerDereference` parse in :meth:`parse_primary`.
+            if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] in TYPE_TOKENS:
+                operand = self.parse_primary()
+                if not isinstance(operand, Cast):
+                    message = "expected pointer cast after '*'"
+                    raise CompileError(message, line=token[2])
+                cast_type = operand.target_type.rstrip()
+                if not cast_type.endswith("*"):
+                    message = f"expected pointer type in '*(T *)expr = ...', got '{cast_type}'"
+                    raise CompileError(message, line=token[2])
+                pointee_type = cast_type[:-1].rstrip()
+                self.eat("ASSIGN")
+                value = self.parse_expression()
+                self.eat("SEMI")
+                return PointerDereferenceAssign(
+                    address=operand.expression,
+                    line=token[2],
+                    target_type=pointee_type,
+                    value=value,
+                )
             name_token = self.eat("IDENT")
             self.eat("ASSIGN")
             expr = self.parse_expression()

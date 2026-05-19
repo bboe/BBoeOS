@@ -58,6 +58,8 @@ from cc.ast_nodes import (
     MemberAssign,
     MemberIndex,
     Node,
+    PointerDereference,
+    PointerDereferenceAssign,
     Return,
     SizeofType,
     SizeofVar,
@@ -98,6 +100,75 @@ class EmissionMixin:
     methods that still live on the generator class) and the
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
+
+    def _emit_pointer_dereference(self, expression: PointerDereference) -> None:
+        """Read through a pointer expression at ``target_type`` width.
+
+        Codegen: evaluate ``expression.expression`` into the accumulator
+        (an address), then load through it.  Width is chosen by
+        ``target_type``: ``uint8_t`` → byte load with zero-extension;
+        anything else → full int_size load.
+
+        Shortcut: when the inner expression is ``AddressOf(Var)`` of a
+        local, fold the ``lea + load`` pair into a single frame-relative
+        load.  This is the hot path for the port-IO bridge idiom
+        ``*(uint8_t *)&local_struct``.
+        """
+        inner = expression.expression
+        if isinstance(inner, AddressOf) and inner.var.name in self.locals:
+            address = f"[{self._local_address(inner.var.name)}]"
+            if expression.target_type == "uint8_t":
+                self.emit_byte_load_zx(address)
+            elif expression.target_type == "uint16_t" and self.target.int_size > 2:
+                self.emit(f"        movzx {self.target.acc}, word {address}")
+            else:
+                self.emit(f"        mov {self.target.acc}, {address}")
+            self.ax_clear()
+            return
+        self.generate_expression(inner)
+        address_register = self.target.acc
+        if expression.target_type == "uint8_t":
+            self.emit(f"        mov al, [{address_register}]")
+            self.emit_accumulator_zx_from_al()
+        elif expression.target_type == "uint16_t" and self.target.int_size > 2:
+            self.emit(f"        movzx {address_register}, word [{address_register}]")
+        else:
+            self.emit(f"        mov {address_register}, [{address_register}]")
+        self.ax_clear()
+
+    def _emit_pointer_dereference_assign(self, statement: PointerDereferenceAssign) -> None:
+        """Write ``value`` through ``*(target_type *)address``.
+
+        Evaluates the RHS into the accumulator, then the address
+        expression into the SI scratch register, and stores at
+        ``target_type`` width.  Shortcut: when ``address`` is
+        ``AddressOf(Var)`` of a local, fold the store directly to
+        ``[ebp-N]`` (no lea / scratch register).  This is the hot path
+        for the port-IO bridge idiom ``*(uint8_t *)&local = inb(...);``.
+        """
+        self.generate_expression(statement.value)
+        accumulator = self.target.acc
+        if isinstance(statement.address, AddressOf) and statement.address.var.name in self.locals:
+            destination = f"[{self._local_address(statement.address.var.name)}]"
+            if statement.target_type == "uint8_t":
+                self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
+            elif statement.target_type == "uint16_t" and self.target.int_size > 2:
+                self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
+            else:
+                self.emit(f"        mov {destination}, {accumulator}")
+            return
+        # General path: stash the value, evaluate address into SI, store.
+        scratch = self.target.si_register
+        self.emit(f"        push {accumulator}")
+        self.generate_expression(statement.address)
+        self.emit(f"        mov {scratch}, {accumulator}")
+        self.emit(f"        pop {accumulator}")
+        if statement.target_type == "uint8_t":
+            self.emit(f"        mov [{scratch}], {self.target.low_byte(accumulator)}")
+        elif statement.target_type == "uint16_t" and self.target.int_size > 2:
+            self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
+        else:
+            self.emit(f"        mov [{scratch}], {accumulator}")
 
     def _emit_scale_index(self, register: str, /, *, scale: int) -> None:
         """Multiply *register* by *scale* (1, 2, or 4) in place.
@@ -1454,6 +1525,8 @@ class EmissionMixin:
             # is tracked in the AST node but cc.py's loose type system treats
             # all register-sized values uniformly so no truncation is emitted.
             self.generate_expression(expression.expression)
+        elif isinstance(expression, PointerDereference):
+            self._emit_pointer_dereference(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -2499,6 +2572,9 @@ class EmissionMixin:
                 else:
                     self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
                 self.ax_clear()
+        elif isinstance(statement, PointerDereferenceAssign):
+            self._emit_pointer_dereference_assign(statement)
+            self.ax_clear()
         elif isinstance(statement, MemberAssign):
             self.generate_member_assign(statement)
             self.ax_clear()

@@ -211,6 +211,26 @@ def test_write_1bit_literal_1_peephole(*, work: Path) -> None:
     assert "or byte" in asm.lower(), f"expected 'or byte' peephole in asm:\n{asm}"
 
 
+def test_write_multibit_through_ebx_preserves_base(*, work: Path) -> None:
+    """Multi-bit write through a struct-pointer in EBX must not clobber EBX.
+
+    Regression: ``_emit_bitfield_write`` used to stash the rhs in BL,
+    which is the low byte of EBX — the same register the arrow path
+    loads the struct pointer into.  The subsequent ``mov al, [ebx]``
+    then read from a corrupted address.  Fix: use CL as scratch.
+    """
+    asm = compile_snippet(
+        name="write_multibit_ebx",
+        source=(
+            "struct s { uint8_t a : 1; uint8_t r : 3; uint8_t p : 2; };\nvoid set_r(struct s *c) { c->r = 5; }\nint main() { return 0; }\n"
+        ),
+        work=work,
+    )
+    body = asm.split("set_r:", 1)[1].split("\n_", 1)[0].lower()
+    assert "mov cl, al" in body, f"expected 'mov cl, al' (CL scratch) in:\n{body}"
+    assert "mov bl, al" not in body, f"BL scratch would clobber EBX base; got:\n{body}"
+
+
 TESTS = (
     test_addressof_bitfield_rejected,
     test_anonymous_padding_advances_offset,
@@ -221,6 +241,7 @@ TESTS = (
     test_sizeof_mixed_run,
     test_sizeof_packed_byte,
     test_width_too_large_rejected,
+    test_write_multibit_through_ebx_preserves_base,
     test_write_1bit_literal_0_peephole,
     test_write_1bit_literal_1_peephole,
 )

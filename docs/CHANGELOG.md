@@ -11,6 +11,36 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `*(T *)expr = value` pointer-dereference-assign.**  Write-side
+  symmetry of the read-side parse below.  A new `PointerDereferenceAssign` AST
+  node carries the address expression, pointee type, and RHS; codegen evaluates
+  the RHS into the accumulator and stores at the chosen width. Shortcut: when
+  the address is `&local`, the store folds to a direct `mov [ebp-K], al` (no lea
+  / scratch register).  Drives the PIC IMR call sites in `fdc`, `ps2`, and
+  `sb16` — one local instead of two, dot-access instead of arrow.
+
+- **cc.py: `*(T *)expr` pointer-dereference-after-cast.**  Parses the read-side
+  bridge idiom directly instead of requiring an intermediate `T *p = (T *)expr;`
+  pointer.  A new `PointerDereference` AST node carries the pointee type;
+  codegen evaluates the inner expression into the accumulator and emits a load
+  of the right width.  Shortcut: when the inner is `&local`, the lea+load pair
+  collapses into a single frame-relative load (`movzx eax, byte [ebp-N]` for
+  `uint8_t`). Drives the new NE2000 / PIC IMR register-struct port-write idiom
+  with no extra temp variables.
+
+- **drivers/ne2k: bitfield register structs end-to-end.**  Replaces magic-byte
+  `kernel_outb(port, 0xNN)` patterns with typed `struct
+  ne2k_{cr,rcr,tcr,dcr,isr,imr}` locals built via designated init: `struct
+  ne2k_cr cr = { .start = 1, .rd = 4 }; kernel_outb(0x300, *(uint8_t *)&cr);`.
+  Each init folds to a single `mov byte [ebp-K], <const>` via the bitfield
+  const-fold peepholes added in the previous release; reads stay on the existing
+  `struct ne2k_X *p = (struct ne2k_X *)&raw;` pointer-cast pattern. PIC IMR
+  (`fdc`, `ps2`, `sb16`) gets the same typed-struct treatment with the new
+  write-side `*(uint8_t *)&imr = kernel_inb(...)` syntax on the
+  read-modify-write path.  Net kernel cost: +344 bytes for substantial
+  readability (every magic byte now reads as named fields with datasheet bit
+  meanings).  Struct definitions live in the new `src/include/registers.h`.
+
 - **cc.py: multi-translation-unit programs end-to-end.**  `make_os.sh` now reads
   an optional `<name>.deps` sidecar next to `tests/programs/<name>.c` (or
   `src/c/<name>.c`); each helper source listed there is compiled with `cc.py

@@ -68,6 +68,8 @@
 #define AUDIO_RING_MASK 511 // = AUDIO_RING_SIZE - 1
 #define AUDIO_SILENCE 0x80  // 8-bit unsigned PCM midpoint
 
+#include "registers.h"
+
 uint8_t sb16_present;
 asm("sb16_present equ _g_sb16_present");
 
@@ -133,13 +135,14 @@ void sb16_reset_delay();
 // of the kernel (allocated permanently in sb16_init); reopening
 // re-zeros them.
 void sb16_close() {
-    int mask;
-    sb16_dsp_out(0xD0);      // pause 8-bit DMA
-    sb16_dsp_out(0xDA);      // exit auto-init 8-bit
-    sb16_dsp_out(0xD3);      // speaker off
-    kernel_outb(0x0A, 0x05); // mask 8237 channel 1
-    mask = kernel_inb(0x21); // mask IRQ 5 on PIC1
-    kernel_outb(0x21, mask | 0x20);
+    struct pic_imr imr;
+    sb16_dsp_out(0xD0);                  // pause 8-bit DMA
+    sb16_dsp_out(0xDA);                  // exit auto-init 8-bit
+    sb16_dsp_out(0xD3);                  // speaker off
+    kernel_outb(0x0A, 0x05);             // mask 8237 channel 1
+    *(uint8_t *)&imr = kernel_inb(0x21); // mask IRQ 5 on PIC1
+    imr.irq5 = 1;
+    kernel_outb(0x21, *(uint8_t *)&imr);
 }
 
 // Send one command/data byte to the DSP.
@@ -208,9 +211,9 @@ asm("sb16_init:\n"
 // Always succeeds when sb16_present is true.  Returns AX = 1, CF clear.
 __attribute__((carry_return)) int sb16_open() {
     int i;
-    int mask;
     int phys;
     int dma_count;
+    struct pic_imr imr;
     i = 0;
     while (i < AUDIO_DMA_SIZE) {
         audio_buffer_kvirt[i] = AUDIO_SILENCE;
@@ -225,12 +228,13 @@ __attribute__((carry_return)) int sb16_open() {
     audio_ring_tail = 0;
     audio_filling_half = 0;
     audio_wakeup = 0;
-    mask = kernel_inb(0x21);
-    kernel_outb(0x21, mask & 0xDF); // unmask IRQ 5 on PIC1
-    sb16_dsp_out(0xD1);             // speaker on
-    sb16_dsp_out(0x41);             // set output sample rate
-    sb16_dsp_out(0x2B);             // 11025 = 0x2B11; high byte first
-    sb16_dsp_out(0x11);             // low byte
+    *(uint8_t *)&imr = kernel_inb(0x21); // unmask IRQ 5 on PIC1
+    imr.irq5 = 0;
+    kernel_outb(0x21, *(uint8_t *)&imr);
+    sb16_dsp_out(0xD1); // speaker on
+    sb16_dsp_out(0x41); // set output sample rate
+    sb16_dsp_out(0x2B); // 11025 = 0x2B11; high byte first
+    sb16_dsp_out(0x11); // low byte
     // 8237 mode byte 0x59 = 01 0 1 10 01:
     //   bits 7-6 = 01 single transfer
     //   bit 5    = 0  address increment

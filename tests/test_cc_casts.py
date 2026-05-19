@@ -72,6 +72,59 @@ def main() -> int:
     return 1 if fail_count else 0
 
 
+def test_byte_dereference_after_cast(*, work: Path) -> None:
+    """``*(uint8_t *)expr`` parses and emits a byte load with zero-extension.
+
+    The ``AddressOf(Var)`` shortcut folds ``*(uint8_t *)&local`` into a
+    direct frame-relative byte load, skipping the intermediate ``lea``.
+    """
+    asm = compile_snippet(
+        name="byte_dereference_after_cast",
+        source=(
+            "struct foo { uint8_t a : 1; uint8_t b : 7; };\n"
+            "uint8_t leak(uint8_t value) { return value; }\n"
+            "void caller() {\n"
+            "    struct foo s = { .a = 1, .b = 5 };\n"
+            "    leak(*(uint8_t *)&s);\n"
+            "}\n"
+        ),
+        work=work,
+    )
+    body = asm.split("caller:", 1)[1].split("\n_", 1)[0]
+    assert "movzx eax, byte [ebp-1]" in body, f"missing frame-relative byte load:\n{body}"
+    assert "lea " not in body, f"unexpected lea (shortcut should bypass it):\n{body}"
+
+
+def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
+    """``*(uint8_t *)&local = value`` parses and emits a direct frame store.
+
+    Models the driver-side read-modify-write port idiom: load a byte
+    from a port into a struct local, flip one bitfield, write the byte
+    back.  The ``AddressOf(Var)`` shortcut on both the assign LHS and
+    the read RHS folds the store / load directly to ``[ebp-K]`` — no
+    intermediate ``lea`` or scratch register.
+    """
+    asm = compile_snippet(
+        name="byte_dereference_assign_after_cast",
+        source=(
+            "struct foo { uint8_t a : 1; uint8_t b : 7; };\n"
+            "uint8_t source() { return 42; }\n"
+            "uint8_t sink(uint8_t value) { return value; }\n"
+            "void caller() {\n"
+            "    struct foo s;\n"
+            "    *(uint8_t *)&s = source();\n"
+            "    s.a = 1;\n"
+            "    sink(*(uint8_t *)&s);\n"
+            "}\n"
+        ),
+        work=work,
+    )
+    body = asm.split("caller:", 1)[1].split("\n_", 1)[0]
+    assert "mov [ebp-1], al" in body, f"missing frame-relative byte store:\n{body}"
+    assert "movzx eax, byte [ebp-1]" in body, f"missing frame-relative byte load:\n{body}"
+    assert "lea " not in body, f"unexpected lea (shortcut should bypass it):\n{body}"
+
+
 def test_cast_in_comparison(*, work: Path) -> None:
     """Cast as a comparison operand round-trips (regression: src/fs/fd/audio.c)."""
     compile_snippet(
@@ -122,6 +175,8 @@ def test_value_cast_is_identity(*, work: Path) -> None:
 
 
 TESTS = (
+    test_byte_dereference_after_cast,
+    test_byte_dereference_assign_after_cast,
     test_cast_in_comparison,
     test_pointer_cast_is_identity,
     test_struct_pointer_cast,

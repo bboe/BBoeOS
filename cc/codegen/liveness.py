@@ -55,6 +55,7 @@ from cc.ast_nodes import (
     MemberIndex,
     Node,
     Param,
+    PointerDereferenceAssign,
     Return,
     SizeofType,
     SizeofVar,
@@ -271,6 +272,10 @@ class LivenessAnalyzer:
         if isinstance(statement, DerefAssign):
             statement_info.uses.add(statement.pointer.name)
             self._add_expression_uses(statement.expr, statement_info.uses)
+            return
+        if isinstance(statement, PointerDereferenceAssign):
+            self._add_expression_uses(statement.address, statement_info.uses)
+            self._add_expression_uses(statement.value, statement_info.uses)
             return
         if isinstance(statement, MemberAssign):
             statement_info.uses.add(statement.object_name)
