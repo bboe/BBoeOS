@@ -1953,6 +1953,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if not self.safe_pin_registers:
             return {}
+        # Reset the switch-discriminant override set on every call: this
+        # function runs once during the pre-pass that computes per-callee
+        # register conventions and once per function body, and the body
+        # pass's :meth:`can_auto_pin` reads the set after this call.
+        self.switch_pin_overrides = set()
 
         param_candidates: list[tuple[str, int]] = []
         for order, param in enumerate(parameters):
@@ -2029,6 +2034,37 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 counts[node.name] = counts.get(node.name, 0) + 1
             elif isinstance(node, (Index, IndexAssign)):
                 counts[node.array.name] = counts.get(node.array.name, 0) + 1
+            if isinstance(node, Switch) and isinstance(node.discriminant, Var):
+                # Each case-label dispatch reads the discriminant once.  If the
+                # switch is structured so that no case body falls through to the
+                # next (every non-empty body always-exits, and empty multi-label
+                # intermediates are followed by another case), the interleaved
+                # dispatch shape in :meth:`generate_switch` can use a pinned-
+                # register `cmp R, imm; jne short` per arm — a 4-byte saving
+                # versus the separated `cmp al, imm; je near` form.  Boost the
+                # discriminant's ref count so the pin allocator ranks it above
+                # candidates whose only use is a single read.  The generic walk
+                # below already counts the discriminant once, so add ``arm_count
+                # - 1`` here for a total of ``arm_count`` from the switch.
+                case_arms = [case for case in node.cases if case.value is not None]
+                if case_arms and self._switch_can_interleave(case_arms):
+                    counts[node.discriminant.name] = counts.get(node.discriminant.name, 0) + len(case_arms) - 1
+                    # The Call-init filter in ``collect`` above excludes
+                    # ``int x = getchar();`` and similar from the candidate
+                    # list (the rationale: pinning a callee's AX return adds
+                    # a ``mov R, eax`` that often outweighs the per-ref save).
+                    # For a switch discriminant with N >= 4 always-exit arms
+                    # the interleaved-dispatch win (4 bytes per arm vs the
+                    # separated near-jump form) easily covers that move, so
+                    # add the discriminant here when it isn't already a body
+                    # candidate.
+                    existing_names = {body_name for body_name, _ in body_candidates}
+                    if node.discriminant.name not in existing_names and len(case_arms) >= 4:
+                        body_candidates.append((node.discriminant.name, len(body_candidates)))
+                    # Tell ``can_auto_pin`` to honor the pin even when the
+                    # declaration's init is a ``Call`` — the per-arm win
+                    # easily covers the extra ``mov R, eax`` after the call.
+                    self.switch_pin_overrides.add(node.discriminant.name)
             if isinstance(node, VarDecl) and node.init is not None:
                 init_count[node.name] = init_count.get(node.name, 0) + 1
                 init_expr[node.name] = node.init
@@ -2469,9 +2505,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         init = statement.init
         if init is None:
             return True
-        # Call initializers stay in memory so they can participate in
-        # error-return fusion without clobbering a pin.
-        return not isinstance(init, Call)
+        # Call initializers normally stay in memory so they can participate
+        # in error-return fusion without clobbering a pin.  Switch
+        # discriminants are an exception: the interleaved dispatch shape in
+        # :meth:`generate_switch` saves 4 bytes per case arm, which on a
+        # 4+-arm switch easily covers the extra ``mov R, eax`` after the
+        # call (and the missed fusion opportunity, if any).
+        if isinstance(init, Call):
+            return statement.name in self.switch_pin_overrides
+        return True
 
     def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
         """Return the pinnable register pool ordered by clobber cost.
