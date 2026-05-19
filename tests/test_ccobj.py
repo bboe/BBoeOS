@@ -73,6 +73,30 @@ def test_flat_mode_unchanged_by_object_plumbing(tmp_path: Path) -> None:
     assert '%include "ccobj_markers.inc"' not in body
 
 
+def test_flat_mode_vdso_calls_stay_direct(tmp_path: Path) -> None:
+    """Flat-mode user code keeps the direct ``jmp FUNCTION_*`` form.
+
+    Regression guard: the indirect-via-pointer-table emission added for
+    object-mode linking must not leak into the default flat-binary
+    build.  Programs in flat mode keep the 5-byte ``E9 <rel32>`` /
+    ``E8 <rel32>`` encodings the kernel's program loader has always
+    seen.
+    """
+    src = tmp_path / "putc.c"
+    src.write_text("int main() { putchar('A'); return 0; }\n")
+    asm = tmp_path / "putc.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert "call FUNCTION_PRINT_CHARACTER\n" in body, body
+    assert "jmp FUNCTION_EXIT\n" in body, body
+    assert "[FUNCTION_EXIT_PTR]" not in body
+    assert "[FUNCTION_PRINT_CHARACTER_PTR]" not in body
+
+
 def test_object_mode_emits_section_directives(tmp_path: Path) -> None:
     """Object mode emits section directives and global declarations.
 
@@ -117,6 +141,33 @@ def test_object_mode_extern_call_uses_ccrel_macro(tmp_path: Path) -> None:
     # No bare `call die` anywhere outside the CCREL_CALL macro.
     body_minus_ccrel = body.replace("CCREL_CALL die", "")
     assert "call die" not in body_minus_ccrel
+
+
+def test_object_mode_vdso_calls_use_indirect_form(tmp_path: Path) -> None:
+    """VDSO calls/jumps emit the indirect ``call/jmp [FUNCTION_*_PTR]`` form.
+
+    Object-mode binaries are placed at PROGRAM_BASE by ``ccld``, which
+    means any PC-relative jump baked in at assembly time is wrong by
+    the program's base address.  Switching vDSO sites to the indirect-
+    through-FUNCTION_POINTER_TABLE form (``FF 15``/``FF 25 <abs32>``)
+    makes the call site base-invariant: NASM emits the abs32 verbatim,
+    pack-ccobj copies the bytes through, and ccld doesn't need to
+    relocate them.
+    """
+    src = tmp_path / "putc.c"
+    src.write_text("int main() { putchar('A'); return 0; }\n")
+    asm = tmp_path / "putc.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", "--object", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert "call [FUNCTION_PRINT_CHARACTER_PTR]" in body, body
+    assert "jmp [FUNCTION_EXIT_PTR]" in body, body
+    # Direct-form residue would be a regression.
+    assert "call FUNCTION_PRINT_CHARACTER\n" not in body
+    assert "jmp FUNCTION_EXIT\n" not in body
 
 
 def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
