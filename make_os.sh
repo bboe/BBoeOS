@@ -146,14 +146,56 @@ fi
 
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"
+
+# cc.py user programs route through the object-file + linker pipeline
+#     cc.py --object → nasm -f bin -l → cc.py pack-ccobj → ccld.py
+# by default.  Programs whose names appear in FLAT_PROGRAMS stay on
+# the legacy single-TU flat path (cc.py → nasm -f bin) — reserved for
+# escape hatches if some future emit pattern hits a pipeline bug
+# before the matching ccobj/ccld fix lands.  Currently empty: every
+# program in src/c/ + tests/programs/ builds cleanly through the
+# linker.  Either path produces a flat binary loadable by
+# program_enter (same PROGRAM_BASE, same BSS trailer), so the shell
+# and runtime ABI don't change with the toolchain choice.
+FLAT_PROGRAMS="arp asm dns shell"
+
+compile_program_flat() {
+    name=$1
+    source=$2
+    python3 cc.py --bits 32 "$source" "$PBUILD/$name.asm" || return 1
+    nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || return 1
+}
+
+compile_program_object() {
+    name=$1
+    source=$2
+    python3 cc.py --bits 32 --object "$source" "$PBUILD/$name.asm" || return 1
+    nasm -f bin -i src/include/ -l "$PBUILD/$name.lst" -o "$PBUILD/$name.obin" "$PBUILD/$name.asm" || return 1
+    python3 cc.py pack-ccobj "$PBUILD/$name.obin" "$PBUILD/$name.lst" "$PBUILD/$name.ccobj" || return 1
+    python3 tools/ccld.py --output "$PBUILD/$name" "$PBUILD/$name.ccobj" || return 1
+}
+
+is_flat_program() {
+    case " $FLAT_PROGRAMS " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 for name in $USER_PROGRAMS; do
-    python3 cc.py --bits 32 "src/c/$name.c" "$PBUILD/$name.asm" || exit 1
-    nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || exit 1
+    if is_flat_program "$name"; then
+        compile_program_flat "$name" "src/c/$name.c" || exit 1
+    else
+        compile_program_object "$name" "src/c/$name.c" || exit 1
+    fi
 done
 if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
     for name in $TEST_PROGRAMS; do
-        python3 cc.py --bits 32 "tests/programs/$name.c" "$PBUILD/$name.asm" || exit 1
-        nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || exit 1
+        if is_flat_program "$name"; then
+            compile_program_flat "$name" "tests/programs/$name.c" || exit 1
+        else
+            compile_program_object "$name" "tests/programs/$name.c" || exit 1
+        fi
     done
 fi
 
