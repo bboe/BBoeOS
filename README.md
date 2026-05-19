@@ -31,4 +31,5 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   — bitfield struct members (`uint8_t name : N;`), type-cast expressions
   (`(T)expr`, `(T *)expr`), and conversion of all bit-twiddly drivers
   (NE2000, FDC, PIC, RTC, DMA, SB16, PS/2) to use the new syntax.
-  Status: design complete; plan + implementation pending.
+  Plan: [2026-05-18-bitfields-cc-plan.md](./2026-05-18-bitfields-cc-plan.md).
+  Status: design + plan complete; implementation pending.
