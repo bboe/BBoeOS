@@ -45,4 +45,6 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   designated-field initializers (`= { .field = X }`), and a
   constant-fold + last-write-wins peephole pair for bitfield register
   init.  Enables the cleaner driver pattern and recovers the kernel
-  size lost in PR #428.  Status: design complete; plan pending.
+  size lost in PR #428.
+  Plan: [2026-05-19-cc-local-structs-plan.md](./2026-05-19-cc-local-structs-plan.md).
+  Status: design + plan complete; implementation pending.
