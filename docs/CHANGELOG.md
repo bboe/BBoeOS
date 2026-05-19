@@ -11,6 +11,20 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: interleaved switch dispatch with pinned-discriminant promotion.**
+  When every case body in a `switch` always-exits (no body-to-body
+  fall-through), the auto-pin allocator now ranks the discriminant by case-arm
+  count and the codegen emits dispatch interleaved with case bodies — `cmp R, K;
+  jne .next_i; <body>; jmp .end; .next_i:` per arm.  Multi-label cases (`case A:
+  case B: body;`) collapse into a single group with a leading `cmp/je` per label
+  and a terminal `cmp/jne` that falls into the shared body.  Versus the
+  separated `cmp al, K; je near` form this saves 4 bytes per arm by keeping
+  every dispatch branch in short-jump range; the discriminant promotion bypasses
+  the usual Call-init exclusion in `can_auto_pin` because the per-arm win covers
+  the extra `mov R, eax` after the call.  Concrete win: `src/c/shell.c` -32
+  bytes; the same optimisation unlocks a further -60 bytes on `src/c/edit.c`
+  once PR #412 lands.
+
 - **NE2000 IRQ 3 + COM1 IRQ 4 wake.**  The NIC now enables `IMR.PRX` and the
   UART enables `IER.RDA` (with `MCR.OUT2` set so the IRQ reaches the PIC); new
   `pmode_irq3_handler` / `pmode_irq4_handler` stubs in `entry.asm` ack the

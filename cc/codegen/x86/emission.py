@@ -1543,6 +1543,7 @@ class EmissionMixin:
         self.array_labels = {}
         self.array_sizes = {}
         self.auto_pin_candidates: dict[str, str] = {}
+        self.switch_pin_overrides: set[str] = set()
         self.ax_clear()
         self.constant_aliases = {}
         self.current_carry_return = function.carry_return
@@ -2514,6 +2515,71 @@ class EmissionMixin:
             and discriminant.name not in self.variable_arrays
             and self.variable_types.get(discriminant.name) != "unsigned long"
         )
+        # Interleaved dispatch: when the discriminant is pinned and every arm
+        # always-exits (no body-to-body fall-through possible), emit the dispatch
+        # and the case body together per arm instead of all dispatches up front.
+        # Each arm group becomes ``cmp R, K; jne .next; <body>; jmp .end;
+        # .next:`` — the ``jne`` only has to skip the current body (almost
+        # always short jump distance), saving 4 bytes per arm versus the
+        # separated form's near ``je`` that has to skip every preceding case
+        # body.  Multi-label arms (``case A: case B: body;`` represented as
+        # adjacent SwitchCases where the earlier one has an empty body) collapse
+        # into a single group: each leading label emits ``cmp R, K; je .body``
+        # and the terminal label emits ``cmp R, K; jne .next`` so dispatch
+        # falls into the shared body.
+        interleave_eligible = (
+            isinstance(discriminant, Var) and discriminant.name in self.pinned_register and self._switch_can_interleave(case_arms)
+        )
+        if interleave_eligible:
+            # Group cases on body-carrying boundaries: each group is a run of
+            # zero-or-more empty-body labels followed by one body-carrying
+            # case.  ``_switch_can_interleave`` guarantees the last case has a
+            # non-empty body, so every group terminates.
+            groups: list[list[SwitchCase]] = []
+            current: list[SwitchCase] = []
+            for case in case_arms:
+                current.append(case)
+                if case.body:
+                    groups.append(current)
+                    current = []
+            self.loop_end_labels.append(end_label)
+            try:
+                for group_index, group in enumerate(groups):
+                    body_label = f".switch_{label_index}_case_{group_index}"
+                    next_label = f".switch_{label_index}_next_{group_index}"
+                    for case in group[:-1]:
+                        # Leading multi-label entries: jump TO the shared body
+                        # on match (the terminal case's jne will fall through
+                        # to .next if all labels miss).
+                        true_jump = BinaryOperation(
+                            left=discriminant,
+                            line=discriminant_line,
+                            operation="==",
+                            right=case_label_node(line=discriminant_line, value=case.value),
+                        )
+                        self.emit_condition_true_jump(condition=true_jump, context="switch", success_label=body_label)
+                    # Terminal label of the group: jne to next group on mismatch.
+                    terminal = group[-1]
+                    skip_jump = BinaryOperation(
+                        left=discriminant,
+                        line=discriminant_line,
+                        operation="!=",
+                        right=case_label_node(line=discriminant_line, value=terminal.value),
+                    )
+                    self.emit_condition_true_jump(condition=skip_jump, context="switch", success_label=next_label)
+                    if len(group) > 1:
+                        self.emit(f"{body_label}:")
+                    self.ax_clear()
+                    self.generate_body(terminal.body, scoped=True)
+                    self.emit(f"{next_label}:")
+                if default_case is not None:
+                    self.ax_clear()
+                    self.generate_body(default_case.body, scoped=True)
+            finally:
+                self.loop_end_labels.pop()
+            self.emit(f"{end_label}:")
+            self.ax_clear()
+            return
         if hoist_eligible:
             self.generate_expression(discriminant)
         for case, arm_label in zip(case_arms, case_labels, strict=True):

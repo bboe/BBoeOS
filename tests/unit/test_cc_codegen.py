@@ -4351,6 +4351,61 @@ def test_user_switch_dispatch_hoists_memory_discriminant_into_register() -> None
     assert len(register_cmps) >= 3, f"expected at least 3 register cmps after hoist, got {len(register_cmps)}:\n{register_cmps}"
 
 
+def test_user_switch_dispatch_interleaves_when_discriminant_pinned() -> None:
+    """A switch whose discriminant ends up pinned and whose arms all exit emits interleaved dispatch.
+
+    The separated dispatch shape (all `cmp; je` up front, all bodies after) forces
+    `je` to jump past every preceding case body — most become 6-byte near jumps.
+    The interleaved shape (`cmp; jne .next_i; <body>; jmp .end; .next_i:` per arm)
+    keeps each dispatch branch local: `jne` skips one body (almost always short),
+    saving 4 bytes per arm.  Only safe when no case body falls through to the next
+    (we always emit `jmp .end` after each body), so the optimisation gates on
+    every case being `always_exits`.
+    """
+    asm = _user(
+        """
+        int main() {
+            int discriminant = 0;
+            while (1) {
+                int previous = discriminant;
+                discriminant = discriminant + 1;
+                switch (previous) {
+                case 1: discriminant = 10; break;
+                case 2: discriminant = 20; break;
+                case 3: discriminant = 30; break;
+                case 4: discriminant = 40; break;
+                case 5: discriminant = 50; break;
+                case 6: discriminant = 60; break;
+                case 7: discriminant = 70; break;
+                case 8: discriminant = 80; break;
+                }
+                if (discriminant > 100) {
+                    return discriminant;
+                }
+            }
+        }
+        """,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # In the interleaved shape, dispatch comparisons are separated by case bodies,
+    # so no two `cmp <reg>, <imm>; je` pairs sit back-to-back.  Find every dispatch
+    # `cmp` and check what's two lines after — in separated it'd be the next dispatch
+    # cmp; in interleaved it'd be a non-cmp (body opcode or next-case label).
+    consecutive_cmp_je = 0
+    for index, line in enumerate(lines):
+        if not line.startswith("cmp "):
+            continue
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("je "):
+            continue
+        # Found a `cmp; je` dispatch pair; check the next line.
+        if index + 2 < len(lines) and lines[index + 2].startswith("cmp "):
+            consecutive_cmp_je += 1
+    assert consecutive_cmp_je <= 1, (
+        f"dispatch looks separated (found {consecutive_cmp_je} back-to-back cmp/je dispatch pairs); "
+        f"expected interleaved shape with case bodies between dispatches:\n{asm}"
+    )
+
+
 def test_user_switch_fall_through_between_cases() -> None:
     """Adjacent cases without ``break`` fall into the next arm's body.
 

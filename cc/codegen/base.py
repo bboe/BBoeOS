@@ -801,6 +801,37 @@ class CodeGeneratorBase:
             lambda n: (isinstance(n, Var) and n.name == name) or (isinstance(n, Assign) and n.name == name),
         )
 
+    @staticmethod
+    def _switch_can_interleave(case_arms: list, /) -> bool:
+        """Return True when *case_arms* can be lowered as interleaved dispatch.
+
+        Interleaved emission (``cmp R, K; jne .next; <body>; jmp .end;
+        .next:`` per arm) requires that no body falls through to the next
+        case at runtime — every body ends in ``jmp .end``, so a missing
+        terminator would skip the next case entirely.
+
+        Empty bodies represent the intermediate label of a multi-label
+        case (``case A: case B: body;`` parses as two adjacent SwitchCase
+        nodes where the first has an empty body and the second has the
+        shared body).  These are allowed when the *next* case in *case_arms*
+        carries the actual body — they're folded into a single emission
+        group by :meth:`generate_switch`.  The final case in the list
+        must have a non-empty always-exits body.
+        """
+        if not case_arms:
+            return False
+        for index, case in enumerate(case_arms):
+            if not case.body:
+                # Intermediate multi-label entry; must be followed by another
+                # case in the same switch so the shared body is reachable.
+                if index == len(case_arms) - 1:
+                    return False
+                continue
+            if not CodeGeneratorBase.always_exits(case.body):
+                return False
+        # The very last case must carry a non-empty body.
+        return bool(case_arms[-1].body)
+
     def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
         if body and self._is_simple_printf(body[-1]):
