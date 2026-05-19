@@ -76,6 +76,32 @@
         %assign FUNCTION_PRINT_STRING       FUNCTION_TABLE + 50 ; DI=null-terminated string: write to stdout
         %assign FUNCTION_PRINTF             FUNCTION_TABLE + 55 ; cdecl: push args R-to-L, push fmt, call
         %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 60 ; SI=buf, CX=len: write to stdout
+        ;; Parallel pointer table at FUNCTION_TABLE + 0x800; one 4-byte
+        ;; function pointer per FUNCTION_* entry, same order.  Object-mode
+        ;; user code calls the vDSO via `call [FUNCTION_*_PTR]` (encoded
+        ;; `FF 15 <abs32>`) so the bytes are base-invariant and survive
+        ;; linker relocation without per-site patching.  Flat-mode code
+        ;; keeps using the direct `call FUNCTION_*` form above.  Slot
+        ;; offsets must match the function_pointer_table dd order in
+        ;; src/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
+        ;; vdso.bin compact: the helper bodies + sigreturn trampoline
+        ;; currently end at ~0x466, so this leaves ~924 bytes of growth
+        ;; headroom before the address would have to be bumped (which
+        ;; would require recompiling every linker-pipeline program).
+        %assign FUNCTION_POINTER_TABLE FUNCTION_TABLE + 0x800
+        %assign FUNCTION_DIE_PTR                FUNCTION_POINTER_TABLE +  0
+        %assign FUNCTION_EXIT_PTR               FUNCTION_POINTER_TABLE +  4
+        %assign FUNCTION_GET_CHARACTER_PTR      FUNCTION_POINTER_TABLE +  8
+        %assign FUNCTION_PRINT_BYTE_DECIMAL_PTR FUNCTION_POINTER_TABLE + 12
+        %assign FUNCTION_PRINT_CHARACTER_PTR    FUNCTION_POINTER_TABLE + 16
+        %assign FUNCTION_PRINT_DATETIME_PTR     FUNCTION_POINTER_TABLE + 20
+        %assign FUNCTION_PRINT_DECIMAL_PTR      FUNCTION_POINTER_TABLE + 24
+        %assign FUNCTION_PRINT_HEX_PTR          FUNCTION_POINTER_TABLE + 28
+        %assign FUNCTION_PRINT_IP_PTR           FUNCTION_POINTER_TABLE + 32
+        %assign FUNCTION_PRINT_MAC_PTR          FUNCTION_POINTER_TABLE + 36
+        %assign FUNCTION_PRINT_STRING_PTR       FUNCTION_POINTER_TABLE + 40
+        %assign FUNCTION_PRINTF_PTR             FUNCTION_POINTER_TABLE + 44
+        %assign FUNCTION_WRITE_STDOUT_PTR       FUNCTION_POINTER_TABLE + 48
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.

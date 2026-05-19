@@ -1637,6 +1637,15 @@ vdso_install:
         mov ecx, (vdso_image_end - vdso_image) / 4
         cld
         rep movsd
+        ;; Copy the FUNCTION_POINTER_TABLE values to kvirt + 0x800.
+        ;; The blob isn't bundled into vdso.bin because that would force
+        ;; ~900 bytes of trailing zero padding to reach the table's
+        ;; fixed offset; see tools/gen_vdso_pointers.py.
+        mov edi, [esp]                  ; kvirt
+        add edi, FUNCTION_POINTER_TABLE - FUNCTION_TABLE
+        mov esi, vdso_pointers_image
+        mov ecx, (vdso_pointers_image_end - vdso_pointers_image) / 4
+        rep movsd
         pop eax                         ; kvirt
         call kmap_unmap
         pop edi

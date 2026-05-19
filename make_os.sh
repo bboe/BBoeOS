@@ -30,7 +30,17 @@ done
 # Build the vDSO blob (FUNCTION_TABLE + shared_* helpers).  The kernel
 # binary embeds it via incbin at the `vdso_image` label and copies it
 # to virtual FUNCTION_TABLE (0x00010000) at boot via `vdso_install`.
+# vdso.asm also emits build/vdso.map (NASM `[map symbols]`); the helper
+# script below turns that into vdso_pointers.bin — the 52-byte
+# FUNCTION_POINTER_TABLE values that vdso_install copies to offset
+# 0x800 of the vDSO page at boot.  Kept out of vdso.bin to avoid ~900
+# bytes of zero padding in kernel.bin.
+mkdir -p build
 nasm -f bin -i src/include/ -o vdso.bin src/vdso/vdso.asm
+if [ $? -ne 0 ]; then
+    exit 1
+fi
+python3 tools/gen_vdso_pointers.py build/vdso.map vdso_pointers.bin
 if [ $? -ne 0 ]; then
     exit 1
 fi

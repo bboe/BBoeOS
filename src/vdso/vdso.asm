@@ -10,9 +10,26 @@
 ;;; the user's stack — there is no vDSO data page in this milestone.
 ;;;
 ;;; Layout:
-;;;   0x00010000  FUNCTION_TABLE (14 × 5-byte jmp slots = 70 bytes)
+;;;   0x00010000  FUNCTION_TABLE (13 × 5-byte jmp slots = 65 bytes)
 ;;;   0x00010046  shared_die / shared_exit / shared_get_character / ...
 ;;;   0x00010XXX  print_datetime_month_lengths (read-only constant)
+;;;   0x00010460  __kernel_sigreturn trampoline (fixed at
+;;;               VDSO_SIGRETURN_OFFSET — signal_dispatch_user writes
+;;;               this as the IRET return address).
+;;;   0x00010800  FUNCTION_POINTER_TABLE (13 × 4-byte function pointers
+;;;               = 52 bytes).  Parallel to FUNCTION_TABLE; same order.
+;;;               Lets object-mode user code reach the vDSO via
+;;;               `call [FUNCTION_*_PTR]` — an absolute indirect call
+;;;               whose encoding is base-invariant, so the bytes survive
+;;;               `ccld` relocation without per-site patching.  NOT
+;;;               emitted into vdso.bin: the kernel build runs
+;;;               tools/gen_vdso_pointers.py against the vDSO's NASM map
+;;;               to produce vdso_pointers.bin (52 bytes), kernel.asm
+;;;               incbins both blobs, and vdso_install copies the
+;;;               pointer blob to dest + 0x800 at boot.  Keeping the
+;;;               pointer table out of vdso.bin avoids ~900 bytes of
+;;;               trailing zero padding in kernel.bin between
+;;;               end-of-helpers and offset 0x800.
 ;;;   end of file (~1.1 KB actual content; the kernel maps the blob as
 ;;;   a user code page so unused tail bytes within the page are
 ;;;   irrelevant)
@@ -602,3 +619,13 @@ __kernel_sigreturn:
         mov ah, SYS_SYS_SIGRETURN               ; 0xF6 in AH — dispatcher reads AH
         int 0x30
         ;; never returns
+
+;;; -----------------------------------------------------------------------
+;;; FUNCTION_POINTER_TABLE values are NOT emitted here.  They live in
+;;; vdso_pointers.bin, produced at build time by
+;;; tools/gen_vdso_pointers.py from this file's NASM map, and copied to
+;;; FUNCTION_POINTER_TABLE (0x10800) by vdso_install (entry.asm) at
+;;; boot.  See the header comment for the rationale.
+;;; -----------------------------------------------------------------------
+
+        [map symbols build/vdso.map]
