@@ -546,29 +546,15 @@ kernel_gdtr:
         dw kernel_gdt_end - kernel_gdt_start - 1
         dd kernel_gdt_start
 
-        ;; vDSO image — separately-assembled blob copied to virtual
-        ;; FUNCTION_TABLE (0x00010000) at boot by `vdso_install` in
-        ;; entry.asm.  Holds the FUNCTION_TABLE jump block plus the
-        ;; shared_* helper bodies; user programs call into it via the
-        ;; FUNCTION_* constants in constants.asm.  Each per-program
-        ;; PD aliases the shared vDSO frame at user-virt 0x10000 with
-        ;; the AVL[0] PTE_SHARED bit so `address_space_destroy` skips
-        ;; it.
-        align 4
-vdso_image:
-        incbin "vdso.bin"
-vdso_image_end:
-
-        ;; FUNCTION_POINTER_TABLE values — 13 absolute virtual addresses
-        ;; (52 bytes) generated at build time by tools/gen_vdso_pointers.py
-        ;; from build/vdso.map.  vdso_install copies this blob to
-        ;; vdso_page + 0x800 at boot.  Kept separate from vdso_image so
-        ;; the vDSO source doesn't have to pad ~900 bytes of zeros up to
-        ;; offset 0x800.
-        align 4
-vdso_pointers_image:
-        incbin "vdso_pointers.bin"
-vdso_pointers_image_end:
+        ;; The libc shared blob (FUNCTION_TABLE jump block + shared_*
+        ;; helper bodies + FUNCTION_POINTER_TABLE) used to be incbin'd
+        ;; here, but it now ships as `lib/libbboeos` on the disk image.
+        ;; `vdso_install` in entry.asm reads it at boot, copies it
+        ;; into a freshly-allocated frame, and maps that frame with
+        ;; PTE_SHARED at user-virt FUNCTION_TABLE (0x00010000) in
+        ;; every per-program PD.  Decoupling the libc from kernel.bin
+        ;; keeps the kernel image smaller and lets the libc grow
+        ;; (eventually past 4 KB) without recompiling the kernel.
 
 kernel_end:
 
