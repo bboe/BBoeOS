@@ -31,6 +31,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Break,
     Call,
+    Cast,
     Char,
     Compound,
     Conditional,
@@ -1386,6 +1387,11 @@ class EmissionMixin:
             self._generate_conditional(expression)
         elif isinstance(expression, (LogicalAnd, LogicalOr)):
             self._generate_logical_value(expression)
+        elif isinstance(expression, Cast):
+            # Identity codegen: evaluate the inner expression; the target type
+            # is tracked in the AST node but cc.py's loose type system treats
+            # all register-sized values uniformly so no truncation is emitted.
+            self.generate_expression(expression.expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)

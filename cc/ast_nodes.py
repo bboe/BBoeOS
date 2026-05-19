@@ -94,6 +94,22 @@ class Call(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class Cast(Node):
+    """C-style type cast expression: ``(T)expr`` or ``(T *)expr``.
+
+    ``target_type`` is a type string in the same shape as
+    ``StructField.type_name`` and parser-internal type names: e.g.
+    ``"uint8_t"``, ``"int *"``, ``"struct foo *"``.  Casts emit no
+    runtime instructions; the node exists so the code generator can
+    pick the right load/store width and the right struct field
+    offsets when the cast result feeds into ``*`` or ``->``.
+    """
+
+    expression: Node
+    target_type: str
+
+
+@dataclass(kw_only=True, slots=True)
 class Compound(Node):
     """``{ statements... }`` — a block introducing a fresh local scope.
 
