@@ -161,7 +161,7 @@ where used.
 
 | Driver | File | Registers |
 | ------ | ---- | --------- |
-| PIC    | `src/drivers/pic.c` if present, else `entry.asm` / `syscall.asm` | IMR (`irq0..irq7`), ISR, IRR |
+| PIC    | IMR writes inlined per driver (`ps2.c`, `fdc.c`, `ne2k.c`, `sb16.c`, `serial.c`); shared `struct pic_imr` in `src/include/registers.h` | IMR (`irq0..irq7`) |
 | NE2000 | `src/drivers/ne2k.c` | CR, ISR, IMR, RCR, TCR, DCR |
 | FDC    | `src/drivers/fdc.c` | MSR, DOR |
 | RTC    | `src/drivers/rtc.c` | Status Reg A, Status Reg B |
@@ -243,10 +243,9 @@ Per the `run_full_ci_matrix_locally` rule, run every suite in
   keyword or `struct` for the cast branch to take.  No user-defined
   typedefs today, so no ambiguity with identifier-typed casts.
 - **Bit-ordering surprise:** LSB-first matches x86 GCC convention.
-  Documented in the codegen section.  Anyone writing a struct for a
-  hardware spec that lists bits MSB-first must mentally invert the
-  order; calling this out in `docs/syscalls.md` or wherever bitfields
-  are documented avoids confusion.
+  Documented in the codegen section here and in the doc comment at
+  the top of `src/include/registers.h` so anyone writing a struct for
+  a hardware spec that lists bits MSB-first knows to mentally invert.
 - **Driver migration footprint:** the all-drivers-in-one-PR scope per
   the brainstorming answer is the biggest single-PR risk.  Mitigation:
   full local CI matrix per `run_full_ci_matrix_locally` and a
