@@ -39,6 +39,7 @@ from cc.ast_nodes import (
     LogicalAnd,
     LogicalOr,
     MemberAccess,
+    MemberAddressOf,
     MemberAssign,
     MemberIndex,
     Node,
@@ -367,6 +368,8 @@ class Parser:
         fields: list[StructField] = []
         while self.peek()[0] != "RBRACE":
             field_type = self.parse_type()
+            bit_width: int | None = None
+            field_name: str | None
             if self.peek()[0] == "LPAREN":
                 # Function pointer field: type (*field_name)(params)
                 self.eat("LPAREN")
@@ -377,16 +380,38 @@ class Parser:
                 self.parse_parameters()  # consume param list; size is always 2
                 self.eat("RPAREN")
                 field_type = "function_pointer"
+            elif self.peek()[0] == "COLON":
+                # Anonymous bitfield: ``uint8_t : N;``
+                self.eat("COLON")
+                bit_width = int(self.eat("NUMBER")[1])
+                field_name = None
             else:
                 field_name = self.eat("IDENT")[1]
+                if self.peek()[0] == "COLON":
+                    self.eat("COLON")
+                    bit_width = int(self.eat("NUMBER")[1])
             # Optional [N] for fixed-size array fields (e.g. ``char _reserved[15]``).
-            if self.peek()[0] == "LBRACKET":
+            if bit_width is None and self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 count_token = self.eat("NUMBER")
                 self.eat("RBRACKET")
                 field_type = f"{field_type}[{count_token[1]}]"
+            if bit_width is not None:
+                if field_type != "uint8_t":
+                    message = f"bitfield container must be uint8_t (got {field_type!r}) at line {line}"
+                    raise SyntaxError(message)
+                if not 1 <= bit_width <= 8:
+                    message = f"bitfield width must be 1..8 (got {bit_width}) at line {line}"
+                    raise SyntaxError(message)
             self.eat("SEMI")
-            fields.append(StructField(field_name=field_name, line=line, type_name=field_type))
+            fields.append(
+                StructField(
+                    bit_width=bit_width,
+                    field_name=field_name,
+                    line=line,
+                    type_name=field_type,
+                )
+            )
         self.eat("RBRACE")
         self.eat("SEMI")
         decl = StructDecl(fields=fields, line=line, name=name)
@@ -953,6 +978,18 @@ class Parser:
                     line=line,
                     operation="+",
                     right=index,
+                )
+            # ``&obj.field`` — address of a struct member.  Codegen rejects
+            # bitfield members (no addressable storage); regular fields are
+            # not yet fully supported but parse correctly so the error is
+            # reported at codegen rather than at parse time.
+            if self.peek()[0] == "DOT":
+                self.eat("DOT")
+                member_token = self.eat("IDENT")
+                return MemberAddressOf(
+                    line=line,
+                    member_name=member_token[1],
+                    object_name=name_token[1],
                 )
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "STAR":

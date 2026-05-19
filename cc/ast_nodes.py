@@ -398,6 +398,19 @@ class MemberAccess(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberAddressOf(Node):
+    """Address-of a struct member: ``&obj.field``.
+
+    Rejected at codegen when ``field`` is a bitfield (bitfields have no
+    addressable storage).  For non-bitfield members the address is the
+    byte address of the containing struct plus the field's byte offset.
+    """
+
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class MemberAssign(Node):
     """Member assignment statement: ``ptr->field = expr;``.
 
@@ -499,9 +512,14 @@ class StructDecl(Node):
 
 @dataclass(kw_only=True, slots=True)
 class StructField(Node):
-    """A single field declaration inside a struct body."""
+    """A single field declaration inside a struct body.
 
-    field_name: str
+    ``bit_width`` is ``None`` for regular fields and ``1..8`` for
+    bitfield members.  Anonymous bitfields use ``field_name=None``.
+    """
+
+    bit_width: int | None = None
+    field_name: str | None
     type_name: str
 
 

@@ -11,6 +11,21 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: bitfield struct members.** `uint8_t name : N;` declares an
+  N-bit (1..8) bitfield within a packed `uint8_t` storage byte;
+  `uint8_t : N;` is an anonymous padding bitfield that consumes bits
+  without becoming an addressable name.  Consecutive bitfields pack
+  LSB-first into a single byte run; a run's total must be ≤ 8 bits.
+  Reads emit `mov` + optional `shr` + optional `and` then zero-extend;
+  writes use read-modify-write with a one-instruction peephole for
+  literal-0/1 stores on 1-bit fields.  `&bitfield` is rejected at
+  compile time.  `sizeof(struct)` accounts for bitfield-run packing.
+  Internally, `struct_layouts` migrated from a positional 3-tuple to a
+  `FieldInfo` namedtuple so future layout-attribute additions don't
+  ripple through every consumer.  Bonus: `&global_struct.field`
+  (non-bitfield) now compiles to an LEA; previously this was a parse
+  error.
+
 - **edit.c line editor: `else if` chain → `switch`.**  Converts the 13+
   control-code dispatch in `src/c/edit.c`'s main edit loop to a `switch
   (character)`.  No break-from-loop arms (all exits use `return 0;` from the

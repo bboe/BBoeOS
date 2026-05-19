@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import fields
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 from cc.ast_nodes import (
     AddressOf,
@@ -42,6 +42,7 @@ from cc.ast_nodes import (
     LogicalAnd,
     LogicalOr,
     MemberAccess,
+    MemberAddressOf,
     MemberAssign,
     MemberIndex,
     Node,
@@ -68,6 +69,24 @@ from cc.errors import CompileError
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
+
+
+class FieldInfo(NamedTuple):
+    """One struct field's layout.
+
+    ``bit_offset`` and ``bit_width`` are populated for bitfield
+    members (currently always ``None`` until Task 2.4 lands the
+    bitfield-aware layout builder).  ``byte_offset`` is the field's
+    start byte within the struct; ``field_size`` is the field's
+    total byte size (``element_size * count`` for array fields,
+    ``element_size`` for scalar fields).
+    """
+
+    bit_offset: int | None
+    bit_width: int | None
+    byte_offset: int
+    element_size: int
+    field_size: int
 
 
 class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
@@ -234,9 +253,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
-        # struct_layouts maps struct tag name → {field_name: (byte_offset, byte_size)}.
+        # struct_layouts maps struct tag name → {field_name: FieldInfo}.
         # Populated by _register_globals when StructDecl nodes are encountered.
-        self.struct_layouts: dict[str, dict[str, tuple[int, int]]] = {}
+        self.struct_layouts: dict[str, dict[str, FieldInfo]] = {}
+        self.struct_sizes: dict[str, int] = {}
         self.target_mode: str = target_mode
 
     def _register_inline_body(self, function: Function, /) -> None:
@@ -423,8 +443,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 return 1
             if type_name.startswith("struct "):
                 tag = type_name[7:]
-                if tag in self.struct_layouts:
-                    return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
+                if tag not in self.struct_sizes:
+                    message = f"unknown struct '{tag}'"
+                    raise CompileError(message)
+                return self.struct_sizes[tag]
             return self.target.type_size(type_name)
         if type_name.endswith("*"):
             base = type_name[:-1]
@@ -432,8 +454,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 return 1
             if base.startswith("struct "):
                 tag = base[7:]
-                if tag in self.struct_layouts:
-                    return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
+                if tag not in self.struct_sizes:
+                    message = f"unknown struct '{tag}'"
+                    raise CompileError(message)
+                return self.struct_sizes[tag]
             return self.target.type_size(base)
         return 1
 
@@ -463,6 +487,55 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return None
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
+
+    def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
+        """Emit the load-shift-mask-extend sequence for a bitfield read.
+
+        ``info`` carries the bit_offset / bit_width.  ``addr`` is the
+        byte's NASM memory operand (e.g. ``[ebx+4]``).  Result lands in
+        the accumulator, zero-extended.  Callers ``return`` after this
+        helper since it produces the rvalue and clears AX-state.
+        """
+        self.emit(f"        mov al, {addr}")
+        if info.bit_offset != 0:
+            self.emit(f"        shr al, {info.bit_offset}")
+        if info.bit_width != 8:
+            self.emit(f"        and al, {(1 << info.bit_width) - 1}")
+        self.emit(f"        movzx {self.target.acc}, al")
+        self.ax_clear()
+
+    def _emit_bitfield_write(self, info: FieldInfo, /, *, addr: str) -> None:
+        """Emit the read-modify-write store sequence for a bitfield write.
+
+        The rhs must already be in AL.  ``info`` carries bit_offset /
+        bit_width; ``addr`` is the byte's NASM memory operand.  Uses
+        BL as scratch.  Callers ``return`` after this helper.
+        """
+        field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
+        clear_mask = (~field_mask) & 0xFF
+        self.emit("        mov bl, al")
+        if info.bit_width != 8:
+            self.emit(f"        and bl, {(1 << info.bit_width) - 1}")
+        if info.bit_offset != 0:
+            self.emit(f"        shl bl, {info.bit_offset}")
+        self.emit(f"        mov al, {addr}")
+        self.emit(f"        and al, {clear_mask}")
+        self.emit("        or al, bl")
+        self.emit(f"        mov {addr}, al")
+
+    def _emit_bitfield_write_literal(self, info: FieldInfo, /, *, addr: str, value: int) -> None:
+        """Emit the single-instruction peephole for a 1-bit bitfield literal 0/1 store.
+
+        ``value`` must be 0 or 1; ``info.bit_width`` must be 1.  Emits
+        ``and byte addr, ~mask`` for value 0 or ``or byte addr, mask``
+        for value 1.
+        """
+        field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
+        clear_mask = (~field_mask) & 0xFF
+        if value == 0:
+            self.emit(f"        and byte {addr}, {clear_mask}")
+        else:
+            self.emit(f"        or byte {addr}, {field_mask}")
 
     def _emit_bss_equs(self) -> None:
         """Emit BSS EQU definitions and ``_bss_end`` after ``_program_end:``.
@@ -798,7 +871,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 lines: list[str] = []
                 for element in declaration.init.elements:
                     assert isinstance(element, StructInit)
-                    for i, (field_name, (offset, field_size, _element_size)) in enumerate(layout.items()):
+                    for i, (field_name, info) in enumerate(layout.items()):
+                        field_size = info.field_size
                         value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
                         if field_size == 1:
                             lines.append(f"db {value}")
@@ -883,10 +957,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.int_size
         if type_name.startswith("struct "):
             tag = type_name[7:]
-            if tag not in self.struct_layouts:
+            if tag not in self.struct_sizes:
                 message = f"unknown struct '{tag}'"
                 raise CompileError(message)
-            return sum(field_size for _, field_size, _element_size in self.struct_layouts[tag].values())
+            return self.struct_sizes[tag]
         message = f"unknown type '{type_name}'"
         raise CompileError(message)
 
@@ -942,7 +1016,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if expression.member_name not in layout:
                 message = f"struct '{tag}' has no field '{expression.member_name}'"
                 raise CompileError(message, line=expression.line)
-            offset, field_size, element_size = layout[expression.member_name]
+            info = layout[expression.member_name]
+            offset = info.byte_offset
+            field_size = info.field_size
+            element_size = info.element_size
             is_array_field = field_size != element_size
             base_symbol = self._local_address(object_name)
             self.ax_clear()
@@ -959,6 +1036,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=expression.line)
             addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            if info.bit_width is not None:
+                self._emit_bitfield_read(info, addr=addr)
+                return
             if field_size == 1:
                 self.emit_byte_load_zx(addr)
             elif field_size == 2 and self.target.int_size == 4:
@@ -978,7 +1058,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if expression.member_name not in layout:
             message = f"struct '{tag}' has no field '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        offset, field_size, element_size = layout[expression.member_name]
+        info = layout[expression.member_name]
+        offset = info.byte_offset
+        field_size = info.field_size
+        element_size = info.element_size
         is_array_field = field_size != element_size
         # Array fields evaluate to the field's address (so callers can pass
         # them to memcpy / memcmp / a function expecting a pointer).  Element
@@ -1007,6 +1090,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._emit_load_var(object_name, register=self.target.bx_register)
             base_reg = self.target.bx_register
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+        if info.bit_width is not None:
+            self._emit_bitfield_read(info, addr=addr)
+            return
         if field_size == 1:
             self.emit_byte_load_zx(addr)
         elif field_size == 2 and self.target.int_size == 4:
@@ -1016,6 +1102,49 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        movzx {self.target.acc}, word {addr}")
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
+        self.ax_clear()
+
+    def generate_member_address_of(self, expression: MemberAddressOf, /) -> None:
+        """Generate code for ``&obj.field``.
+
+        Bitfield members have no addressable storage and are always rejected
+        with a :class:`~cc.errors.CompileError`.  Non-bitfield members on
+        local struct values are not yet supported (dot-access on locals is
+        unimplemented); file-scope struct globals yield ``_g_obj + offset``.
+        """
+        object_name = expression.object_name
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=expression.line)
+        if struct_type.endswith("*"):
+            message = "'&obj.field' requires a struct value, not a pointer; use '&ptr->field' or '&(*ptr).field'"
+            raise CompileError(message, line=expression.line)
+        if not struct_type.startswith("struct "):
+            message = f"'.' requires a struct value, got type '{struct_type}'"
+            raise CompileError(message, line=expression.line)
+        tag = struct_type[7:]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=expression.line)
+        info = layout.get(expression.member_name)
+        if info is None:
+            message = f"struct '{tag}' has no field '{expression.member_name}'"
+            raise CompileError(message, line=expression.line)
+        if info.bit_width is not None:
+            message = f"cannot take address of bitfield '{expression.member_name}'"
+            raise CompileError(message, line=expression.line)
+        # Non-bitfield: emit the field address.  Only file-scope struct globals
+        # are supported; local struct values require a pointer indirection.
+        if object_name not in self.global_scalars:
+            message = "cannot take address of member on local struct value; use a pointer and '->'"
+            raise CompileError(message, line=expression.line)
+        base_symbol = self._local_address(object_name)
+        if offset := info.byte_offset:
+            self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+        else:
+            self.emit(f"        mov {self.target.acc}, {base_symbol}")
         self.ax_clear()
 
     def generate_member_assign(self, statement: MemberAssign, /) -> None:
@@ -1044,15 +1173,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if statement.member_name not in layout:
                 message = f"struct '{tag}' has no field '{statement.member_name}'"
                 raise CompileError(message, line=statement.line)
-            offset, field_size, _element_size = layout[statement.member_name]
+            info = layout[statement.member_name]
+            offset = info.byte_offset
+            field_size = info.field_size
+            base_symbol = self._local_address(object_name)
+            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            if info.bit_width is not None:
+                if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
+                    self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
+                    return
+                self.ax_clear()
+                self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
+                self._emit_bitfield_write(info, addr=addr)
+                return
             allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
             if field_size not in allowed_sizes:
                 message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=statement.line)
             self.ax_clear()
             self.generate_expression(statement.expr)
-            base_symbol = self._local_address(object_name)
-            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
             if field_size == 1:
                 self.emit(f"        mov byte {addr}, al")
             elif field_size == 2 and self.target.int_size == 4:
@@ -1071,7 +1210,35 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if statement.member_name not in layout:
             message = f"struct '{tag}' has no field '{statement.member_name}'"
             raise CompileError(message, line=statement.line)
-        offset, field_size, _element_size = layout[statement.member_name]
+        info = layout[statement.member_name]
+        offset = info.byte_offset
+        field_size = info.field_size
+        if info.bit_width is not None:
+            # Peephole: 1-bit field with a literal 0 / 1 rhs — no expression
+            # evaluation needed, so resolve the base register and addr first.
+            if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
+                if self.si_local == object_name:
+                    base_reg = self.target.si_register
+                else:
+                    self._emit_load_var(object_name, register=self.target.bx_register)
+                    base_reg = self.target.bx_register
+                addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+                self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
+                return
+            # General read-modify-write.  Evaluate rhs first so that
+            # generate_expression cannot clobber the base register we load next.
+            self.ax_clear()
+            self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
+            # If SI still holds the struct pointer (no intervening call), use it
+            # directly as the base register to avoid a BX round-trip.
+            if self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_load_var(object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+            self._emit_bitfield_write(info, addr=addr)
+            return
         allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
         if field_size not in allowed_sizes:
             message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
@@ -1119,7 +1286,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if expression.member_name not in layout:
             message = f"struct '{tag}' has no field '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        field_offset, _field_size, element_size = layout[expression.member_name]
+        info = layout[expression.member_name]
+        field_offset = info.byte_offset
+        element_size = info.element_size
         if element_size not in (1, 2):
             message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
             raise CompileError(message, line=expression.line)
@@ -1195,8 +1364,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         const_base = self._resolve_constant(name)
         assert const_base is not None
         struct_size = self._type_size(type_name)
-        field_offset, field_size, element_size = layout[member_name]
-        return const_base, struct_size, field_offset, field_size, element_size
+        info = layout[member_name]
+        return const_base, struct_size, info.byte_offset, info.field_size, info.element_size
 
     def generate_index_member_access(self, expression: IndexMemberAccess, /) -> None:
         """Generate code for ``arr[i].field`` as an rvalue.
@@ -1907,15 +2076,42 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.NAMED_CONSTANT_VALUES[variant_name] = variant_value
                 continue
             if isinstance(declaration, StructDecl):
-                # Build a packed field layout:
-                # {field_name: (byte_offset, total_byte_size, element_byte_size)}.
-                # For scalar fields total == element.  For array fields
-                # (``uint8_t ip[4]``) total = element_size * count, while
-                # element_size is the per-element width — needed by
-                # ``entry->field[i]`` indexing to scale the index.
-                layout: dict[str, tuple[int, int, int]] = {}
+                # Build a packed field layout: {field_name: FieldInfo}.
+                #
+                # Regular fields (bit_width is None): field_size from
+                # _type_size; array fields get field_size = element_size *
+                # count, element_size = per-element width.
+                #
+                # Bitfields (bit_width 1..8 from the parser): consecutive
+                # bitfields pack into a single byte run.  bit_offset tracks
+                # the next free bit within the current run; LSB-first.  An
+                # anonymous bitfield (field_name is None) advances run_bits
+                # but isn't entered in ``layout`` since it has no name to
+                # look up.  A regular field after a bitfield run closes the
+                # run (advances cursor by 1) before its own byte_offset is
+                # computed.
+                layout: dict[str, FieldInfo] = {}
                 cursor = 0
+                run_bits = 0  # bits already consumed in the current bitfield run
                 for field in declaration.fields:
+                    if field.bit_width is not None:
+                        if run_bits + field.bit_width > 8:
+                            message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
+                            raise CompileError(message, line=field.line)
+                        if field.field_name is not None:
+                            layout[field.field_name] = FieldInfo(
+                                bit_offset=run_bits,
+                                bit_width=field.bit_width,
+                                byte_offset=cursor,
+                                element_size=1,
+                                field_size=1,
+                            )
+                        run_bits += field.bit_width
+                        continue
+                    # Regular field: close any open bitfield run first.
+                    if run_bits > 0:
+                        cursor += 1
+                        run_bits = 0
                     ftype = field.type_name
                     if "[" in ftype:
                         # "char[15]" → element_type="char", count=15
@@ -1927,9 +2123,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     else:
                         field_size = self._type_size(ftype)
                         element_size = field_size
-                    layout[field.field_name] = (cursor, field_size, element_size)
+                    layout[field.field_name] = FieldInfo(
+                        bit_offset=None,
+                        bit_width=None,
+                        byte_offset=cursor,
+                        element_size=element_size,
+                        field_size=field_size,
+                    )
                     cursor += field_size
+                if run_bits > 0:
+                    cursor += 1
                 self.struct_layouts[declaration.name] = layout
+                self.struct_sizes[declaration.name] = cursor
                 continue
             name = declaration.name
             if name in self.NAMED_CONSTANTS:

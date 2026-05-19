@@ -54,6 +54,7 @@ from cc.ast_nodes import (
     LogicalAnd,
     LogicalOr,
     MemberAccess,
+    MemberAddressOf,
     MemberAssign,
     MemberIndex,
     Node,
@@ -517,7 +518,7 @@ class EmissionMixin:
         to decide whether eliding the then-branch (which by the textual
         macro semantics would otherwise be re-evaluated) is safe.
         """
-        if isinstance(node, (Int, String, Var, SizeofType, SizeofVar, AddressOf)):
+        if isinstance(node, (Int, String, Var, SizeofType, SizeofVar, AddressOf, MemberAddressOf)):
             return True
         if isinstance(node, BinaryOperation):
             return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
@@ -1391,6 +1392,8 @@ class EmissionMixin:
             self.ax_is_byte = False
         elif isinstance(expression, MemberAccess):
             self.generate_member_access(expression)
+        elif isinstance(expression, MemberAddressOf):
+            self.generate_member_address_of(expression)
         elif isinstance(expression, MemberIndex):
             self.generate_member_index(expression)
         elif isinstance(expression, IndexMemberAccess):
