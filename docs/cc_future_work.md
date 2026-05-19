@@ -130,6 +130,41 @@ this pointer" is easy to get subtly wrong, and disqualification is trivially
 correct.  Worth revisiting when a real workload's hot path needs both a pin and
 an `&`.
 
+## Multi-translation-unit linkage
+
+### Cross-TU calling-convention agreement
+
+**Size:** medium.
+
+`make_os.sh` already links multiple `.ccobj` files into one program via the
+`.deps` sidecar pipeline, but the convention each side commits to disagrees once
+the cross-TU call carries arguments.  cc.py's intra-TU analyzer promotes
+candidate functions to a register-passing convention (the auto-pin allocator
+decides which params live in which registers).  A cross-TU caller in another
+file sees only the `extern` prototype, so it falls back to cdecl and pushes args
+on the stack — but the callee's prologue still reads them from its chosen pin
+registers and the receiver gets garbage.  Zero-arg cross-TU calls are unaffected
+(both conventions agree on "no args, return in EAX"), which is why
+`tests/programs/multitu_demo.c` constrains its calls to that shape.
+
+The clean fix is a `static`-equivalent linkage marker (probably the C `static`
+keyword once cc.py grows it; see the C-subset section below) so the analyzer
+knows when a callee is exported for cross-TU use and must commit to the stable
+cdecl convention instead of the per-function auto-pin map. Functions marked
+`static` would keep their `binding: local` slot in the ccobj and stay eligible
+for register-convention promotion; functions without `static` would emit a cdecl
+prologue regardless of the pin map.  In the meantime, single-TU programs keep
+the existing optimization and multi-TU programs must either stick to zero-arg
+cross-TU calls or live with the performance loss of forcing the callee to cdecl
+manually.
+
+A heavier-weight alternative (no language change) would have cc.py emit two
+entry points per exported function: a cdecl trampoline that unpacks the stack
+args into the body's chosen pin registers, plus the regparm body for intra-TU
+callers to jump straight at.  Cheap (~7 bytes per export) but duplicates the
+symbol table and requires the analyzer to record per-function pin maps in the
+ccobj so the trampoline can be generated.
+
 ## Language / C subset
 
 Each item below is a feature `tools/libc/*.c` uses today that cc.py rejects.
@@ -143,8 +178,8 @@ maintaining a header-only mirror.
 
 `CHARACTER_ESCAPES` in `cc/tokens.py` covers `\b`, `\e`, `\n`, `\r`, `\t`, `\0`,
 `\\`, `\"`, `\'`, plus `\xNN` hex.  `\v` (vertical tab, 0x0B) and `\f` (form
-feed, 0x0C) are missing, so `<ctype.h>`'s `isspace` deliberately drops them.
-Add two entries to the table.
+feed, 0x0C) are missing, so `<ctype.h>`'s `isspace` deliberately drops them. Add
+two entries to the table.
 
 ### `unsigned` shorthand on built-in integer types
 

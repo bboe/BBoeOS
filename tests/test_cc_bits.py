@@ -51,7 +51,20 @@ def compile_and_assemble(*, source: Path, bits: int, work: Path) -> tuple[bool, 
 
 def main() -> int:
     """Run cc.py + nasm over all .c files in both emission modes."""
-    sources = sorted(source for directory in SOURCE_DIRS for source in directory.glob("*.c"))
+    # Skip multi-TU programs and their helpers: the flat (non-object)
+    # cc.py path emits bare `call <symbol>` for cross-TU references,
+    # which NASM cannot resolve without a linker stage.  Those sources
+    # are covered end-to-end by the object-mode pipeline that
+    # make_os.sh runs and tests/test_programs.py exercises.
+    multi_tu_skip: set[str] = set()
+    for directory in SOURCE_DIRS:
+        for deps_path in directory.glob("*.deps"):
+            multi_tu_skip.add(deps_path.with_suffix(".c").name)
+            for line in deps_path.read_text(encoding="utf-8").splitlines():
+                helper = line.strip()
+                if helper:
+                    multi_tu_skip.add(helper)
+    sources = sorted(source for directory in SOURCE_DIRS for source in directory.glob("*.c") if source.name not in multi_tu_skip)
     fail_count = 0
     failed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="test_cc_bits_") as temp_dir:

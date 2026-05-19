@@ -148,8 +148,38 @@ cat boot.bin kernel.bin > os.bin
 # --with-test-programs is passed (default builds keep them out so a
 # normal boot has just the user programs).  Both lists are sorted so
 # the on-disk directory layout is stable across builds.
-USER_PROGRAMS=$(find src/c -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
-TEST_PROGRAMS=$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
+# A program named <name> with sibling translation units lists those
+# extras in tests/programs/<name>.deps (one filename per line,
+# relative to the directory holding <name>.c).  Listed sources are
+# pulled into the link of <name> and excluded from the auto-
+# discovered program lists below so they do not also build as their
+# own programs.  Today only the multitu_demo test uses this.
+MULTI_TU_DEPS_HELPERS=$(find src/c tests/programs -maxdepth 1 -name '*.deps' 2>/dev/null | while read -r deps_path; do
+    while read -r helper; do
+        [ -z "$helper" ] && continue
+        echo "${helper%.c}"
+    done < "$deps_path"
+done | sort -u | tr '\n' ' ')
+
+exclude_helpers() {
+    result=""
+    for candidate in $1; do
+        keep=1
+        for helper in $MULTI_TU_DEPS_HELPERS; do
+            if [ "$candidate" = "$helper" ]; then
+                keep=0
+                break
+            fi
+        done
+        [ $keep -eq 1 ] && result="$result $candidate"
+    done
+    echo "$result"
+}
+
+USER_PROGRAMS_RAW=$(find src/c -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
+TEST_PROGRAMS_RAW=$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
+USER_PROGRAMS=$(exclude_helpers "$USER_PROGRAMS_RAW")
+TEST_PROGRAMS=$(exclude_helpers "$TEST_PROGRAMS_RAW")
 if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
     PROGRAMS="$USER_PROGRAMS $TEST_PROGRAMS"
 else
@@ -181,10 +211,28 @@ compile_program_flat() {
 compile_program_object() {
     name=$1
     source=$2
+    source_directory=$(dirname "$source")
+    deps_file="${source%.c}.deps"
+    # Compile and pack the main translation unit first.  When a
+    # <name>.deps sidecar exists, walk each listed source through
+    # the same cc.py --object → nasm → pack-ccobj pipeline and
+    # extend the linker's input list before invoking ccld.
     python3 cc.py --bits 32 --object "$source" "$PBUILD/$name.asm" || return 1
     nasm -f bin -i src/include/ -l "$PBUILD/$name.lst" -o "$PBUILD/$name.obin" "$PBUILD/$name.asm" || return 1
     python3 cc.py pack-ccobj "$PBUILD/$name.obin" "$PBUILD/$name.lst" "$PBUILD/$name.ccobj" || return 1
-    python3 tools/ccld.py --output "$PBUILD/$name" "$PBUILD/$name.ccobj" || return 1
+    objects="$PBUILD/$name.ccobj"
+    if [ -f "$deps_file" ]; then
+        while read -r helper; do
+            [ -z "$helper" ] && continue
+            helper_source="$source_directory/$helper"
+            helper_stem=$(basename "$helper" .c)
+            python3 cc.py --bits 32 --object "$helper_source" "$PBUILD/$helper_stem.asm" || return 1
+            nasm -f bin -i src/include/ -l "$PBUILD/$helper_stem.lst" -o "$PBUILD/$helper_stem.obin" "$PBUILD/$helper_stem.asm" || return 1
+            python3 cc.py pack-ccobj "$PBUILD/$helper_stem.obin" "$PBUILD/$helper_stem.lst" "$PBUILD/$helper_stem.ccobj" || return 1
+            objects="$objects $PBUILD/$helper_stem.ccobj"
+        done < "$deps_file"
+    fi
+    python3 tools/ccld.py --output "$PBUILD/$name" $objects || return 1
 }
 
 is_flat_program() {
