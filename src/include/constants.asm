@@ -279,6 +279,7 @@
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
+        %assign VDSO_PAGE_COUNT_MAX 4           ; Compile-time ceiling on how many 4 KB pages the kernel will map for the shared libbboeos image starting at FUNCTION_TABLE.  vdso_install reads `lib/libbboeos` at boot and rounds up to ceil(size / 4096); this constant sizes the per-page phys-frame array (vdso_code_phys) and bounds the per-program map loop in build_child_program_state.  Bumping it costs (4 * VDSO_PAGE_COUNT_MAX) bytes of kernel BSS.
         %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's

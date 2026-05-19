@@ -737,9 +737,17 @@ tss_data                 resb 104
         ;; stack-mapping / argv-staging passes.
 user_image_end           resd 1
 
-        ;; Phys of the shared vDSO code frame; program_enter aliases it
-        ;; into every per-program PD at user-virt FUNCTION_TABLE.
-vdso_code_phys           resd 1
+        ;; Phys of the shared vDSO code frames; build_child_program_state
+        ;; aliases the first vdso_page_count entries into every per-program PD
+        ;; at consecutive user-virts FUNCTION_TABLE, FUNCTION_TABLE + 0x1000,
+        ;; ... so libbboeos can grow past one page.  Sized at compile time by
+        ;; VDSO_PAGE_COUNT_MAX; only the first vdso_page_count slots are live.
+vdso_code_phys           resd VDSO_PAGE_COUNT_MAX
+
+        ;; Number of 4 KB frames vdso_install actually populated this boot.
+        ;; Set to ceil(libbboeos_size / 4096); read by build_child_program_state
+        ;; to bound the per-program vDSO map loop.
+vdso_page_count          resd 1
 
         ;; Current user-virt during page-walk loops in
         ;; build_child_program_state / address_space_map_page callers.
