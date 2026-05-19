@@ -49,7 +49,7 @@ from cc.ast_nodes import (
     Param,
     String,
     StructDecl,
-    StructInit,
+    StructInitializer,
     Switch,
     Var,
     VarDecl,
@@ -69,6 +69,17 @@ from cc.errors import CompileError
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
+
+# Regexes used by the known_local_bytes tracker in _update_known_bytes.
+# Each pattern matches a single line of NASM output that writes a byte
+# immediate to a frame-relative slot of the form [ebp-N] or [ebp-N+M].
+# K (the canonical frame-offset key) is N - M.
+RE_AND_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*and byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+RE_LOCAL_BYTE_ADDR = re.compile(r"^\[ebp-(\d+)(?:\+(\d+))?\]$")
+RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
+RE_MOV_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*mov byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+RE_NON_BYTE_WRITE = re.compile(r"^\s*mov\b.*\[(?!ebp\b)")
+RE_OR_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*or byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
 
 
 class FieldInfo(NamedTuple):
@@ -233,6 +244,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
         self.ax_is_byte: bool = False
+        self.ax_literal: int | None = None
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
@@ -253,6 +265,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
+        # known_local_bytes and _last_byte_store support the Phase C
+        # peephole tracker.  Seeded empty here; reset per function in
+        # generate_function (emission.py).  _last_byte_store records
+        # the most recently emitted qualifying mov-byte-immediate so
+        # that peepholes can fold it; known_local_bytes tracks the
+        # last-known constant byte value at each frame offset K.
+        self.known_local_bytes: dict[int, int] = {}
+        self._last_byte_store: tuple[int, int] | None = None
         # struct_layouts maps struct tag name → {field_name: FieldInfo}.
         # Populated by _register_globals when StructDecl nodes are encountered.
         self.struct_layouts: dict[str, dict[str, FieldInfo]] = {}
@@ -510,9 +530,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         The rhs must already be in AL.  ``info`` carries bit_offset /
         bit_width; ``addr`` is the byte's NASM memory operand.  Uses
         BL as scratch.  Callers ``return`` after this helper.
+
+        Const-fold: when the target byte is a known local constant AND the
+        rhs was just loaded as a literal (``ax_literal`` is set), compute
+        the result byte at compile time and emit a single ``mov byte``.
         """
         field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
         clear_mask = (~field_mask) & 0xFF
+        # Const-fold: target byte is known local AND rhs is a literal AX.
+        slot = self._parse_local_byte_addr(addr)
+        if slot is not None and slot in self.known_local_bytes and self.ax_literal is not None:
+            known = self.known_local_bytes[slot]
+            rhs = self.ax_literal & ((1 << info.bit_width) - 1)
+            new_byte = (known & clear_mask) | (rhs << info.bit_offset)
+            self.emit(f"        mov byte {addr}, {new_byte}")
+            return
+        # General RMW path.
         self.emit("        mov bl, al")
         if info.bit_width != 8:
             self.emit(f"        and bl, {(1 << info.bit_width) - 1}")
@@ -528,10 +561,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         ``value`` must be 0 or 1; ``info.bit_width`` must be 1.  Emits
         ``and byte addr, ~mask`` for value 0 or ``or byte addr, mask``
-        for value 1.
+        for value 1.  When ``addr`` resolves to a ``known_local_bytes`` slot,
+        const-folds the entire byte into a single ``mov byte addr, <result>``.
         """
         field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
         clear_mask = (~field_mask) & 0xFF
+        # Const-fold: if the target byte is a known local constant,
+        # compute the resulting byte and emit a single mov.
+        slot = self._parse_local_byte_addr(addr)
+        if slot is not None and slot in self.known_local_bytes:
+            known = self.known_local_bytes[slot]
+            new_byte = (known & clear_mask) | ((value << info.bit_offset) & field_mask)
+            self.emit(f"        mov byte {addr}, {new_byte}")
+            return
         if value == 0:
             self.emit(f"        and byte {addr}, {clear_mask}")
         else:
@@ -870,10 +912,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 layout = self.struct_layouts[struct_name]
                 lines: list[str] = []
                 for element in declaration.init.elements:
-                    assert isinstance(element, StructInit)
+                    assert isinstance(element, StructInitializer)
+                    assert element.positional is not None, "array-of-struct globals require positional initializers"
                     for i, (field_name, info) in enumerate(layout.items()):
                         field_size = info.field_size
-                        value = self._constant_expression(element.fields[i]) if i < len(element.fields) else "0"
+                        value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
                         if field_size == 1:
                             lines.append(f"db {value}")
                         elif field_size == 2:
@@ -969,8 +1012,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for element in elements:
             if isinstance(element, String):
                 continue
-            if isinstance(element, StructInit):
-                for field in element.fields:
+            if isinstance(element, StructInitializer):
+                assert element.positional is not None, "array-of-struct globals require positional initializers"
+                for field in element.positional:
                     if self._constant_expression(field) is None:
                         message = "struct initializer fields must be constants"
                         raise CompileError(message, line=field.line)
@@ -1005,8 +1049,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=expression.line)
-            if object_name not in self.global_scalars:
-                message = "dot member access on local struct values is not yet supported; use a pointer and '->'"
+            if object_name in self.global_scalars:
+                base_operand = self._local_address(object_name)
+            elif object_name in self.locals:
+                frame_offset = self.locals[object_name]
+                base_operand = f"ebp-{frame_offset}"
+            else:
+                message = f"undefined variable '{object_name}'"
                 raise CompileError(message, line=expression.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
@@ -1021,21 +1070,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             field_size = info.field_size
             element_size = info.element_size
             is_array_field = field_size != element_size
-            base_symbol = self._local_address(object_name)
             self.ax_clear()
             if is_array_field:
-                # Array field: yield the field address as an immediate.
-                if offset:
-                    self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+                if object_name in self.global_scalars:
+                    # Global: load address as immediate (label arithmetic).
+                    if offset:
+                        self.emit(f"        mov {self.target.acc}, {base_operand}+{offset}")
+                    else:
+                        self.emit(f"        mov {self.target.acc}, {base_operand}")
+                # Local: use lea against the frame base.
+                elif offset:
+                    self.emit(f"        lea {self.target.acc}, [{base_operand}+{offset}]")
                 else:
-                    self.emit(f"        mov {self.target.acc}, {base_symbol}")
+                    self.emit(f"        lea {self.target.acc}, [{base_operand}]")
                 self.ax_clear()
                 return
             allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
             if field_size not in allowed_sizes:
                 message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=expression.line)
-            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
@@ -1108,9 +1162,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Generate code for ``&obj.field``.
 
         Bitfield members have no addressable storage and are always rejected
-        with a :class:`~cc.errors.CompileError`.  Non-bitfield members on
-        local struct values are not yet supported (dot-access on locals is
-        unimplemented); file-scope struct globals yield ``_g_obj + offset``.
+        with a :class:`~cc.errors.CompileError`.  Both file-scope struct
+        globals (``_g_obj + offset`` via ``mov``) and local struct values
+        (``[ebp-N+offset]`` via ``lea``) are supported.
         """
         object_name = expression.object_name
         struct_type = self.variable_types.get(object_name)
@@ -1135,16 +1189,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             message = f"cannot take address of bitfield '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        # Non-bitfield: emit the field address.  Only file-scope struct globals
-        # are supported; local struct values require a pointer indirection.
-        if object_name not in self.global_scalars:
-            message = "cannot take address of member on local struct value; use a pointer and '->'"
-            raise CompileError(message, line=expression.line)
-        base_symbol = self._local_address(object_name)
-        if offset := info.byte_offset:
-            self.emit(f"        mov {self.target.acc}, {base_symbol}+{offset}")
+        # Non-bitfield: emit the field address.
+        if object_name in self.global_scalars:
+            base_label = self._local_address(object_name)
+            if info.byte_offset:
+                self.emit(f"        lea {self.target.acc}, [{base_label}+{info.byte_offset}]")
+            else:
+                self.emit(f"        lea {self.target.acc}, [{base_label}]")
+        elif object_name in self.locals:
+            frame_offset = self.locals[object_name]
+            if info.byte_offset:
+                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}+{info.byte_offset}]")
+            else:
+                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}]")
         else:
-            self.emit(f"        mov {self.target.acc}, {base_symbol}")
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=expression.line)
         self.ax_clear()
 
     def generate_member_assign(self, statement: MemberAssign, /) -> None:
@@ -1162,8 +1222,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=statement.line)
-            if object_name not in self.global_scalars:
-                message = "dot member assign on local struct values is not yet supported; use a pointer and '->'"
+            if object_name in self.global_scalars:
+                base_operand = self._local_address(object_name)
+            elif object_name in self.locals:
+                frame_offset = self.locals[object_name]
+                base_operand = f"ebp-{frame_offset}"
+            else:
+                message = f"undefined variable '{object_name}'"
                 raise CompileError(message, line=statement.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
@@ -1176,12 +1241,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             info = layout[statement.member_name]
             offset = info.byte_offset
             field_size = info.field_size
-            base_symbol = self._local_address(object_name)
-            addr = f"[{base_symbol}+{offset}]" if offset else f"[{base_symbol}]"
+            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
             if info.bit_width is not None:
                 if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
                     self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
                     return
+                # Const-fold: literal rhs on a known-constant local byte.
+                # Compute the new byte entirely at compile time and emit a
+                # single mov byte without a preceding mov eax load.  This
+                # keeps the store consecutive with adjacent mov-byte emits
+                # so the last-write-wins peephole in emit() can fire.
+                if isinstance(statement.expr, Int):
+                    slot = self._parse_local_byte_addr(addr)
+                    if slot is not None and slot in self.known_local_bytes:
+                        field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
+                        clear_mask = (~field_mask) & 0xFF
+                        known = self.known_local_bytes[slot]
+                        rhs = statement.expr.value & ((1 << info.bit_width) - 1)
+                        new_byte = (known & clear_mask) | (rhs << info.bit_offset)
+                        self.emit(f"        mov byte {addr}, {new_byte}")
+                        return
                 self.ax_clear()
                 self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
                 self._emit_bitfield_write(info, addr=addr)
@@ -1341,19 +1420,39 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         Tuple shape: ``(const_base, struct_size, field_offset, field_size, element_size)``.
 
-        Validates that *name* is a global array of a known struct type and
-        that *member_name* is a declared field.  Raises :exc:`CompileError`
+        ``const_base`` is a NASM operand fragment usable as the base inside a
+        memory reference: a label string (e.g. ``_g_arr``) for globals, or a
+        frame-relative expression (e.g. ``ebp-12``) for local stack arrays.
+
+        Validates that *name* is a global or local array of a known struct type
+        and that *member_name* is a declared field.  Raises :exc:`CompileError`
         for unknown names or fields.
         """
-        declaration = self.global_arrays.get(name)
-        if declaration is None:
-            message = f"'{name}' is not a global struct array"
+        if name in self.global_arrays:
+            declaration = self.global_arrays[name]
+            type_name = declaration.type_name
+            if not type_name.startswith("struct "):
+                message = f"'{name}' element type '{type_name}' is not a struct"
+                raise CompileError(message, line=line)
+            tag = type_name[7:]
+            const_base = self._resolve_constant(name)
+            assert const_base is not None
+        elif name in self.local_stack_arrays:
+            type_name = self.variable_types.get(name, "")
+            if not type_name.startswith("struct "):
+                message = f"'{name}' is not a local struct array"
+                raise CompileError(message, line=line)
+            tag = type_name[7:]
+            frame_offset = self.locals[name]
+            if self.elide_frame:
+                const_base = f"_l_{name}"
+            elif frame_offset > 0:
+                const_base = f"{self.target.base_register}-{frame_offset}"
+            else:
+                const_base = f"{self.target.base_register}+{-frame_offset}"
+        else:
+            message = f"'{name}' is not a struct array"
             raise CompileError(message, line=line)
-        type_name = declaration.type_name
-        if not type_name.startswith("struct "):
-            message = f"'{name}' element type '{type_name}' is not a struct"
-            raise CompileError(message, line=line)
-        tag = type_name[7:]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
@@ -1361,8 +1460,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if member_name not in layout:
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
-        const_base = self._resolve_constant(name)
-        assert const_base is not None
         struct_size = self._type_size(type_name)
         info = layout[member_name]
         return const_base, struct_size, info.byte_offset, info.field_size, info.element_size
@@ -1937,6 +2034,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
+
+    @staticmethod
+    def _parse_local_byte_addr(addr: str) -> int | None:
+        """Return the frame slot K if addr is ``[ebp-N]`` or ``[ebp-N+M]``; otherwise None.
+
+        K is the absolute frame offset of the targeted byte: K = N - M
+        for the +M form, K = N otherwise.
+        """
+        match = RE_LOCAL_BYTE_ADDR.match(addr.strip())
+        if match is None:
+            return None
+        base = int(match.group(1))
+        offset = int(match.group(2) or 0)
+        return base - offset
 
     def _peephole_will_strand_ax(self) -> bool:
         """Return True if the last emitted lines form a fusion target.
@@ -2732,6 +2843,83 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
+    def _update_known_bytes(self, line: str) -> None:
+        """Update known_local_bytes and _last_byte_store from a single emitted line.
+
+        Tracks which frame-relative byte slots have a constant value in
+        the current basic block.  Conservative invalidation is applied on
+        any memory write through a non-ebp register, on function calls,
+        and on labels (which mark potential jump targets).  No folding is
+        performed here — that is the job of the Phase C.2/C.3/C.4 peepholes.
+
+        Also tracks ``ax_literal``: the integer value currently held in
+        EAX/AL when the immediately preceding emit was ``mov eax, <imm>``.
+        Cleared conservatively on any other non-empty emit.
+        """
+        # ax_literal tracking: must run first so clearing EAX state does
+        # not interfere with the byte-slot tracker logic below.
+        if (eax_match := RE_MOV_EAX_IMMEDIATE.match(line)) is not None:
+            self.ax_literal = int(eax_match.group(1))
+            # Fall through — the byte-tracker may also care about this line.
+        elif line.strip():
+            # Any other non-empty emit may have clobbered EAX/AL.
+            # Conservative: clear ax_literal on every such emit.
+            self.ax_literal = None
+        # mov byte [ebp-N] / [ebp-N+M], imm  →  set known value for slot K.
+        match = RE_MOV_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            self.known_local_bytes[slot] = value
+            self._last_byte_store = (slot, value)
+            return
+        # or byte [ebp-N] / [ebp-N+M], imm  →  fold into known value if present.
+        match = RE_OR_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            if slot in self.known_local_bytes:
+                self.known_local_bytes[slot] = (self.known_local_bytes[slot] | value) & 0xFF
+            else:
+                self.known_local_bytes.pop(slot, None)
+            self._last_byte_store = None
+            return
+        # and byte [ebp-N] / [ebp-N+M], imm  →  fold into known value if present.
+        match = RE_AND_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            if slot in self.known_local_bytes:
+                self.known_local_bytes[slot] = self.known_local_bytes[slot] & value & 0xFF
+            else:
+                self.known_local_bytes.pop(slot, None)
+            self._last_byte_store = None
+            return
+        # All other lines: clear the last-byte-store shadow.
+        self._last_byte_store = None
+        # Conservative: any mov through a non-ebp base register may alias
+        # a local.  Clear everything.
+        if RE_NON_BYTE_WRITE.search(line):
+            self.known_local_bytes.clear()
+            return
+        # Function calls and software interrupts: called code may clobber
+        # arbitrary memory.
+        stripped = line.strip().lower()
+        if stripped.startswith(("call ", "int ")):
+            self.known_local_bytes.clear()
+            return
+        # Labels mark potential jump targets; we don't track dataflow across
+        # branches, so invalidate the whole map.
+        if line.rstrip().endswith(":") and not line.lstrip().startswith(";"):
+            self.known_local_bytes.clear()
+            return
+
     def _validate_node_comparisons(self, node: Node | None, /) -> None:
         """Recursively visit *node*, validating any comparison ``BinaryOperation``.
 
@@ -2926,6 +3114,30 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if any(X86CodeGenerator._statement_references(other, name) for other in other_statements):
                 continue
             self.virtual_long_locals.add(name)
+
+    def emit(self, line: str = "") -> None:
+        """Append a line of assembly and update the known-byte tracker.
+
+        Last-write-wins collapse: if this line is a ``mov byte [ebp-K], imm``
+        and the most recently emitted line was also a ``mov byte [ebp-K], imm``
+        to the SAME slot K, replace the previous line rather than appending.
+        This eliminates redundant sequential stores emitted by the zero-init
+        prelude and the folded designated-init writes.
+        """
+        mov_match = RE_MOV_BYTE_LOCAL_IMMEDIATE.match(line)
+        if mov_match is not None and self._last_byte_store is not None and self.lines and RE_MOV_BYTE_LOCAL_IMMEDIATE.match(self.lines[-1]):
+            base = int(mov_match.group(1))
+            offset = int(mov_match.group(2) or 0)
+            slot = base - offset
+            if self._last_byte_store[0] == slot:
+                # Replace the previous emit and update tracker in place.
+                self.lines[-1] = line
+                value = int(mov_match.group(3)) & 0xFF
+                self.known_local_bytes[slot] = value
+                self._last_byte_store = (slot, value)
+                return
+        self.lines.append(line)
+        self._update_known_bytes(line)
 
     def emit_accumulator_zx_from_al(self) -> None:
         """Zero-extend AL (byte result) to the target accumulator.

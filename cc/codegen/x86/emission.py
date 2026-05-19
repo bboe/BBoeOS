@@ -62,6 +62,7 @@ from cc.ast_nodes import (
     SizeofType,
     SizeofVar,
     String,
+    StructInitializer,
     Switch,
     SwitchCase,
     TailCall,
@@ -122,6 +123,42 @@ class EmissionMixin:
         4x stride lands in one instruction instead of two.
         """
         self._emit_scale_index(register, scale=self.target.int_size)
+
+    def _emit_struct_initializer(self, name: str, init: StructInitializer) -> None:
+        """Emit zero-store prelude + per-field assignments for a struct local.
+
+        Expects the designated form (``init.designated`` populated); the
+        positional form is for array element initializers and is handled by
+        the global-array path in the generator.
+        """
+        if init.designated is None:
+            message = f"positional struct initializer on local '{name}' is not supported"
+            raise CompileError(message, line=init.line)
+        type_name = self.variable_types[name]
+        if not type_name.startswith("struct ") or "[" in type_name:
+            message = f"initializer on non-struct or array local '{name}' is not supported"
+            raise CompileError(message, line=init.line)
+        tag = type_name[7:]
+        size = self.struct_sizes[tag]
+        frame_offset = self.locals[name]
+        # Zero-store prelude: one ``mov byte [ebp-K], 0`` per byte of the slot.
+        for byte_index in range(size):
+            if byte_index == 0:
+                address = f"[ebp-{frame_offset}]"
+            else:
+                address = f"[ebp-{frame_offset}+{byte_index}]"
+            self.emit(f"        mov byte {address}, 0")
+        # Per-field designated assignments via the existing member-assign
+        # codegen path.  Synthesize MemberAssign nodes and dispatch.
+        for field_name, value_node in init.designated.items():
+            synthetic = MemberAssign(
+                arrow=False,
+                expr=value_node,
+                line=init.line,
+                member_name=field_name,
+                object_name=name,
+            )
+            self.generate_member_assign(synthetic)
 
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
@@ -1139,6 +1176,14 @@ class EmissionMixin:
             elif vname in self.array_sizes:
                 size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
                 self.emit(f"        mov {self.target.acc}, {size}")
+            elif (
+                vname in self.variable_types
+                and self.variable_types[vname].startswith("struct ")
+                and not self.variable_types[vname].endswith("]")
+            ):
+                tag = self.variable_types[vname][7:]
+                size = self.struct_sizes[tag]
+                self.emit(f"        mov {self.target.acc}, {size}")
             else:
                 size = self.target.int_size  # all non-array variables are word-sized
                 self.emit(f"        mov {self.target.acc}, {size}")
@@ -1615,6 +1660,9 @@ class EmissionMixin:
         self.current_preserve_registers: list[str] = list(function.preserve_registers)
         self.frame_size = 0
         self.function_pointer_in_registers: dict[str, dict[int, str]] = {}
+        self.ax_literal = None
+        self.known_local_bytes.clear()
+        self._last_byte_store = None
         self.live_long_local = None
         self.local_stack_arrays = {}
         self.locals = {}
@@ -1963,6 +2011,14 @@ class EmissionMixin:
                             self.elided_local_bss_vars.append((vname, "1"))
                         else:
                             self.emit(f"_l_{vname}: db 0")
+                    elif self.variable_types.get(vname, "").startswith("struct ") and not self.variable_types[vname].endswith("*"):
+                        type_name = self.variable_types[vname]
+                        tag = type_name[7:]
+                        struct_byte_count = self.struct_sizes[tag]
+                        if self.object_mode:
+                            self.elided_local_bss_vars.append((vname, str(struct_byte_count)))
+                        else:
+                            self.emit(f"_l_{vname}: times {struct_byte_count} db 0")
                     elif self.object_mode:
                         self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
                     else:
@@ -2341,7 +2397,9 @@ class EmissionMixin:
             if statement.name in self.constant_aliases:
                 return
             if statement.init is not None:
-                if statement.name in self.zero_init_skippable:
+                if isinstance(statement.init, StructInitializer):
+                    self._emit_struct_initializer(statement.name, statement.init)
+                elif statement.name in self.zero_init_skippable:
                     self.zero_init_skippable.discard(statement.name)
                 else:
                     self.emit_store_local(expression=statement.init, name=statement.name)

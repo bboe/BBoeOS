@@ -361,12 +361,12 @@ def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
     assert "[_g_vfs_found+4]" in asm, f"expected direct memory access\n{asm}"
 
 
-def test_dot_access_on_local_struct_still_rejected() -> None:
-    """Dot-access on a local struct value (not a pointer) still raises an error."""
-    error = _kernel_error(
+def test_dot_access_on_local_struct_emits_frame_relative_load() -> None:
+    """Dot-access on a stack-local struct value reads via [ebp-N+offset]."""
+    asm = _kernel(
         """
         struct s { uint8_t x; };
-        void bad() {
+        void read_x() {
             struct s local;
             int y;
             y = local.x;
@@ -374,7 +374,10 @@ def test_dot_access_on_local_struct_still_rejected() -> None:
     """,
         bits=32,
     )
-    assert "dot member access" in error, f"Expected dot-access rejection, got: {error}"
+    # Local struct lives in the frame; the read should target an ebp-relative
+    # byte load rather than a global ``[_g_local+...]`` operand.
+    assert "[ebp-" in asm, f"expected frame-relative load:\n{asm}"
+    assert "_g_local" not in asm, f"local should not have a global symbol:\n{asm}"
 
 
 def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:

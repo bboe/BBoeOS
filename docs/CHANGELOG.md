@@ -12,17 +12,30 @@ time.
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
 - **cc.py: multi-translation-unit programs end-to-end.**  `make_os.sh` now reads
-  an optional `<name>.deps` sidecar next to `tests/programs/
-  <name>.c` (or `src/c/<name>.c`); each helper source listed there is
-  compiled with `cc.py --object`, packed, and threaded into the same `ccld`
-  invocation that links `<name>.ccobj`.  Sources mentioned in a `.deps` are
-  excluded from the auto-discovered program lists, so the helper does not also
-  build as its own program.  `tests/programs/ multitu_demo.c` +
-  `multitu_demo_helper.c` exercise the pipeline end- to-end and are checked by
-  `tests/test_programs.py` under the `multitu_demo` entry.  Cross-TU calls stick
-  to zero-arg shapes for now; multi-arg crossings still mismatch cc.py's
-  intra-TU regparm convention against the caller's cdecl assumption (see
-  `docs/cc_future_work.md`).
+  an optional `<name>.deps` sidecar next to `tests/programs/<name>.c` (or
+  `src/c/<name>.c`); each helper source listed there is compiled with `cc.py
+  --object`, packed, and threaded into the same `ccld` invocation that links
+  `<name>.ccobj`.  Sources mentioned in a `.deps` are excluded from the
+  auto-discovered program lists, so the helper does not also build as its own
+  program.  `tests/programs/multitu_demo.c` + `multitu_demo_helper.c` exercise
+  the pipeline end-to-end and are checked by `tests/test_programs.py` under the
+  `multitu_demo` entry.  Cross-TU calls stick to zero-arg shapes for now;
+  multi-arg crossings still mismatch cc.py's intra-TU regparm convention against
+  the caller's cdecl assumption (see `docs/cc_future_work.md`).
+
+- **cc.py: stack-local struct values + designated init + bitfield constant
+  folding.**  `struct foo c;` and `struct foo arr[N];` are now valid local
+  declarations.  Dot-access read/write (`c.field`, `arr[i].field`), address-of
+  (`&c`, `&c.field` for regular fields), and `sizeof(c)` all work for locals.
+  Two new initializer forms: `struct foo c = { 0 };` (zero-init) and `struct foo
+  c = { .field = X, ... };` (designated; omitted fields zero).  A const-fold
+  peephole pair collapses bitfield-write sequences into a single `mov byte` when
+  the storage is a known local and every value is literal: hardware-register
+  init patterns like `struct cr c = { .stop = 1, .rd = 4, .page = 1 }; uint8_t
+  *p = (uint8_t *)&c; outb(p, *p);` emit one folded `mov byte [ebp-N],
+  <imm>` (e.g. 97) plus the byte load, instead of N read-modify-
+  write sequences.  Out of scope: positional initializers, struct-to- struct
+  assignment, by-value struct args/returns.
 
 - **cc.py: bitfield struct members.** `uint8_t name : N;` declares an N-bit
   (1..8) bitfield within a packed `uint8_t` storage byte; `uint8_t : N;` is an
