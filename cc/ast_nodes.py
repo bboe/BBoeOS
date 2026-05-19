@@ -524,15 +524,27 @@ class StructField(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class StructInit(Node):
-    """Brace-initializer ``{a, b}`` for one struct element within an array initializer.
+class StructInitializer(Node):
+    """Struct initializer in either positional or designated form.
 
-    Fields are positional; unspecified trailing fields are zero-filled by
-    the code generator.  Nested struct-of-struct initializers are not
-    supported.
+    Two mutually-exclusive representations:
+
+    - ``positional`` set (``designated`` None) — values listed in
+      declaration order: ``struct foo arr[] = { {1, 2}, {3, 4} };``.
+      Each ``{1, 2}`` becomes one ``StructInitializer`` with
+      ``positional=[Int(1), Int(2)]``.  Unspecified trailing fields are
+      zero-filled by the code generator.
+
+    - ``designated`` set (``positional`` None) — field name → value
+      mapping for ``struct foo c = { .field = X, ... };``.  Empty dict
+      represents the zero-init shorthand ``{ 0 }``.  Omitted fields are
+      zero-initialized at codegen time.
+
+    Nested struct-of-struct initializers are not supported.
     """
 
-    fields: list[Node]
+    designated: dict[str, Node] | None = None
+    positional: list[Node] | None = None
 
 
 @dataclass(kw_only=True, slots=True)

@@ -106,6 +106,8 @@ jobs:
             command: python3 tests/test_cc_bitfields.py
           - suite: test_cc_casts
             command: python3 tests/test_cc_casts.py
+          - suite: test_cc_local_structs
+            command: python3 tests/test_cc_local_structs.py
           - suite: test_cc_compatibility
             command: python3 tests/test_cc_compatibility.py
           - suite: test_doom_music_qemu
