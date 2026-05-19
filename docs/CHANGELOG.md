@@ -11,6 +11,22 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: stack-local struct values + designated init + bitfield
+  constant folding.**  `struct foo c;` and `struct foo arr[N];` are
+  now valid local declarations.  Dot-access read/write
+  (`c.field`, `arr[i].field`), address-of (`&c`, `&c.field` for
+  regular fields), and `sizeof(c)` all work for locals.  Two new
+  initializer forms: `struct foo c = { 0 };` (zero-init) and
+  `struct foo c = { .field = X, ... };` (designated; omitted fields
+  zero).  A const-fold peephole pair collapses bitfield-write
+  sequences into a single `mov byte` when the storage is a known
+  local and every value is literal: hardware-register init patterns
+  like `struct cr c = { .stop = 1, .rd = 4, .page = 1 }; uint8_t *p
+  = (uint8_t *)&c; outb(p, *p);` emit one folded `mov byte [ebp-N],
+  <imm>` (e.g. 97) plus the byte load, instead of N read-modify-
+  write sequences.  Out of scope: positional initializers, struct-to-
+  struct assignment, by-value struct args/returns.
+
 - **cc.py: bitfield struct members.** `uint8_t name : N;` declares an
   N-bit (1..8) bitfield within a packed `uint8_t` storage byte;
   `uint8_t : N;` is an anonymous padding bitfield that consumes bits

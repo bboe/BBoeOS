@@ -70,6 +70,17 @@ from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
+# Regexes used by the known_local_bytes tracker in _update_known_bytes.
+# Each pattern matches a single line of NASM output that writes a byte
+# immediate to a frame-relative slot of the form [ebp-N] or [ebp-N+M].
+# K (the canonical frame-offset key) is N - M.
+RE_AND_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*and byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+RE_LOCAL_BYTE_ADDR = re.compile(r"^\[ebp-(\d+)(?:\+(\d+))?\]$")
+RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
+RE_MOV_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*mov byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+RE_NON_BYTE_WRITE = re.compile(r"^\s*mov\b.*\[(?!ebp\b)")
+RE_OR_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*or byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+
 
 class FieldInfo(NamedTuple):
     """One struct field's layout.
@@ -233,6 +244,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
         self.ax_is_byte: bool = False
+        self.ax_literal: int | None = None
         self.ax_local: str | None = None
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
@@ -253,6 +265,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.pinned_register: dict[str, str] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
+        # known_local_bytes and _last_byte_store support the Phase C
+        # peephole tracker.  Seeded empty here; reset per function in
+        # generate_function (emission.py).  _last_byte_store records
+        # the most recently emitted qualifying mov-byte-immediate so
+        # that peepholes can fold it; known_local_bytes tracks the
+        # last-known constant byte value at each frame offset K.
+        self.known_local_bytes: dict[int, int] = {}
+        self._last_byte_store: tuple[int, int] | None = None
         # struct_layouts maps struct tag name → {field_name: FieldInfo}.
         # Populated by _register_globals when StructDecl nodes are encountered.
         self.struct_layouts: dict[str, dict[str, FieldInfo]] = {}
@@ -510,9 +530,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         The rhs must already be in AL.  ``info`` carries bit_offset /
         bit_width; ``addr`` is the byte's NASM memory operand.  Uses
         BL as scratch.  Callers ``return`` after this helper.
+
+        Const-fold: when the target byte is a known local constant AND the
+        rhs was just loaded as a literal (``ax_literal`` is set), compute
+        the result byte at compile time and emit a single ``mov byte``.
         """
         field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
         clear_mask = (~field_mask) & 0xFF
+        # Const-fold: target byte is known local AND rhs is a literal AX.
+        slot = self._parse_local_byte_addr(addr)
+        if slot is not None and slot in self.known_local_bytes and self.ax_literal is not None:
+            known = self.known_local_bytes[slot]
+            rhs = self.ax_literal & ((1 << info.bit_width) - 1)
+            new_byte = (known & clear_mask) | (rhs << info.bit_offset)
+            self.emit(f"        mov byte {addr}, {new_byte}")
+            return
+        # General RMW path.
         self.emit("        mov bl, al")
         if info.bit_width != 8:
             self.emit(f"        and bl, {(1 << info.bit_width) - 1}")
@@ -528,10 +561,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         ``value`` must be 0 or 1; ``info.bit_width`` must be 1.  Emits
         ``and byte addr, ~mask`` for value 0 or ``or byte addr, mask``
-        for value 1.
+        for value 1.  When ``addr`` resolves to a ``known_local_bytes`` slot,
+        const-folds the entire byte into a single ``mov byte addr, <result>``.
         """
         field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
         clear_mask = (~field_mask) & 0xFF
+        # Const-fold: if the target byte is a known local constant,
+        # compute the resulting byte and emit a single mov.
+        slot = self._parse_local_byte_addr(addr)
+        if slot is not None and slot in self.known_local_bytes:
+            known = self.known_local_bytes[slot]
+            new_byte = (known & clear_mask) | ((value << info.bit_offset) & field_mask)
+            self.emit(f"        mov byte {addr}, {new_byte}")
+            return
         if value == 0:
             self.emit(f"        and byte {addr}, {clear_mask}")
         else:
@@ -871,7 +913,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 lines: list[str] = []
                 for element in declaration.init.elements:
                     assert isinstance(element, StructInitializer)
-                    assert element.positional is not None
+                    assert element.positional is not None, "array-of-struct globals require positional initializers"
                     for i, (field_name, info) in enumerate(layout.items()):
                         field_size = info.field_size
                         value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
@@ -971,7 +1013,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if isinstance(element, String):
                 continue
             if isinstance(element, StructInitializer):
-                assert element.positional is not None
+                assert element.positional is not None, "array-of-struct globals require positional initializers"
                 for field in element.positional:
                     if self._constant_expression(field) is None:
                         message = "struct initializer fields must be constants"
@@ -1204,6 +1246,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
                     self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
                     return
+                # Const-fold: literal rhs on a known-constant local byte.
+                # Compute the new byte entirely at compile time and emit a
+                # single mov byte without a preceding mov eax load.  This
+                # keeps the store consecutive with adjacent mov-byte emits
+                # so the last-write-wins peephole in emit() can fire.
+                if isinstance(statement.expr, Int):
+                    slot = self._parse_local_byte_addr(addr)
+                    if slot is not None and slot in self.known_local_bytes:
+                        field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
+                        clear_mask = (~field_mask) & 0xFF
+                        known = self.known_local_bytes[slot]
+                        rhs = statement.expr.value & ((1 << info.bit_width) - 1)
+                        new_byte = (known & clear_mask) | (rhs << info.bit_offset)
+                        self.emit(f"        mov byte {addr}, {new_byte}")
+                        return
                 self.ax_clear()
                 self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
                 self._emit_bitfield_write(info, addr=addr)
@@ -1977,6 +2034,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
+
+    @staticmethod
+    def _parse_local_byte_addr(addr: str) -> int | None:
+        """Return the frame slot K if addr is ``[ebp-N]`` or ``[ebp-N+M]``; otherwise None.
+
+        K is the absolute frame offset of the targeted byte: K = N - M
+        for the +M form, K = N otherwise.
+        """
+        match = RE_LOCAL_BYTE_ADDR.match(addr.strip())
+        if match is None:
+            return None
+        base = int(match.group(1))
+        offset = int(match.group(2) or 0)
+        return base - offset
 
     def _peephole_will_strand_ax(self) -> bool:
         """Return True if the last emitted lines form a fusion target.
@@ -2772,6 +2843,83 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit_condition_false_jump(condition=leaves[i], context=context, fail_label=fail_label)
             i += 1
 
+    def _update_known_bytes(self, line: str) -> None:
+        """Update known_local_bytes and _last_byte_store from a single emitted line.
+
+        Tracks which frame-relative byte slots have a constant value in
+        the current basic block.  Conservative invalidation is applied on
+        any memory write through a non-ebp register, on function calls,
+        and on labels (which mark potential jump targets).  No folding is
+        performed here — that is the job of the Phase C.2/C.3/C.4 peepholes.
+
+        Also tracks ``ax_literal``: the integer value currently held in
+        EAX/AL when the immediately preceding emit was ``mov eax, <imm>``.
+        Cleared conservatively on any other non-empty emit.
+        """
+        # ax_literal tracking: must run first so clearing EAX state does
+        # not interfere with the byte-slot tracker logic below.
+        if (eax_match := RE_MOV_EAX_IMMEDIATE.match(line)) is not None:
+            self.ax_literal = int(eax_match.group(1))
+            # Fall through — the byte-tracker may also care about this line.
+        elif line.strip():
+            # Any other non-empty emit may have clobbered EAX/AL.
+            # Conservative: clear ax_literal on every such emit.
+            self.ax_literal = None
+        # mov byte [ebp-N] / [ebp-N+M], imm  →  set known value for slot K.
+        match = RE_MOV_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            self.known_local_bytes[slot] = value
+            self._last_byte_store = (slot, value)
+            return
+        # or byte [ebp-N] / [ebp-N+M], imm  →  fold into known value if present.
+        match = RE_OR_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            if slot in self.known_local_bytes:
+                self.known_local_bytes[slot] = (self.known_local_bytes[slot] | value) & 0xFF
+            else:
+                self.known_local_bytes.pop(slot, None)
+            self._last_byte_store = None
+            return
+        # and byte [ebp-N] / [ebp-N+M], imm  →  fold into known value if present.
+        match = RE_AND_BYTE_LOCAL_IMMEDIATE.match(line)
+        if match:
+            base = int(match.group(1))
+            offset = int(match.group(2) or 0)
+            value = int(match.group(3)) & 0xFF
+            slot = base - offset
+            if slot in self.known_local_bytes:
+                self.known_local_bytes[slot] = self.known_local_bytes[slot] & value & 0xFF
+            else:
+                self.known_local_bytes.pop(slot, None)
+            self._last_byte_store = None
+            return
+        # All other lines: clear the last-byte-store shadow.
+        self._last_byte_store = None
+        # Conservative: any mov through a non-ebp base register may alias
+        # a local.  Clear everything.
+        if RE_NON_BYTE_WRITE.search(line):
+            self.known_local_bytes.clear()
+            return
+        # Function calls and software interrupts: called code may clobber
+        # arbitrary memory.
+        stripped = line.strip().lower()
+        if stripped.startswith(("call ", "int ")):
+            self.known_local_bytes.clear()
+            return
+        # Labels mark potential jump targets; we don't track dataflow across
+        # branches, so invalidate the whole map.
+        if line.rstrip().endswith(":") and not line.lstrip().startswith(";"):
+            self.known_local_bytes.clear()
+            return
+
     def _validate_node_comparisons(self, node: Node | None, /) -> None:
         """Recursively visit *node*, validating any comparison ``BinaryOperation``.
 
@@ -2966,6 +3114,30 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if any(X86CodeGenerator._statement_references(other, name) for other in other_statements):
                 continue
             self.virtual_long_locals.add(name)
+
+    def emit(self, line: str = "") -> None:
+        """Append a line of assembly and update the known-byte tracker.
+
+        Last-write-wins collapse: if this line is a ``mov byte [ebp-K], imm``
+        and the most recently emitted line was also a ``mov byte [ebp-K], imm``
+        to the SAME slot K, replace the previous line rather than appending.
+        This eliminates redundant sequential stores emitted by the zero-init
+        prelude and the folded designated-init writes.
+        """
+        mov_match = RE_MOV_BYTE_LOCAL_IMMEDIATE.match(line)
+        if mov_match is not None and self._last_byte_store is not None and self.lines and RE_MOV_BYTE_LOCAL_IMMEDIATE.match(self.lines[-1]):
+            base = int(mov_match.group(1))
+            offset = int(mov_match.group(2) or 0)
+            slot = base - offset
+            if self._last_byte_store[0] == slot:
+                # Replace the previous emit and update tracker in place.
+                self.lines[-1] = line
+                value = int(mov_match.group(3)) & 0xFF
+                self.known_local_bytes[slot] = value
+                self._last_byte_store = (slot, value)
+                return
+        self.lines.append(line)
+        self._update_known_bytes(line)
 
     def emit_accumulator_zx_from_al(self) -> None:
         """Zero-extend AL (byte result) to the target accumulator.

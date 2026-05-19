@@ -1660,6 +1660,9 @@ class EmissionMixin:
         self.current_preserve_registers: list[str] = list(function.preserve_registers)
         self.frame_size = 0
         self.function_pointer_in_registers: dict[str, dict[int, str]] = {}
+        self.ax_literal = None
+        self.known_local_bytes.clear()
+        self._last_byte_store = None
         self.live_long_local = None
         self.local_stack_arrays = {}
         self.locals = {}
