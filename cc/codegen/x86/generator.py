@@ -532,6 +532,51 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit("        dd _bss_total_size")
         self.emit("        dw 0B032h")
 
+    def _emit_vdso_call(self, name: str, /) -> None:
+        """Emit a ``call`` to the named vDSO entry point.
+
+        In flat mode this is the direct ``call FUNCTION_NAME``
+        (``E8 <rel32>``).  In object mode it's the indirect
+        ``call [FUNCTION_NAME_PTR]`` (``FF 15 <abs32>``), which fetches
+        the target from the FUNCTION_POINTER_TABLE at vDSO offset 0x800
+        and is base-invariant — the bytes survive ``ccld`` relocation
+        without any per-site patching.
+        """
+        if self.object_mode:
+            self.emit(f"        call [{name}_PTR]")
+        else:
+            self.emit(f"        call {name}")
+
+    def _emit_vdso_jcc(self, condition: str, name: str, /) -> None:
+        """Emit a conditional jump to the named vDSO entry.
+
+        ``condition`` is the x86 mnemonic (``jc`` / ``jnc``) for the
+        predicate under which the jump should be taken.  In flat mode
+        this is the direct ``<cond> FUNCTION_NAME``.  In object mode
+        there is no indirect conditional-jump form, so we invert the
+        predicate: ``<inverse> skip; jmp [FUNCTION_NAME_PTR]; skip:``.
+        Costs ~4 extra bytes per site relative to the flat form.
+        """
+        if self.object_mode:
+            inverse = {"jc": "jnc", "jnc": "jc"}[condition]
+            skip_label = f".vdso_skip_{self.new_label()}"
+            self.emit(f"        {inverse} {skip_label}")
+            self.emit(f"        jmp [{name}_PTR]")
+            self.emit(f"{skip_label}:")
+        else:
+            self.emit(f"        {condition} {name}")
+
+    def _emit_vdso_jmp(self, name: str, /) -> None:
+        """Emit a ``jmp`` to the named vDSO entry point.
+
+        Object mode uses the indirect ``jmp [FUNCTION_NAME_PTR]``
+        (``FF 25 <abs32>``); see :meth:`_emit_vdso_call`.
+        """
+        if self.object_mode:
+            self.emit(f"        jmp [{name}_PTR]")
+        else:
+            self.emit(f"        jmp {name}")
+
     def _emit_byte_index_si(self, node: Index, /) -> tuple[str, bool]:
         """Load the base pointer of a byte-indexed node into SI.
 
@@ -3034,10 +3079,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             die_label, die_length = fuse_die
             self.emit(f"        mov {self.target.si_register}, {die_label}")
             self.emit(f"        mov {self.target.count_register}, {die_length}")
-            self.emit("        jc FUNCTION_DIE")
+            self._emit_vdso_jcc("jc", "FUNCTION_DIE")
             return
         if fuse_exit:
-            self.emit("        jnc FUNCTION_EXIT")
+            self._emit_vdso_jcc("jnc", "FUNCTION_EXIT")
             return
         label_index = self.new_label()
         self.emit(f"        jnc .ok_{label_index}")
