@@ -32,4 +32,8 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   (`(T)expr`, `(T *)expr`), and conversion of all bit-twiddly drivers
   (NE2000, FDC, PIC, RTC, DMA, SB16, PS/2) to use the new syntax.
   Plan: [2026-05-18-bitfields-cc-plan.md](./2026-05-18-bitfields-cc-plan.md).
-  Status: design + plan complete; implementation pending.
+  Phase 2 plan revised after Phase 1 cc.py reconnaissance:
+  [2026-05-18-bitfields-cc-plan-phase2.md](./2026-05-18-bitfields-cc-plan-phase2.md).
+  Status: Phase 1 (casts) shipped in PR #422.  Phase 2 (bitfields):
+  revised plan complete, implementation pending.  Phase 3 (driver
+  conversions): plan complete, implementation pending.
