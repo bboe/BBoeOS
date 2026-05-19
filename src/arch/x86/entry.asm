@@ -546,14 +546,33 @@ build_child_program_state:
         jmp .bss_page_loop
 .prog_pages_done:
 
-        ;; --- Map vDSO code page (shared, R-X user) ---
+        ;; --- Map vDSO code pages (shared, R-X user) ---
+        ;; vdso_install populated vdso_page_count frames at boot (one per 4 KB
+        ;; of libbboeos rounded up).  Alias each one into this PD at
+        ;; consecutive user-virts VDSO_VIRT + i*0x1000 so the helper page,
+        ;; pointer table, and any additional pages all sit contiguously in
+        ;; userspace.  PTE_USER_RX_SHARED's AVL[0] bit keeps
+        ;; address_space_destroy from freeing the shared frames on exit.
+        mov dword [virt_cursor], 0
+.vdso_map_loop:
+        mov eax, [virt_cursor]
+        cmp eax, [vdso_page_count]
+        jae .vdso_map_done
+        mov ebx, eax
+        shl ebx, 2
+        mov ecx, [vdso_code_phys + ebx]         ; phys of frame i
+        mov eax, [virt_cursor]
+        shl eax, 12
+        add eax, VDSO_VIRT
+        mov ebx, eax                            ; ebx = VDSO_VIRT + i*0x1000
         mov eax, [current_program_state]
         mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
-        mov ebx, VDSO_VIRT
-        mov ecx, [vdso_code_phys]
         mov edx, PTE_USER_RX_SHARED
         call address_space_map_page
         jc .oom
+        inc dword [virt_cursor]
+        jmp .vdso_map_loop
+.vdso_map_done:
 
         ;; --- Map user stack (private, 16 frames, zeroed) ---
         ;; Captures the topmost frame's phys (the one mapped at virt
@@ -1614,19 +1633,19 @@ userland_entry_stub:
         iretd
 
 vdso_install:
-        ;; Read `lib/libbboeos` from the disk image, copy it into a
-        ;; freshly-allocated frame, and stash the phys for
-        ;; program_enter to map (with PTE_SHARED) at user-virt
-        ;; FUNCTION_TABLE (0x10000) in every per-program PD.  The
-        ;; file's on-disk layout matches the in-memory page: helper
-        ;; trampolines / bodies / sigreturn at offsets 0..~0x466,
-        ;; zero padding, then the 13-entry FUNCTION_POINTER_TABLE at
-        ;; offset 0x800 (FUNCTION_POINTER_TABLE - FUNCTION_TABLE).
-        ;; Streaming the file one sector at a time into the frame
-        ;; mirrors program_enter's binary-page loop; the frame is
-        ;; zero-filled first so any region not covered by the file
-        ;; (e.g. the gap between helpers and the pointer table)
-        ;; stays clean.
+        ;; Read `lib/libbboeos` from the disk image, copy it into one or
+        ;; more freshly-allocated frames, and stash the phys array for
+        ;; build_child_program_state to map (with PTE_SHARED) at
+        ;; consecutive user-virts starting at FUNCTION_TABLE (0x10000) in
+        ;; every per-program PD.  The file's on-disk layout matches the
+        ;; in-memory page sequence: page 0 carries helper bodies /
+        ;; sigreturn / zero pad / FUNCTION_POINTER_TABLE at offset 0x800;
+        ;; pages 1..N-1 (if present) hold whatever spills past 4 KB.
+        ;; Streaming one sector at a time mirrors program_enter's
+        ;; binary-page loop; each frame is zero-filled first so any
+        ;; region the file doesn't cover (e.g. the helpers/pointer-table
+        ;; gap in page 0, or the tail of the final page beyond
+        ;; libbboeos's end) stays clean.
         ;;
         ;; Caller invariant: vfs_init must have run already so
         ;; vfs_find / vfs_read_sec resolve.  protected_mode_entry
@@ -1641,38 +1660,28 @@ vdso_install:
         call vfs_find
         jc .panic
 
-        ;; Reserve the shared frame and map it for write through a
-        ;; kmap_map alias.  At boot the bitmap allocator's first
-        ;; hits land in low conventional RAM, so kmap_map fast-paths
-        ;; to the direct-map alias and doesn't claim a slot — but
-        ;; going through the helper keeps the code uniform with
-        ;; every other "phys → kernel-virt to write" path.
-        call frame_alloc
-        jc .panic
-        mov [vdso_code_phys], eax
-        call kmap_map                   ; EAX = kvirt
-        mov edi, eax                    ; EDI = kvirt (held across the streaming loop)
-
-        ;; Zero the entire frame so any bytes the file doesn't cover
-        ;; — the helpers/pointer-table gap, or the tail of the
-        ;; 4 KB page beyond the file — stay zero.
-        push edi
-        mov ecx, 1024
-        xor eax, eax
-        cld
-        rep stosd
-        pop edi
+        ;; Compute page count = ceil(size / 4096) and assert it fits
+        ;; inside the compile-time VDSO_PAGE_COUNT_MAX ceiling.  A
+        ;; too-big libbboeos here means either the libc has grown past
+        ;; the kernel's BSS-sized phys-frame array (bump
+        ;; VDSO_PAGE_COUNT_MAX) or something else is writing to the
+        ;; file (bug).  Either way it can't silently truncate at boot.
+        mov eax, [vfs_found_size]
+        add eax, 0xFFF
+        shr eax, 12                     ; EAX = ceil(size / 4096)
+        cmp eax, VDSO_PAGE_COUNT_MAX
+        ja .panic
+        mov [vdso_page_count], eax
 
         ;; Build a private fd struct that vfs_read_sec can drive.
-        ;; Mirrors program_enter's program_fd usage; vdso_install
-        ;; runs once at boot before any program loads, so we can
-        ;; safely co-opt the same scratch struct here.
-        push edi
+        ;; Mirrors program_enter's program_fd usage; vdso_install runs
+        ;; once at boot before any program loads, so we can safely
+        ;; co-opt the same scratch struct here.
         mov edi, program_fd
         mov ecx, FD_ENTRY_SIZE / 4
         xor eax, eax
+        cld
         rep stosd
-        pop edi
         mov al, [vfs_found_type]
         mov [program_fd + FD_OFFSET_TYPE], al
         mov ax, [vfs_found_inode]
@@ -1684,21 +1693,45 @@ vdso_install:
         mov ax, [vfs_found_dir_off]
         mov [program_fd + FD_OFFSET_DIRECTORY_OFFSET], ax
 
-        ;; Stream up to 8 sectors (one page) into the frame.  The
-        ;; file is currently ~2.1 KB; future libc growth past one
-        ;; page is PR B's problem — assert here so a too-big
-        ;; libbboeos can't silently truncate.
-        mov eax, [vfs_found_size]
-        cmp eax, 0x1000
-        ja .panic
+        ;; Per-page loop: allocate frame, kmap it, zero it, read up to
+        ;; 8 sectors of file data into it, unmap.  EBP holds page index;
+        ;; each iteration stashes the frame's phys at
+        ;; vdso_code_phys[page_index].
+        xor ebp, ebp                    ; page index
+.page_loop:
+        cmp ebp, [vdso_page_count]
+        jae .page_done
+
+        call frame_alloc
+        jc .panic
+        mov ebx, ebp
+        shl ebx, 2
+        mov [vdso_code_phys + ebx], eax
+        call kmap_map                   ; EAX = kvirt
+        mov edi, eax                    ; EDI = kvirt (held across the streaming loop)
+
+        ;; Zero the entire frame so any bytes the file doesn't cover
+        ;; — the helpers/pointer-table gap in page 0, or the tail of
+        ;; the final page — stay zero.
+        push edi
+        mov ecx, 1024
+        xor eax, eax
+        cld
+        rep stosd
+        pop edi
 
         push edi                        ; save frame kvirt for kmap_unmap
         xor edx, edx                    ; sector-in-page index
 .sector_loop:
         cmp edx, 8
         jae .sector_done
-        mov eax, edx
-        shl eax, 9                      ; file offset = sector * 512
+        ;; File offset for this (page_index, sector_in_page) pair:
+        ;; file_offset = page_index * 4096 + sector_in_page * 512.
+        mov eax, ebp
+        shl eax, 12
+        mov ecx, edx
+        shl ecx, 9
+        add eax, ecx                    ; EAX = file_offset
         cmp eax, [vfs_found_size]
         jae .sector_done                ; past end of file
 
@@ -1712,10 +1745,13 @@ vdso_install:
         pop edx
         jc .panic
 
-        ;; Copy min(size - offset, 512) bytes from sector_buffer to
-        ;; (frame + sector_in_page * 512).
-        mov eax, edx
-        shl eax, 9
+        ;; Copy min(size - file_offset, 512) bytes from sector_buffer
+        ;; to (frame + sector_in_page * 512).
+        mov eax, ebp
+        shl eax, 12
+        mov ecx, edx
+        shl ecx, 9
+        add eax, ecx                    ; EAX = file_offset
         mov ebx, [vfs_found_size]
         sub ebx, eax                    ; EBX = bytes remaining in file
         cmp ebx, 512
@@ -1729,7 +1765,7 @@ vdso_install:
         mov esi, [sector_buffer]
         mov ecx, edx
         shl ecx, 9
-        add edi, ecx                    ; EDI = frame + sector*512
+        add edi, ecx                    ; EDI = frame + sector_in_page*512
         mov ecx, ebx
         cld
         rep movsb
@@ -1743,6 +1779,9 @@ vdso_install:
 .sector_done:
         pop eax                         ; frame kvirt
         call kmap_unmap
+        inc ebp
+        jmp .page_loop
+.page_done:
         popad
         ret
 .panic:
