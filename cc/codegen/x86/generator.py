@@ -218,6 +218,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.bss_total: int | str = 0  # total BSS bytes; int when all literal, str EQU name otherwise
         self.bss_vars: list[tuple[str, str]] = []  # (name, byte_count_expr) for zero-init globals
         self.division_remainder: tuple | None = None
+        # Object-mode-only: zero-init locals from elide_frame functions
+        # (e.g. main's static-storage locals).  In flat mode these are
+        # emitted inline at the tail of the function body; in object
+        # mode they're laid down in section .bss via `resb` so .text
+        # stays code-only.  Each entry: (vname, byte_count_expr) — same
+        # shape as bss_vars but with an `_l_` prefix at emit time.
+        self.elided_local_bss_vars: list[tuple[str, str]] = []
         # in_register_params / out_register_params map function name → {param_index → register}.
         # Populated during the first pass over function definitions in generate().
         self.in_register_params: dict[str, dict[int, str]] = {}
@@ -500,16 +507,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         (avoiding forward references that the self-hosted assembler
         cannot resolve).
 
-        In object mode, BSS reservations are not yet supported (PR 3 will
-        add ``section .bss`` emission).  Programs with non-zero BSS will
-        raise ``NotImplementedError``; zero-BSS programs emit nothing.
+        In object mode there's no flat-binary trailer — the linker
+        appends the BSS trailer when producing the final image.
+        Instead, zero-init globals (``self.bss_vars``) and elided
+        local-static cells (``self.elided_local_bss_vars``) are
+        emitted into ``section .bss`` as ``resb`` reservations so the
+        linker can sum them and emit one trailer for the whole image.
         """
         if self.object_mode:
-            if self.bss_vars:
-                message = (
-                    "object mode does not yet emit `section .bss` reservations; add support before compiling programs with non-zero BSS"
-                )
-                raise NotImplementedError(message)
+            if not self.bss_vars and not self.elided_local_bss_vars:
+                return
+            self.emit()
+            self.emit("section .bss")
+            for name, size_expression in self.bss_vars:
+                self.emit(f"_g_{name}: resb {size_expression}")
+            for name, size_expression in self.elided_local_bss_vars:
+                self.emit(f"_l_{name}: resb {size_expression}")
             return
         if not self.bss_vars:
             return
@@ -718,7 +731,29 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if not self.global_scalars and not self.global_arrays:
             return
         int_directive = "dd" if self.target.int_size == 4 else "dw"
-        self.emit(";; --- global data ---")
+        # In object mode the initialized-globals chunk belongs in
+        # ``section .data`` so the linker can place writable data
+        # independently of code.  The switch + comment are emitted
+        # once, lazily, on the first initialized cell we actually
+        # write below — purely zero-init globals end up in
+        # ``self.bss_vars`` and never need ``.data``.  ``data_header_emitted``
+        # tracks whether we've written the header yet within this call.
+        # In flat mode the header is emitted eagerly up front, matching
+        # the long-standing layout.
+        data_header_emitted = False
+
+        def _emit_data_header() -> None:
+            nonlocal data_header_emitted
+            if data_header_emitted:
+                return
+            if self.object_mode:
+                self.emit()
+                self.emit("section .data")
+            self.emit(";; --- global data ---")
+            data_header_emitted = True
+
+        if not self.object_mode:
+            _emit_data_header()
         for name in sorted(self.global_scalars):
             declaration = self.global_scalars[name]
             if name in self.register_aliased_globals:
@@ -740,6 +775,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 init_expression = self._constant_expression(declaration.init)
                 directive = "db" if self._is_byte_scalar_global(name) else int_directive
+                _emit_data_header()
                 self.emit(f"_g_{name}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
@@ -775,6 +811,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 count = len(declaration.init.elements)
                 size_expression = self._constant_expression(declaration.size)
                 lines.append(f"times ({size_expression}-{count})*{stride} db 0")
+                _emit_data_header()
                 self.emit(f"_g_{name}: {lines[0]}")
                 for line in lines[1:]:
                     self.emit(f"        {line}")
@@ -792,6 +829,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
                     for element in declaration.init.elements
                 ]
+                _emit_data_header()
                 self.emit(f"_g_{name}: {directive} {', '.join(rendered)}")
             else:
                 size_expression = self._constant_expression(declaration.size)

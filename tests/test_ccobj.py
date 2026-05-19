@@ -97,6 +97,85 @@ def test_flat_mode_vdso_calls_stay_direct(tmp_path: Path) -> None:
     assert "[FUNCTION_PRINT_CHARACTER_PTR]" not in body
 
 
+def test_object_mode_emits_data_rodata_bss_sections(tmp_path: Path) -> None:
+    """Strings/init globals/zero-init globals land in dedicated sections.
+
+    Object-mode user code lays data out as:
+      - initialized globals + initialized arrays    → ``section .data``
+      - string literals + local array literals      → ``section .rodata``
+      - zero-init globals + elide-frame local cells → ``section .bss``
+                                                       (``resb`` reservations)
+
+    Flat-mode output is unchanged — everything still rides inline at
+    the tail of ``.text`` under ``org 08048000h``.  This separation
+    lets the linker place each kind of storage independently when
+    composing multiple translation units.
+    """
+    src = tmp_path / "mixed.c"
+    src.write_text(
+        "int g_init = 42;\n"
+        "int g_array[3] = {1, 2, 3};\n"
+        "int g_zero;\n"
+        "int main() {\n"
+        "    g_zero = g_init;\n"
+        '    printf("%d\\n", g_zero);\n'
+        "    return 0;\n"
+        "}\n"
+    )
+    asm = tmp_path / "mixed.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", "--object", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    # Initialized globals → .data
+    assert "section .data" in body
+    assert "_g_g_init: dd 42" in body
+    assert "_g_g_array: dd 1, 2, 3" in body
+    # Strings → .rodata
+    assert "section .rodata" in body
+    assert "_str_0:" in body
+    # Zero-init globals → .bss via resb (no BSS trailer / no EQUs)
+    assert "section .bss" in body
+    assert "_g_g_zero: resb 4" in body
+    assert "dw 0B032h" not in body
+    assert "_g_g_zero equ" not in body
+    # Data labels must not appear inside the .text body.
+    text_section, _, _rest = body.partition("section .data")
+    assert "_g_g_init:" not in text_section
+    assert "_g_g_array:" not in text_section
+    assert "_str_0:" not in text_section
+
+
+def test_object_mode_emits_elided_locals_in_bss(tmp_path: Path) -> None:
+    """``main``'s static-storage locals land in ``section .bss``.
+
+    ``main`` is the only function that's elide-frame'd by default, so
+    its locals are promoted to per-program static storage at
+    ``_l_<name>``.  Flat mode emits the zero cells inline at the tail
+    of the function body; object mode pushes them into ``section .bss``
+    as ``resb`` reservations so the .text section stays code-only.
+    """
+    src = tmp_path / "main_local.c"
+    # ``&byte`` forces the local out of a register into static storage
+    # under elide_frame.  Without an address-of, cc.py keeps it in a
+    # register and no ``_l_`` cell is emitted.
+    src.write_text("int main() {\n    char byte;\n    read(STDIN, &byte, 1);\n    return 0;\n}\n")
+    asm = tmp_path / "main_local.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", "--object", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert "section .bss" in body
+    assert "_l_byte: resb 1" in body
+    # No inline ``_l_byte: db 0`` cell in .text.
+    text_section, _, _rest = body.partition("section .bss")
+    assert "_l_byte:" not in text_section
+
+
 def test_object_mode_emits_section_directives(tmp_path: Path) -> None:
     """Object mode emits section directives and global declarations.
 
