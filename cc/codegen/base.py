@@ -31,6 +31,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Break,
     Call,
+    Cast,
     Char,
     Conditional,
     Continue,
@@ -918,6 +919,12 @@ class CodeGeneratorBase:
                     return "pointer"
             return "integer"
         if isinstance(node, (Call, Conditional, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
+            return "integer"
+        if isinstance(node, Cast):
+            if node.target_type.endswith("*"):
+                return "pointer"
+            if node.target_type == "char":
+                return "char"
             return "integer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)

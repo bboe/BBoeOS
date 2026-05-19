@@ -15,6 +15,7 @@ from cc.ast_nodes import (
     BinaryOperation,
     Break,
     Call,
+    Cast,
     Char,
     Compound,
     Conditional,
@@ -967,16 +968,14 @@ class Parser:
             )
         if token[0] == "LPAREN":
             self.eat()
-            # Pointer-cast or void-cast: `(<type>)expr`.  cc.py's type
-            # system is loose (everything is a 16/32-bit register or a
-            # pointer-sized address) so the cast is a parse-time no-op
-            # — we eat the type, then continue parsing the operand and
-            # return it directly.  This lets sources written for clang
-            # use casts like `(uint8_t *)ptr` without diverging.
+            # Cast expression: `(<type>)expr`.  Detected by peeking at the
+            # token after ``(``.  ``TYPE_TOKENS`` already includes ``STRUCT``
+            # so both plain and struct-pointer casts are caught here.
             if self.peek()[0] in TYPE_TOKENS:
-                self.parse_type()
+                target_type = self.parse_type()
                 self.eat("RPAREN")
-                return self.parse_primary()
+                operand = self.parse_primary()
+                return Cast(expression=operand, line=line, target_type=target_type)
             expression = self.parse_expression()
             self.eat("RPAREN")
             return expression
