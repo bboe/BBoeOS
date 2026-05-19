@@ -27,3 +27,8 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   list (PR #411, closed pre-merge).
   Plan: [2026-05-18-blocking-recvfrom-plan.md](./2026-05-18-blocking-recvfrom-plan.md).
   Status: design + plan complete; implementation pending.
+- [2026-05-18 — cc.py bitfields + type casts](./2026-05-18-bitfields-cc-design.md)
+  — bitfield struct members (`uint8_t name : N;`), type-cast expressions
+  (`(T)expr`, `(T *)expr`), and conversion of all bit-twiddly drivers
+  (NE2000, FDC, PIC, RTC, DMA, SB16, PS/2) to use the new syntax.
+  Status: design complete; plan + implementation pending.
