@@ -559,6 +559,17 @@ vdso_image:
         incbin "vdso.bin"
 vdso_image_end:
 
+        ;; FUNCTION_POINTER_TABLE values — 13 absolute virtual addresses
+        ;; (52 bytes) generated at build time by tools/gen_vdso_pointers.py
+        ;; from build/vdso.map.  vdso_install copies this blob to
+        ;; vdso_page + 0x800 at boot.  Kept separate from vdso_image so
+        ;; the vDSO source doesn't have to pad ~900 bytes of zeros up to
+        ;; offset 0x800.
+        align 4
+vdso_pointers_image:
+        incbin "vdso_pointers.bin"
+vdso_pointers_image_end:
+
 kernel_end:
 
 ;;; -------------------------------------------------------------------------
