@@ -146,6 +146,90 @@ def test_end_to_end_c_to_flat_binary(tmp_path: Path) -> None:
     assert map_data["symbols"]["die"] > PROGRAM_BASE
 
 
+def test_end_to_end_globals_relocate_across_sections(tmp_path: Path) -> None:
+    """Full pipeline: cross-section abs32 refs survive to the linked image.
+
+    cc.py --object lays initialized globals into ``.data``, strings
+    into ``.rodata``, and zero-init globals into ``.bss``, then emits
+    ``mov [_g_x], eax`` / ``push _str_0`` / ``mov eax, [_g_x]``
+    instructions in ``.text`` whose abs32 operands NASM leaves as
+    bracketed placeholders.  pack-ccobj recognises the bracket form
+    and emits abs32 relocations.  ccld places each section, resolves
+    every relocation against the per-object local symbol table, and
+    patches the 4-byte placeholders with the final absolute address.
+
+    This test exercises the contract end-to-end.  The resulting flat
+    binary's `.text` bytes must hold patched (non-zero) abs32 operands
+    pointing at addresses inside the linked image's data range.
+    """
+    cc = REPO_ROOT / "cc.py"
+    source = tmp_path / "globals.c"
+    source.write_text('int g_init = 42;\nint g_zero;\nint main() {\n    g_zero = g_init;\n    printf("%d\\n", g_zero);\n    return 0;\n}\n')
+    assembly = tmp_path / "globals.asm"
+    binary = tmp_path / "globals.bin"
+    listing = tmp_path / "globals.lst"
+    obj = tmp_path / "globals.ccobj"
+    subprocess.run(
+        [sys.executable, str(cc), "--bits", "32", "--object", str(source), str(assembly)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "nasm",
+            "-f",
+            "bin",
+            "-i",
+            str(REPO_ROOT / "src" / "include") + "/",
+            "-l",
+            str(listing),
+            "-o",
+            str(binary),
+            str(assembly),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(cc), "pack-ccobj", str(binary), str(listing), str(obj)],
+        check=True,
+    )
+
+    output = tmp_path / "linked.bin"
+    map_path = tmp_path / "linked.map"
+    subprocess.run(
+        [
+            sys.executable,
+            str(CCLD),
+            "--emit-map",
+            str(map_path),
+            "--output",
+            str(output),
+            str(obj),
+        ],
+        check=True,
+    )
+
+    image = output.read_bytes()
+    # BSS trailer for ``_g_g_zero`` (one int).
+    bss_size, magic = struct.unpack_from("<IH", image, len(image) - 6)
+    assert magic == BSS_MAGIC32
+    assert bss_size == 4
+
+    # main is the only global; data/string symbols are locals and
+    # don't appear in the public map.
+    with map_path.open(encoding="utf-8") as file:
+        symbols = json.load(file)["symbols"]
+    assert symbols["main"] == PROGRAM_BASE
+
+    # The very first instruction emitted into main is
+    # ``mov eax, [_g_g_init]`` — encoded ``A1 <abs32>``.  Its abs32
+    # operand sits at image offset 1; after relocation that abs32
+    # must point inside the linked image.  An unpatched relocation
+    # would leave four zero bytes there.
+    assert image[0] == 0xA1, image[:6].hex()
+    operand = struct.unpack_from("<I", image, 1)[0]
+    assert PROGRAM_BASE <= operand < PROGRAM_BASE + len(image), hex(operand)
+
+
 def test_help_prints_usage() -> None:
     """`tools/ccld.py --help` exits 0 and prints usage."""
     result = subprocess.run(

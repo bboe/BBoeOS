@@ -68,11 +68,16 @@ def _apply_relocations(
     pass is pure patching.
     """
     for object_payload in object_payloads:
+        local_addresses = object_payload.get("local_addresses", {})
         for relocation in object_payload["relocations"]:
             section = object_payload["sections"][relocation["section"]]
             patch_address = section["slot_address"] + relocation["offset"]
             patch_offset_in_image = patch_address - base
-            symbol_address = symbol_addresses[relocation["symbol"]]
+            symbol_name = relocation["symbol"]
+            # Object-local symbols (cc.py's _g_/_l_/_str_/_arr_ labels)
+            # resolve from the owning object's per-file table first;
+            # global symbols fall through to the cross-object table.
+            symbol_address = local_addresses.get(symbol_name) or symbol_addresses[symbol_name]
             packed = (
                 struct.pack("<i", symbol_address - (patch_address + 4))
                 if relocation["type"] == "rel32"
@@ -133,19 +138,26 @@ def _lay_out_sections(*, base: int, object_payloads: list[dict]) -> LinkLayout:
     # duplicate-global errors can name both contributing sources.
     symbol_origin: dict[str, dict] = {}
     for object_payload in object_payloads:
+        # Per-object local-symbol table.  cc.py marks every in-translation-
+        # unit data label (``_g_x`` / ``_l_x`` / ``_str_N`` / ``_arr_N``) as
+        # ``binding: local`` because they should not collide with same-named
+        # symbols in other objects.  Relocations within an object still need
+        # to find their targets, so the linker resolves each relocation
+        # against the owning object's local table first and falls back to
+        # the global table second.
+        local_addresses: dict[str, int] = {}
         for symbol_name, info in object_payload["symbols"].items():
-            if info["binding"] != "global":
-                # Locals are object-private — relocations only ever
-                # reference globals or externs.  Drop them here so
-                # same-named locals in different objects don't collide.
-                continue
             section = object_payload["sections"][info["section"]]
             address = section["slot_address"] + info["offset"]
+            if info["binding"] != "global":
+                local_addresses[symbol_name] = address
+                continue
             if symbol_name in symbol_addresses:
                 previous_source = symbol_origin[symbol_name]["source"]
                 sys.exit(f"ccld: symbol {symbol_name!r} defined more than once: {previous_source} and {object_payload['source']}")
             symbol_addresses[symbol_name] = address
             symbol_origin[symbol_name] = object_payload
+        object_payload["local_addresses"] = local_addresses
 
     return LinkLayout(bss_size=bss_size, image=image, symbol_addresses=symbol_addresses)
 
@@ -370,15 +382,19 @@ def _validate_relocations(*, object_payloads: list[dict], symbol_addresses: dict
     before any patching so a failure leaves the output untouched.
     """
     for object_payload in object_payloads:
+        local_addresses = object_payload.get("local_addresses", {})
         for relocation in object_payload["relocations"]:
             symbol = relocation["symbol"]
-            if symbol not in symbol_addresses:
-                sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
+            symbol_address = local_addresses.get(symbol)
+            if symbol_address is None:
+                if symbol not in symbol_addresses:
+                    sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
+                symbol_address = symbol_addresses[symbol]
             if relocation["type"] != "rel32":
                 continue
             section = object_payload["sections"][relocation["section"]]
             patch_address = section["slot_address"] + relocation["offset"]
-            displacement = symbol_addresses[symbol] - (patch_address + 4)
+            displacement = symbol_address - (patch_address + 4)
             if displacement < -(1 << 31) or displacement >= (1 << 31):
                 sys.exit(f"ccld: {symbol!r} too far for rel32 (displacement {displacement})")
 

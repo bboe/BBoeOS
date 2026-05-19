@@ -249,6 +249,68 @@ def test_object_mode_vdso_calls_use_indirect_form(tmp_path: Path) -> None:
     assert "jmp FUNCTION_EXIT\n" not in body
 
 
+def test_pack_ccobj_auto_relocates_cross_section_abs32(tmp_path: Path) -> None:
+    """Cross-section abs32 references in NASM listings become relocations.
+
+    cc.py --object emits in-translation-unit data references as bare
+    instructions (``mov eax, [_g_x]``, ``push _str_0``), not CCREL_*
+    macros, because the target symbol lives in a different section of
+    the same object file.  NASM emits these with bracketed placeholder
+    bytes (``A1[00000000]``).  pack-ccobj must recognise the bracket
+    form, accumulate the opcode + 4-byte placeholder into the section,
+    and emit an abs32 relocation pointing at the symbol named on the
+    source line — so the linker can patch the placeholder with the
+    final absolute address when the object lands in the program image.
+    """
+    src = tmp_path / "globals.c"
+    src.write_text('int g_init = 42;\nint g_zero;\nint main() {\n    g_zero = g_init;\n    printf("%d\\n", g_zero);\n    return 0;\n}\n')
+    asm = tmp_path / "globals.asm"
+    binary = tmp_path / "globals.bin"
+    listing = tmp_path / "globals.lst"
+    obj = tmp_path / "globals.ccobj"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", "--object", str(src), str(asm)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "nasm",
+            "-f",
+            "bin",
+            "-i",
+            str(REPO_ROOT / "src" / "include") + "/",
+            "-l",
+            str(listing),
+            "-o",
+            str(binary),
+            str(asm),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(CC), "pack-ccobj", str(binary), str(listing), str(obj)],
+        check=True,
+    )
+
+    with obj.open(encoding="utf-8") as file:
+        payload = json.load(file)
+
+    # The cross-section references should produce abs32 relocations
+    # for every in-TU symbol the .text body touches.
+    reloc_symbols = {reloc["symbol"] for reloc in payload["relocations"]}
+    assert reloc_symbols >= {"_g_g_init", "_g_g_zero", "_str_0"}, reloc_symbols
+    for reloc in payload["relocations"]:
+        if reloc["symbol"] in {"_g_g_init", "_g_g_zero", "_str_0"}:
+            assert reloc["type"] == "abs32", reloc
+            assert reloc["section"] == "text", reloc
+
+    # Every relocation target must be a defined symbol in this object.
+    defined_symbols = set(payload["symbols"])
+    assert reloc_symbols <= defined_symbols, reloc_symbols - defined_symbols
+    # ``_g_g_zero`` is BSS-only, so it lands in the ``.bss`` section.
+    assert payload["symbols"]["_g_g_zero"]["section"] == "bss"
+
+
 def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
     """Fixture .asm exercises every CCREL_* macro.
 
