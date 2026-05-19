@@ -102,6 +102,8 @@ jobs:
             command: python3 tests/test_bboefs.py
           - suite: test_cc_bits
             command: python3 tests/test_cc_bits.py
+          - suite: test_cc_bitfields
+            command: python3 tests/test_cc_bitfields.py
           - suite: test_cc_casts
             command: python3 tests/test_cc_casts.py
           - suite: test_cc_compatibility
