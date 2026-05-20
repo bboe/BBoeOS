@@ -1,8 +1,19 @@
-# user/libbboeos/Makefile — builds libbboeos.a, the freestanding libbboeos shim
-# for clang-built bboeos userland programs.
+# user/libbboeos/Makefile — builds libbboeos.a (full freestanding shim,
+# used to populate the shared libbboeos blob) and libbboeos_stubs.o
+# (per-export `jmp [FUNCTION_<NAME>_PTR]` thunks; linked into clang
+# programs BEFORE libbboeos.a so the full bodies stay in the blob
+# instead of being duplicated into every binary).
 
-.DEFAULT_GOAL := libbboeos.a
-.PHONY: clean syscalls_h
+.DEFAULT_GOAL := all
+.PHONY: all clean stubs_s syscalls_h
+
+all: libbboeos.a libbboeos_stubs.o
+
+# libbboeos_stubs.S is auto-generated from kernel/include/constants.asm
+# by tools/generate_libbboeos_stubs.py and gitignored.  Idempotent —
+# regenerate on every build so a renumbered FUNCTION_*_PTR propagates.
+stubs_s:
+	@python3 ../../tools/generate_libbboeos_stubs.py
 
 # include/syscalls.h is generated from kernel/include/constants.asm by
 # tools/generate_syscalls_h.py and gitignored.  Run it unconditionally
@@ -33,10 +44,15 @@ OBJS     = $(C_SRCS:.c=.o) $(S_SRCS:.S=.o)
 S_SRCS  := _start.S setjmp.S
 
 clean:
-	rm -f $(OBJS) libbboeos.a include/syscalls.h
+	rm -f $(OBJS) libbboeos.a libbboeos_stubs.o libbboeos_stubs.S include/syscalls.h
 
 libbboeos.a: $(OBJS)
 	$(AR) rcs $@ $^
+
+libbboeos_stubs.o: libbboeos_stubs.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+libbboeos_stubs.S: stubs_s
 
 %.o: %.c | syscalls_h
 	$(CC) $(CFLAGS) -c $< -o $@

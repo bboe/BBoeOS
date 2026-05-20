@@ -234,6 +234,11 @@ def _link(*, objects: list[Path]) -> None:
         str(ELF_OUTPUT),
         str(LIBBBOEOS / "_start.o"),
         *[str(obj) for obj in objects],
+        # libbboeos_stubs.o MUST come before libbboeos.a so each
+        # FUNCTION_*_PTR export is defined by a 6-byte `jmp [absolute]`
+        # thunk into the shared blob; otherwise ld would pull the full
+        # string.c (etc.) bodies out of the archive into every program.
+        str(LIBBBOEOS / "libbboeos_stubs.o"),
         str(LIBBBOEOS / "libbboeos.a"),
     ])
     subprocess.check_call([
