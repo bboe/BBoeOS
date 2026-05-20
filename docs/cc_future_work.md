@@ -137,9 +137,9 @@ an `&`.
 **Size:** medium.
 
 The aggressive form of this work — letting any call site with `arr[i]`, `s->f`,
-`*p`, or another `Call` use the regparm(min(3, n)) default — is still open. What
-landed instead are two narrower relaxations that cover every production call
-site:
+`*p`, or another `Call` use the implicit register-passing default — is still
+open. What landed instead are two narrower relaxations that cover every
+production call site:
 
 - `_is_simple_arg` admits `BinaryOperation(+ - | & ^, leaf, leaf)` plus shifts
   with an Int RHS (all AX-only lowerings — `* / %` and shifts with a Var RHS
@@ -270,10 +270,11 @@ For libc, the cost shows up in `stdio.c` (~316 lines) where `printf`, `vprintf`,
 - Codegen: `va_list` is a pointer into the caller's stack frame above the named
   args (Linux SysV i386 ABI).  `va_arg(ap, T)` reads `*(T*)ap; ap += sizeof(T)`
   (with alignment quirks for types larger than `int`).
-- Calling convention: variadic callees can't share the regparm / pinned-
-  register path — the unnamed args have to live on the stack so `va_list` can
-  walk them.  Either gate the existing register-passing optimisations on "not
-  variadic", or accept that variadic functions pay full cdecl.
+- Calling convention: variadic callees can't share the implicit register default
+  / pinned-register path — the unnamed args have to live on the stack so
+  `va_list` can walk them.  Either gate the existing register-passing
+  optimisations on "not variadic", or accept that variadic functions pay full
+  cdecl.
 
 The benefit is symmetric: every libc function that today exists only as a cc.py
 builtin (printf, putchar, getchar, …) could move out to a header body or

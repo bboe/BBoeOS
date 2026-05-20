@@ -671,7 +671,7 @@ int emit_alu_mem_imm(int rfield) {
 /* Emit one byte into the output stream.  Pass 1 only bumps
    current_address / output_total; pass 2 also stores the byte into
    OUTPUT_BUFFER at output_position, flushing to output_fd when the
-   buffer fills.  Callers load ``value`` into AX via the ``regparm(1)``
+   buffer fills.  Callers load ``value`` into AX via the ``the fastcall ABI``
    calling convention; the fastcall prologue spills AX into ``value``'s
    local slot so the body reads it through the normal local path.
 
@@ -876,7 +876,7 @@ void emit_sized_imm(int value, int size) {
 
 /* ``emit_byte(value); emit_byte(value >> 8);`` — the low/high byte pair used
    for every ``disp16`` / ``imm16`` in the instruction handlers.
-   ``regparm(1)`` puts ``value`` in AX so the call site compiles to
+   ``the fastcall ABI`` puts ``value`` in AX so the call site compiles to
    ``mov ax, value ; call emit_word``.  ``emit_byte`` masks to a byte on
    store, so no ``& 0xFF`` guard is needed before passing the raw
    value. */
@@ -887,7 +887,7 @@ void emit_word(int value) {
 
 /* Pick between short (rel8) and near (rel16) jump encoding per
    call, using the pass-1 bitmap ``jump_sizes[]`` indexed by
-   ``jump_index``.  Takes the opcode via the ``regparm(1)`` fastcall
+   ``jump_index``.  Takes the opcode via the ``the fastcall ABI`` fastcall
    convention (AX on entry); the body does its own ``push ax`` to
    save the value across ``skip_ws`` / ``peek_label_target`` calls
    and later ``pop ax`` to recover it for emission.  SI points at
@@ -1103,7 +1103,7 @@ void flush_output() {
 /* Single-byte / two-byte emitters for zero-operand mnemonics.  Each
    handler is dispatched through ``mnemonic_table`` (inline-asm tail
    of this file): ``parse_mnemonic`` does an indirect ``call`` on the
-   label.  ``emit_byte`` uses the ``regparm(1)`` fastcall convention
+   label.  ``emit_byte`` uses the ``the fastcall ABI`` fastcall convention
    so each call site compiles to ``mov ax, OPCODE ; call emit_byte``. */
 void handle_aam() {
     emit_word(0x0AD4);
@@ -1339,7 +1339,7 @@ void handle_int() {
 }
 
 /* Conditional-jump family: each handler hands its rel8 opcode off
-   to ``encode_rel8_jump`` via the fastcall ``regparm(1)`` convention
+   to ``encode_rel8_jump`` via the fastcall ``the fastcall ABI`` convention
    so the call site compiles as ``mov ax, OP ; call encode_rel8_jump``
    in pure C.  The shared helper picks between short (rel8) and near
    (rel16) encoding per jump based on the pass-1 jump-table bitmap.
@@ -2039,7 +2039,7 @@ void handle_xor() {
 }
 
 /* Convert an ASCII hex digit to its numeric value.  Returns 0..15
-   on success, ``-1`` on a non-hex byte.  ``regparm(1)`` fastcall —
+   on success, ``-1`` on a non-hex byte.  ``the fastcall ABI`` fastcall —
    the byte arrives in AX (caller zero-extends from AL before the
    call so AH is clean).  Callers check ``ax < 0`` (``js`` on the
    sign bit) to detect the not-hex case; the ``-1`` sentinel
@@ -2158,7 +2158,7 @@ void include_push() {
 /* Classify an ASCII byte as an identifier character — ``[a-zA-Z0-9_]``.
    The ``.`` prefix that marks local labels is NOT an ident char for
    our purposes; label-scan loops add it via an explicit ``|| c == '.'``
-   next to the call.  ``regparm(1)`` + ``carry_return`` so cc.py lowers
+   next to the call.  ``the fastcall ABI`` + ``carry_return`` so cc.py lowers
    ``if (is_ident_char(c))`` to ``mov ax, c ; call is_ident_char ; jc/jnc``. */
 __attribute__((carry_return)) int is_ident_char(int c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -2238,7 +2238,7 @@ int main(int argc, char *argv[]) {
     die("OK\n");
 }
 
-/* Build a register/register ModR/M byte.  ``regparm(1)`` — reg in
+/* Build a register/register ModR/M byte.  ``the fastcall ABI`` — reg in
    AX, rm on stack; returns ``0xC0 | (reg << 3) | rm`` in AX.
    Previous legacy ``make_modrm_reg_reg`` thunk (AL/BL in, modrm out)
    retired with its ~7 inline-asm callers. */
@@ -2313,7 +2313,7 @@ __attribute__((carry_return)) int match_word(char *keyword) {
 
 /* Shared helper for the ``<op> [disp16], r16`` memory-destination
    form (called by handle_add / handle_and / handle_sub).  Opcode
-   arrives via ``regparm(1)`` AX; source cursor is at ``[``.  Emits
+   arrives via ``the fastcall ABI`` AX; source cursor is at ``[``.  Emits
    ``<opcode> <modrm(mod=00, reg=src, rm=110)> <disp16>``.  Bad
    structure (missing ``]`` or a non-register source) calls
    abort_unknown (which never returns). */
@@ -2360,7 +2360,7 @@ __attribute__((always_inline)) char *mnemonic_keyword_at(int index) {
 
 /* Open ``path`` read-only via SYS_IO_OPEN.  Returns the fd on
    success, or -1 on error (CF set by the syscall).  Takes the path
-   pointer via regparm(1) EAX; the body threads it into ESI for the
+   pointer via the fastcall ABI EAX; the body threads it into ESI for the
    syscall.  Inlined at both call sites via always_inline; the
    internal ``.ofr_ok`` label gets per-site uniquified. */
 __attribute__((always_inline)) int open_file_ro(char *path) {
@@ -3194,7 +3194,7 @@ __attribute__((always_inline)) int read_source_sector() {
    isn't one of the four indexable base registers is treated as bp
    (rm=6), matching the retired asm.
 
-   Fastcall ``regparm(1)`` so the C body reads the parameter
+   Fastcall ``the fastcall ABI`` so the C body reads the parameter
    naturally.  Inline-asm callers still do ``mov al, X ; call
    reg_to_rm``; AX arrives with AH carrying whatever junk the
    caller didn't zero, so the body masks to a byte before the
@@ -3484,14 +3484,14 @@ void symbol_add(int value, int scope) {
    so pass-1 code that tells labels from %assigns can skip the
    relocation step).  Delegates the add / update logic to
    symbol_set, then rewrites the type byte.  Takes value via
-   regparm(1); source_cursor supplies the name via its SI pin. */
+   the fastcall ABI; source_cursor supplies the name via its SI pin. */
 void symbol_add_constant(int value) {
     symbol_set(value, 0xFFFF);
     symbol_table[last_symbol_index].type = 1;
 }
 
 /* Linear scan of the symbol table.  Caller passes scope via
-   regparm(1) AX (low byte compared against entry's scope byte;
+   the fastcall ABI AX (low byte compared against entry's scope byte;
    0xFFFF selects globals since the stored low byte is 0xFF).
    Name pointer is ``source_cursor`` (SI-pinned).  On hit: returns
    AX = value, sets ``last_symbol_index`` to the entry index.  On
@@ -3538,7 +3538,7 @@ int symbol_lookup(int scope) {
 }
 
 /* Update or add.  SI = name via source_cursor pin, value via
-   regparm(1) AX, scope on the stack.  Runs a symbol_lookup first;
+   the fastcall ABI AX, scope on the stack.  Runs a symbol_lookup first;
    if the name exists in the table, overwrites the value word in
    place; otherwise appends via symbol_add and caches the new
    entry's index in last_symbol_index. */
@@ -3553,10 +3553,11 @@ void symbol_set(int value, int scope) {
 }
 
 /* C-callable ``symbol_set`` wrappers that hardcode the scope.  Both
-   take ``value`` via ``regparm`` AX; SI = name is pre-loaded by the
-   caller through ``source_cursor``.  Phase B's default flips
-   ``symbol_set`` to regparm(2), so the scope arrives in EDX rather
-   than as a stack push — these wrappers stamp EDX before calling.
+   take ``value`` via fastcall AX; SI = name is pre-loaded by the
+   caller through ``source_cursor``.  The implicit register-passing
+   default lowers ``symbol_set`` to a 2-arg fastcall, so the scope
+   arrives in EDX rather than as a stack push — these wrappers stamp
+   EDX before calling.
    Factored out so the identical "global" / "local" dispatches in
    ``handle_unknown_word`` and ``parse_line`` don't need to open-code
    the EDX setup inline. */
@@ -3574,7 +3575,7 @@ __attribute__((always_inline)) void symbol_set_local(int value) {
    / ``div`` on a r8 or r16).  Emits F6 (byte) or F7 (word) followed
    by a register-mode ModR/M byte whose /r field is baked into
    ``modrm_base`` by the caller (0xE0 mul, 0xD8 neg, 0xD0 not, 0xF0
-   div).  ``regparm(1)`` puts ``modrm_base`` in AX. */
+   div).  ``the fastcall ABI`` puts ``modrm_base`` in AX. */
 void unary_f6f7(int modrm_base) {
     skip_ws();
     int packed_register = parse_register();

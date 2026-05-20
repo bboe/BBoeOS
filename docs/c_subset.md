@@ -149,13 +149,14 @@ language is the builtin `printf`.
 
 ### Calling convention
 
-The default is a cdecl variant: arguments are pushed right-to-left, the callee
-returns its scalar in `eax` (or `ax` in 16-bit mode), and the caller cleans up
-the stack. The compiler offers a few annotation-driven overrides for
-performance-critical or kernel-bridge functions:
+For plain-int callees the compiler implicitly passes args 0..2 in
+`eax`/`edx`/`ecx` (any remaining args caller-push); each register-passed param
+is spilled into a stack slot at the prologue. Returns land in `eax` (or `ax` in
+16-bit mode); the caller cleans up any stack-passed args. The default is
+suppressed for `main` (the loader pushes argc/argv) and for callees whose call
+sites pass complex arguments — those fall back to cdecl. The compiler offers a
+few annotation-driven overrides for kernel-bridge functions:
 
-- `regparm(1)` — first argument arrives in `ax` and is spilled into a stack slot
-  at the prologue.
 - `carry_return` — return value is a boolean delivered in the carry flag (`CF=0`
   → true). Lets the caller branch with `jnc` / `jc` instead of materialising the
   result.
@@ -182,8 +183,8 @@ Token-level expansion only.
 - `#define NAME(p1, p2, …) tokens…` — function-like macro.  Parens must
   immediately follow the name (per C: `#define FOO (x)` is an object-like macro
   whose value is `(x)`).  Arguments are pre-tokenized at definition time, then
-  re-stamped with the call-site's line at expansion.  See `kernel/include/macros.h`
-  for examples.
+  re-stamped with the call-site's line at expansion.  See
+  `kernel/include/macros.h` for examples.
 - `#ifndef NAME` / `#endif` — conditional inclusion.  If `NAME` is already
   defined when the `#ifndef` is seen, every line up to the matching `#endif` is
   dropped (including any nested `#define` / `#include`).  Nests freely.
@@ -224,8 +225,8 @@ struct-of-struct initializers, runtime-sized local arrays.
 There is **no libc**. Instead, the kernel maps a read-only **vDSO** at user-virt
 `0x10000`. Each entry is a 5-byte stub that thunks into the matching `INT 30h`
 syscall. Userland reaches it through the `FUNCTION_*` constants in
-`kernel/include/constants.asm` (`FUNCTION_PRINT_STRING`, `FUNCTION_WRITE_STDOUT`,
-`FUNCTION_DIE`, etc.).
+`kernel/include/constants.asm` (`FUNCTION_PRINT_STRING`,
+`FUNCTION_WRITE_STDOUT`, `FUNCTION_DIE`, etc.).
 
 On top of the vDSO, the compiler recognises a fixed set of **builtin function
 names** and emits inline syscall sequences for them. The authoritative list is
@@ -277,7 +278,8 @@ Differences from the default flat-binary mode:
 - Emits `global <name>` before each defined function (so the linker can resolve
   cross-translation-unit calls).
 - Emits `%include "ccobj_markers.inc"` for the `CCREL_*` marker macros (defined
-  in `kernel/include/`).  Calls to functions declared `extern` become `CCREL_CALL
+  in `kernel/include/`).  Calls to functions declared `extern` become
+  `CCREL_CALL
   <name>` macro invocations — raw bytes the linker will patch at link time.
 - Suppresses the flat-mode `_program_end:` label and `_bss_end equ` trailer; the
   linker emits the final BSS trailer when producing the flat binary.
@@ -369,5 +371,5 @@ nasm -f bin /tmp/greet.asm -o bin/greet
 ```
 
 In practice you don't need the manual path: `./make_os.sh` discovers every `*.c`
-under `user/programs/` and adds its compiled output to the disk image at `bin/<name>`
-automatically.
+under `user/programs/` and adds its compiled output to the disk image at
+`bin/<name>` automatically.

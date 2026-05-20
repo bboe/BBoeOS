@@ -199,11 +199,6 @@ class Parser:
         Returns a ``(name, value)`` tuple that the caller dispatches
         on.  Supported kinds:
 
-        * ``("regparm", N)`` — first N args (1..3) arrive in fixed
-          registers AX, DX, CX in that order; remaining args use the
-          standard caller-pushed cdecl layout.  ``regparm(1)`` is the
-          historical fastcall shape (arg 0 in AX); 2 and 3 extend the
-          contract along the gcc -mregparm=N spelling.
         * ``("asm_register", "si")`` — file-scope global aliases SI.
         * ``("carry_return", True)`` — int return is reported via CF
           (CF clear = 1/true/success, CF set = 0/false/failure); no
@@ -211,8 +206,7 @@ class Parser:
         * ``("always_inline", True)`` — inline the single-asm-body
           function at every C-level call site; no free-standing body.
 
-        clang silently accepts regparm on x86 targets; asm_register /
-        carry_return are unknown to clang and produce a
+        asm_register / carry_return are unknown to clang and produce a
         ``-Wunknown-attributes`` warning (returncode stays 0), so the
         syntax survives ``test_cc.py``.
         """
@@ -221,17 +215,6 @@ class Parser:
         self.eat("LPAREN")
         attr_name_token = self.eat("IDENT")
         attr_name = attr_name_token[1]
-        if attr_name == "regparm":
-            self.eat("LPAREN")
-            count_token = self.eat("NUMBER")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            count = int(count_token[1])
-            if count not in (1, 2, 3):
-                message = f"regparm({count}) not supported; only regparm(1), regparm(2), and regparm(3) are implemented"
-                raise CompileError(message, line=line)
-            return ("regparm", count)
         if attr_name == "asm_name":
             self.eat("LPAREN")
             sym_token = self.eat("STRING")
@@ -1320,12 +1303,11 @@ class Parser:
             self.eat("SEMI")
             return InlineAsm(content=content, line=line)
         # Optional leading ``__attribute__((...))`` directives.
-        # ``regparm(1)`` applies to function definitions (arg 0 in AX);
         # ``asm_register("REG")`` applies to file-scope VarDecls (the
-        # variable aliases the named CPU register).  Both may appear
-        # before the return type.  ``regparm`` may also appear after
-        # the function parameter list; ``asm_register`` is leading-only.
-        regparm_count = 0
+        # variable aliases the named CPU register).  ``carry_return``,
+        # ``always_inline``, ``naked``, ``preserve_register``, and
+        # ``asm_name`` apply to function definitions and may appear
+        # leading or trailing.  ``asm_register`` is leading-only.
         asm_register: str | None = None
         asm_symbol: str | None = None
         carry_return = False
@@ -1334,9 +1316,7 @@ class Parser:
         preserve_registers: list[str] = []
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
-            if kind == "regparm":
-                regparm_count = value
-            elif kind == "carry_return":
+            if kind == "carry_return":
                 carry_return = True
             elif kind == "always_inline":
                 always_inline = True
@@ -1402,12 +1382,7 @@ class Parser:
             self.eat("RPAREN")
             while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
                 kind, value = self._parse_attribute(line=line)
-                if kind == "regparm":
-                    if regparm_count != 0:
-                        message = "regparm attribute specified twice"
-                        raise CompileError(message, line=line)
-                    regparm_count = value
-                elif kind == "carry_return":
+                if kind == "carry_return":
                     carry_return = True
                 elif kind == "always_inline":
                     always_inline = True
@@ -1418,30 +1393,29 @@ class Parser:
                 else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
-            if regparm_count > 0 and len(parameters) < regparm_count:
-                message = f"regparm({regparm_count}) requires at least {regparm_count} parameter{'s' if regparm_count != 1 else ''}"
-                raise CompileError(message, line=line)
             stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
-            # Tentative regparm: the codegen later defaults plain-param
-            # callees to regparm(min(3, n)).  Anticipate that here so the
-            # carry_return / always_inline checks below don't reject
-            # functions whose stack args will actually arrive in EAX/EDX/ECX.
-            # When the default-flip is suppressed (complex callers) the
-            # generator re-validates and raises at emission time.
-            effective_regparm = regparm_count
-            if effective_regparm == 0 and stack_param_count == len(parameters):
-                effective_regparm = min(3, len(parameters))
-            if carry_return and stack_param_count > effective_regparm:
+            # The codegen defaults plain-param callees to the register
+            # convention (args 0..2 in EAX/EDX/ECX, anything beyond on
+            # the stack).  Anticipate that here so the carry_return /
+            # always_inline checks below don't reject functions whose
+            # stack args will actually arrive in registers.  When the
+            # default flip is suppressed (complex callers) the generator
+            # re-validates and raises at emission time.
+            effective_register_args = stack_param_count
+            if stack_param_count == len(parameters):
+                effective_register_args = min(3, len(parameters))
+            if carry_return and stack_param_count > effective_register_args:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
-                # must arrive via register only (regparm(N)), take no args, or
-                # use only out_register/in_register params (no stack push, no cleanup).
-                message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
+                # must take ≤3 plain args (all register-passed), no args,
+                # or only out_register/in_register params (no stack push,
+                # no cleanup).
+                message = "carry_return functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
                 raise CompileError(message, line=line)
-            if always_inline and stack_param_count > effective_regparm:
+            if always_inline and stack_param_count > effective_register_args:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
+                message = "always_inline functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
                 # Function prototype (no body).  Retained in the AST so
@@ -1460,7 +1434,6 @@ class Parser:
                     name=name,
                     params=parameters,
                     preserve_registers=preserve_registers,
-                    regparm_count=regparm_count,
                 )
             self.eat("LBRACE")
             return Function(
@@ -1472,11 +1445,7 @@ class Parser:
                 name=name,
                 params=parameters,
                 preserve_registers=preserve_registers,
-                regparm_count=regparm_count,
             )
-        if regparm_count != 0:
-            message = "regparm attribute is not valid on global variables"
-            raise CompileError(message, line=line)
         if carry_return:
             message = "carry_return attribute is not valid on global variables"
             raise CompileError(message, line=line)

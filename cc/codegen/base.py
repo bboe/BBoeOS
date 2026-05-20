@@ -246,7 +246,7 @@ class CodeGeneratorBase:
         self.constant_aliases: dict[str, str] = {}
         self.defines: dict[str, str] = dict(defines) if defines else {}
         self.elide_frame: bool = False
-        self.fastcall_functions: set[str] = set()  # regparm(N) callees (any positive N)
+        self.fastcall_functions: set[str] = set()  # fastcall callees (regparm_count > 0)
         self.function_regparm_count: dict[str, int] = {}  # name → N (1, 2, or 3); arg i in (acc, dx, cx)[i] for i < N
         self.frame_size: int = 0
         self.global_arrays: dict[str, ArrayDecl] = {}
