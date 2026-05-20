@@ -55,13 +55,16 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   tooling only.  Lands before the shared-libc work so `user/libc/`
   arrives in its final location.
   Status: shipped in PR #437.
-- [2026-05-20 — shared libc: unify the vDSO + tools/libc surfaces](./2026-05-20-shared-libc-design.md)
+- [2026-05-20 — shared libbboeos: unify the vDSO + user/libc surfaces](./2026-05-20-shared-libbboeos-design.md)
   — promote `user/libc/` from "Doom-only static archive" to
-  "shared libc mapped into every program."  Replaces the 13-entry
-  hand-written `user/vdso/vdso.asm` with a real C libc whose exports
-  auto-populate `FUNCTION_POINTER_TABLE`.  cc.py user programs gain
-  unknown-symbol → indirect-call fallback; per-program `strcmp`
-  reimplementations go away.  Six-phase migration (header cleanup
-  → multi-page blob → cc.py extern fallback → stub archive → vDSO
-  retirement → cc.py-compiles-libc).
+  **libbboeos**, the shared BBoeOS system library mapped into every
+  program.  Replaces the 13-entry hand-written `user/vdso/vdso.asm`
+  with a real C source tree whose exports auto-populate
+  `FUNCTION_POINTER_TABLE`.  cc.py user programs gain unknown-symbol
+  → indirect-call fallback; per-program `strcmp` reimplementations
+  go away.  Naming choice: "libbboeos" (not "libc") so future Rust /
+  Go / Zig ports link against it without "I'm writing C?" friction.
+  Seven-phase migration (source-dir rename → header cleanup →
+  multi-page blob → cc.py extern fallback → stub archive → vDSO
+  retirement → cc.py-compiles-libbboeos).
   Status: design complete; implementation pending.
