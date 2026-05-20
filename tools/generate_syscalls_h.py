@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate user/libc/include/syscalls.h from kernel/include/constants.asm.
+"""Generate user/libbboeos/include/syscalls.h from kernel/include/constants.asm.
 
 Single source of truth for kernel-userspace ABI numbers: the kernel reads
 constants.asm directly (NASM %assign), and clang-compiled userland
-(user/libc, ports/doom) reads the generated C header.  Eliminates the
+(user/libbboeos, ports/doom) reads the generated C header.  Eliminates the
 class of bugs where renumbering the asm side leaves hardcoded hex
 literals on the C side pointing at the wrong syscall — see the
 SYS_RTC_MILLIS regression that wedged Doom's main loop after PR #337
@@ -52,7 +52,7 @@ GROUPS = [
 # REPO has to come before DESTINATION and SOURCE because they reference it;
 # DESTINATION before SOURCE keeps the path block alphabetical thereafter.
 REPO = Path(__file__).resolve().parent.parent
-DESTINATION = REPO / "user" / "libc" / "include" / "syscalls.h"
+DESTINATION = REPO / "user" / "libbboeos" / "include" / "syscalls.h"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
@@ -115,12 +115,12 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
         " *",
         " * Mirrors the syscall-ABI %assign constants (numbers + error codes +",
         " * signals + fd types + ioctl commands + vDSO offsets) into a C header",
-        " * so clang-compiled userland (user/libc, ports/doom) can reference",
+        " * so clang-compiled userland (user/libbboeos, ports/doom) can reference",
         " * them by name instead of hardcoding numeric values that drift the",
         " * next time the asm side is renumbered. */",
         "",
-        "#ifndef BBOEOS_LIBC_SYSCALLS_H",
-        "#define BBOEOS_LIBC_SYSCALLS_H",
+        "#ifndef BBOEOS_SYSCALLS_H",
+        "#define BBOEOS_SYSCALLS_H",
         "",
         "/* Stringify a macro's expansion so it can be embedded inside an inline-",
         ' * asm string literal: `"mov $" SYSNUM_STR(SYS_RTC_MILLIS) ", %%ah\\n"`',
@@ -142,7 +142,7 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
                 line = f"{line}  /* {comment} */"
             lines.append(line)
         lines.append("")
-    lines.append("#endif /* BBOEOS_LIBC_SYSCALLS_H */")
+    lines.append("#endif /* BBOEOS_SYSCALLS_H */")
     return "\n".join(lines) + "\n"
 
 

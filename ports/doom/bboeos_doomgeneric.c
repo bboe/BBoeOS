@@ -70,7 +70,7 @@ static int kq_pop(int *pressed, unsigned char *key) {
  *
  * Arrow keys, modifiers, and standalone keys all arrive as single
  * (pressed, BBKEY_*) events now — no CSI sequence reassembly, no
- * ASCII synthesis hacks.  See user/libc/include/bbkeys.h for the
+ * ASCII synthesis hacks.  See user/libbboeos/include/bbkeys.h for the
  * full code list and kernel/drivers/ps2.c for the producer side. */
 static unsigned char keycode_to_doom(int code) {
     switch (code) {

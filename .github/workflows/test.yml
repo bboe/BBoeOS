@@ -143,18 +143,18 @@ jobs:
           - suite: test_unit
             command: python3 -m pytest tests/unit/
           - suite: lint_no_raw_syscalls
-            # Bare `int $0x30` outside user/libc/ means a clang-compiled
+            # Bare `int $0x30` outside user/libbboeos/ means a clang-compiled
             # caller is hardcoding a syscall number and will silently break
             # the next time the asm-side numbers in kernel/include/constants.asm
             # are renumbered (see PR #340 — Doom's hand-rolled DG_GetTicksMs
             # / DG_SleepMs invoked the wrong syscall for two months because
             # nobody updated the hex literal after PR #337's renumber).
             # Userland should call libc wrappers, which use the symbolic
-            # SYS_* macros from the auto-generated user/libc/include/syscalls.h.
+            # SYS_* macros from the auto-generated user/libbboeos/include/syscalls.h.
             command: |
-              matches=$(git grep -n 'int \$0x30' -- 'ports/' ':!user/libc/syscall.c' ':!user/libc/signal.c' || true)
+              matches=$(git grep -n 'int \$0x30' -- 'ports/' ':!user/libbboeos/syscall.c' ':!user/libbboeos/signal.c' || true)
               if [ -n "$matches" ]; then
-                  echo "Bare INT 30h found outside user/libc/{syscall,signal}.c — call a libc wrapper instead:"
+                  echo "Bare INT 30h found outside user/libbboeos/{syscall,signal}.c — call a libc wrapper instead:"
                   echo "$matches"
                   exit 1
               fi

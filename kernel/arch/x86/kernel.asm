@@ -546,14 +546,14 @@ kernel_gdtr:
         dw kernel_gdt_end - kernel_gdt_start - 1
         dd kernel_gdt_start
 
-        ;; The libc shared blob (FUNCTION_TABLE jump block + shared_*
+        ;; The libbboeos shared blob (FUNCTION_TABLE jump block + shared_*
         ;; helper bodies + FUNCTION_POINTER_TABLE) used to be incbin'd
         ;; here, but it now ships as `lib/libbboeos` on the disk image.
         ;; `vdso_install` in entry.asm reads it at boot, copies it
         ;; into a freshly-allocated frame, and maps that frame with
         ;; PTE_SHARED at user-virt FUNCTION_TABLE (0x00010000) in
-        ;; every per-program PD.  Decoupling the libc from kernel.bin
-        ;; keeps the kernel image smaller and lets the libc grow
+        ;; every per-program PD.  Decoupling libbboeos from kernel.bin
+        ;; keeps the kernel image smaller and lets libbboeos grow
         ;; (eventually past 4 KB) without recompiling the kernel.
 
 kernel_end:

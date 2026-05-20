@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """On-OS libc smoke test.
 
-Builds user/libc/test_program/hello.c against libbboeos.a and the
-user/libc/program.ld linker script, drops it on the disk image as
+Builds user/libbboeos/test_program/hello.c against libbboeos.a and the
+user/libbboeos/program.ld linker script, drops it on the disk image as
 bin/hello, runs it from the shell, and verifies the expected serial
 markers.  This is end-to-end coverage for the libc shim: printf,
 malloc/free, setjmp/longjmp, and program exit through _start.
@@ -16,11 +16,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-LIBC = REPO / "user" / "libc"
+LIBBBOEOS = REPO / "user" / "libbboeos"
 
-HELLO_BIN = LIBC / "test_program" / "hello"
-HELLO_SRC = LIBC / "test_program" / "hello.c"
-PROGRAM_LD = LIBC / "program.ld"
+HELLO_BIN = LIBBBOEOS / "test_program" / "hello"
+HELLO_SRC = LIBBBOEOS / "test_program" / "hello.c"
+PROGRAM_LD = LIBBBOEOS / "program.ld"
 
 sys.path.insert(0, str(REPO / "tests"))
 
@@ -49,7 +49,7 @@ def _build_hello() -> None:
     rules into the libc Makefile.
     """
     obj = HELLO_SRC.with_suffix(".o")
-    subprocess.check_call(["make", "-C", str(LIBC), str(obj.relative_to(LIBC))])
+    subprocess.check_call(["make", "-C", str(LIBBBOEOS), str(obj.relative_to(LIBBBOEOS))])
     if HELLO_BIN.exists():
         HELLO_BIN.unlink()
     subprocess.check_call([
@@ -62,9 +62,9 @@ def _build_hello() -> None:
         "binary",
         "-o",
         str(HELLO_BIN),
-        str(LIBC / "_start.o"),
+        str(LIBBBOEOS / "_start.o"),
         str(obj),
-        str(LIBC / "libbboeos.a"),
+        str(LIBBBOEOS / "libbboeos.a"),
     ])
 
 
@@ -75,8 +75,8 @@ def _build_image_and_install() -> None:
 
 
 def _build_libbboeos() -> None:
-    """Build libbboeos.a (and the per-source .o files) via user/libc/Makefile."""
-    subprocess.check_call(["make", "-C", str(LIBC)])
+    """Build libbboeos.a (and the per-source .o files) via user/libbboeos/Makefile."""
+    subprocess.check_call(["make", "-C", str(LIBBBOEOS)])
 
 
 def main() -> None:

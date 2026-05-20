@@ -36,7 +36,7 @@
 // kernel keeps the layout-agnostic code stable, modifier keys are
 // first-class, and consumers can dispatch on the code without ever
 // caring about ASCII / shift state.  KEEP IN SYNC with
-// user/libc/include/bbkeys.h (the userspace consumer header) —
+// user/libbboeos/include/bbkeys.h (the userspace consumer header) —
 // cc.py's preprocessor doesn't share an include path with the
 // userspace clang toolchain so this header can't be a single
 // source of truth.

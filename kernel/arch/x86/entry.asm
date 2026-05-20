@@ -1662,7 +1662,7 @@ vdso_install:
 
         ;; Compute page count = ceil(size / 4096) and assert it fits
         ;; inside the compile-time VDSO_PAGE_COUNT_MAX ceiling.  A
-        ;; too-big libbboeos here means either the libc has grown past
+        ;; too-big libbboeos here means either libbboeos has grown past
         ;; the kernel's BSS-sized phys-frame array (bump
         ;; VDSO_PAGE_COUNT_MAX) or something else is writing to the
         ;; file (bug).  Either way it can't silently truncate at boot.

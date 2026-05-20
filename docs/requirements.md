@@ -59,25 +59,25 @@ the pinned wheel automatically, so no separate install is required for the hook.
 To run clang-format outside of pre-commit, `pip install clang-format` gets the
 same binary the hook uses.
 
-The libc tests need **`clang`**:
+The libbboeos tests need **`clang`**:
 
 - `tests/unit/test_libbboeos.py` runs clang in its host-native default mode to
   compile each unit test's tiny C program.  Same compiler as the smoke test
   below, so installing one covers both.
-- `tests/test_libbboeos_qemu.py` (the libc on-OS smoke test) drives the
+- `tests/test_libbboeos_qemu.py` (the libbboeos on-OS smoke test) drives the
   freestanding cross-compile (`--target=i386-pc-none-elf -m32 -ffreestanding
   -nostdinc -nostdlib`) plus a few build-system tools:
 
-  - **`make`** — invoked as `make -C user/libc`; reuses the Makefile's CFLAGS
+  - **`make`** — invoked as `make -C user/libbboeos`; reuses the Makefile's CFLAGS
     so the test doesn't duplicate them.
   - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against
-    `libbboeos.a` and the `user/libc/program.ld` linker script.
-  - **`ar`** (GNU `ar`, also from `binutils`) — packs the libc objects into
+    `libbboeos.a` and the `user/libbboeos/program.ld` linker script.
+  - **`ar`** (GNU `ar`, also from `binutils`) — packs the libbboeos objects into
     `libbboeos.a`.
 
 ## Doom port (`ports/doom/build.py`)
 
-The Doom build needs the libc deps above (clang, make, ar) plus a GNU-compatible
+The Doom build needs the libbboeos deps above (clang, make, ar) plus a GNU-compatible
 linker + objcopy.  `build.py` auto-picks the first one it finds on `$PATH`,
 in order:
 
@@ -96,7 +96,7 @@ Ubuntu / Debian:
 
 ```sh
 sudo apt-get install -y e2fsprogs nasm qemu-system-x86
-# Plus, for the libc on-OS smoke test:
+# Plus, for the libbboeos on-OS smoke test:
 sudo apt-get install -y binutils clang make
 # Plus, for the Doom port (lld is one option; binutils above also works):
 sudo apt-get install -y lld llvm
@@ -106,7 +106,7 @@ macOS (Homebrew):
 
 ```sh
 brew install e2fsprogs nasm qemu
-# Plus, for the libc on-OS smoke test (clang + make ship with Xcode CLT):
+# Plus, for the libbboeos on-OS smoke test (clang + make ship with Xcode CLT):
 xcode-select --install
 # Plus, for the Doom port — pick one of:
 brew install x86_64-elf-binutils    # GNU cross-binutils, simplest

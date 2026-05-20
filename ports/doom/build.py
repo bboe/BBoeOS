@@ -5,10 +5,10 @@ Pipeline:
   1. fetch doomgeneric source (third_party/doomgeneric, GPLv2) if missing
   2. fetch chocolate-doom OPL stack (third_party/chocolate-doom-opl, GPL-2)
      if missing
-  3. build libbboeos.a (user/libc/Makefile)
+  3. build libbboeos.a (user/libbboeos/Makefile)
   4. compile each non-platform-backend doomgeneric .c file
   5. compile our bboeos backend (ports/doom/bboeos_doomgeneric.c)
-  6. link everything plus user/libc/_start.o through user/libc/program.ld
+  6. link everything plus user/libbboeos/_start.o through user/libbboeos/program.ld
      into a flat binary
 
 Each .c file's .o lands in build/doom/ so re-runs are incremental.
@@ -31,7 +31,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 CHOCOLATE_OPL = REPO / "third_party" / "chocolate-doom-opl"
-LIBC = REPO / "user" / "libc"
+LIBBBOEOS = REPO / "user" / "libbboeos"
 DOOM_DIR = REPO / "ports" / "doom"
 THIRD_PARTY = REPO / "third_party" / "doomgeneric" / "doomgeneric"
 BUILD = REPO / "build" / "doom"
@@ -113,7 +113,7 @@ CFLAGS = (
     # DG_ScreenBuffer with no scaling.
     "-DDOOMGENERIC_RESX=320",
     "-DDOOMGENERIC_RESY=200",
-    f"-I{LIBC / 'include'}",
+    f"-I{LIBBBOEOS / 'include'}",
     f"-I{THIRD_PARTY}",
     f"-I{REPO / 'ports' / 'doom' / 'include'}",  # SDL_mixer.h shim
     f"-I{CHOCOLATE_OPL}",  # fetched chocolate-doom OPL stack
@@ -121,7 +121,7 @@ CFLAGS = (
 
 
 def _build_libbboeos() -> None:
-    """Run make -C user/libc to produce libbboeos.a + _start.o.
+    """Run make -C user/libbboeos to produce libbboeos.a + _start.o.
 
     Forwards a GNU-compatible ``AR`` so the archive's symbol index is
     in the format ld.lld / x86_64-elf-ld expects.  macOS's BSD ``ar``
@@ -129,8 +129,8 @@ def _build_libbboeos() -> None:
     sometimes silently mis-indexes for objects with our --target,
     surfacing as undefined-reference errors at link time.
 
-    Generates user/libc/include/syscalls.h first so both libc itself
-    and Doom (which inherits the same -Iuser/libc/include) compile
+    Generates user/libbboeos/include/syscalls.h first so both libc itself
+    and Doom (which inherits the same -Iuser/libbboeos/include) compile
     against fresh syscall numbers.  Idempotent — the generator only
     rewrites the header when the asm side actually changed.
     """
@@ -142,7 +142,7 @@ def _build_libbboeos() -> None:
         purpose="GNU-compatible ar",
     )
     env = os.environ | {"AR": archiver}
-    subprocess.check_call(["make", "-C", str(LIBC)], env=env)
+    subprocess.check_call(["make", "-C", str(LIBBBOEOS)], env=env)
 
 
 def _compile_one(*, source: Path, extra_cflags: tuple[str, ...] = ()) -> Path:
@@ -228,13 +228,13 @@ def _link(*, objects: list[Path]) -> None:
         "-m",
         "elf_i386",
         "-T",
-        str(LIBC / "program.ld"),
+        str(LIBBBOEOS / "program.ld"),
         f"-Map={MAP_OUTPUT}",
         "-o",
         str(ELF_OUTPUT),
-        str(LIBC / "_start.o"),
+        str(LIBBBOEOS / "_start.o"),
         *[str(obj) for obj in objects],
-        str(LIBC / "libbboeos.a"),
+        str(LIBBBOEOS / "libbboeos.a"),
     ])
     subprocess.check_call([
         objcopy,
