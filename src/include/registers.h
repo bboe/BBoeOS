@@ -30,6 +30,114 @@
  * Structs are listed alphabetically by tag.
  */
 
+/* ATA device-control register (port 0x3F6, write-side).
+ *
+ *  nien:     1 = block IRQs from the controller
+ *  srst:     1 = hold the controller in software reset (clear, wait,
+ *            then re-clear to release)
+ *  hob:      1 = "high-order byte" select for LBA48 reads
+ *
+ * Bit 0 is always 0; bits 3..5 are reserved.
+ */
+struct ata_dcr {
+    uint8_t : 1;
+    uint8_t nien : 1;
+    uint8_t srst : 1;
+    uint8_t : 4;
+    uint8_t hob : 1;
+};
+
+/* ATA drive/head register (port 0x1F6).
+ *
+ *  lba_high[4]: in LBA mode, bits 24..27 of the LBA; in CHS mode, the
+ *               head number (0..15)
+ *  slave:       0 = master device, 1 = slave
+ *  reserved_5:  must be 1 (legacy / obsolete)
+ *  lba:         1 = LBA addressing, 0 = CHS
+ *  reserved_7:  must be 1 (legacy / obsolete)
+ *
+ * The two reserved-must-be-1 bits are what makes a "master + LBA + head 0"
+ * write come out as 0xE0 rather than 0x40.
+ */
+struct ata_drive_head {
+    uint8_t lba_high : 4;
+    uint8_t slave : 1;
+    uint8_t reserved_5 : 1;
+    uint8_t lba : 1;
+    uint8_t reserved_7 : 1;
+};
+
+/* ATA status register (port 0x1F7, read-side).
+ *
+ *  err:  command ended with an error; details in the error register
+ *  idx:  index pulse (legacy, ignored)
+ *  corr: data corrected via ECC (legacy)
+ *  drq:  data request — controller has a sector ready (read) or is
+ *        ready to accept one (write)
+ *  dsc:  drive seek complete (also called SRV on packet devices)
+ *  df:   drive fault (write-fault on legacy drives)
+ *  rdy:  drive ready to accept commands
+ *  bsy:  controller busy; ignore every other bit while this is 1
+ */
+struct ata_status {
+    uint8_t err : 1;
+    uint8_t idx : 1;
+    uint8_t corr : 1;
+    uint8_t drq : 1;
+    uint8_t dsc : 1;
+    uint8_t df : 1;
+    uint8_t rdy : 1;
+    uint8_t bsy : 1;
+};
+
+/* 8237A single-channel mask register (port 0x0A for ch 0-3,
+ * port 0xD4 for ch 4-7).  Writing here masks or unmasks one DMA
+ * channel without disturbing the other three.
+ *
+ *  channel[2]: 00 = ch0/4, 01 = ch1/5, 10 = ch2/6, 11 = ch3/7
+ *  set:        1 = mask the channel, 0 = unmask
+ *  reserved:   bits 7-3
+ */
+struct dma_mask {
+    uint8_t channel : 2;
+    uint8_t set : 1;
+    uint8_t : 5;
+};
+
+/* 8237A mode register (port 0x0B for ch 0-3, port 0xD6 for ch 4-7).
+ *
+ *  channel[2]:  DMA channel within the controller
+ *  transfer[2]: 00 = verify, 01 = write (peripheral -> mem),
+ *               10 = read (mem -> peripheral), 11 = illegal
+ *  autoinit:    1 = reload address/count from base regs at TC
+ *  decrement:   0 = address increment, 1 = decrement
+ *  mode[2]:     00 = demand, 01 = single, 10 = block, 11 = cascade
+ */
+struct dma_mode {
+    uint8_t channel : 2;
+    uint8_t transfer : 2;
+    uint8_t autoinit : 1;
+    uint8_t decrement : 1;
+    uint8_t mode : 2;
+};
+
+/* 82077AA / 8272 digital output register (port 0x3F2).
+ *
+ *  drive[2]:   selected drive 0..3
+ *  reset_not:  0 = hold controller in reset, 1 = run
+ *  dma_irq:    1 = enable DMA/IRQ pin (required for any normal use)
+ *  motor_*:    1 = spin drive N's motor
+ */
+struct fdc_dor {
+    uint8_t drive : 2;
+    uint8_t reset_not : 1;
+    uint8_t dma_irq : 1;
+    uint8_t motor_0 : 1;
+    uint8_t motor_1 : 1;
+    uint8_t motor_2 : 1;
+    uint8_t motor_3 : 1;
+};
+
 /* NE2000 / DP8390 command register (offset 0x00, both pages).
  *
  *  stop:     1 = stop NIC

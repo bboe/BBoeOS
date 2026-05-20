@@ -27,6 +27,28 @@ time.
   get downgraded to cdecl by the complex-arg suppression on call sites that pass
   nested calls like `emit_byte(make_modrm_reg_reg_impl(...))`.
 
+- **drivers/ata: bitfield register structs for the device-control, drive/head,
+  and status registers.**  Adds `struct ata_dcr`, `struct ata_drive_head`, and
+  `struct ata_status` to `src/include/registers.h` and ports every magic-byte /
+  magic-mask call in `ata.c`.  The soft-reset sequence now reads as `struct
+  ata_dcr soft_reset = { .srst = 1 }`, the drive-select write is `{ .lba = 1,
+  .reserved_5 = 1, .reserved_7 = 1 }` (i.e. master + LBA), and BSY/ERR/DRQ
+  status polls become `status_bits->bsy / status_bits->err / status_bits->drq`
+  field accesses instead of `& 0x80 / & 0x01 / & 0x08` masks.  No behavior
+  change; the regression suite (`test_bboefs.py`, `test_programs.py --filesystem
+  ext2`) exercises every changed call site.
+
+- **drivers/fdc + sb16: bitfield register structs for the 8237 DMA and FDC
+  DOR.**  Adds `struct dma_mask`, `struct dma_mode`, and `struct fdc_dor` to
+  `src/include/registers.h` and ports every magic-byte `kernel_outb` in `fdc`
+  and `sb16` that touches the shared 8237 controller or the floppy DOR.  Where
+  the old code read `kernel_outb(0x0B, 0x59)` and relied on a multi-line
+  bit-by-bit comment, the new code says `struct dma_mode m = { .channel = 1,
+  .transfer = 2, .autoinit = 1, .mode = 1 }` and `kernel_outb(0x0B, *(uint8_t
+  *)&m)` — every bit carries its datasheet name.  Same designated-init +
+  bitfield-collapse peephole story as the NE2000 / PIC IMR ports below, so each
+  literal still folds to a single `mov byte [ebp-K], <const>`.
+
 - **cc.py: `*(T *)expr = value` pointer-dereference-assign.**  Write-side
   symmetry of the read-side parse below.  A new `PointerDereferenceAssign` AST
   node carries the address expression, pointee type, and RHS; codegen evaluates

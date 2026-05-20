@@ -13,6 +13,8 @@
 // Stage 1 still uses INT 13h to load stage 2; only the post-boot disk
 // I/O flows through this driver.
 
+#include "registers.h"
+
 // FS scratch frame pointer — defined in vfs.c, populated by
 // `vfs_init` before any disk read.  ata_read_sector / ata_write_sector
 // stream PIO words directly into / out of the buffer it points at.
@@ -23,22 +25,31 @@ extern uint8_t *sector_buffer;
 //   ATA_DATA              = 0x1F0   data port (16-bit)
 //   ATA_SEC_COUNT         = 0x1F2   sector count
 //   ATA_LBA0/1/2          = 0x1F3/4/5
-//   ATA_DRIVE             = 0x1F6   drive/head select; master+LBA = 0xE0
-//   ATA_COMMAND/STATUS    = 0x1F7
-//   ATA_DEV_CTRL          = 0x3F6   software reset bit = 0x04
-//   STATUS bits: BSY=0x80, DRQ=0x08, ERR=0x01
+//   ATA_DRIVE             = 0x1F6   drive/head select; bitfields in
+//                                   struct ata_drive_head
+//   ATA_COMMAND/STATUS    = 0x1F7   status bitfields in struct ata_status
+//   ATA_DEV_CTRL          = 0x3F6   bitfields in struct ata_dcr
 //   commands: READ = 0x20, WRITE = 0x30
 
 void ata_init() {
+    uint8_t status;
+    struct ata_status *status_bits;
+    struct ata_dcr soft_reset = {.srst = 1};
+    struct ata_dcr release = {0};
     // Software-reset the primary controller, four 400ns reads on the
     // device-control register (see SRST hold-time spec), then release.
-    kernel_outb(0x3F6, 0x04);
+    kernel_outb(0x3F6, *(uint8_t *)&soft_reset);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
-    kernel_outb(0x3F6, 0);
-    while ((kernel_inb(0x1F7) & 0x80) != 0) {
+    kernel_outb(0x3F6, *(uint8_t *)&release);
+    while (1) {
+        status = kernel_inb(0x1F7);
+        status_bits = (struct ata_status *)&status;
+        if (status_bits->bsy == 0) {
+            break;
+        }
     }
 }
 
@@ -52,11 +63,19 @@ void ata_issue(int lba __attribute__((in_register("ax"))),
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx"))) {
     int saved_lba;
+    uint8_t status;
+    struct ata_status *status_bits;
+    struct ata_drive_head select = {.lba = 1, .reserved_5 = 1, .reserved_7 = 1};
     saved_lba = lba & 0xFFFF;
-    while ((kernel_inb(0x1F7) & 0x80) != 0) {
+    while (1) {
+        status = kernel_inb(0x1F7);
+        status_bits = (struct ata_status *)&status;
+        if (status_bits->bsy == 0) {
+            break;
+        }
     }
-    kernel_outb(0x1F6, 0xE0); // master + LBA mode
-    kernel_outb(0x1F2, 1);    // sector count = 1
+    kernel_outb(0x1F6, *(uint8_t *)&select);
+    kernel_outb(0x1F2, 1); // sector count = 1
     kernel_outb(0x1F3, saved_lba & 0xFF);
     kernel_outb(0x1F4, (saved_lba >> 8) & 0xFF);
     kernel_outb(0x1F5, 0);
@@ -97,17 +116,19 @@ int ata_read_sector(int lba __attribute__((in_register("ax"))))
 int ata_wait_drq() __attribute__((carry_return))
 __attribute__((preserve_register("edx"))) {
     uint8_t status;
+    struct ata_status *status_bits;
     while (1) {
         status = kernel_inb(0x1F7);
-        if ((status & 0x80) != 0) {
+        status_bits = (struct ata_status *)&status;
+        if (status_bits->bsy) {
             continue;
-        } // BSY — keep polling
-        if ((status & 0x01) != 0) {
+        }
+        if (status_bits->err) {
             return 0;
-        } // ERR → CF=1
-        if ((status & 0x08) != 0) {
+        } // CF=1
+        if (status_bits->drq) {
             return 1;
-        } // DRQ → CF=0
+        } // CF=0
         // BSY=0, DRQ=0, ERR=0 — keep polling
     }
 }
@@ -121,15 +142,17 @@ int ata_write_sector(int lba __attribute__((in_register("ax"))))
     __attribute__((preserve_register("edx")))
     __attribute__((preserve_register("esi"))) {
     uint8_t status;
+    struct ata_status *status_bits;
     ata_issue(lba, 0x30); // ATA_CMD_WRITE
     if (ata_wait_drq()) {
         kernel_outsw(0x1F0, sector_buffer, 256);
         while (1) {
             status = kernel_inb(0x1F7);
-            if ((status & 0x80) != 0) {
+            status_bits = (struct ata_status *)&status;
+            if (status_bits->bsy) {
                 continue;
             }
-            if ((status & 0x01) != 0) {
+            if (status_bits->err) {
                 return 0;
             }
             return 1;
