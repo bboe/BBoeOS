@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **drivers/ata: bitfield register structs for the device-control, drive/head,
+  and status registers.**  Adds `struct ata_dcr`, `struct ata_drive_head`, and
+  `struct ata_status` to `src/include/registers.h` and ports every magic-byte /
+  magic-mask call in `ata.c`.  The soft-reset sequence now reads as `struct
+  ata_dcr soft_reset = { .srst = 1 }`, the drive-select write is `{ .lba = 1,
+  .reserved_5 = 1, .reserved_7 = 1 }` (i.e. master + LBA), and BSY/ERR/DRQ
+  status polls become `status_bits->bsy / status_bits->err / status_bits->drq`
+  field accesses instead of `& 0x80 / & 0x01 / & 0x08` masks.  No behavior
+  change; the regression suite (`test_bboefs.py`, `test_programs.py --filesystem
+  ext2`) exercises every changed call site.
+
 - **drivers/fdc + sb16: bitfield register structs for the 8237 DMA and FDC
   DOR.**  Adds `struct dma_mask`, `struct dma_mode`, and `struct fdc_dor` to
   `src/include/registers.h` and ports every magic-byte `kernel_outb` in `fdc`
