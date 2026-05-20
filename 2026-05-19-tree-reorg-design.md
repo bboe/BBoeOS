@@ -56,7 +56,7 @@ ports/                   # ring 3 — glue around upstream third-party code
                          # + tools/fetch_chocolate_opl.sh
 
 tools/                   # host-side build/dev tooling ONLY
-  ccld.py, ccar.py, generate_syscalls_h.py, gen_vdso_pointers.py,
+  ccld.py, ccar.py, generate_syscalls_h.py, gen_libbboeos_pointers.py,
   wrap_md.py, record_demo.py, calibrate_bigbss.py,
   measure_kernel_ports.sh, fetch_wad.sh
 
@@ -137,7 +137,7 @@ redundant; recommend dropping it.
 
 ### `tools/` — stays put
 
-`ccld.py, ccar.py, generate_syscalls_h.py, gen_vdso_pointers.py,
+`ccld.py, ccar.py, generate_syscalls_h.py, gen_libbboeos_pointers.py,
 wrap_md.py, record_demo.py, calibrate_bigbss.py,
 measure_kernel_ports.sh, fetch_wad.sh` — all host-side or
 cross-cutting.  Note `fetch_wad.sh` is doom-adjacent (fetches the WAD
@@ -156,7 +156,7 @@ Every reference to an old path needs updating.  Sources, by category:
   `-i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/`
   → `-i kernel/include/ -i kernel/ -i kernel/arch/x86/ -i kernel/arch/x86/boot/`
 - VDSO build paths: `src/vdso/vdso.asm` → `user/vdso/vdso.asm`,
-  `build/vdso.bin` / `build/vdso.map` / `build/libbboeos`
+  `build/libbboeos.bin` / `build/libbboeos.map` / `build/libbboeos`
   (kept under `build/` — no rename needed there).
 - Output paths (`kernel.bin`, `boot.bin`, drive image) — unchanged.
 
@@ -167,7 +167,7 @@ Every reference to an old path needs updating.  Sources, by category:
 
 ### `tools/*.py`
 
-- `ccld.py`, `ccar.py`, `gen_vdso_pointers.py` — check for hardcoded
+- `ccld.py`, `ccar.py`, `gen_libbboeos_pointers.py` — check for hardcoded
   `src/` references.
 - `generate_syscalls_h.py` — reads `src/include/constants.asm`, must
   update to `kernel/include/constants.asm`.
