@@ -1,4 +1,4 @@
-"""Unit tests for tools/record_doom.py's pure helpers.
+"""Unit tests for ports/doom/record_doom.py's pure helpers.
 
 The recording itself needs QEMU + ffmpeg + a Doom WAD and isn't suited
 to pytest; these tests cover the BIOS-window filter-chain builder,
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(REPO / "tools"))
+sys.path.insert(0, str(REPO / "ports" / "doom"))
 
 from record_doom import (  # noqa: E402
     _build_audio_filter,  # noqa: PLC2701

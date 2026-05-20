@@ -1,4 +1,4 @@
-/* tools/libc/include/stdlib.h */
+/* user/libc/include/stdlib.h */
 #ifndef BBOEOS_LIBC_STDLIB_H
 #define BBOEOS_LIBC_STDLIB_H
 #include <stddef.h>

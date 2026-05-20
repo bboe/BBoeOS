@@ -217,7 +217,7 @@ ext2_init:
         ;; Same recovery story as the deleted vfs_init_scratch.vis_oom.
         ;;
         ;; frame_alloc preserves EBX (it's pushed in the prologue and
-        ;; restored in the epilogue — see src/memory_management/frame.asm),
+        ;; restored in the epilogue — see kernel/memory_management/frame.asm),
         ;; so [sector_buffer] base in EBX is still valid afterward.
         call frame_alloc
         jc .ei_frame_alloc_panic

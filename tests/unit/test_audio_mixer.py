@@ -1,6 +1,6 @@
-"""Pytest unit tests for the SFX mixer used by tools/doom/i_sound_bboeos.c.
+"""Pytest unit tests for the SFX mixer used by ports/doom/i_sound_bboeos.c.
 
-Compiles tools/doom/audio_mixer.c against the host system clang as a
+Compiles ports/doom/audio_mixer.c against the host system clang as a
 shared library and exercises the mixer through its small public API
 (mixer_reset, mixer_start_voice, mixer_stop_voice, mixer_voice_active,
 mixer_render).  Same shape as tests/unit/test_libbboeos.py.
@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-MIXER_SOURCE = REPO_ROOT / "tools" / "doom" / "audio_mixer.c"
+MIXER_SOURCE = REPO_ROOT / "ports" / "doom" / "audio_mixer.c"
 
 
 def _build_shared_library() -> ctypes.CDLL:

@@ -2,7 +2,7 @@
 """Record a clip of bboeos booting, running Doom, quitting, and rebooting.
 
 Boots QEMU against the existing drive.img (assumes you've already
-run `./tools/install_doom.sh`), captures the VGA framebuffer via
+run `./ports/doom/install_doom.sh`), captures the VGA framebuffer via
 the QEMU monitor's ``screendump`` command, and produces a single
 clip covering: welcome banner + shell prompt → ``doom`` typed →
 title sequence + demo loop → menu-driven quit → shell prompt
@@ -40,7 +40,7 @@ import threading
 import time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "tests"))
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -438,7 +438,7 @@ def main() -> int:  # noqa: PLR0915
     arguments = parser.parse_args()
 
     if not DRIVE.is_file():
-        print(f"record_doom: {DRIVE} missing — run ./tools/install_doom.sh first", file=sys.stderr)
+        print(f"record_doom: {DRIVE} missing — run ./ports/doom/install_doom.sh first", file=sys.stderr)
         return 1
     needed_tools = ["ffmpeg"]
     if arguments.format in {"gif", "both"}:

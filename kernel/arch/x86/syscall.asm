@@ -142,7 +142,7 @@ syscall_handler:
         ;; separate %include subfile gained nothing.  The net_*
         ;; handlers — fd-table inspection, per-protocol dispatch,
         ;; payload memcpy through SECTOR_BUFFER — port to C in
-        ;; `src/syscall/syscalls.c` and the table entries below are
+        ;; `kernel/syscall/syscalls.c` and the table entries below are
         ;; thin shims that call them.
 
         ;; ------------------------------------------------------------
@@ -378,7 +378,7 @@ syscall_handler:
         jmp .iret_cf_eax
 
         ;; ------------------------------------------------------------
-        ;; Network handlers — bodies in src/syscall/syscalls.c.  Each
+        ;; Network handlers — bodies in kernel/syscall/syscalls.c.  Each
         ;; entry is a thin shim that calls the C function and jumps to
         ;; .iret_cf.  sys_net_sendto needs the user's dst_port, which
         ;; lives in the saved EBP slot at [esp+8] (the user passed it

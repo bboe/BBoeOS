@@ -1,1 +1,1 @@
-../src/include/encode_domain.asm
+../../kernel/include/encode_domain.asm

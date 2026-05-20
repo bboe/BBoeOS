@@ -1,4 +1,4 @@
-/* tools/libc/include/math.h */
+/* user/libc/include/math.h */
 #ifndef BBOEOS_LIBC_MATH_H
 #define BBOEOS_LIBC_MATH_H
 

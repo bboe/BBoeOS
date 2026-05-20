@@ -41,7 +41,7 @@ BBoeOS is not production software and ships with no security guarantees. That
 said, the following classes of issues are in scope and welcomed:
 
 - Kernel memory-safety bugs (out-of-bounds, use-after-free, type confusion) in
-  `src/arch/x86/` or the C compiler / assembler.
+  `kernel/arch/x86/` or the C compiler / assembler.
 - Ring-3 → ring-0 privilege escalation via syscalls (INT 30h) or the vDSO.
 - Filesystem parser bugs (bbfs / ext2) that can be triggered by a crafted drive
   image.

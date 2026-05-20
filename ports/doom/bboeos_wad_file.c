@@ -1,4 +1,4 @@
-/* tools/doom/bboeos_wad_file.c — slurp-on-open WAD backend.
+/* ports/doom/bboeos_wad_file.c — slurp-on-open WAD backend.
  *
  * doomgeneric's w_file.h defines wad_file_class_t, a virtual class
  * with OpenFile / CloseFile / Read methods + a mapped-pointer flag.
@@ -18,7 +18,7 @@
  * every level load.  P_SetupLevel's WAD I/O collapses to memcpy
  * from the slurp buffer.
  *
- * tools/build_doom.py adds "w_file_stdc" to its excluded source
+ * ports/doom/build_doom.py adds "w_file_stdc" to its excluded source
  * list so doomgeneric's stock W_StdC_* implementations don't fight
  * this one at link time. */
 

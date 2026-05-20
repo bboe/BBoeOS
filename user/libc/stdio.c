@@ -1,4 +1,4 @@
-/* tools/libc/stdio.c */
+/* user/libc/stdio.c */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

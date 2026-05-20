@@ -53,7 +53,7 @@ void mode_gp() {
 void mode_kernel_buf() {
     printf("okptest: io_write to kernel-half pointer\n");
     /* The inline asm avoids ``setc`` because the self-hosted assembler
-       in src/c/asm.c hasn't grown setcc support yet — capturing CF via
+       in user/programs/asm.c hasn't grown setcc support yet — capturing CF via
        a ``jnc`` branch keeps this assemblable by both NASM and the
        self-host. */
     asm("mov ebx, 1\n"                /* fd = STDOUT */

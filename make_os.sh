@@ -21,8 +21,8 @@ done
 
 KBUILD=build/kernel-c
 rm -rf "$KBUILD" && mkdir -p "$KBUILD"
-find src -name '*.c' -not -path 'src/c/*' | while read -r source; do
-    rel="${source#src/}"; out="$KBUILD/${rel%.c}.kasm"
+find kernel -name '*.c' | while read -r source; do
+    rel="${source#kernel/}"; out="$KBUILD/${rel%.c}.kasm"
     mkdir -p "$(dirname "$out")"
     python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
 done
@@ -36,7 +36,7 @@ done
 # zero-padded to offset 0x800, then the 13-entry FUNCTION_POINTER_TABLE
 # (52 bytes).
 mkdir -p build
-nasm -f bin -i src/include/ -o build/vdso.bin src/vdso/vdso.asm
+nasm -f bin -i kernel/include/ -o build/vdso.bin user/vdso/vdso.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -46,7 +46,7 @@ if [ $? -ne 0 ]; then
 fi
 # Concatenate the two halves at their final on-page offsets.  The
 # pointer table sits at offset 0x800 (FUNCTION_POINTER_TABLE -
-# FUNCTION_TABLE, see src/include/constants.asm).
+# FUNCTION_TABLE, see kernel/include/constants.asm).
 python3 -c "
 import struct
 import sys
@@ -64,9 +64,9 @@ open('build/libbboeos', 'wb').write(image)
 # KERNEL_SECTORS is the only build-time variable; if boot.bin overflows
 # the pad, NASM's `times` directive goes negative and the build fails.
 nasm -f bin \
-    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i kernel/include/ -i kernel/ -i kernel/arch/x86/ -i kernel/arch/x86/boot/ \
     -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" -i "$KBUILD/syscall/" \
-    -o kernel.bin src/arch/x86/kernel.asm
+    -o kernel.bin kernel/arch/x86/kernel.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -76,7 +76,7 @@ KERNEL_SECTORS=$(( ( KERNEL_SIZE + 511 ) / 512 ))
 
 # Compute the first page above the kernel's *resident extent* — that's
 # .text/.data on-disk size PLUS the .bss extent.  The BSS section is
-# `nobits` (declared in src/arch/x86/kernel.asm), so its bytes don't
+# `nobits` (declared in kernel/arch/x86/kernel.asm), so its bytes don't
 # ride on disk; we read its size from build/kernel.map (emitted by
 # the [map symbols] directive at the end of kernel.asm).  Without
 # this, KERNEL_RESERVED_BASE would land inside the BSS region and
@@ -118,9 +118,9 @@ fi
 # All immediates are 32-bit regardless of value, so the size is invariant.
 nasm -f bin \
     -DKERNEL_RESERVED_BASE=$KERNEL_RESERVED_BASE \
-    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i kernel/include/ -i kernel/ -i kernel/arch/x86/ -i kernel/arch/x86/boot/ \
     -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" -i "$KBUILD/arch/x86/" -i "$KBUILD/syscall/" \
-    -o kernel.bin src/arch/x86/kernel.asm
+    -o kernel.bin kernel/arch/x86/kernel.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -134,16 +134,16 @@ fi
 nasm -f bin \
     -DKERNEL_SECTORS=$KERNEL_SECTORS \
     -DKERNEL_RESERVED_BASE=$KERNEL_RESERVED_BASE \
-    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i kernel/include/ -i kernel/ -i kernel/arch/x86/ -i kernel/arch/x86/boot/ \
     -i "$KBUILD/" -i "$KBUILD/net/" -i "$KBUILD/fs/" \
-    -o boot.bin src/arch/x86/boot/boot.asm
+    -o boot.bin kernel/arch/x86/boot/boot.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
 
 cat boot.bin kernel.bin > os.bin
 
-# User-facing programs are every src/c/*.c file; test-only fixtures
+# User-facing programs are every user/programs/*.c file; test-only fixtures
 # live under tests/programs/ and only ship in the drive image when
 # --with-test-programs is passed (default builds keep them out so a
 # normal boot has just the user programs).  Both lists are sorted so
@@ -154,7 +154,7 @@ cat boot.bin kernel.bin > os.bin
 # pulled into the link of <name> and excluded from the auto-
 # discovered program lists below so they do not also build as their
 # own programs.  Today only the multitu_demo test uses this.
-MULTI_TU_DEPS_HELPERS=$(find src/c tests/programs -maxdepth 1 -name '*.deps' 2>/dev/null | while read -r deps_path; do
+MULTI_TU_DEPS_HELPERS=$(find user/programs tests/programs -maxdepth 1 -name '*.deps' 2>/dev/null | while read -r deps_path; do
     while read -r helper; do
         [ -z "$helper" ] && continue
         echo "${helper%.c}"
@@ -176,7 +176,7 @@ exclude_helpers() {
     echo "$result"
 }
 
-USER_PROGRAMS_RAW=$(find src/c -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
+USER_PROGRAMS_RAW=$(find user/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
 TEST_PROGRAMS_RAW=$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
 USER_PROGRAMS=$(exclude_helpers "$USER_PROGRAMS_RAW")
 TEST_PROGRAMS=$(exclude_helpers "$TEST_PROGRAMS_RAW")
@@ -195,7 +195,7 @@ rm -rf "$PBUILD" && mkdir -p "$PBUILD"
 # the legacy single-TU flat path (cc.py → nasm -f bin) — reserved for
 # escape hatches if some future emit pattern hits a pipeline bug
 # before the matching ccobj/ccld fix lands.  Currently empty: every
-# program in src/c/ + tests/programs/ builds cleanly through the
+# program in user/programs/ + tests/programs/ builds cleanly through the
 # linker.  Either path produces a flat binary loadable by
 # program_enter (same PROGRAM_BASE, same BSS trailer), so the shell
 # and runtime ABI don't change with the toolchain choice.
@@ -205,7 +205,7 @@ compile_program_flat() {
     name=$1
     source=$2
     python3 cc.py --bits 32 "$source" "$PBUILD/$name.asm" || return 1
-    nasm -f bin -i src/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || return 1
+    nasm -f bin -i kernel/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || return 1
 }
 
 compile_program_object() {
@@ -218,7 +218,7 @@ compile_program_object() {
     # the same cc.py --object → nasm → pack-ccobj pipeline and
     # extend the linker's input list before invoking ccld.
     python3 cc.py --bits 32 --object "$source" "$PBUILD/$name.asm" || return 1
-    nasm -f bin -i src/include/ -l "$PBUILD/$name.lst" -o "$PBUILD/$name.obin" "$PBUILD/$name.asm" || return 1
+    nasm -f bin -i kernel/include/ -l "$PBUILD/$name.lst" -o "$PBUILD/$name.obin" "$PBUILD/$name.asm" || return 1
     python3 cc.py pack-ccobj "$PBUILD/$name.obin" "$PBUILD/$name.lst" "$PBUILD/$name.ccobj" || return 1
     objects="$PBUILD/$name.ccobj"
     if [ -f "$deps_file" ]; then
@@ -227,7 +227,7 @@ compile_program_object() {
             helper_source="$source_directory/$helper"
             helper_stem=$(basename "$helper" .c)
             python3 cc.py --bits 32 --object "$helper_source" "$PBUILD/$helper_stem.asm" || return 1
-            nasm -f bin -i src/include/ -l "$PBUILD/$helper_stem.lst" -o "$PBUILD/$helper_stem.obin" "$PBUILD/$helper_stem.asm" || return 1
+            nasm -f bin -i kernel/include/ -l "$PBUILD/$helper_stem.lst" -o "$PBUILD/$helper_stem.obin" "$PBUILD/$helper_stem.asm" || return 1
             python3 cc.py pack-ccobj "$PBUILD/$helper_stem.obin" "$PBUILD/$helper_stem.lst" "$PBUILD/$helper_stem.ccobj" || return 1
             objects="$objects $PBUILD/$helper_stem.ccobj"
         done < "$deps_file"
@@ -244,9 +244,9 @@ is_flat_program() {
 
 for name in $USER_PROGRAMS; do
     if is_flat_program "$name"; then
-        compile_program_flat "$name" "src/c/$name.c" || exit 1
+        compile_program_flat "$name" "user/programs/$name.c" || exit 1
     else
-        compile_program_object "$name" "src/c/$name.c" || exit 1
+        compile_program_object "$name" "user/programs/$name.c" || exit 1
     fi
 done
 if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
@@ -283,7 +283,7 @@ done
 # Static reference files used by cat / cp / asm tests.
 ./add_file.py --mkdir --image "$IMAGE" src || exit 1
 STATIC_FILES=""
-for f in static/*; do
+for f in user/static/*; do
     [ -f "$f" ] && STATIC_FILES="$STATIC_FILES $f"
 done
 if [ -n "$STATIC_FILES" ]; then

@@ -1,4 +1,4 @@
-// tools/doom/audio_mixer.h — 8-voice software mixer used by
+// ports/doom/audio_mixer.h — 8-voice software mixer used by
 // i_sound_bboeos.c to mix Doom SFX into a single 8-bit unsigned PCM
 // stream for /dev/audio.
 //

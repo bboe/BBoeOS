@@ -1,5 +1,5 @@
 #!/bin/sh
-# tools/fetch_wad.sh — download the Doom 1.9 shareware WAD into wads/.
+# ports/doom/fetch_wad.sh — download the Doom 1.9 shareware WAD into wads/.
 #
 # id Software released the Doom shareware episode as freely
 # redistributable (DOOM Software Limited Distribution License,
@@ -11,6 +11,8 @@
 # directory is gitignored so the WAD never enters our git history.
 
 set -eu
+
+cd "$(dirname "$0")/../.."
 
 DEST="wads/doom1.wad"
 URL="https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad"

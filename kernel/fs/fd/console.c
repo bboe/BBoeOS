@@ -41,7 +41,7 @@ int vga_scrollback_is_active();
 // pushes from IRQ context to every readable console fd; consumer
 // (this) drains only the calling fd, so independent readers don't
 // steal each other's events.  Wire format and BBKEY_* code list:
-// tools/libc/include/bbkeys.h.
+// user/libc/include/bbkeys.h.
 void fd_ioctl_console();
 
 asm("fd_ioctl_console:\n"

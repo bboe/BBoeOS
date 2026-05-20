@@ -23,14 +23,14 @@
 #define fstat(fd) bboeos_fstat(fd)
 #define mkdir(name) bboeos_mkdir(name)
 
-/* Suppress our header-only libc stubs in src/include/ when compiling
+/* Suppress our header-only libc stubs in kernel/include/ when compiling
    under the host libc — the real <ctype.h>, <stdlib.h>, and <getopt.h>
    declarations above take precedence and our stubs would conflict. */
 #define CTYPE_H
 #define GETOPT_H
 #define STRTOL_H
 
-/* --- Constants (from src/include/constants.asm) --- */
+/* --- Constants (from kernel/include/constants.asm) --- */
 
 #define ARG_MAX 256
 #define DIRECTORY_ENTRY_SIZE 32
@@ -155,7 +155,7 @@ void shutdown(void);
 /* Busy-wait for N milliseconds. unistd.h's sleep collides (takes seconds);
    rely on cc.py's builtin for compilation, don't redeclare here. */
 /* Linux-style brk(2): set/query the program break.  EBX = new break (0 =
-   query); returns resulting break.  Used by src/c/sort.c to acquire its
+   query); returns resulting break.  Used by user/programs/sort.c to acquire its
    line-buffer heap. */
 void *sys_break(void *new_break);
 /* BBoeOS syscall: seconds since boot */
@@ -170,7 +170,7 @@ void video_mode(int fd, int mode);
 /* ARP frame template (included from arp_frame.asm by cc.py) */
 extern char arp_frame[];
 
-/* Assembler keyword strings (defined in src/c/asm.c's trailing asm block).
+/* Assembler keyword strings (defined in user/programs/asm.c's trailing asm block).
    Exposed as NAMED_CONSTANTS in cc.py so match_word_c(STR_X) can pass
    the keyword address through AX without per-keyword wrappers. */
 extern char STR_ALIGN[];
@@ -191,7 +191,7 @@ extern char STR_SHORT[];
 extern char STR_TIMES[];
 extern char STR_WORD[];
 
-/* Register table (defined in src/c/asm.c's trailing asm block): 4-byte
+/* Register table (defined in user/programs/asm.c's trailing asm block): 4-byte
    packed entries of name[2] + reg + size, zero-terminated.  Exposed as
    a NAMED_CONSTANT so parse_register can walk it from pure C. */
 extern char register_table[];

@@ -1,4 +1,4 @@
-// tools/doom/audio_mixer.c — see audio_mixer.h for the API contract.
+// ports/doom/audio_mixer.c — see audio_mixer.h for the API contract.
 
 #include "audio_mixer.h"
 

@@ -288,7 +288,7 @@ def test_codegen_ternary_as_call_argument() -> None:
     assert "call passthrough" in output
 
 
-# --- src/include/macros.h ------------------------------------------------
+# --- kernel/include/macros.h ------------------------------------------------
 
 
 def test_codegen_max_min_macro_avoids_redundant_subexpression() -> None:
@@ -322,7 +322,7 @@ def test_codegen_max_min_macro_avoids_redundant_subexpression() -> None:
     with tempfile.NamedTemporaryFile(
         suffix=".c",
         prefix="_test_min_oneshot_",
-        dir=str(REPO_ROOT / "src" / "c"),
+        dir=str(REPO_ROOT / "user" / "programs"),
         mode="w",
         encoding="utf-8",
         delete=True,
@@ -369,7 +369,7 @@ def test_codegen_guarded_update_collapses_self_branch() -> None:
     with tempfile.NamedTemporaryFile(
         suffix=".c",
         prefix="_test_guarded_update_",
-        dir=str(REPO_ROOT / "src" / "c"),
+        dir=str(REPO_ROOT / "user" / "programs"),
         mode="w",
         encoding="utf-8",
         delete=True,
@@ -401,8 +401,8 @@ def test_macros_h_max_min_compile() -> None:
     """``#include "macros.h"`` makes ``MAX`` / ``MIN`` available; both compile.
 
     The source has to live somewhere the preprocessor's ``include/``
-    discovery can find ``src/include/``.  Easiest is to drop the source
-    into ``src/c/`` for the duration of the test (the preprocessor walks
+    discovery can find ``kernel/include/``.  Easiest is to drop the source
+    into ``user/programs/`` for the duration of the test (the preprocessor walks
     up from the source dir looking for a sibling ``include/``).
     """
     test_source = textwrap.dedent("""
@@ -419,7 +419,7 @@ def test_macros_h_max_min_compile() -> None:
     with tempfile.NamedTemporaryFile(
         suffix=".c",
         prefix="_test_macros_",
-        dir=str(REPO_ROOT / "src" / "c"),
+        dir=str(REPO_ROOT / "user" / "programs"),
         mode="w",
         encoding="utf-8",
         delete=True,

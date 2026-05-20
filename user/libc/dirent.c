@@ -1,4 +1,4 @@
-/* tools/libc/dirent.c — POSIX directory iteration on SYS_IO_GETDENTS.
+/* user/libc/dirent.c — POSIX directory iteration on SYS_IO_GETDENTS.
  *
  * Each DIR owns a 4 KB receive buffer.  readdir() refills it via
  * getdents(2) when the cursor catches up with the high-water mark and

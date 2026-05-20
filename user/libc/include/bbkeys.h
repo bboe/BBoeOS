@@ -27,7 +27,7 @@
  * Consumer: fs/fd/console.c CONSOLE_IOCTL_TRY_GET_EVENT
  *
  * IMPORTANT: keep these values in sync with the matching block at
- * the top of src/drivers/ps2.c.  cc.py's preprocessor doesn't share
+ * the top of kernel/drivers/ps2.c.  cc.py's preprocessor doesn't share
  * an include path with the userspace clang build so the header
  * can't be a single source of truth.
  */

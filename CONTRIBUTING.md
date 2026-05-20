@@ -62,7 +62,7 @@ For kernel-architecture changes (boot path, paging, DMA), run the full matrix in
 - Keep changes focused; prefer multiple small PRs over one large one.
 - Update [docs/CHANGELOG.md](docs/CHANGELOG.md) under the *Unreleased* section
   when your change is user-visible.
-- For substantive rewrites of `src/c/<name>.c`, update `archive/<name>.asm` in
+- For substantive rewrites of `user/programs/<name>.c`, update `archive/<name>.asm` in
   the same commit so the archive size comparison stays apples-to-apples.
 
 ## Security Issues

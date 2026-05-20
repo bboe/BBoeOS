@@ -7,7 +7,7 @@ nav_order: 80
 
 Programs loaded from the filesystem can use `INT 30h` for OS services. Syscall
 numbers are defined symbolically as `SYS_*` constants in
-[`src/include/constants.asm`](https://github.com/bboe/BBoeOS/blob/main/src/include/constants.asm)
+[`kernel/include/constants.asm`](https://github.com/bboe/BBoeOS/blob/main/kernel/include/constants.asm)
 — programs reference the names, not the numbers.
 
 | AH    | Name         | Description                                          |
@@ -59,7 +59,7 @@ value, reserved)`.
 ## Error codes
 
 When a syscall sets CF on return, AL holds one of these codes (symbolic names in
-`src/include/constants.asm`):
+`kernel/include/constants.asm`):
 
 | AL  | Name                  | Meaning                                                      |
 |-----|-----------------------|--------------------------------------------------------------|

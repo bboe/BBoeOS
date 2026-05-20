@@ -1,4 +1,4 @@
-/* tools/libc/program.ld — flat binary at PROGRAM_BASE for BBoeOS
+/* user/libc/program.ld — flat binary at PROGRAM_BASE for BBoeOS
  * userland programs linked against libbboeos.a.
  *
  * Emits .text + .rodata + .data starting at PROGRAM_BASE = 0x08048000,

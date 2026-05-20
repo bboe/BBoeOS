@@ -1,6 +1,6 @@
         ;; Legacy scratch slot at phys 0xF000.  Defined here (and in the
         ;; archive/ pure-asm program sources) rather than in
-        ;; src/include/constants.asm: per-program PDs no longer alias the
+        ;; kernel/include/constants.asm: per-program PDs no longer alias the
         ;; low 1 MB so the constant has no use in active programs.
         %assign SECTOR_BUFFER 0F000h
 

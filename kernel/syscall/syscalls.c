@@ -80,7 +80,7 @@ ip_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
 // drivers/ne2k.c file-scope globals.  extern names the symbols
 // without emitting storage; the actual bytes live in ne2k.c.  The
 // equ shims in ne2k.c expose the bare names for the asm callers in
-// src/net/.
+// kernel/net/.
 extern uint8_t net_present;
 extern uint8_t mac_address[6];
 extern uint8_t *net_receive_buffer;

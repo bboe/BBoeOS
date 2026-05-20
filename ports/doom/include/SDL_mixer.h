@@ -1,4 +1,4 @@
-/* tools/doom/include/SDL_mixer.h — empty shim.
+/* ports/doom/include/SDL_mixer.h — empty shim.
  *
  * doomgeneric's i_sound.c does `#include <SDL_mixer.h>` under
  * `#if defined(FEATURE_SOUND) && !defined(__DJGPP__)`.  We compile

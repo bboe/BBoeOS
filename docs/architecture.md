@@ -8,7 +8,7 @@ nav_order: 60
 The kernel is split across two flat binaries (`nasm -f bin`) concatenated on
 disk:
 
-- **`boot.bin`** (`org 0x7C00`, `src/arch/x86/boot/boot.asm`): MBR + post-MBR
+- **`boot.bin`** (`org 0x7C00`, `kernel/arch/x86/boot/boot.asm`): MBR + post-MBR
   real-mode bootstrap + early-PE bootstrap. Loaded by BIOS at `0x7C00`. The MBR
   does DS/ES/SS:SP setup, disk reset, and an `INT 13h` read that pulls the
   post-MBR portion of `boot.bin` into `0x7E00`. The post-MBR real-mode code
@@ -24,12 +24,12 @@ disk:
   triple-faults; the bootstrap is short and tested. On disk error the MBR prints
   `!` via `INT 10h AH=0Eh` and halts; an `INT 13h` failure on the `kernel.bin`
   read prints `K`.
-- **`kernel.bin`** (`org 0xFF820000`, `src/arch/x86/kernel.asm`): post-paging
+- **`kernel.bin`** (`org 0xFF820000`, `kernel/arch/x86/kernel.asm`): post-paging
   high-half kernel. The `org` equals `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`, so
   the kernel runs at its direct-map alias and PDE[FIRST_KERNEL_PDE = 1022]'s 4
   MB direct map is the only mapping it needs. The very first byte is
   `high_entry`, which lgdts the kernel GDT, lidts the kernel IDT (`idt_init`
-  patches the high-half handler offsets at boot — see `src/arch/x86/idt.asm` for
+  patches the high-half handler offsets at boot — see `kernel/arch/x86/idt.asm` for
   why the IDT_ENTRY macro can't fold them at assemble time), drops the boot
   identity mapping at PDE[0], initializes the bitmap frame allocator from E820,
   allocates the kernel direct-map PTs (no-op at FIRST_KERNEL_PDE = 1022 — the
@@ -42,7 +42,7 @@ disk:
 
 ## Post-flip kernel bring-up
 
-- **Post-flip entry** (`protected_mode_entry` in `src/arch/x86/entry.asm`): TSS
+- **Post-flip entry** (`protected_mode_entry` in `kernel/arch/x86/entry.asm`): TSS
   base patch + `SS0`/`ESP0`/IOPB-offset init + `ltr`, PIT @ 100 Hz, 32-bit IRQ 0
   / IRQ 6 handlers via `idt_set_gate32`, driver inits (`ata_init`, `fd_init`,
   `fdc_init`, `ps2_init`, `vfs_init`, `network_initialize`), unmask IRQ 0/6,
@@ -70,7 +70,7 @@ disk:
   program at ring 3. `sys_exit` from any program restores `[shell_esp]` (the CPU
   has already auto-switched to TSS.ESP0 on the ring-3 → 0 transition) and
   re-enters `shell_reload`.
-- **Shell** (`src/c/shell.c`): Loaded from filesystem at `PROGRAM_BASE`
+- **Shell** (`user/programs/shell.c`): Loaded from filesystem at `PROGRAM_BASE`
   (`0x08048000`, the Linux ELF-shaped user-virt load address). Provides CLI
   loop, command dispatch, and built-in commands using `INT 30h` syscalls.
 
@@ -87,7 +87,7 @@ disk:
   allocates via `frame_alloc` only on a successful ext2 magic match — bbfs
   systems never spend the frame.
 - **FD table** is allocated as kernel BSS (`struct fd fd_table[FD_MAX]` in
-  `src/fs/fd.c`), so it lives inside `kernel.bin` like any other kernel global;
+  `kernel/fs/fd.c`), so it lives inside `kernel.bin` like any other kernel global;
   no fixed-phys reservation needed.  `sys_exec` inherits the parent's `fd_table`
   into the child's `program_state` slot rather than re-running `fd_init`, so
   open file descriptors cross exec boundaries; `child_terminate` walks the
@@ -132,7 +132,7 @@ disk:
   everything past 4 MB phys reaches the kernel through the kmap window.
 - **Kmap window:** PDE 1023 (virt `0xFFC00000..0xFFFFFFFF`) is reserved for a
   kernel-only window of demand-mapped slots. `kmap_init`
-  (`src/memory_management/kmap.asm`, called by `high_entry` after the kernel
+  (`kernel/memory_management/kmap.asm`, called by `high_entry` after the kernel
   idle PD takes over) allocates one frame as the window PT and installs it at
   `kernel_idle_pd[1023]`. Every per-program PD inherits PDE 1023 verbatim
   through `address_space_create`'s kernel-half copy-image. `kmap_map(eax = phys)
@@ -201,22 +201,22 @@ timers](#sigalrm-and-interval-timers) below).
 Four paths set per-signal pending bits (single bytes in the per-slot
 `program_state` — `pending_sigint`, `pending_sigpipe`, `pending_sigalrm`):
 
-- **PS/2 IRQ 1** (`src/drivers/ps2.c`): the cooked-byte path recognises the
+- **PS/2 IRQ 1** (`kernel/drivers/ps2.c`): the cooked-byte path recognises the
   Ctrl+C scancode sequence and sets `pending_sigint` before returning from the
   IRQ handler. Because IRQ 1 fires for every keypress regardless of what the CPU
   is executing, this path works unconditionally — even a tight compute loop in
   user code is interrupted.
-- **Serial 0x03 read** (`src/fs/fd/console.c`, `fd_read_console`): the serial
+- **Serial 0x03 read** (`kernel/fs/fd/console.c`, `fd_read_console`): the serial
   poll branch checks each received byte; if it equals `0x03` (ASCII ETX, the
   byte a terminal sends for Ctrl+C) it sets `pending_sigint` and does not
   enqueue the byte into the line buffer.
-- **`fd_write_pipe`** (`src/fs/fd.c`): when a writer resumes from
+- **`fd_write_pipe`** (`kernel/fs/fd.c`): when a writer resumes from
   `kernel_yield_write` and observes `pipe_reader_open(p) == 0`, it sets
   `pending_sigpipe` on the current slot before returning -1 to userspace.  The
   syscall epilogue's `SIGNAL_TAIL_CHECK` then delivers SIGPIPE — `SIG_DFL` kills
   the writer before the -1 surfaces; `SIG_IGN` clears the pending bit and lets
   the caller see the -1 (`EPIPE`).
-- **PIT IRQ 0** (`src/arch/x86/entry.asm`, `pmode_irq0_handler`): when an alarm
+- **PIT IRQ 0** (`kernel/arch/x86/entry.asm`, `pmode_irq0_handler`): when an alarm
   is armed (`alarm_deadline != 0`) and `system_ticks` reaches the deadline, the
   handler sets `pending_sigalrm` and either re-arms (`alarm_interval != 0`) or
   clears the deadline (one-shot).  IRQ 0 fires every ms so latency is sub-tick.
@@ -224,10 +224,10 @@ Four paths set per-signal pending bits (single bytes in the per-slot
 ### Delivery
 
 Every interrupt and syscall return path passes through the `SIGNAL_TAIL_CHECK`
-macro (defined in `src/include/irq_tail.inc`, inlined into the IRQ 0/5/6
-handlers in `src/arch/x86/entry.asm`, the IRQ 1 handler `ps2_irq1_handler` in
-`src/drivers/ps2.c`, the IRQ 6 handler `fdc_irq6_handler` in
-`src/drivers/fdc.c`, and the INT 30h handler in `src/arch/x86/syscall.asm`). The
+macro (defined in `kernel/include/irq_tail.inc`, inlined into the IRQ 0/5/6
+handlers in `kernel/arch/x86/entry.asm`, the IRQ 1 handler `ps2_irq1_handler` in
+`kernel/drivers/ps2.c`, the IRQ 6 handler `fdc_irq6_handler` in
+`kernel/drivers/fdc.c`, and the INT 30h handler in `kernel/arch/x86/syscall.asm`). The
 macro:
 
 1. Checks the IRET frame's CS: if `RPL != 3` the signal is suppressed (the
@@ -295,7 +295,7 @@ then:
    `signal_dispatch_kill`.
 2. Restores EIP, ESP, and a sanitized subset of EFLAGS (arithmetic flags + DF +
    TF; IF forced on, IOPL/VM/NT/RF cleared per `USER_EFLAGS_MASK` in
-   `src/include/constants.asm`), plus the general-purpose registers from the
+   `kernel/include/constants.asm`), plus the general-purpose registers from the
    sigcontext.
 3. Clears `in_signal_handler` and (if either `pending_sigint` or
    `pending_sigalrm` is set — a signal arrived while the handler was running)
@@ -307,18 +307,18 @@ then:
 Long-blocking syscalls poll both pending bits between iterations and bail out
 early rather than forcing a delivery through the IRET path:
 
-- **`fd_read_console`** (the console read loop in `src/fs/fd/console.c`): checks
+- **`fd_read_console`** (the console read loop in `kernel/fs/fd/console.c`): checks
   `pending_sigint || pending_sigalrm` after each character poll cycle. If either
   is set, returns immediately with `CF=1, AL=ERROR_INTERRUPTED` without
   consuming the flag (the `SIGNAL_TAIL_CHECK` epilogue handles final delivery).
-- **`rtc_sleep_ms`** (the busy-wait loop in `src/drivers/rtc.c`, called from
+- **`rtc_sleep_ms`** (the busy-wait loop in `kernel/drivers/rtc.c`, called from
   `SYS_RTC_SLEEP`): checks both pending bits each tick. Same early-exit
   convention; `SYS_RTC_SLEEP` propagates as `CF=1, AL=ERROR_INTERRUPTED` so
   libc's `sleep()` wrapper can surface `EINTR`.
-- **`MIDI_IOCTL_DRAIN`** (the `sti`/`hlt` drain loop in `src/fs/fd/midi.c`):
+- **`MIDI_IOCTL_DRAIN`** (the `sti`/`hlt` drain loop in `kernel/fs/fd/midi.c`):
   checks both pending bits after each `hlt` wakeup. Same early-exit convention.
 
-The libc `errno` layer in `tools/libc/syscall.c` maps `ERROR_INTERRUPTED` to
+The libc `errno` layer in `user/libc/syscall.c` maps `ERROR_INTERRUPTED` to
 `EINTR`, so portable C programs using `read()` / `sleep()` get the standard
 POSIX interrupted-call semantics.
 
@@ -351,7 +351,7 @@ Linux `signal(7)`); the `^A` kill banner distinguishes it from SIGINT's `^C`.
 
 Userland surface: `unsigned int alarm_ms(unsigned int delay_ms, unsigned int
 interval_ms)` (BBoeOS extension) and the POSIX `unsigned int alarm(unsigned int
-seconds)` wrapper, both in `tools/libc/signal.c`.  cc.py-compiled programs call
+seconds)` wrapper, both in `user/libc/signal.c`.  cc.py-compiled programs call
 `alarm_ms()` directly via the matching builtin.
 
 ## Cooperative pipes (`cmd1 | cmd2`)
@@ -375,7 +375,7 @@ The kernel maintains three `program_state` slots in BSS (`entry.asm`):
 
 ### Pipe pool
 
-`src/fs/pipe.c` maintains a static pool of `MAX_PIPES = 4` `struct pipe`
+`kernel/fs/pipe.c` maintains a static pool of `MAX_PIPES = 4` `struct pipe`
 objects, each occupying exactly one 4 KB frame (sized to match `PIPE_SIZE` in
 `constants.asm`). The ring buffer inside the struct is `PIPE_BUFFER_BYTES =
 4076` bytes. Fields at known offsets (`PIPE_OFFSET_*` in `constants.asm`) let
@@ -388,7 +388,7 @@ builds slot_b (cmd1 writer), builds slot_c (cmd2 reader), marks both
 `STATE_RUNNING`, and calls `kernel_yield_to_pipeline_start` to hand off to the
 first child.
 
-`kernel_yield` (`src/arch/x86/entry.asm`) is the cooperative scheduler:
+`kernel_yield` (`kernel/arch/x86/entry.asm`) is the cooperative scheduler:
 
 1. Saves the current slot's kernel ESP to its `program_state.saved_esp`.
 2. Marks the current slot with the caller-supplied state (`STATE_BLOCKED_READ`,
@@ -405,7 +405,7 @@ first child.
 
 ### Block and wake
 
-`fd_read_pipe` (`src/fs/fd.c`) loops: try to drain the ring buffer; if empty and
+`fd_read_pipe` (`kernel/fs/fd.c`) loops: try to drain the ring buffer; if empty and
 the writer end is still open, call `kernel_yield_read(p)` to park the reader and
 yield.  `fd_write_pipe` loops symmetrically: try to fill the ring buffer; if
 full and the reader end is still open, call `kernel_yield_write(p)` to park the

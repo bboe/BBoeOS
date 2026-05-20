@@ -17,7 +17,7 @@
 // I/O bases / register offsets inlined as bare integers — same rule as
 // rtc.c / fdc.c (cc.py emits #define as %define which would clash with
 // constants.asm's %assigns).  Reference table:
-//   NE2K_BASE        = 0x300  (in src/include/constants.asm)
+//   NE2K_BASE        = 0x300  (in kernel/include/constants.asm)
 //   CR (command)     = +0x00   page 0/1 select, start/stop, DMA op
 //   PSTART/PSTOP/BND = +0x01/+0x02/+0x03   RX ring start/end/boundary
 //   TPSR/TBCR0/TBCR1 = +0x04/+0x05/+0x06   TX page start, byte count

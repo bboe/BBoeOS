@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit vdso_pointers.bin from a NASM map of src/vdso/vdso.asm.
+"""Emit vdso_pointers.bin from a NASM map of user/vdso/vdso.asm.
 
 The vDSO's FUNCTION_POINTER_TABLE (at user-virt 0x10800) is the
 linker-friendly indirect-call vector parallel to FUNCTION_TABLE.  Its
@@ -8,7 +8,7 @@ bodies, which only NASM knows after assembling vdso.asm.  This tool
 parses the map file, looks up each helper symbol, and writes a flat
 52-byte binary containing 13 little-endian 4-byte addresses in the
 order required by the FUNCTION_*_PTR constants in
-src/include/constants.asm.  kernel.asm incbins the output blob and
+kernel/include/constants.asm.  kernel.asm incbins the output blob and
 vdso_install copies it into the live vDSO page at boot.
 """
 
@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 # Order must match the FUNCTION_*_PTR constants in
-# src/include/constants.asm and the function_table jmp order in
-# src/vdso/vdso.asm.
+# kernel/include/constants.asm and the function_table jmp order in
+# user/vdso/vdso.asm.
 HELPER_ORDER = (
     "shared_die",
     "shared_exit",

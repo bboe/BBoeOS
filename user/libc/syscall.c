@@ -8,7 +8,7 @@
  * arg registers per docs/syscalls.md, CF=1 on error with AL holding
  * an ERROR_* code.  Wrappers translate ERROR_* -> errno.
  *
- * ERROR_* values come from src/include/constants.asm (alphabetical-by-name,
+ * ERROR_* values come from kernel/include/constants.asm (alphabetical-by-name,
  * values renumbered to match):
  *   01h ERROR_DIRECTORY_FULL  -> ENOSPC
  *   02h ERROR_EXISTS          -> EEXIST

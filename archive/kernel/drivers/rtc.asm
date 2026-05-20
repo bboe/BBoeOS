@@ -12,7 +12,7 @@
 ;;; (`pmode_irq0_handler` in entry.asm) is wired into the protected mode IDT during
 ;;; `protected_mode_entry`, replacing the BIOS default ~18.2 Hz tick. The
 ;;; PIT_* constants below are consumed by entry.asm.  PIC_EOI lives in
-;;; src/include/constants.asm alongside the other 8259A port numbers.
+;;; kernel/include/constants.asm alongside the other 8259A port numbers.
 ;;; ------------------------------------------------------------------------
 
         CMOS_CENTURY            equ 32h
@@ -28,7 +28,7 @@
         CMOS_YEAR               equ 09h
 
         ;; PIC_EOI / PIT_* / MS_PER_TICK / TICKS_PER_SECOND moved
-        ;; to src/include/constants.asm during the C port; this
+        ;; to kernel/include/constants.asm during the C port; this
         ;; archived snapshot relies on those definitions being live
         ;; in the include chain.
 

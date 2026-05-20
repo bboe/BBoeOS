@@ -72,7 +72,7 @@
         %define KERNEL_RESERVED_BASE 0x180000
         %endif
         ;; Kernel-side layout mirror.  Must match the equ chain in
-        ;; src/arch/x86/kernel.asm so that boot.asm's BOOT_PD_PHYS and
+        ;; kernel/arch/x86/kernel.asm so that boot.asm's BOOT_PD_PHYS and
         ;; FIRST_KERNEL_PT_PHYS resolve to the same physical addresses
         ;; the kernel already expects.  In-memory layout (low to high):
         ;;   KERNEL_RESERVED_BASE          (kernel stack — slot_a)

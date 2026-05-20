@@ -5,7 +5,7 @@ nav_order: 40
 
 # Programs
 
-Every executable that ships with BBoeOS lives as a single C file under `src/c/`,
+Every executable that ships with BBoeOS lives as a single C file under `user/programs/`,
 gets compiled by `cc.py`, assembled by NASM, and added to the disk image inside
 `bin/`. The shell first looks in the root directory, then retries with a `bin/`
 prefix — so `cat foo` finds `bin/cat`.
@@ -28,14 +28,14 @@ separate program:
 
 | Program | Usage | Source |
 |---------|-------|--------|
-| `cat` | `cat <filename>` — print a file to stdout. | `src/c/cat.c` |
-| `chmod` | `chmod [+x\|-x] <file>` — set or clear the `FLAG_EXECUTE` bit. | `src/c/chmod.c` |
-| `cp` | `cp <src> <dst>` — copy a file (preserves mode bits). | `src/c/cp.c` |
-| `ls` | `ls [path]` — list directory entries; appends `/` to dirs and `*` to executables. | `src/c/ls.c` |
-| `mkdir` | `mkdir <name>` — create a subdirectory under root. | `src/c/mkdir.c` |
-| `mv` | `mv <old> <new>` — rename a file. Names are capped at 26 chars. | `src/c/mv.c` |
-| `rm` | `rm <file>` — unlink. Refuses files with `FLAG_PROTECTED`. | `src/c/rm.c` |
-| `rmdir` | `rmdir <dir>` — remove an empty subdirectory. | `src/c/rmdir.c` |
+| `cat` | `cat <filename>` — print a file to stdout. | `user/programs/cat.c` |
+| `chmod` | `chmod [+x\|-x] <file>` — set or clear the `FLAG_EXECUTE` bit. | `user/programs/chmod.c` |
+| `cp` | `cp <src> <dst>` — copy a file (preserves mode bits). | `user/programs/cp.c` |
+| `ls` | `ls [path]` — list directory entries; appends `/` to dirs and `*` to executables. | `user/programs/ls.c` |
+| `mkdir` | `mkdir <name>` — create a subdirectory under root. | `user/programs/mkdir.c` |
+| `mv` | `mv <old> <new>` — rename a file. Names are capped at 26 chars. | `user/programs/mv.c` |
+| `rm` | `rm <file>` — unlink. Refuses files with `FLAG_PROTECTED`. | `user/programs/rm.c` |
+| `rmdir` | `rmdir <dir>` — remove an empty subdirectory. | `user/programs/rmdir.c` |
 
 ## Editors and tools
 
@@ -66,13 +66,13 @@ All four NIC programs require QEMU to be launched with `-netdev user,id=net0
 
 ## Adding a new program
 
-1. Drop a C file in `src/c/` (see [C subset reference](c_subset.html) for what
+1. Drop a C file in `user/programs/` (see [C subset reference](c_subset.html) for what
    `cc.py` accepts).
-2. `./make_os.sh` — the build script auto-discovers every `*.c` under `src/c/`.
+2. `./make_os.sh` — the build script auto-discovers every `*.c` under `user/programs/`.
 3. Boot, type the program name at the shell. Unknown names fall through to
    `bin/<name>`.
 
 The shell's three built-ins (`help`, `reboot`, `shutdown`) are dispatched inside
 `shell.c`'s `else if (strcmp(buf, "name") == 0)` chain — adding a built-in means
 a new branch and an updated `help` string. Adding a regular external command
-means just a new `src/c/*.c` file.
+means just a new `user/programs/*.c` file.

@@ -1,6 +1,6 @@
         ;; times_branch_sm.asm — smoke test for ``times N <branch>``.
         ;;
-        ;; Regression: the self-hosted assembler in src/c/asm.c only
+        ;; Regression: the self-hosted assembler in user/programs/asm.c only
         ;; handled ``times N db ...`` and silently elided every other
         ;; payload (``times N jmp X``, ``times N jcc X``, ``times N
         ;; <mnemonic>``) — emitting zero bytes while reporting OK.

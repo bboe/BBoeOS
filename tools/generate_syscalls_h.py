@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate tools/libc/include/syscalls.h from src/include/constants.asm.
+"""Generate user/libc/include/syscalls.h from kernel/include/constants.asm.
 
 Single source of truth for kernel-userspace ABI numbers: the kernel reads
 constants.asm directly (NASM %assign), and clang-compiled userland
-(tools/libc, tools/doom) reads the generated C header.  Eliminates the
+(user/libc, ports/doom) reads the generated C header.  Eliminates the
 class of bugs where renumbering the asm side leaves hardcoded hex
 literals on the C side pointing at the wrong syscall — see the
 SYS_RTC_MILLIS regression that wedged Doom's main loop after PR #337
@@ -52,8 +52,8 @@ GROUPS = [
 # REPO has to come before DESTINATION and SOURCE because they reference it;
 # DESTINATION before SOURCE keeps the path block alphabetical thereafter.
 REPO = Path(__file__).resolve().parent.parent
-DESTINATION = REPO / "tools" / "libc" / "include" / "syscalls.h"
-SOURCE = REPO / "src" / "include" / "constants.asm"
+DESTINATION = REPO / "user" / "libc" / "include" / "syscalls.h"
+SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
 def _format_value(*, raw: str) -> str:
@@ -110,12 +110,12 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
                 break
     width = max((len(name) for name, _, _ in rows if any(p.match(name) for _, p in GROUPS)), default=0)
     lines: list[str] = [
-        "/* AUTO-GENERATED from src/include/constants.asm by tools/generate_syscalls_h.py.",
+        "/* AUTO-GENERATED from kernel/include/constants.asm by tools/generate_syscalls_h.py.",
         " * DO NOT EDIT MANUALLY — re-run the generator to refresh.",
         " *",
         " * Mirrors the syscall-ABI %assign constants (numbers + error codes +",
         " * signals + fd types + ioctl commands + vDSO offsets) into a C header",
-        " * so clang-compiled userland (tools/libc, tools/doom) can reference",
+        " * so clang-compiled userland (user/libc, ports/doom) can reference",
         " * them by name instead of hardcoding numeric values that drift the",
         " * next time the asm side is renumbered. */",
         "",

@@ -102,11 +102,11 @@ Then in the shell: `cat notes/note.txt`.
 
 ## 6. Write and run a C program
 
-BBoeOS has a custom C subset compiler (`cc.py`) that translates `src/c/*.c` to
-NASM-compatible assembly. The build script picks up every `.c` in `src/c/`
+BBoeOS has a custom C subset compiler (`cc.py`) that translates `user/programs/*.c` to
+NASM-compatible assembly. The build script picks up every `.c` in `user/programs/`
 automatically — drop a new one in and rebuild.
 
-Create `src/c/hello.c`:
+Create `user/programs/hello.c`:
 
 ```c
 int main() {

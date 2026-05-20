@@ -5,7 +5,7 @@ nav_order: 50
 
 # C subset reference
 
-`cc.py` is a from-scratch C compiler that translates `src/c/*.c` to
+`cc.py` is a from-scratch C compiler that translates `user/programs/*.c` to
 NASM-compatible 32-bit assembly. It is small enough to read end-to-end
 (`cc/parser.py`, `cc/codegen/`), and it accepts only the slice of C the kernel
 and userland actually need. This page is the reader's-eye summary of that slice
@@ -174,15 +174,15 @@ Token-level expansion only.
 - `#include "<path>"` — double-quoted only; resolved relative to the source's
   directory first, then against any search paths the CLI adds. `cc/cli.py` walks
   up from the source looking for a sibling `include/` directory and adds it to
-  the search list, so `#include "strtol.h"` from `src/c/foo.c` finds
-  `src/include/strtol.h`.  Recursive includes are detected and rejected.
+  the search list, so `#include "strtol.h"` from `user/programs/foo.c` finds
+  `kernel/include/strtol.h`.  Recursive includes are detected and rejected.
 - `#define NAME tokens…` — object-like macro.  Body extends to end of line;
   replacement is token-level so the value is retokenized at the call site and
   the call site's line number is used in errors.
 - `#define NAME(p1, p2, …) tokens…` — function-like macro.  Parens must
   immediately follow the name (per C: `#define FOO (x)` is an object-like macro
   whose value is `(x)`).  Arguments are pre-tokenized at definition time, then
-  re-stamped with the call-site's line at expansion.  See `src/include/macros.h`
+  re-stamped with the call-site's line at expansion.  See `kernel/include/macros.h`
   for examples.
 - `#ifndef NAME` / `#endif` — conditional inclusion.  If `NAME` is already
   defined when the `#ifndef` is seen, every line up to the matching `#endif` is
@@ -224,7 +224,7 @@ struct-of-struct initializers, runtime-sized local arrays.
 There is **no libc**. Instead, the kernel maps a read-only **vDSO** at user-virt
 `0x10000`. Each entry is a 5-byte stub that thunks into the matching `INT 30h`
 syscall. Userland reaches it through the `FUNCTION_*` constants in
-`src/include/constants.asm` (`FUNCTION_PRINT_STRING`, `FUNCTION_WRITE_STDOUT`,
+`kernel/include/constants.asm` (`FUNCTION_PRINT_STRING`, `FUNCTION_WRITE_STDOUT`,
 `FUNCTION_DIE`, etc.).
 
 On top of the vDSO, the compiler recognises a fixed set of **builtin function
@@ -253,7 +253,7 @@ extra register-to-register move.
 Anything not in `BUILTIN_CLOBBERS` and not declared with `extern` is treated as
 a user-defined function and lowered to a `call _<name>`. Programs are
 single-file: there is no linker. Helpers are shared by putting the function
-definition (not just a prototype) in a header under `src/include/` and
+definition (not just a prototype) in a header under `kernel/include/` and
 `#include`-ing it from each consumer — see `line_helpers.h`, `strtol.h`,
 `ctype.h`, `getopt.h` for the convention. Every program is its own translation
 unit, so each consumer inlines a private copy of the function body; when a real
@@ -266,7 +266,7 @@ bodies disappear from each binary.
 and packaging via `cc.py pack-ccobj`.  The resulting `.ccobj` is consumed by the
 (still in-progress) `tools/ccld.py` linker, which combines per-translation unit
 `.ccobj` files with a runtime archive to produce a flat binary.  Object mode is
-opt-in per program and entirely separate from `tools/libc/libbboeos.a` (the
+opt-in per program and entirely separate from `user/libc/libbboeos.a` (the
 clang-built libc used by the Doom port) — the two link worlds do not
 interoperate.
 
@@ -277,7 +277,7 @@ Differences from the default flat-binary mode:
 - Emits `global <name>` before each defined function (so the linker can resolve
   cross-translation-unit calls).
 - Emits `%include "ccobj_markers.inc"` for the `CCREL_*` marker macros (defined
-  in `src/include/`).  Calls to functions declared `extern` become `CCREL_CALL
+  in `kernel/include/`).  Calls to functions declared `extern` become `CCREL_CALL
   <name>` macro invocations — raw bytes the linker will patch at link time.
 - Suppresses the flat-mode `_program_end:` label and `_bss_end equ` trailer; the
   linker emits the final BSS trailer when producing the flat binary.
@@ -364,10 +364,10 @@ int main(int argc, char *argv[]) {
 Compile and assemble manually:
 
 ```sh
-python3 cc.py src/c/greet.c /tmp/greet.asm
+python3 cc.py user/programs/greet.c /tmp/greet.asm
 nasm -f bin /tmp/greet.asm -o bin/greet
 ```
 
 In practice you don't need the manual path: `./make_os.sh` discovers every `*.c`
-under `src/c/` and adds its compiled output to the disk image at `bin/<name>`
+under `user/programs/` and adds its compiled output to the disk image at `bin/<name>`
 automatically.

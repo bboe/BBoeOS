@@ -12,17 +12,17 @@ A minimal x86 operating system: a real-mode bootloader hands off to a paged
 32-bit protected-mode kernel that runs userland programs at ring 3.  Includes a
 shell, VFS with bbfs and ext2 backends, NE2000 networking (ARP / IP / ICMP /
 UDP), a self-hosted assembler, and a custom C subset compiler that translates
-`src/c/*.c` to NASM-compatible assembly on the host.
+`user/programs/*.c` to NASM-compatible assembly on the host.
 
 It also runs Doom:
 
 https://github.com/user-attachments/assets/5efa60a4-c948-4552-9903-23a4c69a0282
 
-The Doom port lives in `tools/doom/` and links against a hand-rolled
-freestanding libc (`tools/libc/libbboeos.a`).  Build pipeline:
-[`tools/build_doom.py`](tools/build_doom.py); shareware-WAD provisioning:
-[`tools/fetch_wad.sh`](tools/fetch_wad.sh); one-shot "build + install on a fresh
-disk image": [`tools/install_doom.sh`](tools/install_doom.sh).
+The Doom port lives in `ports/doom/` and links against a hand-rolled
+freestanding libc (`user/libc/libbboeos.a`).  Build pipeline:
+[`ports/doom/build_doom.py`](ports/doom/build_doom.py); shareware-WAD provisioning:
+[`ports/doom/fetch_wad.sh`](ports/doom/fetch_wad.sh); one-shot "build + install on a fresh
+disk image": [`ports/doom/install_doom.sh`](ports/doom/install_doom.sh).
 
 The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`) concatenated
 on disk.  `boot.bin` is the MBR + post-MBR real-mode bootstrap + 32-bit paging
@@ -76,7 +76,7 @@ macOS keg-only `PATH` gotcha for `e2fsprogs`.
 
     ./add_file.py <file>
 
-* Run the self-hosting assembler test suite (diffs each program in `static/`
+* Run the self-hosting assembler test suite (diffs each program in `user/static/`
   against NASM output after reassembling it inside the OS):
 
     tests/test_asm.py            # full suite
@@ -85,7 +85,7 @@ macOS keg-only `PATH` gotcha for `e2fsprogs`.
 ## File Structure
 
 ```
-src/arch/x86/         Architecture-specific code
+kernel/arch/x86/         Architecture-specific code
   boot/boot.asm       Pre-paging boot binary: MBR + post-MBR + early-PE bootstrap
   boot/vga_font.asm   Boot-time BIOS ROM font copy into char-gen slot 0x4000
   kernel.asm          Post-paging high-half kernel (org 0xC0020000)
@@ -93,14 +93,14 @@ src/arch/x86/         Architecture-specific code
   idt.asm             32-bit IDT, exception stubs, INT 30h gate
   syscall.asm         INT 30h dispatch table
   system.asm          reboot (8042), shutdown (APM / QEMU / Bochs)
-src/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
-src/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
-src/include/          Shared constants and helper includes
-src/lib/              shared_print_*, shared_die / shared_exit / shared_parse_argv
-src/memory_management/  Bitmap frame allocator (frame.asm)
-src/net/              ARP, IP, ICMP, UDP
-src/syscall/          Per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
-src/c/                User-space programs (C sources, compiled by cc.py)
+kernel/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
+kernel/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
+kernel/include/          Shared constants and helper includes
+user/vdso/            shared_print_*, shared_die / shared_exit, vDSO blob
+kernel/memory_management/  Bitmap frame allocator (frame.asm)
+kernel/net/              ARP, IP, ICMP, UDP
+kernel/syscall/          Per-subsystem INT 30h handlers (fs, io, net, rtc, sys)
+user/programs/                User-space programs (C sources, compiled by cc.py)
 tests/programs/       Test-only programs that exercise specific cc.py / kernel paths
 add_file.py           Host-side script to add files to drive image
 cc.py                 Host-side C subset compiler

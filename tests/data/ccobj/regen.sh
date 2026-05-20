@@ -5,6 +5,6 @@ cd "$(dirname "$0")"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 for asm in *.asm; do
     base=${asm%.asm}
-    nasm -f bin -i "$REPO_ROOT/src/include/" \
+    nasm -f bin -i "$REPO_ROOT/kernel/include/" \
          -l "$base.lst" -o "$base.bin" "$asm"
 done

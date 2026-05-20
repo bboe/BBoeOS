@@ -1,4 +1,4 @@
-/* tools/doom/bboeos_doomgeneric.c — bboeos backend for doomgeneric.
+/* ports/doom/bboeos_doomgeneric.c — bboeos backend for doomgeneric.
  *
  * Implements the DG_* abstraction (display, input, time) on top of
  * the bboeos kernel ABI: SYS_VIDEO_MAP for the MODE13H VGA buffer,
@@ -24,7 +24,7 @@
 
 /* Kernel ABI constants we hand to ioctl + the user-virt slot the kernel
  * maps mode-13h's framebuffer into via SYS_VIDEO_MAP.  Mirrored from
- * src/include/constants.asm so the user-side build doesn't need a
+ * kernel/include/constants.asm so the user-side build doesn't need a
  * kernel-header pull. */
 #define CONSOLE_IOCTL_TRY_GETC      0x00
 #define CONSOLE_IOCTL_TRY_GET_EVENT 0x01
@@ -70,8 +70,8 @@ static int kq_pop(int *pressed, unsigned char *key) {
  *
  * Arrow keys, modifiers, and standalone keys all arrive as single
  * (pressed, BBKEY_*) events now — no CSI sequence reassembly, no
- * ASCII synthesis hacks.  See tools/libc/include/bbkeys.h for the
- * full code list and src/drivers/ps2.c for the producer side. */
+ * ASCII synthesis hacks.  See user/libc/include/bbkeys.h for the
+ * full code list and kernel/drivers/ps2.c for the producer side. */
 static unsigned char keycode_to_doom(int code) {
     switch (code) {
         case BBKEY_W:        return KEY_UPARROW;

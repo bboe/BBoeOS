@@ -58,7 +58,7 @@
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
         ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
-        ;; match the function_table jmp order in src/vdso/vdso.asm.
+        ;; match the function_table jmp order in user/vdso/vdso.asm.
         ;; FUNCTION_TABLE comes first as the base anchor; the rest are
         ;; sorted alphabetically with explicit slot offsets so adding /
         ;; reordering an entry only touches its own line.
@@ -83,7 +83,7 @@
         ;; linker relocation without per-site patching.  Flat-mode code
         ;; keeps using the direct `call FUNCTION_*` form above.  Slot
         ;; offsets must match the function_pointer_table dd order in
-        ;; src/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
+        ;; user/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
         ;; vdso.bin compact: the helper bodies + sigreturn trampoline
         ;; currently end at ~0x466, so this leaves ~924 bytes of growth
         ;; headroom before the address would have to be bumped (which

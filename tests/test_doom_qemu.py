@@ -9,7 +9,7 @@ Two test stages:
      bboeos DG_* backend's init path.
 
   2. ``_test_main_loop_with_wad`` — runs only when wads/doom1.wad is
-     present (fetched via tools/fetch_wad.sh, gitignored).  Boots
+     present (fetched via ports/doom/fetch_wad.sh, gitignored).  Boots
      Doom on a 10 MB ext2 image with the WAD and bin/doom installed;
      asserts the engine completes init and the main loop ticks at
      least 30 frames.  Covers the runtime DG_DrawFrame / DG_GetTicksMs
@@ -71,8 +71,8 @@ def _assert_markers(*, expected: list[str], label: str, output: str) -> None:
 
 
 def _build_doom() -> None:
-    """Run tools/build_doom.py to produce build/doom/doom."""
-    subprocess.check_call([sys.executable, str(REPO / "tools" / "build_doom.py")])
+    """Build the doom binary via ports/doom/build_doom.py."""
+    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build_doom.py")])
 
 
 def _install_doom_and_wad() -> None:
@@ -110,7 +110,7 @@ def _test_main_loop_with_wad() -> None:
     full captured buffer.  Skipped when wads/doom1.wad is missing.
     """
     if not WAD_FILE.is_file():
-        print(f"SKIP main-loop test: {WAD_FILE} not present (run tools/fetch_wad.sh)")
+        print(f"SKIP main-loop test: {WAD_FILE} not present (run ports/doom/fetch_wad.sh)")
         return
     _install_doom_and_wad()
     with qemu_session(memory="64") as session:

@@ -14,7 +14,7 @@
  * name at BUFFER (user-virt 0x1500); a future change can wire that
  * through if a program needs to read its own name.
  *
- * The linker script (tools/libc/program.ld) provides __bss_start and
+ * The linker script (user/libc/program.ld) provides __bss_start and
  * __bss_end; we zero that range before calling main. */
 _start:
         fninit

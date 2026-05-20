@@ -100,7 +100,7 @@ directory_sector dw 0                   ; offset 3
         ;; program_enter streams the binary directly from disk into
         ;; per-program user frames via vfs_read_sec, sector by sector.
         ;;
-        ;; sector_buffer is a `uint8_t *` pointer cell in src/fs/vfs.c
+        ;; sector_buffer is a `uint8_t *` pointer cell in kernel/fs/vfs.c
         ;; BSS, populated at boot by `vfs_init` with the kernel-virt of
         ;; `sector_buffer_storage` — a 512 B `resb` block in this file's
         ;; .bss section (see kernel_bss_start..kernel_bss_end below).

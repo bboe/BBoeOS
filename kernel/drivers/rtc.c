@@ -12,7 +12,7 @@
 // IDT during `protected_mode_entry`, replacing the BIOS default
 // ~18.2 Hz tick.  Constants used by entry.asm and fdc.asm
 // (PIT_*, MS_PER_TICK, TICKS_PER_SECOND, PIC_EOI) live in
-// src/include/constants.asm so they survive the asm file's removal.
+// kernel/include/constants.asm so they survive the asm file's removal.
 //
 // CMOS register layout / port addresses inlined as bare integers
 // (cc.py emits #define as %define which would clash with constants.asm

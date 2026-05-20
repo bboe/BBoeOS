@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-/* Match src/include/constants.asm — the kernel ignores any flag bit it
+/* Match kernel/include/constants.asm — the kernel ignores any flag bit it
  * doesn't recognise, so the previous (0x40) value silently turned every
  * libc-side O_CREAT into a no-op.  Until now nothing in userland passed
  * O_CREAT through libc; chocolate-doom's MUS-to-MID temp-file dance is

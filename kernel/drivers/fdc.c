@@ -22,7 +22,7 @@
 //   DMA_MASK/MODE/CLEAR_FF  = 0x0A / 0x0B / 0x0C
 //   FDC_IRQ6_VECTOR         = 0x26  (post pic_remap)
 //   PIC1_CMD_PORT / PIC1_DATA_PORT = 0x20 / 0x21
-//   PIC_EOI = 0x20  (also in src/include/constants.asm)
+//   PIC_EOI = 0x20  (also in kernel/include/constants.asm)
 
 #include "registers.h"
 
@@ -58,7 +58,7 @@ void fdc_wait_irq();
 // 8237 takes a 24-bit physical address; we feed it the FRAME PHYS,
 // computed as `sector_buffer - DIRECT_MAP_BASE`.  The literal
 // 0xFF800000 below must equal `DIRECT_MAP_BASE` in
-// src/arch/x86/kernel.asm — cc.py doesn't resolve NASM equ symbols
+// kernel/arch/x86/kernel.asm — cc.py doesn't resolve NASM equ symbols
 // inside C expressions, so this is a manual link.  Keep in sync.
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax"))) {

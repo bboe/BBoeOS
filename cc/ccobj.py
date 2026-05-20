@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 # Maps CCREL_* macro names to (reloc_type, opcode_length).  Opcode
 # length is the number of bytes between the macro's first emitted byte
 # and the 4-byte placeholder.  For every macro in
-# src/include/ccobj_markers.inc the opcode is a single byte
+# kernel/include/ccobj_markers.inc the opcode is a single byte
 # (E8 / E9 / A1 / A3), so opcode_length == 1.
 CCREL_MACROS: dict[str, tuple[str, int]] = {
     "CCREL_CALL": ("rel32", 1),
@@ -63,7 +63,7 @@ RE_LABEL = re.compile(r"^([A-Za-z_.][A-Za-z0-9_.]*):")
 # NASM accepts a colon-less label form when the row begins with an
 # identifier directly followed by a data / reservation / EQU
 # directive — e.g. ``STR_ENDMACRO db 'endmacro',0``.  cc.py emits
-# this form from file-scope inline asm blocks in ``src/c/asm.c`` (the
+# this form from file-scope inline asm blocks in ``user/programs/asm.c`` (the
 # self-hosted assembler), so the relocation pre-scan needs to pick
 # these up as defined labels too.  Restricted to a fixed directive
 # whitelist so plain instruction rows (``mov eax, STR_FOO``) never
@@ -295,7 +295,7 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         # Record any label found before dispatching to sub-patterns.
         # Both colon-form (``foo: db ...``) and colon-less form
         # (``foo db ...`` — NASM's compact data-declaration shorthand,
-        # used by file-scope inline asm in src/c/asm.c) are accepted.
+        # used by file-scope inline asm in user/programs/asm.c) are accepted.
         label_name: str | None = None
         label_match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
         if label_match and current_section is not None:

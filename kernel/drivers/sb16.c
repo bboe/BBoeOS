@@ -45,10 +45,10 @@
 // I/O ports inlined as bare integers — same convention as rtc.c /
 // fdc.c / ne2k.c (cc.py emits #define as %define which would clash
 // with constants.asm's %assigns).  See the SB16_BASE comment block
-// in src/include/constants.asm for the canonical port reference table.
+// in kernel/include/constants.asm for the canonical port reference table.
 
 // Buffer sizes are tuned for low SFX latency.  Doom's i_sound backend
-// (tools/doom/i_sound_bboeos.c) renders TICK_SAMPLES = 11025 / 35 ≈ 315
+// (ports/doom/i_sound_bboeos.c) renders TICK_SAMPLES = 11025 / 35 ≈ 315
 // samples per Doom tick and writes them in one shot; matching
 // AUDIO_HALF_SIZE to that exact count means each IRQ 5 boundary is
 // also one Doom tick, and a producer that just wrote can't get more

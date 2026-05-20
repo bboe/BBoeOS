@@ -372,7 +372,7 @@ class EmissionMixin:
             self.emit(f'%include "{include}"')
         # File-scope ``asm("...")`` blocks are emitted BEFORE globals /
         # strings / array data.  When the block holds code (for example
-        # the assembler in src/c/asm.c), this keeps the mutable global-
+        # the assembler in user/programs/asm.c), this keeps the mutable global-
         # variable section away from the same 4K page as frequently-
         # executed instructions — QEMU's TCG invalidates per page on
         # stores, and mixing the two caused a 2x runtime slowdown on

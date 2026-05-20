@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """On-OS libc smoke test.
 
-Builds tools/libc/test_program/hello.c against libbboeos.a and the
-tools/libc/program.ld linker script, drops it on the disk image as
+Builds user/libc/test_program/hello.c against libbboeos.a and the
+user/libc/program.ld linker script, drops it on the disk image as
 bin/hello, runs it from the shell, and verifies the expected serial
 markers.  This is end-to-end coverage for the libc shim: printf,
 malloc/free, setjmp/longjmp, and program exit through _start.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-LIBC = REPO / "tools" / "libc"
+LIBC = REPO / "user" / "libc"
 
 HELLO_BIN = LIBC / "test_program" / "hello"
 HELLO_SRC = LIBC / "test_program" / "hello.c"
@@ -75,7 +75,7 @@ def _build_image_and_install() -> None:
 
 
 def _build_libbboeos() -> None:
-    """Build libbboeos.a (and the per-source .o files) via tools/libc/Makefile."""
+    """Build libbboeos.a (and the per-source .o files) via user/libc/Makefile."""
     subprocess.check_call(["make", "-C", str(LIBC)])
 
 

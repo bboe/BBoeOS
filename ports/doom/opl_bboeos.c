@@ -1,4 +1,4 @@
-/* tools/doom/opl_bboeos.c — Chocolate Doom OPL backend that pushes
+/* ports/doom/opl_bboeos.c — Chocolate Doom OPL backend that pushes
  * register writes to /dev/midi as 6-byte commands.  Implements the
  * API declared in third_party/chocolate-doom-opl/opl.h.
  *
@@ -186,7 +186,7 @@ void OPL_ClearCallbacks(void) {
 }
 
 void OPL_Delay(uint64_t us) {
-    /* No usleep / nanosleep in tools/libc.  Doom's i_oplmusic.c
+    /* No usleep / nanosleep in user/libc.  Doom's i_oplmusic.c
      * doesn't call this anyway; only the SDL backend uses it for
      * detection-sequence pacing.  Stub it as a no-op rather than a
      * busy-wait — a calibrated busy-wait would be wrong without a

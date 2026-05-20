@@ -1,8 +1,8 @@
-/* tools/libc/test_program/hello.c — on-OS smoke test for libbboeos.a.
+/* user/libc/test_program/hello.c — on-OS smoke test for libbboeos.a.
  *
  * Exercises printf (with several format specifiers), malloc/free,
  * setjmp/longjmp, and program exit through _start's call-main-then-exit
- * path.  Built by tools/libc/Makefile against tools/libc/program.ld and
+ * path.  Built by user/libc/Makefile against user/libc/program.ld and
  * dropped on the disk image as bin/hello; verified by
  * tests/test_libbboeos_qemu.py. */
 

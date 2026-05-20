@@ -1,4 +1,4 @@
-/* tools/libc/builtins.c — hand-rolled subset of clang compiler-rt.
+/* user/libc/builtins.c — hand-rolled subset of clang compiler-rt.
  *
  * 32-bit i386 has no hardware 64-bit divide, so clang lowers
  * `int64_t / int64_t` / `uint64_t / uint64_t` (and the corresponding

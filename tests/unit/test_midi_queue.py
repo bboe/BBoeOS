@@ -1,6 +1,6 @@
 """Pytest unit tests for the /dev/midi event queue + drain logic.
 
-Compiles a stripped copy of `src/fs/fd/midi.c` and `src/drivers/opl3.c`
+Compiles a stripped copy of `kernel/fs/fd/midi.c` and `kernel/drivers/opl3.c`
 against the host system clang as a shared library and exercises the
 pure-C ring + drain logic through ctypes accessors defined in
 `midi_queue_harness.c`.
@@ -47,10 +47,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HARNESS = Path(__file__).resolve().parent / "midi_queue_harness.c"
-MIDI_SOURCE = REPO_ROOT / "src" / "fs" / "fd" / "midi.c"
-OPL3_SOURCE = REPO_ROOT / "src" / "drivers" / "opl3.c"
+MIDI_SOURCE = REPO_ROOT / "kernel" / "fs" / "fd" / "midi.c"
+OPL3_SOURCE = REPO_ROOT / "kernel" / "drivers" / "opl3.c"
 
-# OPL bank port pairs; matches src/drivers/opl3.c opl_write().
+# OPL bank port pairs; matches kernel/drivers/opl3.c opl_write().
 BANK0_STATUS = 0x388
 BANK0_DATA = 0x389
 BANK1_STATUS = 0x38A
@@ -85,8 +85,8 @@ def _build_shared_library() -> tuple[ctypes.CDLL, Path]:
         # `-Wstrict-prototypes` on -Wpedantic, but at -Wall -Werror it
         # passes.  Suppress unused-parameter to keep the harness lean.
         "-Wno-unused-parameter",
-        # midi.c #include "program_state.h" lives in src/include/.
-        f"-I{REPO_ROOT / 'src' / 'include'}",
+        # midi.c #include "program_state.h" lives in kernel/include/.
+        f"-I{REPO_ROOT / 'kernel' / 'include'}",
         "-shared",
         "-fPIC",
         str(HARNESS),

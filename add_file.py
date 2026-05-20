@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
-CONSTANTS_PATH = "src/include/constants.asm"
+CONSTANTS_PATH = "kernel/include/constants.asm"
 ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
 EXT2_MAGIC = 0xEF53

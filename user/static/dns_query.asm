@@ -1,1 +1,1 @@
-../src/include/dns_query.asm
+../../kernel/include/dns_query.asm

@@ -5,7 +5,7 @@ Boots Doom under QEMU with `-device sb16,audiodev=a -audiodev wav,id=a,...`,
 runs Doom for ~25 s, and asserts:
 
   1. The captured serial log contains ``"[bboeos doom] OPL music enabled"``
-     — proving ``BBoe_MusicInit`` (in tools/doom/i_sound_bboeos.c) called
+     — proving ``BBoe_MusicInit`` (in ports/doom/i_sound_bboeos.c) called
      the upstream chocolate-doom ``music_opl_module.Init`` and got a
      non-zero return, which means ``OPL_Init`` opened ``/dev/midi`` and
      the kernel reported OPL3 presence.
@@ -58,8 +58,8 @@ MUSIC_UNAVAILABLE_MARKER = "[bboeos doom] OPL music unavailable"
 
 
 def _build_doom() -> None:
-    """Build the doom binary via tools/build_doom.py."""
-    subprocess.check_call([sys.executable, str(REPO / "tools" / "build_doom.py")])
+    """Build the doom binary via ports/doom/build_doom.py."""
+    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build_doom.py")])
 
 
 def _install_doom_and_wad() -> None:
@@ -112,7 +112,7 @@ def _measure_wav(*, wav_path: Path) -> dict:
 def _test_music_with_wad() -> None:
     """Run doom under QEMU+SB16 and verify music init via a serial-log marker."""
     if not WAD_FILE.is_file():
-        print(f"SKIP doom-music test: {WAD_FILE} not present (run tools/fetch_wad.sh)")
+        print(f"SKIP doom-music test: {WAD_FILE} not present (run ports/doom/fetch_wad.sh)")
         return
     _install_doom_and_wad()
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_handle:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 
 def compile_expect_fail(*, message_fragment: str, name: str, source: str, work: Path) -> None:

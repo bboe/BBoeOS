@@ -1,5 +1,5 @@
 /* Compatibility shim for chocolate-doom sources fetched into
- * third_party/chocolate-doom-opl/ (by tools/fetch_chocolate_opl.sh).
+ * third_party/chocolate-doom-opl/ (by ports/doom/fetch_chocolate_opl.sh).
  *
  * The fetched sources are pinned to chocolate-doom 3.1.0
  * (`35fb1372d10756ca27eca05665bd8a7cebc71c05`).  doomgeneric forked an
@@ -8,8 +8,8 @@
  * handful of macros / functions / types the newer sources rely on.
  * This header papers over those gaps without modifying either tree.
  *
- * Wired in via `-include tools/doom/chocolate_compat.h` from
- * tools/build_doom.py for the chocolate sources only — the bboeos
+ * Wired in via `-include ports/doom/chocolate_compat.h` from
+ * ports/doom/build_doom.py for the chocolate sources only — the bboeos
  * backend (`i_sound_bboeos.c`, `opl_bboeos.c`) and doomgeneric core
  * compile unaffected.
  *
@@ -86,7 +86,7 @@ static inline void *I_Realloc(void *pointer, size_t size) {
  * "subdir under root with empty name," so both write and read fail.
  *
  * Override M_TempFile inside chocolate sources only (this header is
- * `-include`d for them via tools/build_doom.py) to drop the /tmp/
+ * `-include`d for them via ports/doom/build_doom.py) to drop the /tmp/
  * prefix entirely — the file is created in the program's cwd instead.
  * The macro is a plain identifier rename so m_misc.h's declaration
  * (`char *M_TempFile(char *s);`) becomes a forward declaration of

@@ -1,8 +1,8 @@
 #!/bin/sh
-# tools/install_doom.sh — build + install Doom on a fresh bboeos disk image.
+# ports/doom/install_doom.sh — build + install Doom on a fresh bboeos disk image.
 #
 # Convenience wrapper around the four steps you'd otherwise run manually:
-#   1. python3 tools/build_doom.py        (compile bin/doom into build/doom/)
+#   1. python3 ports/doom/build_doom.py        (compile bin/doom into build/doom/)
 #   2. ./make_os.sh --ext2 --sectors=...  (10 MB ext2 image)
 #   3. ./add_file.py … bin/doom           (drop the binary in /bin)
 #   4. ./add_file.py … doom1.wad          (drop the WAD at the disk root)
@@ -30,11 +30,11 @@ for arg in "$@"; do
     esac
 done
 
-REPO=$(cd "$(dirname "$0")/.." && pwd)
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$REPO"
 
 if [ ! -f "$WAD" ]; then
-    echo "install_doom: $WAD missing — run tools/fetch_wad.sh first" >&2
+    echo "install_doom: $WAD missing — run ports/doom/fetch_wad.sh first" >&2
     exit 1
 fi
 
@@ -42,8 +42,8 @@ echo "==> building bin/doom (clean rebuild)"
 # --clean forces a full rebuild of doomgeneric + our backend; we also
 # wipe the libc .o cache because the libc Makefile doesn't track CFLAGS
 # changes (so a flag-only flip would otherwise leave libbboeos.a stale).
-make -C tools/libc clean
-python3 tools/build_doom.py --clean
+make -C user/libc clean
+python3 ports/doom/build_doom.py --clean
 
 echo "==> building $IMAGE (ext2, $SECTORS sectors)"
 ./make_os.sh --ext2 --sectors="$SECTORS" "$IMAGE"

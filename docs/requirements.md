@@ -68,14 +68,14 @@ The libc tests need **`clang`**:
   freestanding cross-compile (`--target=i386-pc-none-elf -m32 -ffreestanding
   -nostdinc -nostdlib`) plus a few build-system tools:
 
-  - **`make`** — invoked as `make -C tools/libc`; reuses the Makefile's CFLAGS
+  - **`make`** — invoked as `make -C user/libc`; reuses the Makefile's CFLAGS
     so the test doesn't duplicate them.
   - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against
-    `libbboeos.a` and the `tools/libc/program.ld` linker script.
+    `libbboeos.a` and the `user/libc/program.ld` linker script.
   - **`ar`** (GNU `ar`, also from `binutils`) — packs the libc objects into
     `libbboeos.a`.
 
-## Doom port (`tools/build_doom.py`)
+## Doom port (`ports/doom/build_doom.py`)
 
 The Doom build needs the libc deps above (clang, make, ar) plus a GNU-compatible
 linker + objcopy.  `build_doom.py` auto-picks the first one it finds on `$PATH`,

@@ -1,1 +1,1 @@
-../src/include/parse_ip.asm
+../../kernel/include/parse_ip.asm

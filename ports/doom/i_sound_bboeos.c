@@ -1,4 +1,4 @@
-/* tools/doom/i_sound_bboeos.c — bboeos backend for doomgeneric's
+/* ports/doom/i_sound_bboeos.c — bboeos backend for doomgeneric's
  * sound_module_t / music_module_t.
  *
  * Provides DG_sound_module + DG_music_module (referenced by
@@ -106,7 +106,7 @@ static boolean BBoe_Init(boolean use_sfx_prefix) {
  * i_sound.h has a non-const `extern music_module_t music_opl_module;`.
  * We accept the doomgeneric extern here — the cv-qualifier mismatch is
  * invisible at link time on this i386 target — and let the chocolate
- * TU dodge the colliding extern via tools/doom/chocolate_compat.h
+ * TU dodge the colliding extern via ports/doom/chocolate_compat.h
  * (the shim pre-includes i_sound.h with the symbol renamed to a
  * sacrificial name so chocolate's definition wins).
  *
