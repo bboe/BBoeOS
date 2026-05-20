@@ -929,7 +929,7 @@ syscall_handler:
         .rtc_sleep:
         ;; ECX = milliseconds.  rtc_sleep_ms returns CF=0 on completion,
         ;; CF=1 if interrupted by a pending signal.  Propagate as
-        ;; ERROR_INTERRUPTED so the libc wrapper can surface EINTR.
+        ;; ERROR_INTERRUPTED so the libbboeos wrapper can surface EINTR.
         call rtc_sleep_ms
         jc  .rtc_sleep_eintr
         clc

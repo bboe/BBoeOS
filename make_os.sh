@@ -27,7 +27,7 @@ find kernel -name '*.c' | while read -r source; do
     python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
 done
 
-# Build the libc blob (FUNCTION_TABLE + shared_* helpers).  Lives at
+# Build the libbboeos blob (FUNCTION_TABLE + shared_* helpers).  Lives at
 # lib/libbboeos on the disk image; vdso_install reads it from disk at
 # boot, copies it into a freshly-allocated frame, and maps that frame
 # (with PTE_SHARED) at user-virt FUNCTION_TABLE (0x00010000) in every

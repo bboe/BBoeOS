@@ -266,7 +266,7 @@ bodies disappear from each binary.
 and packaging via `cc.py pack-ccobj`.  The resulting `.ccobj` is consumed by the
 (still in-progress) `tools/ccld.py` linker, which combines per-translation unit
 `.ccobj` files with a runtime archive to produce a flat binary.  Object mode is
-opt-in per program and entirely separate from `user/libc/libbboeos.a` (the
+opt-in per program and entirely separate from `user/libbboeos/libbboeos.a` (the
 clang-built libc used by the Doom port) — the two link worlds do not
 interoperate.
 

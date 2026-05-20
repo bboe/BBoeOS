@@ -42,7 +42,7 @@ echo "==> building bin/doom (clean rebuild)"
 # --clean forces a full rebuild of doomgeneric + our backend; we also
 # wipe the libc .o cache because the libc Makefile doesn't track CFLAGS
 # changes (so a flag-only flip would otherwise leave libbboeos.a stale).
-make -C user/libc clean
+make -C user/libbboeos clean
 python3 ports/doom/build.py --clean
 
 echo "==> building $IMAGE (ext2, $SECTORS sectors)"

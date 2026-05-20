@@ -288,7 +288,7 @@ time.
   errors if any variant is missing a `case` — adding a new enum variant later
   flags every switch site that forgot to handle it.
 - **libc `<dirent.h>`: `opendir` / `readdir` / `closedir` / `rewinddir`.**  New
-  `user/libc/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
+  `user/libbboeos/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
   (linking against `libbboeos.a`) can iterate directories with the POSIX API.
   Each `DIR` owns a 4 KB receive buffer and a single `struct dirent` (`d_ino` /
   `d_type` / `d_name[256]`); subsequent `readdir` invalidates the previous
@@ -674,7 +674,7 @@ time.
 - BBoeOS now boots and runs [doomgeneric](https://github.com/ozkl/doomgeneric).
   `ports/doom/build.py` clones the upstream third_party/doomgeneric on demand,
   cross-compiles with the freestanding clang toolchain, and links it with
-  `libbboeos.a` + `user/libc/program.ld` into a flat-binary `bin/doom`.
+  `libbboeos.a` + `user/libbboeos/program.ld` into a flat-binary `bin/doom`.
   `ports/doom/fetch_wad.sh` downloads the shareware `doom1.wad` (SHA256 verified).
   `ports/doom/install.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld`
   / `objcopy` / `ar` (Linux native, `x86_64-elf-*`, `llvm-*`, `ld.lld`) so the
@@ -716,7 +716,7 @@ time.
     `tests/programs/audio_tone.c` (1.1 kHz square wave).
 
 ### Userspace toolchain (libc)
-- New freestanding libc shim `user/libc/libbboeos.a` (`user/libc/Makefile`)
+- New freestanding libc shim `user/libbboeos/libbboeos.a` (`user/libbboeos/Makefile`)
   covering ctype, errno, math, stdio, stdlib, string, syscall, and
   `_start`/setjmp.  Pinned to `-march=i386 -mno-{mmx,sse,sse2}
   -mno-implicit-float -fno-{vectorize,slp-vectorize}` so Apple clang doesn't
@@ -724,7 +724,7 @@ time.
   Pytest unit tests in `tests/unit/test_libbboeos.py` cross-check each pure
   function against the host libc; on-OS smoke test in
   `tests/test_libbboeos_qemu.py`.
-- Linker script `user/libc/program.ld` for clang-built userland binaries.
+- Linker script `user/libbboeos/program.ld` for clang-built userland binaries.
 - Headers and impls extended for doomgeneric needs (`malloc`/`free`/`realloc`,
   `printf` formatters, `qsort`, `<setjmp.h>` long-jump).  Also includes the
   compiler-rt builtins clang -O2 needs at link time (e.g. `__udivdi3`,
@@ -742,7 +742,7 @@ time.
   as `PTE_USER_RW_SHARED`).  Lets clang-emitted FP code in libc + doomgeneric
   run without `#UD`.
 - **Per-fd PS/2 keyboard event ring** with positional `BBKEY_*` codes
-  (`kernel/drivers/ps2.c`, `user/libc/include/bbkeys.h`).  Each readable console
+  (`kernel/drivers/ps2.c`, `user/libbboeos/include/bbkeys.h`).  Each readable console
   fd gets its own queue, populated by the IRQ broadcaster and drained by
   `CONSOLE_IOCTL_TRY_GET_EVENT`.  Doom's `DG_GetKey` consumes events directly
   without re-parsing CSI sequences or synthesising modifier keys.

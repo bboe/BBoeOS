@@ -314,11 +314,11 @@ early rather than forcing a delivery through the IRET path:
 - **`rtc_sleep_ms`** (the busy-wait loop in `kernel/drivers/rtc.c`, called from
   `SYS_RTC_SLEEP`): checks both pending bits each tick. Same early-exit
   convention; `SYS_RTC_SLEEP` propagates as `CF=1, AL=ERROR_INTERRUPTED` so
-  libc's `sleep()` wrapper can surface `EINTR`.
+  libbboeos's `sleep()` wrapper can surface `EINTR`.
 - **`MIDI_IOCTL_DRAIN`** (the `sti`/`hlt` drain loop in `kernel/fs/fd/midi.c`):
   checks both pending bits after each `hlt` wakeup. Same early-exit convention.
 
-The libc `errno` layer in `user/libc/syscall.c` maps `ERROR_INTERRUPTED` to
+The libbboeos `errno` layer in `user/libbboeos/syscall.c` maps `ERROR_INTERRUPTED` to
 `EINTR`, so portable C programs using `read()` / `sleep()` get the standard
 POSIX interrupted-call semantics.
 
@@ -351,7 +351,7 @@ Linux `signal(7)`); the `^A` kill banner distinguishes it from SIGINT's `^C`.
 
 Userland surface: `unsigned int alarm_ms(unsigned int delay_ms, unsigned int
 interval_ms)` (BBoeOS extension) and the POSIX `unsigned int alarm(unsigned int
-seconds)` wrapper, both in `user/libc/signal.c`.  cc.py-compiled programs call
+seconds)` wrapper, both in `user/libbboeos/signal.c`.  cc.py-compiled programs call
 `alarm_ms()` directly via the matching builtin.
 
 ## Cooperative pipes (`cmd1 | cmd2`)

@@ -18,14 +18,14 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-LIBC = REPO_ROOT / "user" / "libc"
+LIBBBOEOS = REPO_ROOT / "user" / "libbboeos"
 
 
 def _compile_and_run(*, c_source: str, extra_sources: list[Path]) -> str:
     """Compile c_source against extra_sources via host clang, run, return stdout."""
-    # Resolve the placeholder ../user/libc/... include path to an absolute
+    # Resolve the placeholder ../user/libbboeos/... include path to an absolute
     # path so the temp file's directory location does not matter.
-    c_source = c_source.replace("../user/libc/", str(LIBC) + "/")
+    c_source = c_source.replace("../user/libbboeos/", str(LIBBBOEOS) + "/")
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "t.c"
         out = Path(td) / "t"
@@ -36,7 +36,7 @@ def _compile_and_run(*, c_source: str, extra_sources: list[Path]) -> str:
             "-Wall",
             "-Werror",
             "-I",
-            str(LIBC / "include"),
+            str(LIBBBOEOS / "include"),
             str(src),
             *[str(p) for p in extra_sources],
             "-o",
@@ -64,7 +64,7 @@ def test_ctype_matches_system() -> None:
 #define isxdigit bboeos_isxdigit
 #define tolower  bboeos_tolower
 #define toupper  bboeos_toupper
-#include "../user/libc/ctype.c"
+#include "../user/libbboeos/ctype.c"
 #undef isalnum
 #undef isalpha
 #undef iscntrl
@@ -98,7 +98,7 @@ int main(void) {
     return fail != 0;
 }
 """
-    out = _compile_and_run(c_source=src, extra_sources=[LIBC / "ctype.c"])
+    out = _compile_and_run(c_source=src, extra_sources=[LIBBBOEOS / "ctype.c"])
     assert out.strip().endswith("fail=0"), out
 
 
@@ -114,7 +114,7 @@ def test_math_matches_system() -> None:
 #define pow   bboeos_pow
 #define sin   bboeos_sin
 #define sqrt  bboeos_sqrt
-#include "../user/libc/math.c"
+#include "../user/libbboeos/math.c"
 #undef atan2
 #undef cos
 #undef fabs
@@ -208,7 +208,7 @@ static ssize_t bboeos_test_write(int fd, const void *buf, size_t n) {
 #define vsnprintf bboeos_vsnprintf
 #define vsprintf  bboeos_vsprintf
 #define write     bboeos_test_write
-#include "../user/libc/stdio.c"
+#include "../user/libbboeos/stdio.c"
 #undef close
 #undef fclose
 #undef feof
@@ -300,7 +300,7 @@ def test_stdlib_qsort() -> None:
 #define srand    bboeos_srand
 #define strtol   bboeos_strtol
 #define strtoul  bboeos_strtoul
-#include "../user/libc/stdlib.c"
+#include "../user/libbboeos/stdlib.c"
 #undef abort
 #undef atexit
 #undef atoi
@@ -434,7 +434,7 @@ def test_string_matches_system() -> None:
 #define strncpy     bboeos_strncpy
 #define strrchr     bboeos_strrchr
 #define strstr      bboeos_strstr
-#include "../user/libc/string.c"
+#include "../user/libbboeos/string.c"
 #undef memchr
 #undef memcmp
 #undef memcpy

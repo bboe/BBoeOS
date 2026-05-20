@@ -25,7 +25,7 @@ Two userland code paths exist today:
   reach the OS through a small in-kernel vDSO of `FUNCTION_*` helpers at
   user-virt `0x10000` and through raw `INT 30h` syscall wrappers.  No POSIX libc
   is linked in.
-- **clang-compiled programs linked against `user/libc/`** — today only the
+- **clang-compiled programs linked against `user/libbboeos/`** — today only the
   standalone `hello` test binary built by `tests/test_libbboeos_qemu.py`. This
   is a parallel libc waiting to be wired up, originally cut for a Doom port. Its
   functions are real (102 implemented, 8 stubs) but they cannot be called from a
@@ -50,7 +50,7 @@ In the syscall / libc table the "In shipped programs?" column answers a
 different question: can a cc.py-built program in `bin/` reach this today?
 
 - ✅ — yes, via vDSO `FUNCTION_*` helper or raw `INT 30h` wrapper.
-- ⚠️ — only via `user/libc/`, which is not linked into shipped programs yet.
+- ⚠️ — only via `user/libbboeos/`, which is not linked into shipped programs yet.
 - ❌ — no, regardless of which path; the kernel does not implement it.
 
 ## Userland utilities
@@ -96,7 +96,7 @@ usage.
 | `rm` | ⚠️ | Single file; refuses files with `FLAG_PROTECTED`.  No `-r`, `-f`, no globbing. |
 | `rmdir` | ✅ | Removes an empty subdirectory. |
 | `sed` | ❌ | Not shipped. |
-| `sleep` | ❌ | Not shipped as a program.  `sleep_forever` is a test fixture, not POSIX `sleep`.  Use `sleep_ms()` from `user/libc` or `SYS_RTC_SLEEP` directly. |
+| `sleep` | ❌ | Not shipped as a program.  `sleep_forever` is a test fixture, not POSIX `sleep`.  Use `sleep_ms()` from `user/libbboeos` or `SYS_RTC_SLEEP` directly. |
 | `sort` | ⚠️ | Single file or stdin; supports `-r` (reverse), `-n` (numeric), `-u` (unique).  In-memory only (60 KB line buffer); no `-k`, `-t`, `-f`, `-b`, `-o`, `-m`; no multi-file. |
 | `split` | ❌ | Not shipped. |
 | `stty` | ❌ | Not shipped — there is no termios. |
@@ -157,10 +157,10 @@ pipes](architecture.html#cooperative-pipes-cmd1--cmd2).
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `_exit` | `SYS_SYS_EXIT` (F2h) | ✅ | ✅ | Reloads shell; child status returned only via `SYS_SYS_PIPELINE2`. |
-| `atexit` | libc | ⚠️ | ⚠️ | `user/libc` only; 8 slots. |
+| `atexit` | libc | ⚠️ | ⚠️ | `user/libbboeos` only; 8 slots. |
 | `execv` / `execvp` / `execle` / … | — | ❌ | ❌ | Wrappers not provided; spell the argv array yourself and call `SYS_SYS_EXEC`. |
 | `execve` | `SYS_SYS_EXEC` (F1h) | ⚠️ | ✅ | No `envp` (always empty); no path search (shell adds the `bin/` retry); recursive exec from a child rejected with `EINVAL`. |
-| `exit` | libc → `_exit` | ⚠️ | ⚠️ | Only via `user/libc`; runs up to 8 `atexit` callbacks then `_exit`. |
+| `exit` | libc → `_exit` | ⚠️ | ⚠️ | Only via `user/libbboeos`; runs up to 8 `atexit` callbacks then `_exit`. |
 | `fork` | — | ❌ | ❌ | Not implemented; no plan to add.  Only the shell's `SYS_SYS_PIPELINE2` creates additional processes. |
 | `getpid` / `getppid` | — | ❌ | ❌ | No PID model. |
 | `getrlimit` / `setrlimit` | — | ❌ | ❌ | No resource limits. |
@@ -169,7 +169,7 @@ pipes](architecture.html#cooperative-pipes-cmd1--cmd2).
 | `nice` / `getpriority` / `setpriority` | — | ❌ | ❌ | No scheduler priorities; the kernel runs one userland program at a time. |
 | `setpgrp` / `setsid` / `getpgrp` | — | ❌ | ❌ | No process groups or sessions. |
 | `setuid` / `setgid` | — | ❌ | ❌ | No users. |
-| `system` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns `-1`. |
+| `system` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns `-1`. |
 | `wait` / `waitpid` / `waitid` | — | ❌ | ❌ | `SYS_SYS_PIPELINE2` returns child 2's exit status to the shell, but there is no general wait API. |
 
 ### Signals
@@ -216,7 +216,7 @@ Signal delivery](architecture.html#signal-delivery).
 | `read` | `SYS_IO_READ` (17h) | ✅ | ✅ | Works on files, pipes, console, network, devices.  On a directory fd, returns `ERROR_IS_DIRECTORY` (mapped to `EISDIR`) — use `getdents` to iterate. |
 | `readv` / `writev` | — | ❌ | ❌ | No scatter-gather I/O. |
 | `select` / `pselect` / `poll` | — | ❌ | ❌ | No multiplexed wait; ioctls return immediately when no data is available. |
-| `stat` / `lstat` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns `-1`. |
+| `stat` / `lstat` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns `-1`. |
 | `sync` / `fsync` / `fdatasync` | — | ❌ | ❌ | Writes hit the disk on `close` via the dirty bit. |
 | `truncate` / `ftruncate` | — | ❌ | ❌ | |
 | `umask` | — | ❌ | ❌ | No mode bits. |
@@ -235,22 +235,22 @@ are both single-level under root.
 | `chroot` / `mount` / `umount` | — | ❌ | ❌ | |
 | `getdents` | `SYS_IO_GETDENTS` (14h) | ✅ | ✅ | Linux-shaped variable-length records (`d_ino`, `d_reclen`, `d_type`, `d_name`).  See `docs/syscalls.md` for the record layout. |
 | `glob` / `globfree` | — | ❌ | ❌ | No shell-side or library-side globbing. |
-| `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `user/libc` wrapper is a stub returning `-1`. |
+| `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `user/libbboeos` wrapper is a stub returning `-1`. |
 | `nftw` | — | ❌ | ❌ | One-level FS; programs walk the root directory directly. |
-| `opendir` / `readdir` / `closedir` / `rewinddir` | `SYS_IO_GETDENTS` (14h) | ⚠️ | ❌ | Implemented in `user/libc/dirent.c` for clang-built programs (e.g. `bin/hello`).  No `seekdir` / `telldir`; `struct dirent` exposes `d_ino`/`d_type`/`d_name` only.  cc.py-built shipped programs still call `SYS_IO_GETDENTS` directly. |
+| `opendir` / `readdir` / `closedir` / `rewinddir` | `SYS_IO_GETDENTS` (14h) | ⚠️ | ❌ | Implemented in `user/libbboeos/dirent.c` for clang-built programs (e.g. `bin/hello`).  No `seekdir` / `telldir`; `struct dirent` exposes `d_ino`/`d_type`/`d_name` only.  cc.py-built shipped programs still call `SYS_IO_GETDENTS` directly. |
 | `pathconf` / `fpathconf` | — | ❌ | ❌ | `MAX_PATH = 64`, names ≤26 bytes — fixed at compile time. |
 | `realpath` | — | ❌ | ❌ | No symlinks to resolve and no working directory; all paths are already root-relative. |
-| `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `user/libc` `rename()` is a stub. |
+| `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `user/libbboeos` `rename()` is a stub. |
 | `rmdir` | `SYS_FS_RMDIR` (03h) | ✅ | ✅ | Returns `ERROR_NOT_EMPTY` (mapped to `EACCES` in libc, not `ENOTEMPTY`) if the directory is non-empty. |
 | `statvfs` / `fstatvfs` | — | ❌ | ❌ | |
-| `unlink` / `remove` | `SYS_FS_UNLINK` (04h) | ⚠️ | ✅ | Files only; cannot unlink a directory; `user/libc` `remove()` is a stub. |
+| `unlink` / `remove` | `SYS_FS_UNLINK` (04h) | ⚠️ | ✅ | Files only; cannot unlink a directory; `user/libbboeos` `remove()` is a stub. |
 
 ### Memory
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `brk` | `SYS_SYS_BREAK` (F0h) | ✅ | ✅ | No error path. |
-| `malloc` / `free` / `calloc` / `realloc` | libc | ⚠️ | ⚠️ | `user/libc` only — real `sbrk`-backed free-list allocator with coalescing.  Shipped cc.py programs roll their own or stay statically sized. |
+| `malloc` / `free` / `calloc` / `realloc` | libc | ⚠️ | ⚠️ | `user/libbboeos` only — real `sbrk`-backed free-list allocator with coalescing.  Shipped cc.py programs roll their own or stay statically sized. |
 | `mmap` | `SYS_VIDEO_MAP` (40h) | ⚠️ | ✅ | Maps the mode-13h VGA framebuffer (320×200×8bpp) at user-virt `0xB8000000`.  No file or anonymous mmap. |
 | `munmap` / `mprotect` / `mlock` / `madvise` | — | ❌ | ❌ | |
 | `sbrk` | `SYS_SYS_BREAK` (F0h) | ✅ | ✅ | libc wrapper or do the math inline. |
@@ -266,7 +266,7 @@ timespec`.  `SYS_RTC_SLEEP` busy-waits and is interruptible by SIGINT or SIGALRM
 |----------------|---------|:------:|:------:|-------|
 | `clock_gettime` / `clock_settime` / `clock_getres` | — | ❌ | ❌ | No `clockid_t`, no `CLOCK_MONOTONIC` proper. |
 | `difftime` | — | ❌ | ❌ | |
-| `gettimeofday` | `SYS_RTC_MILLIS` (32h) | ⚠️ | ⚠️ | `user/libc` wrapper returns monotonic ms-since-boot, *not* wall-clock; `tz` arg ignored. |
+| `gettimeofday` | `SYS_RTC_MILLIS` (32h) | ⚠️ | ⚠️ | `user/libbboeos` wrapper returns monotonic ms-since-boot, *not* wall-clock; `tz` arg ignored. |
 | `nanosleep` / `clock_nanosleep` | — | ❌ | ❌ | Use `sleep_ms()` (libc) or `SYS_RTC_SLEEP` directly. |
 | `setitimer` / `getitimer` | `SYS_RTC_ALARM` (30h) | ⚠️ | ✅ | First-fire + interval (ms) supported; only the `ITIMER_REAL` flavour exists. |
 | `strftime` / `gmtime` / `localtime` / `mktime` | — | ❌ | ❌ | The vDSO `FUNCTION_PRINT_DATETIME` prints the canonical `YYYY-MM-DD HH:MM:SS` form. |
@@ -312,57 +312,57 @@ line discipline from userland.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `feof` / `ferror` / `fflush` (no-op) | libc | ⚠️ | ⚠️ | `user/libc` only; `fflush` is a no-op (no buffering to flush). |
-| `fgets` / `getline` / `getdelim` | — | ❌ | ❌ | Not in `user/libc`. |
+| `feof` / `ferror` / `fflush` (no-op) | libc | ⚠️ | ⚠️ | `user/libbboeos` only; `fflush` is a no-op (no buffering to flush). |
+| `fgets` / `getline` / `getdelim` | — | ❌ | ❌ | Not in `user/libbboeos`. |
 | `fmemopen` / `open_memstream` | — | ❌ | ❌ | No memory-backed `FILE *`. |
-| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `user/libc` only.  cc.py-built programs use vDSO `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
-| `freopen` / `ungetc` / `fileno` | — | ❌ | ❌ | Not in `user/libc`. |
+| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `user/libbboeos` only.  cc.py-built programs use vDSO `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
+| `freopen` / `ungetc` / `fileno` | — | ❌ | ❌ | Not in `user/libbboeos`. |
 | `perror` / `clearerr` | — | ❌ | ❌ | `strerror` exists in libc. |
 | `popen` / `pclose` | — | ❌ | ❌ | No general subprocess API; only the shell's `SYS_SYS_PIPELINE2`. |
-| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + vDSO `FUNCTION_PRINTF` | ⚠️ | ✅ | The vDSO `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `user/libc` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
-| `remove` / `rename` (libc-layer) | libc (stubs) | ⚠️ | ⚠️ | `user/libc` stubs — always return `-1`. |
-| `rewind` | libc (no-op) | ⚠️ | ⚠️ | `user/libc` no-op (does not seek). |
+| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + vDSO `FUNCTION_PRINTF` | ⚠️ | ✅ | The vDSO `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `user/libbboeos` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
+| `remove` / `rename` (libc-layer) | libc (stubs) | ⚠️ | ⚠️ | `user/libbboeos` stubs — always return `-1`. |
+| `rewind` | libc (no-op) | ⚠️ | ⚠️ | `user/libbboeos` no-op (does not seek). |
 | `scanf` / `fscanf` / `vscanf` / `vfscanf` | — | ❌ | ❌ | |
 | `setvbuf` / `setbuf` | — | ❌ | ❌ | No buffered-IO modes. |
-| `sprintf` / `snprintf` / `vsprintf` / `vsnprintf` | libc | ⚠️ | ⚠️ | `user/libc` only. |
-| `sscanf` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns 0. |
+| `sprintf` / `snprintf` / `vsprintf` / `vsnprintf` | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
+| `sscanf` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns 0. |
 | `tmpfile` / `mkstemp` / `mkdtemp` | — | ❌ | ❌ | |
 
 ### String, ctype, stdlib
 
-All of the rows below are implemented in `user/libc/` (string.c, ctype.c,
+All of the rows below are implemented in `user/libbboeos/` (string.c, ctype.c,
 stdlib.c) and exercised by `tests/test_libbboeos_qemu.py`'s `hello` binary — but
 they are not reachable from cc.py-built shipped programs.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
 | `abs` / `labs` | libc | ⚠️ | ⚠️ | `abs` only; no `labs` / `llabs`. |
-| `atof` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns `0.0`. |
-| `atoi` / `atol` | libc | ⚠️ | ⚠️ | `user/libc` only. |
+| `atof` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns `0.0`. |
+| `atoi` / `atol` | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
 | `div` / `ldiv` / `lldiv` | — | ❌ | ❌ | |
-| Full `ctype.h` (`isalnum` / `isalpha` / `iscntrl` / `isdigit` / `isspace` / `islower` / `isupper` / `isprint` / `ispunct` / `isxdigit` / `tolower` / `toupper`) | libc | ⚠️ | ⚠️ | `user/libc` only. |
-| `getenv` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns `NULL`.  No environment. |
+| Full `ctype.h` (`isalnum` / `isalpha` / `iscntrl` / `isdigit` / `isspace` / `islower` / `isupper` / `isprint` / `ispunct` / `isxdigit` / `tolower` / `toupper`) | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
+| `getenv` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns `NULL`.  No environment. |
 | `locale` (`setlocale`, `LC_*`, collation, wide chars) | — | ❌ | ❌ | ASCII only. |
-| `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` | libc | ⚠️ | ⚠️ | `user/libc` only. |
+| `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
 | `posix_memalign` / `aligned_alloc` | — | ❌ | ❌ | No alignment-aware allocator. |
-| `qsort` / `bsearch` | libc | ⚠️ | ⚠️ | `user/libc` only (Sedgewick quicksort, recursive binary search). |
+| `qsort` / `bsearch` | libc | ⚠️ | ⚠️ | `user/libbboeos` only (Sedgewick quicksort, recursive binary search). |
 | `rand` / `srand` | libc | ⚠️ | ⚠️ | LCG PRNG. |
 | `setenv` / `unsetenv` / `putenv` | — | ❌ | ❌ | No environment. |
-| `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strcasecmp` / `strncasecmp` / `strchr` / `strrchr` / `strstr` / `strlen` / `strdup` / `strerror` | libc | ⚠️ | ⚠️ | `user/libc` only. |
-| `strerror_r` / `strsignal` | — | ❌ | ❌ | Not in `user/libc`. |
-| `strspn` / `strcspn` / `strpbrk` | — | ❌ | ❌ | Not in `user/libc`. |
+| `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strcasecmp` / `strncasecmp` / `strchr` / `strrchr` / `strstr` / `strlen` / `strdup` / `strerror` | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
+| `strerror_r` / `strsignal` | — | ❌ | ❌ | Not in `user/libbboeos`. |
+| `strspn` / `strcspn` / `strpbrk` | — | ❌ | ❌ | Not in `user/libbboeos`. |
 | `strtod` / `strtof` | — | ❌ | ❌ | No floating-point string conversion (matches the `atof` stub). |
-| `strtok` / `strtok_r` | — | ❌ | ❌ | Not in `user/libc`. |
-| `strtol` / `strtoul` | libc | ⚠️ | ⚠️ | `user/libc` only. |
+| `strtok` / `strtok_r` | — | ❌ | ❌ | Not in `user/libbboeos`. |
+| `strtol` / `strtoul` | libc | ⚠️ | ⚠️ | `user/libbboeos` only. |
 | `strtoll` / `strtoull` | — | ❌ | ❌ | No 64-bit string conversion. |
-| `system` | libc (stub) | ⚠️ | ⚠️ | `user/libc` stub — always returns `-1`. |
+| `system` | libc (stub) | ⚠️ | ⚠️ | `user/libbboeos` stub — always returns `-1`. |
 
 ### Math
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `asin` / `acos` / `atan` / `sinh` / `cosh` / `tanh` / `expm1` / `log1p` / `cbrt` / `hypot` / `fmod` / `modf` / `frexp` / `ldexp` / `round` / `trunc` | — | ❌ | ❌ | Not in `user/libc/math.c`. |
-| `sin` / `cos` / `tan` / `atan2` / `sqrt` / `exp` / `log` / `log2` / `log10` / `pow` / `floor` / `ceil` / `fabs` (+ `f` variants) | libc | ⚠️ | ⚠️ | `user/libc/math.c` — all implemented via x87 inline asm.  Float variants wrap the double form. |
+| `asin` / `acos` / `atan` / `sinh` / `cosh` / `tanh` / `expm1` / `log1p` / `cbrt` / `hypot` / `fmod` / `modf` / `frexp` / `ldexp` / `round` / `trunc` | — | ❌ | ❌ | Not in `user/libbboeos/math.c`. |
+| `sin` / `cos` / `tan` / `atan2` / `sqrt` / `exp` / `log` / `log2` / `log10` / `pow` / `floor` / `ceil` / `fabs` (+ `f` variants) | libc | ⚠️ | ⚠️ | `user/libbboeos/math.c` — all implemented via x87 inline asm.  Float variants wrap the double form. |
 
 ### Process IPC
 
@@ -390,7 +390,7 @@ beyond signal handlers (which run on the same stack via the vDSO trampoline).
 
 ### Setjmp, errno, misc
 
-`user/libc` maps a subset of `ERROR_*` to errno: `ENOSPC`, `EEXIST`, `EFAULT`,
+`user/libbboeos` maps a subset of `ERROR_*` to errno: `ENOSPC`, `EEXIST`, `EFAULT`,
 `EINTR`, `EINVAL`, `EACCES` (catch-all for `ERROR_NOT_EMPTY` /
 `ERROR_NOT_EXECUTE` / `ERROR_PROTECTED`), `ENOENT`, with `EIO` as the default
 fallback.  POSIX-distinct codes like `EBADF`, `EISDIR`, `ENOTDIR`, `ESPIPE`,
@@ -398,13 +398,13 @@ fallback.  POSIX-distinct codes like `EBADF`, `EISDIR`, `ENOTDIR`, `ESPIPE`,
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
-| `abort` | libc | ⚠️ | ⚠️ | `user/libc` only — exits 134. |
-| `assert` | libc | ⚠️ | ⚠️ | `user/libc/assert.h` — `fprintf(stderr, …) + abort()`. |
+| `abort` | libc | ⚠️ | ⚠️ | `user/libbboeos` only — exits 134. |
+| `assert` | libc | ⚠️ | ⚠️ | `user/libbboeos/assert.h` — `fprintf(stderr, …) + abort()`. |
 | `dlopen` / `dlsym` / `dlclose` | — | ❌ | ❌ | All code is statically compiled in. |
-| `errno` | libc | ⚠️ | ⚠️ | `user/libc` only — see code list above. |
+| `errno` | libc | ⚠️ | ⚠️ | `user/libbboeos` only — see code list above. |
 | `getopt` | `kernel/include/getopt.h` | ⚠️ | ✅ | Header-only short-option parser used by `echo`, `grep`, `head`, `sort`, `tail`, `tr`, `uniq`, `wc`.  No combined flags (`-lw`), no value-attached form (`-nN`), no `--` sentinel, no argv permutation. |
 | `regex` (`regcomp` / `regexec`) | — | ❌ | ❌ | |
-| `setjmp` / `longjmp` | libc (asm) | ⚠️ | ⚠️ | `user/libc/setjmp.S` — 6-slot `jmp_buf` (esp/ebp/eip + 3 callee-saved). |
+| `setjmp` / `longjmp` | libc (asm) | ⚠️ | ⚠️ | `user/libbboeos/setjmp.S` — 6-slot `jmp_buf` (esp/ebp/eip + 3 callee-saved). |
 | `sigsetjmp` / `siglongjmp` | — | ❌ | ❌ | No signal mask to save. |
 | `sysconf` / `confstr` | — | ❌ | ❌ | No runtime configuration query API; limits are compile-time. |
 
@@ -449,7 +449,7 @@ the source).
   `FUNCTION_PRINT_DECIMAL`, `FUNCTION_PRINT_HEX`.
 - **Device fds**: `/dev/vga` (mode-13h framebuffer + palette ioctls),
   `/dev/audio` (SB16 PCM stream), `/dev/midi` (OPL3 register-write stream).
-- **`user/libc` extensions** (non-POSIX): `alarm_ms()`, `sleep_ms()`,
+- **`user/libbboeos` extensions** (non-POSIX): `alarm_ms()`, `sleep_ms()`,
   `uptime_ms()`, `video_map()`.
 
 ## Updating this document
