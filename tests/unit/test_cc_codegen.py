@@ -2662,6 +2662,51 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     assert "mov eax, 18" in asm or "mov al, 18" in asm, f"folded immediate load missing:\n{asm}"
 
 
+def test_peephole_narrow_acc_immediate_for_byte_out() -> None:
+    """``mov eax, <imm 0..255>`` followed by ``out dx, al`` narrows to ``mov al, <imm>``.
+
+    After :meth:`peephole_fold_byte_immediate_through_local` produces
+    ``mov eax, <imm>`` from a byte-load idiom, the only consumer of AX
+    is ``out dx, al`` (which touches AL only).  The 3-byte saving per
+    site applies when EAX's upper bits are dead after the out — proved
+    here by a follow-on call that caller-clobbers EAX.
+    """
+    asm = _kernel(
+        """
+        struct cr { uint8_t start: 1; uint8_t stop: 1; uint8_t txp: 1;
+                    uint8_t reserved: 1; uint8_t page: 2; uint8_t rd: 2; };
+        void other();
+        void probe() {
+            struct cr c = { .stop = 1, .rd = 4, .page = 1 };
+            kernel_outb(0x300, *(uint8_t *)&c);
+            other();
+        }
+    """,
+        bits=32,
+    )
+    assert "mov al, 18" in asm, f"narrowed byte-immediate load missing:\n{asm}"
+    assert "mov eax, 18" not in asm, f"unnarrowed full-width load survived:\n{asm}"
+
+
+def test_peephole_narrow_acc_immediate_keeps_wider_consumer() -> None:
+    """Narrow is skipped when something reads {acc} wider than AL before clobber.
+
+    Synthetic 16-bit sequence with an ``mov bx, ax`` between the
+    load and the ``out`` — the move-to-BX reads AX, which would see
+    caller-junk in AH if AX were narrowed to AL.  The peephole must
+    leave ``mov ax, 18`` intact.
+    """
+    out = _peephole_run([
+        "f:",
+        "        mov ax, 18",
+        "        cmp ax, 17",
+        "        mov dx, 768",
+        "        out dx, al",
+        "        ret",
+    ])
+    assert "        mov ax, 18" in out, f"narrowing should be skipped — AX consumed wider:\n{out}"
+
+
 def test_peephole_redundant_register_swap_drops_second_mov() -> None:
     """``mov A, B`` followed by ``mov B, A`` drops the second."""
     out = _peephole_run([

@@ -38,6 +38,17 @@ time.
   block sorts cleanly alphabetically — `strcmp` slides from PR #448's locked
   offset 52 into its natural slot at +84 — since `make_os.sh` re-emits every
   consumer against the current table on each run.
+
+- **cc.py: narrow ``mov eax, <imm 0..255>`` to ``mov al, <imm>`` when ``out dx,
+  al`` is the only consumer.**  After
+  ``peephole_fold_byte_immediate_through_local`` rewrites the byte-load idiom
+  into a full-width immediate load, the only consumer is ``out`` which touches
+  AL only.  A new peephole proves the upper bits of EAX are dead between the
+  load and the next full ``{acc}`` clobber, then narrows.  Save: 3 bytes per
+  site in 32-bit (`B8 imm32` → `B0 imm8`), 1 byte in 16-bit.  Phase 2 bails
+  conservatively at labels and `ret`, so loop-tail and trailing-port sites stay
+  unnarrowed.  ~8 byte kernel-wide reduction in this pass.
+
 - **cc.py: skip save-around-eval push/pop when ``kernel_outb`` / ``kernel_outw``
   port is a literal.**  The general non-const-value path was unconditionally
   emitting ``push eax; eval port → DX; pop eax`` to guard the value across port
