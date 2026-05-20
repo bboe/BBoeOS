@@ -2729,20 +2729,6 @@ def test_regparm_2_callee_does_not_read_arg_1_off_stack() -> None:
         assert f"[ebp+{offset}]" not in asm, f"regparm(2) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
-def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
-    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
-    asm = _kernel(
-        """
-        __attribute__((regparm(3))) int add3(int a, int b, int c) {
-            return a + b + c;
-        }
-    """,
-        bits=32,
-    )
-    for offset in (8, 12, 16, 20):
-        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
-
-
 def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
     """A regparm(3) call places args 0/1/2 in EAX/EDX/ECX, not on the stack.
 
@@ -2769,6 +2755,20 @@ def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
     assert "push 20" not in pre_call and "push 30" not in pre_call, (
         f"regparm(3) call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
     )
+
+
+def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
+    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
+    asm = _kernel(
+        """
+        __attribute__((regparm(3))) int add3(int a, int b, int c) {
+            return a + b + c;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16, 20):
+        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
 def test_regparm_default_3_arg_call_site_does_not_push_args() -> None:
