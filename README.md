@@ -48,3 +48,10 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   size lost in PR #428.
   Plan: [2026-05-19-cc-local-structs-plan.md](./2026-05-19-cc-local-structs-plan.md).
   Status: design + plan complete; implementation pending.
+- [2026-05-19 — tree reorg: kernel/, user/, ports/, tools/](./2026-05-19-tree-reorg-design.md)
+  — pure mechanical rename so the ring boundary is visible at the top
+  level (`kernel/` vs `user/`), upstream-wrapping ports get their own
+  home (`ports/doom/`), and `tools/` shrinks to host-side build
+  tooling only.  Lands before the shared-libc work so `user/libc/`
+  arrives in its final location.
+  Status: design complete; implementation pending.
