@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Wire user/libbboeos clang exports into the shared blob.**
+  `user/libbboeos/libbboeos.a` (clang-compiled) now links into `build/libbboeos`
+  alongside the asm helpers via the existing ld pipeline; `-ffunction-sections`
+  + `--gc-sections` drop everything the pointer table doesn't reference, so the
+  blob pays only for what it actually exports.  First entry: `strcmp`, with a
+  new `FUNCTION_STRCMP_PTR` constant at `FUNCTION_POINTER_TABLE + 52`.
+  Cc.py-side wiring (extern-call fallback that emits `call
+  [FUNCTION_<name>_PTR]` for unknown names) lands in a follow-up — this PR is
+  the build-pipeline plumbing.  `VDSO_SIGRETURN_OFFSET` moves from `0x460` →
+  `0xFE0` so the helper region can grow past 1 KB without colliding with the
+  sigreturn trampoline; sigreturn now lives near the end of page 0 (past the
+  pointer table at `0x800..0x83C`).
 - **cc.py: fold byte-immediate store + movzx reload through local.**  When a
   one-shot struct literal local is read via ``*(uint8_t *)&local`` — the driver
   port-I/O idiom — the compiler was emitting ``mov byte [ebp-N],
@@ -22,7 +34,6 @@ time.
   ~5 bytes per fold and trims the kernel's per-function frame traffic for every
   bitfield-struct + ``kernel_outb`` site.  Total kernel kasm reduction: 217
   bytes.
-
 - **Switch libbboeos build to nasm-elf + ld + linker script.**  vdso.asm is now
   `nasm -f elf32`-assembled with section directives
   (`.libbboeos.function_table`, `.libbboeos.text`, `.libbboeos.rodata`,

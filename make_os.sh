@@ -38,9 +38,14 @@ done
 # anchor; objcopy -O binary flattens the linked ELF into the on-disk
 # blob.
 mkdir -p build
+make -C user/libbboeos libbboeos.a >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/vdso/vdso.asm || exit 1
+# --gc-sections drops every clang-compiled libbboeos function the
+# pointer-table LONG()s don't reference, so the blob pays only for
+# what it actually exports.
 ld -m elf_i386 -T user/libbboeos/libbboeos.ld -Map=build/libbboeos.map \
-    -o build/libbboeos.elf build/libbboeos.o || exit 1
+    --gc-sections -o build/libbboeos.elf \
+    build/libbboeos.o user/libbboeos/libbboeos.a || exit 1
 objcopy -O binary build/libbboeos.elf build/libbboeos || exit 1
 
 # Two-pass build: assemble kernel.bin first, measure its sector count,

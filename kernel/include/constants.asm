@@ -102,6 +102,18 @@
         %assign FUNCTION_PRINT_STRING_PTR       FUNCTION_POINTER_TABLE + 40
         %assign FUNCTION_PRINTF_PTR             FUNCTION_POINTER_TABLE + 44
         %assign FUNCTION_WRITE_STDOUT_PTR       FUNCTION_POINTER_TABLE + 48
+        ;; Clang-compiled libbboeos exports (Phase 3+).  Sorted
+        ;; alphabetically — and stays that way until the cc.py extern-call
+        ;; fallback ships and the first program with a baked-in
+        ;; FUNCTION_<name>_PTR offset gets written to disk.  After that
+        ;; the block becomes append-only (same ABI contract as the
+        ;; legacy block above) because reordering would shift offsets
+        ;; under existing on-disk bin/* binaries.  Until then, treat
+        ;; new entries like a freely-reorderable sorted list — insert
+        ;; in alphabetical position and renumber accordingly.  Order
+        ;; must match the LONG()s after the legacy block in
+        ;; user/libbboeos/libbboeos.ld.
+        %assign FUNCTION_STRCMP_PTR             FUNCTION_POINTER_TABLE + 52
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
@@ -280,7 +292,7 @@
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
         %assign VDSO_PAGE_COUNT_MAX 4           ; Compile-time ceiling on how many 4 KB pages the kernel will map for the shared libbboeos image starting at FUNCTION_TABLE.  vdso_install reads `lib/libbboeos` at boot and rounds up to ceil(size / 4096); this constant sizes the per-page phys-frame array (vdso_code_phys) and bounds the per-program map loop in build_child_program_state.  Bumping it costs (4 * VDSO_PAGE_COUNT_MAX) bytes of kernel BSS.
-        %assign VDSO_SIGRETURN_OFFSET 0460h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.
+        %assign VDSO_SIGRETURN_OFFSET 0FE0h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.  Anchored near the end of page 0 (past the pointer table at 0x800..0x83C) so libbboeos.text can grow well past 0x460 as clang-compiled exports accumulate.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with
