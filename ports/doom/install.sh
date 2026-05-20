@@ -1,8 +1,8 @@
 #!/bin/sh
-# ports/doom/install_doom.sh — build + install Doom on a fresh bboeos disk image.
+# ports/doom/install.sh — build + install Doom on a fresh bboeos disk image.
 #
 # Convenience wrapper around the four steps you'd otherwise run manually:
-#   1. python3 ports/doom/build_doom.py        (compile bin/doom into build/doom/)
+#   1. python3 ports/doom/build.py        (compile bin/doom into build/doom/)
 #   2. ./make_os.sh --ext2 --sectors=...  (10 MB ext2 image)
 #   3. ./add_file.py … bin/doom           (drop the binary in /bin)
 #   4. ./add_file.py … doom1.wad          (drop the WAD at the disk root)
@@ -43,7 +43,7 @@ echo "==> building bin/doom (clean rebuild)"
 # wipe the libc .o cache because the libc Makefile doesn't track CFLAGS
 # changes (so a flag-only flip would otherwise leave libbboeos.a stale).
 make -C user/libc clean
-python3 ports/doom/build_doom.py --clean
+python3 ports/doom/build.py --clean
 
 echo "==> building $IMAGE (ext2, $SECTORS sectors)"
 ./make_os.sh --ext2 --sectors="$SECTORS" "$IMAGE"

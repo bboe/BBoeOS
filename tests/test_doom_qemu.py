@@ -71,8 +71,8 @@ def _assert_markers(*, expected: list[str], label: str, output: str) -> None:
 
 
 def _build_doom() -> None:
-    """Build the doom binary via ports/doom/build_doom.py."""
-    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build_doom.py")])
+    """Build the doom binary via ports/doom/build.py."""
+    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build.py")])
 
 
 def _install_doom_and_wad() -> None:

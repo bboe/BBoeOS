@@ -3,10 +3,10 @@
 # commit into third_party/chocolate-doom-opl/.  Skips the download if a
 # previous run wrote the same commit marker, so re-running is a no-op.
 #
-# Mirrors ports/doom/fetch_doom.sh's idempotent shape — third_party/ is
+# Mirrors ports/doom/fetch.sh's idempotent shape — third_party/ is
 # gitignored, so the fetched files never enter version control.  We
 # don't apply local patches; chocolate_compat.h alone bridges
-# chocolate-vs-doomgeneric drift via -include in ports/doom/build_doom.py.
+# chocolate-vs-doomgeneric drift via -include in ports/doom/build.py.
 set -euo pipefail
 
 COMMIT="35fb1372d10756ca27eca05665bd8a7cebc71c05"

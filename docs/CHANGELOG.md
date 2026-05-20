@@ -625,7 +625,7 @@ time.
 - **Doom music**: Doom now plays its background tracks through OPL3.
   Pinned-commit fetch of Chocolate Doom's OPL music stack (`i_oplmusic.c`,
   `mus2mid.c`, `memio.c`, `opl_queue.c`, `midifile.c`, `opl.h`) into
-  `third_party/chocolate-doom-opl/` via `ports/doom/fetch_chocolate_opl.sh`, plus a
+  `third_party/chocolate-doom-opl/` via `ports/doom/fetch_chocolate.sh`, plus a
   thin `ports/doom/opl_bboeos.c` backend that bridges Chocolate's OPL API to
   `/dev/midi`.  The 12 music stubs in `ports/doom/i_sound_bboeos.c` now delegate
   to Chocolate's `music_opl_module`; `ports/doom/chocolate_compat.h` is a
@@ -672,11 +672,11 @@ time.
 
 ### Doom port
 - BBoeOS now boots and runs [doomgeneric](https://github.com/ozkl/doomgeneric).
-  `ports/doom/build_doom.py` clones the upstream third_party/doomgeneric on demand,
+  `ports/doom/build.py` clones the upstream third_party/doomgeneric on demand,
   cross-compiles with the freestanding clang toolchain, and links it with
   `libbboeos.a` + `user/libc/program.ld` into a flat-binary `bin/doom`.
   `ports/doom/fetch_wad.sh` downloads the shareware `doom1.wad` (SHA256 verified).
-  `ports/doom/install_doom.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld`
+  `ports/doom/install.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld`
   / `objcopy` / `ar` (Linux native, `x86_64-elf-*`, `llvm-*`, `ld.lld`) so the
   same script works on Linux + macOS.
 - `ports/doom/bboeos_doomgeneric.c` implements `DG_Init` / `DG_DrawFrame` /
@@ -684,7 +684,7 @@ time.
   (mode-13h framebuffer via `SYS_VIDEO_MAP`, `SYS_RTC_MILLIS` / `SYS_RTC_SLEEP`,
   the per-fd PS/2 event ring).  WASD + arrow keys move, Ctrl/F fires, Space/E
   uses, Esc opens the menu.
-- `ports/doom/record_doom.py` drives QEMU through the monitor socket to capture
+- `ports/doom/record.py` drives QEMU through the monitor socket to capture
   screendumps every 200 ms, encoding to WebM (VP9 via ffmpeg) and/or GIF
   (palettegen + paletteuse + gifsicle).
 - `tests/test_doom_qemu.py` is a two-stage smoke test: bootstrap (always)
@@ -695,7 +695,7 @@ time.
 - 8-voice software mixer (`ports/doom/audio_mixer.c`, sum-clamp at 8 bits)
   drives the new kernel `/dev/audio` device (see Sound below) from
   `ports/doom/i_sound_bboeos.c`'s `sound_module_t` adapter once per Doom tick
-  (~315 samples / ~28 ms).  Music is stubbed.  `ports/doom/build_doom.py` defines
+  (~315 samples / ~28 ms).  Music is stubbed.  `ports/doom/build.py` defines
   `-DFEATURE_SOUND` so doomgeneric registers our backend.  Doom keeps booting
   silently when the SB16 isn't present.  Mixer math has pytest unit tests
   (`tests/unit/test_audio_mixer.py`); end-to-end smoke test in

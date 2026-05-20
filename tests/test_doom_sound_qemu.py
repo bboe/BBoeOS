@@ -32,8 +32,8 @@ from run_qemu import qemu_session  # noqa: E402
 
 
 def _build_doom() -> None:
-    """Build the doom binary via ports/doom/build_doom.py."""
-    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build_doom.py")])
+    """Build the doom binary via ports/doom/build.py."""
+    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build.py")])
 
 
 def _install_doom_and_wad() -> None:

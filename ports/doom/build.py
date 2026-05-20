@@ -169,15 +169,15 @@ def _doomgeneric_sources() -> list[Path]:
 
 
 def _ensure_chocolate_opl_fetched() -> None:
-    """Run ports/doom/fetch_chocolate_opl.sh — itself idempotent on the pinned commit."""
-    subprocess.check_call([str(REPO / "ports" / "doom" / "fetch_chocolate_opl.sh")])
+    """Run ports/doom/fetch_chocolate.sh — itself idempotent on the pinned commit."""
+    subprocess.check_call([str(REPO / "ports" / "doom" / "fetch_chocolate.sh")])
 
 
 def _ensure_doomgeneric_fetched() -> None:
-    """Run ports/doom/fetch_doom.sh if third_party/doomgeneric is missing."""
+    """Run ports/doom/fetch.sh if third_party/doomgeneric is missing."""
     if THIRD_PARTY.is_dir():
         return
-    subprocess.check_call([str(REPO / "ports" / "doom" / "fetch_doom.sh")])
+    subprocess.check_call([str(REPO / "ports" / "doom" / "fetch.sh")])
 
 
 def _find_tool(*, candidates: tuple[str, ...], purpose: str) -> str:
@@ -272,7 +272,7 @@ def main() -> None:
     # bboeos_wad_file.c provides a `stdc_wad_file` symbol — the default
     # backend doomgeneric falls through to without `-mmap` — that
     # slurps the entire WAD into a malloc'd buffer at OpenFile time.
-    # ports/doom/build_doom.py's EXCLUDED_WAD_BACKENDS drops doomgeneric's
+    # ports/doom/build.py's EXCLUDED_WAD_BACKENDS drops doomgeneric's
     # stock W_StdC_* so this one wins at link time.
     objects.extend([
         _compile_one(source=DOOM_DIR / "bboeos_doomgeneric.c"),
@@ -282,7 +282,7 @@ def main() -> None:
         _compile_one(source=DOOM_DIR / "opl_bboeos.c"),
     ])
     # Fetched chocolate-doom OPL music stack (third_party/chocolate-doom-opl/,
-    # populated by ports/doom/fetch_chocolate_opl.sh above).  i_oplmusic registers
+    # populated by ports/doom/fetch_chocolate.sh above).  i_oplmusic registers
     # `music_opl_module`, the doomgeneric MIDI music backend referenced from
     # i_sound_bboeos.c; midifile parses Standard MIDI File chunks for
     # i_oplmusic; mus2mid converts MUS lumps to MIDI; opl_queue is the timed

@@ -75,10 +75,10 @@ The libc tests need **`clang`**:
   - **`ar`** (GNU `ar`, also from `binutils`) — packs the libc objects into
     `libbboeos.a`.
 
-## Doom port (`ports/doom/build_doom.py`)
+## Doom port (`ports/doom/build.py`)
 
 The Doom build needs the libc deps above (clang, make, ar) plus a GNU-compatible
-linker + objcopy.  `build_doom.py` auto-picks the first one it finds on `$PATH`,
+linker + objcopy.  `build.py` auto-picks the first one it finds on `$PATH`,
 in order:
 
 - `x86_64-elf-ld` / `x86_64-elf-objcopy` (GNU cross-binutils — typical macOS

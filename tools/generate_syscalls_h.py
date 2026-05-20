@@ -15,7 +15,7 @@ SIG[A-Z], FD_TYPE_, *_IOCTL_, VDSO_.  Other constants in the asm file
 the C-compiled userland references them.
 
 Re-run is idempotent — the script writes the file only if the contents
-differ, so make / build_doom.py can call it unconditionally without
+differ, so make / build.py can call it unconditionally without
 forcing recompiles.
 """
 

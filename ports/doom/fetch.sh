@@ -1,5 +1,5 @@
 #!/bin/sh
-# ports/doom/fetch_doom.sh — clones doomgeneric (GPLv2) into third_party/
+# ports/doom/fetch.sh — clones doomgeneric (GPLv2) into third_party/
 # at a pinned commit so the build is reproducible.  Skips the clone if
 # the destination already exists, so re-running is a no-op.
 #

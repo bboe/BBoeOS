@@ -188,11 +188,11 @@ nav_order: 90
 
 ## Doom port
 
-- `ports/doom/fetch_chocolate_opl.sh` — pinned-commit fetcher for Chocolate Doom's
+- `ports/doom/fetch_chocolate.sh` — pinned-commit fetcher for Chocolate Doom's
   OPL music sources (`i_oplmusic.c`, `mus2mid.c`, `memio.c`, `opl_queue.c`,
   `midifile.c`, `opl.h`).  Drops them into `third_party/chocolate-doom-opl/`
   (gitignored) so the build can compile them.  Drives Doom's MIDI playback
-  through the `music_opl_module` interface; `ports/doom/build_doom.py` invokes the
+  through the `music_opl_module` interface; `ports/doom/build.py` invokes the
   script before compiling.
 - `ports/doom/chocolate_compat.h` — narrowly-scoped (~95 line) shim that papers
   over the chocolate-vs-doomgeneric drift (a few macros + typedefs Chocolate's

@@ -20,9 +20,9 @@ https://github.com/user-attachments/assets/5efa60a4-c948-4552-9903-23a4c69a0282
 
 The Doom port lives in `ports/doom/` and links against a hand-rolled
 freestanding libc (`user/libc/libbboeos.a`).  Build pipeline:
-[`ports/doom/build_doom.py`](ports/doom/build_doom.py); shareware-WAD provisioning:
+[`ports/doom/build.py`](ports/doom/build.py); shareware-WAD provisioning:
 [`ports/doom/fetch_wad.sh`](ports/doom/fetch_wad.sh); one-shot "build + install on a fresh
-disk image": [`ports/doom/install_doom.sh`](ports/doom/install_doom.sh).
+disk image": [`ports/doom/install.sh`](ports/doom/install.sh).
 
 The kernel ships as two flat binaries (`boot.bin` + `kernel.bin`) concatenated
 on disk.  `boot.bin` is the MBR + post-MBR real-mode bootstrap + 32-bit paging
