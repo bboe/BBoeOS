@@ -26,6 +26,7 @@ CC      := clang      # force clang — `?=` would lose to Make's built-in CC=cc
 CFLAGS  := --target=i386-pc-none-elf -m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 \
            -mno-implicit-float -fno-vectorize -fno-slp-vectorize \
            -ffreestanding -fno-pic -fno-stack-protector \
+           -ffunction-sections -fdata-sections \
            -nostdlib -nostdinc -O2 -Wall -Wextra -Werror -Iinclude
 C_SRCS  := builtins.c ctype.c dirent.c errno.c math.c signal.c stdio.c stdlib.c string.c syscall.c
 OBJS     = $(C_SRCS:.c=.o) $(S_SRCS:.S=.o)
