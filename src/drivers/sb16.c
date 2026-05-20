@@ -136,10 +136,11 @@ void sb16_reset_delay();
 // re-zeros them.
 void sb16_close() {
     struct pic_imr imr;
-    sb16_dsp_out(0xD0);                  // pause 8-bit DMA
-    sb16_dsp_out(0xDA);                  // exit auto-init 8-bit
-    sb16_dsp_out(0xD3);                  // speaker off
-    kernel_outb(0x0A, 0x05);             // mask 8237 channel 1
+    struct dma_mask mask_ch1 = {.channel = 1, .set = 1};
+    sb16_dsp_out(0xD0); // pause 8-bit DMA
+    sb16_dsp_out(0xDA); // exit auto-init 8-bit
+    sb16_dsp_out(0xD3); // speaker off
+    kernel_outb(0x0A, *(uint8_t *)&mask_ch1);
     *(uint8_t *)&imr = kernel_inb(0x21); // mask IRQ 5 on PIC1
     imr.irq5 = 1;
     kernel_outb(0x21, *(uint8_t *)&imr);
@@ -214,6 +215,10 @@ __attribute__((carry_return)) int sb16_open() {
     int phys;
     int dma_count;
     struct pic_imr imr;
+    struct dma_mask mask_ch1 = {.channel = 1, .set = 1};
+    struct dma_mask unmask_ch1 = {.channel = 1};
+    struct dma_mode mode_audio = {
+        .channel = 1, .transfer = 2, .autoinit = 1, .mode = 1};
     i = 0;
     while (i < AUDIO_DMA_SIZE) {
         audio_buffer_kvirt[i] = AUDIO_SILENCE;
@@ -235,25 +240,20 @@ __attribute__((carry_return)) int sb16_open() {
     sb16_dsp_out(0x41); // set output sample rate
     sb16_dsp_out(0x2B); // 11025 = 0x2B11; high byte first
     sb16_dsp_out(0x11); // low byte
-    // 8237 mode byte 0x59 = 01 0 1 10 01:
-    //   bits 7-6 = 01 single transfer
-    //   bit 5    = 0  address increment
-    //   bit 4    = 1  auto-init enable (loop the buffer instead of
-    //                 stopping at TC; the DSP cmd 0x1C below loops in
-    //                 lockstep and fires IRQ at each block boundary)
-    //   bits 3-2 = 10 read transfer (memory → peripheral)
-    //   bits 1-0 = 01 channel 1
+    // 8237: single mode, auto-init (loop the buffer instead of stopping
+    // at TC; the DSP cmd 0x1C below loops in lockstep and fires IRQ at
+    // each block boundary), read transfer (memory -> peripheral), ch 1.
     phys = audio_buffer_phys;
     dma_count = AUDIO_DMA_SIZE - 1;
-    kernel_outb(0x0A, 0x05);        // mask channel 1
-    kernel_outb(0x0C, 0);           // clear flip-flop
-    kernel_outb(0x0B, 0x59);        // single + inc + auto-init + read + ch 1
-    kernel_outb(0x02, phys & 0xFF); // address low
+    kernel_outb(0x0A, *(uint8_t *)&mask_ch1);
+    kernel_outb(0x0C, 0); // clear flip-flop
+    kernel_outb(0x0B, *(uint8_t *)&mode_audio);
+    kernel_outb(0x02, phys & 0xFF);             // address low
     kernel_outb(0x02, (phys >> 8) & 0xFF);      // address high
     kernel_outb(0x83, (phys >> 16) & 0xFF);     // page register for ch 1
     kernel_outb(0x03, dma_count & 0xFF);        // count low
     kernel_outb(0x03, (dma_count >> 8) & 0xFF); // count high
-    kernel_outb(0x0A, 0x01);                    // unmask channel 1
+    kernel_outb(0x0A, *(uint8_t *)&unmask_ch1);
     // Classic-DSP auto-init recipe: 0x48 sets the block transfer size
     // (count - 1, so the DSP fires IRQ 5 every AUDIO_HALF_SIZE bytes);
     // 0x1C then starts auto-init 8-bit PCM playback with NO further

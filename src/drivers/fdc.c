@@ -20,8 +20,6 @@
 //   FDC_SECTOR_SIZE_CODE = 2 (= 2^2 * 128 = 512)
 //   DMA_CH2_ADDR/COUNT/PAGE = 0x04 / 0x05 / 0x81
 //   DMA_MASK/MODE/CLEAR_FF  = 0x0A / 0x0B / 0x0C
-//   DMA_MODE_READ/WRITE     = 0x46 / 0x4A
-//   DMA_MASK_CH2/UNMASK_CH2 = 0x06 / 0x02
 //   FDC_IRQ6_VECTOR         = 0x26  (post pic_remap)
 //   PIC1_CMD_PORT / PIC1_DATA_PORT = 0x20 / 0x21
 //   PIC_EOI = 0x20  (also in src/include/constants.asm)
@@ -65,8 +63,10 @@ void fdc_wait_irq();
 void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax"))) {
     int phys;
+    struct dma_mask mask_ch2 = {.channel = 2, .set = 1};
+    struct dma_mask unmask_ch2 = {.channel = 2};
     phys = sector_buffer - 0xFF800000;
-    kernel_outb(0x0A, 0x06);                    // mask channel 2
+    kernel_outb(0x0A, *(uint8_t *)&mask_ch2);
     kernel_outb(0x0C, 0);                       // clear flip-flop
     kernel_outb(0x04, phys & 0xFF);             // addr low
     kernel_outb(0x04, (phys >> 8) & 0xFF);      // addr high
@@ -75,7 +75,7 @@ void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF); // count high
     kernel_outb(0x0B, mode);                    // DMA mode
     kernel_outb(0x81, (phys >> 16) & 0xFF);     // page
-    kernel_outb(0x0A, 0x02);                    // unmask channel 2
+    kernel_outb(0x0A, *(uint8_t *)&unmask_ch2);
 }
 
 // Drain the 7 result bytes (ST0, ST1, ST2, C, H, R, N) — ignored.
@@ -92,6 +92,8 @@ void fdc_drain_result() {
 // SPECIFY in DMA mode.  Motor stays off until first read or write.
 void fdc_init() {
     struct pic_imr imr;
+    struct fdc_dor dor_reset = {0};
+    struct fdc_dor dor_run = {.reset_not = 1, .dma_irq = 1};
 
     fdc_install_irq();
     *(uint8_t *)&imr = kernel_inb(0x21); // PIC1_DATA_PORT
@@ -101,9 +103,9 @@ void fdc_init() {
     fdc_irq_flag = 0;
 
     // Reset: clear DOR, then raise RESET_NOT with DMA+IRQ + drive 0.
-    kernel_outb(0x3F2, 0);    // FDC_DOR
-    kernel_outb(0x3F2, 0x0C); // RESET_NOT | DMA_IRQ
-    fdc_wait_irq();           // controller signals ready
+    kernel_outb(0x3F2, *(uint8_t *)&dor_reset);
+    kernel_outb(0x3F2, *(uint8_t *)&dor_run);
+    fdc_wait_irq(); // controller signals ready
 
     // Drain 4 polling interrupts (one per drive slot on 82077AA).
     fdc_sense_interrupt();
@@ -245,13 +247,14 @@ int fdc_read_sector(int lba __attribute__((in_register("ax"))))
     __attribute__((preserve_register("edx"))) {
     int cx;
     int dx;
+    struct dma_mode mode_read = {.channel = 2, .transfer = 1, .mode = 1};
 
     if (fdc_motor_ready == 0) {
         fdc_motor_start();
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(0x46); // DMA_MODE_READ
+    fdc_dma_setup(*(uint8_t *)&mode_read);
     fdc_irq_flag = 0;
     fdc_issue_read_write(0xE6, cx, dx); // CMD_READ
     fdc_wait_irq();
@@ -347,13 +350,14 @@ int fdc_write_sector(int lba __attribute__((in_register("ax"))))
     __attribute__((preserve_register("edx"))) {
     int cx;
     int dx;
+    struct dma_mode mode_write = {.channel = 2, .transfer = 2, .mode = 1};
 
     if (fdc_motor_ready == 0) {
         fdc_motor_start();
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(0x4A); // DMA_MODE_WRITE
+    fdc_dma_setup(*(uint8_t *)&mode_write);
     fdc_irq_flag = 0;
     fdc_issue_read_write(0xC5, cx, dx); // CMD_WRITE
     fdc_wait_irq();

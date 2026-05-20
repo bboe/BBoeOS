@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **drivers/fdc + sb16: bitfield register structs for the 8237 DMA and FDC
+  DOR.**  Adds `struct dma_mask`, `struct dma_mode`, and `struct fdc_dor` to
+  `src/include/registers.h` and ports every magic-byte `kernel_outb` in `fdc`
+  and `sb16` that touches the shared 8237 controller or the floppy DOR.  Where
+  the old code read `kernel_outb(0x0B, 0x59)` and relied on a multi-line
+  bit-by-bit comment, the new code says `struct dma_mode m = { .channel = 1,
+  .transfer = 2, .autoinit = 1, .mode = 1 }` and `kernel_outb(0x0B, *(uint8_t
+  *)&m)` — every bit carries its datasheet name.  Same designated-init +
+  bitfield-collapse peephole story as the NE2000 / PIC IMR ports below, so each
+  literal still folds to a single `mov byte [ebp-K], <const>`.
+
 - **cc.py: `*(T *)expr = value` pointer-dereference-assign.**  Write-side
   symmetry of the read-side parse below.  A new `PointerDereferenceAssign` AST
   node carries the address expression, pointee type, and RHS; codegen evaluates
