@@ -77,14 +77,21 @@ def test_byte_dereference_after_cast(*, work: Path) -> None:
 
     The ``AddressOf(Var)`` shortcut folds ``*(uint8_t *)&local`` into a
     direct frame-relative byte load, skipping the intermediate ``lea``.
+
+    Uses a runtime-sourced value (``source()`` call) to keep the byte
+    load present — the ``peephole_fold_byte_immediate_through_local``
+    pass folds the const-fold immediate path into a direct ``mov reg,
+    imm`` and is covered separately.
     """
     asm = compile_snippet(
         name="byte_dereference_after_cast",
         source=(
             "struct foo { uint8_t a : 1; uint8_t b : 7; };\n"
+            "uint8_t source() { return 11; }\n"
             "uint8_t leak(uint8_t value) { return value; }\n"
             "void caller() {\n"
-            "    struct foo s = { .a = 1, .b = 5 };\n"
+            "    struct foo s;\n"
+            "    *(uint8_t *)&s = source();\n"
             "    leak(*(uint8_t *)&s);\n"
             "}\n"
         ),

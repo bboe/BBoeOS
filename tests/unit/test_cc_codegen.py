@@ -2589,6 +2589,42 @@ def test_peephole_dead_temp_slot_kept_when_read() -> None:
     assert "        mov [bp-2], ax" in out, f"live temp-slot store dropped: {out}"
 
 
+def test_peephole_fold_byte_immediate_through_local() -> None:
+    """``mov byte [ebp-N], <imm>; movzx eax, byte [ebp-N]`` folds to ``mov eax, <imm>``.
+
+    Motivating idiom: a bitfield-struct local whose only use is
+    ``*(uint8_t *)&local`` (typical of the driver port-I/O sites).
+    cc.py emits the byte store from the const-folded designated init,
+    then the pointer-deref load.  The peephole observes that the
+    movzx reads exactly the value just stored and rewrites it to a
+    direct immediate load; ``peephole_dead_temp_slots`` then reclaims
+    the now-unreferenced store.
+    """
+    asm = _kernel(
+        """
+        struct cr {
+            uint8_t start: 1;
+            uint8_t stop: 1;
+            uint8_t txp: 1;
+            uint8_t reserved: 1;
+            uint8_t page: 2;
+            uint8_t rd: 2;
+        };
+        void probe() {
+            struct cr c = { .stop = 1, .rd = 4, .page = 1 };
+            kernel_outb(0x300, *(uint8_t *)&c);
+        }
+    """,
+        bits=32,
+    )
+    # The store + load through [ebp-N] is gone; the immediate flows
+    # straight to AX/AL.
+    assert "mov byte [ebp-1]" not in asm, f"byte store to local should be elided:\n{asm}"
+    assert "movzx eax, byte [ebp-1]" not in asm, f"movzx reload should be folded:\n{asm}"
+    # The byte value (0b00010010 = 18) reaches AL one way or another.
+    assert "mov eax, 18" in asm or "mov al, 18" in asm, f"folded immediate load missing:\n{asm}"
+
+
 def test_peephole_redundant_register_swap_drops_second_mov() -> None:
     """``mov A, B`` followed by ``mov B, A`` drops the second."""
     out = _peephole_run([
