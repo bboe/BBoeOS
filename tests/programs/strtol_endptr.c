@@ -2,7 +2,7 @@
    pointer-to-pointer support).  Parses "42abc" and verifies that
    *endptr lands on the first non-digit character ('a'). */
 
-#include "../../src/include/strtol.h"
+#include "../../kernel/include/strtol.h"
 
 int main() {
     char *input = "42abc";

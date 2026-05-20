@@ -25,8 +25,8 @@ Refresh with `tools/measure_kernel_ports.sh`, which runs the full
 swap-and-rebuild loop and prints rows in this format directly.
 
 The path key (left column) matches the file's location under `src/`, minus the
-`.asm` extension (e.g. `drivers/ps2` is `src/drivers/ps2.asm` archived as
-`archive/kernel/drivers/ps2.asm`, ported to `src/drivers/ps2.c`).
+`.asm` extension (e.g. `drivers/ps2` is `kernel/drivers/ps2.asm` archived as
+`archive/kernel/drivers/ps2.asm`, ported to `kernel/drivers/ps2.c`).
 
 | File | ASM (bytes) | C (bytes) | Delta |
 |------|-------------|-----------|-------|

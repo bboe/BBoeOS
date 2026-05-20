@@ -39,7 +39,7 @@ def _compile_32bit(source_text: str, /) -> str:
     with tempfile.NamedTemporaryFile(
         suffix=".c",
         prefix="_test_macros_",
-        dir=str(REPO_ROOT / "src" / "c"),
+        dir=str(REPO_ROOT / "user" / "programs"),
         mode="w",
         encoding="utf-8",
         delete=True,
@@ -104,7 +104,7 @@ def test_max_with_uint32_underflows_via_unsigned_compare() -> None:
         xor  eax, eax         ; only reached when eax was 0+1=1...
 
     This test pins the broken behaviour as documented in
-    ``src/include/macros.h``: callers who need saturation on a type
+    ``kernel/include/macros.h``: callers who need saturation on a type
     ≥ ``int`` width must cast to signed first — ``MAX((int)x - 1, 0)``.
     """
     asm = _compile_32bit("""

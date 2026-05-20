@@ -152,8 +152,8 @@ target registers at the end would let the default apply universally.
 
 ## Language / C subset
 
-Each item below is a feature `tools/libc/*.c` uses today that cc.py rejects.
-Closing this section would let `tools/libc/` sources compile under cc.py
+Each item below is a feature `user/libc/*.c` uses today that cc.py rejects.
+Closing this section would let `user/libc/` sources compile under cc.py
 directly (per-program inlining, no linker), without the parallel-rewrite tax of
 maintaining a header-only mirror.
 
@@ -185,7 +185,7 @@ standard short names instead of the fixed-width aliases.
 **Size:** small.
 
 Both prefix and postfix forms are unsupported; `x += 1` and `x -= 1` are the
-idioms.  `tools/libc/string.c` and `stdlib.c` lean on `*p++ = *s++` and
+idioms.  `user/libc/string.c` and `stdlib.c` lean on `*p++ = *s++` and
 `n--`-style loops on every page.  The implementation choice is whether to
 desugar in the parser (turn `p++` into an explicit temp + `p += 1` + read of the
 temp) or carry a dedicated AST node and lower in codegen.  Parser-level desugar
@@ -216,7 +216,7 @@ file-static helpers that libc uses heavily.
 **Size:** small.
 
 cc.py is while-only; `for` parses as `expected type, got IDENT ('for')`.  Any
-real C source uses `for` constantly, including most of `tools/libc/`.
+real C source uses `for` constantly, including most of `user/libc/`.
 
 The desugaring is mechanical: `for (init; cond; step) body` becomes `{ init;
 while (cond) { body; step; } }`.  The only subtlety is that `continue` must
@@ -246,7 +246,7 @@ to cover:
   cc.py's existing function-pointer machinery without storage emission.
 
 Once typedef works, `size_t`/`ptrdiff_t`/`uintptr_t` from `<stddef.h>` parse
-correctly and most of `tools/libc/*.c` becomes type-checkable.
+correctly and most of `user/libc/*.c` becomes type-checkable.
 
 ### Variadic functions / `va_list` / `va_arg`
 

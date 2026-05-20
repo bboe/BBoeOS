@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the archive/*.asm and src/c/*.c byte counts match the README table.
+"""Verify the archive/*.asm and user/programs/*.c byte counts match the README table.
 
 The archive directory holds the last-known-good assembly form of each
 program that has since been rewritten in C.  The byte-size comparison
@@ -10,7 +10,7 @@ builtins, and the delta must equal ``c - asm``.
 
 This test:
   1. Assembles every archive/*.asm with nasm.
-  2. Compiles the matching src/c/<name>.c via cc.py + nasm.
+  2. Compiles the matching user/programs/<name>.c via cc.py + nasm.
   3. Parses all four columns of the comparison table in
      archive/README.md.
   4. Fails if any program is missing from the README, fails to
@@ -34,9 +34,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_DIR = REPO_ROOT / "archive"
-C_DIR = REPO_ROOT / "src" / "c"
+C_DIR = REPO_ROOT / "user" / "programs"
 CC_PY = REPO_ROOT / "cc.py"
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 README_PATH = ARCHIVE_DIR / "README.md"
 
 # ``| name | asm_16 | asm | c | delta |`` rows.  asm_16 is the frozen
@@ -123,7 +123,7 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
     asm_source = ARCHIVE_DIR / f"{name}.asm"
     c_source = C_DIR / f"{name}.c"
     if not c_source.is_file():
-        return False, f"no src/c/{name}.c for archive entry"
+        return False, f"no user/programs/{name}.c for archive entry"
     if expected is None:
         return False, "no README row"
     asm_output = scratch / f"{name}.asm.bin"

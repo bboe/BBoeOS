@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cc.py --bits=16 / --bits=32 regression test.
 
-For each src/c/*.c and tests/programs/*.c: run cc.py under both
+For each user/programs/*.c and tests/programs/*.c: run cc.py under both
 emission modes and pass the result through NASM.  Fails if either
 mode produces assembly that NASM rejects.  Production builds run
 cc.py at ``--bits=32`` (see make_os.sh, the default since the
@@ -21,8 +21,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
-SOURCE_DIRS = (REPO_ROOT / "src" / "c", REPO_ROOT / "tests" / "programs")
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+SOURCE_DIRS = (REPO_ROOT / "user" / "programs", REPO_ROOT / "tests" / "programs")
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 
 def compile_and_assemble(*, source: Path, bits: int, work: Path) -> tuple[bool, str]:

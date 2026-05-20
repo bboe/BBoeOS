@@ -4,7 +4,7 @@
 %include "constants.asm"
 
         ;; Local copies of the EDIT_* constants.  These used to live in
-        ;; src/include/constants.asm; once edit.c moved to BSS arrays the
+        ;; kernel/include/constants.asm; once edit.c moved to BSS arrays the
         ;; live header dropped them.  This archive snapshot keeps private
         ;; %assigns so the historical real-mode layout still assembles
         ;; under the current kernel ABI.  ``SECTOR_BUFFER`` is in the same

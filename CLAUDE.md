@@ -23,12 +23,12 @@ Requires `nasm` (`brew install nasm`).
 ## Architecture
 
 Two flat binaries (`nasm -f bin`) concatenated on disk: `boot.bin`
-(`src/arch/x86/boot/boot.asm`, MBR + post-MBR real-mode bootstrap + 32-bit
+(`kernel/arch/x86/boot/boot.asm`, MBR + post-MBR real-mode bootstrap + 32-bit
 `early_pe_entry` that builds the boot PD and enables paging) and `kernel.bin`
-(`src/arch/x86/kernel.asm`, post-paging high-half kernel `org`'d at
+(`kernel/arch/x86/kernel.asm`, post-paging high-half kernel `org`'d at
 `0xFF820000`).  After `early_pe_entry` far-jumps to `high_entry`, the kernel
 sets up its IDT/GDT/stack, brings up the bitmap allocator + kmap window + kernel
-idle PD, then falls into `protected_mode_entry` (`src/arch/x86/entry.asm`) which
+idle PD, then falls into `protected_mode_entry` (`kernel/arch/x86/entry.asm`) which
 does driver inits and falls into `shell_reload`.  Programs run ring-3 in
 per-program PDs at `PROGRAM_BASE` (`0x08048000`) with `ESP = USER_STACK_TOP =
 KERNEL_VIRT_BASE = 0xFF800000`; the kernel direct map at PDE 1022 covers phys
@@ -112,7 +112,7 @@ and COM1 (`drivers/serial.c`, IRQ 4 → `serial_ring`, drained in
 
 Programs use INT 30h for OS services.  Numbers and argument-register conventions
 live in [`docs/syscalls.md`](docs/syscalls.md); symbolic names (`SYS_*`) are in
-`src/include/constants.asm`.
+`kernel/include/constants.asm`.
 
 When removing a syscall, collapse the remaining numbers in its group in the same
 commit (e.g. removing `SYS_NET_ARP` (20h) shifts every later `SYS_NET_*` down by
@@ -131,7 +131,7 @@ smoke tests.
 
 - Add new commands and functions in **sorted order** (alphabetical).
 - Preserve existing comments when editing code.
-- Shell command dispatch lives in `dispatch_buffer()` in `src/c/shell.c` — a
+- Shell command dispatch lives in `dispatch_buffer()` in `user/programs/shell.c` — a
   chain of `else if (strcmp(buf, "name") == 0)` checks.  Adding a built-in
   requires a new branch (and a matching entry in the `help` string); builtins
   must set `last_exec_status` so `$?` and `&&`/`||` see a defined value.
@@ -150,7 +150,7 @@ smoke tests.
 - Programs are loaded at `PROGRAM_BASE` (`0x08048000`). The shell is the first
   program loaded at boot. Programs call kernel-provided helpers via the vDSO at
   user-virt `0x10000` (e.g. `FUNCTION_PRINT_STRING`, `FUNCTION_PRINT_CHARACTER`,
-  `FUNCTION_WRITE_STDOUT`, `FUNCTION_DIE` — see `src/include/constants.asm` for
+  `FUNCTION_WRITE_STDOUT`, `FUNCTION_DIE` — see `kernel/include/constants.asm` for
   the full table).  Only program-specific logic files (e.g. `dns_query.asm`,
   `parse_ip.asm`) are still `%include`d.
 - Stage 1 functions must fit within the 512-byte MBR.
@@ -205,7 +205,7 @@ bootloader:
 Update `docs/CHANGELOG.md` with new entries as features land (the file at the
 repo root is a stub that points at it).  Group entries by date under the
 Unreleased section.  After a batch of significant improvements, bump the version
-in `src/arch/x86/entry.asm` (the `welcome_msg` string emitted by
+in `kernel/arch/x86/entry.asm` (the `welcome_msg` string emitted by
 `protected_mode_entry`) and move the Unreleased entries under a new version
 header with updated comparison links.
 
@@ -216,7 +216,7 @@ exercise the serial console and `-machine acpi=off` to test the shutdown failure
 path.
 
 Automated self-hosting test: `tests/test_asm.py` boots the OS in QEMU and has
-the self-hosted assembler reassemble each program in `static/`, then diffs the
+the self-hosted assembler reassemble each program in `user/static/`, then diffs the
 result byte-for-byte against NASM's output. It drives QEMU via a serial fifo and
 waits for the `$ ` shell prompt (no fixed sleeps), so each program finishes in a
 second or two.

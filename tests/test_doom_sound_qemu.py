@@ -32,8 +32,8 @@ from run_qemu import qemu_session  # noqa: E402
 
 
 def _build_doom() -> None:
-    """Build the doom binary via tools/build_doom.py."""
-    subprocess.check_call([sys.executable, str(REPO / "tools" / "build_doom.py")])
+    """Build the doom binary via ports/doom/build.py."""
+    subprocess.check_call([sys.executable, str(REPO / "ports" / "doom" / "build.py")])
 
 
 def _install_doom_and_wad() -> None:
@@ -91,7 +91,7 @@ def _measure_wav(*, wav_path: Path) -> dict:
 def _test_sound_with_wad() -> None:
     """Run doom under QEMU+SB16, capture WAV, check it has real audio."""
     if not WAD_FILE.is_file():
-        print(f"SKIP doom-sound test: {WAD_FILE} not present (run tools/fetch_wad.sh)")
+        print(f"SKIP doom-sound test: {WAD_FILE} not present (run ports/doom/fetch_wad.sh)")
         return
     _install_doom_and_wad()
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_handle:

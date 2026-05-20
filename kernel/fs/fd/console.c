@@ -1,0 +1,195 @@
+// fd/console.c — read/write implementations for FD_TYPE_CONSOLE.
+// Dispatched via fd_ops in fs/fd.c when the syscall layer hands a
+// console-typed fd to fd_read / fd_write.
+//
+// fd_read_console returns at most one byte per call regardless of the
+// caller's `count` — the shell wants a line-discipline-style stream
+// (read one byte, decide whether to loop) and the asm version's
+// behaviour is the same.  CR (0x0D) is translated to LF (0x0A) on
+// input so PS/2 Enter scancodes (which decode as CR via ps2.c's
+// keymap) and serial-terminal Enter (which sends CR) both surface as
+// Unix-style line endings.  put_character on the output path already
+// translates LF → CRLF, so the symmetry is clean.
+
+#include "program_state.h"
+
+// drivers/ps2.c — non-blocking read; returns 0 with ZF set if the
+// keyboard ring buffer is empty.
+char ps2_getc();
+
+// drivers/serial.c — non-blocking read from the COM1 RX ring (filled
+// by pmode_irq4_handler in entry.asm).  Returns 0 with ZF set if the
+// ring is empty.  Same contract as ps2_getc.
+char serial_getc();
+
+// drivers/vga.c — scrollback state and auto-exit helpers.
+void vga_scrollback_down(int rows);
+int vga_scrollback_is_active();
+
+// fd_ioctl_console: non-blocking peek/get of one byte (or one event)
+// for FD_TYPE_CONSOLE.  Cmd byte (AL) selects the operation:
+//   CONSOLE_IOCTL_TRY_GETC      (0) — AX = ASCII byte (0 if empty)
+//   CONSOLE_IOCTL_TRY_GET_EVENT (1) — EAX = (pressed<<16)|bbkey (0 if empty)
+// Returns CF clear on success, CF set for unknown cmd.  Stays as inline
+// asm because the syscall jump-table dispatch enters with a
+// register-state contract (AL=cmd, ESI=entry) that cc.py's
+// prologue/epilogue would clobber.
+//
+// TRY_GET_EVENT pops from this fd's inline event ring (head/tail at
+// FD_OFFSET_EVENT_HEAD/TAIL, slots at FD_OFFSET_EVENT_BUF) — Linux's
+// per-fd evdev model.  Producer (drivers/ps2.c ps2_broadcast_event)
+// pushes from IRQ context to every readable console fd; consumer
+// (this) drains only the calling fd, so independent readers don't
+// steal each other's events.  Wire format and BBKEY_* code list:
+// user/libc/include/bbkeys.h.
+void fd_ioctl_console();
+
+asm("fd_ioctl_console:\n"
+    "        cmp al, 0x00\n" // CONSOLE_IOCTL_TRY_GETC
+    "        je .fd_ioctl_console_try_getc\n"
+    "        cmp al, 0x01\n" // CONSOLE_IOCTL_TRY_GET_EVENT
+    "        je .fd_ioctl_console_try_get_event\n"
+    "        stc\n"
+    "        ret\n"
+
+    ".fd_ioctl_console_try_getc:\n"
+    "        sti\n"           // let IRQ 1 / IRQ 4 fire so the rings populate
+    "        call ps2_getc\n" // AL = char or 0
+    "        test al, al\n"
+    "        jnz .fd_ioctl_console_got_byte\n"
+    "        call serial_getc\n" // PS/2 empty — try the COM1 ring
+    ".fd_ioctl_console_got_byte:\n"
+    "        movzx eax, al\n"
+    "        jmp .fd_ioctl_console_done\n"
+
+    ".fd_ioctl_console_try_get_event:\n"
+    // Per-fd ring drain at [esi + FD_OFFSET_EVENT_BUF].  ESI = fd
+    // entry pointer (set by fd_ioctl).  Serial doesn't carry release
+    // events so the empty-queue path falls back to a synthesized
+    // make-only event from the serial LSR.
+    "        sti\n"
+    "        push ebx\n"
+    "        movzx eax, byte [esi + FD_OFFSET_EVENT_HEAD]\n"
+    "        cmp al, [esi + FD_OFFSET_EVENT_TAIL]\n"
+    "        je .fd_ioctl_console_event_empty\n"
+    "        movzx ebx, al\n"
+    "        mov eax, [esi + FD_OFFSET_EVENT_BUF + ebx*4]\n"
+    "        inc bl\n"
+    "        and bl, FD_EVENT_QUEUE_LEN - 1\n"
+    "        mov [esi + FD_OFFSET_EVENT_HEAD], bl\n"
+    "        pop ebx\n"
+    "        jmp .fd_ioctl_console_done\n"
+    ".fd_ioctl_console_event_empty:\n"
+    "        pop ebx\n"
+    "        call serial_getc\n"
+    "        test al, al\n"
+    "        jz .fd_ioctl_console_done_zero\n"
+    "        movzx eax, al\n"
+    "        or eax, 0x100\n" // pressed=1
+    "        jmp .fd_ioctl_console_done\n"
+    ".fd_ioctl_console_done_zero:\n"
+    "        xor eax, eax\n"
+
+    ".fd_ioctl_console_done:\n"
+    "        clc\n"
+    "        ret");
+
+// drivers/console.c — single-byte console output (handles ANSI parsing
+// + serial mirror + screen write).  Preserves all caller registers.
+void put_character(char byte __attribute__((in_register("ax"))))
+    __attribute__((preserve_register("eax")))
+    __attribute__((preserve_register("ebx")))
+    __attribute__((preserve_register("ecx")))
+    __attribute__((preserve_register("edx")))
+    __attribute__((preserve_register("esi")));
+
+// fs/fd.c file-scope global; the dispatcher (fd_write) stashes the
+// user buffer pointer here before jumping to this handler.
+extern uint8_t *fd_write_buffer;
+
+// Forward declaration for signal_any_pending (defined after fd_write_console
+// in alphabetical order); called from fd_read_console's poll loop.
+int signal_any_pending();
+
+// Read one byte from PS/2 ring or COM1 into *destination.  Returns CF
+// clear (return 1) with AX = 1 on success, or CF clear (return 1) with
+// AX = 0 if max_bytes was 0.  Returns CF set (return 0) with AX =
+// 0x04 (ERROR_INTERRUPTED) if either PENDING_SIGINT or PENDING_SIGALRM
+// in current_program_state is set before a byte arrives.  The syscall
+// handler entered with IF=0 (the INT 30h gate clears it) so we sti
+// once before the polling loop to let IRQ 1 / IRQ 4 fire and the two
+// input rings populate; the loop then `hlt`s between checks so an
+// idle shell burns no CPU.  PS/2 IRQ 1 and COM1 IRQ 4 each wake us
+// immediately on keystroke.
+__attribute__((carry_return)) int
+fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
+                uint8_t *destination __attribute__((in_register("edi"))),
+                int max_bytes __attribute__((in_register("ecx")))) {
+    char byte;
+    if (max_bytes == 0) {
+        *bytes_read = 0;
+        return 1;
+    }
+    asm("sti");
+    while (1) {
+        // Cooperative interrupt: bail out so the syscall epilogue's
+        // SIGNAL_TAIL_CHECK delivers the signal on iret.
+        // ERROR_INTERRUPTED = 0x04 (constants.asm).
+        if (signal_any_pending() != 0) {
+            *bytes_read = 0x04;
+            return 0;
+        }
+        byte = ps2_getc();
+        if (byte != '\0') {
+            break;
+        }
+        byte = serial_getc();
+        if (byte != '\0') {
+            if (byte == '\x03') {
+                // Serial Ctrl+C — set the flag so the next IRQ epilogue
+                // (or this same syscall's epilogue, after we return)
+                // delivers.  The byte is also returned in the buffer
+                // so SIG_IGN'd programs see it as normal input.
+                asm("mov ecx, [current_program_state]\n"
+                    "mov byte [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT], 1");
+            }
+            if (vga_scrollback_is_active() != 0) {
+                vga_scrollback_down(1000);
+            }
+            break;
+        }
+        asm("hlt");
+    }
+    if (byte == '\r') {
+        byte = '\n';
+    }
+    destination[0] = byte;
+    *bytes_read = 1;
+    return 1;
+}
+
+// Write `count` bytes from fd_write_buffer through put_character (which
+// handles ANSI parsing + serial mirror + screen write).  Always returns
+// CF clear; AX = bytes written = count.
+__attribute__((carry_return)) int
+fd_write_console(int *bytes_written __attribute__((out_register("ax"))),
+                 int count __attribute__((in_register("ecx")))) {
+    int index;
+    index = 0;
+    while (index < count) {
+        put_character(fd_write_buffer[index]);
+        index = index + 1;
+    }
+    *bytes_written = count;
+    return 1;
+}
+
+// signal_any_pending: return non-zero (in AX) if either PENDING_SIGINT or
+// PENDING_SIGALRM is set in current_program_state.  Called from the poll
+// loop in fd_read_console as a cooperative-interrupt check.
+asm("signal_any_pending:\n"
+    "    mov ecx, [current_program_state]\n"
+    "    xor eax, eax\n"
+    "    mov al, [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGINT]\n"
+    "    or  al, [ecx + PROGRAM_STATE_OFFSET_PENDING_SIGALRM]\n"
+    "    ret");

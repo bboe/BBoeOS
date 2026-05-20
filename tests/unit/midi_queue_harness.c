@@ -1,7 +1,7 @@
 /* tests/unit/midi_queue_harness.c — host-clang harness for the
  * /dev/midi event queue + drain logic.
  *
- * The kernel sources `src/fs/fd/midi.c` and `src/drivers/opl3.c` are
+ * The kernel sources `kernel/fs/fd/midi.c` and `kernel/drivers/opl3.c` are
  * cc.py-targeted: they use `__attribute__((carry_return))`, register
  * pinning attributes, NASM-syntax `asm("foo equ _g_foo")` aliases, and
  * the `kernel_outb` / `kernel_inb` cc.py intrinsics.  This harness

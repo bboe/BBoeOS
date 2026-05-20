@@ -9,7 +9,7 @@
 #     tests/measure_kernel_port.sh drivers/ps2
 #
 # Prerequisites (run AFTER the port is staged):
-#     src/<path>.c                — the C port (cc.py compiles it)
+#     kernel/<path>.c                — the C port (cc.py compiles it)
 #     archive/kernel/<path>.asm   — the snapshot of the original
 #     bboeos.asm                  — already references .kasm for the
 #                                   ported file (port commits do this)
@@ -35,7 +35,7 @@ if [ $# -ne 1 ]; then
 fi
 
 PATH_NAME="$1"
-SRC_C="src/${PATH_NAME}.c"
+SRC_C="kernel/${PATH_NAME}.c"
 ARCHIVE_ASM="archive/kernel/${PATH_NAME}.asm"
 KASM_PATH="build/kernel-c/${PATH_NAME}.kasm"
 
@@ -57,11 +57,11 @@ C_SIZE=$(stat -c %s os.bin)
 echo "%include \"${PATH_NAME}.asm\"" > "$KASM_PATH"
 
 nasm -f bin \
-    -i src/include/ -i src/ -i src/arch/x86/ -i src/arch/x86/boot/ \
+    -i kernel/include/ -i kernel/ -i kernel/arch/x86/ -i kernel/arch/x86/boot/ \
     -i build/kernel-c/ -i build/kernel-c/net/ -i build/kernel-c/fs/ \
     -i build/kernel-c/arch/x86/ \
     -i archive/kernel/ \
-    -o os.bin src/arch/x86/boot/bboeos.asm
+    -o os.bin kernel/arch/x86/boot/bboeos.asm
 
 ASM_SIZE=$(stat -c %s os.bin)
 
@@ -74,7 +74,7 @@ else
 fi
 
 printf 'ASM:   %5d bytes  (archive/kernel/%s.asm)\n' "$ASM_SIZE" "$PATH_NAME"
-printf 'C:     %5d bytes  (src/%s.c)\n' "$C_SIZE" "$PATH_NAME"
+printf 'C:     %5d bytes  (kernel/%s.c)\n' "$C_SIZE" "$PATH_NAME"
 printf 'Delta: %s bytes\n' "$DELTA_FMT"
 
 # Re-run a normal build at the end so the working tree's os.bin

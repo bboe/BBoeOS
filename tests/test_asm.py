@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test that the self-hosted assembler produces byte-identical output to NASM.
 
-With no argument, tests every program in static/ that has `org 08048000h`.
+With no argument, tests every program in user/static/ that has `org 08048000h`.
 With a name (e.g. ./test_asm.py edit), tests only that one program. On
 single-program runs the artifacts (nasm reference binary, extracted output,
 drive image) are copied to a persistent temp directory so they can be
@@ -28,12 +28,12 @@ from run_qemu import COMMAND_TIMEOUT, run_commands  # noqa: E402
 from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
 BASE_IMAGE = "drive.img"
-C_DIR = Path("src/c")
+C_DIR = Path("user/programs")
 ORG_DIRECTIVE = "org 08048000h"
-STATIC_DIR = Path("static")
+STATIC_DIR = Path("user/static")
 
 # The self-host run on asm.asm itself is the slow-path test; every
-# other program in static/ finishes well under a second.  Give asm
+# other program in user/static/ finishes well under a second.  Give asm
 # its own generous budget and let everything else trip the default
 # 4s cap.  CI runners are significantly slower; use BBOE_ASM_SELF_HOST_TIMEOUT
 # to raise the ceiling (the workflow sets it to 32).
@@ -75,7 +75,7 @@ def _build_references(
         name = source.stem
         reference = temporary_directory / f"ref_{name}.bin"
         subprocess.run(
-            ["nasm", "-f", "bin", "-o", str(reference), str(source), "-I", "static/"],
+            ["nasm", "-f", "bin", "-o", str(reference), str(source), "-I", "user/static/"],
             check=True,
         )
         references[name] = reference
@@ -96,9 +96,9 @@ def _run_tests(*, arguments: argparse.Namespace) -> int:
         directory_sector = compute_directory_sector(image_path=str(temporary_directory / BASE_IMAGE))
         if not programs:
             if arguments.program:
-                print(f"No program named '{arguments.program}' in static/")
+                print(f"No program named '{arguments.program}' in user/static/")
             else:
-                print("No programs found in static/")
+                print("No programs found in user/static/")
             return 1
 
         print("Programs to test:", " ".join(p.name for p in programs))
@@ -180,9 +180,9 @@ def compare_drive_output(
 
 
 def compile_c_sources(*, temporary_directory: Path) -> list[Path]:
-    """Compile each src/c/*.c to temporary_directory/<name>.asm via cc.py.
+    """Compile each user/programs/*.c to temporary_directory/<name>.asm via cc.py.
 
-    Skips C sources whose corresponding .asm already exists in static/
+    Skips C sources whose corresponding .asm already exists in user/static/
     (i.e. a hand-written version is the source of truth).  Returns the
     list of generated paths so they can be included in the test run.
 
@@ -210,7 +210,7 @@ def compile_c_sources(*, temporary_directory: Path) -> list[Path]:
 
 
 def discover_programs(*, additional: list[Path] | None = None, only: str | None) -> list[Path]:
-    """Return the list of static/*.asm (plus any additional) programs that target PROGRAM_BASE."""
+    """Return the list of user/static/*.asm (plus any additional) programs that target PROGRAM_BASE."""
     candidates = sorted(STATIC_DIR.glob("*.asm"))
     if additional:
         candidates = sorted(candidates + additional, key=lambda p: p.stem)

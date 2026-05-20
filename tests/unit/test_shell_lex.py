@@ -1,6 +1,6 @@
 """Pytest unit tests for the shell command-line lexer.
 
-The lexer (``src/include/shell_lex.h``) is a single-pass, quote-aware
+The lexer (``kernel/include/shell_lex.h``) is a single-pass, quote-aware
 tokenizer that the bboeos shell uses to break a command line into a
 TOKEN_* stream before any parser/executor work.  This test compiles
 the header against a tiny C harness with host clang and asserts the
@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 _HARNESS = r"""
 #include <stdio.h>

@@ -115,7 +115,7 @@ def _add_exec_probe(*, image: Path, name: str) -> None:
         )
         binary = Path(tmpdir) / name
         subprocess.run(
-            ["nasm", "-f", "bin", "-i", "src/include/", "-o", str(binary), str(assembled)],
+            ["nasm", "-f", "bin", "-i", "kernel/include/", "-o", str(binary), str(assembled)],
             check=True,
             cwd=str(REPO_ROOT),
         )
@@ -253,7 +253,7 @@ def _ext2_add_large_test_file(*, image: Path) -> None:
     matching content in the direct or singly-indirect range.
     """
     target_bytes = 280 * 1024
-    source = (REPO_ROOT / "src" / "c" / "asm.c").read_bytes()
+    source = (REPO_ROOT / "user" / "programs" / "asm.c").read_bytes()
     content = bytearray((source * (target_bytes // len(source) + 1))[:target_bytes])
     content[_DOUBLY_INDIRECT_START : _DOUBLY_INDIRECT_START + len(_DOUBLY_INDIRECT_SENTINEL)] = _DOUBLY_INDIRECT_SENTINEL
     with tempfile.TemporaryDirectory() as tmpdir:

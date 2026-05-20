@@ -9,7 +9,7 @@ output byte-for-byte identical to the default).
 Also covers user-mode struct support: packed layout + sizeof, ptr->field
 read/write codegen with correct byte offsets, global struct array BSS
 size, struct fd layout pinning against the FD_OFFSET_* constants in
-src/include/constants.asm, and a regression sweep over every src/c/*.c
+kernel/include/constants.asm, and a regression sweep over every user/programs/*.c
 to confirm cc.py + nasm still accept the existing programs under
 both --bits 16 and 32.
 """
@@ -26,12 +26,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CC = REPO_ROOT / "cc.py"
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 sys.path.insert(0, str(REPO_ROOT))
 from cc.codegen.x86.peephole import Peepholer  # noqa: E402
 from cc.target import X86CodegenTarget16  # noqa: E402
 
-# FD layout constants from src/include/constants.asm (must match exactly).
+# FD layout constants from kernel/include/constants.asm (must match exactly).
 # Used by the struct-fd layout-pinning tests below.  Sorted alphabetically
 # per project convention; the byte-offset values themselves trace the
 # struct fd layout (type@0, flags@1, start@2, size@4, position@8,
@@ -660,7 +660,7 @@ def test_double_pointer_deref_assign_emits_indirect_store() -> None:
     assert "mov [esi], eax" in body, f"expected store through ESI\n{asm}"
 
 
-@pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "src" / "c").glob("*.c")))
+@pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "user" / "programs").glob("*.c")))
 @pytest.mark.parametrize("bits", [16, 32])
 def test_existing_programs_unchanged(source_path: Path, bits: int) -> None:
     """Every existing user-space C program still compiles and assembles after PR 0."""
@@ -1749,7 +1749,7 @@ def test_memcmp_topologically_orders_aliased_args() -> None:
     / mov esi, edi``, which made SI point at the freshly-written
     line+start value — every comparison hit the buffer against itself
     and returned 0 (equal), so every line "matched."  Caught while
-    landing src/c/grep.c.  builtin_memcmp now routes register loads
+    landing user/programs/grep.c.  builtin_memcmp now routes register loads
     through _emit_builtin_arg_moves so the load order is topologically
     safe.
     """
@@ -2943,7 +2943,7 @@ def test_struct_array_initializer_emits_fields() -> None:
 def test_struct_array_initializer_function_symbol_fields() -> None:
     """User function names are accepted as constant initializers for function_pointer fields.
 
-    The fd_ops table in src/fs/fd.c is the motivating shape: an array of
+    The fd_ops table in kernel/fs/fd.c is the motivating shape: an array of
     struct { fn_ptr read; fn_ptr write; } entries laid out at file scope
     with `{ fd_read_console, fd_write_console }` style entries.
     """
@@ -4627,7 +4627,7 @@ def test_user_switch_rejects_non_constant_case_label() -> None:
     assert "compile-time integer constant" in message, message
 
 
-@pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "src" / "c").glob("*.c")))
+@pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "user" / "programs").glob("*.c")))
 def test_user_target_identical_to_default(source_path: Path) -> None:
     """--target user output is byte-for-byte identical to the default (no --target)."""
     with tempfile.TemporaryDirectory(prefix="test_kernel_reg_") as work:
@@ -4689,7 +4689,7 @@ def test_builtin_read_emits_fd_last() -> None:
     silently emitting `add edi, ebx` and `sub eax, ebx` that read the fd
     value instead of total.
 
-    Regression caught while landing src/c/tail.c — passing `read(fd,
+    Regression caught while landing user/programs/tail.c — passing `read(fd,
     tail_buf + total, BUF - total)` inside a loop produced wrong reads at
     offset `fd` instead of offset `total`.  builtin_write already orders
     args this way; this test pins down the same property for read.
@@ -4817,7 +4817,7 @@ def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
     base-address scratch — overwriting the buffer pointer that was
     just placed there.  The resulting ``write`` syscall pointed at the
     ``names`` array's first slot every iteration, so ``ls`` (the
-    program that surfaced this in src/c/ls.c) printed the same name
+    program that surfaced this in user/programs/ls.c) printed the same name
     repeated, garbled by length mismatches.
 
     The fix routes write's three arg loads through
@@ -5106,7 +5106,7 @@ def test_builtin_signal_loads_bx_after_clobbering_sibling() -> None:
 def test_builtin_sys_break_emits_break_syscall() -> None:
     """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
 
-    The kernel handler at src/arch/x86/syscall.asm:.sys_break reads EBX as
+    The kernel handler at kernel/arch/x86/syscall.asm:.sys_break reads EBX as
     "new break" (0 = query) and returns the resulting break in EAX with
     CF=0 always.  We pin the C contract end of that ABI here so future
     codegen refactors can't silently change it.
@@ -5128,7 +5128,7 @@ def test_builtin_sys_break_emits_break_syscall() -> None:
     assert "mov ebx, 0" in asm or "xor ebx, ebx" in asm, f"sys_break(0) (query form) must zero EBX before firing the syscall.\nasm:\n{asm}"
     assert "mov ah, SYS_SYS_BREAK" in asm, (
         "sys_break codegen must emit `mov ah, SYS_SYS_BREAK` — the constant lives in "
-        "src/include/constants.asm and is the only stable contract with the kernel handler.\n"
+        "kernel/include/constants.asm and is the only stable contract with the kernel handler.\n"
         f"asm:\n{asm}"
     )
     assert asm.count("mov ah, SYS_SYS_BREAK") == 2, (

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Syntax-check C sources with clang.
 
-Verifies that every src/c/*.c and tests/programs/*.c file compiles
+Verifies that every user/programs/*.c and tests/programs/*.c file compiles
 cleanly under clang with the bboeos.h compatibility header, catching
 type errors and syntax mistakes that cc.py's minimal parser might
 miss.
@@ -20,8 +20,8 @@ from pathlib import Path
 
 HEADER = Path(__file__).resolve().parent / "bboeos.h"
 REPO_ROOT = HEADER.parent.parent
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
-SOURCE_DIRS = (REPO_ROOT / "src" / "c", REPO_ROOT / "tests" / "programs")
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+SOURCE_DIRS = (REPO_ROOT / "user" / "programs", REPO_ROOT / "tests" / "programs")
 
 
 def check_program(*, source: Path) -> tuple[bool, str]:

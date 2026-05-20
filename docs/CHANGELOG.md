@@ -20,7 +20,7 @@ time.
   addition to the original zero-arg pair.  The implicit promotion is suppressed
   when any call site passes a complex argument (`arr[i]`, `s->f`, `*p`, nested
   `Call`); those callees fall back to cdecl until the register-arg scheduler is
-  extended to handle complex args.  `src/c/asm.c` keeps its
+  extended to handle complex args.  `user/programs/asm.c` keeps its
   `__attribute__((regparm(1)))` annotations: the self-hoster relies on the
   AX-only convention (1 arg in EAX, rest on the stack) for its inline-asm
   callers, which doesn't match the new regparm(min(3, n)) default and would also
@@ -29,7 +29,7 @@ time.
 
 - **drivers/ata: bitfield register structs for the device-control, drive/head,
   and status registers.**  Adds `struct ata_dcr`, `struct ata_drive_head`, and
-  `struct ata_status` to `src/include/registers.h` and ports every magic-byte /
+  `struct ata_status` to `kernel/include/registers.h` and ports every magic-byte /
   magic-mask call in `ata.c`.  The soft-reset sequence now reads as `struct
   ata_dcr soft_reset = { .srst = 1 }`, the drive-select write is `{ .lba = 1,
   .reserved_5 = 1, .reserved_7 = 1 }` (i.e. master + LBA), and BSY/ERR/DRQ
@@ -40,7 +40,7 @@ time.
 
 - **drivers/fdc + sb16: bitfield register structs for the 8237 DMA and FDC
   DOR.**  Adds `struct dma_mask`, `struct dma_mode`, and `struct fdc_dor` to
-  `src/include/registers.h` and ports every magic-byte `kernel_outb` in `fdc`
+  `kernel/include/registers.h` and ports every magic-byte `kernel_outb` in `fdc`
   and `sb16` that touches the shared 8237 controller or the floppy DOR.  Where
   the old code read `kernel_outb(0x0B, 0x59)` and relied on a multi-line
   bit-by-bit comment, the new code says `struct dma_mode m = { .channel = 1,
@@ -77,11 +77,11 @@ time.
   write-side `*(uint8_t *)&imr = kernel_inb(...)` syntax on the
   read-modify-write path.  Net kernel cost: +344 bytes for substantial
   readability (every magic byte now reads as named fields with datasheet bit
-  meanings).  Struct definitions live in the new `src/include/registers.h`.
+  meanings).  Struct definitions live in the new `kernel/include/registers.h`.
 
 - **cc.py: multi-translation-unit programs end-to-end.**  `make_os.sh` now reads
   an optional `<name>.deps` sidecar next to `tests/programs/<name>.c` (or
-  `src/c/<name>.c`); each helper source listed there is compiled with `cc.py
+  `user/programs/<name>.c`); each helper source listed there is compiled with `cc.py
   --object`, packed, and threaded into the same `ccld` invocation that links
   `<name>.ccobj`.  Sources mentioned in a `.deps` are excluded from the
   auto-discovered program lists, so the helper does not also build as its own
@@ -119,7 +119,7 @@ time.
   LEA; previously this was a parse error.
 
 - **edit.c line editor: `else if` chain → `switch`.**  Converts the 13+
-  control-code dispatch in `src/c/edit.c`'s main edit loop to a `switch
+  control-code dispatch in `user/programs/edit.c`'s main edit loop to a `switch
   (character)`.  No break-from-loop arms (all exits use `return 0;` from the
   Ctrl+Q dirty=0 path), so no `goto` needed. Backspace+DEL and `\r`+`\n` share
   fall-through cases.  Case bodies with locals (`int c`, `int target_col`, `int
@@ -128,7 +128,7 @@ time.
   the compound-statement support that landed in PR #410. The printable-ASCII
   range check (`' ' <= c <= '~'`) stays inside the `default:` arm since switch
   can't range-match.  Combined with the interleaved-switch optimisation from PR
-  #421, `src/c/edit.c` shrinks by 9 bytes vs the pre-refactor else-if chain
+  #421, `user/programs/edit.c` shrinks by 9 bytes vs the pre-refactor else-if chain
   (3312 → 3303).
 
 - **cc.py: interleaved switch dispatch with pinned-discriminant promotion.**
@@ -141,8 +141,8 @@ time.
   separated `cmp al, K; je near` form this saves 4 bytes per arm by keeping
   every dispatch branch in short-jump range; the discriminant promotion bypasses
   the usual Call-init exclusion in `can_auto_pin` because the per-arm win covers
-  the extra `mov R, eax` after the call.  Concrete win: `src/c/shell.c` -32
-  bytes; the same optimisation unlocks a further -60 bytes on `src/c/edit.c`
+  the extra `mov R, eax` after the call.  Concrete win: `user/programs/shell.c` -32
+  bytes; the same optimisation unlocks a further -60 bytes on `user/programs/edit.c`
   once PR #412 lands.
 
 - **NE2000 IRQ 3 + COM1 IRQ 4 wake.**  The NIC now enables `IMR.PRX` and the
@@ -204,13 +204,13 @@ time.
   al, imm` / `cmp eax, imm` (2-3 bytes) instead of `cmp byte [addr], imm` / `cmp
   dword [addr], imm` (5-7 bytes).  Self-paying for any switch with 2+ arms;
   pinned-register discriminants take the existing register fast path and skip
-  the hoist.  Concrete win on `src/c/edit.c`'s 14-arm line-editor switch
+  the hoist.  Concrete win on `user/programs/edit.c`'s 14-arm line-editor switch
   (introduced in PR #412): -67 bytes.  Also pins a regression test that cases
   whose bodies always-exit via `return` / `goto` don't emit a dead fall-through
   `jmp .switch_*_end`.
 
 - **shell line editor: `else if` chain → `switch`.**  Converts the 13+
-  control-code dispatch in `src/c/shell.c`'s main line-editor loop to a `switch
+  control-code dispatch in `user/programs/shell.c`'s main line-editor loop to a `switch
   (character)`.  The three arms that previously used `break;` to exit the outer
   `while (1)` loop (Ctrl-C cancel, Ctrl-L reprompt, Enter submit) now `goto
   line_done;` instead.  Backspace and DEL share a fall-through case. Case-locals
@@ -245,22 +245,22 @@ time.
 
 - **Switch-conversion follow-ups to PR #393 / #394.**  Mechanical refactor of
   the remaining no-caveat `else if` chains the enum+switch landing left behind:
-  the ANSI CSI dispatch in `src/drivers/console.c` (6-way on terminator byte),
+  the ANSI CSI dispatch in `kernel/drivers/console.c` (6-way on terminator byte),
   the `emit_alu_binop` 4-way `type2` dispatch and 3-way `type2` dispatch in
-  `src/c/asm.c`, the `emit_sized_imm` 3-way `size` dispatch, and both
+  `user/programs/asm.c`, the `emit_sized_imm` 3-way `size` dispatch, and both
   backslash-escape handlers (string + char literal).  Pure readability win — no
-  byte-level behavior change (test_asm.py reassembles every program in static/
+  byte-level behavior change (test_asm.py reassembles every program in user/static/
   against NASM byte-for-byte and confirms identity).  Char discriminants switch
   on the underlying ``char`` variable directly — the ``_type_of_operand``-driven
   Char-wrap in ``generate_switch`` (companion fix) handles the case-label
   classification automatically.
 - **Self-hosted asm: `times N <branch>` now emits N copies instead of zero
-  bytes.**  `src/c/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
+  bytes.**  `user/programs/asm.c`'s `parse_directive` fast-pathed `times N db ...` and
   silently returned for every other payload — most painfully `times N jmp/jcc`
   (and any other instruction whose size resolves on a later pass).  The handler
   now re-dispatches the payload through `parse_directive` itself, so every
   directive shape (`db` / `dw` / `dd` / any mnemonic) gets repeated correctly.
-  New `static/times_branch_sm.asm` fixture pins the behavior under
+  New `user/static/times_branch_sm.asm` fixture pins the behavior under
   `tests/test_asm.py`.
 - **cc.py: `uint16_t` arrays now generate correct halfword load/store.**  Local
   `uint16_t arr[N]` declarations previously got a 4-byte stride and `mov dword`
@@ -288,7 +288,7 @@ time.
   errors if any variant is missing a `case` — adding a new enum variant later
   flags every switch site that forgot to handle it.
 - **libc `<dirent.h>`: `opendir` / `readdir` / `closedir` / `rewinddir`.**  New
-  `tools/libc/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
+  `user/libc/dirent.c` sits on top of `SYS_IO_GETDENTS` so clang-built programs
   (linking against `libbboeos.a`) can iterate directories with the POSIX API.
   Each `DIR` owns a 4 KB receive buffer and a single `struct dirent` (`d_ino` /
   `d_type` / `d_name[256]`); subsequent `readdir` invalidates the previous
@@ -302,7 +302,7 @@ time.
   `SYS_IO_GETDENTS` (14h) returns variable-length records
   (`d_ino`/`d_reclen`/`d_type`/`d_name`) into a user buffer, packed back-to-back
   until full or EOF.  `bbfs_read_dir` and `ext2_read_dir` are rewritten around a
-  shared `dir_emit` callback (`src/fs/vfs.c`): ext2 no longer synthesizes a fake
+  shared `dir_emit` callback (`kernel/fs/vfs.c`): ext2 no longer synthesizes a fake
   bbfs-shaped record and preserves the full 32-bit inode and untruncated
   filename.  `read()` on a directory fd now returns `ERROR_IS_DIRECTORY` (mapped
   to `EISDIR` in libc) — callers must use `getdents`.  `ls.c` migrated to the
@@ -356,7 +356,7 @@ time.
   with bin/ already at the 64-entry cap by picking a natural sector-3 entry
   instead of appending a synthetic `_zexec_last`.
 - **cc.py pointer-to-pointer support.**  Six related fixes that together let
-  `src/include/strtol.h` write back through `endptr` the way libc does. (1)
+  `kernel/include/strtol.h` write back through `endptr` the way libc does. (1)
   `_type_of_operand` in `cc/codegen/base.py` now classifies `char**` /
   `uint8_t**` / `int**` as pointers so `if (endptr != NULL)` compiles instead of
   failing with `pointer compared to non-pointer`.  (2) Same classifier
@@ -382,7 +382,7 @@ time.
   `tests/unit/test_cc_codegen.py` and on-OS by `tests/programs/strtol_endptr.c`.
 - **Userland common utilities (PR 1 of 3).**  Added `true`, `false`, `seq`,
   `yes`, `wc`, `head`, `tail` (file mode), and `tee`, plus four shared headers
-  in `src/include/`: `line_helpers.h` (the `read_line` line-buffered reader),
+  in `kernel/include/`: `line_helpers.h` (the `read_line` line-buffered reader),
   `strtol.h` (a minimal libc-compatible decimal parser used by `seq`, `head`,
   and `tail`), `ctype.h` (`isspace`, shared by `strtol` and `wc`), and
   `getopt.h` (short-option parser used by `wc`, `head`, and `tail`).  `cat` now
@@ -453,7 +453,7 @@ time.
   (`MAX_PIPES = 4`, each 4 KB, ring buffer 4076 bytes), installs the write end
   as slot_b's `STDOUT` and the read end as slot_c's `STDIN`, marks both slots
   `STATE_RUNNING`, and hands off via `kernel_yield_to_pipeline_start`.
-  `fd_read_pipe` / `fd_write_pipe` (`src/fs/fd.c`) block cooperatively via
+  `fd_read_pipe` / `fd_write_pipe` (`kernel/fs/fd.c`) block cooperatively via
   `kernel_yield_read` / `kernel_yield_write`; `fd_close_pipe` wakes the peer
   when the last writer or reader closes.  The bbfs directory was widened from 3
   to 4 sectors (48 → 64 entries) to accommodate the two new test-fixture
@@ -551,7 +551,7 @@ time.
   rtc_sleep, fd_read_console, and MIDI_IOCTL_DRAIN return EINTR when interrupted
   by either signal.  libc adds alarm() (POSIX seconds) and alarm_ms() (BBoeOS
   ms+interval extension).
-- **tools/record_doom**: capture SB16 audio during the recording and mux it into
+- **ports/doom/record_doom**: capture SB16 audio during the recording and mux it into
   `docs/gifs/doom.mp4` (H.264 + AAC, 128 kbps; the GIF stays silent — no audio
   container).  QEMU's `-audiodev wav,...` + `-device sb16,audiodev=...` writes a
   16-bit stereo PCM WAV alongside the PPM frames; ffmpeg's filter graph does
@@ -610,9 +610,9 @@ time.
   writes get 1 ms timing precision.  Single-opener semantics; `MIDI_IOCTL_DRAIN`
   (AL=0) blocks via `sti`/`hlt` until the kernel ring drains.  Userland probes
   for the chip via `open("/dev/midi")` itself — `fd_open_midi` rejects the open
-  if `g_opl3_present == 0`.  New driver `src/drivers/opl3.c` (outb-based
-  register writes + chip probe) and dispatch in `src/fs/fd/midi.c`.
-- **Doom music continues during level loads**: `tools/doom/opl_bboeos.c`
+  if `g_opl3_present == 0`.  New driver `kernel/drivers/opl3.c` (outb-based
+  register writes + chip probe) and dispatch in `kernel/fs/fd/midi.c`.
+- **Doom music continues during level loads**: `ports/doom/opl_bboeos.c`
   installs a SIGALRM handler at `OPL_Init` and arms a 28 ms repeating alarm via
   `alarm_ms`, so `opl_bboeos_poll` keeps draining the OPL queue even when the
   main game loop is blocked on `W_LoadLumpName` / WAD I/O during level
@@ -625,10 +625,10 @@ time.
 - **Doom music**: Doom now plays its background tracks through OPL3.
   Pinned-commit fetch of Chocolate Doom's OPL music stack (`i_oplmusic.c`,
   `mus2mid.c`, `memio.c`, `opl_queue.c`, `midifile.c`, `opl.h`) into
-  `third_party/chocolate-doom-opl/` via `tools/fetch_chocolate_opl.sh`, plus a
-  thin `tools/doom/opl_bboeos.c` backend that bridges Chocolate's OPL API to
-  `/dev/midi`.  The 12 music stubs in `tools/doom/i_sound_bboeos.c` now delegate
-  to Chocolate's `music_opl_module`; `tools/doom/chocolate_compat.h` is a
+  `third_party/chocolate-doom-opl/` via `ports/doom/fetch_chocolate.sh`, plus a
+  thin `ports/doom/opl_bboeos.c` backend that bridges Chocolate's OPL API to
+  `/dev/midi`.  The 12 music stubs in `ports/doom/i_sound_bboeos.c` now delegate
+  to Chocolate's `music_opl_module`; `ports/doom/chocolate_compat.h` is a
   narrowly-scoped (~95 line) shim for the chocolate-vs-doomgeneric drift.  The
   chip is run in OPL3 mode (richer than the spec's planned OPL2 baseline) —
   `OPL_Init` returns `OPL_INIT_OPL3` and `OPL_InitRegisters` enables the second
@@ -672,19 +672,19 @@ time.
 
 ### Doom port
 - BBoeOS now boots and runs [doomgeneric](https://github.com/ozkl/doomgeneric).
-  `tools/build_doom.py` clones the upstream third_party/doomgeneric on demand,
+  `ports/doom/build.py` clones the upstream third_party/doomgeneric on demand,
   cross-compiles with the freestanding clang toolchain, and links it with
-  `libbboeos.a` + `tools/libc/program.ld` into a flat-binary `bin/doom`.
-  `tools/fetch_wad.sh` downloads the shareware `doom1.wad` (SHA256 verified).
-  `tools/install_doom.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld`
+  `libbboeos.a` + `user/libc/program.ld` into a flat-binary `bin/doom`.
+  `ports/doom/fetch_wad.sh` downloads the shareware `doom1.wad` (SHA256 verified).
+  `ports/doom/install.sh` is a one-shot wrapper.  Auto-picks GNU-compatible `ld`
   / `objcopy` / `ar` (Linux native, `x86_64-elf-*`, `llvm-*`, `ld.lld`) so the
   same script works on Linux + macOS.
-- `tools/doom/bboeos_doomgeneric.c` implements `DG_Init` / `DG_DrawFrame` /
+- `ports/doom/bboeos_doomgeneric.c` implements `DG_Init` / `DG_DrawFrame` /
   `DG_GetKey` / `DG_GetTicksMs` / `DG_SleepMs` over the new kernel surface
   (mode-13h framebuffer via `SYS_VIDEO_MAP`, `SYS_RTC_MILLIS` / `SYS_RTC_SLEEP`,
   the per-fd PS/2 event ring).  WASD + arrow keys move, Ctrl/F fires, Space/E
   uses, Esc opens the menu.
-- `tools/record_doom.py` drives QEMU through the monitor socket to capture
+- `ports/doom/record.py` drives QEMU through the monitor socket to capture
   screendumps every 200 ms, encoding to WebM (VP9 via ffmpeg) and/or GIF
   (palettegen + paletteuse + gifsicle).
 - `tests/test_doom_qemu.py` is a two-stage smoke test: bootstrap (always)
@@ -692,10 +692,10 @@ time.
   `DrawFrame` ticks at least 30 frames when `wads/doom1.wad` is present.
 
 ### Doom SFX
-- 8-voice software mixer (`tools/doom/audio_mixer.c`, sum-clamp at 8 bits)
+- 8-voice software mixer (`ports/doom/audio_mixer.c`, sum-clamp at 8 bits)
   drives the new kernel `/dev/audio` device (see Sound below) from
-  `tools/doom/i_sound_bboeos.c`'s `sound_module_t` adapter once per Doom tick
-  (~315 samples / ~28 ms).  Music is stubbed.  `tools/build_doom.py` defines
+  `ports/doom/i_sound_bboeos.c`'s `sound_module_t` adapter once per Doom tick
+  (~315 samples / ~28 ms).  Music is stubbed.  `ports/doom/build.py` defines
   `-DFEATURE_SOUND` so doomgeneric registers our backend.  Doom keeps booting
   silently when the SB16 isn't present.  Mixer math has pytest unit tests
   (`tests/unit/test_audio_mixer.py`); end-to-end smoke test in
@@ -703,8 +703,8 @@ time.
   audio with `-audiodev wav,...` and checks RMS energy.
 
 ### Sound
-- **Sound Blaster 16 driver (`src/drivers/sb16.c`)**, exposed as OSS-style
-  `/dev/audio` (`src/fs/fd/audio.c`).  Probes the SB16 DSP at boot via the
+- **Sound Blaster 16 driver (`kernel/drivers/sb16.c`)**, exposed as OSS-style
+  `/dev/audio` (`kernel/fs/fd/audio.c`).  Probes the SB16 DSP at boot via the
   standard reset-and-0xAA handshake; on success allocates a 4 KB DMA frame in
   the direct-map range so the kernel can `memcpy` into it.  Single-cycle
   synchronous playback model: `fd_write_audio` chunks the user buffer into <= 4
@@ -716,7 +716,7 @@ time.
     `tests/programs/audio_tone.c` (1.1 kHz square wave).
 
 ### Userspace toolchain (libc)
-- New freestanding libc shim `tools/libc/libbboeos.a` (`tools/libc/Makefile`)
+- New freestanding libc shim `user/libc/libbboeos.a` (`user/libc/Makefile`)
   covering ctype, errno, math, stdio, stdlib, string, syscall, and
   `_start`/setjmp.  Pinned to `-march=i386 -mno-{mmx,sse,sse2}
   -mno-implicit-float -fno-{vectorize,slp-vectorize}` so Apple clang doesn't
@@ -724,7 +724,7 @@ time.
   Pytest unit tests in `tests/unit/test_libbboeos.py` cross-check each pure
   function against the host libc; on-OS smoke test in
   `tests/test_libbboeos_qemu.py`.
-- Linker script `tools/libc/program.ld` for clang-built userland binaries.
+- Linker script `user/libc/program.ld` for clang-built userland binaries.
 - Headers and impls extended for doomgeneric needs (`malloc`/`free`/`realloc`,
   `printf` formatters, `qsort`, `<setjmp.h>` long-jump).  Also includes the
   compiler-rt builtins clang -O2 needs at link time (e.g. `__udivdi3`,
@@ -734,7 +734,7 @@ time.
   vectorizers, etc.).
 
 ### Kernel
-- **`SYS_IO_SEEK` syscall** (`fd_seek` in `src/fs/fd.c`) with libc `lseek` /
+- **`SYS_IO_SEEK` syscall** (`fd_seek` in `kernel/fs/fd.c`) with libc `lseek` /
   `fseek` wrappers.  Clamps out-of-range offsets so the WAD reader's
   seek-past-EOF pattern works.
 - **x87 FPU enabled** (`SYS_SYS_BREAK` for sbrk-style heap probing;
@@ -742,7 +742,7 @@ time.
   as `PTE_USER_RW_SHARED`).  Lets clang-emitted FP code in libc + doomgeneric
   run without `#UD`.
 - **Per-fd PS/2 keyboard event ring** with positional `BBKEY_*` codes
-  (`src/drivers/ps2.c`, `tools/libc/include/bbkeys.h`).  Each readable console
+  (`kernel/drivers/ps2.c`, `user/libc/include/bbkeys.h`).  Each readable console
   fd gets its own queue, populated by the IRQ broadcaster and drained by
   `CONSOLE_IOCTL_TRY_GET_EVENT`.  Doom's `DG_GetKey` consumes events directly
   without re-parsing CSI sequences or synthesising modifier keys.
@@ -761,7 +761,7 @@ time.
 
 ## [0.9.2](https://github.com/bboe/BBoeOS/compare/0.9.1...0.9.2) (2026-05-02)
 
-- **Bugfix:** `bbfs_create` (`src/fs/bbfs.asm`) hardcoded the new directory
+- **Bugfix:** `bbfs_create` (`kernel/fs/bbfs.asm`) hardcoded the new directory
   entry's flag byte to `0`, silently dropping the mode argument the kernel
   handed it.  Any program that asked the kernel to create an executable file
   (`asm` writing the assembled `out`, `cp` preserving the source's mode, etc.)
@@ -773,7 +773,7 @@ time.
 
 ## [0.9.1](https://github.com/bboe/BBoeOS/compare/0.9.0...0.9.1) (2026-05-02)
 
-- **Bugfix:** the C-ported `fd_ioctl` / `fd_lookup` (`src/fs/fd.c`) clobbered
+- **Bugfix:** the C-ported `fd_ioctl` / `fd_lookup` (`kernel/fs/fd.c`) clobbered
   ECX and EDX during dispatch — `fd_lookup`'s entry-pointer math trashed EDX,
   and `fd_ioctl`'s array-index multiply trashed ECX — silently destroying the
   user-passed sub-command args before `fd_ioctl_vga` read them.  Every VGA ioctl
@@ -870,7 +870,7 @@ time.
 
 ### Paging prep (2026-04-28)
 - Move the FUNCTION_TABLE and `shared_*` helpers (`lib/print.asm`,
-  `lib/proc.asm`) into a separately-assembled vDSO blob (`src/vdso/vdso.asm`)
+  `lib/proc.asm`) into a separately-assembled vDSO blob (`user/vdso/vdso.asm`)
   loaded at virtual `0x00010000`.  The kernel embeds `vdso.bin` via `incbin` and
   copies it to physical `FUNCTION_TABLE` once at boot via `vdso_install`. Helper
   bodies relocate their `SECTOR_BUFFER` and internal-static references to per-AS
@@ -901,7 +901,7 @@ time.
 
 ### Drivers
 - Port `ps2_init` / `ps2_getc` / `ps2_handle_scancode` / `ps2_putc` from
-  `drivers/ps2.asm` to C in a new `src/drivers/ps2.c`, retiring the asm file.
+  `drivers/ps2.asm` to C in a new `kernel/drivers/ps2.c`, retiring the asm file.
   The IRQ-driven Set-1 scan-code translator (16-byte ring buffer, modifier
   state, ANSI CSI sequences for arrow keys) becomes ~140 lines of C against
   `kernel_inb` / `kernel_outb`; the IRQ stub (`ps2_irq1_handler`, must `iretd`)
@@ -916,7 +916,7 @@ time.
 - Close the self-hosted `asm` assembler's 32-bit codegen gaps so its output is
   byte-identical to NASM under `[bits 32]`, and move `tests/test_asm.py` from
   its `--bits 16` pin to `--bits 32` (matching `make_os.sh`'s production path).
-  Six fixes in `src/c/asm.c`: 32-bit displacement (rel32) for `call`, `jmp`, and
+  Six fixes in `user/programs/asm.c`: 32-bit displacement (rel32) for `call`, `jmp`, and
   conditional-jump near forms (plus the convergence loop's short-vs-long sizing
   math); 3-character e-prefixed register names like `esi`/`edi` parse at the
   trailing `[disp+reg]` position; `handle_movzx` handles the direct-memory
@@ -956,7 +956,7 @@ time.
   32-bit GDT load, then far-jumps into `protected_mode_entry` and stays in
   protected mode.  The previous `stage1.asm` / `stage1_5.asm` / `stage2.asm` /
   `kernel.asm` split collapses into one flat-binary
-  `src/arch/x86/boot/bboeos.asm` whose [bits 16] MBR fronts a [bits 32] stage 2.
+  `kernel/arch/x86/boot/bboeos.asm` whose [bits 16] MBR fronts a [bits 32] stage 2.
   CPU exceptions vector through `idt.asm`'s `exc_common` and print `EXCnn` on
   COM1.
 - Wire IRQ 0 (PIT @ 100 Hz) and IRQ 6 (FDC) handlers into the protected-mode IDT
@@ -972,7 +972,7 @@ time.
 - Restore the boot-time `vga_font_load` that copies the BIOS ROM 8x16 font into
   char-gen plane 2 offset 0x4000 — required for
   `vga_set_mode(VIDEO_MODE_TEXT_80x25)` to render glyphs (mode 03h's SR03=0x05
-  selects that slot).  Lives in `src/arch/x86/boot/vga_font.asm`, included in
+  selects that slot).  Lives in `kernel/arch/x86/boot/vga_font.asm`, included in
   the MBR's [bits 16] region so it runs while `INT 10h` is still mapped.
 - Drop the dead `rtc_tick_init` / `rtc_tick_irq0` from `drivers/rtc.asm` — the
   IVT-based PIT handler was orphaned by the protected-mode port
@@ -1038,7 +1038,7 @@ time.
   console driver (`drivers/ansi.asm`) is available. On disk error stage 1 now
   prints `!` via `INT 10h AH=0Eh` and halts instead of pulling in a string
   printer.
-- Drop `src/arch/x86/boot/ansi_minimal.asm` entirely.  Its `put_string` and
+- Drop `kernel/arch/x86/boot/ansi_minimal.asm` entirely.  Its `put_string` and
   `serial_character` move into `drivers/ansi.asm` alongside `put_character`
   (their natural home — `serial_character` is the COM1 write primitive that
   `put_character` already called; `put_string` is a thin wrapper around
@@ -1056,19 +1056,19 @@ time.
 
 ### Tree layout
 - Reorganize `src/kernel/` into Linux-style subtrees.  Only genuinely
-  x86/PC-specific code lives under `src/arch/x86/`: `boot/` (bootloader:
+  x86/PC-specific code lives under `kernel/arch/x86/`: `boot/` (bootloader:
   `bboeos.asm`, `stage1.asm`, `stage1_5.asm` — the protected mode switch, née
   `protected mode.asm`; `stage2.asm`), `idt.asm`, `pic.asm`, `syscall.asm` (`INT
   30h` dispatcher), `system.asm` (8042 reboot + ACPI shutdown), and a new
-  `kernel.asm` aggregator.  Hardware drivers lift to `src/drivers/` (`ata.asm`,
+  `kernel.asm` aggregator.  Hardware drivers lift to `kernel/drivers/` (`ata.asm`,
   `fdc.asm`, `ps2.asm`, `rtc.asm`, `vga.asm`, plus the NE2000 NIC moved out of
   `net/`, and `ansi.asm` as the console driver delegating to vga).  Filesystem
-  code consolidates under `src/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`,
-  `block.asm` block dispatcher, `vfs.asm`).  Network stack in `src/net/` keeps
+  code consolidates under `kernel/fs/` (`bbfs.asm`, `ext2.asm`, `fd.asm` + `fd/`,
+  `block.asm` block dispatcher, `vfs.asm`).  Network stack in `kernel/net/` keeps
   the protocol layer only (`arp.asm`, `icmp.asm`, `ip.asm`, `udp.asm`).  Shared
-  utilities in `src/lib/`, syscall handlers in `src/syscall/`.  `make_os.sh`
+  utilities in `src/lib/`, syscall handlers in `kernel/syscall/`.  `make_os.sh`
   adds `-i src/` so `%include "drivers/ata.asm"` / `"fs/fd.asm"` /
-  `"net/net.asm"` / … resolve at the top level.  `src/arch/x86/boot/stage2.asm`
+  `"net/net.asm"` / … resolve at the top level.  `kernel/arch/x86/boot/stage2.asm`
   no longer `%include`s the kernel itself — it contains only the boot handoff
   (jump table, `boot_shell`, `bss_setup`).  `bboeos.asm` now composes the flat
   binary as `stage1 + stage2 + kernel.asm`, where `kernel.asm` is the new
@@ -1105,13 +1105,13 @@ time.
   `rtc_tick_init` replaced the BIOS IRQ 0 handler) is replaced by `uptime_ms()`
   — full 32-bit `DX:AX` return when the caller assigns to `unsigned long`, low
   16 bits when assigned to `int`.  `ping` prints `time=N ms` accordingly
-- Extract `kernel_init` out of `boot_shell` into a new `src/arch/x86/init.asm`:
+- Extract `kernel_init` out of `boot_shell` into a new `kernel/arch/x86/init.asm`:
   single-entry routine running `pic_remap` / `rtc_tick_init` /
   `install_syscalls` / `network_initialize`.  Motivation is protected mode prep
   — once the flip lands, `rtc_tick_init` / `install_syscalls` become
   IDT-dependent and either move post-flip or gain 32-bit variants; encapsulating
   the sequence means that refactor edits `init.asm`, not `stage2.asm`.
-- Rename `src/arch/x86/protected mode.asm` → `src/arch/x86/boot/stage1_5.asm`
+- Rename `kernel/arch/x86/protected mode.asm` → `kernel/arch/x86/boot/stage1_5.asm`
   and colocate it under `boot/`.  The file is already the stage-1.5 of the boot
   flow (16→32-bit mode switch between the MBR and the protected mode kernel), so
   give it the positional name.  `tests/pmode_test.asm` and `tests/idt_test.asm`
@@ -1221,7 +1221,7 @@ time.
 - Retire `SYS_VIDEO_MODE` (40h) and the `FUNCTION_VGA_FILL_BLOCK` jump-table
   slot: `video_mode` / `fill_block` / `set_palette_color` cc.py builtins now
   take an fd as the first argument and emit a single `int 30h` to SYS_IO_IOCTL.
-  `src/c/shell.c`, `edit.c`, and `draw.c` each open `/dev/vga` once in `main()`
+  `user/programs/shell.c`, `edit.c`, and `draw.c` each open `/dev/vga` once in `main()`
   and pass the fd through.
 - `SYS_FS_UNLINK` (04h): new syscall for deleting a file.  `vfs_delete`
   dispatches to `bbfs_delete` (zeroes the 32-byte directory entry, freeing the
@@ -1229,7 +1229,7 @@ time.
   via `ext2_free_block`, frees the inode via `ext2_free_inode`, removes the
   directory entry).  New `ext2_free_bit` / `ext2_free_block` / `ext2_free_inode`
   helpers (inverses of `ext2_alloc_bit`).  The shell binary is protected from
-  deletion.  cc.py gains an `unlink()` builtin; `src/c/rm.c` added.
+  deletion.  cc.py gains an `unlink()` builtin; `user/programs/rm.c` added.
 - `SYS_FS_RMDIR` (03h): new syscall for removing an empty directory. `vfs_rmdir`
   dispatches to `bbfs_rmdir` (finds the directory entry, verifies
   `FLAG_DIRECTORY`, scans all `DIRECTORY_SECTORS` of the subdirectory's data for
@@ -1238,7 +1238,7 @@ time.
   `ext2_check_dir_empty` helper — skipping `.` and `..` — then frees
   direct+indirect blocks, frees the inode, removes the directory entry).  New
   `ERROR_NOT_EMPTY` (06h) returned when the directory is non-empty.  cc.py gains
-  an `rmdir()` builtin; `src/c/rmdir.c` added.  `DIRECTORY_SECTOR` bumps 26 → 28
+  an `rmdir()` builtin; `user/programs/rmdir.c` added.  `DIRECTORY_SECTOR` bumps 26 → 28
   → 30 → 31 across this release to fit the expanding kernel.
 
 ### Userspace programs
@@ -1250,7 +1250,7 @@ time.
 ### Tooling
 - cc.py: extend compound-assignment lexer to cover `-=`, `*=`, `/=` so the
   arithmetic family matches the bitwise/shift family (`+=`, `&=`, `|=`, `^=`,
-  `<<=`, `>>=`).  Normalize every `var = var op rhs;` site across `src/c/*.c` to
+  `<<=`, `>>=`).  Normalize every `var = var op rhs;` site across `user/programs/*.c` to
   the compound form.  Two multi-term `x = x + a + b` sites in `dns.c` / `ping.c`
   stay as-is because the left-associative chain emits a tighter sequence than `x
   += a + b` (which parenthesizes the RHS and needs a scratch register)
@@ -1300,7 +1300,7 @@ time.
   loads and `ax_local` shortcut; generic expression fallback).  Array Vars
   dispatch through `_try_direct_load` before `_is_memory_scalar` so the base
   address is loaded (via `lea` / `mov _l_name`) instead of the contents.
-- Self-hosted assembler (`src/c/asm.c`): factor the `<op> byte|word [disp16],
+- Self-hosted assembler (`user/programs/asm.c`): factor the `<op> byte|word [disp16],
   imm` parsing and emission into a shared `emit_alu_mem_imm(rfield)` helper and
   extend coverage from `sub` (the only op the old inline in `handle_sub` knew
   about) to `add`, `and`, `or`, `sub`, `xor` at both byte and word widths.  Byte
@@ -1321,7 +1321,7 @@ time.
   `%endmacro`; `find_macro` linear-scans the name table at `parse_mnemonic`'s
   top; `expand_macro` substitutes `%1..%9` into `line_buffer` and re-runs
   `parse_line` on each expanded line, so labels (`exc_%1:`) and directives
-  (`dw`, `db`) work without special handling.  `static/macro_sm.asm` smoke-tests
+  (`dw`, `db`) work without special handling.  `user/static/macro_sm.asm` smoke-tests
   an `IDT_ENTRY` data macro and an `EXC_NOERR` label-defining / push / jump
   macro.
 - Self-hosted assembler: add `in al, dx` / `in ax, dx` / `out dx, al` / `out dx,
@@ -1330,7 +1330,7 @@ time.
   encodings.  Needed so the self-hosted assembler can reassemble programs that
   talk directly to ports (e.g. `draw.c`'s DAC writes to 3C8h/3C9h).
 - Self-hosted assembler: add `lea` and fix the alu-binop `[reg+disp]` encoding.
-- Self-hosted assembler (`src/c/asm.c`): protected-mode extension (phase 5).
+- Self-hosted assembler (`user/programs/asm.c`): protected-mode extension (phase 5).
   `parse_register` accepts the `e`-prefixed 32-bit general register file (eax /
   ecx / edx / ebx / esp / ebp / esi / edi); a dedicated `parse_creg` handles
   cr0..cr7; `emit_sized` prepends the 0x66 operand-size prefix for 32-bit
@@ -1339,7 +1339,7 @@ time.
   imm32` with the 0x66 prefix; `emit_alu_reg_imm` extends to 32-bit operand size
   for the `or eax, 1` style encodings.  New `handle_lgdt` / `handle_lidt` (0F 01
   /2, /3) and `jmp dword SEL:OFS` (0x66 0xEA ptr16:32) round out the protected
-  mode bootstrap encodings.  `static/pmode_sm.asm` exercises the full set
+  mode bootstrap encodings.  `user/static/pmode_sm.asm` exercises the full set
   against NASM; byte-identical on the self-host test
 - Self-hosted assembler phase 5.4: `push [word|dword] imm` is bits-aware.
   Optional `word` / `dword` size token overrides `default_bits`; the imm tail
@@ -1393,7 +1393,7 @@ time.
   `gap_move_right` helpers
 
 ### Tooling
-- Self-hosted assembler (`src/c/asm.c`): NASM → pure C migration completed in
+- Self-hosted assembler (`user/programs/asm.c`): NASM → pure C migration completed in
   this cycle — every `handle_*` mnemonic handler, every `parse_*` stage, the
   symbol table, the include / file-I/O machinery, and the driver loop all live
   in C.  A trailing file-scope `asm(...)` block retains only the kernel-syscall

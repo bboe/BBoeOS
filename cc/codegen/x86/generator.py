@@ -954,7 +954,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 size_expression = self._constant_expression(declaration.size)
                 # Fold ``size * stride`` at compile time when the size is a
-                # plain integer — the self-hosted assembler in src/c/asm.c
+                # plain integer — the self-hosted assembler in user/programs/asm.c
                 # uses flat operator precedence, so emitting ``(N)*4`` next
                 # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
                 # the self-host group ``(N) * (4 - <next_term>)`` instead of
@@ -971,7 +971,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Emit kernel-mode zero-init globals as a ``section .bss`` block.
 
         The kernel binary declares ``section .bss nobits follows=.text``
-        in src/arch/x86/kernel.asm; switching to ``.bss`` here parks each
+        in kernel/arch/x86/kernel.asm; switching to ``.bss`` here parks each
         ``resb N`` reservation in that section so the zero bytes never
         ride on disk.  Switch back to ``.text`` afterwards so the next
         ``%include``'d kasm (and any inline kernel code that follows)

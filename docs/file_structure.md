@@ -8,22 +8,22 @@ nav_order: 90
 ## Host-side build tooling
 
 - `add_file.py` — Host-side script to add files to the drive image filesystem
-- `cc.py` — Host-side C subset compiler (translates `src/c/*.c` to
+- `cc.py` — Host-side C subset compiler (translates `user/programs/*.c` to
   NASM-compatible assembly)
 - `make_os.sh` — Build script (assembles kernel, compiles C programs via
   `cc.py`, creates floppy image)
 
 ## Shared includes
 
-- `src/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`,
+- `kernel/include/constants.asm` — Shared constants (`BUFFER`, `DIRECTORY_SECTOR`,
   `SECTOR_BUFFER`, `NE2K_BASE`, `PROGRAM_BASE`, `MAX_ARGV_ENTRIES`, `SYS_*`
   syscall numbers, etc.)
-- `src/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared
+- `kernel/include/dns_query.asm`, `encode_domain.asm`, `parse_ip.asm` — Shared
   DNS/IP helpers; see source headers for calling conventions.
 
 ## Boot and kernel core
 
-- `src/arch/x86/boot/boot.asm` — Pre-paging boot binary (`org 0x7C00`): MBR +
+- `kernel/arch/x86/boot/boot.asm` — Pre-paging boot binary (`org 0x7C00`): MBR +
   post-MBR real-mode bootstrap (second `INT 13h` read of `kernel.bin` directly
   into phys `0x20000`, E820 probe, PIC remap, A20, GDT load, `CR0.PE` flip) +
   32-bit `early_pe_entry` (build boot PD + first kernel PT, enable paging,
@@ -33,7 +33,7 @@ nav_order: 90
   (`(boot_end - post_mbr_continue) / 512`) so the count auto-grows when the boot
   code crosses a sector. `make_os.sh` only has to measure `kernel.bin`'s sector
   count for the `-DKERNEL_SECTORS=N` second-pass nasm invocation.
-- `src/arch/x86/kernel.asm` — Post-paging high-half kernel (`section .text
+- `kernel/arch/x86/kernel.asm` — Post-paging high-half kernel (`section .text
   progbits vstart=0FF820000h` = `DIRECT_MAP_BASE + KERNEL_LOAD_PHYS`, plus a
   `section .bss nobits follows=.text` for zero-init reservations): `high_entry`
   (segment / GDT / IDT / stack setup, identity-drop, bitmap init, kernel-PT
@@ -41,13 +41,13 @@ nav_order: 90
   every kernel subsystem (drivers, fs, helpers, net stack, syscall dispatcher,
   IDT, post-flip entry, frame allocator, address-space helpers) and the kernel
   GDT + vDSO blob (`incbin "vdso.bin"`).
-- `src/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and `INT 30h`
+- `kernel/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and `INT 30h`
   gate; `idt_init` (called from `high_entry`) patches the high-half handler
   offsets at boot since the IDT_ENTRY macro can only emit the low 16 bits in
   `nasm -f bin` mode (section-relative labels reject `& 0FFFFh` / `>> 16`
   arithmetic). Any post-flip exception lands in `exc_common` and prints `EXCnn
   EIP=h CR2=h ERR=h` on COM1.
-- `src/arch/x86/entry.asm` — `protected_mode_entry` (TSS patch, PIT + IRQ
+- `kernel/arch/x86/entry.asm` — `protected_mode_entry` (TSS patch, PIT + IRQ
   handler install, driver / VFS / NIC inits, banner) flowing into `shell_reload`
   (loads `bin/shell` and jumps), `program_enter` (fd reset, BSS zero via the
   trailer-magic protocol, ESP snapshot, `iretd` to ring 3 at `PROGRAM_BASE`),
@@ -60,7 +60,7 @@ nav_order: 90
 
 ## Memory management
 
-- `src/memory_management/frame.asm` — Bitmap physical-frame allocator:
+- `kernel/memory_management/frame.asm` — Bitmap physical-frame allocator:
   `frame_alloc` / `frame_free` / `frame_init` (two-pass E820 walker — first pass
   finds the highest type=1 frame base, between passes sizes the bitmap, second
   pass marks free regions) / `frame_reserve_range`. Bitmap is sized at boot from
@@ -68,10 +68,10 @@ nav_order: 90
   lives in the post-kernel cluster at FRAME_BITMAP_PHYS. Frames above
   FRAME_DIRECT_MAP_LIMIT (the kernel direct-map ceiling) reach the kernel via
   the kmap window — see `kmap.asm`.
-- `src/memory_management/access.asm` — `access_ok` user-buffer
+- `kernel/memory_management/access.asm` — `access_ok` user-buffer
   pointer-validation helper (rejects ranges that span the user/kernel boundary
   or wrap), invoked by syscall handlers before touching userspace memory.
-- `src/memory_management/address_space.asm` — Per-program PD lifecycle:
+- `kernel/memory_management/address_space.asm` — Per-program PD lifecycle:
   `address_space_create` (allocate PD, copy-image kernel half from
   `kernel_idle_pd`, build user PTs for handoff frame + vDSO + program text/BSS +
   stack), `address_space_destroy` (free user frames, skipping shared-AVL PTEs,
@@ -79,7 +79,7 @@ nav_order: 90
   (`address_space_map_page`, etc.) those two drive. All PD/PT reads and writes
   go through `kmap_map`/`kmap_unmap` so a high-physical PD or PT frame stays
   addressable.
-- `src/memory_management/kmap.asm` — kernel temporary-mapping window at PDE 1023
+- `kernel/memory_management/kmap.asm` — kernel temporary-mapping window at PDE 1023
   (virt `0xFFC00000..0xFFFFFFFF`). `kmap_init` (called from `high_entry` after
   the idle PD takes over) allocates one frame as the window PT and installs it
   at `kernel_idle_pd[1023]`; per-program PDs inherit it via the kernel-half
@@ -92,80 +92,80 @@ nav_order: 90
 
 ## Syscalls and system
 
-- `src/arch/x86/syscall.asm` — `INT 30h` dispatcher: per-handler bodies inlined
+- `kernel/arch/x86/syscall.asm` — `INT 30h` dispatcher: per-handler bodies inlined
   directly (fs_*, io_*, rtc_*, sys_*) and tail-jump shims into
-  `src/syscall/syscalls.c` for the four net_* handlers. The `.iret_cf` path
+  `kernel/syscall/syscalls.c` for the four net_* handlers. The `.iret_cf` path
   sign-extends AX into EAX before iret; `.iret_cf_eax` is the explicit-32-bit
   variant used by `io_read` / `io_write`, whose byte counts can exceed 32 767.
-- `src/syscall/syscalls.c` — C bodies for the four non-trivial network handlers:
+- `kernel/syscall/syscalls.c` — C bodies for the four non-trivial network handlers:
   `sys_net_mac`, `sys_net_open`, `sys_net_recvfrom`, `sys_net_sendto`. Reached
   via `call sys_net_X; jmp .iret_cf` shims in `syscall.asm`.
-- `src/arch/x86/system.c` — `reboot` (8042 reset), `shutdown` (APM / QEMU /
+- `kernel/arch/x86/system.c` — `reboot` (8042 reset), `shutdown` (APM / QEMU /
   Bochs shutdown ports).
 
 ## Drivers
 
-- `src/drivers/console.c` — Unified output: `put_character` (ANSI parser +
+- `kernel/drivers/console.c` — Unified output: `put_character` (ANSI parser +
   screen + serial mirror with auto `\n` → `\r\n`) and `put_string`. Delegates
   raw bytes to `serial_character` (`drivers/serial.c`) and ANSI cursor / palette
   commands to the VGA helpers in `drivers/vga.c`.
-- `src/drivers/serial.c` — COM1 driver: `serial_character` (output) and
+- `kernel/drivers/serial.c` — COM1 driver: `serial_character` (output) and
   `serial_check` / `serial_read` (input, polled by `fd_read_console`).
-- `src/drivers/ata.c`, `src/drivers/fdc.c` — Hardware disk drivers (ATA PIO and
+- `kernel/drivers/ata.c`, `kernel/drivers/fdc.c` — Hardware disk drivers (ATA PIO and
   floppy DMA); called via `fs/block.asm`'s `read_sector` / `write_sector`
   dispatch (AX = 0-based sector number).
-- `src/drivers/ne2k.c` — NE2000 ISA NIC driver (polled-mode Ethernet); I/O base
+- `kernel/drivers/ne2k.c` — NE2000 ISA NIC driver (polled-mode Ethernet); I/O base
   `0x300`, IRQ 3.
-- `src/drivers/opl3.c` — SB16 OPL3 register-write driver: chip probe +
+- `kernel/drivers/opl3.c` — SB16 OPL3 register-write driver: chip probe +
   outb-based register writes used by `/dev/midi` (no IRQ; the kernel drains the
   queue from IRQ 0).
-- `src/drivers/ps2.c` — PS/2 keyboard driver: `ps2_init`, `ps2_check`,
+- `kernel/drivers/ps2.c` — PS/2 keyboard driver: `ps2_init`, `ps2_check`,
   `ps2_read`.
-- `src/drivers/rtc.c` — RTC / PIT timer: tick counter, `rtc_sleep_ms` busy-wait,
+- `kernel/drivers/rtc.c` — RTC / PIT timer: tick counter, `rtc_sleep_ms` busy-wait,
   CMOS date read.
-- `src/drivers/vga.c` — VGA driver: text and mode-13h helpers (`vga_set_mode`,
+- `kernel/drivers/vga.c` — VGA driver: text and mode-13h helpers (`vga_set_mode`,
   `vga_clear_screen`, `vga_fill_block`, `vga_set_palette_color`, …) plus
   `fd_ioctl_vga` (the `/dev/vga` ioctl dispatcher for `VGA_IOCTL_MODE` /
   `VGA_IOCTL_FILL_BLOCK` / `VGA_IOCTL_SET_PALETTE`).
 
 ## Filesystem and VFS
 
-- `src/fs/fd.c` — File descriptor table and dispatch: `fd_open` (synthesizes
+- `kernel/fs/fd.c` — File descriptor table and dispatch: `fd_open` (synthesizes
   `/dev/vga` into `FD_TYPE_VGA` without touching the filesystem), `fd_read`,
   `fd_write`, `fd_close`, `fd_fstat`, `fd_ioctl`. Per-fd-type handlers live
-  under `src/fs/fd/` (`audio.c`, `console.c`, `fs.c`, `midi.c`, `net.c`).
-- `src/fs/fd/midi.c` — `/dev/midi` event-ring + dispatch (`FD_TYPE_MIDI = 6`).
+  under `kernel/fs/fd/` (`audio.c`, `console.c`, `fs.c`, `midi.c`, `net.c`).
+- `kernel/fs/fd/midi.c` — `/dev/midi` event-ring + dispatch (`FD_TYPE_MIDI = 6`).
   256-slot ring of 6-byte `(delay_lo, delay_hi, bank, reg, value, reserved)`
   commands; the IRQ 0 drainer pops up to 16 events per 1 ms tick and forwards
-  register writes through `src/drivers/opl3.c`.  Implements `fd_read_midi`,
+  register writes through `kernel/drivers/opl3.c`.  Implements `fd_read_midi`,
   `fd_write_midi`, `fd_close_midi`, and `fd_ioctl_midi` (`MIDI_IOCTL_DRAIN`).
   Single-opener.
-- `src/fs/block.asm` — Block I/O dispatcher: `read_sector`, `write_sector`
+- `kernel/fs/block.asm` — Block I/O dispatcher: `read_sector`, `write_sector`
   (dispatches to fdc/ata based on `boot_disk`).
-- `src/fs/bbfs.asm` — BBoeOS filesystem (VFS backend): `bbfs_chmod`,
+- `kernel/fs/bbfs.asm` — BBoeOS filesystem (VFS backend): `bbfs_chmod`,
   `bbfs_create`, `bbfs_find`, `bbfs_init`, `bbfs_load`, `bbfs_mkdir`,
   `bbfs_rename`, `bbfs_update_size`, plus internal helpers (`find_file`,
   `scan_directory_entries`, etc.).
-- `src/fs/ext2.asm` — ext2 filesystem (second VFS backend, auto-detected by
+- `kernel/fs/ext2.asm` — ext2 filesystem (second VFS backend, auto-detected by
   `vfs_init`).
-- `src/fs/vfs.c` — VFS layer: runtime function-pointer table (`vfs_find_fn`,
+- `kernel/fs/vfs.c` — VFS layer: runtime function-pointer table (`vfs_find_fn`,
   etc.), `vfs_found_*` state struct, thin wrapper functions (`vfs_find`,
   `vfs_create`, `vfs_rmdir`, …). Detects bbfs vs ext2 at boot and points the
   function pointers at the corresponding backend.
 
 ## Networking
 
-- `src/net/net.asm` — Four-line orchestrator that `%include`s the protocol
+- `kernel/net/net.asm` — Four-line orchestrator that `%include`s the protocol
   modules: `net/arp.asm`, `net/udp.asm`, plus `build/kernel-c/net/icmp.kasm` and
-  `build/kernel-c/net/ip.kasm` (cc.py-compiled from `src/net/icmp.c` and
-  `src/net/ip.c`). The NE2000 hardware driver itself lives in `drivers/ne2k.c`.
+  `build/kernel-c/net/ip.kasm` (cc.py-compiled from `kernel/net/icmp.c` and
+  `kernel/net/ip.c`). The NE2000 hardware driver itself lives in `drivers/ne2k.c`.
 
 ## Userland programs
 
-- `src/c/` — user-facing programs written in the C subset: `arp`, `asm`, `cat`,
+- `user/programs/` — user-facing programs written in the C subset: `arp`, `asm`, `cat`,
   `chmod`, `cp`, `date`, `dns`, `draw`, `echo`, `edit`, `ls`, `mkdir`, `mv`,
   `ping`, `rm`, `rmdir`, `shell`, `uptime`.
-- `src/c/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q
+- `user/programs/edit.c` — Full-screen text editor with gap buffer, Ctrl+S save, Ctrl+Q
   quit. All editor state is file-scope so cc.py parks it in BSS rather than
   auto-pinning to registers that `buffer_character_at` clobbers (it uses EDX/ECX
   as scratch). The 448 KB gap buffer (`edit_buffer[EDIT_BUFFER_SIZE]`, sized at
@@ -173,14 +173,14 @@ nav_order: 90
   (`edit_kill_buffer[EDIT_KILL_BUFFER_SIZE]`) are BSS arrays — the per-program
   PD that `address_space_create` builds gets enough zero-filled user pages to
   back them via the trailer-magic protocol. Any source file in the tree fits
-  with room to spare (the largest, `src/c/asm.c`, is ~131 KB). A single
+  with room to spare (the largest, `user/programs/asm.c`, is ~131 KB). A single
   `read(fd, edit_buffer, EDIT_BUFFER_SIZE)` fills the buffer in one call:
   `SYS_IO_READ` returns the full 32-bit byte count via `EAX` (the dispatcher
   routes io_read through `.iret_cf_eax`, skipping the AX sign-extend that the
   rest of the syscall surface uses), so no chunking is needed up to the 448 KB
   buffer cap.
-- `src/c/asm.c` — Self-hosted x86 assembler (two-pass; byte-identical to NASM
-  for everything in `static/`). Phase 1 port: the driver and handlers still live
+- `user/programs/asm.c` — Self-hosted x86 assembler (two-pass; byte-identical to NASM
+  for everything in `user/static/`). Phase 1 port: the driver and handlers still live
   inside a single file-scope `asm("...")` block that wraps `archive/asm.asm`'s
   original NASM source; follow-up PRs extract pieces into pure C one family at a
   time. Supported directives and mnemonics are documented in the inline-asm
@@ -188,16 +188,16 @@ nav_order: 90
 
 ## Doom port
 
-- `tools/fetch_chocolate_opl.sh` — pinned-commit fetcher for Chocolate Doom's
+- `ports/doom/fetch_chocolate.sh` — pinned-commit fetcher for Chocolate Doom's
   OPL music sources (`i_oplmusic.c`, `mus2mid.c`, `memio.c`, `opl_queue.c`,
   `midifile.c`, `opl.h`).  Drops them into `third_party/chocolate-doom-opl/`
   (gitignored) so the build can compile them.  Drives Doom's MIDI playback
-  through the `music_opl_module` interface; `tools/build_doom.py` invokes the
+  through the `music_opl_module` interface; `ports/doom/build.py` invokes the
   script before compiling.
-- `tools/doom/chocolate_compat.h` — narrowly-scoped (~95 line) shim that papers
+- `ports/doom/chocolate_compat.h` — narrowly-scoped (~95 line) shim that papers
   over the chocolate-vs-doomgeneric drift (a few macros + typedefs Chocolate's
   OPL stack expects but the doomgeneric tree doesn't expose).
-- `tools/doom/opl_bboeos.c` — OPL backend bridging Chocolate's `i_oplmusic.c` to
+- `ports/doom/opl_bboeos.c` — OPL backend bridging Chocolate's `i_oplmusic.c` to
   the kernel's `/dev/midi`.  Translates `OPL_WriteRegister` /
   `OPL_AdjustCallbacks` / `OPL_SetPaused` calls into 6-byte midi commands;
   `OPL_Init` returns `OPL_INIT_OPL3` so `OPL_InitRegisters` enables the second

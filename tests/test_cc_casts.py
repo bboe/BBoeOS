@@ -18,7 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
-INCLUDE_DIR = REPO_ROOT / "src" / "include"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 
 def compile_snippet(*, name: str, source: str, work: Path) -> str:
@@ -126,7 +126,7 @@ def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
 
 
 def test_cast_in_comparison(*, work: Path) -> None:
-    """Cast as a comparison operand round-trips (regression: src/fs/fd/audio.c)."""
+    """Cast as a comparison operand round-trips (regression: kernel/fs/fd/audio.c)."""
     compile_snippet(
         name="cast_in_comparison",
         source=(

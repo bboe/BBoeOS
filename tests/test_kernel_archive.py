@@ -10,7 +10,7 @@ minimal scaffold:
   2. For each row, asserts the snapshot file exists at
      archive/kernel/<path>.asm.
   3. Optionally enforces that the live source tree has the matching
-     C port at src/<path>.c.
+     C port at kernel/<path>.c.
 
 Per-row byte verification (build os.bin twice and diff) is deferred
 until size drift becomes a problem — for now port commits land the
@@ -33,7 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_KERNEL = REPO_ROOT / "archive" / "kernel"
 README_PATH = ARCHIVE_KERNEL / "README.md"
-SRC_DIR = REPO_ROOT / "src"
+SRC_DIR = REPO_ROOT / "kernel"
 
 # ``| path | asm_bytes | c_bytes | delta |`` rows.  Path may contain
 # slashes (drivers/vga, fs/fd, …).  Delta may have a leading sign and
