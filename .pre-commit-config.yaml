@@ -19,7 +19,7 @@ repos:
   rev: dd18dad857d6133e90bbe478f4f2f22ec0030269  # v22.1.5
   hooks:
     - id: clang-format
-      exclude: ^(tools/doom/|static/)
+      exclude: ^(ports/doom/|user/static/)
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
   hooks:
