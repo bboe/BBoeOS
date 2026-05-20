@@ -54,4 +54,4 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   home (`ports/doom/`), and `tools/` shrinks to host-side build
   tooling only.  Lands before the shared-libc work so `user/libc/`
   arrives in its final location.
-  Status: design complete; implementation pending.
+  Status: shipped in PR #437.
