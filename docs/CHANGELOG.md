@@ -11,18 +11,28 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: skip save-around-eval push/pop when ``kernel_outb`` / ``kernel_outw``
+  port is a literal.**  The general non-const-value path was unconditionally
+  emitting ``push eax; eval port → DX; pop eax`` to guard the value across port
+  evaluation.  When the port is an ``Int`` literal, the port lowering is a
+  single ``mov dx, <imm>`` that doesn't touch EAX — so the save is dead. Add an
+  ``isinstance(port_arg, Int)`` branch that elides the push/pop in that case.
+  Almost every kernel ``kernel_outb`` / ``kernel_outw`` site uses a hex-literal
+  port (``0x21``, ``0x3F6``, etc.), so this fires kernel-wide: **1,980-byte kasm
+  reduction** on top of the byte-imm fold from the previous entry.
+
 - **Wire user/libbboeos clang exports into the shared blob.**
   `user/libbboeos/libbboeos.a` (clang-compiled) now links into `build/libbboeos`
   alongside the asm helpers via the existing ld pipeline; `-ffunction-sections`
   + `--gc-sections` drop everything the pointer table doesn't reference, so the
-  blob pays only for what it actually exports.  First entry: `strcmp`, with a
-  new `FUNCTION_STRCMP_PTR` constant at `FUNCTION_POINTER_TABLE + 52`.
-  Cc.py-side wiring (extern-call fallback that emits `call
-  [FUNCTION_<name>_PTR]` for unknown names) lands in a follow-up — this PR is
-  the build-pipeline plumbing.  `VDSO_SIGRETURN_OFFSET` moves from `0x460` →
-  `0xFE0` so the helper region can grow past 1 KB without colliding with the
-  sigreturn trampoline; sigreturn now lives near the end of page 0 (past the
-  pointer table at `0x800..0x83C`).
+    blob pays only for what it actually exports.  First entry: `strcmp`, with a
+    new `FUNCTION_STRCMP_PTR` constant at `FUNCTION_POINTER_TABLE + 52`.
+    Cc.py-side wiring (extern-call fallback that emits `call
+    [FUNCTION_<name>_PTR]` for unknown names) lands in a follow-up — this PR is
+    the build-pipeline plumbing.  `VDSO_SIGRETURN_OFFSET` moves from `0x460` →
+    `0xFE0` so the helper region can grow past 1 KB without colliding with the
+    sigreturn trampoline; sigreturn now lives near the end of page 0 (past the
+    pointer table at `0x800..0x83C`).
 - **cc.py: fold byte-immediate store + movzx reload through local.**  When a
   one-shot struct literal local is read via ``*(uint8_t *)&local`` — the driver
   port-I/O idiom — the compiler was emitting ``mov byte [ebp-N],
