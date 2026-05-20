@@ -1,6 +1,8 @@
 #include "getopt.h"
 #include "strtol.h"
 
+int strcmp(const char *left, const char *right);
+
 /* Heap layout (68 KB = 0x11000 bytes):
    [0x00000, 0x0F000)  data_buffer        (60 KB, line bytes null-terminated)
    [0x0F000, 0x10000)  line_pointers      (1024 entries x 4 bytes = 4 KB)
@@ -17,7 +19,6 @@ int compare_lines(char *left, char *right, int numeric, int reverse);
 void merge_pass(char **source, char **destination, int line_count,
                 int run_width, int numeric, int reverse);
 int numeric_compare(char *left, char *right);
-int strcmp(const char *left, const char *right);
 
 int compare_lines(char *left, char *right, int numeric, int reverse) {
     int result;
@@ -194,18 +195,4 @@ int numeric_compare(char *left, char *right) {
         return (left_value < right_value) ? -1 : 1;
     }
     return strcmp(left, right);
-}
-
-int strcmp(const char *left, const char *right) {
-    int index = 0;
-    while (left[index] != '\0' && right[index] != '\0') {
-        if (left[index] != right[index]) {
-            return (left[index] < right[index]) ? -1 : 1;
-        }
-        index += 1;
-    }
-    if (left[index] == right[index]) {
-        return 0;
-    }
-    return (left[index] == '\0') ? -1 : 1;
 }

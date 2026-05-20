@@ -20,7 +20,24 @@ time.
   Almost every kernel ``kernel_outb`` / ``kernel_outw`` site uses a hex-literal
   port (``0x21``, ``0x3F6``, etc.), so this fires kernel-wide: **1,980-byte kasm
   reduction** on top of the byte-imm fold from the previous entry.
-
+- **cc.py: extern-call dispatch for libbboeos exports + strict declaration
+  requirement.**  Forward-declared functions (e.g. `int strcmp(const char *,
+  const char *);`) whose name matches a `FUNCTION_<NAME>_PTR` constant in
+  `kernel/include/constants.asm` now emit `call [FUNCTION_<NAME>_PTR]` (cdecl
+  indirect through the libbboeos pointer table at user-virt `0x10800`) instead
+  of the previous direct/CCREL emission.  Calling a libbboeos export *without* a
+  prior prototype is a `CompileError` ("requires a prior prototype declaration")
+  — strict-on-libbboeos hygiene that catches missing `#include` / forward decl
+  at compile time.  The self-hosted assembler in `user/programs/asm.c` gains the
+  matching `call [absolute]` (`FF 15 abs32` / `FF 16 abs16`) form so
+  `tests/test_asm.py` round-trips the new emission. Per-program `strcmp`
+  reimplementations in
+  `user/programs/{fd_helpers,ls,pipe_consumer,pipe_producer,pipe_spam,
+  shell,sort}.c` are deleted; each program now carries a one-line forward decl
+  for `strcmp` instead.  cc.py's preprocessor also learns `#include <name>`
+  (angle brackets) in addition to the existing `"..."` form — same search path,
+  no separate system-include concept.  Available only under `--target user`;
+  kernel-mode compilation keeps the strict unknown-function error.
 - **Wire user/libbboeos clang exports into the shared blob.**
   `user/libbboeos/libbboeos.a` (clang-compiled) now links into `build/libbboeos`
   alongside the asm helpers via the existing ld pipeline; `-ffunction-sections`

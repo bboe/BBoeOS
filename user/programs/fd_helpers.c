@@ -16,6 +16,8 @@
                           dirty-bit gate.  No write happens, so close must
                           not flush a stale position over the file's size. */
 
+int strcmp(const char *a, const char *b);
+
 int run_dup2_close_target() {
     /* dup(1) → some fd >= 3; then dup2(1, that_fd) to force the close-and-overwrite
        path; verify we can still write through the target fd afterwards. */
@@ -73,19 +75,6 @@ int run_noop(char *path) {
     }
     close(fd);
     return 0;
-}
-
-int strcmp(const char *a, const char *b) {
-    int index = 0;
-    while (1) {
-        if (a[index] != b[index]) {
-            return a[index] - b[index];
-        }
-        if (a[index] == '\0') {
-            return 0;
-        }
-        index = index + 1;
-    }
 }
 
 int main(int argc, char *argv[]) {

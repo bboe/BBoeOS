@@ -1,6 +1,8 @@
 #include "shell_lex.h"
 #include "wait.h"
 
+int strcmp(const char *a, const char *b);
+
 #define HISTORY_SIZE 16
 #define MAX_TOKENS MAX_INPUT
 
@@ -691,19 +693,6 @@ int restore_redirections() {
         index = index + 1;
     }
     return 0;
-}
-
-int strcmp(const char *a, const char *b) {
-    int index = 0;
-    while (1) {
-        if (a[index] != b[index]) {
-            return a[index] - b[index];
-        }
-        if (a[index] == '\0') {
-            return 0;
-        }
-        index += 1;
-    }
 }
 
 int try_exec(char *name, char **argv) {

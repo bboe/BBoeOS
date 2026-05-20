@@ -1129,12 +1129,14 @@ void handle_and() {
     emit_alu_binop(4);
 }
 
-/* ``call <label>`` (E8 rel16/rel32) and ``call [reg+disp8]`` (FF /2) —
-   the only two call forms the self-host needs.  The displacement is
-   16-bit under bits=16 and 32-bit under bits=32 (no operand-size
-   prefix in either default).  The indirect form requires a non-zero
-   disp that fits in a signed byte; anything else jumps to
-   abort_unknown. */
+/* ``call <label>`` (E8 rel16/rel32), ``call [reg+disp8]`` (FF /2), and
+   ``call [absolute]`` (FF 15 abs32 / FF 16 abs16) — the three call
+   forms the self-host needs.  The displacement is 16-bit under bits=16
+   and 32-bit under bits=32 (no operand-size prefix in either default).
+   The reg+disp form requires a non-zero disp that fits in a signed
+   byte; anything else jumps to abort_unknown.  The absolute form
+   (``call [FUNCTION_<NAME>_PTR]``) is the libbboeos extern-call
+   indirection emitted by cc.py's Phase 3 fallback. */
 void handle_call() {
     skip_ws();
     if (source_cursor[0] == '[') {
@@ -1142,6 +1144,18 @@ void handle_call() {
         int type = (packed_operand >> 8) & 0xFF;
         int register_id = packed_operand & 0xFF;
         int value = parse_operand_value;
+        if (type == 2) {
+            emit_address_size_prefix(parse_operand_address_size);
+            emit_byte(0xFF);
+            if (parse_operand_address_size == 32) {
+                emit_byte(0x15);
+                emit_dword(value);
+            } else {
+                emit_byte(0x16);
+                emit_word(value);
+            }
+            return;
+        }
         if (type != 3 || value == 0 || value < -128 || value > 127) {
             abort_unknown();
         }
