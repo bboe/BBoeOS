@@ -814,10 +814,10 @@ TESTS: list[ProgramTest] = [
     ProgramTest("exit_status_zero", ["exit_status 0", "echo $?"], r"echo \$\?\n0\n"),
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
-    ProgramTest("fctest", ["convention_test regparm"], r"accumulate\(9\)    = 28"),
+    ProgramTest("fctest", ["convention_test register_one_arg"], r"accumulate\(9\)    = 28"),
     ProgramTest(
         "fctest3",
-        ["convention_test regparm3"],
+        ["convention_test register_three_arg"],
         r"^fan_in\(1,2,3\)    = 321$[\s\S]*^fan_in\(a,b,c\)    = 654$[\s\S]*^blend\(7,8\)       = 708$[\s\S]*^fan_in nested    = 11111$",
     ),
     ProgramTest("gptest", ["fault_test gp", "echo recovered"], r"EXC0D[\s\S]*recovered"),
@@ -864,7 +864,7 @@ TESTS: list[ProgramTest] = [
     # CCREL_CALL relocations for each cross-TU call; ccld resolves them
     # against the helper's globally-bound symbols.  Two of the calls
     # are multi-arg (add: 2 args → EAX/EDX; blend: 3 args → EAX/EDX/ECX),
-    # exercising Phase B's implicit regparm(min(3, n)) default across
+    # exercising the implicit register-passing default across
     # translation-unit boundaries: a mis-paired convention would land
     # at non-42 / non-6 / non-123 sums here.
     ProgramTest("multitu_demo", ["multitu_demo"], r"^multitu_demo: 42 6 123$"),

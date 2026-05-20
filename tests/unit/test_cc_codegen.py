@@ -340,6 +340,64 @@ def test_char_param_compared_to_int_literal_is_rejected() -> None:
     assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
 
 
+def test_default_2_arg_callee_does_not_read_arg_1_off_stack() -> None:
+    """Default register-passing: arg 1 arrives in EDX, not via [ebp+offset].
+
+    A 2-arg callee picks up the implicit register-passing default
+    (args 0/1 in EAX/EDX), so the callee body should never reference
+    [ebp+anything-positive] for argument loads.
+    """
+    asm = _kernel(
+        """
+        int add2(int a, int b) {
+            return a + b;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16):
+        assert f"[ebp+{offset}]" not in asm, f"2-arg callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
+
+
+def test_default_3_arg_call_site_does_not_push_args() -> None:
+    """A 3-arg call uses EAX/EDX/ECX, not the stack.
+
+    The implicit register-passing default places args 0/1/2 in
+    EAX/EDX/ECX, so the call site emits register loads instead of
+    `push 30; push 20; push 10` + `add esp, 12`.
+    """
+    asm = _kernel(
+        """
+        int add3(int a, int b, int c);
+        int call_site() {
+            return add3(10, 20, 30);
+        }
+    """,
+        bits=32,
+    )
+    call_index = asm.index("call add3")
+    pre_call = asm[:call_index]
+    post_call = asm[call_index:]
+    assert "add esp, 12" not in post_call, f"unexpected 3-arg stack cleanup after default call:\n{asm}"
+    assert "push 20" not in pre_call and "push 30" not in pre_call, (
+        f"default 3-arg call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
+    )
+
+
+def test_default_3_arg_callee_does_not_read_args_off_stack() -> None:
+    """A 3-arg callee reads args from registers, not [ebp+N]."""
+    asm = _kernel(
+        """
+        int add3(int a, int b, int c) {
+            return a + b + c;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16, 20):
+        assert f"[ebp+{offset}]" not in asm, f"3-arg callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
+
+
 def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
     """``obj.field`` on a file-scope struct global emits ``[_g_obj+offset]``.
 
@@ -2703,111 +2761,6 @@ def test_preserve_register_push_pop() -> None:
     for ret_pos in ret_positions:
         before_ret = asm[max(0, ret_pos - 40) : ret_pos]
         assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
-
-
-def test_regparm_2_callee_does_not_read_arg_1_off_stack() -> None:
-    """regparm(2): arg 1 arrives in EDX, not via [ebp+offset].
-
-    With the regparm(1) shape, a 2-arg callee would read arg 1 from
-    [ebp+8] (the only stack slot the caller pushed).  regparm(2)
-    must not load anything from the param area — both args are
-    register-passed, so the callee's body should never reference
-    [ebp+anything-positive] for argument loads.
-    """
-    asm = _kernel(
-        """
-        __attribute__((regparm(2))) int add2(int a, int b) {
-            return a + b;
-        }
-    """,
-        bits=32,
-    )
-    # No load from the caller-push param area (positive ebp offsets
-    # 8 / 12 / 16 are the first three stack-arg slots; with regparm(2)
-    # neither arg lives there).
-    for offset in (8, 12, 16):
-        assert f"[ebp+{offset}]" not in asm, f"regparm(2) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
-
-
-def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
-    """A regparm(3) call places args 0/1/2 in EAX/EDX/ECX, not on the stack.
-
-    With cdecl-only fallback the call site would emit `push 30; push 20; push 10`
-    and `add esp, 12` after the call.  regparm(3) instead loads
-    the three immediates into EAX/EDX/ECX with no stack-arg cleanup.
-    """
-    asm = _kernel(
-        """
-        __attribute__((regparm(3))) int add3(int a, int b, int c);
-        int call_site() {
-            return add3(10, 20, 30);
-        }
-    """,
-        bits=32,
-    )
-    call_index = asm.index("call add3")
-    pre_call = asm[:call_index]
-    # No three-arg stack cleanup (add esp, 12) for stack-pushed args.
-    post_call = asm[call_index:]
-    assert "add esp, 12" not in post_call, f"unexpected 3-arg stack cleanup after regparm(3) call:\n{asm}"
-    # Args 1 and 2 reach EDX and ECX.  Bare `push 20` / `push 30`
-    # would indicate the regparm(1) fallback misrouted them.
-    assert "push 20" not in pre_call and "push 30" not in pre_call, (
-        f"regparm(3) call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
-    )
-
-
-def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
-    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
-    asm = _kernel(
-        """
-        __attribute__((regparm(3))) int add3(int a, int b, int c) {
-            return a + b + c;
-        }
-    """,
-        bits=32,
-    )
-    for offset in (8, 12, 16, 20):
-        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
-
-
-def test_regparm_default_3_arg_call_site_does_not_push_args() -> None:
-    """Without any annotation, a 3-arg call uses EAX/EDX/ECX, not the stack.
-
-    Phase B default: every function is implicitly regparm(min(3, n_params)),
-    so the call site emits register loads instead of `push 30; push 20;
-    push 10` + `add esp, 12`.
-    """
-    asm = _kernel(
-        """
-        int add3(int a, int b, int c);
-        int call_site() {
-            return add3(10, 20, 30);
-        }
-    """,
-        bits=32,
-    )
-    call_index = asm.index("call add3")
-    pre_call = asm[:call_index]
-    post_call = asm[call_index:]
-    assert "add esp, 12" not in post_call, f"unexpected 3-arg stack cleanup after default-regparm call:\n{asm}"
-    assert "push 20" not in pre_call and "push 30" not in pre_call, (
-        f"default-regparm call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
-    )
-
-
-def test_regparm_default_3_arg_callee_does_not_read_args_off_stack() -> None:
-    """Without any annotation, a 3-arg callee reads args from registers, not [ebp+N]."""
-    asm = _kernel(
-        """
-        int add3(int a, int b, int c) {
-            return a + b + c;
-        }
-    """,
-        bits=32,
-    )
-    for offset in (8, 12, 16, 20):
-        assert f"[ebp+{offset}]" not in asm, f"default-regparm callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
 def test_read_deref_char_pointer_zero_extends_byte() -> None:

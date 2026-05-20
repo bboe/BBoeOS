@@ -199,10 +199,12 @@ class EnumDecl(Node):
 class Function(Node):
     """Function definition: name, parameter list, and body.
 
-    ``regparm_count`` captures the ``__attribute__((regparm(N)))``
-    annotation on the definition (0 = standard cdecl, 1 = first arg
-    arrives in AX and is spilled to a local stack slot in the
-    prologue).  Only regparm(1) is currently supported.
+    ``regparm_count`` is the number of leading parameters passed in
+    registers (0 = standard cdecl).  The codegen stamps it implicitly
+    in ``_apply_default_regparm`` — eligible plain-int callees get
+    ``min(3, len(params))``, placing args 0..2 in EAX/EDX/ECX with any
+    remaining args caller-pushed.  Parser sets the field to 0; the
+    codegen rewrites it before lowering.
 
     ``carry_return`` captures ``__attribute__((carry_return))`` —
     the function reports its int return via the carry flag instead
@@ -212,11 +214,12 @@ class Function(Node):
     (false) directly — no AX round-trip.
 
     ``always_inline`` captures ``__attribute__((always_inline))`` —
-    the function must have a single ``asm("...")`` body and zero or
-    one (regparm(1)) parameter.  At each C-level call site, cc.py
-    splices the body text in place of ``call X`` (with local label
-    uniquification); no free-standing function body is emitted, so
-    there's nothing for inline-asm ``call X`` to resolve against.
+    the function must have a single ``asm("...")`` body and at most
+    three plain-int parameters (all register-passed).  At each
+    C-level call site, cc.py splices the body text in place of
+    ``call X`` (with local label uniquification); no free-standing
+    function body is emitted, so there's nothing for inline-asm
+    ``call X`` to resolve against.
 
     ``preserve_registers`` captures zero or more
     ``__attribute__((preserve_register("REG")))`` annotations.  Each

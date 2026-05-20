@@ -286,9 +286,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         entire body.  The raw string (unescaped) is stored; each call
         site pastes it in place of ``call <name>``.  Stack parameters
         are already blocked at parse time (``always_inline`` requires
-        0 or regparm(1) params), so callers never need a ``add sp, N``
-        cleanup that would fall between the inlined body and the
-        following code.
+        ≤3 plain params, all register-passed), so callers never need
+        a ``add sp, N`` cleanup that would fall between the inlined
+        body and the following code.
         """
         body = function.body
         if len(body) != 1 or not isinstance(body[0], Call) or body[0].name != "asm":
@@ -345,7 +345,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if function.name == "main" or function.is_prototype:
                 continue
             self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
-            # Fastcall (regparm(1)) param 0 lives in AX on entry and is spilled
+            # Fastcall param 0 lives in AX on entry and is spilled
             # to a local stack slot in the prologue; it never becomes a pin
             # candidate so auto-pin selection skips it entirely.  Params 1..N
             # of a fastcall function keep the standard stack convention in the

@@ -12,10 +12,10 @@
 
    Multi-arg cross-TU calls are exercised here: ``multitu_helper_blend``
    takes three int args and ``multitu_helper_add`` takes two.  cc.py's
-   Phase B implicit regparm(min(3, n)) default applies in both TUs
-   independently — the prototype-side TU and the definition-side TU
-   each see the same parameter shape and derive the same convention,
-   so EAX/EDX/ECX line up without an explicit annotation. */
+   implicit register-passing default applies in both TUs independently
+   — the prototype-side TU and the definition-side TU each see the
+   same parameter shape and derive the same convention, so EAX/EDX/ECX
+   line up without any per-site annotation. */
 extern int multitu_helper_add(int a, int b);
 extern int multitu_helper_blend(int a, int b, int c);
 extern int multitu_helper_meaning_of_life();

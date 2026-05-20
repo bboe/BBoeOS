@@ -102,17 +102,19 @@ class EmissionMixin:
     """
 
     def _apply_default_regparm(self, functions: list[Node], /) -> None:
-        """Phase B default: stamp implicit regparm(min(3, n)) on eligible callees.
+        """Stamp the implicit register-passing convention on eligible callees.
 
-        Eligible: no explicit ``regparm`` annotation, not ``main`` (the
-        loader pushes argc/argv on the stack), not ``naked`` (no
-        prologue spill), takes at least one parameter, and none of the
-        parameters use ``in_register`` / ``out_register`` (those define
-        their own slot mapping).  Prototypes are eligible too — both
-        ends of a cross-TU pair derive the same default so their ABIs
-        agree without explicit annotation.  Falls back to cdecl when
-        any call site passes a complex argument; option A will extend
-        the call-site register-arg scheduler to lift that limit.
+        Sets ``regparm_count = min(3, len(params))`` so args 0..2 land
+        in EAX/EDX/ECX with any remaining args caller-pushed.  Eligible:
+        not ``main`` (the loader pushes argc/argv on the stack), not
+        ``naked`` (no prologue spill), takes at least one parameter,
+        and none of the parameters use ``in_register`` / ``out_register``
+        (those define their own slot mapping).  Prototypes are eligible
+        too — both ends of a cross-TU pair derive the same default so
+        their ABIs agree without per-site annotation.  Falls back to
+        cdecl when any call site passes a complex argument; lifting
+        that limit requires extending the call-site register-arg
+        scheduler (see docs/cc_future_work.md).
         """
         user_names = {function.name for function in functions if function.name != "main"}
         has_complex_call: dict[str, bool] = dict.fromkeys(user_names, False)
@@ -143,8 +145,7 @@ class EmissionMixin:
 
         for function in functions:
             if (
-                function.regparm_count == 0
-                and function.name != "main"
+                function.name != "main"
                 and not function.naked
                 and function.params
                 and not has_complex_call.get(function.name)
@@ -797,7 +798,7 @@ class EmissionMixin:
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
             callee_regparm_count = self.function_regparm_count.get(name, 0)
-            # regparm(N): args 0..N-1 map to fixed registers (acc, dx,
+            # Fastcall: args 0..N-1 map to fixed registers (acc, dx,
             # count_register)[0..N-1].  Arg 0 (AX) is loaded LAST so
             # earlier register-arg evaluation can't trash it via the
             # parallel-move scheduler.
@@ -1865,7 +1866,7 @@ class EmissionMixin:
             self.variable_arrays.add(global_name)
             self.visible_vars.add(global_name)
 
-        # Fastcall (regparm(N)) routing.  Params 0..N-1 arrive in the
+        # Fastcall routing.  Params 0..N-1 arrive in the
         # fixed register slots (acc, dx, count_register)[0..N-1] and
         # are spilled to local stack slots during the prologue; params
         # N..end use the standard caller-pushed cdecl layout, shifted
