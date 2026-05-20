@@ -19,11 +19,14 @@ int remaining;
    cc.py's whole-file pre-pass resolves these without prototypes. */
 __attribute__((regparm(1))) int accumulate(int v);
 __attribute__((regparm(1))) int add_one(int v);
+__attribute__((regparm(2))) int blend(int hi, int lo);
 __attribute__((regparm(1))) int doubled(int v);
+__attribute__((regparm(3))) int fan_in(int a, int b, int c);
 __attribute__((regparm(1))) __attribute__((carry_return)) int
 is_positive(int v);
 void mode_carry();
 void mode_regparm();
+void mode_regparm3();
 int string_equal(char *left, char *right);
 __attribute__((carry_return)) int tick();
 
@@ -35,8 +38,16 @@ __attribute__((regparm(1))) int add_one(int v) {
     return v + 1;
 }
 
+__attribute__((regparm(2))) int blend(int hi, int lo) {
+    return hi * 100 + lo;
+}
+
 __attribute__((regparm(1))) int doubled(int v) {
     return v + v;
+}
+
+__attribute__((regparm(3))) int fan_in(int a, int b, int c) {
+    return a + b * 10 + c * 100;
 }
 
 __attribute__((regparm(1))) __attribute__((carry_return)) int
@@ -56,6 +67,8 @@ int main(int argc, char *argv[]) {
         mode_carry();
     } else if (string_equal(mode, "regparm")) {
         mode_regparm();
+    } else if (string_equal(mode, "regparm3")) {
+        mode_regparm3();
     } else {
         die("convention_test: unknown mode\n");
     }
@@ -90,6 +103,24 @@ void mode_regparm() {
     printf("doubled(x)       = %d\n", doubled(x));          /* 20 */
     printf("nested           = %d\n", add_one(doubled(7))); /* 15 */
     printf("accumulate(9)    = %d\n", accumulate(9));       /* 28 */
+}
+
+void mode_regparm3() {
+    /* Literal args: arg 0 → EAX (=1), arg 1 → EDX (=2), arg 2 → ECX (=3).
+       Result: 1 + 2*10 + 3*100 = 321. */
+    printf("fan_in(1,2,3)    = %d\n", fan_in(1, 2, 3));
+    /* Mix of local and expression args: each must reach the right
+       register without scheduler-cycle clobber. */
+    int a = 4;
+    int b = 5;
+    int c = 6;
+    printf("fan_in(a,b,c)    = %d\n", fan_in(a, b, c)); /* 4 + 50 + 600 = 654 */
+    /* regparm(2): arg 0 → EAX, arg 1 → EDX. */
+    printf("blend(7,8)       = %d\n", blend(7, 8)); /* 708 */
+    /* Nested: inner fan_in returns in EAX; outer fan_in must consume
+       it as its third arg via ECX without trashing the literals. */
+    printf("fan_in nested    = %d\n",
+           fan_in(1, 1, fan_in(1, 1, 1))); /* 1 + 10 + 111*100 = 11111 */
 }
 
 int string_equal(char *left, char *right) {
