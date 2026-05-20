@@ -30,6 +30,54 @@
  * Structs are listed alphabetically by tag.
  */
 
+/* 8237A single-channel mask register (port 0x0A for ch 0-3,
+ * port 0xD4 for ch 4-7).  Writing here masks or unmasks one DMA
+ * channel without disturbing the other three.
+ *
+ *  channel[2]: 00 = ch0/4, 01 = ch1/5, 10 = ch2/6, 11 = ch3/7
+ *  set:        1 = mask the channel, 0 = unmask
+ *  reserved:   bits 7-3
+ */
+struct dma_mask {
+    uint8_t channel : 2;
+    uint8_t set : 1;
+    uint8_t : 5;
+};
+
+/* 8237A mode register (port 0x0B for ch 0-3, port 0xD6 for ch 4-7).
+ *
+ *  channel[2]:  DMA channel within the controller
+ *  transfer[2]: 00 = verify, 01 = write (peripheral -> mem),
+ *               10 = read (mem -> peripheral), 11 = illegal
+ *  autoinit:    1 = reload address/count from base regs at TC
+ *  decrement:   0 = address increment, 1 = decrement
+ *  mode[2]:     00 = demand, 01 = single, 10 = block, 11 = cascade
+ */
+struct dma_mode {
+    uint8_t channel : 2;
+    uint8_t transfer : 2;
+    uint8_t autoinit : 1;
+    uint8_t decrement : 1;
+    uint8_t mode : 2;
+};
+
+/* 82077AA / 8272 digital output register (port 0x3F2).
+ *
+ *  drive[2]:   selected drive 0..3
+ *  reset_not:  0 = hold controller in reset, 1 = run
+ *  dma_irq:    1 = enable DMA/IRQ pin (required for any normal use)
+ *  motor_*:    1 = spin drive N's motor
+ */
+struct fdc_dor {
+    uint8_t drive : 2;
+    uint8_t reset_not : 1;
+    uint8_t dma_irq : 1;
+    uint8_t motor_0 : 1;
+    uint8_t motor_1 : 1;
+    uint8_t motor_2 : 1;
+    uint8_t motor_3 : 1;
+};
+
 /* NE2000 / DP8390 command register (offset 0x00, both pages).
  *
  *  stop:     1 = stop NIC
