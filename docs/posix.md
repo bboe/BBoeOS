@@ -50,7 +50,8 @@ In the syscall / libc table the "In shipped programs?" column answers a
 different question: can a cc.py-built program in `bin/` reach this today?
 
 - ✅ — yes, via vDSO `FUNCTION_*` helper or raw `INT 30h` wrapper.
-- ⚠️ — only via `user/libbboeos/`, which is not linked into shipped programs yet.
+- ⚠️ — only via `user/libbboeos/`, which is not linked into shipped programs
+  yet.
 - ❌ — no, regardless of which path; the kernel does not implement it.
 
 ## Userland utilities
@@ -115,8 +116,8 @@ usage.
 
 ## Shell
 
-The shell (`user/programs/shell.c`) supports line editing (history, `Ctrl+R` reverse
-search, `Ctrl+K`, `Ctrl+Y`), command chaining with `;`, `&&`, `||` (bash
+The shell (`user/programs/shell.c`) supports line editing (history, `Ctrl+R`
+reverse search, `Ctrl+K`, `Ctrl+Y`), command chaining with `;`, `&&`, `||` (bash
 semantics, equal precedence, left-associative), I/O redirection with `<`, `>`,
 `>>`, and a single `|` pipe between exactly two commands.  `$?` expands to the
 last command's exit status.
@@ -390,8 +391,8 @@ beyond signal handlers (which run on the same stack via the vDSO trampoline).
 
 ### Setjmp, errno, misc
 
-`user/libbboeos` maps a subset of `ERROR_*` to errno: `ENOSPC`, `EEXIST`, `EFAULT`,
-`EINTR`, `EINVAL`, `EACCES` (catch-all for `ERROR_NOT_EMPTY` /
+`user/libbboeos` maps a subset of `ERROR_*` to errno: `ENOSPC`, `EEXIST`,
+`EFAULT`, `EINTR`, `EINVAL`, `EACCES` (catch-all for `ERROR_NOT_EMPTY` /
 `ERROR_NOT_EXECUTE` / `ERROR_PROTECTED`), `ENOENT`, with `EIO` as the default
 fallback.  POSIX-distinct codes like `EBADF`, `EISDIR`, `ENOTDIR`, `ESPIPE`,
 `ENOTEMPTY`, `EPERM` are not synthesised separately.
@@ -402,7 +403,7 @@ fallback.  POSIX-distinct codes like `EBADF`, `EISDIR`, `ENOTDIR`, `ESPIPE`,
 | `assert` | libc | ⚠️ | ⚠️ | `user/libbboeos/assert.h` — `fprintf(stderr, …) + abort()`. |
 | `dlopen` / `dlsym` / `dlclose` | — | ❌ | ❌ | All code is statically compiled in. |
 | `errno` | libc | ⚠️ | ⚠️ | `user/libbboeos` only — see code list above. |
-| `getopt` | `kernel/include/getopt.h` | ⚠️ | ✅ | Header-only short-option parser used by `echo`, `grep`, `head`, `sort`, `tail`, `tr`, `uniq`, `wc`.  No combined flags (`-lw`), no value-attached form (`-nN`), no `--` sentinel, no argv permutation. |
+| `getopt` | `user/libbboeos/include/getopt.h` | ⚠️ | ✅ | Header-only short-option parser used by `echo`, `grep`, `head`, `sort`, `tail`, `tr`, `uniq`, `wc`.  No combined flags (`-lw`), no value-attached form (`-nN`), no `--` sentinel, no argv permutation. |
 | `regex` (`regcomp` / `regexec`) | — | ❌ | ❌ | |
 | `setjmp` / `longjmp` | libc (asm) | ⚠️ | ⚠️ | `user/libbboeos/setjmp.S` — 6-slot `jmp_buf` (esp/ebp/eip + 3 callee-saved). |
 | `sigsetjmp` / `siglongjmp` | — | ❌ | ❌ | No signal mask to save. |

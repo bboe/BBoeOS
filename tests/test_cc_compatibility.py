@@ -20,20 +20,23 @@ from pathlib import Path
 
 HEADER = Path(__file__).resolve().parent / "bboeos.h"
 REPO_ROOT = HEADER.parent.parent
-INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+INCLUDE_DIRS = (
+    REPO_ROOT / "kernel" / "include",
+    REPO_ROOT / "user" / "libbboeos" / "include",
+)
 SOURCE_DIRS = (REPO_ROOT / "user" / "programs", REPO_ROOT / "tests" / "programs")
 
 
 def check_program(*, source: Path) -> tuple[bool, str]:
     """Run clang -fsyntax-only on a single source file."""
+    iquote_flags = [flag for include_dir in INCLUDE_DIRS for flag in ("-iquote", str(include_dir))]
     result = subprocess.run(
         [
             "clang",
             "-fsyntax-only",
             "-include",
             str(HEADER),
-            "-iquote",
-            str(INCLUDE_DIR),
+            *iquote_flags,
             str(source),
         ],
         capture_output=True,
