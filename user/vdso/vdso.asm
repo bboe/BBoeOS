@@ -1,9 +1,12 @@
 ;;; ------------------------------------------------------------------------
 ;;; vdso.asm — user-space code blob containing FUNCTION_TABLE + shared_*
-;;; helpers.  Assembled separately and embedded into the kernel binary.
-;;; The kernel copies this 4 KB blob to physical 0x00010000 at boot so
-;;; user programs can call FUNCTION_DIE / FUNCTION_PRINT_STRING / etc.
-;;; via the addresses baked into constants.asm.
+;;; helpers.  Assembled with `nasm -f elf32`, linked with
+;;; user/libbboeos/libbboeos.ld, then flattened with `objcopy -O binary`
+;;; to produce build/libbboeos.  Shipped on disk as `lib/libbboeos` and
+;;; copied by vdso_install (entry.asm) to a freshly-allocated frame mapped
+;;; at user-virt 0x00010000 in every per-program PD.  User programs reach
+;;; FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. via the addresses baked
+;;; into constants.asm.
 ;;;
 ;;; All helpers are CPL=3 (no privileged instructions); they reach the
 ;;; kernel only via INT 30h syscalls.  Per-call scratch state lives on
@@ -21,15 +24,8 @@
 ;;;               Lets object-mode user code reach the vDSO via
 ;;;               `call [FUNCTION_*_PTR]` — an absolute indirect call
 ;;;               whose encoding is base-invariant, so the bytes survive
-;;;               `ccld` relocation without per-site patching.  NOT
-;;;               emitted into libbboeos.bin: the kernel build runs
-;;;               tools/gen_libbboeos_pointers.py against the libbboeos
-;;;               NASM map to produce libbboeos_pointers.bin (52 bytes), kernel.asm
-;;;               incbins both blobs, and vdso_install copies the
-;;;               pointer blob to dest + 0x800 at boot.  Keeping the
-;;;               pointer table out of libbboeos.bin avoids ~900 bytes of
-;;;               trailing zero padding in kernel.bin between
-;;;               end-of-helpers and offset 0x800.
+;;;               `ccld` relocation without per-site patching.  Emitted
+;;;               by the linker script via LONG(shared_*) entries.
 ;;;   end of file (~1.1 KB actual content; the kernel maps the blob as
 ;;;   a user code page so unused tail bytes within the page are
 ;;;   irrelevant)
@@ -39,17 +35,35 @@
 ;;; `address_space_destroy` skips frame_free on it.
 ;;; ------------------------------------------------------------------------
 
-        org 0x00010000
         bits 32
 
         %include "constants.asm"
 
+        ;; Mark every helper global so the ld linker script's LONG()
+        ;; entries in the FUNCTION_POINTER_TABLE can resolve them.
+        global shared_die
+        global shared_exit
+        global shared_get_character
+        global shared_print_byte_decimal
+        global shared_print_character
+        global shared_print_datetime
+        global shared_print_decimal
+        global shared_print_hex
+        global shared_print_ip
+        global shared_print_mac
+        global shared_print_string
+        global shared_printf
+        global shared_write_stdout
+
 ;;; -----------------------------------------------------------------------
 ;;; FUNCTION_TABLE — 13 × 5-byte `jmp strict near` slots at offset 0.
 ;;; Order and address strides MUST match the FUNCTION_* constants in
-;;; constants.asm, which programs `call` / `jmp` directly.
+;;; constants.asm, which programs `call` / `jmp` directly.  The linker
+;;; script (user/libbboeos/libbboeos.ld) places this section at user-virt
+;;; FUNCTION_TABLE (0x00010000).
 ;;; -----------------------------------------------------------------------
 
+        section .libbboeos.function_table progbits alloc exec nowrite
 function_table:
         jmp strict near shared_die              ; FUNCTION_DIE              (+0)
         jmp strict near shared_exit             ; FUNCTION_EXIT             (+5)
@@ -69,9 +83,11 @@ function_table:
 ;;; Helper bodies — ported from src/lib/proc.asm and src/lib/print.asm.
 ;;; All per-call scratch state (the byte transit for char I/O, printf's
 ;;; pad/width flags, print_datetime's intermediate fields) lives on the
-;;; user stack.  No global vDSO data.
+;;; user stack.  No global vDSO data.  Placed after the function_table
+;;; section by the linker, so the bodies live at 0x10046 onward.
 ;;; -----------------------------------------------------------------------
 
+        section .libbboeos.text progbits alloc exec nowrite
 shared_die:
         ;; SI = message, CX = length.  Writes to stdout, falls into shared_exit.
         mov bx, STDOUT
@@ -603,6 +619,7 @@ shared_write_stdout:
 ;;; executable pages are fine on x86 without NX).
 ;;; -----------------------------------------------------------------------
 
+        section .libbboeos.rodata progbits alloc noexec nowrite
         align 2
 print_datetime_month_lengths:
         dw 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
@@ -611,21 +628,20 @@ print_datetime_month_lengths:
 ;;; sigreturn trampoline — fixed at VDSO_VIRT + VDSO_SIGRETURN_OFFSET.
 ;;; signal_dispatch_user sets IRET return-address to this address so that
 ;;; when the user-mode signal handler returns, execution falls here and
-;;; SYS_SYS_SIGRETURN restores the interrupted context.
+;;; SYS_SYS_SIGRETURN restores the interrupted context.  The linker
+;;; script anchors this section at 0x10460.
 ;;; -----------------------------------------------------------------------
 
-        times (VDSO_SIGRETURN_OFFSET - ($ - $$)) db 0
+        section .libbboeos.sigreturn progbits alloc exec nowrite
+        global __kernel_sigreturn
 __kernel_sigreturn:
         mov ah, SYS_SYS_SIGRETURN               ; 0xF6 in AH — dispatcher reads AH
         int 0x30
         ;; never returns
 
 ;;; -----------------------------------------------------------------------
-;;; FUNCTION_POINTER_TABLE values are NOT emitted here.  They live in
-;;; libbboeos_pointers.bin, produced at build time by
-;;; tools/gen_libbboeos_pointers.py from this file's NASM map, and
-;;; copied to FUNCTION_POINTER_TABLE (0x10800) by vdso_install
-;;; (entry.asm) at boot.  See the header comment for the rationale.
+;;; FUNCTION_POINTER_TABLE values are NOT emitted from this asm file.
+;;; The linker script (user/libbboeos/libbboeos.ld) emits the 52-byte
+;;; table at FUNCTION_POINTER_TABLE (0x10800) using LONG(shared_*)
+;;; entries that resolve to the helper addresses at link time.
 ;;; -----------------------------------------------------------------------
-
-        [map symbols build/libbboeos.map]

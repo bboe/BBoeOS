@@ -84,7 +84,7 @@
         ;; keeps using the direct `call FUNCTION_*` form above.  Slot
         ;; offsets must match the function_pointer_table dd order in
         ;; user/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
-        ;; libbboeos.bin compact: the helper bodies + sigreturn trampoline
+        ;; libbboeos blob compact: the helper bodies + sigreturn trampoline
         ;; currently end at ~0x466, so this leaves ~924 bytes of growth
         ;; headroom before the address would have to be bumped (which
         ;; would require recompiling every linker-pipeline program).

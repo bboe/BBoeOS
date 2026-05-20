@@ -31,31 +31,17 @@ done
 # lib/libbboeos on the disk image; vdso_install reads it from disk at
 # boot, copies it into a freshly-allocated frame, and maps that frame
 # (with PTE_SHARED) at user-virt FUNCTION_TABLE (0x00010000) in every
-# per-program PD.  Layout of libbboeos.bin matches the in-memory page:
-# trampolines + helper bodies + sigreturn at offsets 0..~0x466,
-# zero-padded to offset 0x800, then the 13-entry FUNCTION_POINTER_TABLE
-# (52 bytes).
+# per-program PD.  Layout of build/libbboeos matches the in-memory page:
+# trampolines + helper bodies at offset 0, sigreturn trampoline at
+# offset 0x460, FUNCTION_POINTER_TABLE at offset 0x800.  The linker
+# script (user/libbboeos/libbboeos.ld) places each section at its
+# anchor; objcopy -O binary flattens the linked ELF into the on-disk
+# blob.
 mkdir -p build
-nasm -f bin -i kernel/include/ -o build/libbboeos.bin user/vdso/vdso.asm
-if [ $? -ne 0 ]; then
-    exit 1
-fi
-python3 tools/gen_libbboeos_pointers.py build/libbboeos.map build/libbboeos_pointers.bin
-if [ $? -ne 0 ]; then
-    exit 1
-fi
-# Concatenate the two halves at their final on-page offsets.  The
-# pointer table sits at offset 0x800 (FUNCTION_POINTER_TABLE -
-# FUNCTION_TABLE, see kernel/include/constants.asm).
-python3 -c "
-import struct
-import sys
-helpers = open('build/libbboeos.bin', 'rb').read()
-pointers = open('build/libbboeos_pointers.bin', 'rb').read()
-assert len(helpers) <= 0x800, f'libbboeos.bin {len(helpers)} bytes; would overlap pointer table at 0x800'
-image = helpers + b'\\x00' * (0x800 - len(helpers)) + pointers
-open('build/libbboeos', 'wb').write(image)
-" || exit 1
+nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/vdso/vdso.asm || exit 1
+ld -m elf_i386 -T user/libbboeos/libbboeos.ld -Map=build/libbboeos.map \
+    -o build/libbboeos.elf build/libbboeos.o || exit 1
+objcopy -O binary build/libbboeos.elf build/libbboeos || exit 1
 
 # Two-pass build: assemble kernel.bin first, measure its sector count,
 # then pass that as -DKERNEL_SECTORS=N when assembling boot.bin so the

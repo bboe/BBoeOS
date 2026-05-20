@@ -11,6 +11,17 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Switch libbboeos build to nasm-elf + ld + linker script.**  vdso.asm is now
+  `nasm -f elf32`-assembled with section directives
+  (`.libbboeos.function_table`, `.libbboeos.text`, `.libbboeos.rodata`,
+  `.libbboeos.sigreturn`); `user/libbboeos/libbboeos.ld` anchors each section at
+  its required user-virt offset (function_table @ 0x10000, sigreturn @ 0x10460,
+  pointer_table @ 0x10800) and emits the 13-entry `FUNCTION_POINTER_TABLE`
+  directly via `LONG(shared_*)` expressions. `objcopy -O binary` flattens the
+  linked ELF into `build/libbboeos`. Output is byte-identical to the
+  pre-conversion build.  Removes `tools/gen_libbboeos_pointers.py` and the
+  python-concat step. Enables Phase 3+: clang-compiled `.o` files can now link
+  into the blob alongside the asm helpers without a parallel build pipeline.
 - **Rename vDSO build artifacts to libbboeos.**  `tools/gen_vdso_pointers.py` →
   `tools/gen_libbboeos_pointers.py`; build outputs `build/vdso.bin`,
   `build/vdso.map`, `build/vdso_pointers.bin` → `build/libbboeos.{bin,map}`,
