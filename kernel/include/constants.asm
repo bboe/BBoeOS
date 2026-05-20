@@ -62,7 +62,7 @@
         ;; FUNCTION_TABLE comes first as the base anchor; the rest are
         ;; sorted alphabetically with explicit slot offsets so adding /
         ;; reordering an entry only touches its own line.
-        %assign FUNCTION_TABLE 00010000h ; vDSO code page; kernel copies vdso.bin here at boot
+        %assign FUNCTION_TABLE 00010000h ; libbboeos shared code page; kernel copies libbboeos.bin here at boot
         %assign FUNCTION_DIE                FUNCTION_TABLE +  0 ; SI=msg, CX=len: write to stdout then exit
         %assign FUNCTION_EXIT               FUNCTION_TABLE +  5 ; Exit program (reload shell)
         %assign FUNCTION_GET_CHARACTER      FUNCTION_TABLE + 10 ; Read one byte from stdin; returns AL
@@ -84,7 +84,7 @@
         ;; keeps using the direct `call FUNCTION_*` form above.  Slot
         ;; offsets must match the function_pointer_table dd order in
         ;; user/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
-        ;; vdso.bin compact: the helper bodies + sigreturn trampoline
+        ;; libbboeos.bin compact: the helper bodies + sigreturn trampoline
         ;; currently end at ~0x466, so this leaves ~924 bytes of growth
         ;; headroom before the address would have to be bumped (which
         ;; would require recompiling every linker-pipeline program).

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Emit vdso_pointers.bin from a NASM map of user/vdso/vdso.asm.
+"""Emit libbboeos_pointers.bin from a NASM map of user/vdso/vdso.asm.
 
-The vDSO's FUNCTION_POINTER_TABLE (at user-virt 0x10800) is the
-linker-friendly indirect-call vector parallel to FUNCTION_TABLE.  Its
-values are the absolute virtual addresses of the shared_* helper
+The libbboeos blob's FUNCTION_POINTER_TABLE (at user-virt 0x10800) is
+the linker-friendly indirect-call vector parallel to FUNCTION_TABLE.
+Its values are the absolute virtual addresses of the shared_* helper
 bodies, which only NASM knows after assembling vdso.asm.  This tool
 parses the map file, looks up each helper symbol, and writes a flat
 52-byte binary containing 13 little-endian 4-byte addresses in the
 order required by the FUNCTION_*_PTR constants in
 kernel/include/constants.asm.  kernel.asm incbins the output blob and
-vdso_install copies it into the live vDSO page at boot.
+vdso_install copies it into the live libbboeos page at boot.
 """
 
 import argparse
@@ -63,7 +63,7 @@ def _parse_map(*, map_path: Path) -> dict[str, int]:
 
 
 def main() -> int:
-    """CLI entry point: parse vdso.map, write vdso_pointers.bin."""
+    """CLI entry point: parse libbboeos.map, write libbboeos_pointers.bin."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("map_path", type=Path)
     parser.add_argument("output_path", type=Path)
@@ -71,7 +71,7 @@ def main() -> int:
     addresses = _parse_map(map_path=arguments.map_path)
     missing = [name for name in HELPER_ORDER if name not in addresses]
     if missing:
-        print(f"gen_vdso_pointers.py: missing symbols in {arguments.map_path}: {missing}", file=sys.stderr)
+        print(f"gen_libbboeos_pointers.py: missing symbols in {arguments.map_path}: {missing}", file=sys.stderr)
         return 1
     payload = b"".join(struct.pack("<I", addresses[name]) for name in HELPER_ORDER)
     arguments.output_path.write_bytes(payload)
