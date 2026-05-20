@@ -132,38 +132,23 @@ an `&`.
 
 ## Multi-translation-unit linkage
 
-### Cross-TU calling-convention agreement
+### Complex-arg call-site scheduler (option A)
 
 **Size:** medium.
 
-`make_os.sh` already links multiple `.ccobj` files into one program via the
-`.deps` sidecar pipeline, but the convention each side commits to disagrees once
-the cross-TU call carries arguments.  cc.py's intra-TU analyzer promotes
-candidate functions to a register-passing convention (the auto-pin allocator
-decides which params live in which registers).  A cross-TU caller in another
-file sees only the `extern` prototype, so it falls back to cdecl and pushes args
-on the stack — but the callee's prologue still reads them from its chosen pin
-registers and the receiver gets garbage.  Zero-arg cross-TU calls are unaffected
-(both conventions agree on "no args, return in EAX"), which is why
-`tests/programs/multitu_demo.c` constrains its calls to that shape.
+Phase B's implicit regparm(min(3, n)) default kicks in only when every caller of
+a function uses simple arguments (`Int`, `String`, `Var`, or
+`BinaryOperation(+/-, leaf, leaf)`).  Callees reached from any call site with a
+more complex argument — `arr[i]`, `s->f`, `*p`, or another `Call` — fall back to
+cdecl in `cc/codegen/x86/emission.py:_apply_default_regparm`.
 
-The clean fix is a `static`-equivalent linkage marker (probably the C `static`
-keyword once cc.py grows it; see the C-subset section below) so the analyzer
-knows when a callee is exported for cross-TU use and must commit to the stable
-cdecl convention instead of the per-function auto-pin map. Functions marked
-`static` would keep their `binding: local` slot in the ccobj and stay eligible
-for register-convention promotion; functions without `static` would emit a cdecl
-prologue regardless of the pin map.  In the meantime, single-TU programs keep
-the existing optimization and multi-TU programs must either stick to zero-arg
-cross-TU calls or live with the performance loss of forcing the callee to cdecl
-manually.
-
-A heavier-weight alternative (no language change) would have cc.py emit two
-entry points per exported function: a cdecl trampoline that unpacks the stack
-args into the body's chosen pin registers, plus the regparm body for intra-TU
-callers to jump straight at.  Cheap (~7 bytes per export) but duplicates the
-symbol table and requires the analyzer to record per-function pin maps in the
-ccobj so the trampoline can be generated.
+The blocker is the call-site register-arg scheduler in
+`cc/codegen/x86/generator.py:_emit_register_arg_moves`: it only knows how to
+load `Int`, `String`, `Var`, and a narrow `BinaryOperation` shape into the
+target register, and raises `CompileError("register-arg target … given
+unexpected complex node …")` for anything else.  Extending it to evaluate
+complex args into AX, push, run the simple-arg topological pass, and pop into
+target registers at the end would let the default apply universally.
 
 ## Language / C subset
 

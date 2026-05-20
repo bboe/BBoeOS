@@ -101,6 +101,49 @@ class EmissionMixin:
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
 
+    def _apply_default_regparm(self, functions: list[Node], /) -> None:
+        """Phase B default: stamp implicit regparm(min(3, n)) on eligible callees.
+
+        Eligible: no explicit ``regparm`` annotation, not ``main`` (the
+        loader pushes argc/argv on the stack), not ``naked`` (no
+        prologue spill), takes at least one parameter, and none of the
+        parameters use ``in_register`` / ``out_register`` (those define
+        their own slot mapping).  Prototypes are eligible too — both
+        ends of a cross-TU pair derive the same default so their ABIs
+        agree without explicit annotation.  Falls back to cdecl when
+        any call site passes a complex argument; option A will extend
+        the call-site register-arg scheduler to lift that limit.
+        """
+        user_names = {function.name for function in functions if function.name != "main"}
+        has_complex_call: dict[str, bool] = dict.fromkeys(user_names, False)
+
+        def visit(node: Node) -> None:
+            if isinstance(node, Call) and node.name in user_names and any(not self._is_simple_arg(arg) for arg in node.args):
+                has_complex_call[node.name] = True
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            visit(item)
+
+        for function in functions:
+            for statement in function.body:
+                visit(statement)
+
+        for function in functions:
+            if (
+                function.regparm_count == 0
+                and function.name != "main"
+                and not function.naked
+                and function.params
+                and not has_complex_call.get(function.name)
+                and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
+            ):
+                function.regparm_count = min(3, len(function.params))
+
     def _emit_pointer_dereference(self, expression: PointerDereference) -> None:
         """Read through a pointer expression at ``target_type`` width.
 
@@ -258,6 +301,7 @@ class EmissionMixin:
             for name in sorted(self.defines):
                 self.emit(f"%define {name} {self.defines[name]}")
         self.emit()
+        self._apply_default_regparm(ast.functions)
         for function in ast.functions:
             if function.name == "main":
                 if self.target_mode == "kernel":
