@@ -1338,6 +1338,26 @@ def test_kernel_no_program_end() -> None:
     assert "_program_end:" not in asm, f"'_program_end:' found in kernel output\n{asm}"
 
 
+def test_kernel_outb_constant_port_runtime_value_no_push_pop() -> None:
+    """``kernel_outb(<int>, <runtime value>)`` skips the save-around-eval push/pop.
+
+    The push/pop in the general path guards the value (held in AX)
+    across the port evaluation, since port eval may clobber AX.  When
+    port is an ``Int`` literal, the port lowering is a single
+    ``mov dx, <imm>`` that doesn't touch AX — so the save is dead and
+    the codegen elides it.
+    """
+    asm = _kernel("""
+        uint8_t status() { return 5; }
+        void send_status() {
+            kernel_outb(0x20, status());
+        }
+    """)
+    assert "out dx, al" in asm, f"Expected 'out dx, al' in:\n{asm}"
+    assert "push ax" not in asm and "push eax" not in asm, f"Const-port outb should not push the accumulator:\n{asm}"
+    assert "pop ax" not in asm and "pop eax" not in asm, f"Const-port outb should not pop the accumulator:\n{asm}"
+
+
 def test_kernel_outb_constant_value_short_form() -> None:
     """``kernel_outb(port, const)`` compiles to ``mov al, <const>`` (no AX push/pop)."""
     asm = _kernel("""
@@ -1376,6 +1396,23 @@ def test_kernel_outsw_emits_rep_outsw() -> None:
     assert "mov cx, 256" in asm, f"expected count in CX:\n{asm}"
     assert "        cld" in asm, f"expected cld:\n{asm}"
     assert "        rep outsw" in asm, f"expected rep outsw:\n{asm}"
+
+
+def test_kernel_outw_constant_port_runtime_value_no_push_pop() -> None:
+    """``kernel_outw(<int>, <runtime value>)`` skips the save-around-eval push/pop.
+
+    Same elision as :func:`test_kernel_outb_constant_port_runtime_value_no_push_pop`,
+    just for the 16-bit out variant.
+    """
+    asm = _kernel("""
+        int status() { return 5; }
+        void send_status() {
+            kernel_outw(0x300, status());
+        }
+    """)
+    assert "out dx, ax" in asm, f"Expected 'out dx, ax' in:\n{asm}"
+    assert "push ax" not in asm and "push eax" not in asm, f"Const-port outw should not push the accumulator:\n{asm}"
+    assert "pop ax" not in asm and "pop eax" not in asm, f"Const-port outw should not pop the accumulator:\n{asm}"
 
 
 def test_kernel_outw_constant_value_short_form() -> None:

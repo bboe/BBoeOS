@@ -523,10 +523,14 @@ class BuiltinsMixin:
         """Generate code for kernel_outb(port, value). Writes one byte to an I/O port.
 
         Constant ``value`` compiles to ``mov dx, <port>; mov al, <value>;
-        out dx, al``.  Non-constant ``value`` evaluates first into AX,
-        is pushed across the port-evaluation, then popped — the same
-        save-around-eval shape :meth:`builtin_far_write8` uses.
-        Kernel-only (see :meth:`builtin_kernel_inb` for the rationale).
+        out dx, al``.  When ``value`` is a runtime expression but
+        ``port`` is an ``Int`` literal, the value evaluates into AX and
+        the port lowers to a single ``mov dx, <imm>`` that doesn't
+        touch AX — no save-around-eval needed.  The general case
+        (both ``port`` and ``value`` runtime) keeps the push/pop guard
+        around the port evaluation, the same save-around-eval shape
+        :meth:`builtin_far_write8` uses.  Kernel-only (see
+        :meth:`builtin_kernel_inb` for the rationale).
         """
         if self.target_mode != "kernel":
             message = "kernel_outb() is kernel-only; not available in --target user"
@@ -536,6 +540,9 @@ class BuiltinsMixin:
         if isinstance(value_arg, Int):
             self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
             self.emit(f"        mov al, {value_arg.value & 0xFF}")
+        elif isinstance(port_arg, Int):
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        mov {self.target.dx_register}, {port_arg.value & 0xFFFF}")
         else:
             self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
             self.emit(f"        push {self.target.acc}")
@@ -569,8 +576,10 @@ class BuiltinsMixin:
         """Generate code for kernel_outw(port, value). Writes one 16-bit word to an I/O port.
 
         Constant ``value`` compiles to ``mov dx, <port>; mov ax, <value>;
-        out dx, ax``.  Non-constant ``value`` uses the same push/pop guard
-        as :meth:`builtin_kernel_outb`.  Kernel-only.
+        out dx, ax``.  When ``value`` is a runtime expression but
+        ``port`` is an ``Int`` literal, the push/pop guard is elided
+        (same rationale as :meth:`builtin_kernel_outb`).  General
+        case keeps the save-around-eval guard.  Kernel-only.
         """
         if self.target_mode != "kernel":
             message = "kernel_outw() is kernel-only; not available in --target user"
@@ -580,6 +589,9 @@ class BuiltinsMixin:
         if isinstance(value_arg, Int):
             self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
             self.emit(f"        mov {self.target.acc}, {value_arg.value & 0xFFFF}")
+        elif isinstance(port_arg, Int):
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        mov {self.target.dx_register}, {port_arg.value & 0xFFFF}")
         else:
             self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
             self.emit(f"        push {self.target.acc}")
