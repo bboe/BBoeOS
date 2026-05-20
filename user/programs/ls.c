@@ -24,18 +24,7 @@
 #define DT_DIR 4
 #define MAX_ENTRIES 64
 
-int strcmp(const char *a, const char *b) {
-    int index = 0;
-    while (1) {
-        if (a[index] != b[index]) {
-            return a[index] - b[index];
-        }
-        if (a[index] == '\0') {
-            return 0;
-        }
-        index = index + 1;
-    }
-}
+int strcmp(const char *a, const char *b);
 
 int main(int argc, char *argv[]) {
     char *path = ".";

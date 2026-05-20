@@ -317,6 +317,15 @@ class EmissionMixin:
                     message = "kernel-mode source may not define 'main'"
                     raise CompileError(message)
                 continue
+            # Prototypes whose name has a matching FUNCTION_<NAME>_PTR in
+            # constants.asm are libbboeos exports — keep them out of
+            # user_functions / extern_functions so the Call visitor
+            # routes them through the cdecl indirect path rather than a
+            # direct/CCREL call.
+            pointer_constant = f"FUNCTION_{function.name.upper()}_PTR"
+            if function.is_prototype and self.target_mode == "user" and pointer_constant in self.NAMED_CONSTANT_VALUES:
+                self.libbboeos_extern_declarations.add(function.name)
+                continue
             self.user_functions[function.name] = len(function.params)
             if function.is_prototype:
                 self.extern_functions.add(function.name)
@@ -949,6 +958,46 @@ class EmissionMixin:
             return
         handler = getattr(self, f"builtin_{name}", None)
         if handler is None:
+            # Libbboeos extern call.  The prototype-registration pass put
+            # the name in libbboeos_extern_declarations after seeing
+            # `int strcmp(const char *, const char *);` (or equivalent
+            # via `#include "string.h"`).  Emit a cdecl indirect call
+            # through the pointer table — args pushed right-to-left,
+            # `call [FUNCTION_<NAME>_PTR]`, caller pops args.
+            if name in self.libbboeos_extern_declarations:
+                pointer_constant = f"FUNCTION_{name.upper()}_PTR"
+                clobbers: frozenset[str] = frozenset(self.target.register_pool)
+                saved = self._pinned_registers_to_save(clobbers)
+                use_pusha = discard_return and len(saved) >= 3
+                if use_pusha:
+                    self.emit("        pusha")
+                else:
+                    for register in saved:
+                        self.emit(f"        push {register}")
+                for arg in reversed(arguments):
+                    self._emit_push_arg(arg)
+                self.emit(f"        call [{pointer_constant}]")
+                if arguments:
+                    self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+                if use_pusha:
+                    self.emit("        popa")
+                else:
+                    for register in reversed(saved):
+                        self.emit(f"        pop {register}")
+                self.ax_clear()
+                return
+            # Strict-on-libbboeos: if the name HAS a FUNCTION_<NAME>_PTR
+            # constant but no prior prototype, demand the declaration
+            # instead of silently emitting an indirect call.  Encourages
+            # `#include "string.h"` (etc.) at every call site so the
+            # arg-count check below applies.
+            pointer_constant = f"FUNCTION_{name.upper()}_PTR"
+            if self.target_mode == "user" and pointer_constant in self.NAMED_CONSTANT_VALUES:
+                message = (
+                    f"call to libbboeos export '{name}' requires a prior prototype declaration "
+                    f'(e.g. `#include "string.h"` or a forward decl)'
+                )
+                raise CompileError(message, line=statement.line)
             message = f"unknown function: {name}"
             raise CompileError(message, line=statement.line)
         clobbers = self._builtin_clobbers[name]

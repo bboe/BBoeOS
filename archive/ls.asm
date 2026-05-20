@@ -128,7 +128,12 @@ main:
         push esi
         mov edi, esi                            ; b = key
         mov esi, [ebp + edx*4]                  ; a = names[j]
-        call strcmp_si_di
+        ;; Match ls.c's libbboeos call: push args R-to-L (cdecl),
+        ;; indirect through FUNCTION_STRCMP_PTR, pop args.
+        push edi
+        push esi
+        call [FUNCTION_STRCMP_PTR]
+        add esp, 8
         pop esi
         pop edx
         pop ebx
@@ -180,33 +185,6 @@ main:
         mov esi, MESSAGE_NOT_FOUND
         mov ecx, MESSAGE_NOT_FOUND_LENGTH
         jmp FUNCTION_DIE
-
-;; strcmp_si_di(ESI=a, EDI=b) -> EAX = signed first-differing-byte diff.
-;; Clobbers EAX, ECX; preserves ESI / EDI (callers stash anyway).
-strcmp_si_di:
-        push esi
-        push edi
-.loop:
-        mov al, [esi]
-        mov cl, [edi]
-        cmp al, cl
-        jne .diff
-        test al, al
-        je .eq
-        inc esi
-        inc edi
-        jmp .loop
-.eq:
-        xor eax, eax
-        jmp .ret
-.diff:
-        movzx eax, al
-        movzx ecx, cl
-        sub eax, ecx
-.ret:
-        pop edi
-        pop esi
-        ret
 
 ;; Strings
 DOT                      db '.',0

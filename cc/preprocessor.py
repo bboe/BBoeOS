@@ -64,7 +64,13 @@ from pathlib import Path
 from cc.errors import CompileError
 from cc.lexer import tokenize
 
-INCLUDE_PATTERN = re.compile(r'\s*"([^"]+)"\s*$')
+#: Accepts both ``#include "..."`` and ``#include <...>``.  cc.py has
+#: no separate "system" search-path concept, so both forms search the
+#: same include_base + search_paths list — matching what most
+#: embedded toolchains do.  Letting <> work avoids forking shared
+#: headers like ``string.h`` that ship with angle-bracket
+#: dependencies (``#include <stddef.h>``).
+INCLUDE_PATTERN = re.compile(r'\s*(?:"([^"]+)"|<([^>]+)>)\s*$')
 
 #: Matches ``#define NAME(p1, p2, ...) body`` — the open paren must
 #: come **immediately** after the macro name with no intervening
@@ -383,7 +389,7 @@ def preprocess(
             if match is None:
                 message = f"malformed #include: {line.rstrip()!r}"
                 raise CompileError(message, line=line_number)
-            include_name = match.group(1)
+            include_name = match.group(1) or match.group(2)
             candidates = [include_base, *search_paths]
             include_path = None
             for candidate_base in candidates:

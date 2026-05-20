@@ -243,6 +243,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
+        # Subset of extern_functions whose name matches a FUNCTION_<NAME>_PTR
+        # constant in constants.asm: these are libbboeos exports and resolve
+        # via `call [FUNCTION_<NAME>_PTR]` (cdecl indirect) instead of a
+        # direct/CCREL call.  Populated by the prototype-registration loop
+        # in EmissionMixin and consumed by the Call AST visitor.  A bare
+        # libbboeos call without a prior prototype declaration is a
+        # CompileError under --target user — strict-on-libbboeos hygiene.
+        self.libbboeos_extern_declarations: set[str] = set()
         self.ax_is_byte: bool = False
         self.ax_literal: int | None = None
         self.ax_local: str | None = None
@@ -3063,10 +3071,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     # user-call clobber set even when it's pinned.
                     for register in self.target.register_pool:
                         clobber_counts[register] += 1
-                else:
-                    if node.name not in self.BUILTIN_CLOBBERS:
+                elif node.name in self.libbboeos_extern_declarations:
+                    # Libbboeos extern call — cdecl indirect through the
+                    # shared pointer table.  Caller-saved EAX/ECX/EDX
+                    # clobbered (same set the user_function path counts),
+                    # so charge the full register pool.
+                    for register in self.target.register_pool:
+                        clobber_counts[register] += 1
+                elif node.name not in self.BUILTIN_CLOBBERS:
+                    pointer_constant = f"FUNCTION_{node.name.upper()}_PTR"
+                    if self.target_mode == "user" and pointer_constant in self.NAMED_CONSTANT_VALUES:
+                        message = (
+                            f"call to libbboeos export '{node.name}' requires a prior prototype "
+                            f'declaration (e.g. `#include "string.h"` or a forward decl)'
+                        )
+                    else:
                         message = f"unknown function: {node.name}"
-                        raise CompileError(message, line=node.line)
+                    raise CompileError(message, line=node.line)
+                else:
                     for register in self._builtin_clobbers[node.name]:
                         if register in clobber_counts:
                             clobber_counts[register] += 1
