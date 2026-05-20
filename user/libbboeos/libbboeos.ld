@@ -10,15 +10,15 @@
  *   0x10046  .libbboeos.text             shared_* helper bodies (ported
  *                                        from src/lib/{proc,print}.asm).
  *   ...      .libbboeos.rodata           print_datetime_month_lengths.
- *   0x10FE0  .libbboeos.sigreturn        __kernel_sigreturn trampoline
- *                                        (matches VDSO_SIGRETURN_OFFSET).
- *   0x10800  .libbboeos.pointer_table    FUNCTION_POINTER_TABLE.  13
+ *   0x10E00  .libbboeos.pointer_table    FUNCTION_POINTER_TABLE.  13
  *                                        legacy LONG(shared_*) entries
  *                                        + a growing tail of clang-
  *                                        compiled libbboeos exports.
  *                                        Entry order MUST match the
  *                                        FUNCTION_*_PTR offsets in
  *                                        kernel/include/constants.asm.
+ *   0x10FE0  .libbboeos.sigreturn        __kernel_sigreturn trampoline
+ *                                        (matches VDSO_SIGRETURN_OFFSET).
  *
  * Clang-compiled libbboeos C bodies (string.c, etc.) land in
  * .libbboeos.text via `*(.text .text.*)`; -ffunction-sections + ld
@@ -31,8 +31,26 @@ ENTRY(function_table)
 
 /* Force ld to pull these archive members in (and seed --gc-sections).
  * Without EXTERN, the LONG() references inside SECTIONS aren't enough
- * to trigger archive resolution. */
+ * to trigger archive resolution.  Sorted alphabetically. */
+EXTERN(memchr)
+EXTERN(memcmp)
+EXTERN(memcpy)
+EXTERN(memmove)
+EXTERN(memset)
+EXTERN(strcasecmp)
+EXTERN(strcat)
+EXTERN(strchr)
 EXTERN(strcmp)
+EXTERN(strcpy)
+EXTERN(strdup)
+EXTERN(strerror)
+EXTERN(strlen)
+EXTERN(strncasecmp)
+EXTERN(strncat)
+EXTERN(strncmp)
+EXTERN(strncpy)
+EXTERN(strrchr)
+EXTERN(strstr)
 
 SECTIONS {
     . = 0x00010000;
@@ -47,7 +65,7 @@ SECTIONS {
         *(.rodata .rodata.*)
     }
 
-    . = 0x00010800;
+    . = 0x00010E00;
     .libbboeos.pointer_table  : {
         /* Legacy vDSO helpers (asm).  Order pinned by FUNCTION_*_PTR in
          * kernel/include/constants.asm — entries here align 1:1. */
@@ -65,13 +83,29 @@ SECTIONS {
         LONG(shared_printf);
         LONG(shared_write_stdout);
         /* Clang-compiled libbboeos exports.  Sorted alphabetically.
-         * Stays freely-reorderable until the cc.py extern-call fallback
-         * ships and the first on-disk bin/* program bakes in an
-         * offset; from then on the block becomes append-only.  Until
-         * then, insert new entries in alphabetical position and update
-         * the matching FUNCTION_<name>_PTR offsets in
-         * kernel/include/constants.asm together. */
+         * make_os.sh rebuilds the whole user-space on every run, so
+         * reordering is free until BBoeOS starts distributing binaries
+         * independently of the kernel build.  Order must match the
+         * FUNCTION_<name>_PTR offsets in kernel/include/constants.asm. */
+        LONG(memchr);
+        LONG(memcmp);
+        LONG(memcpy);
+        LONG(memmove);
+        LONG(memset);
+        LONG(strcasecmp);
+        LONG(strcat);
+        LONG(strchr);
         LONG(strcmp);
+        LONG(strcpy);
+        LONG(strdup);
+        LONG(strerror);
+        LONG(strlen);
+        LONG(strncasecmp);
+        LONG(strncat);
+        LONG(strncmp);
+        LONG(strncpy);
+        LONG(strrchr);
+        LONG(strstr);
     }
 
     . = 0x00010FE0;

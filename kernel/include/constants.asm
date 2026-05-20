@@ -88,7 +88,7 @@
         ;; currently end at ~0x466, so this leaves ~924 bytes of growth
         ;; headroom before the address would have to be bumped (which
         ;; would require recompiling every linker-pipeline program).
-        %assign FUNCTION_POINTER_TABLE FUNCTION_TABLE + 0x800
+        %assign FUNCTION_POINTER_TABLE FUNCTION_TABLE + 0xE00
         %assign FUNCTION_DIE_PTR                FUNCTION_POINTER_TABLE +  0
         %assign FUNCTION_EXIT_PTR               FUNCTION_POINTER_TABLE +  4
         %assign FUNCTION_GET_CHARACTER_PTR      FUNCTION_POINTER_TABLE +  8
@@ -103,17 +103,32 @@
         %assign FUNCTION_PRINTF_PTR             FUNCTION_POINTER_TABLE + 44
         %assign FUNCTION_WRITE_STDOUT_PTR       FUNCTION_POINTER_TABLE + 48
         ;; Clang-compiled libbboeos exports (Phase 3+).  Sorted
-        ;; alphabetically — and stays that way until the cc.py extern-call
-        ;; fallback ships and the first program with a baked-in
-        ;; FUNCTION_<name>_PTR offset gets written to disk.  After that
-        ;; the block becomes append-only (same ABI contract as the
-        ;; legacy block above) because reordering would shift offsets
-        ;; under existing on-disk bin/* binaries.  Until then, treat
-        ;; new entries like a freely-reorderable sorted list — insert
-        ;; in alphabetical position and renumber accordingly.  Order
-        ;; must match the LONG()s after the legacy block in
+        ;; alphabetically.  make_os.sh rebuilds the whole user-space
+        ;; against this table on every run, so reordering is free
+        ;; until BBoeOS starts distributing binaries independently of
+        ;; the kernel build.  When that day comes, this block flips to
+        ;; append-only (same ABI contract as the legacy block above).
+        ;; Order must match the LONG()s after the legacy block in
         ;; user/libbboeos/libbboeos.ld.
-        %assign FUNCTION_STRCMP_PTR             FUNCTION_POINTER_TABLE + 52
+        %assign FUNCTION_MEMCHR_PTR             FUNCTION_POINTER_TABLE + 52
+        %assign FUNCTION_MEMCMP_PTR             FUNCTION_POINTER_TABLE + 56
+        %assign FUNCTION_MEMCPY_PTR             FUNCTION_POINTER_TABLE + 60
+        %assign FUNCTION_MEMMOVE_PTR            FUNCTION_POINTER_TABLE + 64
+        %assign FUNCTION_MEMSET_PTR             FUNCTION_POINTER_TABLE + 68
+        %assign FUNCTION_STRCASECMP_PTR         FUNCTION_POINTER_TABLE + 72
+        %assign FUNCTION_STRCAT_PTR             FUNCTION_POINTER_TABLE + 76
+        %assign FUNCTION_STRCHR_PTR             FUNCTION_POINTER_TABLE + 80
+        %assign FUNCTION_STRCMP_PTR             FUNCTION_POINTER_TABLE + 84
+        %assign FUNCTION_STRCPY_PTR             FUNCTION_POINTER_TABLE + 88
+        %assign FUNCTION_STRDUP_PTR             FUNCTION_POINTER_TABLE + 92
+        %assign FUNCTION_STRERROR_PTR           FUNCTION_POINTER_TABLE + 96
+        %assign FUNCTION_STRLEN_PTR             FUNCTION_POINTER_TABLE + 100
+        %assign FUNCTION_STRNCASECMP_PTR        FUNCTION_POINTER_TABLE + 104
+        %assign FUNCTION_STRNCAT_PTR            FUNCTION_POINTER_TABLE + 108
+        %assign FUNCTION_STRNCMP_PTR            FUNCTION_POINTER_TABLE + 112
+        %assign FUNCTION_STRNCPY_PTR            FUNCTION_POINTER_TABLE + 116
+        %assign FUNCTION_STRRCHR_PTR            FUNCTION_POINTER_TABLE + 120
+        %assign FUNCTION_STRSTR_PTR             FUNCTION_POINTER_TABLE + 124
         %assign IPPROTO_ICMP 1          ; Protocol argument to net_open for SOCK_DGRAM ICMP sockets
         %assign IPPROTO_UDP 17          ; Protocol argument to net_open for SOCK_DGRAM UDP sockets
         %assign KERNEL_VIRT_BASE 0FF800000h     ; Lowest kernel-virt address.  User pointers + lengths must stay strictly below this; idt.asm's user-fault triage and access_ok both gate on it.  Equals USER_STACK_TOP and DIRECT_MAP_BASE — all three move in lockstep.
