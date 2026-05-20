@@ -30,6 +30,8 @@
 //   DATA             = +0x10   remote DMA data port (16-bit)
 //   RESET            = +0x1F   write-on-read triggers full reset
 
+#include "registers.h"
+
 #define NE2K_RX_START 0x46 // RX ring start page (after 6 TX pages)
 #define NE2K_RX_STOP 0x80  // RX ring end page (one past last)
 #define NE2K_TX_PAGE 0x40  // TX buffer start page
@@ -60,14 +62,30 @@ asm("net_transmit_buffer equ _g_net_transmit_buffer");
 // strictly init-or-trust-it-worked.
 void ne2k_init() {
     int i;
+    struct ne2k_cr cr_stop = {.rd = 4, .stop = 1};
+    struct ne2k_cr cr_stop_page1 = {.page = 1, .rd = 4, .stop = 1};
+    struct ne2k_rcr rcr = {.ab = 1};
+    struct ne2k_tcr tcr = {0};
+    struct ne2k_isr isr_ack_all = {.cnt = 1,
+                                   .ovw = 1,
+                                   .prx = 1,
+                                   .ptx = 1,
+                                   .rdc = 1,
+                                   .rst = 1,
+                                   .rxe = 1,
+                                   .txe = 1};
+    struct ne2k_imr imr = {.prx = 1};
+    struct ne2k_cr cr_start = {.rd = 4, .start = 1};
 
-    kernel_outb(0x300, 0x21);                 // Page 0, stop, abort DMA.
+    // Page 0, stop, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_stop);
     kernel_outb(0x300 + 0x01, NE2K_RX_START); // PSTART
     kernel_outb(0x300 + 0x02, NE2K_RX_STOP);  // PSTOP
     kernel_outb(0x300 + 0x03, NE2K_RX_START); // BOUNDARY
     kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);  // TPSR
 
-    kernel_outb(0x300, 0x61);                     // Page 1, stop, abort DMA.
+    // Page 1, stop, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_stop_page1);
     kernel_outb(0x300 + 0x07, NE2K_RX_START + 1); // CURR
 
     // Program PAR0..PAR5 with the MAC we read in ne2k_probe.
@@ -83,16 +101,20 @@ void ne2k_init() {
         i = i + 1;
     }
 
-    kernel_outb(0x300, 0x21);        // Page 0.
-    kernel_outb(0x300 + 0x0C, 0x04); // RCR: accept broadcast.
-    kernel_outb(0x300 + 0x0D, 0);    // TCR: normal (no loopback).
-    kernel_outb(0x300 + 0x07, 0xFF); // ISR: clear pending.
-    kernel_outb(0x300 + 0x0F, 0x01); // IMR: PRX (RX done) only; wakes
-                                     // hlt-parked sys_net_recvfrom via
-                                     // pmode_irq3_handler in entry.asm.
-                                     // Packet drain still happens in
-                                     // process context via ne2k_receive.
-    kernel_outb(0x300, 0x22);        // Page 0, start, abort DMA.
+    // Back to page 0, stop, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_stop);
+    // RCR: accept broadcast.
+    kernel_outb(0x300 + 0x0C, *(uint8_t *)&rcr);
+    // TCR: normal mode (all fields zero: no loopback, no CRC inhibit).
+    kernel_outb(0x300 + 0x0D, *(uint8_t *)&tcr);
+    // ISR: clear all pending interrupts (ack by writing 1 to each bit).
+    kernel_outb(0x300 + 0x07, *(uint8_t *)&isr_ack_all);
+    // IMR: PRX (RX done) only; wakes hlt-parked sys_net_recvfrom via
+    // pmode_irq3_handler in entry.asm.  Packet drain still happens in
+    // process context via ne2k_receive.
+    kernel_outb(0x300 + 0x0F, *(uint8_t *)&imr);
+    // Page 0, start, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_start);
 }
 
 // Probe and reset the NIC, read the MAC PROM into mac_address.
@@ -102,6 +124,23 @@ int ne2k_probe() __attribute__((carry_return)) {
     uint8_t status;
     uint16_t word;
     int i;
+    uint8_t raw;
+    struct ne2k_cr *cr_read;
+    struct ne2k_isr *isr_read;
+    struct ne2k_isr ack_all = {.cnt = 1,
+                               .ovw = 1,
+                               .prx = 1,
+                               .ptx = 1,
+                               .rdc = 1,
+                               .rst = 1,
+                               .rxe = 1,
+                               .txe = 1};
+    struct ne2k_cr cr_stop = {.rd = 4, .stop = 1};
+    struct ne2k_dcr dcr = {.ft = 2, .ls = 1, .wts = 1};
+    struct ne2k_rcr rcr_probe = {.mon = 1};
+    struct ne2k_tcr tcr_probe = {.lb = 1};
+    struct ne2k_cr cr_start_read = {.rd = 1, .start = 1};
+    struct ne2k_isr ack_rdc = {.rdc = 1};
 
     // Pulse reset by reading then writing the reset port.
     status = kernel_inb(0x300 + 0x1F);
@@ -110,7 +149,9 @@ int ne2k_probe() __attribute__((carry_return)) {
     // Wait up to ~64 KiB polls for ISR's RST bit.
     timeout = 0xFFFF;
     while (timeout > 0) {
-        if ((kernel_inb(0x300 + 0x07) & 0x80) != 0) {
+        raw = kernel_inb(0x300 + 0x07);
+        isr_read = (struct ne2k_isr *)&raw;
+        if (isr_read->rst) {
             break;
         }
         timeout = timeout - 1;
@@ -119,26 +160,41 @@ int ne2k_probe() __attribute__((carry_return)) {
         return 0; // No NIC.
     }
 
-    kernel_outb(0x300 + 0x07, 0xFF); // Acknowledge all interrupts.
-    kernel_outb(0x300, 0x21);        // Page 0, stop, abort DMA.
+    // Acknowledge all interrupts (ack by writing 1 to each bit).
+    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_all);
 
-    // Verify NIC presence by reading CR back.  Mask off page-select bits.
-    if ((kernel_inb(0x300) & 0x3F) != 0x21) {
+    // Page 0, stop, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_stop);
+
+    // Verify NIC presence by reading CR back.  The page bits (6-7) are
+    // ignored; check only stop=1, start=0, transmit=0, rd=4 (bit 5 set).
+    raw = kernel_inb(0x300);
+    cr_read = (struct ne2k_cr *)&raw;
+    if (cr_read->stop != 1 || cr_read->start != 0 || cr_read->transmit != 0 ||
+        cr_read->rd != 4) {
         return 0;
     }
 
-    kernel_outb(0x300 + 0x0E, 0x49); // DCR: word-wide DMA, 4-byte FIFO.
-    kernel_outb(0x300 + 0x0A, 0);    // RBCR0
-    kernel_outb(0x300 + 0x0B, 0);    // RBCR1
-    kernel_outb(0x300 + 0x0C, 0x20); // RCR: monitor mode (no RX during probe).
-    kernel_outb(0x300 + 0x0D, 0x02); // TCR: internal loopback.
+    // DCR: word-wide DMA (wts=1), normal byte order (bos=0), 16-bit DMA
+    // (las=0), normal (ls=1), no auto-init (arm=0), 4-byte FIFO (ft=2).
+    kernel_outb(0x300 + 0x0E, *(uint8_t *)&dcr);
+
+    kernel_outb(0x300 + 0x0A, 0); // RBCR0
+    kernel_outb(0x300 + 0x0B, 0); // RBCR1
+
+    // RCR: monitor mode (no RX during probe).
+    kernel_outb(0x300 + 0x0C, *(uint8_t *)&rcr_probe);
+    // TCR: internal loopback.
+    kernel_outb(0x300 + 0x0D, *(uint8_t *)&tcr_probe);
 
     // Set up a 32-byte remote-DMA read from PROM offset 0.
     kernel_outb(0x300 + 0x08, 0);    // RSAR0
     kernel_outb(0x300 + 0x09, 0);    // RSAR1
     kernel_outb(0x300 + 0x0A, 0x20); // RBCR0 = 32
     kernel_outb(0x300 + 0x0B, 0);    // RBCR1
-    kernel_outb(0x300, 0x0A);        // CR: start + remote read DMA
+
+    // CR: page 0, start, remote read DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_start_read);
 
     // Word-mode DMA: each PROM byte is the low byte of a 16-bit read.
     i = 0;
@@ -154,10 +210,14 @@ int ne2k_probe() __attribute__((carry_return)) {
         i = i + 1;
     }
 
-    // Wait for remote DMA complete (RDC bit in ISR), then ack.
-    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {
+    // Wait for remote DMA complete (ISR.rdc), then ack.
+    raw = kernel_inb(0x300 + 0x07);
+    isr_read = (struct ne2k_isr *)&raw;
+    while (isr_read->rdc == 0) {
+        raw = kernel_inb(0x300 + 0x07);
+        isr_read = (struct ne2k_isr *)&raw;
     }
-    kernel_outb(0x300 + 0x07, 0x40);
+    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_rdc);
     return 1;
 }
 
@@ -305,36 +365,54 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
     __attribute__((preserve_register("edx")))
     __attribute__((preserve_register("esi"))) {
     int dma_count;
-    uint8_t isr;
+    int word_count;
+    uint8_t isr_raw;
+    struct ne2k_isr *isr_read;
     int timeout;
+    uint8_t had_txe;
+    struct ne2k_cr cr_dma_write = {.rd = 2, .start = 1};
+    struct ne2k_isr ack_rdc = {.rdc = 1};
+    struct ne2k_cr cr_transmit = {.rd = 4, .start = 1, .transmit = 1};
+    struct ne2k_isr ack_tx = {.ptx = 1, .txe = 1};
 
     if (length < 60) {
         length = 60;
     }
     dma_count = (length + 1) & 0xFFFE; // Round up to even (word DMA).
+    word_count = dma_count >> 1;
 
     kernel_outb(0x300 + 0x08, 0);                       // RSAR0
     kernel_outb(0x300 + 0x09, NE2K_TX_PAGE);            // RSAR1
     kernel_outb(0x300 + 0x0A, dma_count & 0xFF);        // RBCR0
     kernel_outb(0x300 + 0x0B, (dma_count >> 8) & 0xFF); // RBCR1
-    kernel_outb(0x300, 0x12); // CR: start + remote write DMA.
 
-    kernel_outsw(0x300 + 0x10, frame, dma_count >> 1);
+    // CR: page 0, start, remote write DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_dma_write);
 
-    while ((kernel_inb(0x300 + 0x07) & 0x40) == 0) {
-    } // RDC
-    kernel_outb(0x300 + 0x07, 0x40); // Ack RDC.
+    kernel_outsw(0x300 + 0x10, frame, word_count);
+
+    // Wait for remote DMA complete (ISR.rdc), then ack.
+    isr_raw = kernel_inb(0x300 + 0x07);
+    isr_read = (struct ne2k_isr *)&isr_raw;
+    while (isr_read->rdc == 0) {
+        isr_raw = kernel_inb(0x300 + 0x07);
+        isr_read = (struct ne2k_isr *)&isr_raw;
+    }
+    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_rdc); // Ack RDC.
 
     kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);         // TPSR
     kernel_outb(0x300 + 0x05, length & 0xFF);        // TBCR0
     kernel_outb(0x300 + 0x06, (length >> 8) & 0xFF); // TBCR1
-    kernel_outb(0x300, 0x26);                        // CR: start, transmit.
+
+    // CR: page 0, start, transmit, abort DMA.
+    kernel_outb(0x300, *(uint8_t *)&cr_transmit);
 
     timeout = 0xFFFF;
-    isr = 0;
+    isr_raw = 0;
     while (timeout > 0) {
-        isr = kernel_inb(0x300 + 0x07);
-        if ((isr & 0x0A) != 0) { // PTX (0x02) or TXE (0x08)
+        isr_raw = kernel_inb(0x300 + 0x07);
+        isr_read = (struct ne2k_isr *)&isr_raw;
+        if (isr_read->ptx || isr_read->txe) { // PTX or TXE
             break;
         }
         timeout = timeout - 1;
@@ -345,8 +423,12 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
         // pending state and can decide how to recover.
         return 0;
     }
-    kernel_outb(0x300 + 0x07, 0x0A); // Ack PTX | TXE.
-    if ((isr & 0x08) != 0) {
+    // Save the error flag before the ack write.
+    isr_read = (struct ne2k_isr *)&isr_raw;
+    had_txe = isr_read->txe;
+    // Ack PTX | TXE.
+    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_tx);
+    if (had_txe) {
         return 0; // TX error reported.
     }
     return 1;

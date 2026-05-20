@@ -529,7 +529,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         The rhs must already be in AL.  ``info`` carries bit_offset /
         bit_width; ``addr`` is the byte's NASM memory operand.  Uses
-        BL as scratch.  Callers ``return`` after this helper.
+        CL as scratch — not BL — because ``addr`` is commonly
+        ``[ebx+N]`` (the arrow path loads the struct pointer into EBX),
+        and stashing into BL would clobber EBX's low byte and corrupt
+        the subsequent load / store through the same operand.
 
         Const-fold: when the target byte is a known local constant AND the
         rhs was just loaded as a literal (``ax_literal`` is set), compute
@@ -546,14 +549,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov byte {addr}, {new_byte}")
             return
         # General RMW path.
-        self.emit("        mov bl, al")
+        self.emit("        mov cl, al")
         if info.bit_width != 8:
-            self.emit(f"        and bl, {(1 << info.bit_width) - 1}")
+            self.emit(f"        and cl, {(1 << info.bit_width) - 1}")
         if info.bit_offset != 0:
-            self.emit(f"        shl bl, {info.bit_offset}")
+            self.emit(f"        shl cl, {info.bit_offset}")
         self.emit(f"        mov al, {addr}")
         self.emit(f"        and al, {clear_mask}")
-        self.emit("        or al, bl")
+        self.emit("        or al, cl")
         self.emit(f"        mov {addr}, al")
 
     def _emit_bitfield_write_literal(self, info: FieldInfo, /, *, addr: str, value: int) -> None:

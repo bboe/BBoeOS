@@ -26,6 +26,8 @@
 //   PIC1_CMD_PORT / PIC1_DATA_PORT = 0x20 / 0x21
 //   PIC_EOI = 0x20  (also in src/include/constants.asm)
 
+#include "registers.h"
+
 uint8_t fdc_irq_flag;
 uint8_t fdc_motor_ready;
 
@@ -89,11 +91,12 @@ void fdc_drain_result() {
 // One-time init.  Install IRQ 6 handler + unmask, reset controller,
 // SPECIFY in DMA mode.  Motor stays off until first read or write.
 void fdc_init() {
-    uint8_t mask;
+    struct pic_imr imr;
 
     fdc_install_irq();
-    mask = kernel_inb(0x21);        // PIC1_DATA_PORT
-    kernel_outb(0x21, mask & 0xBF); // clear bit 6 (unmask IRQ 6)
+    *(uint8_t *)&imr = kernel_inb(0x21); // PIC1_DATA_PORT
+    imr.irq6 = 0;                        // unmask IRQ 6
+    kernel_outb(0x21, *(uint8_t *)&imr);
 
     fdc_irq_flag = 0;
 

@@ -463,6 +463,43 @@ class Param:
 
 
 @dataclass(kw_only=True, slots=True)
+class PointerDereference(Node):
+    """Read through a pointer expression: ``*(T *)expr``.
+
+    Used for the port-IO bridge idiom where a bitfield struct is read
+    out as a raw byte: ``uint8_t raw = *(uint8_t *)&s;``.  ``expression``
+    evaluates to an address; ``target_type`` selects the load width
+    (``uint8_t``, ``uint16_t``, or pointer width).
+
+    Unlike :class:`Index` (which assumes ``array`` is a :class:`Var`
+    holding a pointer), this node evaluates an arbitrary address
+    expression into the accumulator and then loads through it.
+    """
+
+    expression: Node
+    target_type: str
+
+
+@dataclass(kw_only=True, slots=True)
+class PointerDereferenceAssign(Node):
+    """Write through a pointer expression: ``*(T *)expr = value;``.
+
+    Write-side counterpart of :class:`PointerDereference`.  Used for the
+    port-IO bridge idiom where a bitfield struct receives a fresh byte
+    read from a hardware port:
+    ``*(uint8_t *)&imr = kernel_inb(IMR_PORT);``.
+
+    ``address`` is the inner address expression (without the leading
+    ``*(T *)``); ``target_type`` selects the store width;  ``value`` is
+    the right-hand side.
+    """
+
+    address: Node
+    target_type: str
+    value: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class Program(Node):
     """Top-level AST: functions and file-scope global declarations.
 

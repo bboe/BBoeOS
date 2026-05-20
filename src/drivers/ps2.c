@@ -24,10 +24,10 @@
 //                 discarded.
 
 #include "program_state.h"
+#include "registers.h"
 
 #define KB_BUFFER_SIZE 16 // power of 2; mask = KB_BUFFER_SIZE - 1
 #define PS2_DATA 0x60
-#define PS2_IRQ1_MASK 0xFD // ~(1 << 1): clear bit 1 to unmask IRQ 1
 #define PS2_PIC1_DATA 0x21 // PIC1 IMR (PIC remapped to 0x20-0x27)
 
 // BBKEY_* — positional keyboard codes pushed into the per-fd event
@@ -425,10 +425,11 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
 // ps2_init: install the IRQ 1 handler and unmask it on the master PIC.
 // Call once from entry.asm before sti.
 void ps2_init() {
-    uint8_t mask;
+    struct pic_imr imr;
     ps2_install_irq();
-    mask = kernel_inb(PS2_PIC1_DATA);
-    kernel_outb(PS2_PIC1_DATA, mask & PS2_IRQ1_MASK);
+    *(uint8_t *)&imr = kernel_inb(PS2_PIC1_DATA);
+    imr.irq1 = 0;
+    kernel_outb(PS2_PIC1_DATA, *(uint8_t *)&imr);
 }
 
 // ps2_install_irq: register ps2_irq1_handler at IDT vector 0x21.
