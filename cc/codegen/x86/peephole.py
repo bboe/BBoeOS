@@ -489,7 +489,7 @@ class Peepholer:
         """
         base_register = self.target.base_register
         slot_pattern = re.compile(rf"\[{base_register}-(\d+)(?:[+\-][^\]]+)?\]")
-        store_pattern = re.compile(rf"^mov \[{base_register}-(\d+)\],")
+        store_pattern = re.compile(rf"^mov (?:byte |word |dword )?\[{base_register}-(\d+)\],")
         result: list[str] = []
         for function_lines in self._iter_function_chunks():
             # Collect every slot READ within this function.  For ``mov
@@ -577,6 +577,57 @@ class Peepholer:
                 self.lines[i + 1] = f"{self.lines[i + 1][: -len(comma_acc_suffix)]},{dx}"
                 del self.lines[i]
                 continue
+            i += 1
+
+    def peephole_fold_byte_immediate_through_local(self) -> None:
+        """Fold ``mov byte [bp-N], <imm>`` + later ``movzx <reg>, byte [bp-N]`` to ``mov <reg>, <imm>``.
+
+        Motivating idiom: a bitfield-struct local whose only use is
+        ``*(uint8_t *)&local`` (the driver port-I/O pattern).  cc.py's
+        const-fold emits a byte store of the designated-init constant,
+        followed eventually by the pointer-deref load.  Intervening
+        instructions are common — sibling designated-init stores, the
+        rest of ``kernel_outb``'s codegen — but as long as none of
+        them write to ``[bp-N]`` or transfer control out of the basic
+        block, the movzx is provably reading the immediate just stored.
+
+        Scan stops at:
+        - a write to ``[bp-N]`` (the slot may now hold a different value);
+        - a control-flow instruction (``ret``, ``jmp``, ``jcc``, ``call``);
+        - a label (potential branch target — predecessors might have
+          written ``[bp-N]`` after our store).
+
+        Only the first matching movzx is folded; later reads of
+        ``[bp-N]`` are left alone so a downstream write+read pair
+        outside our window stays correct.  ``peephole_dead_temp_slots``
+        runs after this and reclaims the store if no other reader of
+        ``[bp-N]`` remains.
+        """
+        base_register = self.target.base_register
+        accumulator = self.target.acc
+        store_pattern = re.compile(rf"^\s*mov byte \[{base_register}-(\d+)\], (\d+)\s*$")
+        label_pattern = re.compile(r"^\s*\.?\w+:\s*$")
+        flow_prefixes = ("ret", "jmp ", "call ", "j")
+        i = 0
+        while i < len(self.lines):
+            store_match = store_pattern.match(self.lines[i])
+            if store_match is None:
+                i += 1
+                continue
+            slot, immediate = store_match.group(1), int(store_match.group(2))
+            slot_address = f"[{base_register}-{slot}]"
+            target_load = f"movzx {accumulator}, byte {slot_address}"
+            write_signature = f"{slot_address},"
+            for j in range(i + 1, len(self.lines)):
+                candidate = self.lines[j].strip()
+                if candidate == target_load:
+                    indent = self.lines[j][: len(self.lines[j]) - len(self.lines[j].lstrip())]
+                    self.lines[j] = f"{indent}mov {accumulator}, {immediate}"
+                    break
+                if write_signature in candidate:
+                    break
+                if label_pattern.match(self.lines[j]) or any(candidate.startswith(prefix) for prefix in flow_prefixes):
+                    break
             i += 1
 
     def peephole_fold_zero_save(self) -> None:
@@ -1349,6 +1400,7 @@ class Peepholer:
         self.peephole_memory_arithmetic_byte()
         self.peephole_dx_to_memory()
         self.peephole_store_reload()
+        self.peephole_fold_byte_immediate_through_local()
         self.peephole_dead_temp_slots()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()

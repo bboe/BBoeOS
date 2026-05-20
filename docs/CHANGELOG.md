@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: fold byte-immediate store + movzx reload through local.**  When a
+  one-shot struct literal local is read via ``*(uint8_t *)&local`` — the driver
+  port-I/O idiom — the compiler was emitting ``mov byte [ebp-N],
+  <imm>; movzx eax, byte [ebp-N]``.  A new peephole observes that the movzx
+  reads exactly the value just stored (or stored earlier in the same basic
+  block, as long as nothing else writes ``[ebp-N]`` in between) and rewrites the
+  load to ``mov eax, <imm>``; ``peephole_dead_temp_slots`` (now extended to
+  recognise byte stores) reclaims the unreferenced byte store afterwards. Saves
+  ~5 bytes per fold and trims the kernel's per-function frame traffic for every
+  bitfield-struct + ``kernel_outb`` site.  Total kernel kasm reduction: 217
+  bytes.
+
 - **Switch libbboeos build to nasm-elf + ld + linker script.**  vdso.asm is now
   `nasm -f elf32`-assembled with section directives
   (`.libbboeos.function_table`, `.libbboeos.text`, `.libbboeos.rodata`,
