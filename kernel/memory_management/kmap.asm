@@ -50,7 +50,7 @@
 ;;; Convention: every "phys → kernel-virt to read/write the page"
 ;;; path pairs kmap_map with a matching kmap_unmap.  Even when a
 ;;; caller knows its frame is below FRAME_DIRECT_MAP_LIMIT (e.g.
-;;; vdso_install at boot), going through the helper keeps the
+;;; libbboeos_install at boot), going through the helper keeps the
 ;;; calling code uniform — the fast path adds DIRECT_MAP_BASE and
 ;;; returns without touching the slot pool.
 ;;; ------------------------------------------------------------------------

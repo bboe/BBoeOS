@@ -19,7 +19,7 @@
 //                                   user stack, then iretd back to the
 //                                   pre-signal user code.  Reached
 //                                   from .sys_sigreturn (SYS_SYS_-
-//                                   SIGRETURN) via the vDSO trampoline
+//                                   SIGRETURN) via the libbboeos trampoline
 //                                   that the user handler returns to.
 //
 // signal_dispatch_kill never returns.  It is reachable only from kernel
@@ -123,7 +123,7 @@ asm("signal_dispatch_kill:\n"
 // pushad ESP slot at +20 is preserved verbatim through the cycle even
 // though popad ignores it on restore — keeping the bulk-copy contiguous
 // is worth one redundant dword on the user stack.
-//   +0   trampoline_addr (FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET = 0x10450)
+//   +0   trampoline_addr (FUNCTION_TABLE + LIBBBOEOS_SIGRETURN_OFFSET = 0x10450)
 //   +4   signum (SIGINT=2 or SIGALRM=14, written from EDX)
 //   +8   saved EDI    +12 ESI  +16 EBP  +20 ESP_pushad
 //   +24  saved EBX    +28 EDX  +32 ECX  +36 EAX
@@ -146,7 +146,7 @@ asm("signal_dispatch_user:\n"
     "        mov ebp, eax\n"        // stash handler — EAX gets clobbered below
     "        mov edi, [esp + 44]\n" // user ESP
     "        sub edi, 52\n"         // sigcontext base
-    "        mov dword [edi + 0], FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET\n"
+    "        mov dword [edi + 0], FUNCTION_TABLE + LIBBBOEOS_SIGRETURN_OFFSET\n"
     "        mov [edi + 4], edx\n" // signum from caller (SIGINT or SIGALRM)
     // Bulk-copy the 8 pushad slots from kernel stack to sigcontext + 8.
     // EBX stashes the sigcontext base across rep movsd (which advances
@@ -192,7 +192,7 @@ asm("signal_dispatch_user:\n"
 // ESP pointing at sigcontext base.  The handler runs as a plain C-style
 // function and ends with `ret`, which pops the first dword (the
 // trampoline address at sigcontext+0) into EIP and lands the CPU at the
-// vDSO sigreturn trampoline (FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET).
+// libbboeos sigreturn trampoline (FUNCTION_TABLE + LIBBBOEOS_SIGRETURN_OFFSET).
 // The trampoline executes `mov eax, 0xF6 / int 0x30` and we re-enter
 // the kernel through the syscall dispatcher.  Cross-priv iret + pushad
 // produced the standard syscall frame:

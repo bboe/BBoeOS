@@ -41,7 +41,7 @@ nav_order: 90
   every kernel subsystem (drivers, fs, helpers, net stack, syscall dispatcher,
   IDT, post-flip entry, frame allocator, address-space helpers) and the kernel
   GDT.  The libbboeos blob is no longer `incbin`'d here — it ships as
-  `lib/libbboeos` on the disk image and `vdso_install` loads it at boot.
+  `lib/libbboeos` on the disk image and `libbboeos_install` loads it at boot.
 - `kernel/arch/x86/idt.asm` — 32-bit IDT with CPU exception stubs and `INT 30h`
   gate; `idt_init` (called from `high_entry`) patches the high-half handler
   offsets at boot since the IDT_ENTRY macro can only emit the low 16 bits in
@@ -74,7 +74,7 @@ nav_order: 90
   or wrap), invoked by syscall handlers before touching userspace memory.
 - `kernel/memory_management/address_space.asm` — Per-program PD lifecycle:
   `address_space_create` (allocate PD, copy-image kernel half from
-  `kernel_idle_pd`, build user PTs for handoff frame + vDSO + program text/BSS +
+  `kernel_idle_pd`, build user PTs for handoff frame + libbboeos + program text/BSS +
   stack), `address_space_destroy` (free user frames, skipping shared-AVL PTEs,
   then free PTs and PD), and the page-mapping primitives
   (`address_space_map_page`, etc.) those two drive. All PD/PT reads and writes

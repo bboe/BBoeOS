@@ -17,7 +17,7 @@ sizeof(kernel.bin))`; example values shown are for the current build (~29 KB
 kernel).
 
 Two narrow `frame_reserve_range` calls at boot pin only the regions the kernel
-still owns: the vDSO target frame at `0x10000` (one 4 KB page) and
+still owns: the libbboeos target frame at `0x10000` (one 4 KB page) and
 `0x20000..(FRAME_BITMAP_PHYS + frame_bitmap_bytes)` (kernel image +
 KERNEL_RESERVED_BASE region; the bitmap end is runtime, sized by `frame_init`
 from E820). Everything else in conventional low memory — IVT/BDA at `0..0x4FF`,
@@ -33,7 +33,7 @@ every slot in one place.
 
 | Phys range | Kernel-virt | Size | Symbol / purpose | In kernel.bin? |
 |---|---|---|---|---|
-| `0x00010000..0x00010FFF` | n/a | 4 KB | vDSO (shared user-virt frame; per-program PDs alias it user-side) | no |
+| `0x00010000..0x00010FFF` | n/a | 4 KB | libbboeos (shared user-virt frame; per-program PDs alias it user-side) | no |
 | `0x00020000..0x00020001` | `0xFF820000..0xFF820001` | 2 B | `jmp short high_entry` trampoline (offset 0 of kernel.bin) | yes |
 | `0x00020002` | `0xFF820002` | 1 B | `boot_disk` (BIOS drive number, written by boot.asm post-load) | yes |
 | `0x00020003..0x00020004` | `0xFF820003..0xFF820004` | 2 B | `directory_sector` (LBA of first directory sector) | yes |
@@ -57,7 +57,7 @@ builds.
 | User-virt range | Size | Purpose |
 |---|---|---|
 | `0x00000000..0x00000FFF` | 4 KB | NULL guard — not mapped (PTE[0] absent so `*(int *)0` raises #PF) |
-| `0x00010000..0x00010FFF` | 4 KB | vDSO (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
+| `0x00010000..0x00010FFF` | 4 KB | libbboeos (`FUNCTION_PRINT_STRING`, `FUNCTION_DIE`, …) |
 | `0x08048000..` | program-sized | program text + BSS (Linux ELF-shaped load address) |
 | `0xFF7E0000..0xFF7EFFFF` | 64 KB | unmapped (stack guard region) |
 | `0xFF7F0000..0xFF7FFFFF` | 64 KB | user stack (16 pages, top at `USER_STACK_TOP`) |

@@ -259,7 +259,7 @@ correctly and most of `user/libbboeos/*.c` becomes type-checkable.
 **Size:** large.
 
 Today `printf` is a cc.py builtin with custom codegen (the variadic call site
-lowers to a known `FUNCTION_PRINTF` jump through the vDSO).  No user-defined
+lowers to a known `FUNCTION_PRINTF` jump through the libbboeos).  No user-defined
 variadic function compiles — `int my_log(const char *fmt, ...)` rejects in the
 parser, and there's no machinery for `va_start` / `va_arg` / `va_end`.
 

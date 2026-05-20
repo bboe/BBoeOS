@@ -36,7 +36,7 @@ disk:
   auto-grow loop's bound `FIRST_KERNEL_PDE + 1` already equals `LAST_KERNEL_PDE
   = 1023`), brings up the kmap window via `kmap_init`, and falls through into
   `protected_mode_entry`. Locating the kernel in conventional RAM (above the
-  vDSO target at phys `0x10000`, below the VGA aperture at phys `0xA0000`) keeps
+  libbboeos target at phys `0x10000`, below the VGA aperture at phys `0xA0000`) keeps
   the entire kernel-side reserved region under 1 MB so the OS boots under QEMU
   `-m 1`.
 
@@ -152,7 +152,7 @@ disk:
   `kernel_idle_pd` (a 4 KB kernel-only PD built once at boot — see below) so the
   kernel direct map and kmap window are reachable from every address space. The
   user half (PDEs 0..1021) is populated only with the program's own pages plus a
-  shared vDSO PTE marked with the `ADDRESS_SPACE_PTE_SHARED` AVL bit (so
+  shared libbboeos PTE marked with the `ADDRESS_SPACE_PTE_SHARED` AVL bit (so
   `address_space_destroy` skips `frame_free` on it). Program binaries are
   streamed directly from disk into the freshly-allocated user frames (via
   `vfs_read_sec` + `sector_buffer` + a private `program_fd` slot in entry.asm
@@ -272,11 +272,11 @@ macro:
   in pushad's natural order so build/restore can use a single `rep movsd` each)
   — transparent to the interrupted code.
 
-### Handler resume via vDSO trampoline
+### Handler resume via libbboeos trampoline
 
-The vDSO page (mapped read-only at user-virt `0x10000`) contains a
+The libbboeos page (mapped read-only at user-virt `0x10000`) contains a
 two-instruction trampoline `__kernel_sigreturn` at user-virt `0x10450`
-(`FUNCTION_TABLE + VDSO_SIGRETURN_OFFSET`):
+(`FUNCTION_TABLE + LIBBBOEOS_SIGRETURN_OFFSET`):
 
 ```nasm
 mov ah, SYS_SYS_SIGRETURN   ; AH = F6h
@@ -448,4 +448,4 @@ child's `build_child_program_state`, `stage_user_argv` consumes the per-side
 scratch and writes the Linux SysV i386 startup frame (argc / argv pointers /
 NULL / empty envp) onto the topmost page of that child's user stack via
 `kmap_map`.  The child reads `argc` from `[esp]` and `argv` from `[esp+4]` at
-process entry — no vDSO `parse_argv` step.
+process entry — no libbboeos `parse_argv` step.

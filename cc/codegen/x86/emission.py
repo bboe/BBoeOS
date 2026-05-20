@@ -506,7 +506,7 @@ class EmissionMixin:
                     self.emit(f"        {false_jump} {skip_label}")
                     self.emit(f"        mov {self.target.si_register}, {die_label}")
                     self.emit(f"        mov {self.target.count_register}, {die_length}")
-                    self._emit_vdso_jmp("FUNCTION_DIE")
+                    self._emit_libbboeos_jmp("FUNCTION_DIE")
                     self.emit(f"{skip_label}:")
                     i += 1
                     continue
@@ -2166,7 +2166,7 @@ class EmissionMixin:
             # set EAX via generate_return; reaching this point means
             # control fell off without one, hence the zero default.
             self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-            self._emit_vdso_jmp("FUNCTION_EXIT")
+            self._emit_libbboeos_jmp("FUNCTION_EXIT")
             if self.elide_frame:
                 # Plain int / pointer locals get the target's native
                 # integer width (``dw`` / ``dd``); ``unsigned long``
@@ -2517,7 +2517,7 @@ class EmissionMixin:
                 self.generate_expression(statement.value)
             else:
                 self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-            self._emit_vdso_jmp("FUNCTION_EXIT")
+            self._emit_libbboeos_jmp("FUNCTION_EXIT")
             return
         if self.current_carry_return:
             value = statement.value

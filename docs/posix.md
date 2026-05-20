@@ -22,7 +22,7 @@ one read.
 Two userland code paths exist today:
 
 - **cc.py-compiled programs** — everything currently shipped in `bin/`.  These
-  reach the OS through a small in-kernel vDSO of `FUNCTION_*` helpers at
+  reach the OS through a small in-kernel libbboeos of `FUNCTION_*` helpers at
   user-virt `0x10000` and through raw `INT 30h` syscall wrappers.  No POSIX libc
   is linked in.
 - **clang-compiled programs linked against `user/libbboeos/`** — today only the
@@ -49,7 +49,7 @@ For deeper detail on individual subsystems, see:
 In the syscall / libc table the "In shipped programs?" column answers a
 different question: can a cc.py-built program in `bin/` reach this today?
 
-- ✅ — yes, via vDSO `FUNCTION_*` helper or raw `INT 30h` wrapper.
+- ✅ — yes, via libbboeos `FUNCTION_*` helper or raw `INT 30h` wrapper.
 - ⚠️ — only via `user/libbboeos/`, which is not linked into shipped programs
   yet.
 - ❌ — no, regardless of which path; the kernel does not implement it.
@@ -143,7 +143,7 @@ extras](#bboeos-specific-extras)); everything else execs `bin/<name>`.
 
 ## System calls and C library
 
-Each row names a POSIX function, the BBoeOS syscall (or vDSO helper) that backs
+Each row names a POSIX function, the BBoeOS syscall (or libbboeos helper) that backs
 it where one exists, and whether a cc.py-built program in `bin/` can call it
 today.
 
@@ -176,7 +176,7 @@ pipes](architecture.html#cooperative-pipes-cmd1--cmd2).
 ### Signals
 
 Three signals exist: `SIGINT` (2), `SIGPIPE` (13), `SIGALRM` (14).  Handlers
-register via `SYS_SYS_SIGNAL`; the vDSO trampoline at handler end calls
+register via `SYS_SYS_SIGNAL`; the libbboeos trampoline at handler end calls
 `SYS_SYS_SIGRETURN` to restore context.  Delivery, dispatch modes, and
 cooperative interruption of blocking syscalls are documented in [Architecture ›
 Signal delivery](architecture.html#signal-delivery).
@@ -270,7 +270,7 @@ timespec`.  `SYS_RTC_SLEEP` busy-waits and is interruptible by SIGINT or SIGALRM
 | `gettimeofday` | `SYS_RTC_MILLIS` (32h) | ⚠️ | ⚠️ | `user/libbboeos` wrapper returns monotonic ms-since-boot, *not* wall-clock; `tz` arg ignored. |
 | `nanosleep` / `clock_nanosleep` | — | ❌ | ❌ | Use `sleep_ms()` (libc) or `SYS_RTC_SLEEP` directly. |
 | `setitimer` / `getitimer` | `SYS_RTC_ALARM` (30h) | ⚠️ | ✅ | First-fire + interval (ms) supported; only the `ITIMER_REAL` flavour exists. |
-| `strftime` / `gmtime` / `localtime` / `mktime` | — | ❌ | ❌ | The vDSO `FUNCTION_PRINT_DATETIME` prints the canonical `YYYY-MM-DD HH:MM:SS` form. |
+| `strftime` / `gmtime` / `localtime` / `mktime` | — | ❌ | ❌ | The libbboeos `FUNCTION_PRINT_DATETIME` prints the canonical `YYYY-MM-DD HH:MM:SS` form. |
 | `time` | `SYS_RTC_DATETIME` (31h) | ⚠️ | ✅ | Bare `unsigned int` — no `time_t *` argument convention. |
 | `times` | — | ❌ | ❌ | No per-process CPU accounting. |
 | `tzset` / `tzname` | — | ❌ | ❌ | No timezone database; the RTC is read as-is. |
@@ -316,11 +316,11 @@ line discipline from userland.
 | `feof` / `ferror` / `fflush` (no-op) | libc | ⚠️ | ⚠️ | `user/libbboeos` only; `fflush` is a no-op (no buffering to flush). |
 | `fgets` / `getline` / `getdelim` | — | ❌ | ❌ | Not in `user/libbboeos`. |
 | `fmemopen` / `open_memstream` | — | ❌ | ❌ | No memory-backed `FILE *`. |
-| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `user/libbboeos` only.  cc.py-built programs use vDSO `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
+| `fopen` / `fclose` / `fread` / `fwrite` / `fseek` / `ftell` / `fgetc` / `fputc` / `fputs` / `puts` / `getchar` / `putchar` | libc | ⚠️ | ⚠️ | `user/libbboeos` only.  cc.py-built programs use libbboeos `FUNCTION_GET_CHARACTER` / `FUNCTION_PRINT_CHARACTER` / `FUNCTION_PRINT_STRING` / `FUNCTION_WRITE_STDOUT` directly. |
 | `freopen` / `ungetc` / `fileno` | — | ❌ | ❌ | Not in `user/libbboeos`. |
 | `perror` / `clearerr` | — | ❌ | ❌ | `strerror` exists in libc. |
 | `popen` / `pclose` | — | ❌ | ❌ | No general subprocess API; only the shell's `SYS_SYS_PIPELINE2`. |
-| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + vDSO `FUNCTION_PRINTF` | ⚠️ | ✅ | The vDSO `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `user/libbboeos` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
+| `printf` / `fprintf` / `vprintf` / `vfprintf` | libc + libbboeos `FUNCTION_PRINTF` | ⚠️ | ✅ | The libbboeos `FUNCTION_PRINTF` handles the common `%s %d %x %c %u` set; `user/libbboeos` `vsnprintf` is a fuller (314-line) format parser including width / precision / padding. |
 | `remove` / `rename` (libc-layer) | libc (stubs) | ⚠️ | ⚠️ | `user/libbboeos` stubs — always return `-1`. |
 | `rewind` | libc (no-op) | ⚠️ | ⚠️ | `user/libbboeos` no-op (does not seek). |
 | `scanf` / `fscanf` / `vscanf` / `vfscanf` | — | ❌ | ❌ | |
@@ -380,7 +380,7 @@ they are not reachable from cc.py-built shipped programs.
 ### Threading
 
 Single-threaded only.  Within a "program" there is no concurrency primitive
-beyond signal handlers (which run on the same stack via the vDSO trampoline).
+beyond signal handlers (which run on the same stack via the libbboeos trampoline).
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
@@ -445,7 +445,7 @@ the source).
   / Bochs hooks).
 - **Syscalls**: `SYS_VIDEO_MAP`, `SYS_NET_MAC`, `SYS_RTC_MILLIS`,
   `SYS_RTC_UPTIME`, `SYS_SYS_REBOOT`, `SYS_SYS_SHUTDOWN`, `SYS_SYS_PIPELINE2`.
-- **vDSO helpers**: `FUNCTION_PRINT_IP`, `FUNCTION_PRINT_MAC`,
+- **libbboeos helpers**: `FUNCTION_PRINT_IP`, `FUNCTION_PRINT_MAC`,
   `FUNCTION_PRINT_DATETIME`, `FUNCTION_PRINT_BYTE_DECIMAL`,
   `FUNCTION_PRINT_DECIMAL`, `FUNCTION_PRINT_HEX`.
 - **Device fds**: `/dev/vga` (mode-13h framebuffer + palette ioctls),

@@ -1,5 +1,5 @@
 /* user/libbboeos/libbboeos.ld — flat binary at user-virt 0x00010000 for
- * BBoeOS's shared libbboeos blob (vDSO + future C-compiled helpers).
+ * BBoeOS's shared libbboeos blob (libbboeos + future C-compiled helpers).
  *
  * Anchored at 0x10000 to match the FUNCTION_TABLE constant in
  * kernel/include/constants.asm.  Layout, in order:
@@ -18,7 +18,7 @@
  *                                        FUNCTION_*_PTR offsets in
  *                                        kernel/include/constants.asm.
  *   0x10FE0  .libbboeos.sigreturn        __kernel_sigreturn trampoline
- *                                        (matches VDSO_SIGRETURN_OFFSET).
+ *                                        (matches LIBBBOEOS_SIGRETURN_OFFSET).
  *
  * Clang-compiled libbboeos C bodies (string.c, etc.) land in
  * .libbboeos.text via `*(.text .text.*)`; -ffunction-sections + ld
@@ -67,7 +67,7 @@ SECTIONS {
 
     . = 0x00010E00;
     .libbboeos.pointer_table  : {
-        /* Legacy vDSO helpers (asm).  Order pinned by FUNCTION_*_PTR in
+        /* Legacy libbboeos helpers (asm).  Order pinned by FUNCTION_*_PTR in
          * kernel/include/constants.asm — entries here align 1:1. */
         LONG(shared_die);
         LONG(shared_exit);

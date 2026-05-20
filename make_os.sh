@@ -28,7 +28,7 @@ find kernel -name '*.c' | while read -r source; do
 done
 
 # Build the libbboeos blob (FUNCTION_TABLE + shared_* helpers).  Lives at
-# lib/libbboeos on the disk image; vdso_install reads it from disk at
+# lib/libbboeos on the disk image; libbboeos_install reads it from disk at
 # boot, copies it into a freshly-allocated frame, and maps that frame
 # (with PTE_SHARED) at user-virt FUNCTION_TABLE (0x00010000) in every
 # per-program PD.  Layout of build/libbboeos matches the in-memory page:
@@ -39,7 +39,7 @@ done
 # blob.
 mkdir -p build
 make -C user/libbboeos libbboeos.a >/dev/null || exit 1
-nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/vdso/vdso.asm || exit 1
+nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
 # --gc-sections drops every clang-compiled libbboeos function the
 # pointer-table LONG()s don't reference, so the blob pays only for
 # what it actually exports.
@@ -265,7 +265,7 @@ for name in $PROGRAMS; do
 done
 ./add_file.py -x -d bin --image "$IMAGE" $PROGRAM_PATHS || exit 1
 
-# Shared-library blob — vdso_install reads `lib/libbboeos` from disk
+# Shared-library blob — libbboeos_install reads `lib/libbboeos` from disk
 # at boot and maps it (with PTE_SHARED) at user-virt FUNCTION_TABLE
 # (0x00010000) in every per-program PD.
 ./add_file.py --mkdir --image "$IMAGE" lib || exit 1

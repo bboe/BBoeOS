@@ -11,7 +11,7 @@ per program.
 Rule: emit a stub for every FUNCTION_<NAME>_PTR entry whose un-suffixed
 FUNCTION_<NAME> counterpart is *absent*.  The legacy 13-entry block at
 the top of FUNCTION_POINTER_TABLE (FUNCTION_DIE_PTR, ...) has both
-FUNCTION_DIE and FUNCTION_DIE_PTR — those resolve to vdso.asm's
+FUNCTION_DIE and FUNCTION_DIE_PTR — those resolve to libbboeos.asm's
 shared_* helpers and aren't libbboeos exports, so they're skipped.
 
 Re-run is idempotent — the script writes the file only if the contents

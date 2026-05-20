@@ -1,7 +1,7 @@
 ;;; ------------------------------------------------------------------------
 ;;; entry.asm — 32-bit post-flip kernel entry.
 ;;;
-;;; protected_mode_entry runs once per boot — TSS / IRQ install, vDSO
+;;; protected_mode_entry runs once per boot — TSS / IRQ install, libbboeos
 ;;; shared-frame allocation, driver / VFS / NIC init, banner — then
 ;;; falls through into shell_reload.  Active PD on entry: `kernel_idle_pd`
 ;;; (built by `high_entry`, replaces the boot PD which has been freed).
@@ -12,7 +12,7 @@
 ;;; program_enter.
 ;;;
 ;;; program_enter builds a fresh per-program PD via address_space_create,
-;;; populates the user-visible regions (program text + BSS, vDSO code
+;;; populates the user-visible regions (program text + BSS, libbboeos code
 ;;; page, user stack), stages the Linux argv/envp/argc frame onto the
 ;;; top of the new user stack (see stage_user_argv), snapshots the kernel
 ;;; ESP for sys_exit, switches CR3, and `iretd`s at CPL=3.
@@ -39,7 +39,7 @@
 
         ;; User address-space layout (Linux-shape, PROGRAM_BASE = 0x08048000):
         ;;   PTE 0x00000             : NOT MAPPED — NULL guard (deref → #PF)
-        ;;   PTE 0x00010             : shared  — vDSO code page (R-X)
+        ;;   PTE 0x00010             : shared  — libbboeos code page (R-X)
         ;;   PTEs 0x08048..          : private — program text + BSS
         ;;   PTEs 0xFF7E0..0xFF7EF   : NOT MAPPED — stack guard (overflow → #PF)
         ;;   PTEs 0xFF7F0..0xFF7FF   : private — user stack (16 × 4 KB = 64 KB),
@@ -56,7 +56,7 @@
         ;; the kernel via a slot in the kmap window.
         STACK_VIRT_BASE         equ STACK_VIRT_END - 0x10000            ; 16 × 4 KB
         STACK_VIRT_END          equ USER_STACK_TOP                      ; one past last page; user/kernel boundary (= KERNEL_VIRT_BASE)
-        VDSO_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
+        LIBBBOEOS_VIRT               equ FUNCTION_TABLE                      ; 0x00010000
 
 %include "irq_tail.inc"
 
@@ -298,7 +298,7 @@ program_enter:
 ;;;
 ;;; PD-build core extracted from program_enter.  Allocates the
 ;;; per-program PD, populates the user-visible regions (handoff
-;;; frame, program text + BSS, vDSO code page, user stack), stages
+;;; frame, program text + BSS, libbboeos code page, user stack), stages
 ;;; the Linux argv/envp/argc frame onto the user stack via kmap,
 ;;; enables the FPU, drains PS/2, and returns.  Does **not** switch
 ;;; CR3 — the caller stays under the parent's (or kernel_idle_pd's)
@@ -546,33 +546,33 @@ build_child_program_state:
         jmp .bss_page_loop
 .prog_pages_done:
 
-        ;; --- Map vDSO code pages (shared, R-X user) ---
-        ;; vdso_install populated vdso_page_count frames at boot (one per 4 KB
+        ;; --- Map libbboeos code pages (shared, R-X user) ---
+        ;; libbboeos_install populated libbboeos_page_count frames at boot (one per 4 KB
         ;; of libbboeos rounded up).  Alias each one into this PD at
-        ;; consecutive user-virts VDSO_VIRT + i*0x1000 so the helper page,
+        ;; consecutive user-virts LIBBBOEOS_VIRT + i*0x1000 so the helper page,
         ;; pointer table, and any additional pages all sit contiguously in
         ;; userspace.  PTE_USER_RX_SHARED's AVL[0] bit keeps
         ;; address_space_destroy from freeing the shared frames on exit.
         mov dword [virt_cursor], 0
-.vdso_map_loop:
+.libbboeos_map_loop:
         mov eax, [virt_cursor]
-        cmp eax, [vdso_page_count]
-        jae .vdso_map_done
+        cmp eax, [libbboeos_page_count]
+        jae .libbboeos_map_done
         mov ebx, eax
         shl ebx, 2
-        mov ecx, [vdso_code_phys + ebx]         ; phys of frame i
+        mov ecx, [libbboeos_code_phys + ebx]         ; phys of frame i
         mov eax, [virt_cursor]
         shl eax, 12
-        add eax, VDSO_VIRT
-        mov ebx, eax                            ; ebx = VDSO_VIRT + i*0x1000
+        add eax, LIBBBOEOS_VIRT
+        mov ebx, eax                            ; ebx = LIBBBOEOS_VIRT + i*0x1000
         mov eax, [current_program_state]
         mov eax, [eax + PROGRAM_STATE_OFFSET_PD_PHYS]
         mov edx, PTE_USER_RX_SHARED
         call address_space_map_page
         jc .oom
         inc dword [virt_cursor]
-        jmp .vdso_map_loop
-.vdso_map_done:
+        jmp .libbboeos_map_loop
+.libbboeos_map_done:
 
         ;; --- Map user stack (private, 16 frames, zeroed) ---
         ;; Captures the topmost frame's phys (the one mapped at virt
@@ -676,7 +676,7 @@ build_child_program_state:
 
         ;; Tear down the partial PD.  address_space_destroy walks user
         ;; PDEs only and frees mapped user pages (skipping shared,
-        ;; e.g. the vDSO PTE), then PTs, then the PD frame.  Safe on a
+        ;; e.g. the libbboeos PTE), then PTs, then the PD frame.  Safe on a
         ;; half-built PD.  CR3 is kernel_idle_pd at this point — the
         ;; caller (boot, sys_exit, sys_exec) switched to it before
         ;; entering program_enter — so we don't need to switch CR3.
@@ -809,7 +809,7 @@ protected_mode_entry:
         ;; — `high_entry` (kernel.asm) ran first and handed off here
         ;; with the kernel GDT / IDT live and ESP pointing at
         ;; `kernel_stack_top`.  We patch the TSS, ltr, bring up devices,
-        ;; allocate the shared vDSO user-page frame, and drop into
+        ;; allocate the shared libbboeos user-page frame, and drop into
         ;; shell_reload.
         ;;
         ;; Patch the TSS descriptor's base bytes with tss_data's linear
@@ -875,7 +875,7 @@ protected_mode_entry:
         ;; program_enter maps the resulting frame (with PTE_SHARED)
         ;; into every per-program PD; address_space_destroy skips it
         ;; on teardown.
-        call vdso_install
+        call libbboeos_install
         ;; Probe the NE2000 NIC and bring it up if present.  CF set =
         ;; no NIC, which is fine — net programs surface that via a
         ;; "no NIC" message rather than halting the kernel.
@@ -1632,7 +1632,7 @@ userland_entry_stub:
         popad
         iretd
 
-vdso_install:
+libbboeos_install:
         ;; Read `lib/libbboeos` from the disk image, copy it into one or
         ;; more freshly-allocated frames, and stash the phys array for
         ;; build_child_program_state to map (with PTE_SHARED) at
@@ -1661,20 +1661,20 @@ vdso_install:
         jc .panic
 
         ;; Compute page count = ceil(size / 4096) and assert it fits
-        ;; inside the compile-time VDSO_PAGE_COUNT_MAX ceiling.  A
+        ;; inside the compile-time LIBBBOEOS_PAGE_COUNT_MAX ceiling.  A
         ;; too-big libbboeos here means either libbboeos has grown past
         ;; the kernel's BSS-sized phys-frame array (bump
-        ;; VDSO_PAGE_COUNT_MAX) or something else is writing to the
+        ;; LIBBBOEOS_PAGE_COUNT_MAX) or something else is writing to the
         ;; file (bug).  Either way it can't silently truncate at boot.
         mov eax, [vfs_found_size]
         add eax, 0xFFF
         shr eax, 12                     ; EAX = ceil(size / 4096)
-        cmp eax, VDSO_PAGE_COUNT_MAX
+        cmp eax, LIBBBOEOS_PAGE_COUNT_MAX
         ja .panic
-        mov [vdso_page_count], eax
+        mov [libbboeos_page_count], eax
 
         ;; Build a private fd struct that vfs_read_sec can drive.
-        ;; Mirrors program_enter's program_fd usage; vdso_install runs
+        ;; Mirrors program_enter's program_fd usage; libbboeos_install runs
         ;; once at boot before any program loads, so we can safely
         ;; co-opt the same scratch struct here.
         mov edi, program_fd
@@ -1696,17 +1696,17 @@ vdso_install:
         ;; Per-page loop: allocate frame, kmap it, zero it, read up to
         ;; 8 sectors of file data into it, unmap.  EBP holds page index;
         ;; each iteration stashes the frame's phys at
-        ;; vdso_code_phys[page_index].
+        ;; libbboeos_code_phys[page_index].
         xor ebp, ebp                    ; page index
 .page_loop:
-        cmp ebp, [vdso_page_count]
+        cmp ebp, [libbboeos_page_count]
         jae .page_done
 
         call frame_alloc
         jc .panic
         mov ebx, ebp
         shl ebx, 2
-        mov [vdso_code_phys + ebx], eax
+        mov [libbboeos_code_phys + ebx], eax
         call kmap_map                   ; EAX = kvirt
         mov edi, eax                    ; EDI = kvirt (held across the streaming loop)
 
