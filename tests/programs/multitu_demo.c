@@ -10,22 +10,22 @@
    point of the test.  test_programs.py runs the linked program
    under QEMU and matches its output.
 
-   Cross-TU calls are intentionally zero-arg here.  cc.py's
-   single-TU analyzer commits a callee to either regparm or cdecl
-   based on intra-TU call shapes, while a cross-TU caller has no
-   visibility into that decision and falls back to cdecl.  Multi-
-   arg cross-TU calls therefore mis-pair the convention until
-   cc.py grows a `static` keyword (or an equivalent ABI marker)
-   so the analyzer knows when a callee is exported for cross-TU
-   use and must commit to the stable convention.  Zero-arg
-   crossings are unaffected because both conventions agree on
-   "no args, return in EAX". */
+   Multi-arg cross-TU calls are exercised here: ``multitu_helper_blend``
+   takes three int args and ``multitu_helper_add`` takes two.  cc.py's
+   Phase B implicit regparm(min(3, n)) default applies in both TUs
+   independently — the prototype-side TU and the definition-side TU
+   each see the same parameter shape and derive the same convention,
+   so EAX/EDX/ECX line up without an explicit annotation. */
+extern int multitu_helper_add(int a, int b);
+extern int multitu_helper_blend(int a, int b, int c);
 extern int multitu_helper_meaning_of_life();
 extern int multitu_helper_seed();
 
 int main() {
     int seed = multitu_helper_seed();
     int answer = multitu_helper_meaning_of_life();
-    printf("multitu_demo: %d\n", seed + answer);
+    int doubled = multitu_helper_add(seed, seed);
+    int blended = multitu_helper_blend(1, 2, 3);
+    printf("multitu_demo: %d %d %d\n", seed + answer, doubled, blended);
     return 0;
 }

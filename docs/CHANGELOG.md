@@ -11,6 +11,22 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: implicit regparm(min(3, n)) default + multi-arg cross-TU.**  Every
+  function with plain-int parameters and no `in_register` / `out_register` /
+  `regparm` annotation now defaults to the SysV-style register convention — args
+  0..2 in EAX/EDX/ECX, anything beyond on the stack.  Both ends of a cross-TU
+  pair derive the same default from their parameter shape, so
+  `tests/programs/multitu_demo` now exercises 2- and 3-arg cross-object calls in
+  addition to the original zero-arg pair.  The implicit promotion is suppressed
+  when any call site passes a complex argument (`arr[i]`, `s->f`, `*p`, nested
+  `Call`); those callees fall back to cdecl until the register-arg scheduler is
+  extended to handle complex args.  `src/c/asm.c` keeps its
+  `__attribute__((regparm(1)))` annotations: the self-hoster relies on the
+  AX-only convention (1 arg in EAX, rest on the stack) for its inline-asm
+  callers, which doesn't match the new regparm(min(3, n)) default and would also
+  get downgraded to cdecl by the complex-arg suppression on call sites that pass
+  nested calls like `emit_byte(make_modrm_reg_reg_impl(...))`.
+
 - **drivers/ata: bitfield register structs for the device-control, drive/head,
   and status registers.**  Adds `struct ata_dcr`, `struct ata_drive_head`, and
   `struct ata_status` to `src/include/registers.h` and ports every magic-byte /

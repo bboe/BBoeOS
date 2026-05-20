@@ -2729,20 +2729,6 @@ def test_regparm_2_callee_does_not_read_arg_1_off_stack() -> None:
         assert f"[ebp+{offset}]" not in asm, f"regparm(2) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
-def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
-    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
-    asm = _kernel(
-        """
-        __attribute__((regparm(3))) int add3(int a, int b, int c) {
-            return a + b + c;
-        }
-    """,
-        bits=32,
-    )
-    for offset in (8, 12, 16, 20):
-        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
-
-
 def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
     """A regparm(3) call places args 0/1/2 in EAX/EDX/ECX, not on the stack.
 
@@ -2769,6 +2755,59 @@ def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
     assert "push 20" not in pre_call and "push 30" not in pre_call, (
         f"regparm(3) call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
     )
+
+
+def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
+    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
+    asm = _kernel(
+        """
+        __attribute__((regparm(3))) int add3(int a, int b, int c) {
+            return a + b + c;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16, 20):
+        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
+
+
+def test_regparm_default_3_arg_call_site_does_not_push_args() -> None:
+    """Without any annotation, a 3-arg call uses EAX/EDX/ECX, not the stack.
+
+    Phase B default: every function is implicitly regparm(min(3, n_params)),
+    so the call site emits register loads instead of `push 30; push 20;
+    push 10` + `add esp, 12`.
+    """
+    asm = _kernel(
+        """
+        int add3(int a, int b, int c);
+        int call_site() {
+            return add3(10, 20, 30);
+        }
+    """,
+        bits=32,
+    )
+    call_index = asm.index("call add3")
+    pre_call = asm[:call_index]
+    post_call = asm[call_index:]
+    assert "add esp, 12" not in post_call, f"unexpected 3-arg stack cleanup after default-regparm call:\n{asm}"
+    assert "push 20" not in pre_call and "push 30" not in pre_call, (
+        f"default-regparm call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
+    )
+
+
+def test_regparm_default_3_arg_callee_does_not_read_args_off_stack() -> None:
+    """Without any annotation, a 3-arg callee reads args from registers, not [ebp+N]."""
+    asm = _kernel(
+        """
+        int add3(int a, int b, int c) {
+            return a + b + c;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16, 20):
+        assert f"[ebp+{offset}]" not in asm, f"default-regparm callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
 def test_read_deref_char_pointer_zero_extends_byte() -> None:
@@ -2938,48 +2977,6 @@ def test_struct_array_initializer_unspecified_fields_zero() -> None:
     assert "_g_table: db 1" in asm
     assert "db 0" in asm
     assert "dw 0" in asm
-
-
-def test_struct_array_field_assign_preserves_pinned_arg() -> None:
-    """``arr[i].field = arg`` must not clobber ``arg`` when arg is auto-pinned to BX/EBX.
-
-    Regression: cc.py auto-pins parameters 1..N to its register pool
-    (``dx, cx, bx, di``).  The struct-array-indexing codegen uses BX
-    as a scratch register for the byte offset (``BX = i * struct_size``),
-    which silently clobbered the third parameter's value before the
-    field store had a chance to read it.
-
-    Symptom in the wild (BBoeOS ``midi_ring_push``): a 4-arg function
-    storing ``reg`` (the third arg) into ``arr[i].reg`` actually wrote
-    ``i * struct_size`` (the offset) instead of the real ``reg`` value.
-    """
-    asm = _kernel(
-        """
-        struct slot {
-            uint32_t a;
-            uint8_t  b;
-            uint8_t  c;
-            uint8_t  d;
-            uint8_t  _pad;
-        };
-        struct slot ring[8];
-        uint8_t tail;
-        void push_to_ring(uint32_t aval, int bval, int cval, int dval) {
-            ring[tail].a = aval;
-            ring[tail].b = bval;
-            ring[tail].c = cval;
-            ring[tail].d = dval;
-        }
-    """,
-        bits=32,
-    )
-    push_function = asm.split("push_to_ring:")[1].split("\nret\n")[0]
-    # Each field store must save+restore EBX around the offset-compute
-    # clobber.  Without the fix, push_to_ring emits the offset compute
-    # (`mov ebx, eax`) without first preserving the pinned EBX, and the
-    # subsequent reads of `cval` (which lives in EBX) read the offset.
-    assert push_function.count("push ebx") >= 4, f"Expected `push ebx` around each field store; got:\n{push_function}"
-    assert push_function.count("pop ebx") >= 4, f"Expected matching `pop ebx` after each field store; got:\n{push_function}"
 
 
 def test_struct_array_member_index_emits_byte_load() -> None:

@@ -17,24 +17,23 @@ int remaining;
 /* Forward declarations — clang requires them since main() is sorted
    alphabetically and lands ahead of every callee it dispatches to.
    cc.py's whole-file pre-pass resolves these without prototypes. */
-__attribute__((regparm(1))) int accumulate(int v);
-__attribute__((regparm(1))) int add_one(int v);
+int accumulate(int v);
+int add_one(int v);
 __attribute__((regparm(2))) int blend(int hi, int lo);
-__attribute__((regparm(1))) int doubled(int v);
+int doubled(int v);
 __attribute__((regparm(3))) int fan_in(int a, int b, int c);
-__attribute__((regparm(1))) __attribute__((carry_return)) int
-is_positive(int v);
+__attribute__((carry_return)) int is_positive(int v);
 void mode_carry();
 void mode_regparm();
 void mode_regparm3();
 int string_equal(char *left, char *right);
 __attribute__((carry_return)) int tick();
 
-__attribute__((regparm(1))) int accumulate(int v) {
+int accumulate(int v) {
     return doubled(v) + add_one(v);
 }
 
-__attribute__((regparm(1))) int add_one(int v) {
+int add_one(int v) {
     return v + 1;
 }
 
@@ -42,7 +41,7 @@ __attribute__((regparm(2))) int blend(int hi, int lo) {
     return hi * 100 + lo;
 }
 
-__attribute__((regparm(1))) int doubled(int v) {
+int doubled(int v) {
     return v + v;
 }
 
@@ -50,8 +49,7 @@ __attribute__((regparm(3))) int fan_in(int a, int b, int c) {
     return a + b * 10 + c * 100;
 }
 
-__attribute__((regparm(1))) __attribute__((carry_return)) int
-is_positive(int v) {
+__attribute__((carry_return)) int is_positive(int v) {
     if (v > 0) {
         return 1;
     }

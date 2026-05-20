@@ -1422,14 +1422,23 @@ class Parser:
                 message = f"regparm({regparm_count}) requires at least {regparm_count} parameter{'s' if regparm_count != 1 else ''}"
                 raise CompileError(message, line=line)
             stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
-            if carry_return and stack_param_count > regparm_count:
+            # Tentative regparm: the codegen later defaults plain-param
+            # callees to regparm(min(3, n)).  Anticipate that here so the
+            # carry_return / always_inline checks below don't reject
+            # functions whose stack args will actually arrive in EAX/EDX/ECX.
+            # When the default-flip is suppressed (complex callers) the
+            # generator re-validates and raises at emission time.
+            effective_regparm = regparm_count
+            if effective_regparm == 0 and stack_param_count == len(parameters):
+                effective_regparm = min(3, len(parameters))
+            if carry_return and stack_param_count > effective_regparm:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
                 # must arrive via register only (regparm(N)), take no args, or
                 # use only out_register/in_register params (no stack push, no cleanup).
                 message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
                 raise CompileError(message, line=line)
-            if always_inline and stack_param_count > regparm_count:
+            if always_inline and stack_param_count > effective_regparm:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
                 message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
