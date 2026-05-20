@@ -30,12 +30,12 @@ from run_qemu import run_commands  # noqa: E402
 # each pattern in the full output independently, so this list is sorted
 # alphabetically rather than in the program's emit order.
 EXPECTED = [
-    r"\[bboeos libc\] -1 4000000000 cafe ok",
-    r"\[bboeos libc\] dirent: \d+ entries, rewind ok",
-    r"\[bboeos libc\] done",
-    r"\[bboeos libc\] hello",
-    r"\[bboeos libc\] longjmp returned 42",
-    r"\[bboeos libc\] malloc-works",
+    r"\[libbboeos\] -1 4000000000 cafe ok",
+    r"\[libbboeos\] dirent: \d+ entries, rewind ok",
+    r"\[libbboeos\] done",
+    r"\[libbboeos\] hello",
+    r"\[libbboeos\] longjmp returned 42",
+    r"\[libbboeos\] malloc-works",
 ]
 
 
@@ -64,6 +64,7 @@ def _build_hello() -> None:
         str(HELLO_BIN),
         str(LIBBBOEOS / "_start.o"),
         str(obj),
+        str(LIBBBOEOS / "libbboeos_stubs.o"),
         str(LIBBBOEOS / "libbboeos.a"),
     ])
 

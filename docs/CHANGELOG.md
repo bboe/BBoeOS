@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **libbboeos: Phase 4 — link clang programs against `libbboeos_stubs.o` thunks
+  instead of pulling the full bodies out of `libbboeos.a`.**  Adds
+  `tools/generate_libbboeos_stubs.py` (reads `FUNCTION_<NAME>_PTR` entries from
+  `kernel/include/constants.asm`, emits a one-`jmp [absolute]`-per-export `.S`
+  file) and a Makefile rule that compiles it to
+  `user/libbboeos/libbboeos_stubs.o`.  `ports/doom/build.py` and
+  `tests/test_libbboeos_qemu.py` now link `libbboeos_stubs.o` BEFORE
+  `libbboeos.a`, so ld resolves every libbboeos export to the 6-byte stub and
+  the corresponding archive member (`string.o`) is never pulled in. Saves ~1.7
+  KB per clang-built binary (hello drops 12,682 → 10,922; doom drops 659,942 →
+  658,182).  The win scales as more libbboeos C sources move behind the pointer
+  table.
 - **libbboeos: export the remaining `<string.h>` surface.**  Add `memchr`,
   `memcmp`, `memcpy`, `memmove`, `memset`, `strcasecmp`, `strcat`, `strchr`,
   `strcpy`, `strdup`, `strerror`, `strlen`, `strncasecmp`, `strncat`, `strncmp`,
