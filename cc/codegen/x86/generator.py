@@ -16,6 +16,7 @@ import re
 from dataclasses import fields
 from typing import ClassVar, NamedTuple
 
+from cc import ir
 from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
@@ -271,6 +272,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}
+        # Liveness map for pinned-register saves: maps id(ir.Call /
+        # ir.CarryBranch) → frozenset of pinned-register names that are
+        # may-defined at that call site.  Populated per function before
+        # IR lowering by _compute_pinned_initialized_per_call.
+        # _pinned_registers_to_save consults this to skip saves for
+        # pinned locals whose value isn't yet meaningful (e.g.,
+        # auto-pinned locals declared but not yet stored to).  None
+        # means "no info available" — fall back to saving everything.
+        self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
+        self._current_call_pinned_initialized: frozenset[str] | None = None
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
         # known_local_bytes and _last_byte_store support the Phase C
@@ -430,33 +441,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self._arg_pinned_sources(arg.left) | self._arg_pinned_sources(arg.right)
         return set()
 
-    def _collect_pinned_reads(self, node: Node, /) -> set[str]:
-        """Return every pinned register that *node*'s expression reads.
-
-        Like :meth:`_arg_pinned_sources` but walks the full AST shape —
-        ``UnaryOperation``, ``AddressOf``, ``Index``, etc. — so it can
-        be used to schedule syscall-builtin argument loads where the
-        arg AST is not restricted to the simple-call shape.  Returns
-        a set of register names (e.g. ``{"ebx", "edi"}``).
-        """
-        reads: set[str] = set()
-        stack: list[Node] = [node]
-        while stack:
-            current = stack.pop()
-            if isinstance(current, Var):
-                if current.name in self.pinned_register:
-                    reads.add(self.pinned_register[current.name])
-                elif current.name in self.param_in_register:
-                    reads.add(self.param_in_register[current.name])
-                continue
-            for slot in getattr(type(current), "__slots__", ()):
-                child = getattr(current, slot, None)
-                if isinstance(child, Node):
-                    stack.append(child)
-                elif isinstance(child, list):
-                    stack.extend(item for item in child if isinstance(item, Node))
-        return reads
-
     def _arithmetic_element_size(self, var_name: str, /) -> int:
         """Return the element stride for pointer/array arithmetic on *var_name*.
 
@@ -523,6 +507,133 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return None
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
+
+    def _collect_pinned_reads(self, node: Node, /) -> set[str]:
+        """Return every pinned register that *node*'s expression reads.
+
+        Like :meth:`_arg_pinned_sources` but walks the full AST shape —
+        ``UnaryOperation``, ``AddressOf``, ``Index``, etc. — so it can
+        be used to schedule syscall-builtin argument loads where the
+        arg AST is not restricted to the simple-call shape.  Returns
+        a set of register names (e.g. ``{"ebx", "edi"}``).
+        """
+        reads: set[str] = set()
+        stack: list[Node] = [node]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Var):
+                if current.name in self.pinned_register:
+                    reads.add(self.pinned_register[current.name])
+                elif current.name in self.param_in_register:
+                    reads.add(self.param_in_register[current.name])
+                continue
+            for slot in getattr(type(current), "__slots__", ()):
+                child = getattr(current, slot, None)
+                if isinstance(child, Node):
+                    stack.append(child)
+                elif isinstance(child, list):
+                    stack.extend(item for item in child if isinstance(item, Node))
+        return reads
+
+    def _compute_pinned_initialized_per_call(self, ir_body: list, /) -> dict[int, frozenset[str]]:
+        """Pre-pass: for each ir.Call / ir.CarryBranch, the may-defined pinned register set.
+
+        Auto-pinned locals are not initialized until the first store to
+        them.  Saving a pinned register around a call before that
+        store preserves garbage — :meth:`_pinned_registers_to_save`
+        consults the map this method produces and skips the save when
+        the local can't yet hold a meaningful value.
+
+        Initial defined set: registers held by parameters (loaded into
+        their pin in the prologue) and locals declared with
+        ``__attribute__((pinned_register(R)))`` whose initializer fired
+        as part of the declaration.  Auto-pinned locals start
+        undefined.
+
+        Loop bodies are pre-merged: any store inside a loop region
+        (Label..back-Jump) is added to the defined set BEFORE the
+        first instruction of the loop, so subsequent iterations see
+        the value as live.  Without this, calls inside the loop body
+        that appear before the store in source order would skip a
+        save that the second iteration actually needs.
+
+        Returns dict keyed by id(instruction).  Empty / missing key
+        means "no live pin" so callers should treat absence as
+        ``frozenset()`` — distinct from ``None`` which means "no
+        analysis was performed" (AST path, naked function, etc.).
+        """
+        pinned_locals: dict[str, str] = dict(self.pinned_register)
+        if not pinned_locals:
+            return {}
+        initial: set[str] = set(self._prologue_initialized_pinned_registers())
+
+        def store_target(instruction: object) -> str | None:
+            if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
+                return instruction.destination
+            if isinstance(instruction, ir.Block):
+                # Block-wrapped AST escape hatch.  A VarDecl with
+                # initialiser is a store to its name; ditto an
+                # ``unsigned long`` Assign that the IR builder routes
+                # through Block.  Pinned-to-register locals can't be
+                # ``unsigned long`` (they wouldn't fit a single register),
+                # so only the VarDecl case can hit a pinned target —
+                # but we still extract Assign / MemberAssign destinations
+                # defensively in case future IR shapes wrap them.
+                node = instruction.node
+                if isinstance(node, Assign):
+                    return node.name
+                if isinstance(node, VarDecl) and node.init is not None:
+                    return node.name
+                # MemberAssign / IndexAssign / inline asm write through
+                # pointers or are opaque — they don't store to a single
+                # named local register.  Skip.
+                return None
+            if isinstance(instruction, ir.Call) and instruction.destination is not None:
+                return instruction.destination
+            if isinstance(instruction, ir.IndexAssign):
+                # IndexAssign writes through a base pointer, not to the
+                # named base itself — leaves the base's register
+                # contents unchanged.  Not a store to the pin.
+                return None
+            return None
+
+        label_positions: dict[str, int] = {}
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Label):
+                label_positions[instruction.name] = index
+        loop_ranges: list[tuple[int, int]] = []
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Jump):
+                target = label_positions.get(instruction.target)
+                if target is not None and target < index:
+                    loop_ranges.append((target, index))
+        loop_stores: list[set[str]] = []
+        for start, end in loop_ranges:
+            stores: set[str] = set()
+            for k in range(start, end + 1):
+                target_name = store_target(ir_body[k])
+                if target_name in pinned_locals:
+                    stores.add(pinned_locals[target_name])
+            loop_stores.append(stores)
+        result: dict[int, frozenset[str]] = {}
+        defined: set[str] = set(initial)
+        for index, instruction in enumerate(ir_body):
+            for loop_index, (start, _end) in enumerate(loop_ranges):
+                if start == index:
+                    defined |= loop_stores[loop_index]
+            # Only record filter sets for builtin calls.  User function
+            # calls go through a different save-set path that this
+            # analysis can't fully model — Block-wrapped statements
+            # (the IR escape hatch) and pointer-aliased pinned locals
+            # could be invalidated by the call in ways our pre-pass
+            # doesn't see.  CarryBranch always wraps a user-function
+            # (``carry_return`` callee); same skip.
+            if isinstance(instruction, ir.Call) and instruction.name in self._builtin_clobbers:
+                result[id(instruction)] = frozenset(defined)
+            target_name = store_target(instruction)
+            if target_name in pinned_locals:
+                defined.add(pinned_locals[target_name])
+        return result
 
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
         """Emit the load-shift-mask-extend sequence for a bitfield read.
@@ -2166,17 +2277,55 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         E-registers in protected mode and 16-bit aliases in real mode.
         Normalise both sides through ``target.low_word`` so the
         comparison still matches when the two halves disagree.
+
+        When :attr:`_current_call_pinned_initialized` is set (by the
+        IR lowering pass via :meth:`_compute_pinned_initialized_per_call`),
+        registers whose pinned local has not yet been written are
+        filtered out — their value is undefined garbage and saving it
+        is dead.
         """
         low_word = self.target.low_word
         normalised_clobbers = frozenset(low_word(register) for register in clobbers)
+        initialized_filter = self._current_call_pinned_initialized
         # Dedup via ``set``: liveness-driven sharing maps several names
         # to the same register, and emitting push/pop pairs once per
         # name would unbalance the stack.
         return sorted({
             register
             for register in self.pinned_register.values()
-            if low_word(register) in normalised_clobbers and low_word(register) != "ax"
+            if low_word(register) in normalised_clobbers
+            and low_word(register) != "ax"
+            and (initialized_filter is None or register in initialized_filter)
         })
+
+    def _prologue_initialized_pinned_registers(self) -> set[str]:
+        """Return the set of pinned registers whose value is meaningful at function entry.
+
+        Parameters that are pinned (via ``in_register`` attribute,
+        auto-pin, or fastcall) are loaded into their pin by the
+        function prologue, so the register holds a meaningful caller-
+        supplied value from the first instruction onward.  Auto-pinned
+        LOCALS (not parameters) are uninitialized until the first
+        store and are excluded.
+
+        Locals with explicit ``__attribute__((pinned_register(R)))``
+        live entirely in the register (no stack slot) — their first
+        write IS the initialisation, so they're treated the same as
+        auto-pinned locals here.
+        """
+        initialized: set[str] = set()
+        for name, register in self.pinned_register.items():
+            if name in self.param_in_register or name in self.in_register_params:
+                initialized.add(register)
+        # Catch all parameters that landed in self.pinned_register —
+        # the prologue loads them either from caller-pushed slots
+        # ([bp+N]) or from the register-convention fastcall slots
+        # (acc/dx/cx).  Any name from the function's parameter list
+        # counts; locals do not.
+        for name in getattr(self, "_current_function_parameter_names", ()):
+            if name in self.pinned_register:
+                initialized.add(self.pinned_register[name])
+        return initialized
 
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.

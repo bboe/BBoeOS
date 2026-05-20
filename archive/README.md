@@ -29,7 +29,7 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | ls      | 135            | 412         | 697       | +285  |
 | mkdir   | 123            | 142         | 163       | +21   |
 | mv      | 217            | 242         | 270       | +28   |
-| ping    | 1034           | 1230        | 1544      | +314  |
+| ping    | 1034           | 1230        | 1522      | +292  |
 | uptime  | 50             | 67          | 102       | +35   |
 
 **arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,

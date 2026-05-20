@@ -1672,11 +1672,19 @@ class EmissionMixin:
                 self.emit_store_local(expression=self._ir_value_to_ast(source), name=destination)
             case ir.Call(destination=None, name=name, args=args):
                 call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
-                self.generate_call(call, discard_return=True)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.generate_call(call, discard_return=True)
+                finally:
+                    self._current_call_pinned_initialized = None
                 self.ax_clear()
             case ir.Call(destination=destination, name=name, args=args):
                 call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
-                self.emit_store_local(expression=call, name=destination)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.emit_store_local(expression=call, name=destination)
+                finally:
+                    self._current_call_pinned_initialized = None
             case ir.Index(destination=destination, base=base, index=index):
                 expression = Index(array=Var(name=base), index=self._ir_value_to_ast(index))
                 self.emit_store_local(expression=expression, name=destination)
@@ -1703,7 +1711,11 @@ class EmissionMixin:
                 # ``if`` / ``while`` condition.  ``generate_call`` sets
                 # up args (regparm / stack) the same way a direct call
                 # would.
-                self.generate_call(call_ast, discard_return=True)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.generate_call(call_ast, discard_return=True)
+                finally:
+                    self._current_call_pinned_initialized = None
                 self.emit(f"        {'jc' if when == 'set' else 'jnc'} {target}")
                 self.ax_clear()
             case ir.Return(value=value):
@@ -1801,6 +1813,9 @@ class EmissionMixin:
         self.current_carry_return = function.carry_return
         self.current_function_is_main = name == "main"
         self.current_function_is_naked = function.naked
+        self._current_function_parameter_names: tuple[str, ...] = tuple(parameter.name for parameter in parameters)
+        self._ir_call_pinned_initialized = {}
+        self._current_call_pinned_initialized = None
         # Per-function user-label bookkeeping for the AST codegen path.
         # The IR path validates inside ir.Builder; main() and other AST-
         # path functions validate here after generate_body completes.
@@ -2138,6 +2153,7 @@ class EmissionMixin:
 
         if ir_body is not None:
             # IR path: lower the flat instruction list directly.
+            self._ir_call_pinned_initialized = self._compute_pinned_initialized_per_call(ir_body)
             self.lower_ir_body(ir_body)
         else:
             # Tail-call: if the last statement is a statement-level user-

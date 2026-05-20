@@ -39,6 +39,20 @@ time.
   offset 52 into its natural slot at +84 — since `make_os.sh` re-emits every
   consumer against the current table on each run.
 
+- **cc.py: skip dead pinned-register saves around builtin calls before the
+  pinned local's first store.**  ``_pinned_registers_to_save`` was saving every
+  pinned register in every clobber set, even when the pinned local hadn't been
+  assigned to yet — preserving garbage.  New per-function pre-pass walks the IR,
+  computes the may-defined set of pinned registers at each builtin call site
+  (with loop bodies pre-merged into the entry set so the back-edge sees in-loop
+  stores), and threads it to the save logic.  Block- wrapped ``VarDecl init`` /
+  ``Assign`` nodes are scanned so the IR escape hatch doesn't leak.  Scope is
+  intentionally limited to builtin call sites — user-function call paths can
+  mutate pinned state through code the analysis can't see (Block-wrapped
+  statements, pointer aliases) so they stay on the conservative save-everything
+  path.  -120 byte kasm reduction kernel-wide; ``ping`` user program shrinks
+  1544 → 1522 bytes.
+
 - **cc.py: narrow ``mov eax, <imm 0..255>`` to ``mov al, <imm>`` when ``out dx,
   al`` is the only consumer.**  After
   ``peephole_fold_byte_immediate_through_local`` rewrites the byte-load idiom
