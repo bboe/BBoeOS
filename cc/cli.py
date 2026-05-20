@@ -24,19 +24,29 @@ def _compile(*, bits: int, input_path: Path, object_mode: bool, output_path: Pat
     """
     try:
         source = input_path.read_text(encoding="utf-8")
-        # Walk up from the source's directory looking for a sibling ``include/``
-        # directory (the canonical home of constants.asm and shared C headers).
-        include_dir = None
+        # Walk up from the source's directory collecting include dirs from
+        # both sides of the tree.  The kernel side holds ``constants.asm`` +
+        # kernel-only headers in ``kernel/include/``; the user side holds
+        # shared C headers in ``user/libbboeos/include/``.  A user program
+        # needs both — its own libbboeos headers plus the kernel's
+        # constants.asm — so we don't break on first hit; we ascend to the
+        # repo root, picking up every relevant ``include/`` along the way.
+        kernel_includes: list[Path] = []
+        user_includes: list[Path] = []
         cursor = input_path.parent.resolve()
         while True:
-            candidate = cursor / "include"
-            if candidate.is_dir():
-                include_dir = candidate
-                break
+            for candidate in (cursor / "include", cursor / "kernel" / "include"):
+                if candidate.is_dir() and candidate not in kernel_includes:
+                    kernel_includes.append(candidate)
+            for candidate in (cursor / "libbboeos" / "include", cursor / "user" / "libbboeos" / "include"):
+                if candidate.is_dir() and candidate not in user_includes:
+                    user_includes.append(candidate)
             if cursor.parent == cursor:
                 break
             cursor = cursor.parent
-        search_paths: tuple[Path, ...] = (include_dir,) if include_dir is not None else ()
+        # Kernel includes win on collision (they're the legacy inline-impl
+        # location); libbboeos prototype headers are the supplement.
+        search_paths: tuple[Path, ...] = (*kernel_includes, *user_includes)
         source, defines, function_defines = preprocess(
             source,
             include_base=input_path.parent,
@@ -45,8 +55,11 @@ def _compile(*, bits: int, input_path: Path, object_mode: bool, output_path: Pat
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
         ast = Parser(tokens).parse_program()
-        constants_asm = include_dir / "constants.asm" if include_dir is not None else None
-        constant_values = parse_asm_constants(constants_asm) if constants_asm is not None and constants_asm.is_file() else {}
+        constants_asm = next(
+            (path / "constants.asm" for path in search_paths if (path / "constants.asm").is_file()),
+            None,
+        )
+        constant_values = parse_asm_constants(constants_asm) if constants_asm is not None else {}
         output = X86CodeGenerator(
             bits=bits,
             constant_values=constant_values,
