@@ -198,6 +198,7 @@ class EmissionMixin:
                 self.extern_functions.add(function.name)
             if function.regparm_count > 0:
                 self.fastcall_functions.add(function.name)
+                self.function_regparm_count[function.name] = function.regparm_count
             if function.carry_return:
                 self.carry_return_functions.add(function.name)
             if function.always_inline:
@@ -672,6 +673,12 @@ class EmissionMixin:
                 raise CompileError(message, line=statement.line)
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
+            callee_regparm_count = self.function_regparm_count.get(name, 0)
+            # regparm(N): args 0..N-1 map to fixed registers (acc, dx,
+            # count_register)[0..N-1].  Arg 0 (AX) is loaded LAST so
+            # earlier register-arg evaluation can't trash it via the
+            # parallel-move scheduler.
+            regparm_registers = (self.target.acc, self.target.dx_register, self.target.count_register)
             out_regs = self.out_register_params.get(name, {})
             in_regs = self.in_register_params.get(name, {})
             fastcall_ax_arg: Node | None = None
@@ -685,6 +692,8 @@ class EmissionMixin:
                     register_args.append((in_regs[index], arg))
                 elif is_fastcall and index == 0:
                     fastcall_ax_arg = arg
+                elif is_fastcall and index < callee_regparm_count:
+                    register_args.append((regparm_registers[index], arg))
                 elif index in callee_pins:
                     register_args.append((callee_pins[index], arg))
                 else:
@@ -1731,11 +1740,14 @@ class EmissionMixin:
             self.variable_arrays.add(global_name)
             self.visible_vars.add(global_name)
 
-        # Fastcall (regparm(1)) routing.  Param 0 arrives in AX and is
-        # spilled to a local stack slot during the prologue; params 1..N
-        # use the standard caller-pushed cdecl layout shifted down by
-        # one slot (caller didn't push arg 0).
+        # Fastcall (regparm(N)) routing.  Params 0..N-1 arrive in the
+        # fixed register slots (acc, dx, count_register)[0..N-1] and
+        # are spilled to local stack slots during the prologue; params
+        # N..end use the standard caller-pushed cdecl layout, shifted
+        # down by N slots (caller didn't push args 0..N-1).
         is_fastcall = name != "main" and function.regparm_count > 0
+        regparm_count = function.regparm_count if is_fastcall else 0
+        regparm_registers = (self.target.acc, self.target.dx_register, self.target.count_register)[:regparm_count]
         # Allocate parameters and record their types.
         for param in parameters:
             if param.name in self.global_scalars or param.name in self.global_arrays:
@@ -1766,30 +1778,31 @@ class EmissionMixin:
                     # Input register param: caller puts arg in named register (no push).
                     # Allocate a local slot below; spilled after sub sp,N in prologue.
                     continue
-                if is_fastcall and i == 0:
-                    # Param 0 gets a local slot allocated below; it has no
-                    # caller-pushed address.
+                if is_fastcall and i < regparm_count:
+                    # Register-passed params get local slots allocated
+                    # below; they have no caller-pushed address.
                     continue
                 self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
                 caller_push_index += 1
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body)
-        # Exclude fastcall param 0 from auto-pin candidates — it's spilled to
-        # the stack at prologue entry and the body accesses it through that
-        # slot like any other local.
+        # Exclude regparm params from auto-pin candidates — they're spilled
+        # to the stack at prologue entry and the body accesses them through
+        # those slots like any other local.
         if name == "main":
             param_candidates = []
         elif is_fastcall:
-            param_candidates = [p for p in parameters[1:] if p.out_register is None and p.in_register is None]
+            param_candidates = [p for p in parameters[regparm_count:] if p.out_register is None and p.in_register is None]
         else:
             param_candidates = [p for p in parameters if p.out_register is None and p.in_register is None]
         self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
 
-        # Reserve a local stack slot for fastcall param 0 before scan_locals
-        # runs so its offset is stable against body-local allocations.
+        # Reserve local stack slots for regparm params before scan_locals
+        # runs so their offsets are stable against body-local allocations.
         if is_fastcall:
-            self.allocate_local(parameters[0].name)
+            for i in range(regparm_count):
+                self.allocate_local(parameters[i].name)
         # Reserve local slots for in_register params (spilled at prologue entry).
         # Naked functions skip the spill: in_register params are pinned to
         # their register and the body reads them directly without a stack slot.
@@ -1829,7 +1842,7 @@ class EmissionMixin:
         # the stack at [bp+N].
         if name != "main":
             for i, param in enumerate(parameters):
-                if is_fastcall and i == 0:
+                if is_fastcall and i < regparm_count:
                     continue
                 if param.out_register is not None:
                     continue
@@ -1876,10 +1889,12 @@ class EmissionMixin:
             if self.frame_size > 0:
                 self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
             if is_fastcall:
-                # Spill AX (the caller-supplied arg 0) into its local slot
-                # so the body can read it through the normal local path.
-                slot = self.locals[parameters[0].name]
-                self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
+                # Spill the caller-supplied regparm registers into their
+                # local slots so the body can read them through the normal
+                # local path.
+                for i, register in enumerate(regparm_registers):
+                    slot = self.locals[parameters[i].name]
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {register}")
             for param in parameters:
                 if param.in_register is not None:
                     if not self._param_slot_is_read(body, param.name):
@@ -1921,7 +1936,7 @@ class EmissionMixin:
                 # into their registers.
                 caller_push_index = 0
                 for i, param in enumerate(parameters):
-                    if is_fastcall and i == 0:
+                    if is_fastcall and i < regparm_count:
                         continue
                     if param.out_register is not None:
                         continue

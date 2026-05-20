@@ -815,6 +815,11 @@ TESTS: list[ProgramTest] = [
     ProgramTest("exit_status_42", ["exit_status 42", "echo $?"], r"echo \$\?\n42\n"),
     ProgramTest("false_chain", ["false && echo skipped || echo ran"], r"^ran$"),
     ProgramTest("fctest", ["convention_test regparm"], r"accumulate\(9\)    = 28"),
+    ProgramTest(
+        "fctest3",
+        ["convention_test regparm3"],
+        r"^fan_in\(1,2,3\)    = 321$[\s\S]*^fan_in\(a,b,c\)    = 654$[\s\S]*^blend\(7,8\)       = 708$[\s\S]*^fan_in nested    = 11111$",
+    ),
     ProgramTest("gptest", ["fault_test gp", "echo recovered"], r"EXC0D[\s\S]*recovered"),
     ProgramTest("grep_basic", ["echo -e aaa\\nbbb\\naaa | grep aaa"], r"^aaa\r?\naaa\r?\n\$"),
     ProgramTest("grep_case", ["echo HELLO | grep -i hello"], r"^HELLO\r?\n\$"),

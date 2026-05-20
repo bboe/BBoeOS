@@ -197,7 +197,11 @@ class Parser:
         Returns a ``(name, value)`` tuple that the caller dispatches
         on.  Supported kinds:
 
-        * ``("regparm", 1)`` — first arg arrives in AX (fastcall).
+        * ``("regparm", N)`` — first N args (1..3) arrive in fixed
+          registers AX, DX, CX in that order; remaining args use the
+          standard caller-pushed cdecl layout.  ``regparm(1)`` is the
+          historical fastcall shape (arg 0 in AX); 2 and 3 extend the
+          contract along the gcc -mregparm=N spelling.
         * ``("asm_register", "si")`` — file-scope global aliases SI.
         * ``("carry_return", True)`` — int return is reported via CF
           (CF clear = 1/true/success, CF set = 0/false/failure); no
@@ -222,8 +226,8 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             count = int(count_token[1])
-            if count != 1:
-                message = f"regparm({count}) not supported; only regparm(1) is implemented"
+            if count not in (1, 2, 3):
+                message = f"regparm({count}) not supported; only regparm(1), regparm(2), and regparm(3) are implemented"
                 raise CompileError(message, line=line)
             return ("regparm", count)
         if attr_name == "asm_name":
@@ -1371,21 +1375,21 @@ class Parser:
                 else:
                     message = f"trailing {kind} attribute is not valid on function definitions"
                     raise CompileError(message, line=line)
-            if regparm_count > 0 and not parameters:
-                message = "regparm(1) requires at least one parameter"
+            if regparm_count > 0 and len(parameters) < regparm_count:
+                message = f"regparm({regparm_count}) requires at least {regparm_count} parameter{'s' if regparm_count != 1 else ''}"
                 raise CompileError(message, line=line)
             stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
             if carry_return and stack_param_count > regparm_count:
                 # Stack-passed args would require an ``add sp, N`` cleanup
                 # after the call, which clobbers CF.  carry_return callees
-                # must arrive via AX only (regparm(1)), take no args, or
+                # must arrive via register only (regparm(N)), take no args, or
                 # use only out_register/in_register params (no stack push, no cleanup).
-                message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
+                message = "carry_return functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
                 raise CompileError(message, line=line)
             if always_inline and stack_param_count > regparm_count:
                 # Inlining splices the body in place; stack args would
                 # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(1)"
+                message = "always_inline functions may not take stack args; use 0 params, out_register/in_register params, or regparm(N)"
                 raise CompileError(message, line=line)
             if self.peek()[0] == "SEMI":
                 # Function prototype (no body).  Retained in the AST so

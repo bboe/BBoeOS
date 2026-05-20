@@ -2705,6 +2705,72 @@ def test_preserve_register_push_pop() -> None:
         assert "pop cx" in before_ret, f"expected 'pop cx' before ret at pos {ret_pos}"
 
 
+def test_regparm_2_callee_does_not_read_arg_1_off_stack() -> None:
+    """regparm(2): arg 1 arrives in EDX, not via [ebp+offset].
+
+    With the regparm(1) shape, a 2-arg callee would read arg 1 from
+    [ebp+8] (the only stack slot the caller pushed).  regparm(2)
+    must not load anything from the param area — both args are
+    register-passed, so the callee's body should never reference
+    [ebp+anything-positive] for argument loads.
+    """
+    asm = _kernel(
+        """
+        __attribute__((regparm(2))) int add2(int a, int b) {
+            return a + b;
+        }
+    """,
+        bits=32,
+    )
+    # No load from the caller-push param area (positive ebp offsets
+    # 8 / 12 / 16 are the first three stack-arg slots; with regparm(2)
+    # neither arg lives there).
+    for offset in (8, 12, 16):
+        assert f"[ebp+{offset}]" not in asm, f"regparm(2) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
+
+
+def test_regparm_3_callee_does_not_read_args_1_or_2_off_stack() -> None:
+    """regparm(3): args 1 and 2 arrive in EDX and ECX, not via [ebp+offset]."""
+    asm = _kernel(
+        """
+        __attribute__((regparm(3))) int add3(int a, int b, int c) {
+            return a + b + c;
+        }
+    """,
+        bits=32,
+    )
+    for offset in (8, 12, 16, 20):
+        assert f"[ebp+{offset}]" not in asm, f"regparm(3) callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
+
+
+def test_regparm_3_call_site_does_not_push_args_0_through_2() -> None:
+    """A regparm(3) call places args 0/1/2 in EAX/EDX/ECX, not on the stack.
+
+    With cdecl-only fallback the call site would emit `push 30; push 20; push 10`
+    and `add esp, 12` after the call.  regparm(3) instead loads
+    the three immediates into EAX/EDX/ECX with no stack-arg cleanup.
+    """
+    asm = _kernel(
+        """
+        __attribute__((regparm(3))) int add3(int a, int b, int c);
+        int call_site() {
+            return add3(10, 20, 30);
+        }
+    """,
+        bits=32,
+    )
+    call_index = asm.index("call add3")
+    pre_call = asm[:call_index]
+    # No three-arg stack cleanup (add esp, 12) for stack-pushed args.
+    post_call = asm[call_index:]
+    assert "add esp, 12" not in post_call, f"unexpected 3-arg stack cleanup after regparm(3) call:\n{asm}"
+    # Args 1 and 2 reach EDX and ECX.  Bare `push 20` / `push 30`
+    # would indicate the regparm(1) fallback misrouted them.
+    assert "push 20" not in pre_call and "push 30" not in pre_call, (
+        f"regparm(3) call site unexpectedly pushed args 1/2 on the stack:\n{asm}"
+    )
+
+
 def test_read_deref_char_pointer_zero_extends_byte() -> None:
     """``char c = *p;`` reads one byte (matches ``p[0]`` semantics)."""
     asm = _kernel("""
