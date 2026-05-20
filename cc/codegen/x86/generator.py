@@ -369,7 +369,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         has_complex_call: dict[str, bool] = dict.fromkeys(self.user_functions, False)
 
         def visit(node: Node) -> None:
-            if isinstance(node, Call) and node.name in self.user_functions and any(not self._is_simple_arg(arg) for arg in node.args):
+            if (
+                isinstance(node, Call)
+                and node.name in self.user_functions
+                and len(node.args) > 1
+                and any(not self._is_simple_arg(arg) for arg in node.args)
+            ):
+                # 1-arg fastcall calls take the ``emit_register_from_argument``
+                # path (any expression OK); the register-convention auto-pin
+                # is only at risk when multiple args could clobber each other.
                 has_complex_call[node.name] = True
             for node_field in fields(node):
                 value = getattr(node, node_field.name)
@@ -2026,8 +2034,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
         elif isinstance(arg, BinaryOperation):
-            # ``_is_simple_arg`` only admits BinaryOperation(+/-, leaf, leaf), and
-            # the topological scheduler in ``_emit_register_arg_moves``
+            # ``_is_simple_arg`` admits BinaryOperation(+ - | & ^, leaf, leaf)
+            # plus shifts with Int RHS — all stay in the accumulator. The
+            # topological scheduler in ``_emit_register_arg_moves``
             # already verified that ``target`` is not read by any other
             # pending arg.  Evaluate into AX, then move into target.
             self.generate_expression(arg)

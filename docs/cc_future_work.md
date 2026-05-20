@@ -132,29 +132,35 @@ an `&`.
 
 ## Multi-translation-unit linkage
 
-### Complex-arg call-site scheduler (option A)
+### Complex-arg call-site scheduler
 
 **Size:** medium.
 
-Phase B's implicit regparm(min(3, n)) default kicks in only when every caller of
-a function uses simple arguments (`Int`, `String`, `Var`, or
-`BinaryOperation(+/-, leaf, leaf)`).  Callees reached from any call site with a
-more complex argument — `arr[i]`, `s->f`, `*p`, or another `Call` — fall back to
-cdecl in `cc/codegen/x86/emission.py:_apply_default_regparm`.
+The aggressive form of this work — letting any call site with `arr[i]`, `s->f`,
+`*p`, or another `Call` use the regparm(min(3, n)) default — is still open. What
+landed instead are two narrower relaxations that cover every production call
+site:
 
-The blocker is the call-site register-arg scheduler in
-`cc/codegen/x86/generator.py:_emit_register_arg_moves`: it only knows how to
-load `Int`, `String`, `Var`, and a narrow `BinaryOperation` shape into the
-target register, and raises `CompileError("register-arg target … given
-unexpected complex node …")` for anything else.  Extending it to evaluate
-complex args into AX, push, run the simple-arg topological pass, and pop into
-target registers at the end would let the default apply universally.
+- `_is_simple_arg` admits `BinaryOperation(+ - | & ^, leaf, leaf)` plus shifts
+  with an Int RHS (all AX-only lowerings — `* / %` and shifts with a Var RHS
+  still touch EDX/CL and stay rejected).
+- `has_complex_call` only triggers when the call has more than one argument:
+  single-arg fastcalls already route through `emit_register_from_argument`,
+  which handles arbitrary expressions through AX without any other arg to
+  clobber.
+
+The deferred piece is the multi-arg complex case — `f(arr[i], s->field)` still
+falls back to cdecl.  Closing it requires extending
+`cc/codegen/x86/generator.py:_emit_register_arg_moves` to evaluate complex args
+into AX, push, run the simple-arg topological pass, and pop into target
+registers at the end.  No current `.c` source needs it; mostly relevant for
+future programs that pass struct fields / dereferences as multiple args.
 
 ## Language / C subset
 
 Each item below is a feature `user/libc/*.c` uses today that cc.py rejects.
-Closing this section would let `user/libc/` sources compile under cc.py
-directly (per-program inlining, no linker), without the parallel-rewrite tax of
+Closing this section would let `user/libc/` sources compile under cc.py directly
+(per-program inlining, no linker), without the parallel-rewrite tax of
 maintaining a header-only mirror.
 
 ### Vertical tab / form feed escape sequences

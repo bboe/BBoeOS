@@ -707,8 +707,16 @@ class CodeGeneratorBase:
         """
         if isinstance(node, (Int, String, Var)):
             return True
-        if isinstance(node, BinaryOperation) and node.operation in ("+", "-"):
-            return isinstance(node.left, (Int, String, Var)) and isinstance(node.right, (Int, String, Var))
+        if isinstance(node, BinaryOperation) and isinstance(node.left, (Int, String, Var)):
+            # AX-only binops: ``+ - | & ^`` always stay in the accumulator;
+            # ``<< >>`` only when the shift count is an immediate (a Var
+            # RHS would route through CL and could clobber another arg's
+            # ECX target).  Multiply / divide / modulo touch EDX and are
+            # therefore not admitted.
+            if node.operation in ("+", "-", "|", "&", "^"):
+                return isinstance(node.right, (Int, String, Var))
+            if node.operation in ("<<", ">>"):
+                return isinstance(node.right, Int)
         return False
 
     @staticmethod

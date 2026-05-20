@@ -118,7 +118,15 @@ class EmissionMixin:
         has_complex_call: dict[str, bool] = dict.fromkeys(user_names, False)
 
         def visit(node: Node) -> None:
-            if isinstance(node, Call) and node.name in user_names and any(not self._is_simple_arg(arg) for arg in node.args):
+            if (
+                isinstance(node, Call)
+                and node.name in user_names
+                and len(node.args) > 1
+                and any(not self._is_simple_arg(arg) for arg in node.args)
+            ):
+                # 1-arg fastcall calls route through ``emit_register_from_argument``,
+                # which already handles arbitrary expressions via AX; there is
+                # no inter-arg target to clobber, so complexity is harmless.
                 has_complex_call[node.name] = True
             for node_field in fields(node):
                 value = getattr(node, node_field.name)
