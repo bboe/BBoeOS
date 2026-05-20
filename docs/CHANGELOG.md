@@ -11,6 +11,11 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Rename vDSO build artifacts to libbboeos.**  `tools/gen_vdso_pointers.py` →
+  `tools/gen_libbboeos_pointers.py`; build outputs `build/vdso.bin`,
+  `build/vdso.map`, `build/vdso_pointers.bin` → `build/libbboeos.{bin,map}`,
+  `build/libbboeos_pointers.bin`.  Naming cleanup ahead of Phase 2 of the
+  shared-libbboeos work; no behaviour change.
 - **cc.py: drop the `regparm` attribute.**  The implicit register-passing
   default (args 0..2 in EAX/EDX/ECX; previously the "phase B" entry below)
   produces the same ABI for every shape that production sources ever requested
@@ -20,7 +25,6 @@ time.
   exercise (the implicit default rather than the explicit annotation).
   `regparm_count` survives as an internal codegen field that the implicit-
   default pass stamps; user-visible surface area is removed.
-
 - **Promote shared C headers out of `kernel/include/`.**  `getopt.h`,
   `line_helpers.h`, `shell_lex.h`, and `wait.h` move to
   `user/libbboeos/include/` — they're user-program surface, not kernel ABI.

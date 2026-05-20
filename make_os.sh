@@ -36,11 +36,11 @@ done
 # zero-padded to offset 0x800, then the 13-entry FUNCTION_POINTER_TABLE
 # (52 bytes).
 mkdir -p build
-nasm -f bin -i kernel/include/ -o build/vdso.bin user/vdso/vdso.asm
+nasm -f bin -i kernel/include/ -o build/libbboeos.bin user/vdso/vdso.asm
 if [ $? -ne 0 ]; then
     exit 1
 fi
-python3 tools/gen_vdso_pointers.py build/vdso.map build/vdso_pointers.bin
+python3 tools/gen_libbboeos_pointers.py build/libbboeos.map build/libbboeos_pointers.bin
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -50,10 +50,10 @@ fi
 python3 -c "
 import struct
 import sys
-vdso = open('build/vdso.bin', 'rb').read()
-pointers = open('build/vdso_pointers.bin', 'rb').read()
-assert len(vdso) <= 0x800, f'vdso.bin {len(vdso)} bytes; would overlap pointer table at 0x800'
-image = vdso + b'\\x00' * (0x800 - len(vdso)) + pointers
+helpers = open('build/libbboeos.bin', 'rb').read()
+pointers = open('build/libbboeos_pointers.bin', 'rb').read()
+assert len(helpers) <= 0x800, f'libbboeos.bin {len(helpers)} bytes; would overlap pointer table at 0x800'
+image = helpers + b'\\x00' * (0x800 - len(helpers)) + pointers
 open('build/libbboeos', 'wb').write(image)
 " || exit 1
 

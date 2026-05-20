@@ -22,12 +22,12 @@
 ;;;               `call [FUNCTION_*_PTR]` — an absolute indirect call
 ;;;               whose encoding is base-invariant, so the bytes survive
 ;;;               `ccld` relocation without per-site patching.  NOT
-;;;               emitted into vdso.bin: the kernel build runs
-;;;               tools/gen_vdso_pointers.py against the vDSO's NASM map
-;;;               to produce vdso_pointers.bin (52 bytes), kernel.asm
+;;;               emitted into libbboeos.bin: the kernel build runs
+;;;               tools/gen_libbboeos_pointers.py against the libbboeos
+;;;               NASM map to produce libbboeos_pointers.bin (52 bytes), kernel.asm
 ;;;               incbins both blobs, and vdso_install copies the
 ;;;               pointer blob to dest + 0x800 at boot.  Keeping the
-;;;               pointer table out of vdso.bin avoids ~900 bytes of
+;;;               pointer table out of libbboeos.bin avoids ~900 bytes of
 ;;;               trailing zero padding in kernel.bin between
 ;;;               end-of-helpers and offset 0x800.
 ;;;   end of file (~1.1 KB actual content; the kernel maps the blob as
@@ -622,10 +622,10 @@ __kernel_sigreturn:
 
 ;;; -----------------------------------------------------------------------
 ;;; FUNCTION_POINTER_TABLE values are NOT emitted here.  They live in
-;;; vdso_pointers.bin, produced at build time by
-;;; tools/gen_vdso_pointers.py from this file's NASM map, and copied to
-;;; FUNCTION_POINTER_TABLE (0x10800) by vdso_install (entry.asm) at
-;;; boot.  See the header comment for the rationale.
+;;; libbboeos_pointers.bin, produced at build time by
+;;; tools/gen_libbboeos_pointers.py from this file's NASM map, and
+;;; copied to FUNCTION_POINTER_TABLE (0x10800) by vdso_install
+;;; (entry.asm) at boot.  See the header comment for the rationale.
 ;;; -----------------------------------------------------------------------
 
-        [map symbols build/vdso.map]
+        [map symbols build/libbboeos.map]
