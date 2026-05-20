@@ -11,6 +11,21 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **libbboeos: export the remaining `<string.h>` surface.**  Add `memchr`,
+  `memcmp`, `memcpy`, `memmove`, `memset`, `strcasecmp`, `strcat`, `strchr`,
+  `strcpy`, `strdup`, `strerror`, `strlen`, `strncasecmp`, `strncat`, `strncmp`,
+  `strncpy`, `strrchr`, `strstr` to the libbboeos pointer table so Phase 4
+  clang-built consumers (and any future cc.py call site that needs a non-builtin
+  string fn) can dispatch through `[FUNCTION_<NAME>_PTR]` instead of statically
+  linking the body.  cc.py-built programs keep using the inline builtins for
+  `memcpy`/`memcmp`/`memset`/`strlen` — the libbboeos slot just becomes another
+  resolution channel.  Moves `FUNCTION_POINTER_TABLE` from `FUNCTION_TABLE +
+  0x800` to `+ 0xE00` so `.libbboeos.text` and `.rodata` (now ~2.8 KB with all
+  string bodies pulled in) don't overlap the table; the whole user-space
+  rebuilds against the new offset so on-disk programs land correct.  The whole
+  block sorts cleanly alphabetically — `strcmp` slides from PR #448's locked
+  offset 52 into its natural slot at +84 — since `make_os.sh` re-emits every
+  consumer against the current table on each run.
 - **cc.py: skip save-around-eval push/pop when ``kernel_outb`` / ``kernel_outw``
   port is a literal.**  The general non-const-value path was unconditionally
   emitting ``push eax; eval port → DX; pop eax`` to guard the value across port

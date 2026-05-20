@@ -642,6 +642,6 @@ __kernel_sigreturn:
 ;;; -----------------------------------------------------------------------
 ;;; FUNCTION_POINTER_TABLE values are NOT emitted from this asm file.
 ;;; The linker script (user/libbboeos/libbboeos.ld) emits the 52-byte
-;;; table at FUNCTION_POINTER_TABLE (0x10800) using LONG(shared_*)
+;;; table at FUNCTION_POINTER_TABLE (0x10E00) using LONG(shared_*)
 ;;; entries that resolve to the helper addresses at link time.
 ;;; -----------------------------------------------------------------------
