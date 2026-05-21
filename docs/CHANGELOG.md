@@ -11,6 +11,16 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: accept file-scope `typedef <type> <name>;`.**  Registers a type alias
+  that expands inline at every type-specifier site (variable declarations,
+  parameters, casts, `sizeof`, `*(T *)expr`).  Caller-side pointer stars compose
+  on top of the alias's own stars (`typedef char *str; str *pp;` becomes `char
+  **`), capped at the usual 2-star pointer depth.  Local-scope typedefs and
+  function-pointer typedefs (`typedef void (*sig_t)(int);`) aren't yet handled;
+  the former needs scoping in the parser, the latter needs a hop through the
+  existing function-pointer machinery.  Lands as step 1 of Phase 6 (compiling
+  libbboeos C with cc.py) — `dirent.c`, `signal.c`, and `stdlib.c` are all
+  blocked on typedef.
 - **libbboeos: Phase 5 — retire the "vDSO" naming throughout the tree.**
   `user/vdso/vdso.asm` moves to `user/libbboeos/libbboeos.asm` (the `user/vdso/`
   directory is gone); kernel-side symbols rename `vdso_install` →

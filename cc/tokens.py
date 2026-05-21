@@ -53,6 +53,7 @@ KEYWORDS = frozenset({
     "sizeof",
     "struct",
     "switch",
+    "typedef",
     "uint8_t",
     "uint16_t",
     "uint32_t",

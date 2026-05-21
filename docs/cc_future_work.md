@@ -235,33 +235,28 @@ into the same loop-context stack while currently uses.
 
 ### `typedef`
 
-**Size:** medium.
+**Status:** type aliases land; function-pointer typedefs still outstanding.
 
-cc.py doesn't recognise `typedef` as a keyword, so `typedef struct foo foo;` or
-`typedef unsigned int size_t;` reject as an identifier.  Adding it means
-threading a "type alias" table through the type parser so a `foo` identifier
-resolves to its underlying type at every declaration / cast / sizeof site.
-
-A simple aliasing table is enough; cc.py doesn't need full C typedef semantics
-(no anonymous structs to name, no incomplete-type forward decls yet).  Two cases
-to cover:
-
-- Type aliases (`typedef unsigned int size_t;`) — substitute the alias name for
-  its target everywhere a type name is expected.
-- Function-pointer typedefs (`typedef void (*sighandler_t)(int);`) — slot into
-  cc.py's existing function-pointer machinery without storage emission.
-
-Once typedef works, `size_t`/`ptrdiff_t`/`uintptr_t` from `<stddef.h>` parse
-correctly and most of `user/libbboeos/*.c` becomes type-checkable.
+File-scope `typedef <type> <name>;` registers a name that expands inline
+wherever a type specifier is expected — variable declarations, parameters,
+casts, `sizeof`, `*(T *)expr`.  The implementation is the simple aliasing table
+described above: `Parser.typedef_aliases` is consulted by `_is_type_start` and
+`parse_type` so the alias name flows through the rest of the compiler as its
+underlying type, with caller-side pointer stars composing on top of the alias's
+own stars (`typedef char *str; str *pp;` becomes `char **`).  Local-scope
+typedefs and function-pointer typedefs (`typedef void (*sighandler_t)(int);`)
+are not yet supported — the latter needs a hop through cc.py's function-pointer
+machinery without storage emission.
 
 ### Variadic functions / `va_list` / `va_arg`
 
 **Size:** large.
 
 Today `printf` is a cc.py builtin with custom codegen (the variadic call site
-lowers to a known `FUNCTION_PRINTF` jump through the libbboeos).  No user-defined
-variadic function compiles — `int my_log(const char *fmt, ...)` rejects in the
-parser, and there's no machinery for `va_start` / `va_arg` / `va_end`.
+lowers to a known `FUNCTION_PRINTF` jump through the libbboeos).  No
+user-defined variadic function compiles — `int my_log(const char *fmt, ...)`
+rejects in the parser, and there's no machinery for `va_start` / `va_arg` /
+`va_end`.
 
 For libc, the cost shows up in `stdio.c` (~316 lines) where `printf`, `vprintf`,
 `snprintf`, `vsnprintf`, etc. all assume `va_list` is real. Lowering needs:
