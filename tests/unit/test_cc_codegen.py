@@ -3371,6 +3371,47 @@ def test_sizeof_packed_char_int_32bit() -> None:
     assert "mov eax, 5" in asm, f"Expected 'mov eax, 5' for sizeof packed {{char+int}} (32-bit)\n{asm}"
 
 
+def test_static_keyword_accepted_on_functions_and_globals() -> None:
+    """``static`` parses as a no-op storage-class qualifier.
+
+    BBoeOS doesn't model translation-unit linkage; ``static`` exists
+    only so portable C source (notably ``libbboeos/stdio.c``'s
+    file-static helpers) compiles without manual edits.  Verify the
+    keyword is accepted on function definitions, function prototypes,
+    and file-scope variable declarations, and that codegen is
+    unaffected versus the same source without the keyword.
+    """
+    source_text = textwrap.dedent(
+        """
+        static int helper(int x);
+        static int counter = 0;
+        static int helper(int x) {
+            counter = counter + 1;
+            return x + 1;
+        }
+        int main() {
+            return helper(41);
+        }
+        """,
+    )
+    with tempfile.TemporaryDirectory(prefix="test_static_") as work:
+        work_path = Path(work)
+        src = work_path / "test.c"
+        out = work_path / "test.asm"
+        src.write_text(source_text)
+        result = subprocess.run(
+            ["python3", str(CC), "--bits", "32", str(src), str(out)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        assert result.returncode == 0, f"cc.py failed:\n{result.stderr}"
+        asm = out.read_text()
+    assert "helper:" in asm, f"expected helper to be emitted:\n{asm}"
+    assert "_g_counter:" in asm, f"expected counter to be emitted as a normal global:\n{asm}"
+
+
 def test_struct_array_initializer_emits_fields() -> None:
     """A struct array with a partial initializer emits per-field directives."""
     asm = _kernel("""

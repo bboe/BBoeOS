@@ -1456,10 +1456,22 @@ class Parser:
         # declarations.  Names a symbol whose storage lives in another
         # translation unit; the generator emits no ``_g_<name>:`` bytes
         # for it, but references compile normally to ``[_g_<name>]``.
+        #
+        # ``static`` is accepted as a parallel storage-class qualifier.
+        # On functions, BBoeOS doesn't surface a linkage distinction
+        # (every function name is local to its translation unit
+        # already), so ``static`` is a no-op marker — present to make
+        # portable C source compile.  ``static`` and ``extern`` are
+        # mutually exclusive per C; we reject the pair.
         is_extern = False
+        is_static = False
         if self.peek()[0] == "EXTERN":
             self.eat("EXTERN")
             is_extern = True
+        elif self.peek()[0] == "STATIC":
+            self.eat("STATIC")
+            is_static = True
+        _ = is_static  # keyword accepted on functions/vars/arrays at file scope; no codegen effect
         type_string = self.parse_type()
         # Function-pointer global: ``type (*name)(params);``.  The parens
         # around ``*name`` distinguish this from a function definition

@@ -53,6 +53,7 @@ KEYWORDS = frozenset({
     "short",
     "signed",
     "sizeof",
+    "static",
     "struct",
     "switch",
     "typedef",
