@@ -36,8 +36,8 @@
 #define NE2K_RX_STOP 0x80  // RX ring end page (one past last)
 #define NE2K_TX_PAGE 0x40  // TX buffer start page
 
-uint8_t mac_address[6];
-uint8_t net_present;
+u8 mac_address[6];
+u8 net_present;
 
 // net_receive_buffer / net_transmit_buffer hold the kernel-virt of two
 // 4 KB scratch frames (1.5 KB used inside each: a max-size Ethernet
@@ -46,8 +46,8 @@ uint8_t net_present;
 // spend the two frames.  asm callers (arp.asm, ip.c's inline asm,
 // ne2k.c's own inline asm, the syscall path) load the pointer through
 // the equ shims below: ``mov edi, [net_receive_buffer]``.
-uint8_t *net_receive_buffer;
-uint8_t *net_transmit_buffer;
+u8 *net_receive_buffer;
+u8 *net_transmit_buffer;
 
 // Bare-name aliases for asm callers (entry.asm sets net_present indirectly
 // via network_initialize's return, but arp.asm/ip.c/syscall/net.asm read
@@ -78,14 +78,14 @@ void ne2k_init() {
     struct ne2k_cr cr_start = {.rd = 4, .start = 1};
 
     // Page 0, stop, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_stop);
+    kernel_outb(0x300, *(u8 *)&cr_stop);
     kernel_outb(0x300 + 0x01, NE2K_RX_START); // PSTART
     kernel_outb(0x300 + 0x02, NE2K_RX_STOP);  // PSTOP
     kernel_outb(0x300 + 0x03, NE2K_RX_START); // BOUNDARY
     kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);  // TPSR
 
     // Page 1, stop, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_stop_page1);
+    kernel_outb(0x300, *(u8 *)&cr_stop_page1);
     kernel_outb(0x300 + 0x07, NE2K_RX_START + 1); // CURR
 
     // Program PAR0..PAR5 with the MAC we read in ne2k_probe.
@@ -102,29 +102,29 @@ void ne2k_init() {
     }
 
     // Back to page 0, stop, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_stop);
+    kernel_outb(0x300, *(u8 *)&cr_stop);
     // RCR: accept broadcast.
-    kernel_outb(0x300 + 0x0C, *(uint8_t *)&rcr);
+    kernel_outb(0x300 + 0x0C, *(u8 *)&rcr);
     // TCR: normal mode (all fields zero: no loopback, no CRC inhibit).
-    kernel_outb(0x300 + 0x0D, *(uint8_t *)&tcr);
+    kernel_outb(0x300 + 0x0D, *(u8 *)&tcr);
     // ISR: clear all pending interrupts (ack by writing 1 to each bit).
-    kernel_outb(0x300 + 0x07, *(uint8_t *)&isr_ack_all);
+    kernel_outb(0x300 + 0x07, *(u8 *)&isr_ack_all);
     // IMR: PRX (RX done) only; wakes hlt-parked sys_net_recvfrom via
     // pmode_irq3_handler in entry.asm.  Packet drain still happens in
     // process context via ne2k_receive.
-    kernel_outb(0x300 + 0x0F, *(uint8_t *)&imr);
+    kernel_outb(0x300 + 0x0F, *(u8 *)&imr);
     // Page 0, start, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_start);
+    kernel_outb(0x300, *(u8 *)&cr_start);
 }
 
 // Probe and reset the NIC, read the MAC PROM into mac_address.
 // Returns 1 on success (CF clear), 0 if no NIC found / probe timed out.
 int ne2k_probe() __attribute__((carry_return)) {
     int timeout;
-    uint8_t status;
-    uint16_t word;
+    u8 status;
+    u16 word;
     int i;
-    uint8_t raw;
+    u8 raw;
     struct ne2k_cr *cr_read;
     struct ne2k_isr *isr_read;
     struct ne2k_isr ack_all = {.cnt = 1,
@@ -161,10 +161,10 @@ int ne2k_probe() __attribute__((carry_return)) {
     }
 
     // Acknowledge all interrupts (ack by writing 1 to each bit).
-    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_all);
+    kernel_outb(0x300 + 0x07, *(u8 *)&ack_all);
 
     // Page 0, stop, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_stop);
+    kernel_outb(0x300, *(u8 *)&cr_stop);
 
     // Verify NIC presence by reading CR back.  The page bits (6-7) are
     // ignored; check only stop=1, start=0, transmit=0, rd=4 (bit 5 set).
@@ -177,15 +177,15 @@ int ne2k_probe() __attribute__((carry_return)) {
 
     // DCR: word-wide DMA (wts=1), normal byte order (bos=0), 16-bit DMA
     // (las=0), normal (ls=1), no auto-init (arm=0), 4-byte FIFO (ft=2).
-    kernel_outb(0x300 + 0x0E, *(uint8_t *)&dcr);
+    kernel_outb(0x300 + 0x0E, *(u8 *)&dcr);
 
     kernel_outb(0x300 + 0x0A, 0); // RBCR0
     kernel_outb(0x300 + 0x0B, 0); // RBCR1
 
     // RCR: monitor mode (no RX during probe).
-    kernel_outb(0x300 + 0x0C, *(uint8_t *)&rcr_probe);
+    kernel_outb(0x300 + 0x0C, *(u8 *)&rcr_probe);
     // TCR: internal loopback.
-    kernel_outb(0x300 + 0x0D, *(uint8_t *)&tcr_probe);
+    kernel_outb(0x300 + 0x0D, *(u8 *)&tcr_probe);
 
     // Set up a 32-byte remote-DMA read from PROM offset 0.
     kernel_outb(0x300 + 0x08, 0);    // RSAR0
@@ -194,7 +194,7 @@ int ne2k_probe() __attribute__((carry_return)) {
     kernel_outb(0x300 + 0x0B, 0);    // RBCR1
 
     // CR: page 0, start, remote read DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_start_read);
+    kernel_outb(0x300, *(u8 *)&cr_start_read);
 
     // Word-mode DMA: each PROM byte is the low byte of a 16-bit read.
     i = 0;
@@ -217,7 +217,7 @@ int ne2k_probe() __attribute__((carry_return)) {
         raw = kernel_inb(0x300 + 0x07);
         isr_read = (struct ne2k_isr *)&raw;
     }
-    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_rdc);
+    kernel_outb(0x300 + 0x07, *(u8 *)&ack_rdc);
     return 1;
 }
 
@@ -228,7 +228,7 @@ int ne2k_probe() __attribute__((carry_return)) {
 // length, CF = packet-available) via out_register parameters and
 // carry_return so C callers see it as a normal function.
 __attribute__((carry_return)) int
-ne2k_receive(uint8_t *frame_pointer __attribute__((out_register("edi"))),
+ne2k_receive(u8 *frame_pointer __attribute__((out_register("edi"))),
              int *length __attribute__((out_register("ecx"))));
 
 asm("ne2k_receive:\n"
@@ -358,7 +358,7 @@ asm("ne2k_receive:\n"
 // Send one Ethernet frame.  ESI = frame pointer, ECX = length in bytes.
 // Returns 1 on success (CF clear), 0 on timeout / TX error.  Pads short
 // frames to the 60-byte minimum (NIC adds a 4-byte FCS for 64 on-wire).
-int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
+int ne2k_send(u8 *frame __attribute__((in_register("esi"))),
               int length __attribute__((in_register("ecx"))))
     __attribute__((carry_return)) __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ecx")))
@@ -366,10 +366,10 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
     __attribute__((preserve_register("esi"))) {
     int dma_count;
     int word_count;
-    uint8_t isr_raw;
+    u8 isr_raw;
     struct ne2k_isr *isr_read;
     int timeout;
-    uint8_t had_txe;
+    u8 had_txe;
     struct ne2k_cr cr_dma_write = {.rd = 2, .start = 1};
     struct ne2k_isr ack_rdc = {.rdc = 1};
     struct ne2k_cr cr_transmit = {.rd = 4, .start = 1, .transmit = 1};
@@ -387,7 +387,7 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
     kernel_outb(0x300 + 0x0B, (dma_count >> 8) & 0xFF); // RBCR1
 
     // CR: page 0, start, remote write DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_dma_write);
+    kernel_outb(0x300, *(u8 *)&cr_dma_write);
 
     kernel_outsw(0x300 + 0x10, frame, word_count);
 
@@ -398,14 +398,14 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
         isr_raw = kernel_inb(0x300 + 0x07);
         isr_read = (struct ne2k_isr *)&isr_raw;
     }
-    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_rdc); // Ack RDC.
+    kernel_outb(0x300 + 0x07, *(u8 *)&ack_rdc); // Ack RDC.
 
     kernel_outb(0x300 + 0x04, NE2K_TX_PAGE);         // TPSR
     kernel_outb(0x300 + 0x05, length & 0xFF);        // TBCR0
     kernel_outb(0x300 + 0x06, (length >> 8) & 0xFF); // TBCR1
 
     // CR: page 0, start, transmit, abort DMA.
-    kernel_outb(0x300, *(uint8_t *)&cr_transmit);
+    kernel_outb(0x300, *(u8 *)&cr_transmit);
 
     timeout = 0xFFFF;
     isr_raw = 0;
@@ -427,7 +427,7 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
     isr_read = (struct ne2k_isr *)&isr_raw;
     had_txe = isr_read->txe;
     // Ack PTX | TXE.
-    kernel_outb(0x300 + 0x07, *(uint8_t *)&ack_tx);
+    kernel_outb(0x300 + 0x07, *(u8 *)&ack_tx);
     if (had_txe) {
         return 0; // TX error reported.
     }
@@ -454,7 +454,7 @@ int ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
 //
 // The allocation + offset assignments are tucked into a single
 // inline-asm block because cc.py doesn't have a pointer cast syntax
-// for the int-to-`uint8_t *` conversion.
+// for the int-to-`u8 *` conversion.
 int network_initialize() __attribute__((carry_return));
 asm("network_initialize:\n"
     "        push eax\n"

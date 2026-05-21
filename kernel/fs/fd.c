@@ -30,20 +30,20 @@
 // the asm sides reach in via FD_OFFSET_EVENT_BUF + index*4 for the
 // 32-bit (pressed << 16) | bbkey slots.
 struct fd {
-    uint8_t type;
-    uint8_t flags;
-    uint16_t start;
+    u8 type;
+    u8 flags;
+    u16 start;
     int size;
     int position;
-    uint16_t directory_sector;
-    uint16_t directory_offset;
-    uint8_t mode;
-    uint8_t event_head;
-    uint8_t event_tail;
-    uint8_t dirty;
-    uint8_t event_buf[32];
-    uint32_t recv_timeout_ms;
-    uint8_t _rest[8];
+    u16 directory_sector;
+    u16 directory_offset;
+    u8 mode;
+    u8 event_head;
+    u8 event_tail;
+    u8 dirty;
+    u8 event_buf[32];
+    u32 recv_timeout_ms;
+    u8 _rest[8];
 };
 
 // fd_lookup is forward-declared because fd_close calls it but the
@@ -60,10 +60,10 @@ vfs_update_size(struct fd *entry __attribute__((in_register("esi"))));
 
 // fs/vfs.asm: locates a file (vfs_find) or creates one (vfs_create);
 // both populate the vfs_found_* cluster and return CF clear on success.
-__attribute__((carry_return)) int vfs_find(uint8_t *path
+__attribute__((carry_return)) int vfs_find(u8 *path
                                            __attribute__((in_register("esi"))));
 __attribute__((carry_return)) int
-vfs_create(uint8_t *path __attribute__((in_register("esi"))));
+vfs_create(u8 *path __attribute__((in_register("esi"))));
 
 // vfs.asm globals populated by vfs_find / vfs_create.  Read by
 // fd_open after the call to populate the new fd entry.  ``size`` is
@@ -73,12 +73,12 @@ vfs_create(uint8_t *path __attribute__((in_register("esi"))));
 // labels and uses the bare names (``vfs_found_size``, not
 // ``_g_vfs_found_size``); ``extern`` would emit ``_g_<name>``
 // references that NASM can't resolve.
-uint8_t vfs_found_type __attribute__((asm_name("vfs_found_type")));
-uint8_t vfs_found_mode __attribute__((asm_name("vfs_found_mode")));
-uint16_t vfs_found_inode __attribute__((asm_name("vfs_found_inode")));
-uint32_t vfs_found_size __attribute__((asm_name("vfs_found_size")));
-uint16_t vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
-uint16_t vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
+u8 vfs_found_type __attribute__((asm_name("vfs_found_type")));
+u8 vfs_found_mode __attribute__((asm_name("vfs_found_mode")));
+u16 vfs_found_inode __attribute__((asm_name("vfs_found_inode")));
+u32 vfs_found_size __attribute__((asm_name("vfs_found_size")));
+u16 vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
+u16 vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 
 // fd_ops dispatch table — one entry per FD_TYPE_*.  Each entry is a
 // (read_fn, write_fn) pair; a 0 slot means "unsupported".  Indexed
@@ -126,13 +126,13 @@ void midi_reset_state();
 // /dev/audio branch (refuses open when 0).  Mirrors the asm-name
 // shim used in drivers/ne2k.c so cc.py emits the bare name reference
 // the asm-side `_g_sb16_present` can satisfy at link time.
-uint8_t sb16_present __attribute__((asm_name("_g_sb16_present")));
+u8 sb16_present __attribute__((asm_name("_g_sb16_present")));
 
 // Set by drivers/opl3.c on successful OPL3 probe.  Read by fd_open's
 // /dev/midi branch (refuses open when 0).  Same asm-name shim as
 // sb16_present so cc.py emits the bare name reference the asm-side
 // `_g_opl3_present` can satisfy at link time.
-uint8_t opl3_present __attribute__((asm_name("_g_opl3_present")));
+u8 opl3_present __attribute__((asm_name("_g_opl3_present")));
 
 // Forward decls for the SB16 driver's per-open / per-close callbacks.
 // sb16_open allocates the DMA frame and arms the controller; called
@@ -198,7 +198,7 @@ struct fd *fd_table_base() {
 // caller-supplied user buffer pointer here before tail-jumping to the
 // per-type write handler.  Hoisted out of asm so the C-ported
 // handlers in fs/fd/{console,fs,net}.c can read it directly.
-uint8_t *fd_write_buffer;
+u8 *fd_write_buffer;
 asm("fd_write_buffer equ _g_fd_write_buffer");
 
 // fd_alloc: linear scan for the first FD_TYPE_FREE slot.  AX = fd
@@ -368,7 +368,7 @@ fd_dup2(int *result __attribute__((out_register("ax"))),
 // invalid.  ``mode`` uses ``out_register("ax")`` rather than
 // ``out_register("al")`` because the syscall dispatcher only looks at
 // AL — emitting through AX (with the high byte cleared by the
-// uint8_t-to-int widening) keeps the cc.py codegen path uniform with
+// u8-to-int widening) keeps the cc.py codegen path uniform with
 // the CX/DX captures and avoids the byte-alias mismatch in the
 // DerefAssign emission.
 // CF set if the fd is invalid.  PIPE_R/PIPE_W also return CF set —
@@ -475,7 +475,7 @@ fd_lookup(int fd_num __attribute__((in_register("bx"))),
 // the size so a subsequent write rebuilds the file from scratch.
 __attribute__((carry_return)) int
 fd_open(int *result __attribute__((out_register("ax"))),
-        uint8_t *name __attribute__((in_register("esi"))),
+        u8 *name __attribute__((in_register("esi"))),
         int flags __attribute__((in_register("ax")))) {
     int fd_num;
     struct fd *entry;
@@ -596,12 +596,12 @@ fd_open(int *result __attribute__((out_register("ax"))),
 __attribute__((carry_return)) int
 fd_read(int *result __attribute__((out_register("ax"))),
         int fd_num __attribute__((in_register("bx"))),
-        uint8_t *buffer __attribute__((in_register("edi"))),
+        u8 *buffer __attribute__((in_register("edi"))),
         int count __attribute__((in_register("ecx")))) {
     struct fd *entry;
     struct fd_ops_entry *ops;
     int (*handler)(struct fd *e __attribute__((in_register("esi"))),
-                   uint8_t *b __attribute__((in_register("edi"))),
+                   u8 *b __attribute__((in_register("edi"))),
                    int c __attribute__((in_register("ecx"))));
     if (!fd_lookup(fd_num, &entry)) {
         *result = -1;
@@ -623,7 +623,7 @@ fd_read(int *result __attribute__((out_register("ax"))),
 __attribute__((carry_return)) int
 fd_read_pipe(int *result __attribute__((out_register("ax"))),
              struct fd *entry __attribute__((in_register("esi"))),
-             uint8_t *buffer __attribute__((in_register("edi"))),
+             u8 *buffer __attribute__((in_register("edi"))),
              int count __attribute__((in_register("ecx")))) {
     struct pipe *p;
     int bytes_read;
@@ -708,7 +708,7 @@ fd_seek(int *result __attribute__((out_register("ax"))),
 __attribute__((carry_return)) int
 fd_write(int *result __attribute__((out_register("ax"))),
          int fd_num __attribute__((in_register("bx"))),
-         uint8_t *source __attribute__((in_register("esi"))),
+         u8 *source __attribute__((in_register("esi"))),
          int count __attribute__((in_register("ecx")))) {
     struct fd *entry;
     struct fd_ops_entry *ops;
@@ -745,7 +745,7 @@ fd_write_pipe(int *result __attribute__((out_register("ax"))),
     struct pipe *p;
     int bytes_written;
     int total;
-    uint8_t *cursor;
+    u8 *cursor;
     p = pipe_at(entry->start);
     if (p == 0) {
         *result = -1;

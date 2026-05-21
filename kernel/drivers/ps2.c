@@ -120,9 +120,9 @@ char ps2_buf[KB_BUFFER_SIZE];
 // ^A..^Z.  The event path doesn't need them; BBKEY codes are
 // positional (BBKEY_W is "the W slot" regardless of shift) with
 // separate events for the modifier keys themselves.
-uint8_t ps2_ctrl;
-uint8_t ps2_extended;
-uint8_t ps2_head;
+u8 ps2_ctrl;
+u8 ps2_extended;
+u8 ps2_head;
 
 // Set-1 scan code → ASCII tables (codes 0x00–0x3A only — F-keys /
 // CapsLock land above 0x3A and get filtered out before the table is
@@ -149,7 +149,7 @@ char ps2_map_unshift[59] = {
 // event ring (ASCII/shift state lives in the cooked path only).
 // Modifier scancodes (Shift/Ctrl) and CapsLock are first-class
 // here, unlike in ps2_map_unshift where they slot 0 to be skipped.
-uint8_t ps2_scancode_to_bbkey[59] = {
+u8 ps2_scancode_to_bbkey[59] = {
     /* 0x00 */ 0,
     /* 0x01 */ BBKEY_ESC,
     /* 0x02 */ BBKEY_1,
@@ -211,8 +211,8 @@ uint8_t ps2_scancode_to_bbkey[59] = {
     /* 0x3A */ BBKEY_CAPSLOCK,
 };
 
-uint8_t ps2_shift;
-uint8_t ps2_tail;
+u8 ps2_shift;
+u8 ps2_tail;
 
 // Forward declarations for callees that come later alphabetically.
 // ps2_install_irq and ps2_broadcast_event are asm shims in the
@@ -225,7 +225,7 @@ void ps2_putc(char byte __attribute__((in_register("ax"))));
 // drivers/vga.c — current display mode byte and scrollback API.
 // vga_current_mode is declared without the _g_ prefix; cc.py adds that
 // automatically when emitting [_g_vga_current_mode] in the assembly.
-extern uint8_t vga_current_mode;
+extern u8 vga_current_mode;
 void vga_scrollback_down(int rows);
 int vga_scrollback_is_active();
 void vga_scrollback_up(int rows);
@@ -256,7 +256,7 @@ void ps2_drain() {
 // (AL=0), which the asm caller in `fs/fd/console.asm` checks via
 // ``test al, al`` — char return matches that contract directly.
 char ps2_getc() {
-    uint8_t head;
+    u8 head;
     char byte;
     if (ps2_head == ps2_tail) {
         return '\0';
@@ -283,9 +283,9 @@ char ps2_getc() {
 //      dispatch on physical key without reasoning about ASCII.
 //
 // Called from the IRQ stub with the scancode in AL.
-void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
-    uint8_t code;
-    uint8_t pressed;
+void ps2_handle_scancode(u8 scancode __attribute__((in_register("ax")))) {
+    u8 code;
+    u8 pressed;
     int bbkey;
     char ascii;
     char upper;
@@ -427,9 +427,9 @@ void ps2_handle_scancode(uint8_t scancode __attribute__((in_register("ax")))) {
 void ps2_init() {
     struct pic_imr imr;
     ps2_install_irq();
-    *(uint8_t *)&imr = kernel_inb(PS2_PIC1_DATA);
+    *(u8 *)&imr = kernel_inb(PS2_PIC1_DATA);
     imr.irq1 = 0;
-    kernel_outb(PS2_PIC1_DATA, *(uint8_t *)&imr);
+    kernel_outb(PS2_PIC1_DATA, *(u8 *)&imr);
 }
 
 // ps2_install_irq: register ps2_irq1_handler at IDT vector 0x21.
@@ -527,8 +527,8 @@ ps2_broadcast_event:
 // before the byte is pushed.  vga_scrollback_down clamps internally
 // so over-shooting by 1000 is harmless.
 void ps2_putc(char byte __attribute__((in_register("ax")))) {
-    uint8_t tail;
-    uint8_t next;
+    u8 tail;
+    u8 next;
     if (vga_scrollback_is_active() != 0) {
         vga_scrollback_down(1000);
     }

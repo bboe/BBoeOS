@@ -1,3 +1,5 @@
+#include "types.h"
+
 // serial.c — COM1 serial port driver (polled TX, IRQ 4 RX).
 //
 // Output:
@@ -38,9 +40,9 @@
 // FIFO before returning) — interactive typing fits in any size.
 #define SERIAL_RING_SIZE 128
 
-uint8_t serial_buf[SERIAL_RING_SIZE];
-uint8_t serial_head;
-uint8_t serial_tail;
+u8 serial_buf[SERIAL_RING_SIZE];
+u8 serial_head;
+u8 serial_tail;
 
 // Bare-name aliases so the asm IRQ stub in entry.asm can reach them
 // without the _g_ prefix cc.py emits for C globals.
@@ -144,8 +146,8 @@ asm("serial_init:\n"
 // full.  Called only from the IRQ 4 handler path, so head/tail
 // concurrency is one-sided (IRQ writes tail; reader writes head).
 void serial_putc(char byte __attribute__((in_register("ax")))) {
-    uint8_t tail;
-    uint8_t next;
+    u8 tail;
+    u8 next;
     tail = serial_tail;
     next = (tail + 1) & (SERIAL_RING_SIZE - 1);
     if (next == serial_head) {

@@ -1,3 +1,5 @@
+#include "types.h"
+
 // fs/fd/fs.c — read/write implementations for FD_TYPE_DIRECTORY and
 // FD_TYPE_FILE.  Dispatched via fd_ops in fs/fd.c when the syscall
 // layer hands a directory- or file-typed fd to fd_read / fd_write.
@@ -12,18 +14,18 @@
 // `vfs_init` from a `frame_alloc` + direct-map adjust.  Holds
 // the kernel-virt of the 4 KB frame whose first 512 bytes back
 // the per-sector disk read window.
-extern uint8_t *sector_buffer;
+extern u8 *sector_buffer;
 
 // fd entry layout — match the asm-side FD_OFFSET_* offsets.  Only
 // `size` and `position` are touched here; the rest is opaque
 // padding to keep field offsets aligned with constants.asm.
 struct fd {
-    uint8_t type;
-    uint8_t flags;
-    uint16_t start;
+    u8 type;
+    u8 flags;
+    u16 start;
     int size;
     int position;
-    uint8_t _rest[20];
+    u8 _rest[20];
 };
 
 // fs/vfs.asm — runtime function-pointer thunks into the active
@@ -41,7 +43,7 @@ vfs_read_sec(int *byte_offset __attribute__((out_register("bx"))),
 
 // fs/fd.c file-scope global; fd_write stashes the user buffer
 // pointer here before jumping to this handler.
-extern uint8_t *fd_write_buffer;
+extern u8 *fd_write_buffer;
 
 // In-flight read/write bookkeeping.  Lifted from the original
 // fs.asm's three trailing `dd 0` slots.  These are private to this
@@ -59,7 +61,7 @@ int fd_rw_left;
 __attribute__((carry_return)) int
 fd_read_isdir(int *result __attribute__((out_register("ax"))),
               struct fd *entry __attribute__((in_register("esi"))),
-              uint8_t *buffer __attribute__((in_register("edi"))),
+              u8 *buffer __attribute__((in_register("edi"))),
               int count __attribute__((in_register("ecx")))) {
     (void)entry;
     (void)buffer;
@@ -75,7 +77,7 @@ fd_read_isdir(int *result __attribute__((out_register("ax"))),
 __attribute__((carry_return)) int
 fd_read_file(int *result __attribute__((out_register("ax"))),
              struct fd *entry __attribute__((in_register("esi"))),
-             uint8_t *destination __attribute__((in_register("edi"))),
+             u8 *destination __attribute__((in_register("edi"))),
              int count __attribute__((in_register("ecx")))) {
     int byte_offset;
     int chunk;

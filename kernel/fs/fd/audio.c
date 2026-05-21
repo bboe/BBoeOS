@@ -1,3 +1,5 @@
+#include "types.h"
+
 // fd/audio.c — read/write/ioctl/close handlers for FD_TYPE_AUDIO
 // (/dev/audio).  Companion to drivers/sb16.c.
 //
@@ -17,12 +19,12 @@
 // usage but the ring still bounds total queue depth — total worst-case
 // SFX latency stays at AUDIO_RING_SIZE + AUDIO_HALF_SIZE ≈ 75 ms.  Keep
 // these in sync with the matching macros in drivers/sb16.c.
-extern uint8_t sb16_present;
-extern uint8_t *audio_ring_kvirt;
-extern uint32_t audio_ring_head;
-extern uint32_t audio_ring_tail;
-extern uint8_t audio_wakeup;
-extern uint8_t *fd_write_buffer;
+extern u8 sb16_present;
+extern u8 *audio_ring_kvirt;
+extern u32 audio_ring_head;
+extern u32 audio_ring_tail;
+extern u8 audio_wakeup;
+extern u8 *fd_write_buffer;
 
 #define AUDIO_RING_SIZE 512
 #define AUDIO_RING_MASK 511
@@ -70,9 +72,9 @@ __attribute__((carry_return)) int
 fd_write_audio(int *bytes_written __attribute__((out_register("ax"))),
                int count __attribute__((in_register("ecx")))) {
     int written;
-    uint32_t head;
-    uint32_t tail;
-    uint32_t free_bytes;
+    u32 head;
+    u32 tail;
+    u32 free_bytes;
     int chunk;
     int index;
     written = 0;
@@ -92,7 +94,7 @@ fd_write_audio(int *bytes_written __attribute__((out_register("ax"))),
             continue;
         }
         chunk = count - written;
-        if ((uint32_t)chunk > free_bytes) {
+        if ((u32)chunk > free_bytes) {
             chunk = free_bytes;
         }
         index = 0;

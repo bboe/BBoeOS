@@ -1,3 +1,5 @@
+#include "types.h"
+
 // fd/net.c — read/write implementations for FD_TYPE_NET (raw NE2000
 // sockets).  Dispatched via fd_ops in fs/fd.c when the syscall layer
 // hands a NET-typed fd to fd_read / fd_write.
@@ -13,16 +15,16 @@
 // pointer and ECX = packet length; ne2k_send takes ESI = frame, ECX =
 // length and returns CF set on error.
 __attribute__((carry_return)) int
-ne2k_receive(uint8_t *frame_pointer __attribute__((out_register("edi"))),
+ne2k_receive(u8 *frame_pointer __attribute__((out_register("edi"))),
              int *length __attribute__((out_register("ecx"))));
 __attribute__((carry_return)) int
-ne2k_send(uint8_t *frame __attribute__((in_register("esi"))),
+ne2k_send(u8 *frame __attribute__((in_register("esi"))),
           int length __attribute__((in_register("ecx"))));
 
 // fs/fd.c file-scope global, set by fd_write before this function is
 // reached.  Storage lives in fd.c; extern names the symbol without
 // emitting a second copy.
-extern uint8_t *fd_write_buffer;
+extern u8 *fd_write_buffer;
 
 // fd_read_net: poll the NIC for one frame; copy min(packet_length,
 // max_bytes) into user_destination.  EAX = bytes copied (0 if no
@@ -31,9 +33,9 @@ extern uint8_t *fd_write_buffer;
 // read).
 __attribute__((carry_return)) int
 fd_read_net(int *bytes_copied __attribute__((out_register("ax"))),
-            uint8_t *user_destination __attribute__((in_register("edi"))),
+            u8 *user_destination __attribute__((in_register("edi"))),
             int max_bytes __attribute__((in_register("ecx")))) {
-    uint8_t *frame_pointer;
+    u8 *frame_pointer;
     int packet_length;
     if (!ne2k_receive(&frame_pointer, &packet_length)) {
         *bytes_copied = 0;

@@ -1,8 +1,10 @@
+#include "types.h"
+
 // opl3.c — Sound Blaster 16 built-in OPL3 FM chip driver.
 //
 // Caller-facing surface (referenced by fs/fd/midi.c, drivers/sb16.c):
 //
-//     opl3_present (uint8_t) — set to 1 by sb16_init when the SB16 DSP
+//     opl3_present (u8) — set to 1 by sb16_init when the SB16 DSP
 //                              probe succeeded (real SB16 cards always
 //                              include OPL3, so the SB16 probe doubles
 //                              as the OPL3 probe); gates the
@@ -24,7 +26,7 @@
 // would otherwise clobber the register-state contract some callers
 // (the IRQ 0 ISR draining the midi queue) need to honour.
 
-uint8_t opl3_present;
+u8 opl3_present;
 asm("opl3_present equ _g_opl3_present");
 
 // Forward declaration so opl_silence_all (alphabetically earlier) can

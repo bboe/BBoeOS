@@ -161,15 +161,15 @@
         ;; struct pipe layout — fields strict-alphabetical; trailing _pad
         ;; aligns the struct to exactly 4096 bytes for clean BSS reservation.
         %assign PIPE_BUFFER_BYTES            4076
-        %assign PIPE_OFFSET_BLOCKED_READER   0x000  ; uint32_t* program_state or 0
-        %assign PIPE_OFFSET_BLOCKED_WRITER   0x004  ; uint32_t* program_state or 0
-        %assign PIPE_OFFSET_BUFFER           0x008  ; uint8_t[4076]; ends at 0xFF4
-        %assign PIPE_OFFSET_COUNT            0xFF4  ; uint16_t bytes in buffer
-        %assign PIPE_OFFSET_HEAD             0xFF6  ; uint16_t read cursor
-        %assign PIPE_OFFSET_IN_USE           0xFF8  ; uint8_t pool occupancy
-        %assign PIPE_OFFSET_READER_FD_OPEN   0xFF9  ; uint8_t refcount of read ends
-        %assign PIPE_OFFSET_TAIL             0xFFA  ; uint16_t write cursor
-        %assign PIPE_OFFSET_WRITER_FD_OPEN   0xFFC  ; uint8_t refcount of write ends
+        %assign PIPE_OFFSET_BLOCKED_READER   0x000  ; u32* program_state or 0
+        %assign PIPE_OFFSET_BLOCKED_WRITER   0x004  ; u32* program_state or 0
+        %assign PIPE_OFFSET_BUFFER           0x008  ; u8[4076]; ends at 0xFF4
+        %assign PIPE_OFFSET_COUNT            0xFF4  ; u16 bytes in buffer
+        %assign PIPE_OFFSET_HEAD             0xFF6  ; u16 read cursor
+        %assign PIPE_OFFSET_IN_USE           0xFF8  ; u8 pool occupancy
+        %assign PIPE_OFFSET_READER_FD_OPEN   0xFF9  ; u8 refcount of read ends
+        %assign PIPE_OFFSET_TAIL             0xFFA  ; u16 write cursor
+        %assign PIPE_OFFSET_WRITER_FD_OPEN   0xFFC  ; u8 refcount of write ends
         ;; PIPE_OFFSET 0xFFD..0xFFF are _pad[3]; total struct size = 0x1000.
         %assign PIPE_SIZE                    0x1000
         %assign PROGRAM_BASE 08048000h          ; user-virt program load address (Linux ELF convention)
@@ -182,11 +182,11 @@
         ;; fields stay 4-byte-aligned.
         %assign PROGRAM_STATE_OFFSET_ALARM_DEADLINE     0x000
         %assign PROGRAM_STATE_OFFSET_ALARM_INTERVAL     0x004
-        %assign PROGRAM_STATE_OFFSET_CURRENT_PIPE       0x008  ; uint32_t struct pipe* or 0
+        %assign PROGRAM_STATE_OFFSET_CURRENT_PIPE       0x008  ; u32 struct pipe* or 0
         %assign PROGRAM_STATE_OFFSET_FD_TABLE           0x00C
         %assign PROGRAM_STATE_OFFSET_IN_SIGNAL_HANDLER  0x20C
         ;; bytes 0x20D..0x20F are pad_after_handler[3]
-        %assign PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP   0x210  ; uint32_t pointer to this slot's kernel stack top
+        %assign PROGRAM_STATE_OFFSET_KERNEL_STACK_TOP   0x210  ; u32 pointer to this slot's kernel stack top
         %assign PROGRAM_STATE_OFFSET_PD_PHYS            0x214
         %assign PROGRAM_STATE_OFFSET_PENDING_SIGALRM    0x218
         %assign PROGRAM_STATE_OFFSET_PENDING_SIGINT     0x219
@@ -194,14 +194,14 @@
         ;; byte 0x21B is pad_after_pending[1]
         %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK      0x21C
         %assign PROGRAM_STATE_OFFSET_PROGRAM_BREAK_MIN  0x220
-        %assign PROGRAM_STATE_OFFSET_SAVED_ESP          0x224  ; uint32_t parked kernel ESP while this slot is not current
+        %assign PROGRAM_STATE_OFFSET_SAVED_ESP          0x224  ; u32 parked kernel ESP while this slot is not current
         %assign PROGRAM_STATE_OFFSET_SIGALRM_HANDLER    0x228
         %assign PROGRAM_STATE_OFFSET_SIGINT_HANDLER     0x22C
         %assign PROGRAM_STATE_OFFSET_SIGPIPE_HANDLER    0x230
-        %assign PROGRAM_STATE_OFFSET_STATE              0x234  ; uint8_t STATE_*
+        %assign PROGRAM_STATE_OFFSET_STATE              0x234  ; u8 STATE_*
         ;; bytes 0x235..0x237 are pad_after_state[3]
-        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x238  ; uint32_t parked exit code while STATE_EXITED
-        %assign PROGRAM_STATE_OFFSET_INITIAL_ESP        0x23C  ; uint32_t user-virt ESP for the first iretd into ring 3; build_initial_iret_frame writes this into the on-stack SS:ESP slot
+        %assign PROGRAM_STATE_OFFSET_WAIT_STATUS        0x238  ; u32 parked exit code while STATE_EXITED
+        %assign PROGRAM_STATE_OFFSET_INITIAL_ESP        0x23C  ; u32 user-virt ESP for the first iretd into ring 3; build_initial_iret_frame writes this into the on-stack SS:ESP slot
         %assign PROGRAM_STATE_SIZE                      0x240
         ;; Sound Blaster 16 (ISA) at QEMU's `-device sb16` defaults — base 0x220.
         ;; C drivers/sb16.c uses bare integers for the offset registers (matches

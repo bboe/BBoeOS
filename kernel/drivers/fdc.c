@@ -26,8 +26,8 @@
 
 #include "registers.h"
 
-uint8_t fdc_irq_flag;
-uint8_t fdc_motor_ready;
+u8 fdc_irq_flag;
+u8 fdc_motor_ready;
 
 // FS scratch frame pointer — defined in vfs.c, populated by
 // `vfs_init` before the first disk read.  fdc_dma_setup feeds the
@@ -38,7 +38,7 @@ uint8_t fdc_motor_ready;
 // frame above the 16 MB ISA-DMA ceiling would still be a problem
 // here; vfs_init's first-fit allocation lands well below 16 MB in
 // practice.
-extern uint8_t *sector_buffer;
+extern u8 *sector_buffer;
 
 // Forward declarations for callees that come later alphabetically and
 // are invoked from earlier-alphabetical C functions.  asm-body
@@ -49,7 +49,7 @@ void fdc_install_irq();
 int fdc_recv() __attribute__((preserve_register("edx")));
 void fdc_seek(int cx_arg __attribute__((in_register("cx"))),
               int dx_arg __attribute__((in_register("dx"))));
-void fdc_send(uint8_t byte __attribute__((in_register("ax"))));
+void fdc_send(u8 byte __attribute__((in_register("ax"))));
 void fdc_sense_interrupt();
 void fdc_wait_irq();
 
@@ -60,13 +60,13 @@ void fdc_wait_irq();
 // 0xFF800000 below must equal `DIRECT_MAP_BASE` in
 // kernel/arch/x86/kernel.asm — cc.py doesn't resolve NASM equ symbols
 // inside C expressions, so this is a manual link.  Keep in sync.
-void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
+void fdc_dma_setup(u8 mode __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax"))) {
     int phys;
     struct dma_mask mask_ch2 = {.channel = 2, .set = 1};
     struct dma_mask unmask_ch2 = {.channel = 2};
     phys = sector_buffer - 0xFF800000;
-    kernel_outb(0x0A, *(uint8_t *)&mask_ch2);
+    kernel_outb(0x0A, *(u8 *)&mask_ch2);
     kernel_outb(0x0C, 0);                       // clear flip-flop
     kernel_outb(0x04, phys & 0xFF);             // addr low
     kernel_outb(0x04, (phys >> 8) & 0xFF);      // addr high
@@ -75,12 +75,12 @@ void fdc_dma_setup(uint8_t mode __attribute__((in_register("ax"))))
     kernel_outb(0x05, ((512 - 1) >> 8) & 0xFF); // count high
     kernel_outb(0x0B, mode);                    // DMA mode
     kernel_outb(0x81, (phys >> 16) & 0xFF);     // page
-    kernel_outb(0x0A, *(uint8_t *)&unmask_ch2);
+    kernel_outb(0x0A, *(u8 *)&unmask_ch2);
 }
 
 // Drain the 7 result bytes (ST0, ST1, ST2, C, H, R, N) — ignored.
 void fdc_drain_result() {
-    uint8_t index;
+    u8 index;
     index = 0;
     while (index < 7) {
         fdc_recv();
@@ -96,15 +96,15 @@ void fdc_init() {
     struct fdc_dor dor_run = {.reset_not = 1, .dma_irq = 1};
 
     fdc_install_irq();
-    *(uint8_t *)&imr = kernel_inb(0x21); // PIC1_DATA_PORT
-    imr.irq6 = 0;                        // unmask IRQ 6
-    kernel_outb(0x21, *(uint8_t *)&imr);
+    *(u8 *)&imr = kernel_inb(0x21); // PIC1_DATA_PORT
+    imr.irq6 = 0;                   // unmask IRQ 6
+    kernel_outb(0x21, *(u8 *)&imr);
 
     fdc_irq_flag = 0;
 
     // Reset: clear DOR, then raise RESET_NOT with DMA+IRQ + drive 0.
-    kernel_outb(0x3F2, *(uint8_t *)&dor_reset);
-    kernel_outb(0x3F2, *(uint8_t *)&dor_run);
+    kernel_outb(0x3F2, *(u8 *)&dor_reset);
+    kernel_outb(0x3F2, *(u8 *)&dor_run);
     fdc_wait_irq(); // controller signals ready
 
     // Drain 4 polling interrupts (one per drive slot on 82077AA).
@@ -151,7 +151,7 @@ asm("fdc_irq6_handler:\n"
 
 // Issue a READ or WRITE command with the 9-byte parameter sequence.
 // AL = command, CH = cyl, CL = sec (1-based), DH = head.
-void fdc_issue_read_write(uint8_t command __attribute__((in_register("ax"))),
+void fdc_issue_read_write(u8 command __attribute__((in_register("ax"))),
                           int cx_arg __attribute__((in_register("cx"))),
                           int dx_arg __attribute__((in_register("dx"))));
 
@@ -254,7 +254,7 @@ int fdc_read_sector(int lba __attribute__((in_register("ax"))))
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(*(uint8_t *)&mode_read);
+    fdc_dma_setup(*(u8 *)&mode_read);
     fdc_irq_flag = 0;
     fdc_issue_read_write(0xE6, cx, dx); // CMD_READ
     fdc_wait_irq();
@@ -357,7 +357,7 @@ int fdc_write_sector(int lba __attribute__((in_register("ax"))))
     }
     fdc_lba_to_chs_internal(lba, &cx, &dx);
     fdc_seek(cx, dx);
-    fdc_dma_setup(*(uint8_t *)&mode_write);
+    fdc_dma_setup(*(u8 *)&mode_write);
     fdc_irq_flag = 0;
     fdc_issue_read_write(0xC5, cx, dx); // CMD_WRITE
     fdc_wait_irq();

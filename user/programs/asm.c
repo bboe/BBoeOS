@@ -4,6 +4,8 @@
    nesting.  Compiled with ``cc.py --bits 32`` for ring-0 protected
    mode. */
 
+#include <stdint.h>
+
 #include "asm_layout.h"
 
 /* Symbol-table and jump-size tables in BSS.  ``struct Symbol`` packs
