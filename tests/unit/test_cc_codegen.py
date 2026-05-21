@@ -700,6 +700,55 @@ def test_address_of_at_out_register_arg_still_allows_auto_pin() -> None:
     assert "mov dx, cx" in asm, f"expected pinned-register capture, got\n{asm}"
 
 
+def test_auto_pin_cost_model_subtracts_pre_first_store_calls() -> None:
+    """Pre-first-store calls are dropped from the auto-pin cost gate.
+
+    PR #454's liveness pre-pass elides ``push <pin>`` / ``pop <pin>``
+    around any call that runs before the pinned local is first
+    written.  Auto-pin's cost model now factors that in: a candidate
+    whose first store happens late in the function only pays the
+    save cost for calls AFTER the store, not the function-wide
+    clobber count.
+
+    Here ``counter`` is written for the first time after 8 helper
+    calls — under the pre-refinement model, refs (6) didn't beat
+    the EBX clobber count (8) so auto-pin bailed.  Post-refinement
+    the effective cost is 0 (all 8 calls are pre-store), so the
+    pin lands and ``counter`` lives in EBX.
+    """
+    asm = _kernel(
+        """
+        int helper(int x);
+        int late_store() {
+            int counter;
+            helper(0);
+            helper(1);
+            helper(2);
+            helper(3);
+            helper(4);
+            helper(5);
+            helper(6);
+            helper(7);
+            counter = 0;
+            counter = counter + 1;
+            counter = counter + 1;
+            return counter;
+        }
+    """,
+        bits=32,
+    )
+    # Counter pins to an E-register (any of the safe ones), so its
+    # store pattern is ``mov eRR, eax`` rather than a stack-slot
+    # spill (``mov [ebp-N], eax``).  Before the refinement, refs (6)
+    # didn't beat the function-wide EBX clobber count (8 user-call
+    # clobbers), so auto-pin bailed and counter spilled.
+    pinned_store_forms = ("mov ebx, eax", "mov ecx, eax", "mov edx, eax", "mov edi, eax")
+    assert any(form in asm for form in pinned_store_forms), (
+        f"expected counter to pin to an E-register (store via {pinned_store_forms}):\n{asm}"
+    )
+    assert "[ebp-4], eax" not in asm, f"counter should not spill to its frame slot:\n{asm}"
+
+
 def test_double_pointer_deref_assign_emits_indirect_store() -> None:
     """``*endptr = value`` lowers to ``mov [reg], <acc>`` for plain pointer locals.
 
@@ -2515,7 +2564,15 @@ def test_out_register_prototype_registers_convention() -> None:
 
 
 def test_out_register_si_cleared_across_call() -> None:
-    """If a second call intervenes after the capture, the optimization falls back to BX."""
+    """If a second call intervenes after the capture, ``p`` survives without using SI.
+
+    Pre-auto-pin-liveness, ``p`` spilled to ``[bp-N]`` and reloaded
+    via ``mov bx, [bp-N]``.  With the cost model honouring the
+    out_register capture as a first store, ``p`` auto-pins and the
+    intervening call wraps with ``push <pin>`` / ``pop <pin>``.
+    The essential invariant is the same: ``[si]`` cannot back the
+    member write because ``other_func`` clobbers SI.
+    """
     asm = _kernel("""
         struct point { int x; int y; };
 
@@ -2530,16 +2587,22 @@ def test_out_register_si_cleared_across_call() -> None:
             }
         }
     """)
-    # After other_func(), SI is no longer trusted — fallback to BX.
-    assert "mov bx, [bp-" in asm, f"expected BX reload after intervening call\n{asm}"
+    # SI is dead after other_func; the member write must reach
+    # through a different base (frame reload OR a pinned register
+    # the call saved/restored).
+    assert "mov [si]" not in asm and "mov [si+" not in asm, f"SI is clobbered by other_func; cannot back the write\n{asm}"
 
 
 def test_out_register_si_used_directly_for_member_access() -> None:
-    """SI-cached pointer uses [si+offset] directly for struct writes.
+    """``p`` survives without a frame slot — via SI fast-path or an auto-pinned register.
 
-    When no call intervenes between the out_register capture and the member
-    writes, the code uses SI as the base register directly instead of the
-    ``mov bx, [bp-N]; [bx+offset]`` round-trip.
+    Pre-auto-pin-liveness, the SI-cached pointer was used directly
+    via ``[si]`` / ``[si+N]`` because ``p`` didn't auto-pin (refs
+    didn't beat the clobber gate).  With the cost model honouring
+    the out_register capture as a first store, ``p`` may now auto-
+    pin and the writes go through that pinned register instead.
+    Either way the invariant is the same: no stack reload for
+    ``p`` between the capture and the member writes.
     """
     asm = _kernel("""
         struct point { int x; int y; };
@@ -2554,9 +2617,7 @@ def test_out_register_si_used_directly_for_member_access() -> None:
             }
         }
     """)
-    # Both field writes should reference SI directly.
-    assert "[si]" in asm or "[si+" in asm, f"expected [si] or [si+N] in member writes\n{asm}"
-    assert "mov bx, [bp-" not in asm, f"unexpected BX reload for SI-cached pointer\n{asm}"
+    assert "mov bx, [bp-" not in asm and "mov bx, [bp+" not in asm, f"unexpected BX reload from frame for short-lived pointer\n{asm}"
 
 
 def test_peephole_dead_temp_slot_dropped() -> None:
