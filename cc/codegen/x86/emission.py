@@ -21,6 +21,7 @@ emitted.
 
 from __future__ import annotations
 
+import re
 from dataclasses import fields
 
 from cc import ir
@@ -75,9 +76,15 @@ from cc.ast_nodes import (
 from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED, JUMP_WHEN_TRUE, JUMP_WHEN_TRUE_UNSIGNED
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
-from cc.target import X86CodegenTarget16
+from cc.target import CodegenTarget, X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
+
+#: Lines that look like a function label: bare identifier at column 0
+#: followed by ``:`` and nothing else.  Used by :func:`_elide_dead_frames`
+#: to split the global line stream into per-function ranges.  Anchors,
+#: directives, and inline comments don't match.
+_FUNCTION_LABEL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*:$")
 
 #: Pointer types whose pointee is a 4-byte unsigned integer.  On the
 #: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
@@ -88,6 +95,67 @@ from cc.utils import decode_string_escapes, string_byte_length
 #: ``uint32_t *`` form silently reads only the low 16 bits on the
 #: 16-bit target.
 _LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
+
+def _elide_dead_frames(*, lines: list[str], target: CodegenTarget) -> list[str]:
+    """Drop ``sub <sp>, N`` + ``mov <sp>, <bp>`` lines in functions whose body never touches the frame.
+
+    Functions allocate a stack frame for every declared local even
+    when later peephole passes fold every use to an immediate — the
+    common case for one-shot bitfield-register structs:
+
+        struct foo s = {.bit = 1};
+        kernel_outb(port, *(u8 *)&s);
+
+    The const-fold + dead-store peepholes collapse both the init and
+    the read to ``mov al, <const>``, leaving the prologue's
+    ``sub esp, N`` and the matching ``mov esp, ebp`` epilogue paying
+    for storage that's never referenced.  This sweep walks each
+    emitted function's line range and, when no ``[<bp>+N]`` /
+    ``[<bp>-N]`` reference survived peepholing, drops those two
+    instruction shapes (and any duplicates from multiple-return
+    paths).  ``push <bp>`` / ``pop <bp>`` stay — leaving them keeps
+    the caller's frame chain undisturbed at zero extra cost relative
+    to a hand-written asm equivalent.
+    """
+    base = target.base_register
+    stack = target.stack_register
+    bracket_base = f"[{base}"
+    sub_prefix = f"        sub {stack}, "
+    mov_unwind = f"        mov {stack}, {base}"
+    result: list[str] = []
+    # Buffer each function's body so we can decide whether to drop the
+    # frame-management lines before flushing.  Anything outside a
+    # function (preamble, file-scope storage, trailing %include) passes
+    # through unchanged.
+    pending: list[str] | None = None
+    pending_has_frame_ref = False
+
+    def flush(*, buffer: list[str] | None, has_frame_ref: bool) -> None:
+        if buffer is None:
+            return
+        if has_frame_ref:
+            result.extend(buffer)
+            return
+        for line in buffer:
+            if line.startswith(sub_prefix) or line == mov_unwind:
+                continue
+            result.append(line)
+
+    for line in lines:
+        if _FUNCTION_LABEL_PATTERN.match(line):
+            flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
+            pending = [line]
+            pending_has_frame_ref = False
+            continue
+        if pending is None:
+            result.append(line)
+            continue
+        if bracket_base in line:
+            pending_has_frame_ref = True
+        pending.append(line)
+    flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
+    return result
 
 
 class EmissionMixin:
@@ -386,6 +454,7 @@ class EmissionMixin:
                     self.generate_function(function)
 
         self.lines = Peepholer(lines=self.lines, target=self.target).run()
+        self.lines = _elide_dead_frames(lines=self.lines, target=self.target)
         for include in sorted(self.required_includes):
             self.emit(f'%include "{include}"')
         # File-scope ``asm("...")`` blocks are emitted BEFORE globals /
