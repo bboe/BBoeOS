@@ -125,8 +125,6 @@ int ne2k_probe() __attribute__((carry_return)) {
     u16 word;
     int i;
     u8 raw;
-    struct ne2k_cr *cr_read;
-    struct ne2k_isr *isr_read;
     struct ne2k_isr ack_all = {.cnt = 1,
                                .ovw = 1,
                                .prx = 1,
@@ -150,8 +148,7 @@ int ne2k_probe() __attribute__((carry_return)) {
     timeout = 0xFFFF;
     while (timeout > 0) {
         raw = kernel_inb(0x300 + 0x07);
-        isr_read = (struct ne2k_isr *)&raw;
-        if (isr_read->rst) {
+        if (((struct ne2k_isr *)&raw)->rst) {
             break;
         }
         timeout = timeout - 1;
@@ -169,9 +166,10 @@ int ne2k_probe() __attribute__((carry_return)) {
     // Verify NIC presence by reading CR back.  The page bits (6-7) are
     // ignored; check only stop=1, start=0, transmit=0, rd=4 (bit 5 set).
     raw = kernel_inb(0x300);
-    cr_read = (struct ne2k_cr *)&raw;
-    if (cr_read->stop != 1 || cr_read->start != 0 || cr_read->transmit != 0 ||
-        cr_read->rd != 4) {
+    if (((struct ne2k_cr *)&raw)->stop != 1 ||
+        ((struct ne2k_cr *)&raw)->start != 0 ||
+        ((struct ne2k_cr *)&raw)->transmit != 0 ||
+        ((struct ne2k_cr *)&raw)->rd != 4) {
         return 0;
     }
 
@@ -212,10 +210,8 @@ int ne2k_probe() __attribute__((carry_return)) {
 
     // Wait for remote DMA complete (ISR.rdc), then ack.
     raw = kernel_inb(0x300 + 0x07);
-    isr_read = (struct ne2k_isr *)&raw;
-    while (isr_read->rdc == 0) {
+    while (((struct ne2k_isr *)&raw)->rdc == 0) {
         raw = kernel_inb(0x300 + 0x07);
-        isr_read = (struct ne2k_isr *)&raw;
     }
     kernel_outb(0x300 + 0x07, *(u8 *)&ack_rdc);
     return 1;
@@ -367,7 +363,6 @@ int ne2k_send(u8 *frame __attribute__((in_register("esi"))),
     int dma_count;
     int word_count;
     u8 isr_raw;
-    struct ne2k_isr *isr_read;
     int timeout;
     u8 had_txe;
     struct ne2k_cr cr_dma_write = {.rd = 2, .start = 1};
@@ -393,10 +388,8 @@ int ne2k_send(u8 *frame __attribute__((in_register("esi"))),
 
     // Wait for remote DMA complete (ISR.rdc), then ack.
     isr_raw = kernel_inb(0x300 + 0x07);
-    isr_read = (struct ne2k_isr *)&isr_raw;
-    while (isr_read->rdc == 0) {
+    while (((struct ne2k_isr *)&isr_raw)->rdc == 0) {
         isr_raw = kernel_inb(0x300 + 0x07);
-        isr_read = (struct ne2k_isr *)&isr_raw;
     }
     kernel_outb(0x300 + 0x07, *(u8 *)&ack_rdc); // Ack RDC.
 
@@ -411,8 +404,8 @@ int ne2k_send(u8 *frame __attribute__((in_register("esi"))),
     isr_raw = 0;
     while (timeout > 0) {
         isr_raw = kernel_inb(0x300 + 0x07);
-        isr_read = (struct ne2k_isr *)&isr_raw;
-        if (isr_read->ptx || isr_read->txe) { // PTX or TXE
+        if (((struct ne2k_isr *)&isr_raw)->ptx ||
+            ((struct ne2k_isr *)&isr_raw)->txe) { // PTX or TXE
             break;
         }
         timeout = timeout - 1;
@@ -424,8 +417,7 @@ int ne2k_send(u8 *frame __attribute__((in_register("esi"))),
         return 0;
     }
     // Save the error flag before the ack write.
-    isr_read = (struct ne2k_isr *)&isr_raw;
-    had_txe = isr_read->txe;
+    had_txe = ((struct ne2k_isr *)&isr_raw)->txe;
     // Ack PTX | TXE.
     kernel_outb(0x300 + 0x07, *(u8 *)&ack_tx);
     if (had_txe) {
