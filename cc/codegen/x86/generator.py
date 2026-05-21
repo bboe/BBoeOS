@@ -1385,10 +1385,46 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         field_size = info.field_size
         element_size = info.element_size
         is_array_field = field_size != element_size
-        # Materialise the base pointer into BX/EBX.  generate_expression
-        # leaves the value in AX/EAX; move to BX so the field-load
-        # addressing modes ([bx+N] / [ebx+N]) match the named-pointer
-        # path below.
+        # Fast path: when the cast wraps ``&local`` (the port-IO bridge
+        # idiom ``((struct T *)&raw)->field``), the base pointer is a
+        # known frame address — skip the ``lea + mov ebx, eax + mov al,
+        # [ebx]`` indirection and load directly from ``[ebp-K+offset]``.
+        # Saves ~5 bytes per call site versus going through EBX.  Falls
+        # through to the general path for non-AddressOf bases or for
+        # AddressOf of something other than a known local (globals,
+        # parameters not in locals, etc.).
+        direct_address: str | None = None
+        if isinstance(base.expression, AddressOf) and base.expression.var.name in self.locals:
+            direct_address = self._local_address(base.expression.var.name)
+        if direct_address is not None:
+            self.ax_clear()
+            if is_array_field:
+                if offset:
+                    self.emit(f"        lea {self.target.acc}, [{direct_address}+{offset}]")
+                else:
+                    self.emit(f"        lea {self.target.acc}, [{direct_address}]")
+                self.ax_clear()
+                return
+            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+            if field_size not in allowed_sizes:
+                message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
+                raise CompileError(message, line=expression.line)
+            addr = f"[{direct_address}+{offset}]" if offset else f"[{direct_address}]"
+            if info.bit_width is not None:
+                self._emit_bitfield_read(info, addr=addr)
+                return
+            if field_size == 1:
+                self.emit_byte_load_zx(addr)
+            elif field_size == 2 and self.target.int_size == 4:
+                self.emit(f"        movzx {self.target.acc}, word {addr}")
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+            self.ax_clear()
+            return
+        # General path: materialise the base pointer into BX/EBX.
+        # generate_expression leaves the value in AX/EAX; move to BX so
+        # the field-load addressing modes ([bx+N] / [ebx+N]) match the
+        # named-pointer path below.
         self.generate_expression(base.expression)
         self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
         base_reg = self.target.bx_register

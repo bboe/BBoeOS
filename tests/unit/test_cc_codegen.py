@@ -1784,15 +1784,15 @@ def test_member_access_via_cast_arrow_bitfield() -> None:
         bits=32,
     )
     body = asm.split("read_busy:")[1].split("ret")[0]
-    # base pointer moved into EBX, low byte read, shr+and extracts the
-    # ``busy`` bitfield (top 3 bits).
-    assert "mov ebx," in body
-    assert "shr al, 5" in body
-    assert "and al, 7" in body
+    # Fast path: AddressOf(local) base skips the lea + mov ebx, eax
+    # indirection and reads the bitfield directly from the frame slot.
+    assert "mov ebx," not in body, f"AddressOf base should skip EBX\n{asm}"
+    assert "shr al, 5" in body, asm
+    assert "and al, 7" in body, asm
 
 
 def test_member_access_via_cast_arrow_byte_field() -> None:
-    """``((struct T *)&raw)->field`` reads a byte member at offset 0 without a named local."""
+    """``((struct T *)&raw)->field`` reads a byte member from the frame slot directly."""
     asm = _user(
         """
         struct port_byte { unsigned char value; };
@@ -1803,8 +1803,27 @@ def test_member_access_via_cast_arrow_byte_field() -> None:
         bits=32,
     )
     body = asm.split("read_port:")[1].split("ret")[0]
-    assert "mov ebx," in body, f"expected base into EBX\n{asm}"
-    assert "movzx eax, byte [ebx]" in body, f"expected byte load through EBX\n{asm}"
+    assert "mov ebx," not in body, f"AddressOf base should skip EBX\n{asm}"
+    assert "byte [ebp-" in body, f"expected direct frame load\n{asm}"
+
+
+def test_member_access_via_cast_arrow_non_addressof_uses_ebx() -> None:
+    """``((struct T *)expr)->field`` where the base is not ``&local`` falls through to the EBX path."""
+    asm = _user(
+        """
+        struct rec { int value; };
+        int read_via_ptr(struct rec *p) {
+            // Base is a parameter Var (not AddressOf), so the general
+            // path materialises the pointer into EBX before the field
+            // load.  Exercises the fall-through branch of the helper.
+            return ((struct rec *)p)->value;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("read_via_ptr:")[1].split("ret")[0]
+    assert "mov ebx," in body, f"expected EBX path for non-AddressOf base\n{asm}"
+    assert "[ebx]" in body, asm
 
 
 def test_member_access_via_cast_arrow_rejects_non_struct_pointer() -> None:
@@ -1825,7 +1844,7 @@ def test_member_access_via_cast_arrow_rejects_non_struct_pointer() -> None:
 
 
 def test_member_access_via_cast_arrow_word_field_offset() -> None:
-    """``((struct T *)&raw)->field`` at non-zero offset emits ``[ebx+N]``."""
+    """``((struct T *)&raw)->field`` at non-zero offset emits a frame load at ``[ebp-K+offset]``."""
     asm = _user(
         """
         struct rec { unsigned char a; unsigned char b; unsigned short c; };
@@ -1836,7 +1855,10 @@ def test_member_access_via_cast_arrow_word_field_offset() -> None:
         bits=32,
     )
     body = asm.split("read_c:")[1].split("ret")[0]
-    assert "movzx eax, word [ebx+2]" in body, f"expected word load at offset 2\n{asm}"
+    assert "mov ebx," not in body, f"AddressOf base should skip EBX\n{asm}"
+    # Offset 2 is added to the frame slot directly; NASM accepts the
+    # ``[ebp-K+2]`` form.
+    assert "+2]" in body, f"expected +2 offset in frame load\n{asm}"
 
 
 def test_member_read_and_write_roundtrip() -> None:
