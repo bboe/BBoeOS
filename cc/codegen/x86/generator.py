@@ -621,14 +621,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for loop_index, (start, _end) in enumerate(loop_ranges):
                 if start == index:
                     defined |= loop_stores[loop_index]
-            # Only record filter sets for builtin calls.  User function
-            # calls go through a different save-set path that this
-            # analysis can't fully model — Block-wrapped statements
-            # (the IR escape hatch) and pointer-aliased pinned locals
-            # could be invalidated by the call in ways our pre-pass
-            # doesn't see.  CarryBranch always wraps a user-function
-            # (``carry_return`` callee); same skip.
-            if isinstance(instruction, ir.Call) and instruction.name in self._builtin_clobbers:
+            # Record filter sets for every direct IR call — builtin
+            # and user-function alike — plus CarryBranch
+            # (``carry_return`` callee invoked from a condition).
+            # Block-wrapped statements are not analysed; ``ir.Block``
+            # lowering leaves :attr:`_current_call_pinned_initialized`
+            # at ``None`` so any nested calls fall back to the
+            # conservative full save-set.
+            if isinstance(instruction, (ir.Call, ir.CarryBranch)):
                 result[id(instruction)] = frozenset(defined)
             target_name = store_target(instruction)
             if target_name in pinned_locals:

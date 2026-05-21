@@ -21,6 +21,13 @@ time.
   existing function-pointer machinery.  Lands as step 1 of Phase 6 (compiling
   libbboeos C with cc.py) — `dirent.c`, `signal.c`, and `stdlib.c` are all
   blocked on typedef.
+
+- **cc: extend the dead-pinned-save liveness pass to user-function calls.**
+  `_compute_pinned_initialized_per_call` now records its filter set for every
+  direct `ir.Call` (and `ir.CarryBranch`), not just builtin calls — user
+  functions, indirect calls, and `__attribute__((carry_return))` callees all
+  honour the "pin not yet written" skip.  `kernel.bin` -64 bytes (40622 →
+  40558); `os.bin` -64 bytes (42158 → 42094).  No behaviour change.
 - **libbboeos: Phase 5 — retire the "vDSO" naming throughout the tree.**
   `user/vdso/vdso.asm` moves to `user/libbboeos/libbboeos.asm` (the `user/vdso/`
   directory is gone); kernel-side symbols rename `vdso_install` →
