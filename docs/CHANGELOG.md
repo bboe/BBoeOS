@@ -11,6 +11,20 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: clear `ax_local` after the pinned-right comparison fast path.**
+  ``emit_comparison``'s pinned-right path emits ``mov ax,
+  <pin_left>`` + ``cmp ax, <pin_right>``; the later
+  ``peephole_compare_through_register`` pass folds the pair into a single ``cmp
+  <pin_left>, <pin_right>`` and deletes the ``mov``. Without an ``ax_clear()``
+  after the cmp emit, the codegen's ``ax_local`` tracker keeps lying that AX
+  still holds the pinned left operand — so the next ``Var(<pin_left>)`` read
+  skips its own load and picks up whatever AX actually holds (the
+  peephole-deleted source register, or worse, a byte value from a movzx that
+  intervened along a different control-flow path).  Mirrors the memory-backed
+  sibling fast path immediately below, which already clears for the same reason.
+  Latent today (no current source path trips it); guards against the miscompile
+  that the in-flight break→continue refinement to the auto-pin cost gate would
+  expose. Zero binary delta on the current tree.
 - **cc.py: gate the auto-pin sharing pass on `apply_liveness_elision`.**  PR
   #458's cost-model refinement passed `apply_liveness_elision=False` for
   `main()` (which uses the AST codegen path and never consults the IR liveness
