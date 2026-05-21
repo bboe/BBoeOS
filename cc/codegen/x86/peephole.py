@@ -662,6 +662,83 @@ class Peepholer:
                     continue
             i += 1
 
+    def peephole_fuse_byte_modify_in_place(self) -> None:
+        """Fuse spill / in-frame byte-mask / reload into register-direct AND/OR/XOR.
+
+        The bitfield-register modify-in-place idiom emits::
+
+            mov [<bp>-K], al              ; spill (e.g. from ``in al, dx``)
+            <and|or|xor> byte [<bp>-K], imm   ; one-bit toggle
+            movzx eax, byte [<bp>-K]      ; reload for next op (e.g. out dx, al)
+
+        AL still holds the *pre-modification* byte after the spill, so
+        the mask never actually had to round-trip through memory.
+        Rewrite to operate on AL directly::
+
+            <and|or|xor> al, imm
+            mov [<bp>-K], al
+            movzx eax, al
+
+        The store is kept so any later reads of the slot still see the
+        modified value; :meth:`peephole_dead_temp_slots` drops it
+        afterwards when nothing reads ``[<bp>-K]`` again.  Saves 3 bytes
+        per match (``<op> al, imm8`` and ``movzx eax, al`` are each one
+        byte shorter than the memory-direct forms), and the dead-store
+        pass typically reclaims another byte on top.
+        """
+        base_register = self.target.base_register
+        operations = ("and", "or", "xor")
+        i = 0
+        while i < len(self.lines) - 2:
+            a = self.lines[i].strip()
+            b = self.lines[i + 1].strip()
+            c = self.lines[i + 2].strip()
+            # Line 1: spill AL to a bp-relative byte slot.
+            if not a.startswith(f"mov [{base_register}-"):
+                i += 1
+                continue
+            if not a.endswith("], al"):
+                i += 1
+                continue
+            address = a[len("mov ") : a.index("]") + 1]
+            # Line 2: in-place byte AND/OR/XOR with an immediate.  The
+            # ``byte`` width qualifier is required; any other width
+            # would clobber bytes outside the slot and break the rewrite.
+            operation: str | None = None
+            immediate: str | None = None
+            for candidate in operations:
+                prefix = f"{candidate} byte {address}, "
+                if b.startswith(prefix):
+                    operation = candidate
+                    immediate = b[len(prefix) :]
+                    break
+            if operation is None:
+                i += 1
+                continue
+            # Line 3: reload the just-modified byte into EAX with
+            # zero-extension (the standard byte-read shape).  ``mov al,
+            # [address]`` (no widen) also counts — same fix, smaller
+            # rewrite on the load side.
+            zx_reload = f"movzx eax, byte {address}"
+            narrow_reload = f"mov al, {address}"
+            if c == zx_reload:
+                widen = "movzx eax, al"
+            elif c == narrow_reload:
+                widen = "mov al, al"  # placeholder; collapsed below
+            else:
+                i += 1
+                continue
+            self.lines[i] = f"        {operation} al, {immediate}"
+            self.lines[i + 1] = f"        mov {address}, al"
+            if c == zx_reload:
+                self.lines[i + 2] = f"        {widen}"
+                i += 3
+            else:
+                # ``mov al, [address]`` reload is a pure no-op now — AL
+                # already holds the modified value — drop the line.
+                del self.lines[i + 2]
+                i += 2
+
     def peephole_index_through_memory(self) -> None:
         """Use ``add si, [mem]`` instead of staging through AX.
 
@@ -1511,6 +1588,7 @@ class Peepholer:
         self.peephole_dx_to_memory()
         self.peephole_store_reload()
         self.peephole_fold_byte_immediate_through_local()
+        self.peephole_fuse_byte_modify_in_place()
         self.peephole_dead_temp_slots()
         self.peephole_narrow_acc_immediate_for_byte_out()
         self.peephole_constant_to_register()

@@ -2825,6 +2825,48 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     assert "mov eax, 18" in asm or "mov al, 18" in asm, f"folded immediate load missing:\n{asm}"
 
 
+def test_peephole_fuse_byte_modify_in_place() -> None:
+    """``spill / byte-mask in frame / reload`` collapses to ``<op> al, imm; out``.
+
+    Motivating idiom: bitfield register read-modify-write —
+
+        u8 raw = kernel_inb(port);
+        ((struct ne2k_imr *)&raw)->irq5 = 0;
+        kernel_outb(port, raw);
+
+    cc.py emits ``in al, dx; mov [ebp-K], al; and byte [ebp-K], <mask>;
+    movzx eax, byte [ebp-K]; out dx, al``.  AL still holds the
+    pre-modification byte after the spill, so the mask never had to
+    round-trip through memory.  The peephole rewrites the in-frame
+    AND/OR/XOR to operate on AL directly, then ``peephole_dead_temp_slots``
+    drops the now-dead spill.
+    """
+    asm = _kernel(
+        """
+        struct imr {
+            uint8_t irq0: 1;
+            uint8_t irq1: 1;
+            uint8_t irq2: 1;
+            uint8_t irq3: 1;
+            uint8_t irq4: 1;
+            uint8_t irq5: 1;
+            uint8_t irq6: 1;
+            uint8_t irq7: 1;
+        };
+        void unmask_irq5() {
+            struct imr mask;
+            *(uint8_t *)&mask = kernel_inb(0x21);
+            mask.irq5 = 0;
+            kernel_outb(0x21, *(uint8_t *)&mask);
+        }
+    """,
+        bits=32,
+    )
+    # The in-frame byte AND is gone; the mask runs on AL directly.
+    assert "and byte [ebp-" not in asm, f"in-frame byte mask should be fused:\n{asm}"
+    assert "and al, 223" in asm, f"expected ``and al, 223`` (clear bit 5):\n{asm}"
+
+
 def test_peephole_narrow_acc_immediate_for_byte_out() -> None:
     """``mov eax, <imm 0..255>`` followed by ``out dx, al`` narrows to ``mov al, <imm>``.
 
