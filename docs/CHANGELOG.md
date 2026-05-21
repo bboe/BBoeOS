@@ -11,6 +11,14 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: gate the auto-pin sharing pass on `apply_liveness_elision`.**  PR
+  #458's cost-model refinement passed `apply_liveness_elision=False` for
+  `main()` (which uses the AST codegen path and never consults the IR liveness
+  pre-pass), but the sharing pass kept subtracting elided saves unconditionally
+  — leaving a latent gate inconsistency.  Mirror the main loop's guard.  No
+  current code reaches this path so binaries are byte-identical to main, but the
+  fix plugs a real latent miscompile risk.
+
 - **cc.py: accept `signed`, `short`, `long long`, `(void)` parameter lists, and
   typedef aliases whose name clashes with a built-in type.**  Stdint.h's typedef
   block (`typedef signed short int16_t;`, `typedef unsigned long long

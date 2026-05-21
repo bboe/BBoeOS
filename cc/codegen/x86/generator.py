@@ -2983,7 +2983,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         continue
                     chosen = min(candidate_registers, key=lambda register: self.register_clobber_counts.get(register, 0))
                     raw_cost = self.register_clobber_counts.get(chosen, 0)
-                    elided = pre_store_clobbers.get(name, {}).get(chosen, 0)
+                    elided = pre_store_clobbers.get(name, {}).get(chosen, 0) if apply_liveness_elision else 0
                     effective_cost = max(0, raw_cost - elided)
                     if refs > effective_cost:
                         assignments[name] = chosen
