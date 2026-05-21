@@ -3190,6 +3190,54 @@ def test_tail_call_wrong_fn_raises_error() -> None:
     assert "__tail_call" in error, f"Expected __tail_call error, got: {error}"
 
 
+def test_typedef_alias_expands_in_declarations() -> None:
+    """``typedef`` registers a name that expands inline at every type-spec site.
+
+    Covers the three places parse_type is reached from: file-scope decls
+    (return type + parameter type of ``add``), local-variable decls
+    (``size_t x``), and parameter types (``size_t a, size_t b``).  Also
+    checks pointer-suffix interaction (``typedef char *str;`` then
+    ``str s;`` should still classify as a pointer-to-char).
+    """
+    asm = _user(
+        """
+        typedef unsigned int size_t;
+        typedef char *str;
+
+        size_t add(size_t a, size_t b) { return a + b; }
+
+        int main() {
+            size_t x = 10;
+            str s = "hi";
+            return (int)add(x, 20);
+        }
+        """,
+        bits=32,
+    )
+    assert "main:" in asm
+    assert "add:" in asm
+
+
+def test_typedef_struct_alias_resolves_in_pointer_param() -> None:
+    """``typedef struct point point_t;`` lets ``point_t *p`` parse as ``struct point *p``."""
+    asm = _user(
+        """
+        struct point { int x; int y; };
+        typedef struct point point_t;
+
+        int sum(point_t *p) { return p->x + p->y; }
+        int main() {
+            struct point pt;
+            pt.x = 3;
+            pt.y = 4;
+            return sum(&pt);
+        }
+        """,
+        bits=32,
+    )
+    assert "sum:" in asm
+
+
 def test_uint16_pointer_load_is_word() -> None:
     """``uint16_t *p; r = p[0];`` loads exactly 2 bytes, not 4 (32-bit target regression).
 

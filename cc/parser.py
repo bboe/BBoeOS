@@ -90,6 +90,14 @@ class Parser:
         # can run the switch exhaustiveness check later.
         self.enum_constants: dict[str, int] = {}
         self.enum_decls: dict[str, EnumDecl] = {}
+        # File-scope ``typedef <type> <name>;`` aliases.  A bare ``typedef``
+        # registers an alternate spelling for an existing type; cc.py's
+        # parse_type expands the alias inline so the rest of the compiler
+        # never sees the alias name.  Pointer-suffix typedefs are supported
+        # (``typedef char *string_t;`` -> ``string_t s;`` parses the same
+        # as ``char *s;``), but function-pointer typedefs aren't yet — they
+        # need their own VarDecl/Function machinery.
+        self.typedef_aliases: dict[str, str] = {}
 
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
         """Consume and return the current token, optionally checking its kind.
@@ -192,6 +200,20 @@ class Parser:
             return node.value
         message = "expected compile-time integer constant expression"
         raise CompileError(message, line=node.line)
+
+    def _is_type_start(self, *, offset: int = 0) -> bool:
+        """Return True if the token at ``offset`` begins a type specifier.
+
+        Either one of the built-in type keywords (``TYPE_TOKENS``) or an
+        ``IDENT`` that names a previously-registered ``typedef`` alias.
+        Used at the four decision points where parse_type would otherwise
+        be called (variable decl start, sizeof operand, cast LPAREN look-
+        ahead, ``*(T *)expr`` look-ahead).
+        """
+        token = self.peek(offset=offset)
+        if token[0] in TYPE_TOKENS:
+            return True
+        return token[0] == "IDENT" and token[1] in self.typedef_aliases
 
     def _parse_attribute(self, *, line: int) -> tuple[str, object]:
         """Consume a single ``__attribute__((name(args)))`` directive.
@@ -1026,7 +1048,7 @@ class Parser:
             #    picks the load width.  This is the port-IO bridge
             #    idiom ``*(uint8_t *)&s`` for byte-sized bitfield structs.
             self.eat()
-            if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] in TYPE_TOKENS:
+            if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
                 operand = self.parse_primary()
                 if not isinstance(operand, Cast):
                     message = "expected pointer cast after '*'"
@@ -1050,7 +1072,7 @@ class Parser:
             # Cast expression: `(<type>)expr`.  Detected by peeking at the
             # token after ``(``.  ``TYPE_TOKENS`` already includes ``STRUCT``
             # so both plain and struct-pointer casts are caught here.
-            if self.peek()[0] in TYPE_TOKENS:
+            if self._is_type_start():
                 target_type = self.parse_type()
                 self.eat("RPAREN")
                 operand = self.parse_primary()
@@ -1104,7 +1126,7 @@ class Parser:
         token = self.eat("SIZEOF")
         self.eat("LPAREN")
         # sizeof(type) or sizeof(variable)
-        if self.peek()[0] in TYPE_TOKENS:
+        if self._is_type_start():
             type_string = self.parse_type()
             self.eat("RPAREN")
             return SizeofType(line=token[2], type_name=type_string)
@@ -1123,7 +1145,7 @@ class Parser:
 
         """
         token = self.peek()
-        if token[0] in TYPE_TOKENS:
+        if self._is_type_start():
             return self.parse_variable_declaration()
         if token[0] == "LBRACE":
             self.eat("LBRACE")
@@ -1165,7 +1187,7 @@ class Parser:
             # ``*(T *)expr = value;`` — cast-then-assign through an
             # arbitrary pointer.  Symmetric with the read-side
             # :class:`PointerDereference` parse in :meth:`parse_primary`.
-            if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] in TYPE_TOKENS:
+            if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
                 operand = self.parse_primary()
                 if not isinstance(operand, Cast):
                     message = "expected pointer cast after '*'"
@@ -1278,7 +1300,7 @@ class Parser:
         self.eat("RBRACE")
         return Switch(cases=cases, discriminant=discriminant, line=token[2])
 
-    def parse_top_level_declaration(self) -> Node:
+    def parse_top_level_declaration(self) -> Node | None:
         """Parse a function definition, a file-scope variable / array, or a file-scope ``asm(...)``.
 
         Dispatches on the token after ``type IDENT``: ``(`` drives the
@@ -1287,6 +1309,13 @@ class Parser:
         the output's data tail — useful for raw tables and labels.
         """
         line = self.peek()[2]
+        if self.peek()[0] == "TYPEDEF":
+            self.eat("TYPEDEF")
+            target_type = self.parse_type()
+            alias_token = self.eat("IDENT")
+            self.eat("SEMI")
+            self.typedef_aliases[alias_token[1]] = target_type
+            return None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return self._parse_struct_declaration()
         if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
@@ -1566,6 +1595,21 @@ class Parser:
             self.eat()
             tag_token = self.eat("IDENT")
             return self._parse_pointer_suffix(f"enum {tag_token[1]}", max_stars=1)
+        if token[0] == "IDENT" and token[1] in self.typedef_aliases:
+            # Inline-expand a ``typedef <type> <alias>;`` reference.  The
+            # alias resolves to a complete type spelling (which may itself
+            # carry pointer stars from the typedef target); appending
+            # caller-side stars on top covers ``alias_t *p;`` shapes,
+            # capped at the combined max of 2 to match the rest of
+            # parse_type's pointer-depth contract.
+            self.eat("IDENT")
+            base = self.typedef_aliases[token[1]]
+            base_stars = len(base) - len(base.rstrip("*"))
+            extra_stars = 0
+            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
+                self.eat("STAR")
+                extra_stars += 1
+            return base + "*" * extra_stars
         message = f"expected type, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
