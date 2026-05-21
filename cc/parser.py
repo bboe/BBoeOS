@@ -77,10 +77,23 @@ from cc.utils import decode_first_character
 class Parser:
     """Recursive descent parser for the C subset grammar."""
 
-    def __init__(self, tokens: list[tuple[str, str, int]], /) -> None:
-        """Initialize the parser with a token list."""
+    def __init__(self, tokens: list[tuple[str, str, int]], /, *, bits: int = 32) -> None:
+        """Initialize the parser with a token list.
+
+        *bits* is the target CPU mode (16 or 32).  Under --bits 32 the
+        three 32-bit-unsigned type spellings (``unsigned int`` /
+        ``unsigned long`` / ``uint32_t``) collapse to ``unsigned int``
+        at parse time so the codegen sees a single canonical type — the
+        DX:AX-pair codegen for ``unsigned long`` is a --bits 16
+        artifact and never runs under --bits 32.
+        """
         self.tokens = tokens
         self.position = 0
+        self.bits = bits
+        # ``"unsigned int"`` under --bits 32; ``"unsigned long"`` under
+        # --bits 16 (where the DX:AX-pair codegen is the only way to
+        # represent a 32-bit unsigned value).
+        self._unsigned32 = "unsigned int" if bits == 32 else "unsigned long"
         self.struct_decls: dict[str, StructDecl] = {}
         # File-scope ``enum NAME { ... };`` declarations.  ``enum_constants``
         # maps each variant identifier to its integer value (used to fold
@@ -1593,7 +1606,11 @@ class Parser:
             "CHAR": "char",
             "UINT8_T": "uint8_t",
             "UINT16_T": "uint16_t",
-            "UINT32_T": "uint32_t",
+            # Under --bits 32 ``uint32_t`` folds into ``unsigned int``
+            # so codegen sees one canonical 32-bit unsigned type.  Under
+            # --bits 16 it stays as ``uint32_t`` (kept distinct from the
+            # 16-bit ``unsigned int``).
+            "UINT32_T": "unsigned int" if self.bits == 32 else "uint32_t",
         }
         if token[0] in pointer_bases:
             self.eat()
@@ -1627,7 +1644,11 @@ class Parser:
                 # storage — caveat emptor until int64 support lands).
                 if self.peek()[0] == "LONG":
                     self.eat()
-                return self._parse_pointer_suffix("unsigned long", max_stars=2)
+                # Under --bits 32 ``unsigned long`` folds into ``unsigned
+                # int`` — same width (4 bytes) and a single canonical
+                # codegen path.  Under --bits 16 the spelling is kept so
+                # the DX:AX-pair codegen still applies.
+                return self._parse_pointer_suffix(self._unsigned32, max_stars=2)
             if following[0] == "INT":
                 self.eat()
                 return self._parse_pointer_suffix("unsigned int", max_stars=2)
@@ -1639,15 +1660,16 @@ class Parser:
             message = f"expected 'char', 'int', 'long', or 'short' after 'unsigned', got {following[1]!r}"
             raise CompileError(message, line=token[2])
         if token[0] == "LONG":
-            # Treat bare ``long`` / ``long long`` as ``unsigned long``
-            # so ``typedef long off_t;`` and ``typedef long long
-            # int64_t;`` from ``<stdint.h>`` parse without forcing
-            # callers to use ``unsigned long`` themselves.  Width is
-            # 32-bit either way under cc.py's current type system.
+            # Treat bare ``long`` / ``long long`` as the canonical 32-bit
+            # unsigned spelling so ``typedef long off_t;`` and ``typedef
+            # long long int64_t;`` from ``<stdint.h>`` parse without
+            # forcing callers to use ``unsigned long`` themselves.
+            # ``_unsigned32`` is ``unsigned int`` under --bits 32 and
+            # ``unsigned long`` under --bits 16.
             self.eat()
             if self.peek()[0] == "LONG":
                 self.eat()
-            return self._parse_pointer_suffix("unsigned long", max_stars=2)
+            return self._parse_pointer_suffix(self._unsigned32, max_stars=2)
         if token[0] == "STRUCT":
             self.eat()
             tag_token = self.eat("IDENT")

@@ -2493,8 +2493,18 @@ class EmissionMixin:
                 # through to the unsupported-shape error.
         if isinstance(expression, Var):
             vname = expression.name
-            if self.variable_types.get(vname) != "unsigned long":
-                message = f"expected 'unsigned long' expression, got '{self.variable_types.get(vname, 'int')}' variable {vname!r}"
+            # Under --bits 32 the parser folds ``unsigned long`` (and
+            # ``uint32_t``) into ``unsigned int`` — same width, single
+            # codegen path.  Accept either spelling here so long-returning
+            # builtins (``datetime`` / ``print_datetime`` / ``time``) can
+            # consume a normal int local just as well as the legacy
+            # DX:AX-pair shape that --bits 16 needs.
+            actual_type = self.variable_types.get(vname)
+            long_compatible = {"unsigned long"}
+            if not isinstance(self.target, X86CodegenTarget16):
+                long_compatible.add("unsigned int")
+            if actual_type not in long_compatible:
+                message = f"expected 'unsigned long' expression, got '{actual_type or 'int'}' variable {vname!r}"
                 raise CompileError(message, line=expression.line)
             if vname in self.virtual_long_locals:
                 if self.live_long_local != vname:

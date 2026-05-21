@@ -184,7 +184,7 @@ class CodeGeneratorBase:
     #: (``*``) and ``struct`` element types are accepted separately at
     #: the validation site since both require different codegen
     #: treatment.
-    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "int", "uint16_t", "uint32_t", "uint8_t"})
+    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "int", "uint16_t", "uint32_t", "uint8_t", "unsigned int"})
 
     #: Non-pointer scalar type names whose values are unsigned in
     #: comparisons.  Pointers are handled separately by

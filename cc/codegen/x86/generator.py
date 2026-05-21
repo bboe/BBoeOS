@@ -3426,7 +3426,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             statement = statements[index]
             if not isinstance(statement, VarDecl):
                 continue
-            if statement.type_name != "unsigned long" or statement.init is None:
+            # Under --bits 32 the parser folds ``unsigned long`` into
+            # ``unsigned int`` (single canonical 32-bit unsigned type),
+            # so the virtual-long pattern triggers on either spelling.
+            # Under --bits 16 ``unsigned int`` is 16-bit, so only the
+            # original ``unsigned long`` shape is eligible.
+            long_eligible = {"unsigned long"}
+            if self.target.int_size == 4:
+                long_eligible.add("unsigned int")
+            if statement.type_name not in long_eligible or statement.init is None:
                 continue
             consumer = statements[index + 1]
             if not isinstance(consumer, Call) or consumer.name != "print_datetime":
@@ -4004,7 +4012,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # round-trip through AX and grow the code.
         if isinstance(expression, Conditional) and self._try_emit_guarded_update(expression=expression, name=name):
             return
-        if self.variable_types.get(name) == "unsigned long":
+        # Under --bits 32 the parser folds ``unsigned long`` into
+        # ``unsigned int``; the virtual-long optimisation pattern stays
+        # eligible (discover_virtual_long_locals adds the unsigned-int
+        # name), so route assignments to those locals through the long
+        # path too — the value is produced by datetime() in EAX and
+        # consumed directly by print_datetime() with no frame spill.
+        if self.variable_types.get(name) == "unsigned long" or name in self.virtual_long_locals:
             self.ax_clear()
             self.generate_long_expression(expression)
             if name in self.virtual_long_locals:
