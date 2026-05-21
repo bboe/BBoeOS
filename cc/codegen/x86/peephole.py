@@ -632,6 +632,132 @@ class Peepholer:
                     break
             i += 1
 
+    def peephole_fold_single_write_byte_constant_local(self) -> None:
+        """Fold a ``mov byte [bp-N], <imm>`` whose slot is otherwise read-only.
+
+        Stronger sibling of :meth:`peephole_fold_byte_immediate_through_local`.
+        The block-local version stops scanning at the first label or
+        control-flow instruction, since a predecessor could fall in and
+        rewrite the slot before the next read.  But when **the entire
+        function** writes the slot exactly once (the constant byte we
+        just stored), every read of that slot is provably the same
+        constant — labels and control flow don't matter.
+
+        Per-function scoping (via :meth:`_iter_function_chunks`)
+        guarantees that ``[bp-N]`` in function A is unrelated to
+        ``[bp-N]`` in function B.  Within a chunk:
+
+        * one ``mov byte [bp-N], <imm>`` (the candidate),
+        * no other write to ``[bp-N]`` (``mov [bp-N], reg``, in-place
+          ``<op> byte [bp-N], ...``),
+        * no ``lea`` of ``[bp-N]`` (would let the address escape and
+          let some callee mutate the slot),
+
+        means every ``movzx <acc>, byte [bp-N]`` and ``mov al,
+        [bp-N]`` can be replaced with the immediate.
+        :meth:`peephole_dead_temp_slots` then reclaims the now-dead
+        write.
+
+        Motivating idiom: ``ne2k_init`` does six designated-init byte
+        stores at the top of the function (one per bitfield struct
+        local), then walks through a loop and consumes each value via
+        ``*(uint8_t *)&local`` far below.  The block-local fold gave
+        up at the first ``._ir_wloopK:`` label; this pass folds
+        regardless.
+        """
+        base_register = self.target.base_register
+        accumulator = self.target.acc
+        store_pattern = re.compile(rf"^\s*mov byte \[{base_register}-(\d+)\], (\d+)\s*$")
+        # Per-slot bookkeeping classifies each ``[bp-N]`` reference as
+        # a constant store, a non-folding write, an in-place modify, or
+        # a lea escape.  Reads (``movzx`` / ``mov al``) are handled in
+        # the rewrite pass via direct string equality so they don't
+        # need their own regex.
+        store_signature_pattern = re.compile(rf"^\s*mov (?:byte |word |dword )?\[{base_register}-(\d+)(?:[+\-][^\]]+)?\],")
+        in_place_pattern = re.compile(
+            rf"^\s*(?:and|or|xor|add|sub|inc|dec) (?:byte |word |dword )?\[{base_register}-(\d+)(?:[+\-][^\]]+)?\]"
+        )
+        lea_pattern = re.compile(rf"^\s*lea \w+, \[{base_register}-(\d+)(?:[+\-][^\]]+)?\]")
+        zx_load_template = f"movzx {accumulator}, byte "
+        narrow_load_template = "mov al, "
+        chunks = self._iter_function_chunks()
+        rebuilt: list[str] = []
+        for chunk in chunks:
+            # First pass: per-slot bookkeeping.  Track every store
+            # immediate (if any), and count writes / in-place modifies /
+            # lea-references so we can decide which slots are safe to
+            # fold afterwards.
+            constant_writes: dict[int, tuple[int, int]] = {}  # slot -> (line_index, immediate)
+            total_writes: dict[int, int] = {}
+            disqualified: set[int] = set()
+            for line_index, line in enumerate(chunk):
+                stripped = line.strip()
+                store_match = store_pattern.match(line)
+                if store_match is not None:
+                    slot = int(store_match.group(1))
+                    immediate = int(store_match.group(2))
+                    total_writes[slot] = total_writes.get(slot, 0) + 1
+                    if slot in constant_writes:
+                        # Multiple constant writes to the same slot — bail.
+                        disqualified.add(slot)
+                    else:
+                        constant_writes[slot] = (line_index, immediate)
+                    continue
+                # Other write shape (reg source / wider width / different
+                # syntax): disqualify the slot.
+                other_store = store_signature_pattern.match(line)
+                if other_store is not None:
+                    slot = int(other_store.group(1))
+                    total_writes[slot] = total_writes.get(slot, 0) + 1
+                    disqualified.add(slot)
+                    continue
+                # In-place modify or lea: disqualify but don't count as a
+                # write (those are "read+write" / "address-take").
+                in_place = in_place_pattern.match(line)
+                if in_place is not None:
+                    disqualified.add(int(in_place.group(1)))
+                lea_match = lea_pattern.match(line)
+                if lea_match is not None:
+                    disqualified.add(int(lea_match.group(1)))
+            # Second pass: rewrite eligible slots' reads to the
+            # immediate, and drop the now-dead store.
+            eligible: dict[int, int] = {
+                slot: immediate
+                for slot, (_, immediate) in constant_writes.items()
+                if slot not in disqualified and total_writes.get(slot, 0) == 1
+            }
+            if not eligible:
+                rebuilt.extend(chunk)
+                continue
+            store_lines_to_drop = {constant_writes[slot][0] for slot in eligible}
+            new_chunk: list[str] = []
+            for line_index, line in enumerate(chunk):
+                if line_index in store_lines_to_drop:
+                    continue
+                stripped = line.strip()
+                # Rewrite eligible reads.  Two shapes the existing
+                # codegen produces: ``movzx <acc>, byte [bp-N]`` (the
+                # standard byte-read), and ``mov al, [bp-N]`` (the
+                # narrow-byte-into-al variant).  Anything else through
+                # the slot wasn't classified as a read so we leave it.
+                handled = False
+                for slot, immediate in eligible.items():
+                    address = f"[{base_register}-{slot}]"
+                    if stripped == f"{zx_load_template}{address}":
+                        indent = line[: len(line) - len(line.lstrip())]
+                        new_chunk.append(f"{indent}mov {accumulator}, {immediate}")
+                        handled = True
+                        break
+                    if stripped == f"{narrow_load_template}{address}":
+                        indent = line[: len(line) - len(line.lstrip())]
+                        new_chunk.append(f"{indent}mov al, {immediate}")
+                        handled = True
+                        break
+                if not handled:
+                    new_chunk.append(line)
+            rebuilt.extend(new_chunk)
+        self.lines = rebuilt
+
     def peephole_fold_zero_save(self) -> None:
         """Fuse ``xor reg, reg / push reg`` into ``push 0``.
 
@@ -1588,6 +1714,7 @@ class Peepholer:
         self.peephole_dx_to_memory()
         self.peephole_store_reload()
         self.peephole_fold_byte_immediate_through_local()
+        self.peephole_fold_single_write_byte_constant_local()
         self.peephole_fuse_byte_modify_in_place()
         self.peephole_dead_temp_slots()
         self.peephole_narrow_acc_immediate_for_byte_out()

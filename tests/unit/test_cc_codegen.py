@@ -2825,6 +2825,50 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     assert "mov eax, 18" in asm or "mov al, 18" in asm, f"folded immediate load missing:\n{asm}"
 
 
+def test_peephole_fold_single_write_byte_constant_local() -> None:
+    """A function-local byte slot with one constant write folds across labels.
+
+    The block-local fold (``peephole_fold_byte_immediate_through_local``)
+    stops at the first label / control-flow instruction.  The
+    whole-function variant keeps going: as long as the slot has
+    exactly one write (the candidate constant store) and no other
+    writes / in-place modifies / lea-references, every read sees the
+    same immediate.
+
+    Motivating shape (driver port init sequence): designated-init
+    byte stores at function entry, then a loop or two, then far below
+    a ``kernel_outb(port, *(uint8_t *)&local)`` consumes the value.
+    The block-local fold gave up at the first ``._ir_wloop:`` label.
+    """
+    asm = _kernel(
+        """
+        struct cmd {
+            uint8_t start: 1;
+            uint8_t stop: 1;
+            uint8_t rd: 3;
+            uint8_t page: 3;
+        };
+        void f() {
+            struct cmd c = { .stop = 1, .rd = 4, .page = 1 };
+            int i = 0;
+            while (i < 4) {
+                kernel_outb(0x100 + i, 0);
+                i = i + 1;
+            }
+            kernel_outb(0x110, *(uint8_t *)&c);
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("f:", 1)[1].split("\n_", 1)[0]
+    # The byte init at the top of the function is gone — the eventual
+    # read past the loop label was rewritten to a direct immediate.
+    assert "mov byte [ebp-1]" not in body, f"init store should fold away:\n{body}"
+    # The eventual byte read becomes a direct immediate load.  The
+    # designated-init byte is .stop=1 | .rd=4<<2 | .page=1<<5 = 0x32.
+    assert "mov eax, 50" in body or "mov al, 50" in body, f"folded constant missing:\n{body}"
+
+
 def test_peephole_fuse_byte_modify_in_place() -> None:
     """``spill / byte-mask in frame / reload`` collapses to ``<op> al, imm; out``.
 

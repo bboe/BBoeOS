@@ -177,7 +177,17 @@ def test_bitfield_local_byte_uses_frame_addressing(*, work: Path) -> None:
 
 
 def test_designated_init_multi_field_const_fold(*, work: Path) -> None:
-    """Multi-field designated init for a bitfield struct folds to a single ``mov byte``."""
+    """Multi-field designated init for a bitfield struct folds to a single immediate.
+
+    After const-fold + sequential-collapse the multi-field init lands
+    as one ``mov byte [ebp-N], 23`` (the packed value
+    ``.a=1 | .b=1<<1 | .c=5<<2 = 23``).  When the local's only use is
+    a bitfield read on the just-initialised slot,
+    ``peephole_fold_single_write_byte_constant_local`` propagates the
+    immediate to the consumer and ``peephole_dead_temp_slots`` drops
+    the now-orphan store: AL goes straight to ``23`` and the bitfield
+    extract (``and al, 1`` for ``f.a``) runs on the immediate.
+    """
     asm = compile_snippet(
         name="designated_init_multi",
         source=(
@@ -191,15 +201,19 @@ def test_designated_init_multi_field_const_fold(*, work: Path) -> None:
     )
     body = asm.split("main:", 1)[1]
     body = body.split("\n_", 1)[0] if "\n_" in body else body
-    # After const-fold + sequential-collapse, expect exactly one mov-byte store
-    # before the return.  The folded value is 1 + 2 + 5*4 = 23.
-    mov_byte_stores = [line.strip() for line in body.splitlines() if "mov byte" in line.lower()]
-    assert len(mov_byte_stores) == 1, f"expected exactly 1 'mov byte' store after const-fold; got {len(mov_byte_stores)}:\n{body}"
-    assert "23" in mov_byte_stores[0], f"expected folded value 23 in mov byte store; got: {mov_byte_stores[0]}"
+    assert "mov al, 23" in body, f"expected folded immediate ``mov al, 23``:\n{body}"
+    assert "and al, 1" in body, f"expected bitfield extract for ``f.a``:\n{body}"
+    assert "[ebp-" not in body, f"frame slot should have folded away:\n{body}"
 
 
 def test_designated_init_single_bitfield(*, work: Path) -> None:
-    """Single-field designated init collapses to one ``mov byte [ebp-N], <value>``."""
+    """Single-field designated init folds past the frame slot when its only use is a bitfield read.
+
+    The init is one byte, the only use is ``return f.a;`` (a bitfield
+    extract on the same slot), so the whole-function single-write
+    fold propagates the immediate directly: AL loads ``1`` then the
+    bitfield extract masks bit 0.  No frame slot survives.
+    """
     asm = compile_snippet(
         name="designated_init_single",
         source=("struct flags { uint8_t a : 1; uint8_t b : 7; };\nint main() {\n    struct flags f = { .a = 1 };\n    return f.a;\n}\n"),
@@ -207,9 +221,9 @@ def test_designated_init_single_bitfield(*, work: Path) -> None:
     )
     body = asm.split("main:", 1)[1]
     body = body.split("\n_", 1)[0] if "\n_" in body else body
-    mov_byte_stores = [line.strip() for line in body.splitlines() if "mov byte" in line.lower()]
-    assert len(mov_byte_stores) == 1, f"expected exactly 1 'mov byte' store; got {len(mov_byte_stores)}:\n{body}"
-    assert "1" in mov_byte_stores[0], f"expected value 1 in mov byte store; got: {mov_byte_stores[0]}"
+    assert "mov al, 1" in body, f"expected folded immediate ``mov al, 1``:\n{body}"
+    assert "and al, 1" in body, f"expected bitfield extract for ``f.a``:\n{body}"
+    assert "[ebp-" not in body, f"frame slot should have folded away:\n{body}"
 
 
 def test_dot_read_write_regular_field(*, work: Path) -> None:
