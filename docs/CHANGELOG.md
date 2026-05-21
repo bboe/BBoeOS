@@ -11,6 +11,26 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **Type-name separation: kernel uses `u8`/`u16`/`u32`/`u64`; userspace uses
+  `uint*_t` via `<stdint.h>`.**  Adds `kernel/include/types.h` with Linux-style
+  short-name typedefs (`u8` = `unsigned char`, `u16` = `unsigned short`, `u32` =
+  `unsigned int`, `u64` = `unsigned long long`, and the matching signed `s*`
+  siblings), included transitively via `macros.h` / `registers.h` /
+  `program_state.h`.  Renames every `uint*_t` use in `kernel/` to the kernel
+  short name (26 .c/.h files swept with a word-boundary sed; .asm comments
+  touched for consistency).  Adds `#include <stdint.h>` to the userspace files
+  that use the standard names (`user/programs/asm.c`,
+  `tests/programs/codegen_test.c`). Updates `user/libbboeos/include/stdint.h` to
+  typedef through the compiler's `__UINT8_TYPE__` / `__INT8_TYPE__` / etc.
+  built-in width macros (cc.py predefines them in `_BUILTIN_DEFINES`, clang on
+  i386 already predefines them) so the same source compiles correctly under
+  cc.py --bits 32, cc.py --bits 16, clang for the bboeos target, and the 64-bit
+  host cc used by `tests/unit/test_libbboeos.py`.  cc.py keeps `uint8_t` /
+  `uint16_t` / `uint32_t` as built-in keywords (a permissive extension — clang
+  requires the header include) so the existing test corpus and any source that
+  omits the include keeps working; the kernel/userspace split is what matters.
+  Convention matches Linux: when you see `u32` you know you're inside the
+  kernel, `uint32_t` you know you're in userspace.
 - **cc.py: accept `signed`, `short`, `long long`, `(void)` parameter lists, and
   typedef aliases whose name clashes with a built-in type.**  Stdint.h's typedef
   block (`typedef signed short int16_t;`, `typedef unsigned long long

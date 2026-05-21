@@ -105,7 +105,7 @@ void put_character(char byte __attribute__((in_register("ax"))))
 
 // fs/fd.c file-scope global; the dispatcher (fd_write) stashes the
 // user buffer pointer here before jumping to this handler.
-extern uint8_t *fd_write_buffer;
+extern u8 *fd_write_buffer;
 
 // Forward declaration for signal_any_pending (defined after fd_write_console
 // in alphabetical order); called from fd_read_console's poll loop.
@@ -123,7 +123,7 @@ int signal_any_pending();
 // immediately on keystroke.
 __attribute__((carry_return)) int
 fd_read_console(int *bytes_read __attribute__((out_register("ax"))),
-                uint8_t *destination __attribute__((in_register("edi"))),
+                u8 *destination __attribute__((in_register("edi"))),
                 int max_bytes __attribute__((in_register("ecx")))) {
     char byte;
     if (max_bytes == 0) {

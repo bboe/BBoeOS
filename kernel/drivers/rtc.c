@@ -25,16 +25,16 @@
 
 #include "program_state.h"
 
-uint8_t epoch_day;
-uint8_t epoch_hours;
-uint8_t epoch_minutes;
-uint8_t epoch_month;
-uint8_t epoch_seconds;
-uint16_t epoch_year;
+u8 epoch_day;
+u8 epoch_hours;
+u8 epoch_minutes;
+u8 epoch_month;
+u8 epoch_seconds;
+u16 epoch_year;
 int rtc_month_days[12] = {
     0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334,
 };
-uint32_t system_ticks;
+u32 system_ticks;
 
 // `entry.asm`'s IRQ 0 handler does ``inc dword [system_ticks]`` and
 // the post-flip init does ``mov dword [system_ticks], 0``.  cc.py
@@ -48,7 +48,7 @@ void rtc_read_time_internal(int *cx __attribute__((out_register("cx"))),
                             int *dx __attribute__((out_register("dx"))));
 
 // Convert one BCD byte to binary.  AL → AL.
-uint8_t rtc_bcd_to_bin(uint8_t bcd __attribute__((in_register("ax")))) {
+u8 rtc_bcd_to_bin(u8 bcd __attribute__((in_register("ax")))) {
     return ((bcd >> 4) & 0x0F) * 10 + (bcd & 0x0F);
 }
 
@@ -72,7 +72,7 @@ int rtc_is_leap_year(int year) {
 // across multiple rtc_read calls into DH/DL, and the kernel_outb /
 // kernel_inb builtins would clobber DX with the port number on each
 // call (destroying the month before the day write completes).
-uint8_t rtc_read(uint8_t reg __attribute__((in_register("ax"))));
+u8 rtc_read(u8 reg __attribute__((in_register("ax"))));
 
 asm("rtc_read:\n"
     "    out 0x70, al\n"
@@ -106,7 +106,7 @@ asm("rtc_read_date_internal:\n"
 // 1970-01-01 UTC, valid through 2106-02-07.  CF clear (never errors).
 // Preserves EBX/ECX/ESI; clobbers EAX/EDX (the trailing imuls leave
 // junk in EDX, which every caller treats as scratch anyway).
-uint32_t rtc_read_epoch() __attribute__((preserve_register("ebx")))
+u32 rtc_read_epoch() __attribute__((preserve_register("ebx")))
 __attribute__((preserve_register("ecx")))
 __attribute__((preserve_register("esi"))) {
     int cx;

@@ -85,16 +85,33 @@ FUNCTION_DEFINE_PATTERN = re.compile(
 _EOF_KIND = "EOF"
 
 #: Object-like macros every translation unit gets for free.  Mirrors the
-#: width-type built-ins that clang predefines for the i386 target —
-#: ``<stddef.h>`` uses them to typedef ``size_t`` / ``ptrdiff_t`` in a
-#: way that stays portable when the same source is compiled by the
-#: 64-bit host cc for libbboeos unit tests.  cc.py only ever emits
-#: 16-bit or 32-bit code, so ``int`` / ``unsigned int`` match the
-#: target's natural word width and these typedefs come out the same
-#: shape clang would produce for the bboeos --target.
+#: width-type built-ins clang predefines for the i386 target — these
+#: are the ``__SIZE_TYPE__`` / ``__UINT32_TYPE__`` / etc. macros that
+#: ``<stddef.h>`` and ``<stdint.h>`` use to typedef ``size_t`` /
+#: ``uint32_t`` / etc. in a way that stays portable across:
+#:
+#: 1. cc.py's --bits 16 (bootloader) and --bits 32 (production) modes;
+#: 2. clang building the same source for the bboeos i386 target; and
+#: 3. the host cc (often x86_64) used by ``tests/unit/test_libbboeos.py``
+#:    to natively unit-test the pure libbboeos functions.
+#:
+#: The cc.py expansions pick types that are width-correct under BOTH
+#: --bits modes — ``unsigned long`` is the 32-bit-safe spelling because
+#: cc.py routes it through a fixed-width codegen path (4 bytes always),
+#: whereas ``unsigned int`` would be 16 bits under --bits 16.  clang
+#: predefines these as ``unsigned int`` / ``signed int`` for the i386
+#: target (where ``int`` is always 32 bits), which is also correct.
 _BUILTIN_DEFINES: dict[str, str] = {
+    "__INT16_TYPE__": "signed short",
+    "__INT32_TYPE__": "signed int",
+    "__INT64_TYPE__": "signed long long",
+    "__INT8_TYPE__": "signed char",
     "__PTRDIFF_TYPE__": "int",
     "__SIZE_TYPE__": "unsigned int",
+    "__UINT16_TYPE__": "unsigned short",
+    "__UINT32_TYPE__": "unsigned long",
+    "__UINT64_TYPE__": "unsigned long long",
+    "__UINT8_TYPE__": "unsigned char",
 }
 
 

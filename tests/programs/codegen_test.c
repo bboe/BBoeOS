@@ -15,6 +15,8 @@
  *           prints observed + expected so regressions are obvious.
  *           Previously booltest.c. */
 
+#include <stdint.h>
+
 uint8_t bcounter;
 int counter;
 

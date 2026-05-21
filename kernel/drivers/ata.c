@@ -18,7 +18,7 @@
 // FS scratch frame pointer — defined in vfs.c, populated by
 // `vfs_init` before any disk read.  ata_read_sector / ata_write_sector
 // stream PIO words directly into / out of the buffer it points at.
-extern uint8_t *sector_buffer;
+extern u8 *sector_buffer;
 
 // Port addresses and command/status bits inlined as bare integers to
 // avoid clashing with the shared asm %include namespace.
@@ -32,18 +32,18 @@ extern uint8_t *sector_buffer;
 //   commands: READ = 0x20, WRITE = 0x30
 
 void ata_init() {
-    uint8_t status;
+    u8 status;
     struct ata_status *status_bits;
     struct ata_dcr soft_reset = {.srst = 1};
     struct ata_dcr release = {0};
     // Software-reset the primary controller, four 400ns reads on the
     // device-control register (see SRST hold-time spec), then release.
-    kernel_outb(0x3F6, *(uint8_t *)&soft_reset);
+    kernel_outb(0x3F6, *(u8 *)&soft_reset);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
     kernel_inb(0x3F6);
-    kernel_outb(0x3F6, *(uint8_t *)&release);
+    kernel_outb(0x3F6, *(u8 *)&release);
     while (1) {
         status = kernel_inb(0x1F7);
         status_bits = (struct ata_status *)&status;
@@ -57,13 +57,13 @@ void ata_init() {
 // after waiting for BSY clear.  Caller polls DRQ via ata_wait_drq.
 // AX = LBA (low 16 bits; LBA28 high = 0).  BL = command byte.
 void ata_issue(int lba __attribute__((in_register("ax"))),
-               uint8_t command __attribute__((in_register("bx"))))
+               u8 command __attribute__((in_register("bx"))))
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx"))) {
     int saved_lba;
-    uint8_t status;
+    u8 status;
     struct ata_status *status_bits;
     struct ata_drive_head select = {.lba = 1, .reserved_5 = 1, .reserved_7 = 1};
     saved_lba = lba & 0xFFFF;
@@ -74,7 +74,7 @@ void ata_issue(int lba __attribute__((in_register("ax"))),
             break;
         }
     }
-    kernel_outb(0x1F6, *(uint8_t *)&select);
+    kernel_outb(0x1F6, *(u8 *)&select);
     kernel_outb(0x1F2, 1); // sector count = 1
     kernel_outb(0x1F3, saved_lba & 0xFF);
     kernel_outb(0x1F4, (saved_lba >> 8) & 0xFF);
@@ -115,7 +115,7 @@ int ata_read_sector(int lba __attribute__((in_register("ax"))))
 // reached via the asm calling shape.
 int ata_wait_drq() __attribute__((carry_return))
 __attribute__((preserve_register("edx"))) {
-    uint8_t status;
+    u8 status;
     struct ata_status *status_bits;
     while (1) {
         status = kernel_inb(0x1F7);
@@ -141,7 +141,7 @@ int ata_write_sector(int lba __attribute__((in_register("ax"))))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx")))
     __attribute__((preserve_register("esi"))) {
-    uint8_t status;
+    u8 status;
     struct ata_status *status_bits;
     ata_issue(lba, 0x30); // ATA_CMD_WRITE
     if (ata_wait_drq()) {

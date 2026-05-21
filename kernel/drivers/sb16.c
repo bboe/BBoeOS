@@ -3,7 +3,7 @@
 // Caller-facing surface (referenced by fs/fd.c, fs/fd/audio.c, and
 // the IRQ 5 handler in arch/x86/entry.asm):
 //
-//     sb16_present (uint8_t) — 1 if the DSP probe matched 0xAA at boot,
+//     sb16_present (u8) — 1 if the DSP probe matched 0xAA at boot,
 //                              0 otherwise.  Read from fd_open's
 //                              /dev/audio branch and AUDIO_IOCTL_QUERY.
 //     sb16_init () — driver-chain entry; called from entry.asm.
@@ -70,24 +70,24 @@
 
 #include "registers.h"
 
-uint8_t sb16_present;
+u8 sb16_present;
 asm("sb16_present equ _g_sb16_present");
 
 // audio_buffer_kvirt — 4 KB DMA double-buffer (two AUDIO_HALF_SIZE
 // halves).  The 8237 walks it in auto-init mode while the DSP fires
 // IRQ 5 at each half boundary; sb16_refill rewrites the just-finished
 // half from the software ring.
-uint8_t *audio_buffer_kvirt;
+u8 *audio_buffer_kvirt;
 asm("audio_buffer_kvirt equ _g_audio_buffer_kvirt");
 
 // audio_buffer_phys — physical address of the DMA frame, programmed
 // into the 8237 channel-1 address + page registers at sb16_open.
-uint32_t audio_buffer_phys;
+u32 audio_buffer_phys;
 asm("audio_buffer_phys equ _g_audio_buffer_phys");
 
 // audio_ring_kvirt — kernel-virt of the 4 KB software ring frame.
 // fd_write_audio writes into it (head); sb16_refill drains it (tail).
-uint8_t *audio_ring_kvirt;
+u8 *audio_ring_kvirt;
 asm("audio_ring_kvirt equ _g_audio_ring_kvirt");
 
 // Producer / consumer indices into audio_ring_kvirt.  Both are dword-
@@ -95,10 +95,10 @@ asm("audio_ring_kvirt equ _g_audio_ring_kvirt");
 // to a single-CPU IRQ.  fd_write_audio writes head; sb16_refill writes
 // tail.  Empty ring: head == tail.  Full ring: ((head + 1) & MASK) ==
 // tail (the canonical "lose one slot to disambiguate" convention).
-uint32_t audio_ring_head;
+u32 audio_ring_head;
 asm("audio_ring_head equ _g_audio_ring_head");
 
-uint32_t audio_ring_tail;
+u32 audio_ring_tail;
 asm("audio_ring_tail equ _g_audio_ring_tail");
 
 // audio_filling_half — 0 or 1; identifies the DMA half that the next
@@ -106,7 +106,7 @@ asm("audio_ring_tail equ _g_audio_ring_tail");
 // program the DSP, set audio_filling_half = 0, and start playback —
 // so the first IRQ 5 (when half 0 finishes) refills half 0 and flips
 // the flag to 1.  Subsequent IRQs alternate.
-uint8_t audio_filling_half;
+u8 audio_filling_half;
 asm("audio_filling_half equ _g_audio_filling_half");
 
 // audio_wakeup — set by sb16_refill on every IRQ 5 so a ring-full
@@ -115,7 +115,7 @@ asm("audio_filling_half equ _g_audio_filling_half");
 // any IRQ wakes the CPU but only sb16_refill setting the flag confirms
 // the wake came from a buffer drain (not, say, a stray PIT tick — though
 // either is fine, the recheck is cheap).
-uint8_t audio_wakeup;
+u8 audio_wakeup;
 asm("audio_wakeup equ _g_audio_wakeup");
 
 // Forward declarations so the function bodies below can sit in
@@ -140,10 +140,10 @@ void sb16_close() {
     sb16_dsp_out(0xD0); // pause 8-bit DMA
     sb16_dsp_out(0xDA); // exit auto-init 8-bit
     sb16_dsp_out(0xD3); // speaker off
-    kernel_outb(0x0A, *(uint8_t *)&mask_ch1);
-    *(uint8_t *)&imr = kernel_inb(0x21); // mask IRQ 5 on PIC1
+    kernel_outb(0x0A, *(u8 *)&mask_ch1);
+    *(u8 *)&imr = kernel_inb(0x21); // mask IRQ 5 on PIC1
     imr.irq5 = 1;
-    kernel_outb(0x21, *(uint8_t *)&imr);
+    kernel_outb(0x21, *(u8 *)&imr);
 }
 
 // Send one command/data byte to the DSP.
@@ -233,9 +233,9 @@ __attribute__((carry_return)) int sb16_open() {
     audio_ring_tail = 0;
     audio_filling_half = 0;
     audio_wakeup = 0;
-    *(uint8_t *)&imr = kernel_inb(0x21); // unmask IRQ 5 on PIC1
+    *(u8 *)&imr = kernel_inb(0x21); // unmask IRQ 5 on PIC1
     imr.irq5 = 0;
-    kernel_outb(0x21, *(uint8_t *)&imr);
+    kernel_outb(0x21, *(u8 *)&imr);
     sb16_dsp_out(0xD1); // speaker on
     sb16_dsp_out(0x41); // set output sample rate
     sb16_dsp_out(0x2B); // 11025 = 0x2B11; high byte first
@@ -245,15 +245,15 @@ __attribute__((carry_return)) int sb16_open() {
     // each block boundary), read transfer (memory -> peripheral), ch 1.
     phys = audio_buffer_phys;
     dma_count = AUDIO_DMA_SIZE - 1;
-    kernel_outb(0x0A, *(uint8_t *)&mask_ch1);
+    kernel_outb(0x0A, *(u8 *)&mask_ch1);
     kernel_outb(0x0C, 0); // clear flip-flop
-    kernel_outb(0x0B, *(uint8_t *)&mode_audio);
+    kernel_outb(0x0B, *(u8 *)&mode_audio);
     kernel_outb(0x02, phys & 0xFF);             // address low
     kernel_outb(0x02, (phys >> 8) & 0xFF);      // address high
     kernel_outb(0x83, (phys >> 16) & 0xFF);     // page register for ch 1
     kernel_outb(0x03, dma_count & 0xFF);        // count low
     kernel_outb(0x03, (dma_count >> 8) & 0xFF); // count high
-    kernel_outb(0x0A, *(uint8_t *)&unmask_ch1);
+    kernel_outb(0x0A, *(u8 *)&unmask_ch1);
     // Classic-DSP auto-init recipe: 0x48 sets the block transfer size
     // (count - 1, so the DSP fires IRQ 5 every AUDIO_HALF_SIZE bytes);
     // 0x1C then starts auto-init 8-bit PCM playback with NO further
@@ -299,8 +299,8 @@ int sb16_probe() {
 void sb16_refill() {
     int half_offset;
     int filled;
-    uint32_t head;
-    uint32_t tail;
+    u32 head;
+    u32 tail;
     if (audio_filling_half == 0) {
         half_offset = 0;
     } else {

@@ -1,3 +1,5 @@
+#include "types.h"
+
 // syscalls.c — INT 30h handler bodies for the five non-trivial net_*
 // syscalls.  The dispatcher (`syscall_handler`, `.iret_cf`, the dispatch
 // table, `.check_shell`) and every other handler stay in
@@ -28,11 +30,11 @@
 // padding that cc.py doesn't need to know about; only type, flags, and
 // recv_timeout_ms are touched here.
 struct fd {
-    uint8_t type;
-    uint8_t flags;
-    uint8_t _pad0[50];
-    uint32_t recv_timeout_ms;
-    uint8_t _rest[8];
+    u8 type;
+    u8 flags;
+    u8 _pad0[50];
+    u32 recv_timeout_ms;
+    u8 _rest[8];
 };
 
 // fs/fd.c: returns AX = fd number, ESI = entry pointer, CF set on
@@ -56,39 +58,39 @@ asm("kernel_hlt_idle:\n"
     "    cli\n"
     "    ret\n");
 
-uint32_t rtc_tick_read();
+u32 rtc_tick_read();
 
 // Network plumbing.  All four return CF set on error.
 __attribute__((carry_return)) int
-udp_receive(uint8_t *payload __attribute__((out_register("edi"))),
+udp_receive(u8 *payload __attribute__((out_register("edi"))),
             int *length __attribute__((out_register("ecx"))));
 __attribute__((carry_return)) int
-udp_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
+udp_send(u8 *dest_ip __attribute__((in_register("ebx"))),
          int source_port __attribute__((in_register("edi"))),
          int dest_port __attribute__((in_register("edx"))),
-         uint8_t *payload __attribute__((in_register("esi"))),
+         u8 *payload __attribute__((in_register("esi"))),
          int length __attribute__((in_register("ecx"))));
 __attribute__((carry_return)) int
-icmp_receive(uint8_t *payload __attribute__((out_register("edi"))),
+icmp_receive(u8 *payload __attribute__((out_register("edi"))),
              int *length __attribute__((out_register("ecx"))));
 __attribute__((carry_return)) int
-ip_send(uint8_t *dest_ip __attribute__((in_register("ebx"))),
-        uint8_t protocol __attribute__((in_register("ax"))),
-        uint8_t *payload __attribute__((in_register("esi"))),
+ip_send(u8 *dest_ip __attribute__((in_register("ebx"))),
+        u8 protocol __attribute__((in_register("ax"))),
+        u8 *payload __attribute__((in_register("esi"))),
         int length __attribute__((in_register("ecx"))));
 
 // drivers/ne2k.c file-scope globals.  extern names the symbols
 // without emitting storage; the actual bytes live in ne2k.c.  The
 // equ shims in ne2k.c expose the bare names for the asm callers in
 // kernel/net/.
-extern uint8_t net_present;
-extern uint8_t mac_address[6];
-extern uint8_t *net_receive_buffer;
+extern u8 net_present;
+extern u8 mac_address[6];
+extern u8 *net_receive_buffer;
 
 // sys_net_mac: copy the 6-byte cached MAC into the caller's buffer at
 // EDI.  CF set if no NIC was ever probed (net_present stays zero).
 __attribute__((carry_return)) int
-sys_net_mac(uint8_t *out __attribute__((in_register("edi")))) {
+sys_net_mac(u8 *out __attribute__((in_register("edi")))) {
     if (net_present == 0) {
         return 0;
     }
@@ -146,15 +148,15 @@ sys_net_open(int *result_fd __attribute__((out_register("ax"))),
 __attribute__((carry_return)) int
 sys_net_recvfrom(int *bytes_copied __attribute__((out_register("ax"))),
                  int fd_num __attribute__((in_register("bx"))),
-                 uint8_t *user_buffer __attribute__((in_register("edi"))),
+                 u8 *user_buffer __attribute__((in_register("edi"))),
                  int max_bytes __attribute__((in_register("ecx"))),
                  int local_port __attribute__((in_register("dx")))) {
     struct fd *entry;
-    uint8_t *payload;
+    u8 *payload;
     int payload_length;
     int dest_port;
-    uint32_t timeout_ms;
-    uint32_t deadline;
+    u32 timeout_ms;
+    u32 deadline;
     int have_deadline;
     int had_packet;
     if (!fd_lookup(fd_num, &entry)) {
@@ -225,9 +227,9 @@ __attribute__((carry_return)) int
 sys_net_sendto(int *bytes_sent __attribute__((out_register("ax"))),
                int dst_port __attribute__((in_register("ax"))),
                int fd_num __attribute__((in_register("bx"))),
-               uint8_t *payload __attribute__((in_register("esi"))),
+               u8 *payload __attribute__((in_register("esi"))),
                int payload_length __attribute__((in_register("ecx"))),
-               uint8_t *dest_ip __attribute__((in_register("edi"))),
+               u8 *dest_ip __attribute__((in_register("edi"))),
                int source_port __attribute__((in_register("dx")))) {
     struct fd *entry;
     if (!fd_lookup(fd_num, &entry)) {
@@ -281,7 +283,7 @@ sys_net_setsockopt(int *result __attribute__((out_register("ax"))),
             *result = -1;
             return 0;
         }
-        entry->recv_timeout_ms = (uint32_t)value;
+        entry->recv_timeout_ms = (u32)value;
         *result = 0;
         return 1;
     }

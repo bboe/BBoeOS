@@ -1,3 +1,5 @@
+#include "types.h"
+
 // vga.c — native VGA driver (text + mode 13h).
 //
 // Replaces drivers/vga.asm.  Five families:
@@ -46,31 +48,31 @@ asm("VGA_COLS equ 80");
 // the SR03 flip and FB wipe when the requested mode matches.  Init to
 // 0x03 — BIOS leaves us in 80x25 text after boot and vga_font_load
 // runs against that state without our mode-table programming.
-uint8_t vga_current_mode = 0x03;
+u8 vga_current_mode = 0x03;
 
 // Scrollback ring: 200 rows × 80 cells.  vga_scroll_up pushes the
 // about-to-be-discarded row 0 here before scrolling the framebuffer.
 // Note: SCROLLBACK_ROWS is defined as a C macro below; inline-asm sites
 // use the literal 200 because cc.py does not pass C #define into NASM.
 //
-// cc.py global arrays support only char, int, uint8_t, or struct element
-// types; uint16_t is not supported.  Each VGA cell (char + attribute
-// byte) is split into two parallel uint8_t arrays to stay within cc.py's
+// cc.py global arrays support only char, int, u8, or struct element
+// types; u16 is not supported.  Each VGA cell (char + attribute
+// byte) is split into two parallel u8 arrays to stay within cc.py's
 // constraints while keeping the total BSS small (two 16 KB arrays for
 // the ring = 32 KB; two 2 KB arrays for the snapshot = 4 KB).
 #define SCROLLBACK_ROWS 200
 
-uint8_t vga_scrollback_ring_char[SCROLLBACK_ROWS * 80];
-uint8_t vga_scrollback_ring_attr[SCROLLBACK_ROWS * 80];
+u8 vga_scrollback_ring_char[SCROLLBACK_ROWS * 80];
+u8 vga_scrollback_ring_attr[SCROLLBACK_ROWS * 80];
 int vga_scrollback_head;
 int vga_scrollback_valid;
 int vga_scrollback_offset;
-uint8_t vga_scrollback_snapshot_char[80 * 25];
-uint8_t vga_scrollback_snapshot_attr[80 * 25];
+u8 vga_scrollback_snapshot_char[80 * 25];
+u8 vga_scrollback_snapshot_attr[80 * 25];
 
 // 16-entry default DAC palette (6-bit R, G, B per entry).  Restored on
 // every mode switch so mode-13h programs can freely modify the DAC.
-uint8_t vga_default_palette[48] = {
+u8 vga_default_palette[48] = {
     0,  0,  0,  //  0 black
     0,  0,  42, //  1 dark blue
     0,  42, 0,  //  2 dark green
@@ -92,7 +94,7 @@ uint8_t vga_default_palette[48] = {
 // VGA mode register tables for vga_set_mode.  Each entry: 1 mode-id +
 // 1 misc + 4 seq(1-4) + 25 crtc(0-18h) + 9 gc(0-8) + 21 ac(0-14h) =
 // 61 bytes.  Two entries: mode 0x03 (text) and mode 0x13 (graphics).
-uint8_t vga_mode_table[122] = {
+u8 vga_mode_table[122] = {
     // ----- Mode 03h: 80x25 16-colour text, 400 scan lines ---------------
     0x03, // mode ID
     0x67, // Misc Output
@@ -328,7 +330,7 @@ asm("vga_clear_screen:\n"
 
 // EDI = DIRECT_MAP_BASE + 0xA0000 + row*2560 + col*8 — flat 32-bit linear address.
 // Writes 8 rows of 8 pixels each, advancing 320 bytes per row.
-void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
+void vga_fill_block(u8 color __attribute__((in_register("ax"))),
                     int col_row __attribute__((in_register("bx"))))
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
@@ -372,11 +374,11 @@ void vga_fill_block(uint8_t color __attribute__((in_register("ax"))),
 void vga_get_cursor(int *dx_out __attribute__((out_register("dx"))))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx"))) {
-    uint8_t high;
-    uint8_t low;
+    u8 high;
+    u8 low;
     int linear;
-    uint8_t row;
-    uint8_t col;
+    u8 row;
+    u8 col;
 
     kernel_outb(0x3D4, 0x0E);
     high = kernel_inb(0x3D5);
@@ -426,7 +428,7 @@ asm("vga_scroll_up:\n"
 
     /* Push current row 0 into the scrollback ring at head.
        Each VGA cell is a 2-byte word [char, attr].  The ring stores chars
-       and attrs in separate uint8_t arrays.  EBX = ring row byte offset. */
+       and attrs in separate u8 arrays.  EBX = ring row byte offset. */
     "        mov eax, [_g_vga_scrollback_head]\n"
     "        imul eax, eax, 80\n"
     "        lea edi, [_g_vga_scrollback_ring_char + eax]\n"
@@ -611,7 +613,7 @@ void vga_scrollback_up(int rows) {
 // Reads VGA_INPUT_STATUS_1 first to reset the AC index/data flip-flop
 // to "index" state, then writes the (0x11 | 0x20) index byte (bit 5 =
 // keep palette latched / video unblanked) and the colour byte to 0x3C0.
-void vga_set_bg(uint8_t color __attribute__((in_register("ax"))))
+void vga_set_bg(u8 color __attribute__((in_register("ax"))))
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("edx"))) {
     kernel_inb(0x3DA);               // reset AC flip-flop
@@ -625,8 +627,8 @@ void vga_set_cursor(int row_col __attribute__((in_register("dx"))))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("ecx")))
     __attribute__((preserve_register("edx"))) {
-    uint8_t row;
-    uint8_t col;
+    u8 row;
+    u8 col;
     int linear;
 
     row = (row_col >> 8) & 0xFF;
@@ -815,10 +817,10 @@ void vga_set_palette_color(int index_r __attribute__((in_register("cx"))),
     __attribute__((preserve_register("eax")))
     __attribute__((preserve_register("ebx")))
     __attribute__((preserve_register("edx"))) {
-    uint8_t index;
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
+    u8 index;
+    u8 r;
+    u8 g;
+    u8 b;
 
     index = index_r & 0xFF;
     r = (index_r >> 8) & 0xFF;
@@ -918,7 +920,7 @@ asm("vga_teletype:\n"
 // vga_write_attribute: AL = char, BL = attribute.  Writes at the current
 // cursor with no advance.  Used by ANSI colour mid-line.  Preserves all.
 void vga_write_attribute(char byte __attribute__((in_register("ax"))),
-                         uint8_t attr __attribute__((in_register("bx"))));
+                         u8 attr __attribute__((in_register("bx"))));
 
 asm("vga_write_attribute:\n"
     "        push eax\n"

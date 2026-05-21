@@ -1,3 +1,5 @@
+#include "types.h"
+
 // fs/vfs.c -- Virtual Filesystem Switch
 //
 // A table of file-scope function_pointer globals dispatches to the
@@ -67,14 +69,14 @@ __attribute__((carry_return)) int ext2_update_size();
 // fd entry layout — only struct-pointer type identity matters for
 // the function_pointer signatures below; nothing reads fields here.
 struct fd {
-    uint8_t _opaque[32];
+    u8 _opaque[32];
 };
 
 // FS scratch frame pointer.  Populated by `vfs_init` from a
 // `frame_alloc` + direct-map adjust.  cc.py emits storage as
 // `_g_sector_buffer`; the asm `equ` shim aliases the bare name back
 // for inline-asm and bbfs.asm / ext2.asm callers.
-uint8_t *sector_buffer;
+u8 *sector_buffer;
 asm("sector_buffer equ _g_sector_buffer");
 
 // ---------------------------------------------------------------------------
@@ -84,30 +86,25 @@ asm("sector_buffer equ _g_sector_buffer");
 // is detected.
 // ---------------------------------------------------------------------------
 
-int (*vfs_chmod_fn)(uint8_t *path __attribute__((in_register("esi"))),
-                    uint8_t mode
-                    __attribute__((in_register("ax")))) = bbfs_chmod;
+int (*vfs_chmod_fn)(u8 *path __attribute__((in_register("esi"))),
+                    u8 mode __attribute__((in_register("ax")))) = bbfs_chmod;
 int (*vfs_commit_write_sec_fn)(
     struct fd *e __attribute__((in_register("esi")))) = bbfs_commit_write_sec;
-int (*vfs_create_fn)(uint8_t *path
+int (*vfs_create_fn)(u8 *path
                      __attribute__((in_register("esi")))) = bbfs_create;
-int (*vfs_delete_fn)(uint8_t *path
+int (*vfs_delete_fn)(u8 *path
                      __attribute__((in_register("esi")))) = bbfs_delete;
-int (*vfs_find_fn)(uint8_t *path
-                   __attribute__((in_register("esi")))) = bbfs_find;
-int (*vfs_mkdir_fn)(uint8_t *name
-                    __attribute__((in_register("esi")))) = bbfs_mkdir;
+int (*vfs_find_fn)(u8 *path __attribute__((in_register("esi")))) = bbfs_find;
+int (*vfs_mkdir_fn)(u8 *name __attribute__((in_register("esi")))) = bbfs_mkdir;
 int (*vfs_prepare_write_sec_fn)(
     struct fd *e __attribute__((in_register("esi")))) = bbfs_prepare_write_sec;
 int (*vfs_read_dir_fn)(struct fd *e
                        __attribute__((in_register("esi")))) = bbfs_read_dir;
 int (*vfs_read_sec_fn)(struct fd *e
                        __attribute__((in_register("esi")))) = bbfs_read_sec;
-int (*vfs_rename_fn)(uint8_t *old __attribute__((in_register("esi"))),
-                     uint8_t *new
-                     __attribute__((in_register("edi")))) = bbfs_rename;
-int (*vfs_rmdir_fn)(uint8_t *name
-                    __attribute__((in_register("esi")))) = bbfs_rmdir;
+int (*vfs_rename_fn)(u8 *old __attribute__((in_register("esi"))),
+                     u8 *new __attribute__((in_register("edi")))) = bbfs_rename;
+int (*vfs_rmdir_fn)(u8 *name __attribute__((in_register("esi")))) = bbfs_rmdir;
 int (*vfs_update_size_fn)(struct fd *e __attribute__((in_register("esi")))) =
     bbfs_update_size;
 
@@ -173,22 +170,22 @@ vfs_commit_write_sec(struct fd *e __attribute__((in_register("esi")))) {
 }
 
 __attribute__((carry_return)) int
-vfs_create(uint8_t *path __attribute__((in_register("esi")))) {
+vfs_create(u8 *path __attribute__((in_register("esi")))) {
     __tail_call(vfs_create_fn, path);
 }
 
 __attribute__((carry_return)) int
-vfs_delete(uint8_t *path __attribute__((in_register("esi")))) {
+vfs_delete(u8 *path __attribute__((in_register("esi")))) {
     __tail_call(vfs_delete_fn, path);
 }
 
 __attribute__((carry_return)) int
-vfs_find(uint8_t *path __attribute__((in_register("esi")))) {
+vfs_find(u8 *path __attribute__((in_register("esi")))) {
     __tail_call(vfs_find_fn, path);
 }
 
 __attribute__((carry_return)) int
-vfs_mkdir(uint8_t *name __attribute__((in_register("esi")))) {
+vfs_mkdir(u8 *name __attribute__((in_register("esi")))) {
     __tail_call(vfs_mkdir_fn, name);
 }
 
@@ -205,7 +202,7 @@ vfs_read_dir(struct fd *e __attribute__((in_register("esi")))) {
 // Cursor/remaining cells consumed by dir_emit (see the asm block
 // below).  Each SYS_IO_GETDENTS syscall stamps these from the
 // user-supplied buffer + count before dispatching vfs_read_dir.
-uint8_t *dir_emit_cursor = 0;
+u8 *dir_emit_cursor = 0;
 int dir_emit_remaining = 0;
 
 __attribute__((carry_return)) int
@@ -214,13 +211,13 @@ vfs_read_sec(struct fd *e __attribute__((in_register("esi")))) {
 }
 
 __attribute__((carry_return)) int
-vfs_rename(uint8_t *old __attribute__((in_register("esi"))),
-           uint8_t *new __attribute__((in_register("edi")))) {
+vfs_rename(u8 *old __attribute__((in_register("esi"))),
+           u8 *new __attribute__((in_register("edi")))) {
     __tail_call(vfs_rename_fn, old, new);
 }
 
 __attribute__((carry_return)) int
-vfs_rmdir(uint8_t *name __attribute__((in_register("esi")))) {
+vfs_rmdir(u8 *name __attribute__((in_register("esi")))) {
     __tail_call(vfs_rmdir_fn, name);
 }
 
@@ -256,9 +253,9 @@ asm("vfs_found_dir_off  dw 0\n"
     ";; safe for the duration of one getdents syscall.\n"
     ";;\n"
     ";; Record layout (variable length, padded to 4-byte boundary):\n"
-    ";;     offset 0  uint32_t d_ino\n"
-    ";;     offset 4  uint16_t d_reclen\n"
-    ";;     offset 6  uint8_t  d_type\n"
+    ";;     offset 0  u32 d_ino\n"
+    ";;     offset 4  u16 d_reclen\n"
+    ";;     offset 6  u8  d_type\n"
     ";;     offset 7  char     d_name[]  (null-terminated, padded)\n"
     ";; reclen = (7 + namelen + 1 + 3) & ~3 = (namelen + 8) & ~3.\n"
     ";;\n"

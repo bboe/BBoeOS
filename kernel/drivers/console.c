@@ -1,3 +1,5 @@
+#include "types.h"
+
 // console.c — full ANSI escape sequence parser.
 //
 // put_character: unified output to screen (with ANSI parsing) and serial.
@@ -22,10 +24,10 @@
 // (cc.py emits #define as ``%define`` which would collide with
 // vga.asm's ``VGA_COLS equ 80`` and friends).
 
-uint8_t ansi_active_param;
-uint8_t ansi_fg = 7;
+u8 ansi_active_param;
+u8 ansi_fg = 7;
 int ansi_params[3];
-uint8_t ansi_state;
+u8 ansi_state;
 
 // drivers/vga.asm reads the foreground attribute as ``[ansi_fg]``.
 // cc.py emits the C-side storage with a ``_g_`` prefix; alias the
@@ -45,7 +47,7 @@ void serial_character(char byte __attribute__((in_register("ax"))));
 void vga_get_cursor(int *dx_out __attribute__((out_register("dx"))));
 
 // vga_set_bg: AL = color.
-void vga_set_bg(uint8_t color __attribute__((in_register("ax"))));
+void vga_set_bg(u8 color __attribute__((in_register("ax"))));
 
 // vga_set_cursor: DH=row, DL=col (packed in DX).
 void vga_set_cursor(int row_col __attribute__((in_register("dx"))));
@@ -55,7 +57,7 @@ void vga_teletype(char byte __attribute__((in_register("ax"))));
 
 // vga_write_attribute: AL = char, BL = attribute byte.
 void vga_write_attribute(char byte __attribute__((in_register("ax"))),
-                         uint8_t attr __attribute__((in_register("bx"))));
+                         u8 attr __attribute__((in_register("bx"))));
 
 // preserve_register uses the E-register names so cc.py emits 32-bit
 // push/pop (NOTES.md landmine #2).  ESI is also preserved because

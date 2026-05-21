@@ -2,11 +2,11 @@
 // (/dev/midi).  Companion to drivers/opl3.c.
 //
 // Wire format: each command is 6 bytes —
-//     uint16_t delay     (PIT ticks since previous command in this stream)
-//     uint8_t  bank      (0 → 0x388/0x389, 1 → 0x38A/0x38B; others ignored)
-//     uint8_t  reg       (OPL register 0x00..0xFF)
-//     uint8_t  value     (register value)
-//     uint8_t  reserved  (must be 0)
+//     u16 delay     (PIT ticks since previous command in this stream)
+//     u8  bank      (0 → 0x388/0x389, 1 → 0x38A/0x38B; others ignored)
+//     u8  reg       (OPL register 0x00..0xFF)
+//     u8  value     (register value)
+//     u8  reserved  (must be 0)
 //
 // Kernel keeps a 256-slot ring (255 effective capacity) of
 // (tick_due, bank, reg, value) tuples.  fd_write_midi parses the
@@ -21,9 +21,9 @@
 
 #include "program_state.h"
 
-extern uint8_t *fd_write_buffer;
-extern uint8_t opl3_present;
-extern uint32_t system_ticks;
+extern u8 *fd_write_buffer;
+extern u8 opl3_present;
+extern u32 system_ticks;
 
 // drivers/opl3.c
 void opl_silence_all();
@@ -34,21 +34,20 @@ void opl_write(int bank, int reg, int value);
 #define MIDI_RING_SIZE 256
 
 struct midi_event {
-    uint8_t _pad;
-    uint8_t bank;
-    uint8_t reg;
-    uint32_t tick_due;
-    uint8_t value;
+    u8 _pad;
+    u8 bank;
+    u8 reg;
+    u32 tick_due;
+    u8 value;
 };
 
-uint8_t midi_head; // next slot to consume
+u8 midi_head; // next slot to consume
 asm("midi_head equ _g_midi_head");
 struct midi_event midi_ring[MIDI_RING_SIZE];
 asm("midi_ring equ _g_midi_ring");
-uint8_t midi_tail; // next slot to produce
+u8 midi_tail; // next slot to produce
 asm("midi_tail equ _g_midi_tail");
-uint32_t
-    midi_virtual_clock; // PIT ticks; per-fd but stored globally because single-instance
+u32 midi_virtual_clock; // PIT ticks; per-fd but stored globally because single-instance
 asm("midi_virtual_clock equ _g_midi_virtual_clock");
 
 // Forward declarations for the helpers fd_write_midi calls.  Functions
@@ -56,7 +55,7 @@ asm("midi_virtual_clock equ _g_midi_virtual_clock");
 // land after fd_write_midi in source order so they need a forward
 // signature here for cc.py to resolve the call sites.
 int midi_ring_full();
-void midi_ring_push(uint32_t tick_due, int bank, int reg, int value);
+void midi_ring_push(u32 tick_due, int bank, int reg, int value);
 
 // fd_close_midi: per-/dev/midi-close hook.  Drop queued events and
 // silence the chip so a Doom crash can't leave 18 stuck FM voices.
@@ -124,7 +123,7 @@ fd_write_midi(int *bytes_written __attribute__((out_register("ax"))),
     int consumed;
     int delay;
     int reg;
-    uint32_t tick_due;
+    u32 tick_due;
     int value;
     consumed = 0;
     while ((count - consumed) >= MIDI_COMMAND_BYTES) {
@@ -154,7 +153,7 @@ void midi_drain_due() {
     int bank;
     int drained;
     int reg;
-    uint32_t tick_due;
+    u32 tick_due;
     int value;
     drained = 0;
     while (drained < MIDI_DRAIN_PER_TICK && midi_head != midi_tail) {
@@ -189,14 +188,14 @@ void midi_reset_state() {
 
 // midi_ring_full: returns 1 when the ring has 255 entries queued.
 int midi_ring_full() {
-    uint8_t next;
+    u8 next;
     next = (midi_tail + 1) & 0xFF;
     return next == midi_head;
 }
 
 // midi_ring_push: enqueue (tick_due, bank, reg, value).  Caller has
 // already verified the ring is not full.
-void midi_ring_push(uint32_t tick_due, int bank, int reg, int value) {
+void midi_ring_push(u32 tick_due, int bank, int reg, int value) {
     midi_ring[midi_tail].tick_due = tick_due;
     midi_ring[midi_tail].bank = bank;
     midi_ring[midi_tail].reg = reg;

@@ -15,6 +15,8 @@
 #ifndef BBOEOS_PIPE_H
 #define BBOEOS_PIPE_H
 
+#include "types.h"
+
 /* Linear-search allocator.  Returns a pool index (0..MAX_PIPES-1) on
    success or -1 on exhaustion.  The returned slot is fully zero-filled
    (all fields including blocked_reader/blocked_writer cleared), then
@@ -36,14 +38,14 @@ int pipe_both_ends_closed(struct pipe *p);
    Never blocks — the caller is responsible for empty handling.
    Calling convention: p on stack ([ebp+8]), dst in EBX, want in EDI. */
 int pipe_buffer_read(struct pipe *p,
-                     uint8_t *dst __attribute__((in_register("ebx"))),
+                     u8 *dst __attribute__((in_register("ebx"))),
                      int want __attribute__((in_register("edi"))));
 
 /* Deposit up to `want` bytes from `src` into the pipe's ring.
    Returns bytes actually transferred; may be 0 if full.  Never blocks.
    Calling convention: p on stack ([ebp+8]), src in EBX, want in EDI. */
 int pipe_buffer_write(struct pipe *p,
-                      uint8_t *src __attribute__((in_register("ebx"))),
+                      u8 *src __attribute__((in_register("ebx"))),
                       int want __attribute__((in_register("edi"))));
 
 /* Decrement the reader or writer open-fd refcount (saturating at 0). */

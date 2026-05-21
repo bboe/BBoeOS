@@ -13,17 +13,17 @@
 // matching those constants.
 
 struct pipe {
-    uint32_t blocked_reader; // 0x000  struct program_state*
-    uint32_t blocked_writer; // 0x004
-    uint8_t buffer
-        [4076];     // 0x008  size must match PIPE_BUFFER_BYTES in constants.asm
-    uint16_t count; // 0xFF4
-    uint16_t head;  // 0xFF6
-    uint8_t in_use; // 0xFF8
-    uint8_t reader_fd_open; // 0xFF9
-    uint16_t tail;          // 0xFFA
-    uint8_t writer_fd_open; // 0xFFC
-    uint8_t pad_after_writer_fd_open
+    u32 blocked_reader; // 0x000  struct program_state*
+    u32 blocked_writer; // 0x004
+    u8 buffer
+        [4076]; // 0x008  size must match PIPE_BUFFER_BYTES in constants.asm
+    u16 count;  // 0xFF4
+    u16 head;   // 0xFF6
+    u8 in_use;  // 0xFF8
+    u8 reader_fd_open; // 0xFF9
+    u16 tail;          // 0xFFA
+    u8 writer_fd_open; // 0xFFC
+    u8 pad_after_writer_fd_open
         [3]; // 0xFFD  align struct to PIPE_SIZE (one frame)
 }; // total 0x1000
 
@@ -33,12 +33,12 @@ int pipe_alloc() {
     int i;
     int j;
     struct pipe *slot;
-    uint8_t *bytes;
+    u8 *bytes;
     i = 0;
     slot = pipe_pool;
     while (i < MAX_PIPES) {
         if (slot->in_use == 0) {
-            bytes = (uint8_t *)slot;
+            bytes = (u8 *)slot;
             j = 0;
             // cc.py has no memset; zero the slot byte-by-byte. PIPE_SIZE (not
             // PIPE_BUFFER_BYTES) — clear all fields, not just the ring buffer.
@@ -71,10 +71,10 @@ int pipe_both_ends_closed(struct pipe *p) {
 }
 
 int pipe_buffer_read(struct pipe *p,
-                     uint8_t *dst __attribute__((in_register("ebx"))),
+                     u8 *dst __attribute__((in_register("ebx"))),
                      int want __attribute__((in_register("edi")))) {
     int bytes_read;
-    uint8_t *buf;
+    u8 *buf;
     buf = p->buffer;
     bytes_read = 0;
     while (bytes_read < want) {
@@ -93,10 +93,10 @@ int pipe_buffer_read(struct pipe *p,
 }
 
 int pipe_buffer_write(struct pipe *p,
-                      uint8_t *src __attribute__((in_register("ebx"))),
+                      u8 *src __attribute__((in_register("ebx"))),
                       int want __attribute__((in_register("edi")))) {
     int bytes_written;
-    uint8_t *buf;
+    u8 *buf;
     buf = p->buffer;
     bytes_written = 0;
     while (bytes_written < want) {

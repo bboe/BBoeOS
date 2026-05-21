@@ -1,3 +1,5 @@
+#include "types.h"
+
 // fs/sector_cache.c — 8-sector LRU cache between the FS layer and the
 // fs/block.asm dispatcher.
 //
@@ -26,27 +28,27 @@
 // in bbfs.asm and ext2.asm) routes through the cache without source
 // changes.
 
-extern uint8_t *sector_buffer;
+extern u8 *sector_buffer;
 
 #define SECTOR_CACHE_SIZE 8
 #define SECTOR_BYTES 512
 
 struct sector_cache_entry {
-    uint32_t sector;
-    uint32_t last_used;
-    uint8_t valid;
-    uint8_t _pad0;
-    uint8_t _pad1;
-    uint8_t _pad2;
+    u32 sector;
+    u32 last_used;
+    u8 valid;
+    u8 _pad0;
+    u8 _pad1;
+    u8 _pad2;
 };
 
 struct sector_cache_entry sector_cache_metadata[SECTOR_CACHE_SIZE];
 asm("sector_cache_metadata equ _g_sector_cache_metadata");
 
-uint8_t *sector_cache_data;
+u8 *sector_cache_data;
 asm("sector_cache_data equ _g_sector_cache_data");
 
-uint32_t sector_cache_tick;
+u32 sector_cache_tick;
 asm("sector_cache_tick equ _g_sector_cache_tick");
 
 // disk_read_sector / disk_write_sector live in fs/block.asm.  Same
@@ -98,9 +100,9 @@ read_sector(int sec __attribute__((in_register("ax")))) {
     int i;
     int lru;
     int cached_valid;
-    uint32_t cached_sector;
-    uint32_t cached_last_used;
-    uint32_t lru_tick;
+    u32 cached_sector;
+    u32 cached_last_used;
+    u32 lru_tick;
     sector_cache_tick = sector_cache_tick + 1;
     i = 0;
     while (i < SECTOR_CACHE_SIZE) {
@@ -149,7 +151,7 @@ __attribute__((preserve_register("edi"))) int
 write_sector(int sec __attribute__((in_register("ax")))) {
     int i;
     int cached_valid;
-    uint32_t cached_sector;
+    u32 cached_sector;
     if (!disk_write_sector(sec)) {
         return 0;
     }
