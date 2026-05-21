@@ -27,6 +27,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
+
+# Auto-prepended to every inline C snippet compiled through the helpers
+# below so test sources can use ``uint8_t`` / ``uint16_t`` / ``uint32_t``
+# without each test snippet repeating the include.  The names come from
+# ``user/libbboeos/include/stdint.h`` (cc.py reaches it via the ``-I``
+# flag we add to every subprocess call).
+_STDINT_PREAMBLE = "#include <stdint.h>\n"
 sys.path.insert(0, str(REPO_ROOT))
 from cc.codegen.x86.peephole import Peepholer  # noqa: E402
 from cc.target import X86CodegenTarget16  # noqa: E402
@@ -49,14 +57,14 @@ FD_OFFSET_TYPE = 0
 
 def _compile(source_text: str, /, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
     """Run cc.py on *source_text*; return (success, output_or_stderr)."""
-    text = textwrap.dedent(source_text)
+    text = _STDINT_PREAMBLE + textwrap.dedent(source_text)
     with tempfile.TemporaryDirectory(prefix="test_kernel_") as work:
         work_path = Path(work)
         src = work_path / "test.c"
         out = work_path / "test.asm"
         src.write_text(text)
         result = subprocess.run(
-            ["python3", str(CC), "--bits", str(bits), "--target", target, str(src), str(out)],
+            ["python3", str(CC), "--bits", str(bits), "--target", target, "-I", str(LIBBBOEOS_INCLUDE), str(src), str(out)],
             capture_output=True,
             check=False,
             cwd=str(REPO_ROOT),
@@ -69,7 +77,7 @@ def _compile(source_text: str, /, *, target: str = "user", bits: int = 16) -> tu
 
 def _compile_and_assemble(source_text: str, /, *, bits: int = 16) -> None:
     """Compile *source_text* in user mode and assemble with nasm; fail on any error."""
-    text = textwrap.dedent(source_text)
+    text = _STDINT_PREAMBLE + textwrap.dedent(source_text)
     with tempfile.TemporaryDirectory(prefix="test_kernel_cc_") as work:
         work_path = Path(work)
         src = work_path / "test.c"
@@ -77,7 +85,7 @@ def _compile_and_assemble(source_text: str, /, *, bits: int = 16) -> None:
         binary = work_path / "test.bin"
         src.write_text(text)
         cc_result = subprocess.run(
-            ["python3", str(CC), "--bits", str(bits), str(src), str(asm)],
+            ["python3", str(CC), "--bits", str(bits), "-I", str(LIBBBOEOS_INCLUDE), str(src), str(asm)],
             capture_output=True,
             check=False,
             cwd=str(REPO_ROOT),

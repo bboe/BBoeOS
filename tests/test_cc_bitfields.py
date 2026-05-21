@@ -20,15 +20,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
+
+# Auto-prepended to every inline C snippet so tests can use ``uint*_t``
+# without each snippet repeating the ``#include <stdint.h>``.
+_STDINT_PREAMBLE = "#include <stdint.h>\n"
 
 
 def compile_expect_fail(*, message_fragment: str, name: str, source: str, work: Path) -> None:
     """Run cc.py; assert it exits non-zero and stderr contains ``message_fragment``."""
     source_path = work / f"{name}.c"
     asm_path = work / f"{name}.asm"
-    source_path.write_text(source)
+    source_path.write_text(_STDINT_PREAMBLE + source)
     result = subprocess.run(
-        ["python3", str(CC), "--bits", "32", str(source_path), str(asm_path)],
+        ["python3", str(CC), "--bits", "32", "-I", str(LIBBBOEOS_INCLUDE), str(source_path), str(asm_path)],
         capture_output=True,
         check=False,
         text=True,
@@ -42,9 +47,9 @@ def compile_snippet(*, name: str, source: str, work: Path) -> str:
     source_path = work / f"{name}.c"
     asm_path = work / f"{name}.asm"
     bin_path = work / f"{name}.bin"
-    source_path.write_text(source)
+    source_path.write_text(_STDINT_PREAMBLE + source)
     subprocess.run(
-        ["python3", str(CC), "--bits", "32", str(source_path), str(asm_path)],
+        ["python3", str(CC), "--bits", "32", "-I", str(LIBBBOEOS_INCLUDE), str(source_path), str(asm_path)],
         capture_output=True,
         check=True,
         text=True,

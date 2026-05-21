@@ -1601,16 +1601,19 @@ class Parser:
         if token[0] == "VOID":
             self.eat()
             return "void"
+        # ``uint8_t`` / ``uint16_t`` / ``uint32_t`` are no longer
+        # built-in keywords — sources that want the standard fixed-width
+        # names must ``#include <stdint.h>`` (cc.py's preprocessor
+        # exposes the matching ``__UINT*_TYPE__`` width macros and
+        # ``user/libbboeos/include/stdint.h`` typedefs them onto
+        # ``unsigned char`` / ``unsigned short`` / the bits-mode-aware
+        # 32-bit unsigned spelling).  This matches standard C and
+        # removes a non-standard convenience that papered over the
+        # missing typedef machinery (cc.py supports ``typedef`` since
+        # PR #453).
         pointer_bases = {
             "INT": "int",
             "CHAR": "char",
-            "UINT8_T": "uint8_t",
-            "UINT16_T": "uint16_t",
-            # Under --bits 32 ``uint32_t`` folds into ``unsigned int``
-            # so codegen sees one canonical 32-bit unsigned type.  Under
-            # --bits 16 it stays as ``uint32_t`` (kept distinct from the
-            # 16-bit ``unsigned int``).
-            "UINT32_T": "unsigned int" if self.bits == 32 else "uint32_t",
         }
         if token[0] in pointer_bases:
             self.eat()

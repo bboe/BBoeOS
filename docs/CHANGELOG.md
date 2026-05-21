@@ -11,6 +11,22 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: drop `uint8_t` / `uint16_t` / `uint32_t` as built-in keywords;
+  sources must `#include <stdint.h>`.**  cc.py supports `typedef` (PR #453) and
+  now predefines bits-aware width macros (`__UINT*_TYPE__`), so the non-standard
+  built-in keywords just papered over the missing standard-C plumbing.  Removes
+  the `UINT8_T` / `UINT16_T` / `UINT32_T` tokens and their `pointer_bases`
+  entries; every source that uses the names already does (or now does) the
+  `#include`.  Adds a `-I PATH` flag to cc.py so out-of-tree sources (tempdir
+  test inputs, future out-of-tree builds) can resolve the standard headers, and
+  threads `-I <user/libbboeos/include>` plus an auto-prepended `#include
+  <stdint.h>` through every test helper that compiles inline C snippets
+  (`tests/unit/test_cc_codegen.py`, `tests/unit/test_macros.py`,
+  `tests/test_cc_bitfields.py`, `tests/test_cc_local_structs.py`,
+  `tests/test_cc_casts.py`).  Type behaviour is unchanged — under `--bits 32`
+  the typedef-derived `uint32_t` routes through the same canonical `unsigned
+  int` codegen as the kernel's `u32`; under `--bits 16` it resolves to `unsigned
+  long` (the `__UINT32_TYPE__` expansion).
 - **cc.py: collapse the three 32-bit-unsigned type spellings into a single
   canonical type under `--bits 32`.**  The parser now folds `unsigned long`,
   `uint32_t`, and (via the bits-aware `__UINT32_TYPE__` predefine) any
