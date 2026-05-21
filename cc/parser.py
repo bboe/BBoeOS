@@ -880,6 +880,13 @@ class Parser:
         """
         if self.peek()[0] == "RPAREN":
             return []
+        # ``(void)`` as a parameter list spells "no parameters" in C.
+        # Accept it as a synonym for the empty list — clang-built headers
+        # use this shape for prototypes (``int closedir(DIR *)`` vs
+        # ``void rewinddir(void)``).
+        if self.peek()[0] == "VOID" and self.peek(offset=1)[0] == "RPAREN":
+            self.eat("VOID")
+            return []
         parameters = [self.parse_parameter()]
         while self.peek()[0] == "COMMA":
             self.eat("COMMA")
@@ -1312,9 +1319,23 @@ class Parser:
         if self.peek()[0] == "TYPEDEF":
             self.eat("TYPEDEF")
             target_type = self.parse_type()
-            alias_token = self.eat("IDENT")
+            # The alias name is usually a fresh IDENT, but stdint.h does
+            # ``typedef unsigned short uint16_t;`` even though cc.py
+            # already has ``uint16_t`` as a built-in keyword.  Accept
+            # the typedef silently in that case (the alias resolves to
+            # the same underlying type either way) instead of forcing
+            # the header to fork between clang and cc.py builds.
+            alias_kind = self.peek()[0]
+            if alias_kind == "IDENT":
+                alias_name = self.eat("IDENT")[1]
+                self.typedef_aliases[alias_name] = target_type
+            elif alias_kind in TYPE_TOKENS:
+                self.eat()
+            else:
+                token = self.peek()
+                message = f"expected typedef alias name, got {token[0]} ({token[1]!r})"
+                raise CompileError(message, line=token[2])
             self.eat("SEMI")
-            self.typedef_aliases[alias_token[1]] = target_type
             return None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return self._parse_struct_declaration()
@@ -1546,6 +1567,11 @@ class Parser:
         strcmp(const char *, const char *)``) that ``<string.h>``
         expects when the same source is syntax-checked by clang.
 
+        ``signed`` is accepted and discarded for the same reason:
+        cc.py's ``int`` / ``char`` are already signed, so the modifier
+        is a no-op.  Lets sources with explicit-signedness typedefs
+        (``typedef signed short int16_t;`` from ``<stdint.h>``) parse.
+
         Returns:
             The type as a string.
 
@@ -1554,7 +1580,9 @@ class Parser:
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
-        if self.peek()[0] == "CONST":
+        # ``const`` / ``signed`` are no-op leading qualifiers.  Loop so
+        # ``const signed int`` etc. drop both before we read the base.
+        while self.peek()[0] in {"CONST", "SIGNED"}:
             self.eat()
         token = self.peek()
         if token[0] == "VOID":
@@ -1570,20 +1598,56 @@ class Parser:
         if token[0] in pointer_bases:
             self.eat()
             return self._parse_pointer_suffix(pointer_bases[token[0]], max_stars=2)
+        if token[0] == "SHORT":
+            # ``short`` alone, ``short int`` — both width-checking lie
+            # as cc.py's machine-word ``int`` (16-bit under --bits 16,
+            # 32-bit under --bits 32), but the parse succeeds so the
+            # rest of the file gets through.  Width-faithful int16_t
+            # is future work.
+            self.eat()
+            if self.peek()[0] == "INT":
+                self.eat()
+            return self._parse_pointer_suffix("int", max_stars=2)
         if token[0] == "UNSIGNED":
             self.eat()
             following = self.peek()
+            if following[0] == "SHORT":
+                # ``unsigned short`` — width matches uint16_t, so route
+                # through that for both width and codegen.
+                self.eat()
+                if self.peek()[0] == "INT":
+                    self.eat()
+                return self._parse_pointer_suffix("uint16_t", max_stars=2)
             if following[0] == "LONG":
                 self.eat()
+                # ``unsigned long long`` collapses to ``unsigned long``
+                # (cc.py has no real 64-bit type; the alias lets
+                # ``typedef unsigned long long uint64_t;`` parse, but
+                # any caller that actually instantiates it gets 32-bit
+                # storage — caveat emptor until int64 support lands).
+                if self.peek()[0] == "LONG":
+                    self.eat()
                 return self._parse_pointer_suffix("unsigned long", max_stars=2)
             if following[0] == "INT":
                 self.eat()
                 return self._parse_pointer_suffix("unsigned int", max_stars=2)
-            message = f"expected 'int' or 'long' after 'unsigned', got {following[1]!r}"
+            if following[0] == "CHAR":
+                # ``unsigned char`` — width matches uint8_t, so route
+                # through that for both width and codegen.
+                self.eat()
+                return self._parse_pointer_suffix("uint8_t", max_stars=2)
+            message = f"expected 'char', 'int', 'long', or 'short' after 'unsigned', got {following[1]!r}"
             raise CompileError(message, line=token[2])
         if token[0] == "LONG":
-            message = "bare 'long' is not supported; use 'unsigned long'"
-            raise CompileError(message, line=token[2])
+            # Treat bare ``long`` / ``long long`` as ``unsigned long``
+            # so ``typedef long off_t;`` and ``typedef long long
+            # int64_t;`` from ``<stdint.h>`` parse without forcing
+            # callers to use ``unsigned long`` themselves.  Width is
+            # 32-bit either way under cc.py's current type system.
+            self.eat()
+            if self.peek()[0] == "LONG":
+                self.eat()
+            return self._parse_pointer_suffix("unsigned long", max_stars=2)
         if token[0] == "STRUCT":
             self.eat()
             tag_token = self.eat("IDENT")
