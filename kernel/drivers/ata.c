@@ -33,7 +33,6 @@ extern u8 *sector_buffer;
 
 void ata_init() {
     u8 status;
-    struct ata_status *status_bits;
     struct ata_dcr soft_reset = {.srst = 1};
     struct ata_dcr release = {0};
     // Software-reset the primary controller, four 400ns reads on the
@@ -46,8 +45,7 @@ void ata_init() {
     kernel_outb(0x3F6, *(u8 *)&release);
     while (1) {
         status = kernel_inb(0x1F7);
-        status_bits = (struct ata_status *)&status;
-        if (status_bits->bsy == 0) {
+        if (((struct ata_status *)&status)->bsy == 0) {
             break;
         }
     }
@@ -64,13 +62,11 @@ void ata_issue(int lba __attribute__((in_register("ax"))),
     __attribute__((preserve_register("edx"))) {
     int saved_lba;
     u8 status;
-    struct ata_status *status_bits;
     struct ata_drive_head select = {.lba = 1, .reserved_5 = 1, .reserved_7 = 1};
     saved_lba = lba & 0xFFFF;
     while (1) {
         status = kernel_inb(0x1F7);
-        status_bits = (struct ata_status *)&status;
-        if (status_bits->bsy == 0) {
+        if (((struct ata_status *)&status)->bsy == 0) {
             break;
         }
     }
@@ -116,17 +112,15 @@ int ata_read_sector(int lba __attribute__((in_register("ax"))))
 int ata_wait_drq() __attribute__((carry_return))
 __attribute__((preserve_register("edx"))) {
     u8 status;
-    struct ata_status *status_bits;
     while (1) {
         status = kernel_inb(0x1F7);
-        status_bits = (struct ata_status *)&status;
-        if (status_bits->bsy) {
+        if (((struct ata_status *)&status)->bsy) {
             continue;
         }
-        if (status_bits->err) {
+        if (((struct ata_status *)&status)->err) {
             return 0;
         } // CF=1
-        if (status_bits->drq) {
+        if (((struct ata_status *)&status)->drq) {
             return 1;
         } // CF=0
         // BSY=0, DRQ=0, ERR=0 — keep polling
@@ -142,17 +136,15 @@ int ata_write_sector(int lba __attribute__((in_register("ax"))))
     __attribute__((preserve_register("edx")))
     __attribute__((preserve_register("esi"))) {
     u8 status;
-    struct ata_status *status_bits;
     ata_issue(lba, 0x30); // ATA_CMD_WRITE
     if (ata_wait_drq()) {
         kernel_outsw(0x1F0, sector_buffer, 256);
         while (1) {
             status = kernel_inb(0x1F7);
-            status_bits = (struct ata_status *)&status;
-            if (status_bits->bsy) {
+            if (((struct ata_status *)&status)->bsy) {
                 continue;
             }
-            if (status_bits->err) {
+            if (((struct ata_status *)&status)->err) {
                 return 0;
             }
             return 1;
