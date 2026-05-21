@@ -108,13 +108,23 @@ def test_byte_dereference_after_cast(*, work: Path) -> None:
 
 
 def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
-    """``*(uint8_t *)&local = value`` parses and emits a direct frame store.
+    """``*(uint8_t *)&local = value`` parses cleanly and fully folds when the slot is dead.
 
     Models the driver-side read-modify-write port idiom: load a byte
     from a port into a struct local, flip one bitfield, write the byte
-    back.  The ``AddressOf(Var)`` shortcut on both the assign LHS and
-    the read RHS folds the store / load directly to ``[ebp-K]`` — no
-    intermediate ``lea`` or scratch register.
+    back.  When the local is only used in the bridge pattern (no other
+    reads or address-takes), the full pipeline collapses past the
+    memory round-trip:
+
+    * The ``AddressOf(Var)`` shortcut on the assign LHS folds the
+      initial store to ``[ebp-K]``.
+    * ``peephole_fuse_byte_modify_in_place`` rewrites the bitfield set
+      (which originally emitted ``or byte [ebp-K], 1``) to operate on
+      AL directly.
+    * ``peephole_dead_temp_slots`` then drops the now-unreferenced
+      spill, leaving ``call source / or al, 1 / movzx eax, al / call sink``.
+
+    No ``[ebp-K]`` access should survive.
     """
     asm = compile_snippet(
         name="byte_dereference_assign_after_cast",
@@ -132,8 +142,9 @@ def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
         work=work,
     )
     body = asm.split("caller:", 1)[1].split("\n_", 1)[0]
-    assert "mov [ebp-1], al" in body, f"missing frame-relative byte store:\n{body}"
-    assert "movzx eax, byte [ebp-1]" in body, f"missing frame-relative byte load:\n{body}"
+    assert "or al, 1" in body, f"missing AL-direct bitfield set:\n{body}"
+    assert "call source" in body and "call sink" in body, body
+    assert "[ebp-" not in body, f"frame slot should have folded away:\n{body}"
     assert "lea " not in body, f"unexpected lea (shortcut should bypass it):\n{body}"
 
 
