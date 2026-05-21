@@ -2879,6 +2879,41 @@ def test_pinned_register_save_skipped_before_first_store() -> None:
     assert "push edx" in after_loop, f"in-loop save must survive:\n{after_loop}"
 
 
+def test_pinned_register_save_skipped_before_first_store_for_user_call() -> None:
+    """User-function calls before the first store to a pinned local skip its save.
+
+    Mirrors the builtin-call variant
+    (:func:`test_pinned_register_save_skipped_before_first_store`):
+    the pin is undefined garbage until the first store, so wrapping a
+    user-function call in ``push ebx`` / ``pop ebx`` preserves
+    nothing.  Once the pin is initialised the save returns — the
+    compiler doesn't do liveness past the call, so any post-store
+    call still gets the save.
+    """
+    asm = _kernel(
+        """
+        int get_fn();
+        int helper(int x);
+        int dispatch() {
+            int (*handler)() __attribute__((pinned_register("ebx")));
+            helper(0);
+            handler = get_fn();
+            helper(0);
+            return handler();
+        }
+    """,
+        bits=32,
+    )
+    pre_store, _, post_store = asm.partition("mov ebx, eax")
+    # ``helper(0)`` before the pin is written, and ``get_fn()`` whose
+    # return populates the pin — both have nothing live in EBX, so
+    # neither wraps with ``push ebx`` / ``pop ebx``.
+    assert "push ebx" not in pre_store, f"pre-store user calls should not save ebx:\n{pre_store}"
+    # The post-store ``helper(0)`` and the ``handler()`` indirect call
+    # both see a live pin and must preserve it across the clobber.
+    assert post_store.count("push ebx") == 2, f"post-store calls must save ebx twice:\n{post_store}"
+
+
 def test_pointer_compared_to_int_literal_is_rejected() -> None:
     """``char *p; if (p == 0)`` raises — must spell as ``p == NULL``."""
     error = _kernel_error("""
