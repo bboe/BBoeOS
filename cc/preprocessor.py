@@ -84,6 +84,7 @@ FUNCTION_DEFINE_PATTERN = re.compile(
 #: Token-kind sentinel for the EOF token appended by :func:`cc.lexer.tokenize`.
 _EOF_KIND = "EOF"
 
+
 #: Object-like macros every translation unit gets for free.  Mirrors the
 #: width-type built-ins clang predefines for the i386 target — these
 #: are the ``__SIZE_TYPE__`` / ``__UINT32_TYPE__`` / etc. macros that
@@ -95,24 +96,28 @@ _EOF_KIND = "EOF"
 #: 3. the host cc (often x86_64) used by ``tests/unit/test_libbboeos.py``
 #:    to natively unit-test the pure libbboeos functions.
 #:
-#: The cc.py expansions pick types that are width-correct under BOTH
-#: --bits modes — ``unsigned long`` is the 32-bit-safe spelling because
-#: cc.py routes it through a fixed-width codegen path (4 bytes always),
-#: whereas ``unsigned int`` would be 16 bits under --bits 16.  clang
-#: predefines these as ``unsigned int`` / ``signed int`` for the i386
-#: target (where ``int`` is always 32 bits), which is also correct.
-_BUILTIN_DEFINES: dict[str, str] = {
-    "__INT16_TYPE__": "signed short",
-    "__INT32_TYPE__": "signed int",
-    "__INT64_TYPE__": "signed long long",
-    "__INT8_TYPE__": "signed char",
-    "__PTRDIFF_TYPE__": "int",
-    "__SIZE_TYPE__": "unsigned int",
-    "__UINT16_TYPE__": "unsigned short",
-    "__UINT32_TYPE__": "unsigned long",
-    "__UINT64_TYPE__": "unsigned long long",
-    "__UINT8_TYPE__": "unsigned char",
-}
+#: The expansions are bits-mode aware: under --bits 32 the 32-bit
+#: width types collapse to ``unsigned int`` / ``signed int`` (4 bytes,
+#: the well-trodden codegen path — matching what clang predefines for
+#: the i386 target), while under --bits 16 ``__UINT32_TYPE__`` stays as
+#: ``unsigned long`` so it routes through the DX:AX-pair codegen that
+#: 16-bit mode needs.  :func:`_builtin_defines` returns the right table
+#: for the active bits mode.
+def _builtin_defines(*, bits: int) -> dict[str, str]:
+    """Return clang-style width-type predefines for the active --bits mode."""
+    uint32_type = "unsigned int" if bits == 32 else "unsigned long"
+    return {
+        "__INT16_TYPE__": "signed short",
+        "__INT32_TYPE__": "signed int",
+        "__INT64_TYPE__": "signed long long",
+        "__INT8_TYPE__": "signed char",
+        "__PTRDIFF_TYPE__": "int",
+        "__SIZE_TYPE__": "unsigned int",
+        "__UINT16_TYPE__": "unsigned short",
+        "__UINT32_TYPE__": uint32_type,
+        "__UINT64_TYPE__": "unsigned long long",
+        "__UINT8_TYPE__": "unsigned char",
+    }
 
 
 def _collect_function_macro_arguments(
@@ -326,6 +331,7 @@ def preprocess(
     source: str,
     /,
     *,
+    bits: int = 32,
     include_base: Path | None = None,
     include_stack: frozenset[Path] = frozenset(),
     search_paths: tuple[Path, ...] = (),
@@ -370,7 +376,7 @@ def preprocess(
     if include_base is None:
         include_base = Path()
     source = _splice_line_continuations(source)
-    defines: dict[str, str] = dict(_BUILTIN_DEFINES)
+    defines: dict[str, str] = _builtin_defines(bits=bits)
     function_defines: dict[str, tuple[tuple[str, ...], list[tuple[str, str, int]]]] = {}
     output_lines: list[str] = []
     # Conditional-compilation stack.  Each entry is ``(name, skipping,
@@ -440,6 +446,7 @@ def preprocess(
                 raise CompileError(message, line=line_number) from error
             included_text, included_defines, included_function_defines = preprocess(
                 included_source,
+                bits=bits,
                 include_base=include_path.parent,
                 include_stack=include_stack | {include_path},
                 search_paths=search_paths,

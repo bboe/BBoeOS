@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: collapse the three 32-bit-unsigned type spellings into a single
+  canonical type under `--bits 32`.**  The parser now folds `unsigned long`,
+  `uint32_t`, and (via the bits-aware `__UINT32_TYPE__` predefine) any
+  `<stdint.h>`-sourced `uint32_t` into the well-trodden `unsigned int` codegen
+  path; the `unsigned long` DX:AX-pair codegen is a `--bits 16` artifact and no
+  longer fires for 32-bit builds.  The virtual-long optimisation (`unsigned long
+  now = datetime(); print_datetime(now);` → no frame spill) generalises to the
+  canonical type so the date(1) byte count holds.  Unblocks future removal of
+  cc.py's `uint*_t` built-in keywords: source that includes `<stdint.h>` will
+  route through the typedef and produce the same code as the legacy keyword
+  path.  Under `--bits 16` the three spellings remain distinct (`unsigned int`
+  is 16-bit there) — the unification is `--bits 32`-only.
 - **Type-name separation: kernel uses `u8`/`u16`/`u32`/`u64`; userspace uses
   `uint*_t` via `<stdint.h>`.**  Adds `kernel/include/types.h` with Linux-style
   short-name typedefs (`u8` = `unsigned char`, `u16` = `unsigned short`, `u32` =

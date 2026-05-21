@@ -49,12 +49,13 @@ def _compile(*, bits: int, input_path: Path, object_mode: bool, output_path: Pat
         search_paths: tuple[Path, ...] = (*kernel_includes, *user_includes)
         source, defines, function_defines = preprocess(
             source,
+            bits=bits,
             include_base=input_path.parent,
             search_paths=search_paths,
         )
         tokens = tokenize(source)
         tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
-        ast = Parser(tokens).parse_program()
+        ast = Parser(tokens, bits=bits).parse_program()
         constants_asm = next(
             (path / "constants.asm" for path in search_paths if (path / "constants.asm").is_file()),
             None,
