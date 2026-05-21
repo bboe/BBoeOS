@@ -17,7 +17,15 @@ from cc.utils import parse_asm_constants
 SUBCOMMANDS = ("compile", "pack-ccobj")
 
 
-def _compile(*, bits: int, input_path: Path, object_mode: bool, output_path: Path | None, target_mode: str) -> int:
+def _compile(
+    *,
+    bits: int,
+    extra_include_paths: tuple[Path, ...],
+    input_path: Path,
+    object_mode: bool,
+    output_path: Path | None,
+    target_mode: str,
+) -> int:
     """Translate a C source file to NASM assembly.
 
     Output is written to ``output_path``, or to stdout when None.
@@ -45,8 +53,12 @@ def _compile(*, bits: int, input_path: Path, object_mode: bool, output_path: Pat
                 break
             cursor = cursor.parent
         # Kernel includes win on collision (they're the legacy inline-impl
-        # location); libbboeos prototype headers are the supplement.
-        search_paths: tuple[Path, ...] = (*kernel_includes, *user_includes)
+        # location); libbboeos prototype headers are the supplement.  Any
+        # explicit ``-I`` paths come last (lowest priority) so they can
+        # provide standard-C headers like ``<stdint.h>`` for sources that
+        # live outside the repo tree (e.g. tempdir test inputs) without
+        # overriding repo-local copies.
+        search_paths: tuple[Path, ...] = (*kernel_includes, *user_includes, *extra_include_paths)
         source, defines, function_defines = preprocess(
             source,
             bits=bits,
@@ -120,6 +132,21 @@ def main() -> int:
         ),
     )
     compile_parser.add_argument(
+        "-I",
+        action="append",
+        default=[],
+        dest="include_paths",
+        help=(
+            "add a directory to the #include search path; may be repeated."
+            "  Tried after the repo's auto-discovered kernel/ and"
+            " libbboeos/ include dirs, so standard headers (e.g."
+            " ``<stdint.h>``) resolve even when the source file lives"
+            " outside the repo tree (a tempdir test input, an out-of-tree"
+            " build)."
+        ),
+        metavar="PATH",
+    )
+    compile_parser.add_argument(
         "--target",
         choices=("user", "kernel"),
         default="user",
@@ -156,6 +183,7 @@ def main() -> int:
 
     return _compile(
         bits=arguments.bits,
+        extra_include_paths=tuple(Path(p) for p in arguments.include_paths),
         input_path=Path(arguments.input),
         object_mode=arguments.object,
         output_path=Path(arguments.output) if arguments.output is not None else None,

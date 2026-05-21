@@ -33,9 +33,12 @@ CC = REPO_ROOT / "cc.py"
 sys.path.insert(0, str(REPO_ROOT))
 
 
+_STDINT_PREAMBLE = "#include <stdint.h>\n"
+
+
 def _compile_32bit(source_text: str, /) -> str:
     """Run cc.py --bits 32 on *source_text*; return the generated asm."""
-    text = textwrap.dedent(source_text)
+    text = _STDINT_PREAMBLE + textwrap.dedent(source_text)
     with tempfile.NamedTemporaryFile(
         suffix=".c",
         prefix="_test_macros_",
