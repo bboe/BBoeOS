@@ -216,7 +216,6 @@ class EmissionMixin:
                 function.name != "main"
                 and not function.naked
                 and function.params
-                and not function.is_variadic
                 and not has_complex_call.get(function.name)
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
@@ -1887,6 +1886,8 @@ class EmissionMixin:
         self.current_carry_return = function.carry_return
         self.current_function_is_main = name == "main"
         self.current_function_is_naked = function.naked
+        self.current_function_is_variadic = function.is_variadic
+        self.current_function_regparm_count = function.regparm_count
         self._current_function_parameter_names: tuple[str, ...] = tuple(parameter.name for parameter in parameters)
         self._ir_call_pinned_initialized = {}
         self._current_call_pinned_initialized = None

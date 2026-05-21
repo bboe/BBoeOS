@@ -424,12 +424,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # auto-pinned params.  Skip the register_convention
                 # promotion so call sites take the fastcall path.
                 continue
-            if name in self.variadic_functions:
-                # Variadic callers use plain cdecl (every arg pushed on
-                # the stack right-to-left); the callee can't piggyback
-                # on auto-pinned params because the caller had no way to
-                # know which register each named param maps to.
-                continue
             if pins and not has_complex_call.get(name):
                 self.register_convention_functions.add(name)
 
