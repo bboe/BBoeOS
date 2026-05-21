@@ -84,6 +84,19 @@ FUNCTION_DEFINE_PATTERN = re.compile(
 #: Token-kind sentinel for the EOF token appended by :func:`cc.lexer.tokenize`.
 _EOF_KIND = "EOF"
 
+#: Object-like macros every translation unit gets for free.  Mirrors the
+#: width-type built-ins that clang predefines for the i386 target —
+#: ``<stddef.h>`` uses them to typedef ``size_t`` / ``ptrdiff_t`` in a
+#: way that stays portable when the same source is compiled by the
+#: 64-bit host cc for libbboeos unit tests.  cc.py only ever emits
+#: 16-bit or 32-bit code, so ``int`` / ``unsigned int`` match the
+#: target's natural word width and these typedefs come out the same
+#: shape clang would produce for the bboeos --target.
+_BUILTIN_DEFINES: dict[str, str] = {
+    "__PTRDIFF_TYPE__": "int",
+    "__SIZE_TYPE__": "unsigned int",
+}
+
 
 def _collect_function_macro_arguments(
     *,
@@ -340,7 +353,7 @@ def preprocess(
     if include_base is None:
         include_base = Path()
     source = _splice_line_continuations(source)
-    defines: dict[str, str] = {}
+    defines: dict[str, str] = dict(_BUILTIN_DEFINES)
     function_defines: dict[str, tuple[tuple[str, ...], list[tuple[str, str, int]]]] = {}
     output_lines: list[str] = []
     # Conditional-compilation stack.  Each entry is ``(name, skipping,

@@ -11,6 +11,13 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: predefine `__PTRDIFF_TYPE__` and `__SIZE_TYPE__`.**  Mirrors the
+  width-type built-ins clang predefines for the i386 target so `<stddef.h>`'s
+  `typedef __SIZE_TYPE__ size_t;` (and the matching `ptrdiff_t`) resolve under
+  cc.py the same way they do under clang. Without these, every libbboeos source
+  that pulled in `<stddef.h>` transitively (via `<unistd.h>`, `<sys/types.h>`,
+  etc.) bounced cc.py with `expected type, got IDENT ('__PTRDIFF_TYPE__')`.
+  Step 2 of Phase 6.
 - **cc.py: accept file-scope `typedef <type> <name>;`.**  Registers a type alias
   that expands inline at every type-specifier site (variable declarations,
   parameters, casts, `sizeof`, `*(T *)expr`).  Caller-side pointer stars compose
