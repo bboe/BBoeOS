@@ -5658,3 +5658,57 @@ def test_builtin_sys_break_emits_break_syscall() -> None:
     assert asm.count("mov ah, SYS_SYS_BREAK") == 2, (
         f"expected exactly two SYS_SYS_BREAK firings (query + set); got {asm.count('mov ah, SYS_SYS_BREAK')}.\nasm:\n{asm}"
     )
+
+
+def test_variadic_sum_compiles_with_stdarg() -> None:
+    """A variadic ``sum(count, ...)`` function compiles via stdarg.h.
+
+    End-to-end check: the parser accepts ``, ...)``, ``regparm_count``
+    is forced to 0 (every named arg goes on the stack so ``&last`` is
+    a valid frame address for ``va_start``), ``register_convention``
+    auto-pin promotion is skipped (callers can't honour it under
+    cdecl varargs), and the ``__va_start`` / ``__va_arg`` builtins
+    lower the macros from ``user/libbboeos/include/stdarg.h``.
+    """
+    source_text = textwrap.dedent(
+        """
+        #include <stdarg.h>
+        int sum(int count, ...) {
+            va_list ap;
+            int total = 0;
+            int i = 0;
+            va_start(ap, count);
+            while (i < count) {
+                total = total + va_arg(ap, int);
+                i = i + 1;
+            }
+            va_end(ap);
+            return total;
+        }
+        int main() {
+            return sum(4, 10, 20, 30, 40);
+        }
+        """,
+    )
+    with tempfile.TemporaryDirectory(prefix="test_variadic_") as work:
+        work_path = Path(work)
+        src = work_path / "test.c"
+        out = work_path / "test.asm"
+        src.write_text(source_text)
+        result = subprocess.run(
+            ["python3", str(CC), "--bits", "32", "-I", str(LIBBBOEOS_INCLUDE), str(src), str(out)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+        assert result.returncode == 0, f"cc.py failed:\n{result.stderr}"
+        asm = out.read_text()
+    sum_body = asm.split("sum:", 1)[1].split("\nmain:", 1)[0]
+    # va_start: ap points to the byte just past ``count`` (which lives
+    # at ``[ebp+8]`` because variadic functions skip regparm).
+    assert "lea " in sum_body and "[ebp+12]" in sum_body, f"expected va_start to compute &count+4 = ebp+12:\n{sum_body}"
+    # main pushes args right-to-left including count last on the stack.
+    main_body = asm.split("main:", 1)[1].split("\n_", 1)[0]
+    assert "push 4" in main_body, f"expected count pushed onto stack (variadic forces cdecl):\n{main_body}"
+    assert "add esp, 20" in main_body, f"caller cleans 5 args at 4 bytes each after the call:\n{main_body}"

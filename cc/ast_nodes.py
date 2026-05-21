@@ -245,6 +245,7 @@ class Function(Node):
     body: list[Node]
     carry_return: bool = field(default=False, kw_only=True)
     is_prototype: bool = field(default=False, kw_only=True)
+    is_variadic: bool = field(default=False, kw_only=True)
     naked: bool = field(default=False, kw_only=True)
     name: str
     params: list[Param]

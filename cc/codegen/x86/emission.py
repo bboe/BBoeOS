@@ -216,6 +216,7 @@ class EmissionMixin:
                 function.name != "main"
                 and not function.naked
                 and function.params
+                and not function.is_variadic
                 and not has_complex_call.get(function.name)
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
@@ -395,6 +396,8 @@ class EmissionMixin:
                 self.libbboeos_extern_declarations.add(function.name)
                 continue
             self.user_functions[function.name] = len(function.params)
+            if function.is_variadic:
+                self.variadic_functions.add(function.name)
             if function.is_prototype:
                 self.extern_functions.add(function.name)
             if function.regparm_count > 0:
@@ -870,8 +873,10 @@ class EmissionMixin:
             return
         if name in self.user_functions:
             expected = self.user_functions[name]
-            if len(arguments) != expected:
-                message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
+            is_variadic = name in self.variadic_functions
+            if (is_variadic and len(arguments) < expected) or (not is_variadic and len(arguments) != expected):
+                comparator = "at least" if is_variadic else "exactly"
+                message = f"{name}() expects {comparator} {expected} argument{'s' if expected != 1 else ''}"
                 raise CompileError(message, line=statement.line)
             callee_pins = self.user_function_pin_params.get(name, {}) if name in self.register_convention_functions else {}
             is_fastcall = name in self.fastcall_functions
