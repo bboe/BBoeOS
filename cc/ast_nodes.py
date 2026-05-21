@@ -393,11 +393,19 @@ class MemberAccess(Node):
     ``arrow=True`` form (pointer dereference) is fully supported in the
     first cycle; ``arrow=False`` is parsed but may raise CompileError
     in codegen if the base is not a pointer.
+
+    The base is either a named variable (``object_name``) or an
+    arbitrary pointer expression (``base_expr``) — exactly one is set.
+    The base-expression form covers ``((struct T *)expr)->field``,
+    where the cast's target type tells codegen which struct to use
+    for field-offset lookup.  ``object_name`` is the empty string when
+    ``base_expr`` is set.
     """
 
     arrow: bool
     member_name: str
     object_name: str
+    base_expr: Node | None = None
 
 
 @dataclass(kw_only=True, slots=True)

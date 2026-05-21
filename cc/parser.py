@@ -1096,9 +1096,41 @@ class Parser:
                 target_type = self.parse_type()
                 self.eat("RPAREN")
                 operand = self.parse_primary()
-                return Cast(expression=operand, line=line, target_type=target_type)
+                cast = Cast(expression=operand, line=line, target_type=target_type)
+                # Postfix ``->field`` on a struct-pointer cast.  Lets sources
+                # write ``((struct foo *)&raw)->field`` directly instead of
+                # the named-pointer bridge (``struct foo *p = (struct foo
+                # *)&raw; p->field``).  Limited to the arrow form — ``.`` on
+                # a cast would require the cast to evaluate to a struct
+                # value, which cc.py doesn't carry as a first-class type.
+                if self.peek()[0] == "ARROW":
+                    self.eat("ARROW")
+                    member_token = self.eat("IDENT")
+                    return MemberAccess(
+                        arrow=True,
+                        base_expr=cast,
+                        line=line,
+                        member_name=member_token[1],
+                        object_name="",
+                    )
+                return cast
             expression = self.parse_expression()
             self.eat("RPAREN")
+            # Postfix ``->field`` on a parenthesized pointer expression
+            # (typically ``((struct T *)expr)->field``, where the outer
+            # parens wrap a Cast).  Mirrors the cast-branch hook above
+            # so both ``((cast))->field`` and ``(cast)->field`` are
+            # accepted.
+            if self.peek()[0] == "ARROW" and isinstance(expression, Cast):
+                self.eat("ARROW")
+                member_token = self.eat("IDENT")
+                return MemberAccess(
+                    arrow=True,
+                    base_expr=expression,
+                    line=line,
+                    member_name=member_token[1],
+                    object_name="",
+                )
             return expression
         message = f"expected expression, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=line)

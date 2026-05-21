@@ -23,6 +23,7 @@ from cc.ast_nodes import (
     Assign,
     BinaryOperation,
     Call,
+    Cast,
     Char,
     Compound,
     Conditional,
@@ -1221,7 +1222,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         file-scope struct globals where the address of the struct is a
         compile-time symbol (``[_g_obj+offset]``); for those, no base
         register is needed.
+
+        When ``expression.base_expr`` is set (the ``(struct T *)expr``
+        cast form), the base pointer is materialised by evaluating that
+        expression into BX/EBX; the field load then proceeds the same
+        way as the named-variable form.
         """
+        if expression.base_expr is not None:
+            self._generate_member_access_via_expr(expression)
+            return
         object_name = expression.object_name
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
@@ -1339,6 +1348,69 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # 32-bit target: clear upper bytes of EAX so downstream
             # ``test eax, eax`` / signed compares don't read stale bits
             # left behind by a wider previous load.
+            self.emit(f"        movzx {self.target.acc}, word {addr}")
+        else:
+            self.emit(f"        mov {self.target.acc}, {addr}")
+        self.ax_clear()
+
+    def _generate_member_access_via_expr(self, expression: MemberAccess, /) -> None:
+        """Generate code for ``((struct T *)expr)->field``.
+
+        The base is an arbitrary pointer expression (today: always a
+        ``Cast`` to a ``struct T *``; the cast's target type tells us
+        which struct layout to use for the field offset).  Evaluates
+        the cast's inner expression into BX/EBX, then loads the field
+        with the same offset / bitfield / byte-width handling as the
+        named-pointer form.
+        """
+        base = expression.base_expr
+        assert base is not None
+        if not isinstance(base, Cast):
+            message = "'->' on a non-cast expression base is not supported"
+            raise CompileError(message, line=expression.line)
+        target_type = base.target_type.rstrip()
+        if not (target_type.startswith("struct ") and target_type.endswith("*")):
+            message = f"'->' requires a struct-pointer cast, got '{target_type}'"
+            raise CompileError(message, line=expression.line)
+        tag = target_type[7:-1].rstrip()
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=expression.line)
+        if expression.member_name not in layout:
+            message = f"struct '{tag}' has no field '{expression.member_name}'"
+            raise CompileError(message, line=expression.line)
+        info = layout[expression.member_name]
+        offset = info.byte_offset
+        field_size = info.field_size
+        element_size = info.element_size
+        is_array_field = field_size != element_size
+        # Materialise the base pointer into BX/EBX.  generate_expression
+        # leaves the value in AX/EAX; move to BX so the field-load
+        # addressing modes ([bx+N] / [ebx+N]) match the named-pointer
+        # path below.
+        self.generate_expression(base.expression)
+        self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+        base_reg = self.target.bx_register
+        self.ax_clear()
+        if is_array_field:
+            if offset:
+                self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, {base_reg}")
+            self.ax_clear()
+            return
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=expression.line)
+        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+        if info.bit_width is not None:
+            self._emit_bitfield_read(info, addr=addr)
+            return
+        if field_size == 1:
+            self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
             self.emit(f"        movzx {self.target.acc}, word {addr}")
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")

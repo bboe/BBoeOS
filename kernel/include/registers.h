@@ -21,13 +21,13 @@
  *     kernel_outb(PORT, *p);
  *
  *     u8 raw = kernel_inb(PORT);
- *     struct foo *s = (struct foo *)&raw;
- *     ... s->field ...;
+ *     ... ((struct foo *)&raw)->field ...;
  *
  * The struct-literal write path benefits from designated-init +
  * bitfield-collapse peepholes: a multi-field init folds to a single
- * ``mov byte [ebp-K], <const>``.  The read path stays as a pointer
- * cast because cc.py doesn't parse ``*(T *)expr``.
+ * ``mov byte [ebp-K], <const>``.  The read path drops the named-pointer
+ * local entirely now that cc.py accepts ``((struct T *)expr)->field`` as
+ * a single postfix expression.
  *
  * Structs are listed alphabetically by tag.
  */

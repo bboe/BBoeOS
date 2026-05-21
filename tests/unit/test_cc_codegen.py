@@ -1767,6 +1767,78 @@ def test_member_access_uint32_write_32bit() -> None:
     assert "mov [ebx+4], eax" in asm, f"Expected 'mov [ebx+4], eax' for uint32_t field write\n{asm}"
 
 
+def test_member_access_via_cast_arrow_bitfield() -> None:
+    """``((struct T *)&raw)->bf`` extracts a bitfield without a named local."""
+    asm = _user(
+        """
+        struct ata_status {
+            unsigned char err : 1;
+            unsigned char idx : 1;
+            unsigned char drq : 3;
+            unsigned char busy : 3;
+        };
+        int read_busy(unsigned char raw) {
+            return ((struct ata_status *)&raw)->busy;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("read_busy:")[1].split("ret")[0]
+    # base pointer moved into EBX, low byte read, shr+and extracts the
+    # ``busy`` bitfield (top 3 bits).
+    assert "mov ebx," in body
+    assert "shr al, 5" in body
+    assert "and al, 7" in body
+
+
+def test_member_access_via_cast_arrow_byte_field() -> None:
+    """``((struct T *)&raw)->field`` reads a byte member at offset 0 without a named local."""
+    asm = _user(
+        """
+        struct port_byte { unsigned char value; };
+        int read_port(unsigned char raw) {
+            return ((struct port_byte *)&raw)->value;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("read_port:")[1].split("ret")[0]
+    assert "mov ebx," in body, f"expected base into EBX\n{asm}"
+    assert "movzx eax, byte [ebx]" in body, f"expected byte load through EBX\n{asm}"
+
+
+def test_member_access_via_cast_arrow_rejects_non_struct_pointer() -> None:
+    """``((int *)expr)->field`` is rejected — the cast must be to ``struct T *``."""
+    ok, message = _compile(
+        """
+        struct rec { int value; };
+        int main() {
+            int raw = 0;
+            return ((int *)&raw)->value;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert not ok, f"expected struct-pointer-cast rejection, got success:\n{message}"
+    assert "struct-pointer cast" in message, message
+
+
+def test_member_access_via_cast_arrow_word_field_offset() -> None:
+    """``((struct T *)&raw)->field`` at non-zero offset emits ``[ebx+N]``."""
+    asm = _user(
+        """
+        struct rec { unsigned char a; unsigned char b; unsigned short c; };
+        int read_c(unsigned int raw) {
+            return ((struct rec *)&raw)->c;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("read_c:")[1].split("ret")[0]
+    assert "movzx eax, word [ebx+2]" in body, f"expected word load at offset 2\n{asm}"
+
+
 def test_member_read_and_write_roundtrip() -> None:
     """p->flags = x; y = p->flags; compiles and assembles cleanly."""
     _compile_and_assemble(
