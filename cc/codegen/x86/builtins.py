@@ -174,7 +174,7 @@ class BuiltinsMixin:
         length = string_byte_length(argument.content)
         self.emit(f"        mov {self.target.si_register}, {label}")
         self.emit(f"        mov {self.target.count_register}, {length}")
-        self._emit_vdso_jmp("FUNCTION_DIE")
+        self._emit_libbboeos_jmp("FUNCTION_DIE")
 
     def builtin_dup(self, arguments: list[Node], /) -> None:
         """Generate code for the dup() builtin.
@@ -254,7 +254,7 @@ class BuiltinsMixin:
             message = "exit() not available in --target kernel"
             raise CompileError(message)
         self._check_argument_count(arguments=arguments, expected=0, name="exit")
-        self._emit_vdso_jmp("FUNCTION_EXIT")
+        self._emit_libbboeos_jmp("FUNCTION_EXIT")
 
     def builtin_far_read16(self, arguments: list[Node], /) -> None:
         """Generate code for the ``far_read16(offset)`` builtin.
@@ -442,7 +442,7 @@ class BuiltinsMixin:
         FUNCTION_GET_CHARACTER.  Returns the byte zero-extended in AX.
         """
         self._check_argument_count(arguments=arguments, expected=0, name="getchar")
-        self._emit_vdso_call("FUNCTION_GET_CHARACTER")
+        self._emit_libbboeos_call("FUNCTION_GET_CHARACTER")
         self.emit_accumulator_zx_from_al()
         self.ax_clear()
 
@@ -849,7 +849,7 @@ class BuiltinsMixin:
         """Generate code for the print_datetime(unsigned long) builtin.
 
         Prints the epoch value as ``YYYY-MM-DD HH:MM:SS`` (no newline).
-        The vDSO entry point reads the full epoch in EAX; on the 16-bit
+        The libbboeos entry point reads the full epoch in EAX; on the 16-bit
         target an extra ``shl edx, 16 / movzx eax, ax / or eax, edx``
         recombines the DX:AX shape held in 16-bit ``unsigned long``
         storage into EAX before the call.
@@ -857,7 +857,7 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="print_datetime")
         self.generate_long_expression(arguments[0])
         self._emit_long_to_eax()
-        self._emit_vdso_call("FUNCTION_PRINT_DATETIME")
+        self._emit_libbboeos_call("FUNCTION_PRINT_DATETIME")
 
     def builtin_print_ip(self, arguments: list[Node], /) -> None:
         """Generate code for the print_ip(buffer) builtin.
@@ -866,7 +866,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=1, name="print_ip")
         self.emit_si_from_argument(arguments[0])
-        self._emit_vdso_call("FUNCTION_PRINT_IP")
+        self._emit_libbboeos_call("FUNCTION_PRINT_IP")
 
     def builtin_print_mac(self, arguments: list[Node], /) -> None:
         """Generate code for the print_mac(buffer) builtin.
@@ -875,7 +875,7 @@ class BuiltinsMixin:
         """
         self._check_argument_count(arguments=arguments, expected=1, name="print_mac")
         self.emit_si_from_argument(arguments[0])
-        self._emit_vdso_call("FUNCTION_PRINT_MAC")
+        self._emit_libbboeos_call("FUNCTION_PRINT_MAC")
 
     def builtin_printf(self, arguments: list[Node], /) -> None:
         """Generate code for the printf() builtin.
@@ -897,7 +897,7 @@ class BuiltinsMixin:
         if "%" not in fmt and len(arguments) == 1:
             label = self.new_string_label(fmt)
             self.emit(f"        mov {self.target.di_register}, {label}")
-            self._emit_vdso_call("FUNCTION_PRINT_STRING")
+            self._emit_libbboeos_call("FUNCTION_PRINT_STRING")
             return
         # Count format specifiers (excluding %%) to validate argument count.
         expected_args = 0
@@ -919,7 +919,7 @@ class BuiltinsMixin:
         # Push format string pointer.
         label = self.new_string_label(fmt)
         self.emit(f"        push {label}")
-        self._emit_vdso_call("FUNCTION_PRINTF")
+        self._emit_libbboeos_call("FUNCTION_PRINTF")
         stack_size = len(arguments) * self.target.int_size
         self.emit(f"        add {self.target.stack_register}, {stack_size}")
 
@@ -934,7 +934,7 @@ class BuiltinsMixin:
             self.emit(f"        mov al, {argument.value}")
         else:
             self.generate_expression(argument)
-        self._emit_vdso_call("FUNCTION_PRINT_CHARACTER")
+        self._emit_libbboeos_call("FUNCTION_PRINT_CHARACTER")
 
     def builtin_read(self, arguments: list[Node], /) -> None:
         """Generate code for the read() builtin.

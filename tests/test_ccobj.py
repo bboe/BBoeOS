@@ -73,7 +73,7 @@ def test_flat_mode_unchanged_by_object_plumbing(tmp_path: Path) -> None:
     assert '%include "ccobj_markers.inc"' not in body
 
 
-def test_flat_mode_vdso_calls_stay_direct(tmp_path: Path) -> None:
+def test_flat_mode_libbboeos_calls_stay_direct(tmp_path: Path) -> None:
     """Flat-mode user code keeps the direct ``jmp FUNCTION_*`` form.
 
     Regression guard: the indirect-via-pointer-table emission added for
@@ -222,12 +222,12 @@ def test_object_mode_extern_call_uses_ccrel_macro(tmp_path: Path) -> None:
     assert "call die" not in body_minus_ccrel
 
 
-def test_object_mode_vdso_calls_use_indirect_form(tmp_path: Path) -> None:
-    """VDSO calls/jumps emit the indirect ``call/jmp [FUNCTION_*_PTR]`` form.
+def test_object_mode_libbboeos_calls_use_indirect_form(tmp_path: Path) -> None:
+    """Libbboeos calls/jumps emit the indirect ``call/jmp [FUNCTION_*_PTR]`` form.
 
     Object-mode binaries are placed at PROGRAM_BASE by ``ccld``, which
     means any PC-relative jump baked in at assembly time is wrong by
-    the program's base address.  Switching vDSO sites to the indirect-
+    the program's base address.  Switching libbboeos sites to the indirect-
     through-FUNCTION_POINTER_TABLE form (``FF 15``/``FF 25 <abs32>``)
     makes the call site base-invariant: NASM emits the abs32 verbatim,
     pack-ccobj copies the bytes through, and ccld doesn't need to

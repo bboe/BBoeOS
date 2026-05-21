@@ -30,7 +30,7 @@ bring-up; `kernel.bin` is the high-half kernel (`org 0xC0020000`) that owns
 drivers, filesystems, the network stack, and the INT 30h syscall surface.  Each
 user program runs in its own page directory built by `address_space_create`; the
 kernel half (PDEs 768..1023) is copy-imaged from a single `kernel_idle_pd`, and
-the user half holds the program's text, BSS, stack, and a shared vDSO page.
+the user half holds the program's text, BSS, stack, and a shared libbboeos page.
 
 ## Dependencies
 
@@ -96,7 +96,7 @@ kernel/arch/x86/         Architecture-specific code
 kernel/drivers/          ATA, FDC, NE2000, PS/2, RTC, VGA, console, serial
 kernel/fs/               block I/O dispatch, VFS, bbfs, ext2, fd table
 kernel/include/          Shared constants and helper includes
-user/vdso/            shared_print_*, shared_die / shared_exit, vDSO blob
+user/libbboeos/            shared_print_*, shared_die / shared_exit, libbboeos blob
 kernel/memory_management/  Bitmap frame allocator (frame.asm)
 kernel/net/              ARP, IP, ICMP, UDP
 kernel/syscall/          Per-subsystem INT 30h handlers (fs, io, net, rtc, sys)

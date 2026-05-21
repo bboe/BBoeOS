@@ -84,7 +84,7 @@
         ;;
         ;; kernel.bin loads directly to its final physical home — there's
         ;; no real-mode-to-PE relocation copy.  KERNEL_LOAD_PHYS sits
-        ;; above the vDSO target frame at phys 0x10000 and below the VGA
+        ;; above the libbboeos target frame at phys 0x10000 and below the VGA
         ;; aperture at phys 0xA0000, so the entire reserved region fits
         ;; in conventional memory and the OS boots under QEMU `-m 1`.
         ;;

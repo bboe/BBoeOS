@@ -11,6 +11,19 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **libbboeos: Phase 5 — retire the "vDSO" naming throughout the tree.**
+  `user/vdso/vdso.asm` moves to `user/libbboeos/libbboeos.asm` (the `user/vdso/`
+  directory is gone); kernel-side symbols rename `vdso_install` →
+  `libbboeos_install`, `vdso_code_phys` → `libbboeos_code_phys`,
+  `vdso_page_count` → `libbboeos_page_count`, `VDSO_VIRT` → `LIBBBOEOS_VIRT`,
+  `VDSO_SIGRETURN_OFFSET` → `LIBBBOEOS_SIGRETURN_OFFSET`, `VDSO_PAGE_COUNT_MAX`
+  → `LIBBBOEOS_PAGE_COUNT_MAX`.  cc.py codegen helpers rename
+  `_emit_vdso_{call,jmp,jcc}` → `_emit_libbboeos_{call,jmp,jcc}`.
+  `tools/generate_syscalls_h.py`'s group filter switches `^VDSO_` →
+  `^LIBBBOEOS_`.  Prose comments and docs swap "vDSO" → "libbboeos" wherever
+  they referred to the shared blob (the Linux "vDSO" analogy was load-bearing
+  before phases 1–4 unified everything under one libbboeos page table; now it
+  just misleads).  No behaviour change.
 - **libbboeos: Phase 4 — link clang programs against `libbboeos_stubs.o` thunks
   instead of pulling the full bodies out of `libbboeos.a`.**  Adds
   `tools/generate_libbboeos_stubs.py` (reads `FUNCTION_<NAME>_PTR` entries from

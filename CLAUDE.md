@@ -148,7 +148,7 @@ smoke tests.
   into the child PD — segments are NOT dispatched from `chain_buf` directly for
   this reason.
 - Programs are loaded at `PROGRAM_BASE` (`0x08048000`). The shell is the first
-  program loaded at boot. Programs call kernel-provided helpers via the vDSO at
+  program loaded at boot. Programs call kernel-provided helpers via the libbboeos at
   user-virt `0x10000` (e.g. `FUNCTION_PRINT_STRING`, `FUNCTION_PRINT_CHARACTER`,
   `FUNCTION_WRITE_STDOUT`, `FUNCTION_DIE` — see `kernel/include/constants.asm` for
   the full table).  Only program-specific logic files (e.g. `dns_query.asm`,

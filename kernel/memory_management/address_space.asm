@@ -111,7 +111,7 @@ address_space_destroy:
         ;; EAX = pd_phys.  Walks PDEs 0..767 (user half) through a
         ;; kmap_map alias of the PD frame.  For each present PDE,
         ;; kmap_maps the PT, frees every present user-page frame
-        ;; (skipping ADDRESS_SPACE_PTE_SHARED entries — vDSO and
+        ;; (skipping ADDRESS_SPACE_PTE_SHARED entries — libbboeos and
         ;; friends live in shared tables managed by the kernel),
         ;; then unmaps and frees the PT frame itself.  Finally
         ;; unmaps and frees the PD frame.  Caller must not have
@@ -143,7 +143,7 @@ address_space_destroy:
         mov eax, [edx + ecx*4]
         test eax, ADDRESS_SPACE_PDE_PRESENT
         jz .next_pte
-        test eax, ADDRESS_SPACE_PTE_SHARED      ; shared frame (vDSO)?
+        test eax, ADDRESS_SPACE_PTE_SHARED      ; shared frame (libbboeos)?
         jnz .next_pte                           ; yes — leave it for other PDs
         and eax, 0xFFFFF000                     ; user-page phys
         call frame_free

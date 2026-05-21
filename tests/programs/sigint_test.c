@@ -5,7 +5,7 @@
    (AX = 1, CF clear).  The syscall epilogue's SIGNAL_TAIL_CHECK sees
    pending_sigint and calls signal_dispatch_user, which builds a
    sigcontext on the user stack and iretds into on_sigint.  on_sigint
-   sets got_sigint = 1 and returns through the vDSO sigreturn
+   sets got_sigint = 1 and returns through the libbboeos sigreturn
    trampoline.  signal_resume_after_handler restores the interrupted
    register state and iretds back to user code at the instruction
    following the SYS_IO_READ int 30h.  Main checks got_sigint and

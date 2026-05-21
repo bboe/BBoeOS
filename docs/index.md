@@ -24,7 +24,7 @@ directories.
 
 ## Writing programs
 
-- [C subset reference](c_subset.html) — what `cc.py` accepts, the vDSO, and the
+- [C subset reference](c_subset.html) — what `cc.py` accepts, the libbboeos, and the
   compiler's builtin functions
 
 ## Reference

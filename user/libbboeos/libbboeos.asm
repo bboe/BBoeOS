@@ -1,36 +1,38 @@
 ;;; ------------------------------------------------------------------------
-;;; vdso.asm — user-space code blob containing FUNCTION_TABLE + shared_*
+;;; libbboeos.asm — user-space code blob containing FUNCTION_TABLE + shared_*
 ;;; helpers.  Assembled with `nasm -f elf32`, linked with
 ;;; user/libbboeos/libbboeos.ld, then flattened with `objcopy -O binary`
 ;;; to produce build/libbboeos.  Shipped on disk as `lib/libbboeos` and
-;;; copied by vdso_install (entry.asm) to a freshly-allocated frame mapped
+;;; copied by libbboeos_install (entry.asm) to a freshly-allocated frame mapped
 ;;; at user-virt 0x00010000 in every per-program PD.  User programs reach
 ;;; FUNCTION_DIE / FUNCTION_PRINT_STRING / etc. via the addresses baked
 ;;; into constants.asm.
 ;;;
 ;;; All helpers are CPL=3 (no privileged instructions); they reach the
 ;;; kernel only via INT 30h syscalls.  Per-call scratch state lives on
-;;; the user's stack — there is no vDSO data page in this milestone.
+;;; the user's stack — there is no libbboeos data page in this milestone.
 ;;;
 ;;; Layout:
 ;;;   0x00010000  FUNCTION_TABLE (13 × 5-byte jmp slots = 65 bytes)
 ;;;   0x00010046  shared_die / shared_exit / shared_get_character / ...
 ;;;   0x00010XXX  print_datetime_month_lengths (read-only constant)
-;;;   0x00010460  __kernel_sigreturn trampoline (fixed at
-;;;               VDSO_SIGRETURN_OFFSET — signal_dispatch_user writes
-;;;               this as the IRET return address).
-;;;   0x00010800  FUNCTION_POINTER_TABLE (13 × 4-byte function pointers
-;;;               = 52 bytes).  Parallel to FUNCTION_TABLE; same order.
-;;;               Lets object-mode user code reach the vDSO via
+;;;   0x00010E00  FUNCTION_POINTER_TABLE.  13 legacy 4-byte pointers
+;;;               parallel to FUNCTION_TABLE (same order), then a growing
+;;;               tail of clang-compiled libbboeos exports (string.h etc.).
+;;;               Lets object-mode user code dispatch via
 ;;;               `call [FUNCTION_*_PTR]` — an absolute indirect call
 ;;;               whose encoding is base-invariant, so the bytes survive
 ;;;               `ccld` relocation without per-site patching.  Emitted
-;;;               by the linker script via LONG(shared_*) entries.
-;;;   end of file (~1.1 KB actual content; the kernel maps the blob as
+;;;               by the linker script via LONG(shared_*) / LONG(<export>)
+;;;               entries.
+;;;   0x00010FE0  __kernel_sigreturn trampoline (fixed at
+;;;               LIBBBOEOS_SIGRETURN_OFFSET — signal_dispatch_user writes
+;;;               this as the IRET return address).
+;;;   end of file (the kernel maps the blob as
 ;;;   a user code page so unused tail bytes within the page are
 ;;;   irrelevant)
 ;;;
-;;; Each per-program PD aliases the shared vDSO frame at user-virt
+;;; Each per-program PD aliases the shared libbboeos frame at user-virt
 ;;; 0x00010000 with the AVL[0] PTE_SHARED bit so
 ;;; `address_space_destroy` skips frame_free on it.
 ;;; ------------------------------------------------------------------------
@@ -83,7 +85,7 @@ function_table:
 ;;; Helper bodies — ported from src/lib/proc.asm and src/lib/print.asm.
 ;;; All per-call scratch state (the byte transit for char I/O, printf's
 ;;; pad/width flags, print_datetime's intermediate fields) lives on the
-;;; user stack.  No global vDSO data.  Placed after the function_table
+;;; user stack.  No global libbboeos data.  Placed after the function_table
 ;;; section by the linker, so the bodies live at 0x10046 onward.
 ;;; -----------------------------------------------------------------------
 
@@ -625,7 +627,7 @@ print_datetime_month_lengths:
         dw 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 
 ;;; -----------------------------------------------------------------------
-;;; sigreturn trampoline — fixed at VDSO_VIRT + VDSO_SIGRETURN_OFFSET.
+;;; sigreturn trampoline — fixed at LIBBBOEOS_VIRT + LIBBBOEOS_SIGRETURN_OFFSET.
 ;;; signal_dispatch_user sets IRET return-address to this address so that
 ;;; when the user-mode signal handler returns, execution falls here and
 ;;; SYS_SYS_SIGRETURN restores the interrupted context.  The linker

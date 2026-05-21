@@ -220,15 +220,15 @@ section and is null-terminated.
 Not supported: designated initializers, compound literals, nested
 struct-of-struct initializers, runtime-sized local arrays.
 
-## The runtime: vDSO and builtin functions
+## The runtime: libbboeos and builtin functions
 
-There is **no libc**. Instead, the kernel maps a read-only **vDSO** at user-virt
+There is **no libc**. Instead, the kernel maps a read-only **libbboeos** at user-virt
 `0x10000`. Each entry is a 5-byte stub that thunks into the matching `INT 30h`
 syscall. Userland reaches it through the `FUNCTION_*` constants in
 `kernel/include/constants.asm` (`FUNCTION_PRINT_STRING`,
 `FUNCTION_WRITE_STDOUT`, `FUNCTION_DIE`, etc.).
 
-On top of the vDSO, the compiler recognises a fixed set of **builtin function
+On top of the libbboeos, the compiler recognises a fixed set of **builtin function
 names** and emits inline syscall sequences for them. The authoritative list is
 `BUILTIN_CLOBBERS` in `cc/codegen/x86/generator.py`:
 

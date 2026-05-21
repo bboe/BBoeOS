@@ -57,8 +57,8 @@
         %assign FD_TYPE_VGA 11
         %assign FLAG_DIRECTORY  02h         ; Directory entry flags: bit 1 = subdirectory
         %assign FLAG_EXECUTE 01h         ; Directory entry flags: bit 0 = executable
-        ;; vDSO FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
-        ;; match the function_table jmp order in user/vdso/vdso.asm.
+        ;; libbboeos FUNCTION_TABLE base + 5-byte slots.  Slot offsets must
+        ;; match the function_table jmp order in user/libbboeos/libbboeos.asm.
         ;; FUNCTION_TABLE comes first as the base anchor; the rest are
         ;; sorted alphabetically with explicit slot offsets so adding /
         ;; reordering an entry only touches its own line.
@@ -78,12 +78,12 @@
         %assign FUNCTION_WRITE_STDOUT       FUNCTION_TABLE + 60 ; SI=buf, CX=len: write to stdout
         ;; Parallel pointer table at FUNCTION_TABLE + 0x800; one 4-byte
         ;; function pointer per FUNCTION_* entry, same order.  Object-mode
-        ;; user code calls the vDSO via `call [FUNCTION_*_PTR]` (encoded
+        ;; user code calls the libbboeos via `call [FUNCTION_*_PTR]` (encoded
         ;; `FF 15 <abs32>`) so the bytes are base-invariant and survive
         ;; linker relocation without per-site patching.  Flat-mode code
         ;; keeps using the direct `call FUNCTION_*` form above.  Slot
         ;; offsets must match the function_pointer_table dd order in
-        ;; user/vdso/vdso.asm.  Anchored at 0x800 to keep the on-disk
+        ;; user/libbboeos/libbboeos.asm.  Anchored at 0x800 to keep the on-disk
         ;; libbboeos blob compact: the helper bodies + sigreturn trampoline
         ;; currently end at ~0x466, so this leaves ~924 bytes of growth
         ;; headroom before the address would have to be bumped (which
@@ -306,8 +306,8 @@
         %assign USER_CODE_SELECTOR 1Bh  ; GDT[3] | RPL=3: ring-3 code segment (flat 4 GB)
         %assign USER_DATA_SELECTOR 23h  ; GDT[4] | RPL=3: ring-3 data segment (flat 4 GB)
         %assign USER_STACK_TOP 0FF800000h       ; Ring-3 stack top (one past last user-virt page); 64 KB stack at 0xFF7F0000-0xFF800000, 64 KB guard at 0xFF7E0000-0xFF7F0000.  Top sits exactly at the user/kernel boundary so ESP=USER_STACK_TOP can push 4 B into [0xFF7FFFFC, 0xFF800000) without crossing into the kernel half.
-        %assign VDSO_PAGE_COUNT_MAX 4           ; Compile-time ceiling on how many 4 KB pages the kernel will map for the shared libbboeos image starting at FUNCTION_TABLE.  vdso_install reads `lib/libbboeos` at boot and rounds up to ceil(size / 4096); this constant sizes the per-page phys-frame array (vdso_code_phys) and bounds the per-program map loop in build_child_program_state.  Bumping it costs (4 * VDSO_PAGE_COUNT_MAX) bytes of kernel BSS.
-        %assign VDSO_SIGRETURN_OFFSET 0FE0h     ; offset within the vDSO page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.  Anchored near the end of page 0 (past the pointer table at 0x800..0x83C) so libbboeos.text can grow well past 0x460 as clang-compiled exports accumulate.
+        %assign LIBBBOEOS_PAGE_COUNT_MAX 4           ; Compile-time ceiling on how many 4 KB pages the kernel will map for the shared libbboeos image starting at FUNCTION_TABLE.  libbboeos_install reads `lib/libbboeos` at boot and rounds up to ceil(size / 4096); this constant sizes the per-page phys-frame array (libbboeos_code_phys) and bounds the per-program map loop in build_child_program_state.  Bumping it costs (4 * LIBBBOEOS_PAGE_COUNT_MAX) bytes of kernel BSS.
+        %assign LIBBBOEOS_SIGRETURN_OFFSET 0FE0h     ; offset within the libbboeos page (FUNCTION_TABLE) of the __kernel_sigreturn trampoline that ends every signal handler — `mov ah, SYS_SYS_SIGRETURN; int 30h`.  Anchored near the end of page 0 (past the pointer table at 0x800..0x83C) so libbboeos.text can grow well past 0x460 as clang-compiled exports accumulate.
 
         ;; PIT constants used by entry.asm's IRQ 0 hookup and rtc.c's
         ;; PIT-driven sleep / tick counter.  PIC_EOI lives above with

@@ -130,7 +130,7 @@ hello from a user program
 ```
 
 `hello` runs from `bin/hello`, loaded at user-virt `0x08048000` in its own page
-directory at ring 3. `printf` resolves to a vDSO entry the kernel maps read-only
+directory at ring 3. `printf` resolves to a libbboeos entry the kernel maps read-only
 at user-virt `0x10000`.
 
 The full set of types, control flow, operators, and builtin functions the

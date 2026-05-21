@@ -3,7 +3,7 @@
 ;;;
 ;;; Loaded onto disk after boot.bin and read into physical 0x20000 by
 ;;; boot.asm's real-mode INT 13h.  The phys load address sits in
-;;; conventional RAM (above the vDSO target at 0x10000, below the VGA
+;;; conventional RAM (above the libbboeos target at 0x10000, below the VGA
 ;;; aperture at 0xA0000) so the entire kernel-side reserved region
 ;;; fits under 1 MB and the OS can boot under QEMU `-m 1`.  The
 ;;; kernel `org` is KERNEL_VIRT_BASE + KERNEL_LOAD_PHYS, which means
@@ -27,10 +27,10 @@
 ;;; `kernel_idle_pd` so the kernel direct map is reachable from
 ;;; every address space.  The user half (PDEs 0..767) starts empty and
 ;;; is populated only with the program's own pages, plus the shared
-;;; vDSO PTE marked with the AVL[0] PTE_SHARED bit so
+;;; libbboeos PTE marked with the AVL[0] PTE_SHARED bit so
 ;;; `address_space_destroy` skips frame_free on it.  Programs run
 ;;; with PROGRAM_BASE=0x08048000 and USER_STACK_TOP=0x40000000 (Linux
-;;; ELF convention); the vDSO (0x10000) stays at low user-virt and
+;;; ELF convention); the libbboeos (0x10000) stays at low user-virt and
 ;;; reaches the program through the per-program PD's first PT.
 ;;; ------------------------------------------------------------------------
 
@@ -70,7 +70,7 @@ directory_sector dw 0                   ; offset 3
         ;; Kernel-side memory layout.  In-memory order (low to high):
         ;;
         ;;   E820 table at phys 0x500             (read-only, from boot.asm)
-        ;;   vDSO target at phys 0x10000          (1 page, mapped per-PD)
+        ;;   libbboeos target at phys 0x10000          (1 page, mapped per-PD)
         ;;   kernel.bin at KERNEL_LOAD_PHYS       (image; var size)
         ;;   KERNEL_RESERVED_BASE                 (page-aligned post-image)
         ;;     kernel_stack                       (KERNEL_STACK_BYTES = 1 KB; slot_a)
@@ -299,8 +299,8 @@ high_entry:
         ;; all dead by now and stay free in the bitmap so the user
         ;; pool can grow into them.  Two narrow reserves:
         ;;
-        ;;   1. vDSO target frame at phys 0x10000.  One 4 KB page.
-        ;;      The vDSO is mapped into every per-program PD as a
+        ;;   1. libbboeos target frame at phys 0x10000.  One 4 KB page.
+        ;;      The libbboeos is mapped into every per-program PD as a
         ;;      shared user code page, so its phys location must
         ;;      stay pinned.
         ;;   2. Kernel image and KERNEL_RESERVED_BASE region:
@@ -308,7 +308,7 @@ high_entry:
         ;;      Covers the kernel image, kernel stack, boot PD, first
         ;;      kernel PT, and the runtime-sized frame_bitmap.
         mov eax, 0x10000
-        mov ecx, 0x1000                 ; vDSO target page
+        mov ecx, 0x1000                 ; libbboeos target page
         call frame_reserve_range
         mov eax, KERNEL_LOAD_PHYS
         mov ecx, [frame_bitmap_bytes]
@@ -439,7 +439,7 @@ high_entry:
         ;; window is reachable from every CR3.  Must run before the
         ;; first user PD is built (i.e. before shell_reload), and
         ;; before any kmap_map call could land on a slot — which
-        ;; means before vdso_install in protected_mode_entry below
+        ;; means before libbboeos_install in protected_mode_entry below
         ;; (the first kmap-using callsite past this point).
         call kmap_init
 
@@ -549,7 +549,7 @@ kernel_gdtr:
         ;; The libbboeos shared blob (FUNCTION_TABLE jump block + shared_*
         ;; helper bodies + FUNCTION_POINTER_TABLE) used to be incbin'd
         ;; here, but it now ships as `lib/libbboeos` on the disk image.
-        ;; `vdso_install` in entry.asm reads it at boot, copies it
+        ;; `libbboeos_install` in entry.asm reads it at boot, copies it
         ;; into a freshly-allocated frame, and maps that frame with
         ;; PTE_SHARED at user-virt FUNCTION_TABLE (0x00010000) in
         ;; every per-program PD.  Decoupling libbboeos from kernel.bin
@@ -737,17 +737,17 @@ tss_data                 resb 104
         ;; stack-mapping / argv-staging passes.
 user_image_end           resd 1
 
-        ;; Phys of the shared vDSO code frames; build_child_program_state
-        ;; aliases the first vdso_page_count entries into every per-program PD
+        ;; Phys of the shared libbboeos code frames; build_child_program_state
+        ;; aliases the first libbboeos_page_count entries into every per-program PD
         ;; at consecutive user-virts FUNCTION_TABLE, FUNCTION_TABLE + 0x1000,
         ;; ... so libbboeos can grow past one page.  Sized at compile time by
-        ;; VDSO_PAGE_COUNT_MAX; only the first vdso_page_count slots are live.
-vdso_code_phys           resd VDSO_PAGE_COUNT_MAX
+        ;; LIBBBOEOS_PAGE_COUNT_MAX; only the first libbboeos_page_count slots are live.
+libbboeos_code_phys           resd LIBBBOEOS_PAGE_COUNT_MAX
 
-        ;; Number of 4 KB frames vdso_install actually populated this boot.
+        ;; Number of 4 KB frames libbboeos_install actually populated this boot.
         ;; Set to ceil(libbboeos_size / 4096); read by build_child_program_state
-        ;; to bound the per-program vDSO map loop.
-vdso_page_count          resd 1
+        ;; to bound the per-program libbboeos map loop.
+libbboeos_page_count          resd 1
 
         ;; Current user-virt during page-walk loops in
         ;; build_child_program_state / address_space_map_page callers.

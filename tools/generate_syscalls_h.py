@@ -10,7 +10,7 @@ SYS_RTC_MILLIS regression that wedged Doom's main loop after PR #337
 shifted 0x31 -> 0x32.
 
 Filtered to the prefixes that matter to userland: SYS_, ERROR_,
-SIG[A-Z], FD_TYPE_, *_IOCTL_, VDSO_.  Other constants in the asm file
+SIG[A-Z], FD_TYPE_, *_IOCTL_, LIBBBOEOS_.  Other constants in the asm file
 (memory layout, paging, port numbers) stay asm-only because nothing in
 the C-compiled userland references them.
 
@@ -31,7 +31,7 @@ ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>\S+)\s*(?:;(?P<com
 # GROUPS order is load-bearing in two ways:
 # 1. Section order in the generated header — entries print top-to-bottom in
 #    GROUPS order, so put the most-referenced groups (SYS_, ERROR_) ahead of
-#    niche ones (VDSO_) so a reader scanning the file lands on syscall
+#    niche ones (LIBBBOEOS_) so a reader scanning the file lands on syscall
 #    numbers without scrolling past everything else.
 # 2. Classification is first-match-wins (the loop in `_render_header` breaks
 #    on the first matching pattern), so if a name ever satisfied two
@@ -46,7 +46,7 @@ GROUPS = [
     ("Signal numbers", re.compile(r"^SIG[A-Z]")),
     ("File-descriptor types", re.compile(r"^FD_TYPE_")),
     ("ioctl commands", re.compile(r"^(MIDI|CONSOLE|AUDIO|VGA)_IOCTL_")),
-    ("vDSO offsets", re.compile(r"^VDSO_")),
+    ("libbboeos offsets", re.compile(r"^LIBBBOEOS_")),
 ]
 
 # REPO has to come before DESTINATION and SOURCE because they reference it;
@@ -114,7 +114,7 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
         " * DO NOT EDIT MANUALLY — re-run the generator to refresh.",
         " *",
         " * Mirrors the syscall-ABI %assign constants (numbers + error codes +",
-        " * signals + fd types + ioctl commands + vDSO offsets) into a C header",
+        " * signals + fd types + ioctl commands + libbboeos offsets) into a C header",
         " * so clang-compiled userland (user/libbboeos, ports/doom) can reference",
         " * them by name instead of hardcoding numeric values that drift the",
         " * next time the asm side is renumbered. */",
