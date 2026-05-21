@@ -2662,6 +2662,51 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     assert "mov eax, 18" in asm or "mov al, 18" in asm, f"folded immediate load missing:\n{asm}"
 
 
+def test_peephole_narrow_acc_immediate_for_byte_out() -> None:
+    """``mov eax, <imm 0..255>`` followed by ``out dx, al`` narrows to ``mov al, <imm>``.
+
+    After :meth:`peephole_fold_byte_immediate_through_local` produces
+    ``mov eax, <imm>`` from a byte-load idiom, the only consumer of AX
+    is ``out dx, al`` (which touches AL only).  The 3-byte saving per
+    site applies when EAX's upper bits are dead after the out — proved
+    here by a follow-on call that caller-clobbers EAX.
+    """
+    asm = _kernel(
+        """
+        struct cr { uint8_t start: 1; uint8_t stop: 1; uint8_t txp: 1;
+                    uint8_t reserved: 1; uint8_t page: 2; uint8_t rd: 2; };
+        void other();
+        void probe() {
+            struct cr c = { .stop = 1, .rd = 4, .page = 1 };
+            kernel_outb(0x300, *(uint8_t *)&c);
+            other();
+        }
+    """,
+        bits=32,
+    )
+    assert "mov al, 18" in asm, f"narrowed byte-immediate load missing:\n{asm}"
+    assert "mov eax, 18" not in asm, f"unnarrowed full-width load survived:\n{asm}"
+
+
+def test_peephole_narrow_acc_immediate_keeps_wider_consumer() -> None:
+    """Narrow is skipped when something reads {acc} wider than AL before clobber.
+
+    Synthetic 16-bit sequence with an ``mov bx, ax`` between the
+    load and the ``out`` — the move-to-BX reads AX, which would see
+    caller-junk in AH if AX were narrowed to AL.  The peephole must
+    leave ``mov ax, 18`` intact.
+    """
+    out = _peephole_run([
+        "f:",
+        "        mov ax, 18",
+        "        cmp ax, 17",
+        "        mov dx, 768",
+        "        out dx, al",
+        "        ret",
+    ])
+    assert "        mov ax, 18" in out, f"narrowing should be skipped — AX consumed wider:\n{out}"
+
+
 def test_peephole_redundant_register_swap_drops_second_mov() -> None:
     """``mov A, B`` followed by ``mov B, A`` drops the second."""
     out = _peephole_run([
@@ -2774,6 +2819,64 @@ def test_pinned_register_on_non_function_pointer_rejected() -> None:
         }
     """)
     assert "pinned_register" in error, f"Expected pinned_register error, got: {error}"
+
+
+def test_pinned_register_save_kept_after_var_decl_initialiser() -> None:
+    """``int count = n; kernel_outb(...);`` saves EDX once count is pinned to it.
+
+    The IR builder routes ``VarDecl`` with initialiser through a
+    ``Block`` escape hatch — the pre-pass must look inside Block to
+    see the implicit store, otherwise it would mis-treat the pin as
+    uninitialised and elide the save for the first call.  Regression
+    guard for that path.
+    """
+    asm = _kernel(
+        """
+        void test_param(int n) {
+            int count = n;
+            kernel_outb(0x1F3, 0);
+            kernel_outb(0x1F4, count);
+        }
+    """,
+        bits=32,
+    )
+    first_call = asm.split("out dx, al", 1)[0]
+    assert "push edx" in first_call, f"VarDecl-initialised pin must be saved on first call:\n{first_call}"
+
+
+def test_pinned_register_save_skipped_before_first_store() -> None:
+    """Builtin calls before the first store to a pinned local skip push/pop of its register.
+
+    ``status_bits`` auto-pins to EDX, but its first write happens
+    inside the while loop.  The two pre-loop ``kernel_outb`` calls
+    therefore have no meaningful EDX value to preserve — saving it
+    is dead.  The loop-body ``kernel_inb`` still wraps with ``push
+    edx`` / ``pop edx`` because the body stores to status_bits, so
+    every iteration past the first sees a live pin.
+    """
+    asm = _kernel(
+        """
+        struct ata_status { uint8_t err: 1; uint8_t idx: 1;
+            uint8_t corr: 1; uint8_t drq: 1; uint8_t srv: 1;
+            uint8_t df: 1; uint8_t rdy: 1; uint8_t bsy: 1; };
+        void test_init() {
+            uint8_t status;
+            struct ata_status *status_bits;
+            kernel_outb(0x3F6, 4);
+            kernel_outb(0x3F6, 0);
+            while (1) {
+                status = kernel_inb(0x1F7);
+                status_bits = (struct ata_status *)&status;
+                if (status_bits->bsy == 0) { break; }
+            }
+        }
+    """,
+        bits=32,
+    )
+    pre_loop_body, _, after_loop = asm.partition("._ir_wloop")
+    assert "push edx" not in pre_loop_body, f"pre-loop save should be elided:\n{pre_loop_body}"
+    # The loop body's call still saves — second iteration sees a live pin.
+    assert "push edx" in after_loop, f"in-loop save must survive:\n{after_loop}"
 
 
 def test_pointer_compared_to_int_literal_is_rejected() -> None:

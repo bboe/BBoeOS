@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 from cc.codegen.x86.jumps import JUMP_INVERT
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cc.target import CodegenTarget
 
 
@@ -1085,6 +1087,114 @@ class Peepholer:
             del self.lines[i + 1 : i + 5]
             continue
 
+    def peephole_narrow_acc_immediate_for_byte_out(self) -> None:
+        """Narrow ``mov {acc}, <0..255>`` to ``mov al, <imm>`` when ``out dx, al`` consumes it.
+
+        After :meth:`peephole_fold_byte_immediate_through_local` rewrites
+        ``movzx {acc}, byte [bp-N]`` into ``mov {acc}, <imm>`` (the
+        driver port-I/O byte-load idiom), the full-width load survives
+        even though the only consumer is ``out dx, al``, which reads
+        AL only.  Narrowing to ``mov al, <imm>`` saves 3 bytes per site
+        in 32-bit mode (``mov eax, imm32`` is 5 bytes, ``mov al, imm8``
+        is 2 bytes) and 1 byte in 16-bit mode (``mov ax, imm16`` is 3
+        bytes, ``mov al, imm8`` is 2 bytes).
+
+        After narrowing, the upper bits of {acc} hold the caller's
+        previous value instead of zero, so the rewrite is only safe
+        when nothing reads {acc} wider than AL between the load and
+        the next full clobber of {acc}.  Forward scan from the
+        candidate ``mov {acc}, imm``:
+
+        Phase 1 — find the consumer.  Walk to ``out dx, al``; bail on
+        any wider-than-AL read of {acc}, any other write to {acc}
+        (would mean the load is already dead), or any control flow
+        (label, jump, ret, call).
+
+        Phase 2 — confirm post-out safety.  From the line after the
+        ``out``, walk until a full clobber of {acc} (``mov {acc}, ...``,
+        ``xor {acc}, {acc}``, ``movzx {acc}, ...``, ``pop {acc}``,
+        ``call ...``).  Bail on any wider read, ``ret``, label, or
+        jump before that clobber.
+
+        ``xor ah, ah`` and ``in al, dx`` are write-only on their
+        respective AX halves — neither reads {acc} wider than AL —
+        so the scan walks past them.  They don't constitute a *full*
+        clobber of {acc} (the high 16 bits in 32-bit mode stay live),
+        which is why phase 2 must continue searching until a real
+        full-clobber instruction is found.
+        """
+        acc = self.target.acc
+        mov_acc_imm_pattern = re.compile(rf"^\s*mov {re.escape(acc)}, (\d+)\s*$")
+        wider_tokens = ("ah", "ax") if acc == "ax" else ("ah", "ax", "eax")
+        wider_pattern = re.compile(rf"\b(?:{'|'.join(wider_tokens)})\b")
+        full_write_prefixes = (
+            f"mov {acc}, ",
+            f"pop {acc}",
+            f"movzx {acc}, ",
+        )
+
+        def find_forward(start: int, *, matches: Callable[[str], bool], extra_bails: tuple[Callable[[str], bool], ...] = ()) -> int | None:
+            """Walk forward until ``matches`` fires; return that index, else None.
+
+            Common bails for both phases: wider-than-AL read of {acc},
+            label, ``ret``, ``jmp`` / Jcc, ``int``.  ``extra_bails``
+            adds caller-supplied bail predicates (phase 1 uses
+            :func:`is_full_acc_clobber` as one — reaching a clobber
+            before ``out`` means our load is already dead).
+            """
+            for line_index in range(start, len(self.lines)):
+                candidate = self.lines[line_index].strip()
+                if matches(candidate):
+                    return line_index
+                if reads_wider_than_al(candidate):
+                    return None
+                if any(bail(candidate) for bail in extra_bails):
+                    return None
+                if candidate.endswith(":") or candidate.startswith(("ret", "jmp ", "j", "int ")):
+                    return None
+            return None
+
+        def is_full_acc_clobber(stripped: str) -> bool:
+            return (
+                any(stripped.startswith(prefix) for prefix in full_write_prefixes)
+                or stripped == f"xor {acc}, {acc}"
+                or stripped.startswith("call ")
+            )
+
+        def reads_wider_than_al(stripped: str) -> bool:
+            if any(stripped.startswith(prefix) for prefix in full_write_prefixes):
+                return False
+            if stripped == f"xor {acc}, {acc}":
+                return False
+            # ``xor ah, ah`` and ``mov ah, <X>`` both write AH without
+            # reading it as a source; treat as non-reads.
+            if stripped == "xor ah, ah" or stripped.startswith("mov ah, "):
+                return False
+            return bool(wider_pattern.search(stripped))
+
+        for i, line in enumerate(self.lines):
+            match = mov_acc_imm_pattern.match(line)
+            if match is None:
+                continue
+            value = int(match.group(1))
+            if not 0 <= value <= 255:
+                continue
+            # Phase 1: scan to the ``out dx, al`` consumer.  An
+            # intervening full clobber means our load is dead — bail.
+            out_index = find_forward(
+                i + 1,
+                matches=lambda candidate: candidate == "out dx, al",
+                extra_bails=(is_full_acc_clobber,),
+            )
+            if out_index is None:
+                continue
+            # Phase 2: confirm a full clobber follows before any wider
+            # read or control flow that could leak the upper bits.
+            if find_forward(out_index + 1, matches=is_full_acc_clobber) is None:
+                continue
+            indent = line[: len(line) - len(line.lstrip())]
+            self.lines[i] = f"{indent}mov al, {value}"
+
     def peephole_redundant_bx(self) -> None:
         """Remove redundant ``mov bx, X`` / ``mov si, X`` reloads.
 
@@ -1402,6 +1512,7 @@ class Peepholer:
         self.peephole_store_reload()
         self.peephole_fold_byte_immediate_through_local()
         self.peephole_dead_temp_slots()
+        self.peephole_narrow_acc_immediate_for_byte_out()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()
         self.peephole_self_move()
