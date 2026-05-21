@@ -11,6 +11,16 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: accept `((struct T *)expr)->field` as a single postfix expression.**
+  The parser now extends the `->` operator to any parenthesised struct-pointer
+  cast, not just a named pointer variable; codegen materialises the base into
+  EBX and runs the same field-load (with byte / word / dword / bitfield paths)
+  as the named-pointer form.  Eliminates the named-pointer bridge that every
+  `kernel/include/registers.h` bitfield-struct read used to require (`struct foo
+  *p = (struct foo *)&raw; ... p->field ...`).  The dot operator, member-write,
+  and member-index nodes still require a named base — extending those is a
+  separate follow-up (most call sites only need the read path that
+  `kernel/include/registers.h` documents).
 - **cc.py: drop `uint8_t` / `uint16_t` / `uint32_t` as built-in keywords;
   sources must `#include <stdint.h>`.**  cc.py supports `typedef` (PR #453) and
   now predefines bits-aware width macros (`__UINT*_TYPE__`), so the non-standard

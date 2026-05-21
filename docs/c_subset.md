@@ -106,7 +106,7 @@ Supported:
 | Logical (short-circuit) | `&&`, `\|\|`, `!` |
 | Assignment | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` |
 | Unary | `&` (address-of), `*` (dereference), unary `-`, `~`, `!` |
-| Postfix | `[]`, `()`, `.`, `->` |
+| Postfix | `[]`, `()`, `.`, `->` (the arrow form accepts a struct-pointer cast as base: `((struct T *)expr)->field`, no named-pointer local required) |
 | Other | `sizeof(type)` and `sizeof(expr)`, casts |
 
 Not supported: `++`, `--`, the comma operator (commas only separate function
