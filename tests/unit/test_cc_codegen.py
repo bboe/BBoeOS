@@ -16,6 +16,7 @@ both --bits 16 and 32.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -5663,12 +5664,11 @@ def test_builtin_sys_break_emits_break_syscall() -> None:
 def test_variadic_sum_compiles_with_stdarg() -> None:
     """A variadic ``sum(count, ...)`` function compiles via stdarg.h.
 
-    End-to-end check: the parser accepts ``, ...)``, ``regparm_count``
-    is forced to 0 (every named arg goes on the stack so ``&last`` is
-    a valid frame address for ``va_start``), ``register_convention``
-    auto-pin promotion is skipped (callers can't honour it under
-    cdecl varargs), and the ``__va_start`` / ``__va_arg`` builtins
-    lower the macros from ``user/libbboeos/include/stdarg.h``.
+    End-to-end check: the parser accepts ``, ...)``, auto-pin still
+    promotes the named param into a register (regparm_count = 1 here),
+    ``va_start`` skips past the named-on-stack block (zero slots when
+    every named param is register-passed, so ``ap`` lands at
+    ``[ebp+8]``), and the caller pushes only the variadic args.
     """
     source_text = textwrap.dedent(
         """
@@ -5705,10 +5705,12 @@ def test_variadic_sum_compiles_with_stdarg() -> None:
         assert result.returncode == 0, f"cc.py failed:\n{result.stderr}"
         asm = out.read_text()
     sum_body = asm.split("sum:", 1)[1].split("\nmain:", 1)[0]
-    # va_start: ap points to the byte just past ``count`` (which lives
-    # at ``[ebp+8]`` because variadic functions skip regparm).
-    assert "lea " in sum_body and "[ebp+12]" in sum_body, f"expected va_start to compute &count+4 = ebp+12:\n{sum_body}"
-    # main pushes args right-to-left including count last on the stack.
+    # va_start: with count auto-pinned into EAX, no named slots sit on
+    # the stack, so ap lands at [ebp+8] (the first variadic arg).
+    assert "lea " in sum_body and "[ebp+8]" in sum_body, f"expected va_start to compute first variadic = ebp+8:\n{sum_body}"
+    # main passes count in EAX (regparm) and pushes only the 4 variadic
+    # args right-to-left; caller cleans 16 bytes.
     main_body = asm.split("main:", 1)[1].split("\n_", 1)[0]
-    assert "push 4" in main_body, f"expected count pushed onto stack (variadic forces cdecl):\n{main_body}"
-    assert "add esp, 20" in main_body, f"caller cleans 5 args at 4 bytes each after the call:\n{main_body}"
+    assert "mov eax, 4" in main_body, f"expected count loaded into EAX (regparm):\n{main_body}"
+    assert re.search(r"^\s*push 4\s*$", main_body, re.MULTILINE) is None, f"count must not be pushed once it's regparm-loaded:\n{main_body}"
+    assert "add esp, 16" in main_body, f"caller cleans only the 4 variadic args (16 bytes):\n{main_body}"

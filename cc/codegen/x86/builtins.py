@@ -118,35 +118,33 @@ class BuiltinsMixin:
         self._check_argument_count(arguments=arguments, expected=1, name="__builtin_va_end")
 
     def builtin___builtin_va_start(self, arguments: list[Node], /) -> None:
-        """Generate code for ``__builtin_va_start(ap, last)`` — point ``ap`` past ``last``.
+        """Generate code for ``__builtin_va_start(ap, last)`` — point ``ap`` at the first variadic arg.
 
-        Cdecl pushes args right-to-left, so on entry the stack frame
-        holds ``[ebp+8]`` = first named arg, then each subsequent slot
-        at +sizeof(int).  ``__builtin_va_start`` writes ``ap`` to the
-        address immediately following ``last`` — i.e., the first
-        variadic arg.  Variadic functions force ``regparm_count = 0``
-        (every named arg gets a stack slot) so ``&last`` is always a
-        valid frame address.
+        Cdecl pushes args right-to-left, so on entry stack-passed args
+        sit at ``[ebp+8]`` upward.  With auto-pin, the first
+        ``regparm_count`` named params live in EAX/EDX/ECX and occupy
+        no stack space; the remaining ``len(params) - regparm_count``
+        named params sit on the stack starting at ``[ebp+8]``, and the
+        first variadic arg follows them at
+        ``[ebp + 8 + max(0, named_stack_count) * sizeof(int)]``.
+
+        The ``last`` argument is a C-level marker only — it must be the
+        last named parameter, but its codegen location (register or
+        frame) is irrelevant to the computation.
         """
         self._check_argument_count(arguments=arguments, expected=2, name="__builtin_va_start")
         cursor, last = arguments
         if not isinstance(last, Var):
             message = "__builtin_va_start() requires the last named parameter as its second argument"
             raise CompileError(message, line=last.line)
-        last_name = last.name
-        if last_name not in self.locals:
-            message = f"__builtin_va_start() second argument must be a stack-allocated parameter; '{last_name}' is not a local"
+        named_parameter_names = self._current_function_parameter_names
+        if not named_parameter_names or last.name != named_parameter_names[-1]:
+            message = f"__builtin_va_start() second argument must name the last fixed parameter; got '{last.name}'"
             raise CompileError(message, line=last.line)
-        # Parameters live at positive offsets above EBP (``[ebp+N]``).
-        # ``self.locals[name]`` stores the negated EBP-relative offset
-        # for parameters (i.e., a negative value), and a positive slot
-        # for body locals.  ``__builtin_va_start`` only makes sense
-        # when ``last`` is a stack-passed parameter (negative slot).
-        last_slot = self.locals[last_name]
-        if last_slot >= 0:
-            message = f"__builtin_va_start() requires a stack-passed parameter; '{last_name}' lives in a register or body slot"
-            raise CompileError(message, line=last.line)
-        last_offset = -last_slot + self.target.int_size
+        named_count = len(named_parameter_names)
+        regparm_count = self.current_function_regparm_count
+        named_stack_count = max(0, named_count - regparm_count)
+        last_offset = self.target.int_size * 2 + named_stack_count * self.target.int_size
         cursor_register, cursor_address = self._va_list_destination(cursor, builtin_name="__builtin_va_start")
         base = self.target.base_register
         if cursor_register is not None:
