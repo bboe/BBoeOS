@@ -52,7 +52,8 @@ Errors land on stderr as `<file>:<line>: error: <message>` and the process exits
 | `int` | Signed, native machine word: 32-bit under `--bits 32`, 16-bit under `--bits 16`. |
 | `char` | 8-bit signed; zero-extends on load. |
 | `uint8_t`, `uint16_t`, `uint32_t` | Fixed-width unsigned. |
-| `unsigned long` | Always 32-bit unsigned (held in `DX:AX` under `--bits 16`). Locals only — file-scope `unsigned long` globals are rejected. Bare `long` is rejected; use `unsigned long`. |
+| `unsigned long` | Always 32-bit unsigned (held in `DX:AX` under `--bits 16`). Locals only — file-scope `unsigned long` globals are rejected.  Bare `long` / `long long` / `unsigned long long` all parse as `unsigned long` (so stdint.h's `typedef long off_t;` and `typedef unsigned long long uint64_t;` work, though int64_t storage stays 32 bits — width-faithful int64 is future work). |
+| `short` | Parses but aliases to `int` (machine word) — width-faithful int16_t is future work.  `unsigned short` routes through `uint16_t` (correct width).  `unsigned char` routes through `uint8_t` (correct width). |
 | `void` | Function return only; or `void *`. |
 | `struct NAME` | Layout matches positional declaration. Member access uses `.` for values, `->` through pointers. |
 
@@ -60,9 +61,13 @@ Pointer depth tops out at `T **` for scalars and `struct T *` for structs.
 Multi-dimensional arrays (`int grid[5][10]`) are supported with positional
 initializers; designated initializers (`{[2] = 5}`) are not.
 
-The keywords `const` and `volatile` are accepted in declarations and ignored —
-they exist only so POSIX-style prototypes (`int strcmp(const char *a, const char
-*b)`) parse.
+The keywords `const`, `volatile`, and `signed` are accepted in declarations and
+ignored — they exist only so POSIX-style prototypes (`int strcmp(const char *a,
+const char *b)`) and stdint.h's `typedef signed short int16_t;` parse.  cc.py's
+`int` and `char` are already signed, so the `signed` modifier is a no-op.
+
+`(void)` is accepted as an alias for the empty parameter list, so `int
+main(void)` and `void rewinddir(void)` parse.
 
 File-scope `typedef <type> <name>;` registers an alias that expands inline
 wherever a type specifier is expected (variable declarations, parameters, casts,
@@ -71,8 +76,9 @@ alias's own stars — `typedef char *str; str *pp;` becomes `char **`, capped at
 the usual 2-star pointer depth.  Local-scope typedefs and function-pointer
 typedefs (`typedef void (*sig_t)(int);`) are not yet supported.
 
-Not supported: `float`, `double`, `long long`, `_Bool` / `bool`, bit-fields,
-VLAs, K&R function syntax, typedef'd function-pointer aliases.
+Not supported: `float`, `double`, width-faithful `long long` / `int64_t`,
+`_Bool` / `bool`, bit-fields, VLAs, K&R function syntax, typedef'd
+function-pointer aliases.
 
 ## Storage classes and attributes
 

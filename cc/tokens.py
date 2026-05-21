@@ -50,6 +50,8 @@ KEYWORDS = frozenset({
     "int",
     "long",
     "return",
+    "short",
+    "signed",
     "sizeof",
     "struct",
     "switch",
@@ -135,4 +137,18 @@ TOKEN_PATTERN = re.compile(
     re.VERBOSE,
 )
 
-TYPE_TOKENS = frozenset({"CHAR", "CONST", "ENUM", "INT", "LONG", "STRUCT", "UINT16_T", "UINT32_T", "UINT8_T", "UNSIGNED", "VOID"})
+TYPE_TOKENS = frozenset({
+    "CHAR",
+    "CONST",
+    "ENUM",
+    "INT",
+    "LONG",
+    "SHORT",
+    "SIGNED",
+    "STRUCT",
+    "UINT16_T",
+    "UINT32_T",
+    "UINT8_T",
+    "UNSIGNED",
+    "VOID",
+})

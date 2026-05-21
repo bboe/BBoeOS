@@ -3390,6 +3390,35 @@ def test_typedef_alias_expands_in_declarations() -> None:
     assert "add:" in asm
 
 
+def test_typedef_signed_short_long_long_parse() -> None:
+    """``<stdint.h>`` typedefs parse without forking the header.
+
+    ``signed`` is a no-op leading modifier; ``short`` aliases to ``int``
+    (width-faithful int16_t is future work); ``unsigned short`` /
+    ``unsigned char`` route through the existing uint16_t / uint8_t
+    machinery; ``long long`` collapses to ``unsigned long``.  And the
+    alias name itself is allowed to clash with a built-in type token
+    (`typedef unsigned short uint16_t;`) — the typedef silently no-ops
+    in that case so stdint.h doesn't need a cc.py-specific fork.
+    """
+    asm = _user(
+        """
+        typedef signed short int16_t;
+        typedef signed int int32_t;
+        typedef signed long long int64_t;
+        typedef signed char int8_t;
+        typedef unsigned short uint16_t;
+        typedef unsigned long long uint64_t;
+        typedef unsigned char uint8_t;
+        typedef long off_t;
+
+        int main(void) { return 0; }
+        """,
+        bits=32,
+    )
+    assert "main:" in asm
+
+
 def test_typedef_struct_alias_resolves_in_pointer_param() -> None:
     """``typedef struct point point_t;`` lets ``point_t *p`` parse as ``struct point *p``."""
     asm = _user(

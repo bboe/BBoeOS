@@ -11,6 +11,20 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: accept `signed`, `short`, `long long`, `(void)` parameter lists, and
+  typedef aliases whose name clashes with a built-in type.**  Stdint.h's typedef
+  block (`typedef signed short int16_t;`, `typedef unsigned long long
+  uint64_t;`, etc.) now parses without forking the header.  `signed` is an
+  ignored leading modifier (cc.py's `int` and `char` are already signed);
+  `short` aliases to `int` (machine word — width-faithful int16_t is future
+  work); `unsigned short` and `unsigned char` route through `uint16_t` and
+  `uint8_t` (correct width); bare `long`, `long long`, and `unsigned long long`
+  all collapse to `unsigned long`.  `(void)` parses as an alias for the empty
+  parameter list.  Typedef aliases whose name is already a type keyword
+  (`typedef unsigned short uint16_t;`) silently no-op instead of bouncing the
+  typedef.  Step 3 of Phase 6 — gets the three previously-blocked libbboeos
+  sources (dirent / signal / stdlib) further through the parser before they hit
+  their next gap.
 - **cc.py: predefine `__PTRDIFF_TYPE__` and `__SIZE_TYPE__`.**  Mirrors the
   width-type built-ins clang predefines for the i386 target so `<stddef.h>`'s
   `typedef __SIZE_TYPE__ size_t;` (and the matching `ptrdiff_t`) resolve under
@@ -18,7 +32,6 @@ time.
   that pulled in `<stddef.h>` transitively (via `<unistd.h>`, `<sys/types.h>`,
   etc.) bounced cc.py with `expected type, got IDENT ('__PTRDIFF_TYPE__')`. Step
   2 of Phase 6.
-
 - **cc.py: accept `__attribute__((pinned_register("REG")))` on int and pointer
   locals.**  The attribute was previously restricted to `function_pointer`
   locals (the `fd_ioctl` use case).  Relax the parser check to allow any scalar
@@ -27,7 +40,6 @@ time.
   enabler that lets future codegen hot-spots pin a counter or pointer to a
   register without going through `can_auto_pin`'s cost gating.  No behaviour
   change for existing code.
-
 - **cc.py: accept file-scope `typedef <type> <name>;`.**  Registers a type alias
   that expands inline at every type-specifier site (variable declarations,
   parameters, casts, `sizeof`, `*(T *)expr`).  Caller-side pointer stars compose
