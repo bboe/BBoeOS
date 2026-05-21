@@ -117,6 +117,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     """
 
     BUILTIN_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "__builtin_va_arg": frozenset({"ax", "bx"}),
+        "__builtin_va_copy": frozenset({"ax"}),
+        "__builtin_va_end": frozenset(),
+        "__builtin_va_start": frozenset({"ax", "bx"}),
         "_exit": frozenset({"ax"}),
         "alarm_ms": frozenset({"ax", "bx", "cx"}),
         "asm": frozenset({"ax", "bx", "cx", "dx", "si", "di"}),
@@ -419,6 +423,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # via the standard stack; the latter piggybacks on
                 # auto-pinned params.  Skip the register_convention
                 # promotion so call sites take the fastcall path.
+                continue
+            if name in self.variadic_functions:
+                # Variadic callers use plain cdecl (every arg pushed on
+                # the stack right-to-left); the callee can't piggyback
+                # on auto-pinned params because the caller had no way to
+                # know which register each named param maps to.
                 continue
             if pins and not has_complex_call.get(name):
                 self.register_convention_functions.add(name)

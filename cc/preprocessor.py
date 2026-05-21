@@ -117,6 +117,17 @@ def _builtin_defines(*, bits: int) -> dict[str, str]:
         "__UINT32_TYPE__": uint32_type,
         "__UINT64_TYPE__": "unsigned long long",
         "__UINT8_TYPE__": "unsigned char",
+        # clang spells va_list's underlying type as ``__builtin_va_list``;
+        # on i386 cdecl every variadic arg is int-promoted to a stack
+        # slot, so a single ``int *`` cursor is enough — clang's
+        # intrinsic resolves to the same shape under the same target.
+        # Defining it as a preprocessor macro lets ``typedef
+        # __builtin_va_list va_list;`` parse cleanly without cc.py
+        # learning a new built-in type spelling, and gives clang
+        # (which already knows the name natively) something harmless
+        # to expand to under ``-nostdinc`` builds where this header
+        # shadows the compiler's own.
+        "__builtin_va_list": "int *",
     }
 
 
@@ -401,17 +412,34 @@ def preprocess(
             ifndef_stack.pop()
             output_lines.append("\n")  # Preserve line numbering.
             continue
-        if stripped.startswith("#ifndef"):
-            name_text = stripped[len("#ifndef") :].strip()
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name_text):
-                message = f"malformed #ifndef: {line.rstrip()!r}"
+        if stripped.startswith("#else"):
+            if not ifndef_stack:
+                message = "#else without matching #ifndef / #ifdef"
                 raise CompileError(message, line=line_number)
-            # An inner ``#ifndef`` nested inside a skipping block stays
+            # Flip the top frame's skipping flag.  An outer skipping
+            # frame keeps everything inside skipped regardless of the
+            # inner else flip, so we OR with the parents' state.
+            name_text, was_skipping, opened_line = ifndef_stack[-1]
+            outer_skipping = any(skipping for _name, skipping, _opened in ifndef_stack[:-1])
+            ifndef_stack[-1] = (name_text, outer_skipping or not was_skipping, opened_line)
+            output_lines.append("\n")  # Preserve line numbering.
+            continue
+        if stripped.startswith(("#ifndef", "#ifdef")):
+            negate = stripped.startswith("#ifndef")
+            directive = "#ifndef" if negate else "#ifdef"
+            name_text = stripped[len(directive) :].strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name_text):
+                message = f"malformed {directive}: {line.rstrip()!r}"
+                raise CompileError(message, line=line_number)
+            # An inner directive nested inside a skipping block stays
             # in "skipping" mode regardless of whether its own name is
             # defined — the body never runs, so it makes no difference.
             already_skipping = any(skipping for _name, skipping, _opened in ifndef_stack)
             name_is_defined = name_text in defines or name_text in function_defines
-            ifndef_stack.append((name_text, already_skipping or name_is_defined, line_number))
+            # ``#ifndef NAME`` skips the body when NAME *is* defined;
+            # ``#ifdef NAME`` skips the body when NAME *is not* defined.
+            skip_body = name_is_defined if negate else not name_is_defined
+            ifndef_stack.append((name_text, already_skipping or skip_body, line_number))
             output_lines.append("\n")  # Preserve line numbering.
             continue
         if any(skipping for _name, skipping, _opened in ifndef_stack):

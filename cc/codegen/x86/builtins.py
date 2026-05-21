@@ -32,6 +32,131 @@ class BuiltinsMixin:
     memory/locals state initialized by ``CodeGeneratorBase.__init__``.
     """
 
+    def _va_list_destination(self, cursor: Node, *, builtin_name: str) -> tuple[str | None, str | None]:
+        """Resolve ``ap`` to either a CPU register or a frame address.
+
+        Returns ``(register, address)`` where exactly one is non-None.
+        Auto-pinning may promote a ``va_list`` local to a register,
+        so accept both shapes.  Raises :class:`CompileError` if the
+        argument isn't a ``va_list``-like local at all.
+        """
+        if not isinstance(cursor, Var):
+            message = f"{builtin_name}() requires a va_list variable as its first argument"
+            raise CompileError(message, line=cursor.line)
+        cursor_name = cursor.name
+        if cursor_name in self.pinned_register:
+            return self.pinned_register[cursor_name], None
+        if cursor_name in self.locals:
+            return None, self._local_address(cursor_name)
+        message = f"{builtin_name}() first argument '{cursor_name}' is not a local"
+        raise CompileError(message, line=cursor.line)
+
+    def builtin___builtin_va_arg(self, arguments: list[Node], /) -> None:
+        """Generate code for ``__builtin_va_arg(ap, T)`` — read one int-sized arg and advance ``ap``.
+
+        The type argument ``T`` is stripped at parse time (cc.py only
+        widens through int — the cast is a no-op for every int-sized
+        type, and wider types aren't yet supported), so the codegen
+        sees a single-arg call: ``ap`` is the variadic-argument
+        cursor (a ``va_list`` local that points to the next stack
+        slot), the builtin reads ``*ap`` into EAX, then advances
+        ``ap`` by ``sizeof(int)`` so the next call reads the
+        following slot.  Same intrinsic name clang uses so the same
+        ``<stdarg.h>`` text serves both compilers — clang has its
+        own native lowering of this builtin and never sees cc.py's
+        codegen here.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="__builtin_va_arg")
+        cursor = arguments[0]
+        cursor_register, cursor_address = self._va_list_destination(cursor, builtin_name="__builtin_va_arg")
+        acc = self.target.acc
+        int_size = self.target.int_size
+        if cursor_register is not None:
+            # ap lives in a register: read through it directly, then bump.
+            self.emit(f"        mov {acc}, [{cursor_register}]")
+            self.emit(f"        add {cursor_register}, {int_size}")
+        else:
+            bx = self.target.bx_register
+            self.emit(f"        mov {bx}, [{cursor_address}]")
+            self.emit(f"        mov {acc}, [{bx}]")
+            self.emit(f"        add {bx}, {int_size}")
+            self.emit(f"        mov [{cursor_address}], {bx}")
+        self.ax_clear()
+
+    def builtin___builtin_va_copy(self, arguments: list[Node], /) -> None:
+        """Generate code for ``__builtin_va_copy(dest, src)`` — copy one va_list to another.
+
+        On i386 cdecl ``va_list`` is just a single int-pointer cursor,
+        so the copy is a plain ``mov dest, src`` (one int-wide move).
+        Each side may be a frame slot or an auto-pinned register; all
+        four combinations stage through EAX so the addressing-mode
+        scheduler stays simple.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="__builtin_va_copy")
+        dest, src = arguments
+        dest_register, dest_address = self._va_list_destination(dest, builtin_name="__builtin_va_copy")
+        src_register, src_address = self._va_list_destination(src, builtin_name="__builtin_va_copy")
+        acc = self.target.acc
+        if src_register is not None:
+            self.emit(f"        mov {acc}, {src_register}")
+        else:
+            self.emit(f"        mov {acc}, [{src_address}]")
+        if dest_register is not None:
+            self.emit(f"        mov {dest_register}, {acc}")
+        else:
+            self.emit(f"        mov [{dest_address}], {acc}")
+        self.ax_clear()
+
+    def builtin___builtin_va_end(self, arguments: list[Node], /) -> None:
+        """Generate code for ``__builtin_va_end(ap)`` — no-op on i386 cdecl.
+
+        Cdecl doesn't reserve any backing state for ``va_list`` (it's
+        just a pointer into the caller's pushed-arg block), so there
+        is nothing to tear down.  Accept the call so ``<stdarg.h>``'s
+        ``va_end`` macro lowers cleanly.
+        """
+        self._check_argument_count(arguments=arguments, expected=1, name="__builtin_va_end")
+
+    def builtin___builtin_va_start(self, arguments: list[Node], /) -> None:
+        """Generate code for ``__builtin_va_start(ap, last)`` — point ``ap`` past ``last``.
+
+        Cdecl pushes args right-to-left, so on entry the stack frame
+        holds ``[ebp+8]`` = first named arg, then each subsequent slot
+        at +sizeof(int).  ``__builtin_va_start`` writes ``ap`` to the
+        address immediately following ``last`` — i.e., the first
+        variadic arg.  Variadic functions force ``regparm_count = 0``
+        (every named arg gets a stack slot) so ``&last`` is always a
+        valid frame address.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="__builtin_va_start")
+        cursor, last = arguments
+        if not isinstance(last, Var):
+            message = "__builtin_va_start() requires the last named parameter as its second argument"
+            raise CompileError(message, line=last.line)
+        last_name = last.name
+        if last_name not in self.locals:
+            message = f"__builtin_va_start() second argument must be a stack-allocated parameter; '{last_name}' is not a local"
+            raise CompileError(message, line=last.line)
+        # Parameters live at positive offsets above EBP (``[ebp+N]``).
+        # ``self.locals[name]`` stores the negated EBP-relative offset
+        # for parameters (i.e., a negative value), and a positive slot
+        # for body locals.  ``__builtin_va_start`` only makes sense
+        # when ``last`` is a stack-passed parameter (negative slot).
+        last_slot = self.locals[last_name]
+        if last_slot >= 0:
+            message = f"__builtin_va_start() requires a stack-passed parameter; '{last_name}' lives in a register or body slot"
+            raise CompileError(message, line=last.line)
+        last_offset = -last_slot + self.target.int_size
+        cursor_register, cursor_address = self._va_list_destination(cursor, builtin_name="__builtin_va_start")
+        base = self.target.base_register
+        if cursor_register is not None:
+            self.emit(f"        lea {cursor_register}, [{base}+{last_offset}]")
+        else:
+            bx = self.target.bx_register
+            self.emit(f"        lea {bx}, [{base}+{last_offset}]")
+            self.emit(f"        mov [{cursor_address}], {bx}")
+        self.ax_clear()
+
     def builtin__exit(self, arguments: list[Node], /) -> None:
         """Generate code for the _exit(status) builtin.
 

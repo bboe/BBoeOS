@@ -127,6 +127,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<RPAREN>\))
   | (?P<COLON>:)
   | (?P<COMMA>,)
+  | (?P<ELLIPSIS>\.\.\.)
   | (?P<DOT>\.)
   | (?P<QUESTION>\?)
   | (?P<SEMI>;)

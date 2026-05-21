@@ -401,7 +401,7 @@ class Parser:
                 field_name = self.eat("IDENT")[1]
                 self.eat("RPAREN")
                 self.eat("LPAREN")
-                self.parse_parameters()  # consume param list; size is always 2
+                self.parse_parameters()  # tuple discarded; struct-field function-pointer size is always pointer-width
                 self.eat("RPAREN")
                 field_type = "function_pointer"
             elif self.peek()[0] == "COLON":
@@ -884,27 +884,42 @@ class Parser:
                 raise CompileError(message, line=name_token[2])
         return Param(in_register=in_register, is_array=is_array, name=name, out_register=out_register, type=type_string)
 
-    def parse_parameters(self) -> list[Param]:
+    def parse_parameters(self, *, allow_variadic: bool = False) -> tuple[list[Param], bool]:
         """Parse a function parameter list.
 
+        When ``allow_variadic`` is True and the list ends with ``, ...)``
+        (the standard C variadic-function tail), the trailing ``...`` is
+        consumed and the caller is told via the second tuple element.
+        Function-pointer parameter lists never accept ``...`` (cc.py has
+        no variadic-function-pointer machinery), so call sites that
+        forward through ``allow_variadic=False`` (the default) reject
+        the spelling cleanly.
+
         Returns:
-            A list of Param dataclasses.
+            Tuple ``(parameters, is_variadic)``.  ``is_variadic`` is
+            True iff the list ended with a ``...`` after the last named
+            parameter.
 
         """
         if self.peek()[0] == "RPAREN":
-            return []
+            return [], False
         # ``(void)`` as a parameter list spells "no parameters" in C.
         # Accept it as a synonym for the empty list — clang-built headers
         # use this shape for prototypes (``int closedir(DIR *)`` vs
         # ``void rewinddir(void)``).
         if self.peek()[0] == "VOID" and self.peek(offset=1)[0] == "RPAREN":
             self.eat("VOID")
-            return []
+            return [], False
         parameters = [self.parse_parameter()]
+        is_variadic = False
         while self.peek()[0] == "COMMA":
             self.eat("COMMA")
+            if allow_variadic and self.peek()[0] == "ELLIPSIS":
+                self.eat("ELLIPSIS")
+                is_variadic = True
+                break
             parameters.append(self.parse_parameter())
-        return parameters
+        return parameters, is_variadic
 
     def parse_primary(self) -> Node:
         """Parse a primary expression (literals, variables, indexing, parens).
@@ -937,6 +952,20 @@ class Parser:
         if token[0] == "IDENT":
             self.eat()
             if self.peek()[0] == "LPAREN":
+                # ``__builtin_va_arg(ap, T)`` is special-cased like
+                # ``sizeof(T)`` — its second argument is a type literal,
+                # not an expression.  cc.py only widens variadic args
+                # through int (every cdecl variadic arg is int-promoted
+                # on entry), so the type is discarded after parsing.
+                # Same name clang uses, so a single ``<stdarg.h>`` text
+                # works for both compilers.
+                if token[1] == "__builtin_va_arg":
+                    self.eat("LPAREN")
+                    cursor_arg = self.parse_expression()
+                    self.eat("COMMA")
+                    self.parse_type()  # T parsed and discarded
+                    self.eat("RPAREN")
+                    return Call(args=[cursor_arg], line=line, name=token[1])
                 self.eat("LPAREN")
                 return Call(args=self.parse_arguments(), line=line, name=token[1])
             if self.peek()[0] == "LBRACKET":
@@ -1442,7 +1471,7 @@ class Parser:
             name = self.eat("IDENT")[1]
             self.eat("RPAREN")
             self.eat("LPAREN")
-            function_pointer_params_list = self.parse_parameters()
+            function_pointer_params_list, _ = self.parse_parameters()
             self.eat("RPAREN")
             init: Node | None = None
             if self.peek()[0] == "ASSIGN":
@@ -1473,7 +1502,7 @@ class Parser:
             # cross-translation-unit references explicitly.
             _ = is_extern  # keyword accepted; no effect on AST
             self.eat("LPAREN")
-            parameters = self.parse_parameters()
+            parameters, is_variadic = self.parse_parameters(allow_variadic=True)
             self.eat("RPAREN")
             while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
                 kind, value = self._parse_attribute(line=line)
@@ -1524,6 +1553,7 @@ class Parser:
                     body=[],
                     carry_return=carry_return,
                     is_prototype=True,
+                    is_variadic=is_variadic,
                     line=line,
                     naked=naked,
                     name=name,
@@ -1535,6 +1565,7 @@ class Parser:
                 always_inline=always_inline,
                 body=self.parse_block(),
                 carry_return=carry_return,
+                is_variadic=is_variadic,
                 line=line,
                 naked=naked,
                 name=name,
@@ -1751,7 +1782,7 @@ class Parser:
             name = self.eat("IDENT")[1]
             self.eat("RPAREN")
             self.eat("LPAREN")
-            function_pointer_params_list = self.parse_parameters()
+            function_pointer_params_list, _ = self.parse_parameters()
             self.eat("RPAREN")
             type_string = "function_pointer"
         else:

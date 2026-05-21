@@ -264,6 +264,7 @@ class CodeGeneratorBase:
         self.required_includes: set[str] = set()
         self.strings: list[tuple[str, str]] = []
         self.user_functions: dict[str, int] = {}  # name → param count
+        self.variadic_functions: set[str] = set()  # callers may pass extra args past the param count
         self.variable_arrays: set[str] = set()
         self.variable_types: dict[str, str] = {}
         self.virtual_long_locals: set[str] = set()
