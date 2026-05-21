@@ -16,8 +16,18 @@ time.
   `typedef __SIZE_TYPE__ size_t;` (and the matching `ptrdiff_t`) resolve under
   cc.py the same way they do under clang. Without these, every libbboeos source
   that pulled in `<stddef.h>` transitively (via `<unistd.h>`, `<sys/types.h>`,
-  etc.) bounced cc.py with `expected type, got IDENT ('__PTRDIFF_TYPE__')`.
-  Step 2 of Phase 6.
+  etc.) bounced cc.py with `expected type, got IDENT ('__PTRDIFF_TYPE__')`. Step
+  2 of Phase 6.
+
+- **cc.py: accept `__attribute__((pinned_register("REG")))` on int and pointer
+  locals.**  The attribute was previously restricted to `function_pointer`
+  locals (the `fd_ioctl` use case).  Relax the parser check to allow any scalar
+  that fits one GP register; only `unsigned long` (DX:AX / EDX:EAX pair) is
+  still rejected.  No current site uses the broader form yet — this is an
+  enabler that lets future codegen hot-spots pin a counter or pointer to a
+  register without going through `can_auto_pin`'s cost gating.  No behaviour
+  change for existing code.
+
 - **cc.py: accept file-scope `typedef <type> <name>;`.**  Registers a type alias
   that expands inline at every type-specifier site (variable declarations,
   parameters, casts, `sizeof`, `*(T *)expr`).  Caller-side pointer stars compose

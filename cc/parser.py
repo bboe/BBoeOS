@@ -1635,12 +1635,12 @@ class Parser:
             type_string = "function_pointer"
         else:
             name = self.eat("IDENT")[1]
-        # Optional trailing ``__attribute__((pinned_register("REG")))`` —
-        # currently only supported on function_pointer locals to control
-        # which register holds the pointer value (so __tail_call can
-        # ``jmp <reg>`` instead of clobbering EAX with the function
-        # address — needed when the user's calling convention uses AL/AX
-        # for an actual argument, e.g. fd_ioctl's ``cmd`` byte).
+        # Optional trailing ``__attribute__((pinned_register("REG")))``
+        # reserves a register for this local's lifetime.  Allowed on
+        # any scalar that fits a single GP register: ints, pointers,
+        # function_pointers.  ``unsigned long`` is rejected because it
+        # spans a register pair (DX:AX in 16-bit, EDX:EAX in 32-bit)
+        # and the pinning machinery is single-register only.
         pinned_register_value: str | None = None
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
@@ -1649,8 +1649,8 @@ class Parser:
             else:
                 message = f"trailing {kind} attribute is not valid on local variable declarations"
                 raise CompileError(message, line=line)
-        if pinned_register_value is not None and type_string != "function_pointer":
-            message = "pinned_register attribute is currently only supported on function_pointer locals"
+        if pinned_register_value is not None and type_string == "unsigned long":
+            message = "pinned_register attribute is not supported on 'unsigned long' (spans two registers)"
             raise CompileError(message, line=line)
         # Optional [] or [N] for array declarations
         is_array = False

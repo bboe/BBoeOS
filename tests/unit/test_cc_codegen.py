@@ -2810,11 +2810,45 @@ def test_pinned_function_pointer_emits_jmp_via_pinned_register() -> None:
     assert "mov ebx, eax" in asm, f"must move return value into the pinned register\n{asm}"
 
 
-def test_pinned_register_on_non_function_pointer_rejected() -> None:
-    """``pinned_register`` on a plain int local is rejected at parse time."""
+def test_pinned_register_on_int_local_pins_value_to_register() -> None:
+    """``int x __attribute__((pinned_register("ebx")))`` reserves EBX for the local.
+
+    Mirrors the function-pointer variant: the explicit attribute
+    bypasses ``can_auto_pin`` cost gating so even short-lived ints
+    can hold a register across clobbering calls when the caller
+    knows the trade-off is worth it.  Verified by checking the
+    store/use lower to ``mov ebx, ..`` / ``mov eax, ebx`` instead of
+    spilling through a stack slot.
+    """
+    asm = _kernel(
+        """
+        int helper(int x);
+        int compute(int n) {
+            int sum __attribute__((pinned_register("ebx")));
+            sum = n;
+            sum = sum + helper(0);
+            return sum;
+        }
+    """,
+        bits=32,
+    )
+    assert "mov ebx, eax" in asm or "mov ebx, " in asm, f"sum must land in ebx:\n{asm}"
+    # No frame slot for ``sum`` — pinned locals live entirely in the
+    # register, so the prologue's ``sub esp, N`` must not include it.
+    assert "[ebp-4]" not in asm or "sum" not in asm.lower(), f"pinned local should not spill:\n{asm}"
+
+
+def test_pinned_register_on_unsigned_long_rejected() -> None:
+    """``pinned_register`` on a 64-bit local is rejected — doesn't fit one register.
+
+    ``unsigned long`` is the only scalar type that can't live in a
+    single GP register on either the 16-bit (DX:AX pair) or 32-bit
+    (EDX:EAX pair) target.  Auto-pin already excludes it; the
+    explicit attribute matches.
+    """
     error = _kernel_error("""
         void bad() {
-            int x __attribute__((pinned_register("ebx")));
+            unsigned long x __attribute__((pinned_register("ebx")));
             x = 0;
         }
     """)
