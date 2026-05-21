@@ -3827,11 +3827,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if isinstance(right, Var) and right.name in self.pinned_register:
                 source = self.pinned_register[right.name]
                 if source != self.target.count_register or isinstance(left, (Int, Var, String)):
+                    left_pinned = isinstance(left, Var) and left.name in self.pinned_register
                     self.generate_expression(left)
                     # Use matching-width operands for cmp: if source is
                     # narrower than acc (e.g., bp vs eax), compare ax/source.
                     cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
                     self.emit(f"        cmp {cmp_acc}, {source}")
+                    # ``peephole_compare_through_register`` deletes the
+                    # ``mov ax, <pin>`` emitted by ``generate_expression``
+                    # above when a conditional jump follows the cmp.
+                    # Without this clear, downstream reads of ``left``
+                    # would skip their own load (``ax_local ==
+                    # left.name``) and pick up whatever AX actually held
+                    # — the peephole-deleted source register, not the
+                    # pinned local.  Mirrors the memory-backed sibling.
+                    if left_pinned:
+                        self.ax_clear()
                     return
             # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
             # skips the CX load entirely.  Byte-scalar locals / globals

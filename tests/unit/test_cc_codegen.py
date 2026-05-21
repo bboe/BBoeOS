@@ -348,6 +348,81 @@ def test_char_param_compared_to_int_literal_is_rejected() -> None:
     assert "char compared to non-char" in error, f"expected char-vs-int rejection, got: {error}"
 
 
+def test_compare_pinned_left_to_pinned_right_reloads_after_jcc() -> None:
+    """``cmp <pin>, <pin>`` + Jcc must not promise AX still holds left.
+
+    ``emit_comparison``'s pinned-right fast path emits ``mov ax,
+    <pin_left>`` + ``cmp ax, <pin_right>``; the
+    ``peephole_compare_through_register`` pass then folds the pair into
+    a single ``cmp <pin_left>, <pin_right>`` and deletes the ``mov``.
+    Without an ``ax_clear()`` after the cmp, the codegen's
+    ``ax_local`` tracker keeps lying about AX holding ``pin_left``'s
+    value, so the next ``Var(pin_left)`` read skips its own load and
+    picks up whatever AX actually holds — the broken-out compare's
+    byte value, for instance.
+
+    The shape below mirrors ``parse_operand`` in user/programs/asm.c:
+    a loop that breaks via ``movzx eax, byte [esi]; cmp eax, K; jne
+    <break>``, followed by ``plus = back - 1`` reading the pinned
+    ``back``.  The pin assignment ``mov edi, edx`` (or any explicit
+    reload of the pinned register into AX or another scratch) is
+    required to make ``dec`` operate on ``back``, not on the byte.
+    """
+    asm = _kernel(
+        """
+        __attribute__((asm_register("si"))) char *cursor;
+        __attribute__((carry_return)) int is_space(int c);
+        char *helper(void) {
+            char *back = cursor;
+            char *limit = (char *)0x1000;
+            while (back > limit) {
+                char *pb = back - 1;
+                if (is_space(pb[0])) {
+                    back = pb;
+                    continue;
+                }
+                break;
+            }
+            if (back > limit) {
+                char *plus = back - 1;
+                if (plus[0] == '+') {
+                    return plus;
+                }
+            }
+            return 0;
+        }
+    """,
+        bits=32,
+    )
+    # The post-loop ``plus = back - 1`` site must reload back from
+    # its pinned register before decrementing — either ``mov eax,
+    # edX; dec eax`` (AX path) or ``mov edY, edX; dec edY`` (direct
+    # pinned-to-pinned subtract).  A bare ``dec eax`` without a
+    # preceding reload is the bug.
+    lines = [line.strip() for line in asm.splitlines()]
+    saw_reload_before_dec = False
+    for index, line in enumerate(lines):
+        if line != "dec eax":
+            continue
+        previous = lines[index - 1] if index > 0 else ""
+        if previous.startswith("mov eax, e") and not previous.startswith("mov eax, eax"):
+            saw_reload_before_dec = True
+            break
+    # The optimal codegen skips AX entirely: ``mov edi, edx; dec
+    # edi``.  Accept either shape — what matters is that ``dec`` runs
+    # on a register that was just loaded from the pinned source.
+    has_direct_dec_after_pin_copy = False
+    for index, line in enumerate(lines):
+        if not line.startswith("dec e") or line == "dec eax":
+            continue
+        target_register = line.split()[1]
+        previous = lines[index - 1] if index > 0 else ""
+        if previous.startswith(f"mov {target_register}, e"):
+            has_direct_dec_after_pin_copy = True
+            break
+    assert saw_reload_before_dec or has_direct_dec_after_pin_copy, f"expected pinned reload before dec for plus = back - 1:\n{asm}"
+
+
 def test_default_2_arg_callee_does_not_read_arg_1_off_stack() -> None:
     """Default register-passing: arg 1 arrives in EDX, not via [ebp+offset].
 
