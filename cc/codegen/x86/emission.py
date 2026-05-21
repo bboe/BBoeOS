@@ -1986,7 +1986,14 @@ class EmissionMixin:
             param_candidates = [p for p in parameters[regparm_count:] if p.out_register is None and p.in_register is None]
         else:
             param_candidates = [p for p in parameters if p.out_register is None and p.in_register is None]
-        self.auto_pin_candidates = self._select_auto_pin_candidates(body=body, parameters=param_candidates)
+        # main uses the AST codegen path, which doesn't consult the
+        # IR-level liveness pre-pass — its pinned-register saves are
+        # always emitted at every call.  Don't subtract pre-store
+        # clobbers from the cost gate here or auto-pin will think
+        # those saves are free and over-pin.
+        self.auto_pin_candidates = self._select_auto_pin_candidates(
+            body=body, parameters=param_candidates, apply_liveness_elision=name != "main"
+        )
 
         # Reserve local stack slots for regparm params before scan_locals
         # runs so their offsets are stable against body-local allocations.

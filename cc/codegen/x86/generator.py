@@ -508,6 +508,36 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
 
+    def _collect_function_pointer_vars(self, body: list[Node], /) -> set[str]:
+        """Return every name that names a function_pointer (locals + file-scope globals).
+
+        Shared by :meth:`compute_safe_pin_registers` (per-call clobber
+        tally) and :meth:`_select_auto_pin_candidates` (per-candidate
+        pre-store clobber tally) so they classify indirect calls the
+        same way.
+        """
+        function_pointer_vars: set[str] = set()
+
+        def visit(statements: list[Node]) -> None:
+            for statement in statements:
+                if isinstance(statement, VarDecl) and statement.type_name == "function_pointer":
+                    function_pointer_vars.add(statement.name)
+                elif isinstance(statement, If):
+                    visit(statement.body)
+                    if statement.else_body is not None:
+                        visit(statement.else_body)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    visit(statement.body)
+                elif isinstance(statement, Switch):
+                    for case in statement.cases:
+                        visit(case.body)
+
+        visit(body)
+        for global_name, declaration in self.global_scalars.items():
+            if declaration.type_name == "function_pointer":
+                function_pointer_vars.add(global_name)
+        return function_pointer_vars
+
     def _collect_pinned_reads(self, node: Node, /) -> set[str]:
         """Return every pinned register that *node*'s expression reads.
 
@@ -567,9 +597,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return {}
         initial: set[str] = set(self._prologue_initialized_pinned_registers())
 
-        def store_target(instruction: object) -> str | None:
+        def store_targets(instruction: object) -> list[str]:
+            """Return every local name written by *instruction*.
+
+            Most shapes write at most one local; ``ir.Call`` is the
+            exception — beyond its (optional) ``destination``, every
+            ``out_register`` arg captures into the named local AFTER
+            the call returns, so all of them count as stores for the
+            purposes of "is the pin live around the next call".
+            """
             if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
-                return instruction.destination
+                return [instruction.destination]
             if isinstance(instruction, ir.Block):
                 # Block-wrapped AST escape hatch.  A VarDecl with
                 # initialiser is a store to its name; ditto an
@@ -581,21 +619,39 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # defensively in case future IR shapes wrap them.
                 node = instruction.node
                 if isinstance(node, Assign):
-                    return node.name
+                    return [node.name]
                 if isinstance(node, VarDecl) and node.init is not None:
-                    return node.name
+                    return [node.name]
                 # MemberAssign / IndexAssign / inline asm write through
                 # pointers or are opaque — they don't store to a single
                 # named local register.  Skip.
-                return None
-            if isinstance(instruction, ir.Call) and instruction.destination is not None:
-                return instruction.destination
+                return []
+            if isinstance(instruction, ir.Call):
+                stores: list[str] = []
+                if instruction.destination is not None:
+                    stores.append(instruction.destination)
+                out_regs = self.out_register_params.get(instruction.name, {})
+                for index, arg in enumerate(instruction.args):
+                    if index in out_regs and isinstance(arg, AddressOf):
+                        stores.append(arg.var.name)
+                return stores
+            if isinstance(instruction, ir.CarryBranch):
+                # ``carry_return`` callees can also have ``out_register``
+                # captures — match the ir.Call handling so the pin
+                # tracker sees their writes too.
+                call_ast = instruction.call_ast
+                stores = []
+                out_regs = self.out_register_params.get(call_ast.name, {})
+                for index, arg in enumerate(call_ast.args):
+                    if index in out_regs and isinstance(arg, AddressOf):
+                        stores.append(arg.var.name)
+                return stores
             if isinstance(instruction, ir.IndexAssign):
                 # IndexAssign writes through a base pointer, not to the
                 # named base itself — leaves the base's register
                 # contents unchanged.  Not a store to the pin.
-                return None
-            return None
+                return []
+            return []
 
         label_positions: dict[str, int] = {}
         for index, instruction in enumerate(ir_body):
@@ -611,9 +667,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for start, end in loop_ranges:
             stores: set[str] = set()
             for k in range(start, end + 1):
-                target_name = store_target(ir_body[k])
-                if target_name in pinned_locals:
-                    stores.add(pinned_locals[target_name])
+                for target_name in store_targets(ir_body[k]):
+                    if target_name in pinned_locals:
+                        stores.add(pinned_locals[target_name])
             loop_stores.append(stores)
         result: dict[int, frozenset[str]] = {}
         defined: set[str] = set(initial)
@@ -630,9 +686,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # conservative full save-set.
             if isinstance(instruction, (ir.Call, ir.CarryBranch)):
                 result[id(instruction)] = frozenset(defined)
-            target_name = store_target(instruction)
-            if target_name in pinned_locals:
-                defined.add(pinned_locals[target_name])
+            for target_name in store_targets(instruction):
+                if target_name in pinned_locals:
+                    defined.add(pinned_locals[target_name])
         return result
 
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
@@ -2494,7 +2550,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = f"unexpected top-level declaration: {type(declaration).__name__}"
                 raise CompileError(message, line=declaration.line)
 
-    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list) -> dict[str, str]:
+    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list, apply_liveness_elision: bool = True) -> dict[str, str]:
         """Choose locals/parameters to auto-pin and match them to registers.
 
         Body locals win slots before parameters — pinning a body local
@@ -2535,6 +2591,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         body_candidates: list[tuple[str, int]] = []
         order = 0
+        function_pointer_vars: set[str] = self._collect_function_pointer_vars(body)
+
+        def call_clobbers(call_node: Call) -> tuple[str, ...] | frozenset[str]:
+            """Mirror :meth:`compute_safe_pin_registers`'s per-call clobber set."""
+            if call_node.name in self.user_functions or call_node.name in function_pointer_vars:
+                return self.target.register_pool
+            if call_node.name in self.libbboeos_extern_declarations:
+                return self.target.register_pool
+            if call_node.name in self._builtin_clobbers:
+                return self._builtin_clobbers[call_node.name]
+            return ()
 
         def collect(nodes: list[Node], *, top_level: bool) -> None:
             nonlocal order
@@ -2744,6 +2811,94 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 return False
             return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
 
+        # Per-candidate-per-register count of calls that ran BEFORE the
+        # candidate's first AST-level store.  PR #454's liveness pre-pass
+        # elides ``push <pin>`` / ``pop <pin>`` around those calls
+        # (the pin holds garbage), so the auto-pin cost gate subtracts
+        # them from ``register_clobber_counts`` per-candidate.
+        # Parameters are not tracked — the prologue counts as their first
+        # store, so every call in the body is post-store for them.
+        candidate_names = {name for name, _ in body_candidates}
+        pre_store_clobbers: dict[str, dict[str, int]] = {name: {} for name in candidate_names}
+        written: dict[str, bool] = dict.fromkeys(candidate_names, False)
+
+        def loop_writes(stmts: list[Node]) -> set[str]:
+            """Return the set of candidate names assigned anywhere within *stmts*.
+
+            Pre-merge stores from loop bodies into the written set
+            before walking the body, mirroring the liveness pre-pass's
+            loop-pre-merge (a store inside a loop is live on every
+            iteration including the first, so calls BEFORE that store
+            inside the body still see a live pin).
+            """
+            found: set[str] = set()
+            for statement in stmts:
+                if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
+                    found.add(statement.name)
+                elif isinstance(statement, If):
+                    found |= loop_writes(statement.body)
+                    if statement.else_body is not None:
+                        found |= loop_writes(statement.else_body)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    found |= loop_writes(statement.body)
+                elif isinstance(statement, Switch):
+                    for case in statement.cases:
+                        found |= loop_writes(case.body)
+            return found
+
+        def pre_store_visit(node: Node) -> None:
+            if isinstance(node, (DoWhile, While)):
+                for name in loop_writes(node.body):
+                    if name in candidate_names:
+                        written[name] = True
+                for body_statement in node.body:
+                    pre_store_visit(body_statement)
+                return
+            if isinstance(node, Call):
+                # Walk args first so a store inside an arg expression
+                # (rare but possible) lands in `written` before the
+                # call itself is counted.  Then tally clobbers for
+                # candidates still pre-store.
+                for arg in node.args:
+                    pre_store_visit(arg)
+                regs = call_clobbers(node)
+                for cand_name, already_written in written.items():
+                    if not already_written:
+                        per_reg = pre_store_clobbers[cand_name]
+                        for register in regs:
+                            per_reg[register] = per_reg.get(register, 0) + 1
+                # ``out_register("REG")`` args capture into the named
+                # local AFTER the call returns — mirror the IR pre-pass
+                # by marking those candidates as written here so any
+                # subsequent call counts as post-store for them.
+                out_regs = self.out_register_params.get(node.name, {})
+                for index, arg in enumerate(node.args):
+                    if index in out_regs and isinstance(arg, AddressOf) and arg.var.name in candidate_names:
+                        written[arg.var.name] = True
+                return
+            if isinstance(node, Assign):
+                pre_store_visit(node.expr)
+                if node.name in candidate_names:
+                    written[node.name] = True
+                return
+            if isinstance(node, VarDecl):
+                if node.init is not None:
+                    pre_store_visit(node.init)
+                    if node.name in candidate_names:
+                        written[node.name] = True
+                return
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node):
+                    pre_store_visit(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Node):
+                            pre_store_visit(item)
+
+        for statement in body:
+            pre_store_visit(statement)
+
         def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
             return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
 
@@ -2788,13 +2943,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 deferred_for_sharing.append((name, counts.get(name, 0)))
                 continue
             refs = counts.get(name, 0)
-            if refs > self.register_clobber_counts.get(chosen, 0):
+            # Effective cost subtracts pre-first-store clobbers: PR #454's
+            # liveness pre-pass elides ``push <pin>`` / ``pop <pin>``
+            # around any call before the local's first store, so those
+            # bytes never appear at runtime even though the raw clobber
+            # count includes them.
+            raw_cost = self.register_clobber_counts.get(chosen, 0)
+            elided = pre_store_clobbers.get(name, {}).get(chosen, 0) if apply_liveness_elision else 0
+            effective_cost = max(0, raw_cost - elided)
+            if refs > effective_cost:
                 assignments[name] = chosen
                 available.remove(chosen)
                 register_holders.setdefault(chosen, []).append(name)
             else:
                 # Candidate didn't beat its matched register's
-                # clobber cost; the original logic broke out of the
+                # effective cost; the original logic broke out of the
                 # loop here because every later candidate was lower
                 # priority.  Mirror that with a single break.
                 break
@@ -2819,7 +2982,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     if not candidate_registers:
                         continue
                     chosen = min(candidate_registers, key=lambda register: self.register_clobber_counts.get(register, 0))
-                    if refs > self.register_clobber_counts.get(chosen, 0):
+                    raw_cost = self.register_clobber_counts.get(chosen, 0)
+                    elided = pre_store_clobbers.get(name, {}).get(chosen, 0)
+                    effective_cost = max(0, raw_cost - elided)
+                    if refs > effective_cost:
                         assignments[name] = chosen
                         register_holders[chosen].append(name)
         return assignments
@@ -3187,29 +3353,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
-        function_pointer_vars: set[str] = set()
-
-        def collect_function_pointer_vars(stmts: list[Node]) -> None:
-            for stmt in stmts:
-                if isinstance(stmt, VarDecl) and stmt.type_name == "function_pointer":
-                    function_pointer_vars.add(stmt.name)
-                elif isinstance(stmt, If):
-                    collect_function_pointer_vars(stmt.body)
-                    if stmt.else_body:
-                        collect_function_pointer_vars(stmt.else_body)
-                elif isinstance(stmt, (Compound, DoWhile, While)):
-                    collect_function_pointer_vars(stmt.body)
-                elif isinstance(stmt, Switch):
-                    for case in stmt.cases:
-                        collect_function_pointer_vars(case.body)
-
-        collect_function_pointer_vars(body)
-        # File-scope function_pointer globals are visible from every
-        # function body — add them so an indirect call through one
-        # isn't misclassified as ``unknown function`` below.
-        for global_name, declaration in self.global_scalars.items():
-            if declaration.type_name == "function_pointer":
-                function_pointer_vars.add(global_name)
+        function_pointer_vars = self._collect_function_pointer_vars(body)
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):

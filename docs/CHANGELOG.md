@@ -25,6 +25,18 @@ time.
   typedef.  Step 3 of Phase 6 — gets the three previously-blocked libbboeos
   sources (dirent / signal / stdlib) further through the parser before they hit
   their next gap.
+
+- **cc.py: auto-pin cost gate honours liveness-elided saves.**
+  `_select_auto_pin_candidates` now subtracts pre-first-store calls from the
+  per-register clobber count when scoring a candidate, matching PR #454's
+  liveness pre-pass that elides those saves at runtime.  More late-store body
+  locals clear the gate and pin to a register.  Gated off for `main()` (which
+  uses the AST codegen path and never consults the liveness pre-pass).  Also
+  extends the liveness pre-pass itself to recognise `out_register` captures as
+  defining stores on both `ir.Call` and `ir.CarryBranch`, plugging a latent hole
+  that the cost-model refinement would otherwise expose.  `ping` user binary -5
+  bytes (1522 → 1517); kernel unchanged.
+
 - **cc.py: predefine `__PTRDIFF_TYPE__` and `__SIZE_TYPE__`.**  Mirrors the
   width-type built-ins clang predefines for the i386 target so `<stddef.h>`'s
   `typedef __SIZE_TYPE__ size_t;` (and the matching `ptrdiff_t`) resolve under
