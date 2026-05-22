@@ -153,6 +153,40 @@ class DerefAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class DerefIncrement(Node):
+    """Postfix ``*p++`` / ``*p--`` as an rvalue expression.
+
+    Evaluates to the pointee read through ``target_name`` *before* the
+    pointer is bumped (postfix semantics).  ``delta`` is ``+1`` or
+    ``-1``; ``is_postfix`` is always ``True`` for now — prefix
+    ``*++p`` is rejected by the parser, so the field exists only for
+    symmetry with :class:`IncrementDecrement` and future-proofing.
+    The bump advances ``target_name`` by ``sizeof(*target_name)``
+    bytes, matching standard C pointer arithmetic.
+    """
+
+    delta: int
+    is_postfix: bool
+    target_name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class DerefIncrementAssign(Node):
+    """Statement ``*p++ = expr;`` / ``*p-- = expr;``.
+
+    Writes ``expr`` through ``target_name`` (pointee-width store),
+    then advances ``target_name`` by ``sizeof(*target_name)``.  Used
+    in the ``_utoa`` digit-emit loop where ``*out++ = tmp[i];``
+    streams digits into the output buffer.
+    """
+
+    delta: int
+    expr: Node
+    is_postfix: bool
+    target_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class DoubleIndex(Node):
     """Chained subscript ``name[outer][inner]``.
 

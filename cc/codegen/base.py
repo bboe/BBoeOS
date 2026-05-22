@@ -35,6 +35,7 @@ from cc.ast_nodes import (
     Char,
     Conditional,
     Continue,
+    DerefIncrement,
     DoubleIndex,
     EnumDecl,
     If,
@@ -935,6 +936,18 @@ class CodeGeneratorBase:
                 if left_type == "pointer" and right_type == "pointer":
                     return "integer"
                 if left_type == "pointer" or right_type == "pointer":
+                    return "pointer"
+            return "integer"
+        if isinstance(node, DerefIncrement):
+            # ``*p++`` rvalue classifies as the pointee type stripped
+            # of one ``*``: ``char *`` → ``"char"``, ``uint8_t *`` /
+            # ``int *`` / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
+            holder_type = self.variable_types.get(node.target_name)
+            if holder_type and holder_type.endswith("*"):
+                pointee = holder_type[:-1].rstrip()
+                if pointee == "char":
+                    return "char"
+                if pointee.endswith("*"):
                     return "pointer"
             return "integer"
         if isinstance(
