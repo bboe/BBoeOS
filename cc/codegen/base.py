@@ -44,6 +44,7 @@ from cc.ast_nodes import (
     LogicalAnd,
     LogicalOr,
     MemberAccess,
+    MemberIncrementDecrement,
     Node,
     Return,
     SizeofType,
@@ -936,7 +937,10 @@ class CodeGeneratorBase:
                 if left_type == "pointer" or right_type == "pointer":
                     return "pointer"
             return "integer"
-        if isinstance(node, (Call, Conditional, IncrementDecrement, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
+        if isinstance(
+            node,
+            (Call, Conditional, IncrementDecrement, LogicalAnd, LogicalOr, MemberAccess, MemberIncrementDecrement, SizeofType, SizeofVar),
+        ):
             return "integer"
         if isinstance(node, Cast):
             if node.target_type.endswith("*"):

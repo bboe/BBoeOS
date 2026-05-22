@@ -42,6 +42,7 @@ from cc.ast_nodes import (
     MemberAccess,
     MemberAddressOf,
     MemberAssign,
+    MemberIncrementDecrement,
     MemberIndex,
     MemberIndexAssign,
     Node,
@@ -375,18 +376,33 @@ class Parser:
         self.enum_decls[name] = decl
         return decl
 
-    def _parse_member_assignment(self) -> MemberAssign | MemberIndexAssign:
+    def _parse_member_assignment(self) -> MemberAssign | MemberIncrementDecrement | MemberIndexAssign:
         """Parse a struct member assignment statement.
 
-        Accepts ``name (. | ->) member = expr ;`` and the indexed form
-        ``name (. | ->) member [ index ] = expr ;`` (the latter
-        produces a :class:`MemberIndexAssign`).
+        Accepts ``name (. | ->) member = expr ;``, the indexed form
+        ``name (. | ->) member [ index ] = expr ;`` (yielding
+        :class:`MemberIndexAssign`), and the postfix increment/decrement
+        forms ``name (. | ->) member ++ ;`` / ``name (. | ->) member -- ;``
+        (yielding :class:`MemberIncrementDecrement` with
+        ``is_postfix=True``).
         """
         token = self.eat("IDENT")
         object_name = token[1]
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
+        if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            operator_token = self.eat()
+            self.eat("SEMI")
+            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            return MemberIncrementDecrement(
+                arrow=arrow,
+                delta=delta,
+                is_postfix=True,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
@@ -975,13 +991,24 @@ class Parser:
         token = self.peek()
         line = token[2]
         if token[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-            # Prefix ``++var`` / ``--var`` — target must be a plain
-            # name.  Postfix ``var++`` / ``var--`` is recognized after
-            # the Var is parsed, further down.  Other lvalues (``*p``,
-            # ``a[i]``, ``s.f``) are out of scope for the first cut.
+            # Prefix ``++var`` / ``--var`` and ``++ptr->member`` /
+            # ``--s.member``.  Postfix forms are recognized after the
+            # target lvalue is parsed, further down.  Other lvalues
+            # (``*p``, ``a[i]``) are out of scope for the first cut.
             operator_token = self.eat()
             delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
             name_token = self.eat("IDENT")
+            if self.peek()[0] in ("DOT", "ARROW"):
+                arrow_token = self.eat()
+                member_token = self.eat("IDENT")
+                return MemberIncrementDecrement(
+                    arrow=arrow_token[0] == "ARROW",
+                    delta=delta,
+                    is_postfix=False,
+                    line=line,
+                    member_name=member_token[1],
+                    object_name=name_token[1],
+                )
             return IncrementDecrement(delta=delta, is_postfix=False, line=line, target_name=name_token[1])
         if token[0] == "SIZEOF":
             return self.parse_sizeof()
@@ -1072,6 +1099,19 @@ class Parser:
                     return MemberIndex(
                         arrow=arrow,
                         index=index,
+                        line=line,
+                        member_name=member_token[1],
+                        object_name=token[1],
+                    )
+                if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                    # Postfix ``ptr->member++`` / ``s.member--`` as an
+                    # expression — evaluates to the pre-update value.
+                    operator_token = self.eat()
+                    delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+                    return MemberIncrementDecrement(
+                        arrow=arrow,
+                        delta=delta,
+                        is_postfix=True,
                         line=line,
                         member_name=member_token[1],
                         object_name=token[1],
@@ -1367,12 +1407,25 @@ class Parser:
             self.eat("SEMI")
             return InlineAsm(content="", line=token[2])
         if token[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-            # Prefix ``++var;`` / ``--var;`` as a bare statement — value
-            # discarded.  Postfix shape (``var++;``) is handled in the
-            # IDENT branch below.
+            # Prefix ``++var;`` / ``--var;`` and prefix
+            # ``++name->member;`` / ``--name.member;`` as bare
+            # statements — value discarded.  Postfix shapes are
+            # handled in the IDENT branch below.
             operator_token = self.eat()
             delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
             name_token = self.eat("IDENT")
+            if self.peek()[0] in ("DOT", "ARROW"):
+                arrow_token = self.eat()
+                member_token = self.eat("IDENT")
+                self.eat("SEMI")
+                return MemberIncrementDecrement(
+                    arrow=arrow_token[0] == "ARROW",
+                    delta=delta,
+                    is_postfix=False,
+                    line=token[2],
+                    member_name=member_token[1],
+                    object_name=name_token[1],
+                )
             self.eat("SEMI")
             return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])
         if token[0] == "IDENT":
