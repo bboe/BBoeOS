@@ -3217,10 +3217,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 register_holders.setdefault(chosen, []).append(name)
             else:
                 # Candidate didn't beat its matched register's
-                # effective cost; the original logic broke out of the
-                # loop here because every later candidate was lower
-                # priority.  Mirror that with a single break.
-                break
+                # effective cost.  Earlier code broke here under the
+                # assumption that every later candidate was lower
+                # priority — but priority ranks by ref count, not by
+                # matched-register cost, and a lower-ref candidate may
+                # still beat a cheaper leftover register (e.g. EDI/CX
+                # at zero clobber for a function with no calls).
+                # Continue so those candidates get a chance.  PR #471's
+                # ``ax_clear`` after the pinned-right cmp fast path is
+                # the load-bearing safety belt for the extra pins this
+                # produces.
+                continue
         # Sharing pass: liveness-driven reuse of already-taken
         # registers for candidates whose live ranges don't overlap
         # any name on the register.  Skipped when the analyzer can't
