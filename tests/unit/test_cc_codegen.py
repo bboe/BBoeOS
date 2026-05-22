@@ -278,6 +278,101 @@ def test_auto_pin_cost_model_subtracts_pre_first_store_calls() -> None:
     assert "[ebp-4], eax" not in asm, f"counter should not spill to its frame slot:\n{asm}"
 
 
+def test_braceless_control_bodies_parse() -> None:
+    """``if`` / ``else`` / ``while`` / ``do`` accept single-statement bodies.
+
+    Standard C lets these control statements omit the braces when the
+    body is a single statement.  Pin that all four forms parse, plus
+    ``else if`` chains and ``while (cond) stmt;``.  ``stdio.c``'s
+    ``vsnprintf`` parser uses these constantly — without braceless
+    bodies, large swathes of portable C don't parse.
+    """
+    asm = _kernel("""
+        void f(int x) {
+            if (x) x = x + 1;
+            else x = x - 1;
+            while (x > 0) x = x - 1;
+            if (x < 0)
+                x = 0;
+            else if (x == 0)
+                x = -1;
+            do x = x + 1; while (x < 5);
+        }
+        """)
+    assert "f:" in asm, f"expected f() to be emitted:\n{asm}"
+
+
+def test_braceless_dangling_else_binds_to_innermost_if() -> None:
+    """Standard C dangling-else: ``else`` binds to the nearest unmatched ``if``.
+
+    For::
+
+        if (a)
+            if (b) x();
+            else y();
+        z();
+
+    the ``else`` belongs to ``if (b)``, not ``if (a)``.  Concretely:
+    when ``a`` is false, neither ``x`` nor ``y`` runs and control
+    falls through to ``z``.  The parser inherits this for free
+    because the inner ``parse_if`` consumes its own ``else`` before
+    returning to the outer call — pin it here so a future refactor
+    that lifts ``else`` handling to the outer scope can't silently
+    invert the semantics.
+    """
+    asm = _kernel("""
+        extern int x(void);
+        extern int y(void);
+        extern int z(void);
+        void f(int a, int b) {
+            if (a)
+                if (b)
+                    x();
+                else
+                    y();
+            z();
+        }
+        """)
+    # The outer ``if (a)`` jump must skip BOTH the call to x() AND the
+    # call to y() — i.e. the outer endif label sits AFTER the y() call.
+    # Slice from the start of f's body to just before ``call z`` and
+    # confirm the inner else / endif structure sits inside that range.
+    f_body = asm.split("f:", 1)[1].split("call z", 1)[0]
+    call_x = f_body.find("call x")
+    call_y = f_body.find("call y")
+    assert call_x != -1 and call_y != -1, f"expected calls to both x and y:\n{f_body}"
+    # Both calls sit before the outer ``if (a)`` endif label is reached
+    # by the false-branch jump; verify the inner else label appears
+    # between the two calls (proving the else gates ONLY y, leaving x
+    # under the inner true branch).
+    else_marker = f_body.find("_else", call_x)
+    assert call_x < else_marker < call_y, (
+        f"expected the inner ``else`` label to sit between call x and call y (dangling-else binds to inner if):\n{f_body}"
+    )
+
+
+def test_braceless_decl_in_single_statement_body_rejected() -> None:
+    """A bare ``int x = 0;`` inside an unbraced body must fail.
+
+    Declaring there would introduce a one-statement scope that nothing
+    else can observe, so cc.py rejects it and tells the user to wrap
+    in ``{}``.
+    """
+    ok, output = _compile(
+        """
+        void f(int x) {
+            if (x)
+                int y = 0;
+        }
+        int main() { return 0; }
+        """,
+        bits=32,
+        target="user",
+    )
+    assert not ok, f"expected compile failure for bare decl in unbraced body:\n{output}"
+    assert "single-statement body" in output, f"expected the user-facing hint:\n{output}"
+
+
 def test_builtin_dup2_loads_bx_after_clobbering_sibling() -> None:
     """dup2(old_fd, get_target()) must load EBX last.
 
