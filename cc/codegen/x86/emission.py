@@ -226,6 +226,45 @@ class EmissionMixin:
             ):
                 function.regparm_count = min(3, len(function.params))
 
+    def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
+        """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
+
+        Used by :class:`DerefIncrement` / :class:`DerefIncrementAssign`
+        codegen to bump the pointer *without* touching the accumulator —
+        either ``inc reg`` / ``add reg, N`` for a pinned-register
+        pointer, or ``inc dword [ebp-N]`` / ``add dword [ebp-N], N`` for
+        a frame-slot pointer.  Pointee width comes from the recorded
+        pointer type (``char *`` → 1, ``uint16_t *`` → 2, anything else
+        → ``int_size``).  Skips the accumulator-tracking invalidation
+        the caller needs (so the freshly-loaded ``*p`` value remains
+        valid in acc); the caller decides whether to ``ax_clear()``.
+        """
+        holder_type = self.variable_types.get(name)
+        if not holder_type or not holder_type.endswith("*"):
+            message = f"postfix '*{name}++' / '*{name}--' requires a pointer; got '{holder_type}'"
+            raise CompileError(message, line=line)
+        pointee_type = holder_type[:-1].rstrip()
+        try:
+            pointee_size = self.target.type_size(pointee_type) if pointee_type else 1
+        except KeyError:
+            pointee_size = self.target.int_size
+        bump = pointee_size * delta
+        operation = "add" if bump >= 0 else "sub"
+        amount = abs(bump)
+        if name in self.pinned_register:
+            register = self.pinned_register[name]
+            if amount == 1:
+                self.emit(f"        {'inc' if bump > 0 else 'dec'} {register}")
+            else:
+                self.emit(f"        {operation} {register}, {amount}")
+        else:
+            address = self._local_address(name)
+            width = self.target.word_size
+            if amount == 1:
+                self.emit(f"        {'inc' if bump > 0 else 'dec'} {width} [{address}]")
+            else:
+                self.emit(f"        {operation} {width} [{address}], {amount}")
+
     def _emit_pointer_dereference(self, expression: PointerDereference) -> None:
         """Read through a pointer expression at ``target_type`` width.
 
@@ -294,45 +333,6 @@ class EmissionMixin:
             self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
         else:
             self.emit(f"        mov [{scratch}], {accumulator}")
-
-    def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
-        """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
-
-        Used by :class:`DerefIncrement` / :class:`DerefIncrementAssign`
-        codegen to bump the pointer *without* touching the accumulator —
-        either ``inc reg`` / ``add reg, N`` for a pinned-register
-        pointer, or ``inc dword [ebp-N]`` / ``add dword [ebp-N], N`` for
-        a frame-slot pointer.  Pointee width comes from the recorded
-        pointer type (``char *`` → 1, ``uint16_t *`` → 2, anything else
-        → ``int_size``).  Skips the accumulator-tracking invalidation
-        the caller needs (so the freshly-loaded ``*p`` value remains
-        valid in acc); the caller decides whether to ``ax_clear()``.
-        """
-        holder_type = self.variable_types.get(name)
-        if not holder_type or not holder_type.endswith("*"):
-            message = f"postfix '*{name}++' / '*{name}--' requires a pointer; got '{holder_type}'"
-            raise CompileError(message, line=line)
-        pointee_type = holder_type[:-1].rstrip()
-        try:
-            pointee_size = self.target.type_size(pointee_type) if pointee_type else 1
-        except KeyError:
-            pointee_size = self.target.int_size
-        bump = pointee_size * delta
-        operation = "add" if bump >= 0 else "sub"
-        amount = abs(bump)
-        if name in self.pinned_register:
-            register = self.pinned_register[name]
-            if amount == 1:
-                self.emit(f"        {'inc' if bump > 0 else 'dec'} {register}")
-            else:
-                self.emit(f"        {operation} {register}, {amount}")
-        else:
-            address = self._local_address(name)
-            width = self.target.word_size
-            if amount == 1:
-                self.emit(f"        {'inc' if bump > 0 else 'dec'} {width} [{address}]")
-            else:
-                self.emit(f"        {operation} {width} [{address}], {amount}")
 
     def _emit_scale_index(self, register: str, /, *, scale: int) -> None:
         """Multiply *register* by *scale* (1, 2, or 4) in place.
