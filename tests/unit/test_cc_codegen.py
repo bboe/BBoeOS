@@ -1648,6 +1648,62 @@ def test_file_scope_function_pointer_tail_call() -> None:
     assert "jmp eax" in asm, f"expected jmp eax\n{asm}"
 
 
+def test_file_scope_multi_declarator_extern_pointers_parse() -> None:
+    """``extern T *a, *b, *c;`` at file scope parses as three independent extern globals.
+
+    Forcing function: ``user/libbboeos/include/stdio.h`` declares
+    ``extern FILE *stderr, *stdin, *stdout;`` on one line.  Each name
+    must produce its own VarDecl with the shared base type and the
+    leading ``extern`` propagated; references resolve to distinct
+    ``_g_<name>`` symbols.
+    """
+    source = textwrap.dedent("""
+        typedef struct FILE FILE;
+        extern FILE *first, *second, *third;
+        int read_three(int *result __attribute__((out_register("ax")))) {
+            *result = (int)first + (int)second + (int)third;
+            return 1;
+        }
+    """)
+    output = _kernel(source)
+    for name in ("first", "second", "third"):
+        assert f"[_g_{name}]" in output, f"expected reference to _g_{name}\n{output}"
+        assert f"_g_{name}:" not in output, f"extern must not emit storage for _g_{name}\n{output}"
+
+
+def test_file_scope_multi_declarator_with_attribute_rejected() -> None:
+    """``__attribute__`` on a multi-declarator file-scope declaration is rejected.
+
+    Standard C allows per-declarator attribute lists; cc.py's
+    asm_register / asm_name pin a single symbol and the per-declarator
+    semantics aren't worth the AST complexity, so a clear error is
+    raised when a COMMA follows an attributed declarator.
+    """
+    error = _kernel_error("""
+        uint8_t a __attribute__((asm_name("sym_a"))), b;
+    """)
+    assert "multi-declarator" in error, f"expected multi-declarator + attribute error, got: {error}"
+
+
+def test_file_scope_multi_declarator_with_initializers() -> None:
+    """``int a = 1, b = 2;`` at file scope emits two globals with the right initial values.
+
+    Each declarator parses its own ``= init`` independently while
+    sharing the base type.
+    """
+    output = _kernel("""
+        int counter_a = 1, counter_b = 2;
+        int read_pair(int *result __attribute__((out_register("ax")))) {
+            *result = counter_a + counter_b;
+            return 1;
+        }
+    """)
+    assert "_g_counter_a:" in output, f"expected _g_counter_a storage\n{output}"
+    assert "_g_counter_b:" in output, f"expected _g_counter_b storage\n{output}"
+    # The data words for each initializer should appear in the emitted output.
+    assert "1" in output and "2" in output, f"expected both initializer literals\n{output}"
+
+
 def test_function_pointer_and_unnamed_param_parse_in_prototype() -> None:
     """Function-pointer parameters and unnamed parameters parse in prototypes.
 

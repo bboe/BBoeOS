@@ -1439,11 +1439,19 @@ class Parser:
         functions: list[Node] = []
         globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
-            declaration = self.parse_top_level_declaration()
-            if isinstance(declaration, Function):
-                functions.append(declaration)
-            elif declaration is not None:
-                globals_list.append(declaration)
+            declarations = self.parse_top_level_declaration()
+            if declarations is None:
+                continue
+            # Each top-level statement yields a list (singleton for
+            # functions / struct / enum / inline-asm; one element per
+            # declarator for ``extern T *a, *b;``-style multi-decls).
+            # Functions go in their own bucket so the codegen can
+            # iterate them separately from data globals.
+            for node in declarations:
+                if isinstance(node, Function):
+                    functions.append(node)
+                else:
+                    globals_list.append(node)
         return Program(functions=functions, globals=globals_list, line=line)
 
     def parse_shift(self) -> Node:
@@ -1706,13 +1714,26 @@ class Parser:
         self.eat("RBRACE")
         return Switch(cases=cases, discriminant=discriminant, line=token[2])
 
-    def parse_top_level_declaration(self) -> Node | None:
+    def parse_top_level_declaration(self) -> list[Node] | None:
         """Parse a function definition, a file-scope variable / array, or a file-scope ``asm(...)``.
 
         Dispatches on the token after ``type IDENT``: ``(`` drives the
         function path, any other token means a global declaration.  A
         bare ``asm("...");`` at the top level is emitted verbatim into
         the output's data tail — useful for raw tables and labels.
+
+        Returns ``None`` for typedef shapes that register metadata but
+        produce no AST node, otherwise a ``list[Node]`` of one or more
+        top-level constructs.  Function definitions / prototypes return
+        ``[Function]``; struct / enum / inline-asm constructs return
+        their respective singleton lists; variable / array declarations
+        return one element per declarator so multi-decl lines like
+        ``extern FILE *stderr, *stdin, *stdout;`` get one
+        :class:`VarDecl` per name.  All declarators in a multi-decl
+        share the base type and the leading ``extern`` / ``static``
+        storage class.  ``__attribute__`` decorations are unsupported
+        on multi-declarator lines (raised at parse time when a COMMA
+        follows an attributed declaration).
         """
         line = self.peek()[2]
         if self.peek()[0] == "TYPEDEF":
@@ -1737,9 +1758,9 @@ class Parser:
             self.eat("SEMI")
             return None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
-            return self._parse_struct_declaration()
+            return [self._parse_struct_declaration()]
         if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
-            return self._parse_enum_declaration()
+            return [self._parse_enum_declaration()]
         if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
             self.eat("IDENT")
             self.eat("LPAREN")
@@ -1750,7 +1771,7 @@ class Parser:
                 content += self.eat()[1][1:-1]
             self.eat("RPAREN")
             self.eat("SEMI")
-            return InlineAsm(content=content, line=line)
+            return [InlineAsm(content=content, line=line)]
         # Optional leading ``__attribute__((...))`` directives.
         # ``asm_register("REG")`` applies to file-scope VarDecls (the
         # variable aliases the named CPU register).  ``carry_return``,
@@ -1818,14 +1839,16 @@ class Parser:
             if is_extern and init is not None:
                 message = "extern declarations may not have an initializer"
                 raise CompileError(message, line=line)
-            return VarDecl(
-                function_pointer_params=function_pointer_params_list,
-                init=init,
-                is_extern=is_extern,
-                line=line,
-                name=name,
-                type_name="function_pointer",
-            )
+            return [
+                VarDecl(
+                    function_pointer_params=function_pointer_params_list,
+                    init=init,
+                    is_extern=is_extern,
+                    line=line,
+                    name=name,
+                    type_name="function_pointer",
+                ),
+            ]
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
@@ -1888,11 +1911,26 @@ class Parser:
                 # functions called from C.  No code is emitted for
                 # prototype nodes.
                 self.eat("SEMI")
-                return Function(
+                return [
+                    Function(
+                        always_inline=always_inline,
+                        body=[],
+                        carry_return=carry_return,
+                        is_prototype=True,
+                        is_variadic=is_variadic,
+                        line=line,
+                        naked=naked,
+                        name=name,
+                        params=parameters,
+                        preserve_registers=preserve_registers,
+                    )
+                ]
+            self.eat("LBRACE")
+            return [
+                Function(
                     always_inline=always_inline,
-                    body=[],
+                    body=self.parse_block(),
                     carry_return=carry_return,
-                    is_prototype=True,
                     is_variadic=is_variadic,
                     line=line,
                     naked=naked,
@@ -1900,18 +1938,7 @@ class Parser:
                     params=parameters,
                     preserve_registers=preserve_registers,
                 )
-            self.eat("LBRACE")
-            return Function(
-                always_inline=always_inline,
-                body=self.parse_block(),
-                carry_return=carry_return,
-                is_variadic=is_variadic,
-                line=line,
-                naked=naked,
-                name=name,
-                params=parameters,
-                preserve_registers=preserve_registers,
-            )
+            ]
         if carry_return:
             message = "carry_return attribute is not valid on global variables"
             raise CompileError(message, line=line)
@@ -1926,6 +1953,10 @@ class Parser:
             raise CompileError(message, line=line)
         # Trailing ``__attribute__`` on the variable name (e.g. ``uint16_t x __attribute__((asm_name("sym")))``)
         # is equivalent to a leading one for global variable declarations.
+        # Only consumed for the first declarator; multi-declarator lines
+        # (``T a, b;``) reject attributes because the per-declarator
+        # attribute-attachment semantics standard C allows aren't worth
+        # the AST complexity for cc.py's use cases.
         while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=line)
             if kind == "asm_name":
@@ -1935,44 +1966,92 @@ class Parser:
             else:
                 message = f"trailing {kind} attribute is not valid on global variable declarations"
                 raise CompileError(message, line=line)
-        # File-scope variable: scalar or array.  Globals may specify a
-        # size inside ``[...]`` (unlike locals) since there is no
-        # runtime initializer to imply one.
-        is_array = False
-        size_expression: Node | None = None
-        if self.peek()[0] == "LBRACKET":
-            self.eat("LBRACKET")
-            is_array = True
-            if self.peek()[0] != "RBRACKET":
-                size_expression = self.parse_expression()
-            self.eat("RBRACKET")
-        init: Node | None = None
-        if self.peek()[0] == "ASSIGN":
-            self.eat("ASSIGN")
+        has_attribute = asm_register is not None or asm_symbol is not None
+        # File-scope variable / array.  Loop on COMMA so a single base
+        # type can produce multiple declarators
+        # (``extern FILE *stderr, *stdin, *stdout;``).  Each declarator
+        # parses its own pointer stars, optional ``[N]`` and ``= init``;
+        # ``extern`` propagates to every declarator in the list.
+        # Globals may specify a size inside ``[...]`` (unlike locals)
+        # since there is no runtime initializer to imply one.
+        #
+        # The shared base type is ``type_string`` as returned by
+        # parse_type — including any pointer stars that bound directly
+        # to the base spelling (e.g. ``FILE *`` produces base ``"FILE*"``,
+        # so the second declarator in ``FILE *a, *b;`` sees one pre-bound
+        # star and may add one more, staying within parse_type's cap of 2).
+        shared_base_type = type_string
+        base_stars = len(shared_base_type) - len(shared_base_type.rstrip("*"))
+        declarations: list[Node] = []
+        current_name = name
+        current_type = type_string
+        while True:
+            is_array = False
+            size_expression: Node | None = None
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                is_array = True
+                if self.peek()[0] != "RBRACKET":
+                    size_expression = self.parse_expression()
+                self.eat("RBRACKET")
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                if is_array:
+                    init = self.parse_array_init()
+                elif self.peek()[0] == "LBRACE":
+                    init = self._parse_designated_struct_initializer()
+                else:
+                    init = self.parse_expression()
+            if is_extern and init is not None:
+                message = "extern declarations may not have an initializer"
+                raise CompileError(message, line=line)
             if is_array:
-                init = self.parse_array_init()
-            elif self.peek()[0] == "LBRACE":
-                init = self._parse_designated_struct_initializer()
+                if asm_register is not None:
+                    message = "asm_register attribute is not valid on arrays"
+                    raise CompileError(message, line=line)
+                if asm_symbol is not None:
+                    message = "asm_name attribute is not valid on arrays"
+                    raise CompileError(message, line=line)
+                if size_expression is None and init is None and not is_extern:
+                    message = f"global array '{current_name}' needs either a size or an initializer"
+                    raise CompileError(message, line=line)
+                declarations.append(
+                    ArrayDecl(init=init, is_extern=is_extern, line=line, name=current_name, size=size_expression, type_name=current_type),
+                )
             else:
-                init = self.parse_expression()
+                declarations.append(
+                    VarDecl(
+                        asm_register=asm_register,
+                        asm_symbol=asm_symbol,
+                        init=init,
+                        is_extern=is_extern,
+                        line=line,
+                        name=current_name,
+                        type_name=current_type,
+                    ),
+                )
+            if self.peek()[0] != "COMMA":
+                break
+            # Reject multi-declarator + attributes — standard C lets
+            # each declarator carry its own attribute list, but cc.py's
+            # asm_register / asm_name pin a single symbol and we have
+            # no use case for repeating that across siblings.
+            if has_attribute:
+                message = "__attribute__ on multi-declarator declarations is not supported; split into separate declarations"
+                raise CompileError(message, line=line)
+            self.eat("COMMA")
+            # Per-declarator pointer stars on top of the shared base
+            # (``T *a, *b`` — each name independently grows pointer
+            # depth).  Cap at parse_type's combined max of 2 stars.
+            extra_stars = 0
+            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
+                self.eat("STAR")
+                extra_stars += 1
+            current_name = self.eat("IDENT")[1]
+            current_type = shared_base_type + "*" * extra_stars
         self.eat("SEMI")
-        if is_extern and init is not None:
-            message = "extern declarations may not have an initializer"
-            raise CompileError(message, line=line)
-        if is_array:
-            if asm_register is not None:
-                message = "asm_register attribute is not valid on arrays"
-                raise CompileError(message, line=line)
-            if asm_symbol is not None:
-                message = "asm_name attribute is not valid on arrays"
-                raise CompileError(message, line=line)
-            if size_expression is None and init is None and not is_extern:
-                message = f"global array '{name}' needs either a size or an initializer"
-                raise CompileError(message, line=line)
-            return ArrayDecl(init=init, is_extern=is_extern, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(
-            asm_register=asm_register, asm_symbol=asm_symbol, init=init, is_extern=is_extern, line=line, name=name, type_name=type_string
-        )
+        return declarations
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).
