@@ -469,6 +469,23 @@ class MemberIndex(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberIndexAssign(Node):
+    """Indexed assignment into a struct member: ``ptr->field[i] = expr;``.
+
+    Stores one element (byte / word / dword, per the field's pointee or
+    element size) at ``base + index * element_size`` when ``field`` is a
+    pointer, or at ``base + field_offset + index * element_size`` when
+    ``field`` is an inline array.
+    """
+
+    arrow: bool
+    expr: Node
+    index: Node
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class Param:
     """A function parameter: type, name, and whether it was declared with ``[]``.
 

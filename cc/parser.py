@@ -43,6 +43,7 @@ from cc.ast_nodes import (
     MemberAddressOf,
     MemberAssign,
     MemberIndex,
+    MemberIndexAssign,
     Node,
     Param,
     PointerDereference,
@@ -352,13 +353,33 @@ class Parser:
         self.enum_decls[name] = decl
         return decl
 
-    def _parse_member_assignment(self) -> MemberAssign:
-        """Parse ``name (. | ->) member = expr ;``."""
+    def _parse_member_assignment(self) -> MemberAssign | MemberIndexAssign:
+        """Parse a struct member assignment statement.
+
+        Accepts ``name (. | ->) member = expr ;`` and the indexed form
+        ``name (. | ->) member [ index ] = expr ;`` (the latter
+        produces a :class:`MemberIndexAssign`).
+        """
         token = self.eat("IDENT")
         object_name = token[1]
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            index_expression = self.parse_expression()
+            self.eat("RBRACKET")
+            self.eat("ASSIGN")
+            value_expression = self.parse_expression()
+            self.eat("SEMI")
+            return MemberIndexAssign(
+                arrow=arrow,
+                expr=value_expression,
+                index=index_expression,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
         self.eat("ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
