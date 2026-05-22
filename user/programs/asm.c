@@ -633,39 +633,81 @@ int emit_alu_mem_imm(int rfield) {
     if (source_cursor[0] != '[') {
         abort_unknown();
     }
-    source_cursor += 1;
-    int disp = resolve_value();
-    if (source_cursor[0] != ']') {
+    /* Route through ``parse_operand`` so ``[reg+disp]`` (type 3) picks
+       up the short disp8 / SIB / EBP-zero encoding via
+       ``emit_indexed_mem`` — matching NASM byte-for-byte.  Bare
+       ``[disp]`` (type 2) keeps the disp32-direct form via
+       ``emit_modrm_direct``.  The post-peephole rewrite
+       ``add dword [ebp-4], 32`` is the motivating case: under the
+       prior ``resolve_value`` path this emitted the 7-byte disp32
+       form (mod=00 rm=5), losing 3 bytes against NASM's 4-byte
+       ``83 45 FC 20`` (mod=01 rm=5 disp8). */
+    int packed_operand = parse_operand();
+    int memory_type = (packed_operand >> 8) & 0xFF;
+    int base_register_id = packed_operand & 0xFF;
+    int memory_value = parse_operand_value;
+    if (memory_type != 2 && memory_type != 3) {
         abort_unknown();
     }
-    source_cursor += 1;
     skip_comma();
+    /* Peek at the second operand: a register source picks the
+       reg-mem encoding (``00 /r`` for the byte form, ``01 /r``
+       otherwise — opcode = ``rfield << 3``).  NASM accepts the
+       ``dword`` size keyword as a NOP type hint on the
+       ``<op> [mem], <reg>`` shape, so peephole-emitted
+       ``add dword [ebp-disp], edx`` assembles byte-identically to
+       the bare ``add [ebp-disp], edx`` form.  Anything else falls
+       through to the imm path. */
+    int packed_source = parse_register();
+    if (packed_source >= 0) {
+        int source_register_id = packed_source & 0xFF;
+        int source_size = (packed_source >> 8) & 0xFF;
+        if (source_size != size) {
+            abort_unknown();
+        }
+        int op_rr = rfield << 3;
+        emit_sized_mem(op_rr, size);
+        if (memory_type == 2) {
+            emit_modrm_direct(source_register_id, memory_value);
+        } else {
+            emit_indexed_mem(source_register_id, base_register_id,
+                             memory_value);
+        }
+        return 1;
+    }
     int imm = resolve_value();
     /* Operand-size prefix sits before the opcode for non-byte sizes
-       that disagree with ``default_bits``.  ``emit_modrm_direct``
-       picks the right ModR/M (rm=110 for [disp16] under bits=16,
-       rm=101 for [disp32] under bits=32) and emits the matching
-       displacement width, so the same opcode body assembles both
-       modes. */
+       that disagree with ``default_bits``; address-size prefix
+       handles ``[reg+disp]`` under a non-matching addressing width
+       (e.g. ``[ebp-4]`` under bits=16). */
     if (size != 8) {
         emit_operand_size_prefix(size);
     }
+    emit_address_size_prefix(parse_operand_address_size);
+    int opcode;
+    int is_imm8;
     if (size == 8) {
-        emit_byte(0x80);
-        emit_modrm_direct(rfield, disp);
-        emit_byte(imm & 0xFF);
+        opcode = 0x80;
+        is_imm8 = 1;
     } else if (imm >= -128 && imm <= 127) {
-        emit_byte(0x83);
-        emit_modrm_direct(rfield, disp);
-        emit_byte(imm & 0xFF);
+        opcode = 0x83;
+        is_imm8 = 1;
     } else {
-        emit_byte(0x81);
-        emit_modrm_direct(rfield, disp);
-        if (size == 32) {
-            emit_dword(imm);
-        } else {
-            emit_word(imm);
-        }
+        opcode = 0x81;
+        is_imm8 = 0;
+    }
+    emit_byte(opcode);
+    if (memory_type == 2) {
+        emit_modrm_direct(rfield, memory_value);
+    } else {
+        emit_indexed_mem(rfield, base_register_id, memory_value);
+    }
+    if (is_imm8) {
+        emit_byte(imm & 0xFF);
+    } else if (size == 32) {
+        emit_dword(imm);
+    } else {
+        emit_word(imm);
     }
     return 1;
 }
