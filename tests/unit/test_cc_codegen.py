@@ -2495,6 +2495,63 @@ def test_member_array_field_indexed_write_byte() -> None:
     assert "mov byte [ebx+4], al" in body, f"Expected inline byte store at +4 offset\n{asm}"
 
 
+def test_member_compound_assign_bitwise_arrow() -> None:
+    """``s->flags |= 0x4;`` lowers through MemberAssign + BinaryOperation.
+
+    The synthesized desugaring is ``s->flags = s->flags | 0x4``, so the
+    backend must load the field, OR an immediate, then store back through
+    the same field offset.
+    """
+    asm = _kernel("""
+        struct S { int flags; };
+        void f(struct S *s) {
+            s->flags |= 0x4;
+        }
+        """)
+    body = asm.split("f:", 1)[1].split("ret", 1)[0]
+    assert "or " in body, f"expected an OR in bitwise compound assign\n{body}"
+
+
+def test_member_compound_assign_minus_arrow() -> None:
+    """``s->len -= n;`` is parsed and emits a subtract through the field."""
+    asm = _kernel("""
+        struct S { int cap; int len; };
+        void f(struct S *s, int n) {
+            s->len -= n;
+        }
+        """)
+    body = asm.split("f:", 1)[1].split("ret", 1)[0]
+    assert "sub " in body, f"expected a SUB in minus compound assign\n{body}"
+
+
+def test_member_compound_assign_plus_arrow() -> None:
+    """``s->len += n;`` — the forcing function from stdio.c::_emit_str.
+
+    The desugaring is ``s->len = s->len + n``; the back end must load the
+    field, add the RHS, and store back at the same offset.
+    """
+    asm = _kernel("""
+        struct S { int cap; int len; };
+        void f(struct S *s, int n) {
+            s->len += n;
+        }
+        """)
+    body = asm.split("f:", 1)[1].split("ret", 1)[0]
+    assert "add " in body, f"expected an ADD in plus compound assign\n{body}"
+
+
+def test_member_compound_assign_shift_arrow() -> None:
+    """``s->mask <<= 2;`` lowers to a shift through the same field offset."""
+    asm = _kernel("""
+        struct S { int mask; };
+        void f(struct S *s) {
+            s->mask <<= 2;
+        }
+        """)
+    body = asm.split("f:", 1)[1].split("ret", 1)[0]
+    assert "shl " in body or "sal " in body, f"expected a left-shift in shift compound assign\n{body}"
+
+
 def test_member_increment_decrement_compiles_all_four_shapes() -> None:
     """``ptr->f`` and ``s.f`` accept prefix/postfix ``++`` / ``--``.
 

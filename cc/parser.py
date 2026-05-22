@@ -418,6 +418,30 @@ class Parser:
                 member_name=member_token[1],
                 object_name=object_name,
             )
+        if self.peek()[0] in COMPOUND_ASSIGN_OPERATORS:
+            operator_token = self.eat()
+            operator = COMPOUND_ASSIGN_OPERATORS[operator_token[0]]
+            right_expression = self.parse_expression()
+            self.eat("SEMI")
+            member_access = MemberAccess(
+                arrow=arrow,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
+            combined_expression = BinaryOperation(
+                left=member_access,
+                line=token[2],
+                operation=operator,
+                right=right_expression,
+            )
+            return MemberAssign(
+                arrow=arrow,
+                expr=combined_expression,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
         self.eat("ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
