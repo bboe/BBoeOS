@@ -313,6 +313,28 @@ class Parser:
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
+    def _parse_control_body(self) -> list[Node]:
+        """Parse a braced block or a single bare statement as a body list.
+
+        Standard C lets ``if (cond) stmt;`` / ``while (cond) stmt;`` /
+        ``else stmt;`` / ``do stmt while (cond);`` omit the braces when
+        the body is a single statement.  Wrap that single-statement
+        case in a one-element list so the downstream codegen (which
+        walks ``body: list[Node]``) sees the same shape either way.
+        Local variable declarations inside an unbraced body would
+        introduce a one-statement scope that nothing else can observe,
+        so they're rejected — wrap in ``{}`` if you need to declare
+        there.
+        """
+        if self.peek()[0] == "LBRACE":
+            self.eat("LBRACE")
+            return self.parse_block()
+        if self._is_type_start():
+            token = self.peek()
+            message = "variable declaration not allowed in single-statement body; use '{ ... }'"
+            raise CompileError(message, line=token[2])
+        return [self.parse_statement()]
+
     def _parse_enum_declaration(self) -> EnumDecl:
         """Parse ``enum NAME { A, B = 5, C, ... };`` at file scope.
 
@@ -751,8 +773,7 @@ class Parser:
 
         """
         token = self.eat("DO")
-        self.eat("LBRACE")
-        body = self.parse_block()
+        body = self._parse_control_body()
         self.eat("WHILE")
         self.eat("LPAREN")
         condition = self.parse_condition()
@@ -780,16 +801,14 @@ class Parser:
         self.eat("LPAREN")
         condition = self.parse_condition()
         self.eat("RPAREN")
-        self.eat("LBRACE")
-        body = self.parse_block()
+        body = self._parse_control_body()
         else_body: list[Node] | None = None
         if self.peek()[0] == "ELSE":
             self.eat("ELSE")
             if self.peek()[0] == "IF":
                 else_body = [self.parse_if()]
             else:
-                self.eat("LBRACE")
-                else_body = self.parse_block()
+                else_body = self._parse_control_body()
         return If(body=body, cond=condition, else_body=else_body, line=token[2])
 
     def parse_index_assignment(self) -> Node:
@@ -1923,5 +1942,4 @@ class Parser:
         self.eat("LPAREN")
         condition = self.parse_condition()
         self.eat("RPAREN")
-        self.eat("LBRACE")
-        return While(body=self.parse_block(), cond=condition, line=token[2])
+        return While(body=self._parse_control_body(), cond=condition, line=token[2])
