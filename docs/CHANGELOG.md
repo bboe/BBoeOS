@@ -11,6 +11,23 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: auto-pin cost gate continues past first failed candidate.**
+  `_select_auto_pin_candidates` used to ``break`` out of the
+  body-candidate loop the first time a candidate failed its
+  matched-register cost gate, on the assumption that every later
+  (lower-ref) candidate was also doomed.  That conflates two
+  orderings — candidates are ranked by ref count, but registers are
+  ranked by clobber cost — so a lower-ref candidate can still beat a
+  cheaper leftover register (e.g. EDI/CX at zero clobber for a
+  function with no calls).  Switch to ``continue`` so those
+  candidates get a chance.  Shrinks asm.bin by 16 bytes and
+  kernel.bin by 8 bytes; ``lookup_ident_here`` / ``parse_operand``
+  in ``user/programs/asm.c`` and ``rtc_read_epoch`` /
+  ``ps2_handle_scancode`` in ``kernel/drivers/`` each pick up an
+  extra pin.  PR #471's ``ax_clear`` after the pinned-right cmp
+  fast path is the load-bearing safety belt for the extra pins this
+  produces; PR #478's cross-page BSS-trailer fix is what made it
+  safe to land at all.
 - **kernel: stage the BSS trailer across the last two binary frames.**
   ``program_enter``'s post-stream trailer peek only inspected the
   *last* loaded binary frame.  When the binary ended 1..5 bytes into
