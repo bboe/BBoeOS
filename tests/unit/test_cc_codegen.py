@@ -1648,6 +1648,23 @@ def test_file_scope_function_pointer_tail_call() -> None:
     assert "jmp eax" in asm, f"expected jmp eax\n{asm}"
 
 
+def test_function_pointer_and_unnamed_param_parse_in_prototype() -> None:
+    """Function-pointer parameters and unnamed parameters parse in prototypes.
+
+    Standard C lets a function-pointer parameter spell out its inner
+    arg-list with no parameter names (``int (*cmp)(const void *,
+    const void *)``).  cc.py now accepts both shapes so libbboeos
+    headers (``qsort``, ``bsearch``, ``atexit``, ``signal``) parse
+    through cc.py.
+    """
+    asm = _kernel("""
+        void qsort(void *base, unsigned int n, unsigned int size,
+                   int (*cmp)(const void *, const void *));
+        int f(void) { return 0; }
+        """)
+    assert "f:" in asm, f"expected f() to be emitted:\n{asm}"
+
+
 def test_function_pointer_arg_count_mismatch_raises_error() -> None:
     """Calling an function_pointer with wrong arg count raises CompileError."""
     error = _kernel_error("""
@@ -3087,6 +3104,21 @@ def test_named_constant_emits_immediate_not_memory_operand() -> None:
     output = _kernel(source)
     assert "MAX_INPUT" in output
     assert "[MAX_INPUT]" not in output
+
+
+def test_noreturn_attribute_accepted_as_no_op() -> None:
+    """``__attribute__((noreturn))`` parses on prototypes and definitions.
+
+    cc.py has no noreturn-aware codegen; the attribute is accepted and
+    discarded so libbboeos headers (``void exit(int)
+    __attribute__((noreturn));``) parse through cc.py.
+    """
+    asm = _kernel("""
+        void die(int code) __attribute__((noreturn));
+        void f(void) { die(1); }
+        """)
+    assert "f:" in asm, f"expected f() to be emitted:\n{asm}"
+    assert "call die" in asm or "jmp die" in asm, f"expected a call to die:\n{asm}"
 
 
 def test_not_carry_return_call_emits_jnc() -> None:
