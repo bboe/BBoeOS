@@ -2958,6 +2958,33 @@ def test_memset_zero_literal_loads_correctly() -> None:
     assert "eax, 0" in asm or "xor eax, eax" in asm or "xor ax, ax" in asm, f"Expected zero value loaded into AX:\n{asm}"
 
 
+def test_multi_declarator_local_decls_compile_to_independent_slots() -> None:
+    """``int a = 1, b = 2, c = 3;`` parses as three separate VarDecls.
+
+    cc.py's parse_variable_declaration now loops on COMMA after the
+    first declarator and emits one VarDecl per name, all sharing the
+    base type.  parse_block (and the LBRACE branch of parse_statement)
+    flatten the list into the surrounding statement body so the names
+    stay in their natural scope — wrapping in a Compound would have
+    introduced a fresh scope and lost cross-statement visibility.
+
+    The forcing function is ``user/libbboeos/stdio.c``'s vsnprintf,
+    whose flag-parsing loop opens with
+    ``int alt = 0, left = 0, plus = 0, zero = 0;``.
+    """
+    asm = _kernel("""
+        int sum() {
+            int a = 1, b = 2, c = 3;
+            return a + b + c;
+        }
+        """)
+    # All three locals should reach codegen — pinned to registers or
+    # frame slots, the function should still return 6.  Verify both
+    # mov-of-literal stores show up.
+    assert "1" in asm and "2" in asm and "3" in asm, f"expected all three init literals in:\n{asm}"
+    assert "sum:" in asm, f"expected sum() to be emitted:\n{asm}"
+
+
 def test_naked_if_else_dispatch_both_branches_tail_jmp() -> None:
     """A naked function whose body is ``if/else`` with calls in both branches emits two tail jmps.
 

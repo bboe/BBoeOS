@@ -455,6 +455,79 @@ class Parser:
             object_name=object_name,
         )
 
+    def _parse_one_declarator(self, *, line: int, type_string: str) -> Node:
+        """Parse one declarator after the base type has been consumed.
+
+        Handles the optional ``(*name)(params)`` function-pointer shape
+        (only meaningful for the first declarator — see
+        :meth:`parse_variable_declaration` for the multi-declarator
+        rationale), the optional ``[N]`` array suffix, an optional
+        ``__attribute__((pinned_register("REG")))``, and an optional
+        ``= initializer``.  Does *not* consume the trailing ``;`` —
+        that's the caller's responsibility because in the
+        multi-declarator case there's exactly one ``;`` shared across
+        every declarator.
+        """
+        function_pointer_params_list: list[Param] | None = None
+        local_type_string = type_string
+        if self.peek()[0] == "LPAREN":
+            # Function pointer variable: type (*name)(params)
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            function_pointer_params_list, _ = self.parse_parameters()
+            self.eat("RPAREN")
+            local_type_string = "function_pointer"
+        else:
+            name = self.eat("IDENT")[1]
+        # Optional trailing ``__attribute__((pinned_register("REG")))``
+        # reserves a register for this local's lifetime.  Allowed on
+        # any scalar that fits a single GP register: ints, pointers,
+        # function_pointers.  ``unsigned long`` is rejected because it
+        # spans a register pair (DX:AX in 16-bit, EDX:EAX in 32-bit)
+        # and the pinning machinery is single-register only.
+        pinned_register_value: str | None = None
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "pinned_register":
+                pinned_register_value = value
+            else:
+                message = f"trailing {kind} attribute is not valid on local variable declarations"
+                raise CompileError(message, line=line)
+        if pinned_register_value is not None and local_type_string == "unsigned long":
+            message = "pinned_register attribute is not supported on 'unsigned long' (spans two registers)"
+            raise CompileError(message, line=line)
+        # Optional [] or [N] for array declarations
+        is_array = False
+        size_expression: Node | None = None
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            is_array = True
+            if self.peek()[0] != "RBRACKET":
+                size_expression = self.parse_expression()
+            self.eat("RBRACKET")
+        init = None
+        if self.peek()[0] == "ASSIGN":
+            self.eat("ASSIGN")
+            if is_array:
+                init = self.parse_array_init()
+            elif self.peek()[0] == "LBRACE":
+                init = self._parse_designated_struct_initializer()
+            else:
+                init = self.parse_expression()
+        if is_array:
+            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=local_type_string)
+        return VarDecl(
+            function_pointer_params=function_pointer_params_list,
+            init=init,
+            line=line,
+            name=name,
+            pinned_register=pinned_register_value,
+            type_name=local_type_string,
+        )
+
     def _parse_pointer_suffix(self, base: str, /, *, max_stars: int) -> str:
         """Greedily consume up to ``max_stars`` trailing ``*`` tokens.
 
@@ -720,7 +793,11 @@ class Parser:
         """
         body: list[Node] = []
         while self.peek()[0] != "RBRACE":
-            body.append(self.parse_statement())
+            statement = self.parse_statement()
+            if isinstance(statement, list):
+                body.extend(statement)
+            else:
+                body.append(statement)
         self.eat("RBRACE")
         return body
 
@@ -1357,11 +1434,13 @@ class Parser:
         self.eat("RPAREN")
         return SizeofVar(line=token[2], name=name)
 
-    def parse_statement(self) -> Node:
+    def parse_statement(self) -> Node | list[Node]:
         """Parse a single statement.
 
-        Returns:
-            An AST node for the statement.
+        Returns an AST node for the statement, or a ``list[Node]`` when
+        the source line is a multi-declarator local declaration
+        (``int a = 1, b = 2;``) — see :meth:`parse_variable_declaration`.
+        Callers that splice into a statement list flatten the result.
 
         Raises:
             CompileError: If an unexpected token is encountered.
@@ -1374,7 +1453,11 @@ class Parser:
             self.eat("LBRACE")
             body: list[Node] = []
             while self.peek()[0] != "RBRACE":
-                body.append(self.parse_statement())
+                statement = self.parse_statement()
+                if isinstance(statement, list):
+                    body.extend(statement)
+                else:
+                    body.append(statement)
             self.eat("RBRACE")
             return Compound(body=body, line=token[2])
         if token[0] == "IF":
@@ -1572,7 +1655,11 @@ class Parser:
                     statement_token = self.peek()
                     message = "switch body may not contain statements before the first case"
                     raise CompileError(message, line=statement_token[2])
-                current.body.append(self.parse_statement())
+                statement = self.parse_statement()
+                if isinstance(statement, list):
+                    current.body.extend(statement)
+                else:
+                    current.body.append(statement)
         self.eat("RBRACE")
         return Switch(cases=cases, discriminant=discriminant, line=token[2])
 
@@ -1981,74 +2068,31 @@ class Parser:
         message = f"expected type, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
-    def parse_variable_declaration(self) -> Node:
+    def parse_variable_declaration(self) -> list[Node]:
         """Parse a variable or array declaration.
 
-        Returns:
-            An AST node for the declaration.
-
+        Always returns a list of AST nodes — one element for the common
+        one-declarator case, several when the source declares multiple
+        names sharing a base type (``int a = 1, b = 2;``).  Callers
+        that splice into a statement list (``parse_block``, the LBRACE
+        branch of ``parse_statement``) extend their body unconditionally.
+        Callers that wrap into a single-statement body
+        (``_parse_control_body``) already reject local declarations
+        before reaching here, so they never see this method's result.
         """
         line = self.peek()[2]
         type_string = self.parse_type()
-        function_pointer_params_list: list[Param] | None = None
-        if self.peek()[0] == "LPAREN":
-            # Function pointer variable: type (*name)(params)
-            self.eat("LPAREN")
-            self.eat("STAR")
-            name = self.eat("IDENT")[1]
-            self.eat("RPAREN")
-            self.eat("LPAREN")
-            function_pointer_params_list, _ = self.parse_parameters()
-            self.eat("RPAREN")
-            type_string = "function_pointer"
-        else:
-            name = self.eat("IDENT")[1]
-        # Optional trailing ``__attribute__((pinned_register("REG")))``
-        # reserves a register for this local's lifetime.  Allowed on
-        # any scalar that fits a single GP register: ints, pointers,
-        # function_pointers.  ``unsigned long`` is rejected because it
-        # spans a register pair (DX:AX in 16-bit, EDX:EAX in 32-bit)
-        # and the pinning machinery is single-register only.
-        pinned_register_value: str | None = None
-        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
-            kind, value = self._parse_attribute(line=line)
-            if kind == "pinned_register":
-                pinned_register_value = value
-            else:
-                message = f"trailing {kind} attribute is not valid on local variable declarations"
-                raise CompileError(message, line=line)
-        if pinned_register_value is not None and type_string == "unsigned long":
-            message = "pinned_register attribute is not supported on 'unsigned long' (spans two registers)"
-            raise CompileError(message, line=line)
-        # Optional [] or [N] for array declarations
-        is_array = False
-        size_expression: Node | None = None
-        if self.peek()[0] == "LBRACKET":
-            self.eat("LBRACKET")
-            is_array = True
-            if self.peek()[0] != "RBRACKET":
-                size_expression = self.parse_expression()
-            self.eat("RBRACKET")
-        init = None
-        if self.peek()[0] == "ASSIGN":
-            self.eat("ASSIGN")
-            if is_array:
-                init = self.parse_array_init()
-            elif self.peek()[0] == "LBRACE":
-                init = self._parse_designated_struct_initializer()
-            else:
-                init = self.parse_expression()
+        declarations: list[Node] = [self._parse_one_declarator(line=line, type_string=type_string)]
+        while self.peek()[0] == "COMMA":
+            # Additional declarators share the base ``type_string`` and
+            # each parse their own optional ``[N]`` + ``= init``.
+            # Function-pointer declarators (``type (*name)(params)``)
+            # are single-declarator only — they hijack the LPAREN token
+            # before the name, so they can never appear after a COMMA.
+            self.eat("COMMA")
+            declarations.append(self._parse_one_declarator(line=line, type_string=type_string))
         self.eat("SEMI")
-        if is_array:
-            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=type_string)
-        return VarDecl(
-            function_pointer_params=function_pointer_params_list,
-            init=init,
-            line=line,
-            name=name,
-            pinned_register=pinned_register_value,
-            type_name=type_string,
-        )
+        return declarations
 
     def parse_while(self) -> Node:
         """Parse a while loop statement.
