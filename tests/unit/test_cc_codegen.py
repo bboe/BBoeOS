@@ -1135,6 +1135,103 @@ def test_default_3_arg_callee_does_not_read_args_off_stack() -> None:
         assert f"[ebp+{offset}]" not in asm, f"3-arg callee unexpectedly reads stack arg at [ebp+{offset}]:\n{asm}"
 
 
+def test_deref_postfix_decrement_char_pointer_read() -> None:
+    """``*p--`` on ``char *p`` emits a byte-zero-extended load then a ``dec`` on the slot.
+
+    Mirror of the ``*p++`` read-side test — locks down the sign of the
+    bump (``dec`` not ``inc``) so a future refactor can't quietly flip
+    direction.
+    """
+    asm = _kernel(
+        """
+        int read_back(char *p) {
+            return *p--;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("read_back:", 1)[1]
+    assert "movzx eax, byte [esi]" in body, f"expected byte-zero-extend load\n{asm}"
+    assert "dec dword [ebp-4]" in body, f"expected dec on char* slot\n{asm}"
+
+
+def test_deref_postfix_increment_assign_char_pointer() -> None:
+    """``*p++ = c`` on ``char *p`` stores a byte through ESI then bumps ``p`` by 1.
+
+    Forcing function for the ``_utoa`` digit-emit loop in
+    ``user/libbboeos/stdio.c`` (``*out++ = tmp[i]``).  The store goes
+    through ESI at byte width (``mov [esi], al``) and the bump uses
+    ``inc dword [ebp-N]`` so the accumulator never participates.
+    """
+    asm = _kernel(
+        """
+        void put(char *p, char c) {
+            *p++ = c;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("put:", 1)[1]
+    assert "mov esi, [ebp-4]" in body, f"expected pointer load into ESI\n{asm}"
+    assert "mov [esi], al" in body, f"expected byte store through ESI\n{asm}"
+    assert "inc dword [ebp-4]" in body, f"expected char* bump by 1\n{asm}"
+
+
+def test_deref_postfix_increment_char_pointer_read() -> None:
+    """``*p++`` on ``char *p`` loads a byte (zero-extended) then bumps ``p`` by 1.
+
+    Forcing function for ``_emit(s, *p++)`` in
+    ``user/libbboeos/stdio.c``.  The value of the expression is ``*p``
+    before the bump — the bump goes via ``inc`` on the pointer's slot
+    so the freshly loaded byte stays in the accumulator.
+    """
+    asm = _kernel(
+        """
+        int read_byte(char *p) {
+            return *p++;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("read_byte:", 1)[1]
+    assert "movzx eax, byte [esi]" in body, f"expected byte-zero-extend load\n{asm}"
+    assert "inc dword [ebp-4]" in body, f"expected inc on char* slot\n{asm}"
+
+
+def test_deref_postfix_increment_int_pointer_read() -> None:
+    """``*p++`` on ``int *p`` emits a 4-byte load then bumps ``p`` by 4."""
+    asm = _kernel(
+        """
+        int read_word(int *p) {
+            return *p++;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("read_word:", 1)[1]
+    assert "mov eax, [esi]" in body, f"expected 4-byte load through ESI\n{asm}"
+    assert "add dword [ebp-4], 4" in body, f"expected int* bump by 4\n{asm}"
+
+
+def test_deref_prefix_increment_rejected() -> None:
+    """Prefix ``*++p`` is rejected with a usable error.
+
+    Supporting prefix-deref requires a different lowering (deref the
+    post-incremented pointer) and the in-tree forcing functions
+    (stdio.c's ``_emit`` / ``_utoa``) only need the postfix form.
+    """
+    error = _kernel_error(
+        """
+        int f(int *p) {
+            return *++p;
+        }
+        """,
+        bits=32,
+    )
+    assert "prefix" in error, f"expected 'prefix' in error message, got:\n{error}"
+    assert "*++p" in error or "*--p" in error, f"expected hint about *++p/*--p, got:\n{error}"
+
+
 def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
     """``obj.field`` on a file-scope struct global emits ``[_g_obj+offset]``.
 

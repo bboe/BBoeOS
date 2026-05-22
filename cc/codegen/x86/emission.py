@@ -38,6 +38,8 @@ from cc.ast_nodes import (
     Conditional,
     Continue,
     DerefAssign,
+    DerefIncrement,
+    DerefIncrementAssign,
     DoubleIndex,
     DoWhile,
     Function,
@@ -223,6 +225,45 @@ class EmissionMixin:
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
                 function.regparm_count = min(3, len(function.params))
+
+    def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
+        """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
+
+        Used by :class:`DerefIncrement` / :class:`DerefIncrementAssign`
+        codegen to bump the pointer *without* touching the accumulator —
+        either ``inc reg`` / ``add reg, N`` for a pinned-register
+        pointer, or ``inc dword [ebp-N]`` / ``add dword [ebp-N], N`` for
+        a frame-slot pointer.  Pointee width comes from the recorded
+        pointer type (``char *`` → 1, ``uint16_t *`` → 2, anything else
+        → ``int_size``).  Skips the accumulator-tracking invalidation
+        the caller needs (so the freshly-loaded ``*p`` value remains
+        valid in acc); the caller decides whether to ``ax_clear()``.
+        """
+        holder_type = self.variable_types.get(name)
+        if not holder_type or not holder_type.endswith("*"):
+            message = f"postfix '*{name}++' / '*{name}--' requires a pointer; got '{holder_type}'"
+            raise CompileError(message, line=line)
+        pointee_type = holder_type[:-1].rstrip()
+        try:
+            pointee_size = self.target.type_size(pointee_type) if pointee_type else 1
+        except KeyError:
+            pointee_size = self.target.int_size
+        bump = pointee_size * delta
+        operation = "add" if bump >= 0 else "sub"
+        amount = abs(bump)
+        if name in self.pinned_register:
+            register = self.pinned_register[name]
+            if amount == 1:
+                self.emit(f"        {'inc' if bump > 0 else 'dec'} {register}")
+            else:
+                self.emit(f"        {operation} {register}, {amount}")
+        else:
+            address = self._local_address(name)
+            width = self.target.word_size
+            if amount == 1:
+                self.emit(f"        {'inc' if bump > 0 else 'dec'} {width} [{address}]")
+            else:
+                self.emit(f"        {operation} {width} [{address}], {amount}")
 
     def _emit_pointer_dereference(self, expression: PointerDereference) -> None:
         """Read through a pointer expression at ``target_type`` width.
@@ -1738,6 +1779,24 @@ class EmissionMixin:
                 reverse = "sub" if expression.delta > 0 else "add"
                 self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
                 self.ax_clear()
+        elif isinstance(expression, DerefIncrement):
+            # ``*p++`` / ``*p--`` as an rvalue: load ``*p`` (pre-update
+            # value) into the accumulator first, then bump ``p`` by
+            # sizeof(*p) bytes *without* touching the accumulator.  The
+            # bump operates directly on the pinned register or the
+            # frame slot via :meth:`_emit_pointer_bump`, so the freshly
+            # loaded value survives untouched.  Postfix-only — prefix
+            # ``*++p`` is rejected at parse time.
+            target = expression.target_name
+            self._check_defined(target, line=expression.line)
+            self.generate_expression(
+                Index(
+                    array=Var(line=expression.line, name=target),
+                    index=Int(line=expression.line, value=0),
+                    line=expression.line,
+                )
+            )
+            self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
         elif isinstance(expression, MemberIncrementDecrement):
             # Same lowering shape as IncrementDecrement, but for
             # struct-member lvalues: synthesize ``s->f = s->f ± 1`` and
@@ -2878,6 +2937,32 @@ class EmissionMixin:
                 else:
                     self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
                 self.ax_clear()
+        elif isinstance(statement, DerefIncrementAssign):
+            # ``*p++ = expr;`` — evaluate ``expr`` into the accumulator,
+            # store through ``p`` at pointee width (mirroring
+            # :class:`DerefAssign` codegen), then bump ``p`` by
+            # ``sizeof(*p)`` bytes via the in-place pointer-bump helper
+            # (no accumulator touch).  The store itself goes via the
+            # ESI scratch register so the accumulator survives intact
+            # for the bump's neighborhood — and we ``ax_clear()`` at
+            # the end because the next read of ``p`` must reload.
+            target = statement.target_name
+            self._check_defined(target, line=statement.line)
+            holder_type = self.variable_types.get(target)
+            if not holder_type or not holder_type.endswith("*"):
+                message = f"postfix '*{target}++' / '*{target}--' write requires a pointer; got '{holder_type}'"
+                raise CompileError(message, line=statement.line)
+            pointee_type = holder_type[:-1].rstrip()
+            self.generate_expression(statement.expr)
+            self._emit_load_var(target, register=self.target.si_register)
+            if pointee_type in ("char", "uint8_t"):
+                self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
+            elif pointee_type == "uint16_t" and self.target.int_size > 2:
+                self.emit(f"        mov word [{self.target.si_register}], {self.target.low_word(self.target.acc)}")
+            else:
+                self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+            self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
+            self.ax_clear()
         elif isinstance(statement, PointerDereferenceAssign):
             self._emit_pointer_dereference_assign(statement)
             self.ax_clear()
