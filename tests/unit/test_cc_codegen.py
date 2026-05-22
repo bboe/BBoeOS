@@ -148,6 +148,60 @@ def test_address_of_array_element_compiles() -> None:
     assert "3*4" in asm or "12" in asm, f"Expected stride-scaled offset (3*4 or 12) in:\n{asm}"
 
 
+def test_address_of_at_out_register_arg_still_allows_auto_pin() -> None:
+    """``&x`` at an ``out_register`` arg position is a fake address: *x* may still pin.
+
+    The disqualification above must NOT fire for out_register captures
+    — the callee writes the named register and the caller copies it
+    back to *x*, so *x* never needs a memory address.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int net_get(int *value __attribute__((out_register("cx"))));
+
+        int process() {
+            int inner_value;
+            if (net_get(&inner_value)) {
+                return inner_value;
+            }
+            return inner_value;
+        }
+    """,
+        bits=16,
+    )
+    # The pin should land — the capture move into the pinned register
+    # must appear (mov dx, cx or similar) rather than [bp-N], cx.
+    assert "mov dx, cx" in asm, f"expected pinned-register capture, got\n{asm}"
+
+
+def test_address_of_local_disqualifies_auto_pin() -> None:
+    """``&local`` keeps *local* in a frame slot instead of pinning to a register.
+
+    Regression for the auto-pin / address-of collision: previously a
+    high-ref local that also had its address taken would be auto-pinned
+    to a register, then ``_local_address`` rejected with ``no address
+    for 'name'`` when the AddressOf tried to look up its slot.
+    """
+    src = """
+        int consume(int *p);
+        int observe(int *q);
+
+        int worker() {
+            int value = 0;
+            consume(&value);
+            observe(&value);
+            return value;
+        }
+    """
+    asm = _kernel(src, bits=32)
+    assert "worker:" in asm
+    # The local must have a frame slot — look for any [ebp-N] or [bp-N]
+    # reference under worker's body that names value's address.
+    body = asm.split("worker:", 1)[1]
+    assert "[ebp-" in body or "[bp-" in body, f"expected frame-slot ref for &value\n{asm}"
+
+
 def test_asm_name_global_compiles() -> None:
     """asm_name globals compile without emitting storage."""
     source = textwrap.dedent("""
@@ -175,18 +229,518 @@ def test_asm_name_with_offset_compiles() -> None:
     assert "[vfs_found_size+2]" in output
 
 
-def test_cast_pointer_byte_compiles() -> None:
-    """``(uint8_t *)expr`` parses as a transparent pointer cast.
+def test_auto_pin_cost_model_subtracts_pre_first_store_calls() -> None:
+    """Pre-first-store calls are dropped from the auto-pin cost gate.
 
-    cc.py's type system is loose; the cast is parsed and discarded so
-    the operand carries through unchanged.  This lets the source use
-    casts for clang compatibility without diverging behaviour.
+    PR #454's liveness pre-pass elides ``push <pin>`` / ``pop <pin>``
+    around any call that runs before the pinned local is first
+    written.  Auto-pin's cost model now factors that in: a candidate
+    whose first store happens late in the function only pays the
+    save cost for calls AFTER the store, not the function-wide
+    clobber count.
+
+    Here ``counter`` is written for the first time after 8 helper
+    calls — under the pre-refinement model, refs (6) didn't beat
+    the EBX clobber count (8) so auto-pin bailed.  Post-refinement
+    the effective cost is 0 (all 8 calls are pre-store), so the
+    pin lands and ``counter`` lives in EBX.
     """
+    asm = _kernel(
+        """
+        int helper(int x);
+        int late_store() {
+            int counter;
+            helper(0);
+            helper(1);
+            helper(2);
+            helper(3);
+            helper(4);
+            helper(5);
+            helper(6);
+            helper(7);
+            counter = 0;
+            counter = counter + 1;
+            counter = counter + 1;
+            return counter;
+        }
+    """,
+        bits=32,
+    )
+    # Counter pins to an E-register (any of the safe ones), so its
+    # store pattern is ``mov eRR, eax`` rather than a stack-slot
+    # spill (``mov [ebp-N], eax``).  Before the refinement, refs (6)
+    # didn't beat the function-wide EBX clobber count (8 user-call
+    # clobbers), so auto-pin bailed and counter spilled.
+    pinned_store_forms = ("mov ebx, eax", "mov ecx, eax", "mov edx, eax", "mov edi, eax")
+    assert any(form in asm for form in pinned_store_forms), (
+        f"expected counter to pin to an E-register (store via {pinned_store_forms}):\n{asm}"
+    )
+    assert "[ebp-4], eax" not in asm, f"counter should not spill to its frame slot:\n{asm}"
+
+
+def test_builtin_dup2_loads_bx_after_clobbering_sibling() -> None:
+    """dup2(old_fd, get_target()) must load EBX last.
+
+    Regression: builtin_dup2 used to load EBX=old_fd first, then
+    EDX=target_fd.  When ``target_fd`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel dup2 handler then saw garbage
+    in EBX.
+
+    Routing dup2's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_target() { return 5; }
+        int main() {
+            dup2(2, get_target());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # a user-function call in a sibling arg IS the bug we want to
+    # catch (caller-save scratching the already-loaded EBX), so the
+    # walk-back must span past it.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_DUP2" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the dup2 input
+        # ``mov ebx, <old_fd>``), nothing else in the setup block may
+        # write EBX — a user-function call between that load and the
+        # syscall would clobber EBX as caller-save scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_dup2 loaded EBX before a sibling call that clobbers it. "
+            "The dup2 syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_DUP2; got asm:\n{asm}"
+
+
+def test_builtin_pipeline2_loads_si_after_index_sibling() -> None:
+    """pipeline2(cmds[i], _, cmds[j], _) must load ESI last.
+
+    Regression: builtin_pipeline2 used to load ESI=left_path first
+    (via emit_si_from_argument), then EDI=right_path.  When
+    ``right_path`` is an Index expression like ``cmds[j]``, the
+    Index lowering reuses ESI as the base-address scratch — wiping
+    out the left_path pointer before the SYS_SYS_PIPELINE2 syscall
+    runs.  Same shape as the write(fd, names[i], strlen(names[i]))
+    bug that motivated PR #386.
+
+    The fix routes pipeline2's four arg loads through
+    :meth:`_emit_builtin_arg_moves`, whose scheduler defers the ESI
+    target until after sibling args whose lowering scratches ESI.
+    """
+    asm = _user(
+        """
+        int main() {
+            char *cmds[3];
+            char **argv = 0;
+            cmds[0] = "a"; cmds[1] = "b"; cmds[2] = "c";
+            int i = 0;
+            int j = 1;
+            pipeline2(cmds[i], argv, cmds[j], argv);
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_SYS_PIPELINE2" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # The fix's contract: after ESI is loaded with the final
+        # cmds[i] value (``mov esi, eax``), nothing else in the
+        # setup block may re-write ESI — the second Index lowering
+        # (for cmds[j]) must have completed already, including all
+        # its `lea esi, [ebp-...]` / `add esi, ...` scratch writes.
+        # Different shape from the write test (which catches
+        # post-load overwrites by a sibling builtin Call) because
+        # pipeline2's bug surfaces as a mid-sequence Index-lowering
+        # overwrite.
+        final_esi_load = -1
+        for offset, instruction in enumerate(block):
+            if instruction == "mov esi, eax":
+                final_esi_load = offset
+        if final_esi_load < 0:
+            continue
+        tail = block[final_esi_load + 1 :]
+        bad = [
+            instruction
+            for instruction in tail
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        assert not bad, (
+            "builtin_pipeline2 re-wrote ESI after loading the left_path "
+            "pointer.  In the buggy sequential order, cmds[j]'s Index "
+            "lowering scratches ESI between the ESI load and the syscall, "
+            "wiping the left_path pointer.  The topological scheduler must "
+            "emit the right_path Index lowering BEFORE the ESI=left_path "
+            "load.  Offending tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_PIPELINE2; got asm:\n{asm}"
+
+
+def test_builtin_read_emits_fd_last() -> None:
+    """builtin_read must load `fd` into BX AFTER computing buf/count.
+
+    Otherwise: when `total` (or any var pinned to BX) is referenced by the
+    buf or count expression, the `mov bx, fd` clobbers it before use,
+    silently emitting `add edi, ebx` and `sub eax, ebx` that read the fd
+    value instead of total.
+
+    Regression caught while landing user/programs/tail.c — passing `read(fd,
+    tail_buf + total, BUF - total)` inside a loop produced wrong reads at
+    offset `fd` instead of offset `total`.  builtin_write already orders
+    args this way; this test pins down the same property for read.
+
+    We use a tail.c-shaped source because the auto-pin allocator's
+    decision is sensitive to call mix and var ref counts; with the
+    walk-back logic and the second `read(fd, &overflow, 1)` call, `total`
+    lands on EBX, which is what makes the bug visible.
+    """
+    asm = _user(
+        """
+        #define BUF 65536
+        int parse_int(char *string) {
+            int value = 0;
+            int index = 0;
+            while (string[index] >= '0' && string[index] <= '9') {
+                value = value * 10 + (string[index] - '0');
+                index = index + 1;
+            }
+            return value;
+        }
+        char tail_buf[BUF];
+        int main(int argc, char *argv[]) {
+            int want = 10;
+            char *path = NULL;
+            int arg = 1;
+            while (arg < argc) {
+                char *a = argv[arg];
+                if (a[0] == '-' && a[1] == 'n' && a[2] == '\\0') {
+                    arg = arg + 1;
+                    if (arg >= argc) {
+                        die("tail: -n needs a number\\n");
+                    }
+                    want = parse_int(argv[arg]);
+                } else {
+                    path = a;
+                }
+                arg = arg + 1;
+            }
+            if (path == NULL) {
+                die("tail: pass a file\\n");
+            }
+            int fd = open(path, O_RDONLY);
+            if (fd < 0) {
+                die("tail: open failed\\n");
+            }
+            int total = 0;
+            while (total < BUF) {
+                int n = read(fd, tail_buf + total, BUF - total);
+                if (n <= 0) {
+                    break;
+                }
+                total = total + n;
+            }
+            char overflow;
+            int extra = read(fd, &overflow, 1);
+            close(fd);
+            if (extra > 0) {
+                die("tail: file too large\\n");
+            }
+            int index = total;
+            int found = 0;
+            if (index > 0 && tail_buf[index - 1] == '\\n') {
+                index = index - 1;
+            }
+            while (index > 0 && found < want) {
+                index = index - 1;
+                if (tail_buf[index] == '\\n') {
+                    found = found + 1;
+                    if (found == want) {
+                        index = index + 1;
+                        break;
+                    }
+                }
+            }
+            int remaining = total - index;
+            if (remaining > 0) {
+                write(STDOUT, tail_buf + index, remaining);
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    # For each SYS_IO_READ syscall, walk back to find the argument-setup
+    # block and check that EBX is not written then read within it.
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_READ" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        last_ebx_write = -1
+        for offset, instruction in enumerate(block):
+            if instruction.startswith(("mov ebx,", "xor ebx,", "pop ebx")) and not instruction.startswith("pop ebx"):
+                last_ebx_write = offset
+        if last_ebx_write < 0:
+            continue
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if ", ebx" in instruction.split(";", 1)[0]]
+        assert not bad, (
+            "builtin_read clobbered EBX before reading it as a source operand. "
+            "If a pinned variable lives in EBX, this corrupts it. Offending "
+            "tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_READ; got asm:\n{asm}"
+
+
+def test_builtin_signal_loads_bx_after_clobbering_sibling() -> None:
+    """signal(signum, get_handler()) must load EBX last.
+
+    Regression: builtin_signal used to load EBX=signum first, then
+    ECX=handler.  When ``handler`` was a user-function call, the
+    Call's lowering (caller-save cdecl) clobbered EBX between the
+    load and the syscall.  The kernel signal handler then saw
+    garbage in EBX as the signal number.
+
+    Routing signal's arg loads through :meth:`_emit_builtin_arg_moves`
+    defers the EBX load until after every sibling whose evaluation
+    would clobber EBX.
+    """
+    asm = _user(
+        """
+        int get_handler() { return 1; }
+        int main() {
+            signal(2, get_handler());
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    # NOTE: "call" intentionally omitted from the block-break set —
+    # the bug we want to surface is a sibling user-function call
+    # clobbering EBX after it's been loaded, so walk-back must
+    # cross past calls.
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_SYS_SIGNAL" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # After the LAST instruction that writes EBX (the signal
+        # input ``mov ebx, <signum>``), nothing else in the setup
+        # block may write EBX — a user-function call between that
+        # load and the syscall would clobber EBX as caller-save
+        # scratch.
+        ebx_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
+        ]
+        if not ebx_writes:
+            continue
+        last_ebx_write = ebx_writes[-1]
+        tail = block[last_ebx_write + 1 :]
+        bad = [instruction for instruction in tail if instruction.startswith("call ")]
+        assert not bad, (
+            "builtin_signal loaded EBX before a sibling call that clobbers it. "
+            "The signal syscall will read garbage from EBX. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_SIGNAL; got asm:\n{asm}"
+
+
+def test_builtin_sys_break_emits_break_syscall() -> None:
+    """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
+
+    The kernel handler at kernel/arch/x86/syscall.asm:.sys_break reads EBX as
+    "new break" (0 = query) and returns the resulting break in EAX with
+    CF=0 always.  We pin the C contract end of that ABI here so future
+    codegen refactors can't silently change it.
+    """
+    asm = _user(
+        """
+        int main(int argc, char *argv[]) {
+            uint32_t current = sys_break(0);
+            uint32_t requested = current + 65536;
+            uint32_t got = sys_break(requested);
+            if (got != requested) {
+                die("oom\\n");
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    assert "mov ebx, 0" in asm or "xor ebx, ebx" in asm, f"sys_break(0) (query form) must zero EBX before firing the syscall.\nasm:\n{asm}"
+    assert "mov ah, SYS_SYS_BREAK" in asm, (
+        "sys_break codegen must emit `mov ah, SYS_SYS_BREAK` — the constant lives in "
+        "kernel/include/constants.asm and is the only stable contract with the kernel handler.\n"
+        f"asm:\n{asm}"
+    )
+    assert asm.count("mov ah, SYS_SYS_BREAK") == 2, (
+        f"expected exactly two SYS_SYS_BREAK firings (query + set); got {asm.count('mov ah, SYS_SYS_BREAK')}.\nasm:\n{asm}"
+    )
+
+
+def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
+    """write(fd, names[i], strlen(names[i])) must load ESI last.
+
+    Regression: builtin_write used to load ESI=buffer, then ECX=count.
+    When ``count`` was ``strlen(names[i])`` the recursive lowering
+    re-evaluated the Index expression and re-used ESI as the
+    base-address scratch — overwriting the buffer pointer that was
+    just placed there.  The resulting ``write`` syscall pointed at the
+    ``names`` array's first slot every iteration, so ``ls`` (the
+    program that surfaced this in user/programs/ls.c) printed the same name
+    repeated, garbled by length mismatches.
+
+    The fix routes write's three arg loads through
+    :meth:`_emit_builtin_arg_moves`, whose scheduler now also tracks
+    "this evaluation will scratch ESI" and defers the ESI-targeted
+    load until after sibling args whose lowering clobbers it.
+    """
+    asm = _user(
+        """
+        int main() {
+            char arena[16];
+            char *names[3];
+            arena[0] = 'a'; arena[1] = 'b'; arena[2] = 0;
+            arena[3] = 'c'; arena[4] = 'd'; arena[5] = 0;
+            arena[6] = 'e'; arena[7] = 'f'; arena[8] = 0;
+            names[0] = arena + 0;
+            names[1] = arena + 3;
+            names[2] = arena + 6;
+            int i = 0;
+            while (i < 3) {
+                write(STDOUT, names[i], strlen(names[i]));
+                putchar('\\n');
+                i = i + 1;
+            }
+            return 0;
+        }
+        """,
+        bits=32,
+    )
+    lines = [line.strip() for line in asm.splitlines()]
+    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
+    found_at_least_one = False
+    for index, line in enumerate(lines):
+        if line != "int 30h":
+            continue
+        if index < 1 or "SYS_IO_WRITE" not in lines[index - 1]:
+            continue
+        found_at_least_one = True
+        start = index
+        while start > 0:
+            previous = lines[start - 1]
+            if previous.endswith(":") or previous.startswith(jump_prefixes):
+                break
+            start -= 1
+        block = lines[start:index]
+        # The buffer load is the LAST instruction that writes ESI
+        # before the syscall.  After that, nothing else should write
+        # ESI — that would obliterate the buffer pointer before
+        # SYS_IO_WRITE reads it.
+        esi_writes = [
+            offset
+            for offset, instruction in enumerate(block)
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        if not esi_writes:
+            continue
+        last_esi_write = esi_writes[-1]
+        tail = block[last_esi_write + 1 :]
+        bad = [
+            instruction
+            for instruction in tail
+            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
+        ]
+        assert not bad, (
+            "builtin_write clobbered ESI after loading the buffer pointer. "
+            "The syscall will dereference the wrong address. Offending tail:\n"
+            + "\n".join(tail)
+            + "\n--- full setup block ---\n"
+            + "\n".join(block)
+        )
+    assert found_at_least_one, f"test source must compile to at least one SYS_IO_WRITE; got asm:\n{asm}"
+
+
+def test_cast_in_compound_expression_compiles() -> None:
+    """``base + (uint8_t *)offset`` cast inside a larger expression."""
     asm = _kernel("""
-        void f(uint16_t *src) {
-            uint8_t *dst;
-            dst = (uint8_t *)src;
-            dst[0] = 0;
+        uint8_t buffer[16];
+        void f(int n) {
+            uint8_t *p;
+            p = buffer + (uint8_t *)n;
+            p[0] = 0;
         }
     """)
     assert "f:" in asm
@@ -202,14 +756,18 @@ def test_cast_int_compiles() -> None:
     assert "f:" in asm
 
 
-def test_cast_in_compound_expression_compiles() -> None:
-    """``base + (uint8_t *)offset`` cast inside a larger expression."""
+def test_cast_pointer_byte_compiles() -> None:
+    """``(uint8_t *)expr`` parses as a transparent pointer cast.
+
+    cc.py's type system is loose; the cast is parsed and discarded so
+    the operand carries through unchanged.  This lets the source use
+    casts for clang compatibility without diverging behaviour.
+    """
     asm = _kernel("""
-        uint8_t buffer[16];
-        void f(int n) {
-            uint8_t *p;
-            p = buffer + (uint8_t *)n;
-            p[0] = 0;
+        void f(uint16_t *src) {
+            uint8_t *dst;
+            dst = (uint8_t *)src;
+            dst[0] = 0;
         }
     """)
     assert "f:" in asm
@@ -612,6 +1170,24 @@ def test_double_pointer_char_double_star_parses() -> None:
     assert "f:" in asm
 
 
+def test_double_pointer_deref_assign_emits_indirect_store() -> None:
+    """``*endptr = value`` lowers to ``mov [reg], <acc>`` for plain pointer locals.
+
+    Regression for the DerefAssign path that used to reject any
+    non-out_register holder.  The holder is loaded into ESI and the
+    accumulator is stored through it.
+    """
+    src = """
+        void f(char **endptr, char *value __attribute__((in_register("di")))) {
+            *endptr = value;
+        }
+    """
+    asm = _kernel(src, bits=32)
+    body = asm.split("f:", 1)[1]
+    assert "mov esi, [" in body, f"expected holder load into ESI\n{asm}"
+    assert "mov [esi], eax" in body, f"expected store through ESI\n{asm}"
+
+
 def test_double_pointer_indexed_assign_uses_word_stride() -> None:
     """``argv[i] = ptr`` on ``uint8_t**`` writes a 16-bit value (slot is a pointer)."""
     src = """
@@ -639,17 +1215,6 @@ def test_double_pointer_int_double_star_parses() -> None:
     assert "f:" in asm
 
 
-def test_double_pointer_parameter_compiles() -> None:
-    """``uint8_t **argv`` is accepted as a parameter type."""
-    src = """
-        void f(uint8_t **argv __attribute__((in_register("di")))) {
-            argv[0] = argv[1];
-        }
-    """
-    asm = _kernel(src)
-    assert "f:" in asm, f"function emitted\n{asm}"
-
-
 def test_double_pointer_null_compare_classifies_as_pointer() -> None:
     """``if (p != NULL)`` compiles when *p* is ``char**`` (regression).
 
@@ -665,6 +1230,17 @@ def test_double_pointer_null_compare_classifies_as_pointer() -> None:
     """
     asm = _kernel(src)
     assert "f:" in asm
+
+
+def test_double_pointer_parameter_compiles() -> None:
+    """``uint8_t **argv`` is accepted as a parameter type."""
+    src = """
+        void f(uint8_t **argv __attribute__((in_register("di")))) {
+            argv[0] = argv[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm, f"function emitted\n{asm}"
 
 
 def test_double_pointer_pointer_arith_classifies_as_pointer() -> None:
@@ -683,172 +1259,6 @@ def test_double_pointer_pointer_arith_classifies_as_pointer() -> None:
     """
     asm = _kernel(src)
     assert "f:" in asm
-
-
-def test_address_of_local_disqualifies_auto_pin() -> None:
-    """``&local`` keeps *local* in a frame slot instead of pinning to a register.
-
-    Regression for the auto-pin / address-of collision: previously a
-    high-ref local that also had its address taken would be auto-pinned
-    to a register, then ``_local_address`` rejected with ``no address
-    for 'name'`` when the AddressOf tried to look up its slot.
-    """
-    src = """
-        int consume(int *p);
-        int observe(int *q);
-
-        int worker() {
-            int value = 0;
-            consume(&value);
-            observe(&value);
-            return value;
-        }
-    """
-    asm = _kernel(src, bits=32)
-    assert "worker:" in asm
-    # The local must have a frame slot — look for any [ebp-N] or [bp-N]
-    # reference under worker's body that names value's address.
-    body = asm.split("worker:", 1)[1]
-    assert "[ebp-" in body or "[bp-" in body, f"expected frame-slot ref for &value\n{asm}"
-
-
-def test_out_register_captures_topologically_ordered() -> None:
-    """Topologically order out_register captures when one's source feeds another.
-
-    When two out_register captures form a chain — capture A's source
-    register is capture B's pinned destination — capture B must be
-    emitted before capture A so B's read isn't clobbered.
-
-    Regression for the fd_read_net page-fault: ne2k_receive returns
-    ``frame_pointer`` in EDI and ``packet_length`` in ECX.  After auto-
-    pin assigned ECX to frame_pointer and EDX to packet_length, the
-    naive in-order emission produced ``mov ecx, edi; mov edx, ecx``,
-    where the second move read the already-overwritten ECX.
-    """
-    asm = _kernel(
-        """
-        __attribute__((carry_return))
-        int producer(int *first  __attribute__((out_register("edi"))),
-                     int *second __attribute__((out_register("ecx"))));
-
-        int consume(int a, int b);
-
-        int caller() {
-            int a;
-            int b;
-            producer(&a, &b);
-            return consume(a, b) + consume(a, b) + consume(a, b);
-        }
-    """,
-        bits=32,
-    )
-    body = asm.split("caller:", 1)[1]
-    call_index = body.find("call producer")
-    after_call = body[call_index:].splitlines()[1:5]
-    # The capture whose source (ECX) is the OTHER capture's destination
-    # must come first.  If both captures end up pinned and the order is
-    # wrong, the assertion below would still pass — so also check the
-    # second capture doesn't read from the first's pinned destination.
-    if any("mov ecx, edi" in line for line in after_call):
-        ecx_capture_index = next(i for i, line in enumerate(after_call) if "mov ecx, edi" in line)
-        edx_capture_index = next((i for i, line in enumerate(after_call) if "mov edx, ecx" in line), None)
-        assert edx_capture_index is None or edx_capture_index < ecx_capture_index, (
-            f"out_register captures emitted in wrong order — mov edx, ecx must precede mov ecx, edi:\n{asm}"
-        )
-
-
-def test_address_of_at_out_register_arg_still_allows_auto_pin() -> None:
-    """``&x`` at an ``out_register`` arg position is a fake address: *x* may still pin.
-
-    The disqualification above must NOT fire for out_register captures
-    — the callee writes the named register and the caller copies it
-    back to *x*, so *x* never needs a memory address.
-    """
-    asm = _kernel(
-        """
-        __attribute__((carry_return))
-        int net_get(int *value __attribute__((out_register("cx"))));
-
-        int process() {
-            int inner_value;
-            if (net_get(&inner_value)) {
-                return inner_value;
-            }
-            return inner_value;
-        }
-    """,
-        bits=16,
-    )
-    # The pin should land — the capture move into the pinned register
-    # must appear (mov dx, cx or similar) rather than [bp-N], cx.
-    assert "mov dx, cx" in asm, f"expected pinned-register capture, got\n{asm}"
-
-
-def test_auto_pin_cost_model_subtracts_pre_first_store_calls() -> None:
-    """Pre-first-store calls are dropped from the auto-pin cost gate.
-
-    PR #454's liveness pre-pass elides ``push <pin>`` / ``pop <pin>``
-    around any call that runs before the pinned local is first
-    written.  Auto-pin's cost model now factors that in: a candidate
-    whose first store happens late in the function only pays the
-    save cost for calls AFTER the store, not the function-wide
-    clobber count.
-
-    Here ``counter`` is written for the first time after 8 helper
-    calls — under the pre-refinement model, refs (6) didn't beat
-    the EBX clobber count (8) so auto-pin bailed.  Post-refinement
-    the effective cost is 0 (all 8 calls are pre-store), so the
-    pin lands and ``counter`` lives in EBX.
-    """
-    asm = _kernel(
-        """
-        int helper(int x);
-        int late_store() {
-            int counter;
-            helper(0);
-            helper(1);
-            helper(2);
-            helper(3);
-            helper(4);
-            helper(5);
-            helper(6);
-            helper(7);
-            counter = 0;
-            counter = counter + 1;
-            counter = counter + 1;
-            return counter;
-        }
-    """,
-        bits=32,
-    )
-    # Counter pins to an E-register (any of the safe ones), so its
-    # store pattern is ``mov eRR, eax`` rather than a stack-slot
-    # spill (``mov [ebp-N], eax``).  Before the refinement, refs (6)
-    # didn't beat the function-wide EBX clobber count (8 user-call
-    # clobbers), so auto-pin bailed and counter spilled.
-    pinned_store_forms = ("mov ebx, eax", "mov ecx, eax", "mov edx, eax", "mov edi, eax")
-    assert any(form in asm for form in pinned_store_forms), (
-        f"expected counter to pin to an E-register (store via {pinned_store_forms}):\n{asm}"
-    )
-    assert "[ebp-4], eax" not in asm, f"counter should not spill to its frame slot:\n{asm}"
-
-
-def test_double_pointer_deref_assign_emits_indirect_store() -> None:
-    """``*endptr = value`` lowers to ``mov [reg], <acc>`` for plain pointer locals.
-
-    Regression for the DerefAssign path that used to reject any
-    non-out_register holder.  The holder is loaded into ESI and the
-    accumulator is stored through it.
-    """
-    src = """
-        void f(char **endptr, char *value __attribute__((in_register("di")))) {
-            *endptr = value;
-        }
-    """
-    asm = _kernel(src, bits=32)
-    body = asm.split("f:", 1)[1]
-    assert "mov esi, [" in body, f"expected holder load into ESI\n{asm}"
-    assert "mov [esi], eax" in body, f"expected store through ESI\n{asm}"
 
 
 @pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "user" / "programs").glob("*.c")))
@@ -2748,6 +3158,51 @@ def test_out_register_capture_widens_into_pinned_eregister_32bit() -> None:
     assert "mov ebx, bx" not in asm and "mov edx, bx" not in asm and "mov ecx, bx" not in asm, (
         f"raw 'mov eX, bx' is mixed-width and invalid:\n{asm}"
     )
+
+
+def test_out_register_captures_topologically_ordered() -> None:
+    """Topologically order out_register captures when one's source feeds another.
+
+    When two out_register captures form a chain — capture A's source
+    register is capture B's pinned destination — capture B must be
+    emitted before capture A so B's read isn't clobbered.
+
+    Regression for the fd_read_net page-fault: ne2k_receive returns
+    ``frame_pointer`` in EDI and ``packet_length`` in ECX.  After auto-
+    pin assigned ECX to frame_pointer and EDX to packet_length, the
+    naive in-order emission produced ``mov ecx, edi; mov edx, ecx``,
+    where the second move read the already-overwritten ECX.
+    """
+    asm = _kernel(
+        """
+        __attribute__((carry_return))
+        int producer(int *first  __attribute__((out_register("edi"))),
+                     int *second __attribute__((out_register("ecx"))));
+
+        int consume(int a, int b);
+
+        int caller() {
+            int a;
+            int b;
+            producer(&a, &b);
+            return consume(a, b) + consume(a, b) + consume(a, b);
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("caller:", 1)[1]
+    call_index = body.find("call producer")
+    after_call = body[call_index:].splitlines()[1:5]
+    # The capture whose source (ECX) is the OTHER capture's destination
+    # must come first.  If both captures end up pinned and the order is
+    # wrong, the assertion below would still pass — so also check the
+    # second capture doesn't read from the first's pinned destination.
+    if any("mov ecx, edi" in line for line in after_call):
+        ecx_capture_index = next(i for i, line in enumerate(after_call) if "mov ecx, edi" in line)
+        edx_capture_index = next((i for i, line in enumerate(after_call) if "mov edx, ecx" in line), None)
+        assert edx_capture_index is None or edx_capture_index < ecx_capture_index, (
+            f"out_register captures emitted in wrong order — mov edx, ecx must precede mov ecx, edi:\n{asm}"
+        )
 
 
 def test_out_register_carry_return_condition() -> None:
@@ -4674,6 +5129,25 @@ def test_user_file_scope_bss_globals() -> None:
     assert "_bss_end equ _program_end + 44" in asm, f"expected 4+32+8=44 BSS bytes:\n{asm}"
 
 
+def test_user_global_array_accepts_uint16_element() -> None:
+    """uint16_t global arrays compile and use the halfword codegen path."""
+    ok, output = _compile(
+        r"""
+        uint16_t halfwords[4];
+
+        int main() {
+            halfwords[0] = 0xAABB;
+            return 0;
+        }
+        """,
+        target="user",
+        bits=32,
+    )
+    assert ok, f"unexpected compile error:\n{output}"
+    assert "mov dword" not in output, f"uint16_t global must not store dword:\n{output}"
+    assert "mov word [_g_halfwords]" in output, f"expected halfword store:\n{output}"
+
+
 def test_user_global_array_pointer_and_uint32_elements() -> None:
     """Pointer-typed and uint32_t global arrays land in BSS as word-strided slots.
 
@@ -4704,25 +5178,6 @@ def test_user_global_array_pointer_and_uint32_elements() -> None:
     assert "_g_counters equ _program_end" in asm, f"counters missing from BSS:\n{asm}"
     # 4 pointer slots (16 bytes) + 3 uint32 slots (12 bytes) = 28 bytes.
     assert "_bss_end equ _program_end + 28" in asm, f"expected 16+12=28 BSS bytes:\n{asm}"
-
-
-def test_user_global_array_accepts_uint16_element() -> None:
-    """uint16_t global arrays compile and use the halfword codegen path."""
-    ok, output = _compile(
-        r"""
-        uint16_t halfwords[4];
-
-        int main() {
-            halfwords[0] = 0xAABB;
-            return 0;
-        }
-        """,
-        target="user",
-        bits=32,
-    )
-    assert ok, f"unexpected compile error:\n{output}"
-    assert "mov dword" not in output, f"uint16_t global must not store dword:\n{output}"
-    assert "mov word [_g_halfwords]" in output, f"expected halfword store:\n{output}"
 
 
 def test_user_goto_backward_jump_re_enters_block() -> None:
@@ -5394,516 +5849,6 @@ def test_user_target_identical_to_default(source_path: Path) -> None:
         )
 
 
-def test_void_cast_call_statement_emits_call() -> None:
-    """``(void)open(...);`` parses and emits the call, discarding the return."""
-    asm = _user("""
-        int main() {
-            (void)open("foo", 0);
-            return 0;
-        }
-    """)
-    assert "IO_OPEN" in asm or "SYS_IO_OPEN" in asm, f"expected open syscall to be emitted:\n{asm}"
-
-
-def test_void_cast_variable_compiles_to_no_op() -> None:
-    """``(void)x;`` parses and emits no code for the cast itself."""
-    asm = _user("""
-        int main() {
-            int x;
-            x = 5;
-            (void)x;
-            return x;
-        }
-    """)
-    # The variable read still has its assignment, but the (void) cast
-    # itself produces no instructions.
-    assert "main:" in asm
-
-
-def test_void_pointer_param_parses_and_compiles() -> None:
-    """``void *`` parses as a generic pointer parameter and call site.
-
-    cc.py has no real type system to distinguish pointee widths, so
-    ``void *`` is the opaque-pointer spelling C uses for generic
-    buffers (``memcpy``, ``read``, ``write``).  This test pins that
-    the parser accepts ``void *`` in a function prototype, in a
-    function-definition parameter list, and in a cast — without it,
-    every libbboeos header that declares an I/O routine fails to
-    parse on the very first include.
-    """
-    asm = _user("""
-        extern int read(int fd, void *buf, unsigned int n);
-        int copy(void *dst, void *src, unsigned int n) {
-            (void)dst;
-            (void)src;
-            (void)n;
-            return 0;
-        }
-        int main() {
-            char buf[8];
-            read(0, buf, 8);
-            return copy(buf, buf, 8);
-        }
-    """)
-    assert "copy:" in asm, f"expected copy() to be emitted:\n{asm}"
-    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"
-
-
-def test_builtin_read_emits_fd_last() -> None:
-    """builtin_read must load `fd` into BX AFTER computing buf/count.
-
-    Otherwise: when `total` (or any var pinned to BX) is referenced by the
-    buf or count expression, the `mov bx, fd` clobbers it before use,
-    silently emitting `add edi, ebx` and `sub eax, ebx` that read the fd
-    value instead of total.
-
-    Regression caught while landing user/programs/tail.c — passing `read(fd,
-    tail_buf + total, BUF - total)` inside a loop produced wrong reads at
-    offset `fd` instead of offset `total`.  builtin_write already orders
-    args this way; this test pins down the same property for read.
-
-    We use a tail.c-shaped source because the auto-pin allocator's
-    decision is sensitive to call mix and var ref counts; with the
-    walk-back logic and the second `read(fd, &overflow, 1)` call, `total`
-    lands on EBX, which is what makes the bug visible.
-    """
-    asm = _user(
-        """
-        #define BUF 65536
-        int parse_int(char *string) {
-            int value = 0;
-            int index = 0;
-            while (string[index] >= '0' && string[index] <= '9') {
-                value = value * 10 + (string[index] - '0');
-                index = index + 1;
-            }
-            return value;
-        }
-        char tail_buf[BUF];
-        int main(int argc, char *argv[]) {
-            int want = 10;
-            char *path = NULL;
-            int arg = 1;
-            while (arg < argc) {
-                char *a = argv[arg];
-                if (a[0] == '-' && a[1] == 'n' && a[2] == '\\0') {
-                    arg = arg + 1;
-                    if (arg >= argc) {
-                        die("tail: -n needs a number\\n");
-                    }
-                    want = parse_int(argv[arg]);
-                } else {
-                    path = a;
-                }
-                arg = arg + 1;
-            }
-            if (path == NULL) {
-                die("tail: pass a file\\n");
-            }
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) {
-                die("tail: open failed\\n");
-            }
-            int total = 0;
-            while (total < BUF) {
-                int n = read(fd, tail_buf + total, BUF - total);
-                if (n <= 0) {
-                    break;
-                }
-                total = total + n;
-            }
-            char overflow;
-            int extra = read(fd, &overflow, 1);
-            close(fd);
-            if (extra > 0) {
-                die("tail: file too large\\n");
-            }
-            int index = total;
-            int found = 0;
-            if (index > 0 && tail_buf[index - 1] == '\\n') {
-                index = index - 1;
-            }
-            while (index > 0 && found < want) {
-                index = index - 1;
-                if (tail_buf[index] == '\\n') {
-                    found = found + 1;
-                    if (found == want) {
-                        index = index + 1;
-                        break;
-                    }
-                }
-            }
-            int remaining = total - index;
-            if (remaining > 0) {
-                write(STDOUT, tail_buf + index, remaining);
-            }
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    # For each SYS_IO_READ syscall, walk back to find the argument-setup
-    # block and check that EBX is not written then read within it.
-    lines = [line.strip() for line in asm.splitlines()]
-    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
-    found_at_least_one = False
-    for index, line in enumerate(lines):
-        if line != "int 30h":
-            continue
-        if index < 1 or "SYS_IO_READ" not in lines[index - 1]:
-            continue
-        found_at_least_one = True
-        start = index
-        while start > 0:
-            previous = lines[start - 1]
-            if previous.endswith(":") or previous.startswith(jump_prefixes):
-                break
-            start -= 1
-        block = lines[start:index]
-        last_ebx_write = -1
-        for offset, instruction in enumerate(block):
-            if instruction.startswith(("mov ebx,", "xor ebx,", "pop ebx")) and not instruction.startswith("pop ebx"):
-                last_ebx_write = offset
-        if last_ebx_write < 0:
-            continue
-        tail = block[last_ebx_write + 1 :]
-        bad = [instruction for instruction in tail if ", ebx" in instruction.split(";", 1)[0]]
-        assert not bad, (
-            "builtin_read clobbered EBX before reading it as a source operand. "
-            "If a pinned variable lives in EBX, this corrupts it. Offending "
-            "tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
-        )
-    assert found_at_least_one, f"test source must compile to at least one SYS_IO_READ; got asm:\n{asm}"
-
-
-def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
-    """write(fd, names[i], strlen(names[i])) must load ESI last.
-
-    Regression: builtin_write used to load ESI=buffer, then ECX=count.
-    When ``count`` was ``strlen(names[i])`` the recursive lowering
-    re-evaluated the Index expression and re-used ESI as the
-    base-address scratch — overwriting the buffer pointer that was
-    just placed there.  The resulting ``write`` syscall pointed at the
-    ``names`` array's first slot every iteration, so ``ls`` (the
-    program that surfaced this in user/programs/ls.c) printed the same name
-    repeated, garbled by length mismatches.
-
-    The fix routes write's three arg loads through
-    :meth:`_emit_builtin_arg_moves`, whose scheduler now also tracks
-    "this evaluation will scratch ESI" and defers the ESI-targeted
-    load until after sibling args whose lowering clobbers it.
-    """
-    asm = _user(
-        """
-        int main() {
-            char arena[16];
-            char *names[3];
-            arena[0] = 'a'; arena[1] = 'b'; arena[2] = 0;
-            arena[3] = 'c'; arena[4] = 'd'; arena[5] = 0;
-            arena[6] = 'e'; arena[7] = 'f'; arena[8] = 0;
-            names[0] = arena + 0;
-            names[1] = arena + 3;
-            names[2] = arena + 6;
-            int i = 0;
-            while (i < 3) {
-                write(STDOUT, names[i], strlen(names[i]));
-                putchar('\\n');
-                i = i + 1;
-            }
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    lines = [line.strip() for line in asm.splitlines()]
-    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
-    found_at_least_one = False
-    for index, line in enumerate(lines):
-        if line != "int 30h":
-            continue
-        if index < 1 or "SYS_IO_WRITE" not in lines[index - 1]:
-            continue
-        found_at_least_one = True
-        start = index
-        while start > 0:
-            previous = lines[start - 1]
-            if previous.endswith(":") or previous.startswith(jump_prefixes):
-                break
-            start -= 1
-        block = lines[start:index]
-        # The buffer load is the LAST instruction that writes ESI
-        # before the syscall.  After that, nothing else should write
-        # ESI — that would obliterate the buffer pointer before
-        # SYS_IO_WRITE reads it.
-        esi_writes = [
-            offset
-            for offset, instruction in enumerate(block)
-            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
-        ]
-        if not esi_writes:
-            continue
-        last_esi_write = esi_writes[-1]
-        tail = block[last_esi_write + 1 :]
-        bad = [
-            instruction
-            for instruction in tail
-            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
-        ]
-        assert not bad, (
-            "builtin_write clobbered ESI after loading the buffer pointer. "
-            "The syscall will dereference the wrong address. Offending tail:\n"
-            + "\n".join(tail)
-            + "\n--- full setup block ---\n"
-            + "\n".join(block)
-        )
-    assert found_at_least_one, f"test source must compile to at least one SYS_IO_WRITE; got asm:\n{asm}"
-
-
-def test_builtin_dup2_loads_bx_after_clobbering_sibling() -> None:
-    """dup2(old_fd, get_target()) must load EBX last.
-
-    Regression: builtin_dup2 used to load EBX=old_fd first, then
-    EDX=target_fd.  When ``target_fd`` was a user-function call, the
-    Call's lowering (caller-save cdecl) clobbered EBX between the
-    load and the syscall.  The kernel dup2 handler then saw garbage
-    in EBX.
-
-    Routing dup2's arg loads through :meth:`_emit_builtin_arg_moves`
-    defers the EBX load until after every sibling whose evaluation
-    would clobber EBX.
-    """
-    asm = _user(
-        """
-        int get_target() { return 5; }
-        int main() {
-            dup2(2, get_target());
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    lines = [line.strip() for line in asm.splitlines()]
-    # NOTE: "call" intentionally omitted from the block-break set —
-    # a user-function call in a sibling arg IS the bug we want to
-    # catch (caller-save scratching the already-loaded EBX), so the
-    # walk-back must span past it.
-    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
-    found_at_least_one = False
-    for index, line in enumerate(lines):
-        if line != "int 30h":
-            continue
-        if index < 1 or "SYS_IO_DUP2" not in lines[index - 1]:
-            continue
-        found_at_least_one = True
-        start = index
-        while start > 0:
-            previous = lines[start - 1]
-            if previous.endswith(":") or previous.startswith(jump_prefixes):
-                break
-            start -= 1
-        block = lines[start:index]
-        # After the LAST instruction that writes EBX (the dup2 input
-        # ``mov ebx, <old_fd>``), nothing else in the setup block may
-        # write EBX — a user-function call between that load and the
-        # syscall would clobber EBX as caller-save scratch.
-        ebx_writes = [
-            offset
-            for offset, instruction in enumerate(block)
-            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
-        ]
-        if not ebx_writes:
-            continue
-        last_ebx_write = ebx_writes[-1]
-        tail = block[last_ebx_write + 1 :]
-        bad = [instruction for instruction in tail if instruction.startswith("call ")]
-        assert not bad, (
-            "builtin_dup2 loaded EBX before a sibling call that clobbers it. "
-            "The dup2 syscall will read garbage from EBX. Offending tail:\n"
-            + "\n".join(tail)
-            + "\n--- full setup block ---\n"
-            + "\n".join(block)
-        )
-    assert found_at_least_one, f"test source must compile to at least one SYS_IO_DUP2; got asm:\n{asm}"
-
-
-def test_builtin_pipeline2_loads_si_after_index_sibling() -> None:
-    """pipeline2(cmds[i], _, cmds[j], _) must load ESI last.
-
-    Regression: builtin_pipeline2 used to load ESI=left_path first
-    (via emit_si_from_argument), then EDI=right_path.  When
-    ``right_path`` is an Index expression like ``cmds[j]``, the
-    Index lowering reuses ESI as the base-address scratch — wiping
-    out the left_path pointer before the SYS_SYS_PIPELINE2 syscall
-    runs.  Same shape as the write(fd, names[i], strlen(names[i]))
-    bug that motivated PR #386.
-
-    The fix routes pipeline2's four arg loads through
-    :meth:`_emit_builtin_arg_moves`, whose scheduler defers the ESI
-    target until after sibling args whose lowering scratches ESI.
-    """
-    asm = _user(
-        """
-        int main() {
-            char *cmds[3];
-            char **argv = 0;
-            cmds[0] = "a"; cmds[1] = "b"; cmds[2] = "c";
-            int i = 0;
-            int j = 1;
-            pipeline2(cmds[i], argv, cmds[j], argv);
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    lines = [line.strip() for line in asm.splitlines()]
-    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "call", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
-    found_at_least_one = False
-    for index, line in enumerate(lines):
-        if line != "int 30h":
-            continue
-        if index < 1 or "SYS_SYS_PIPELINE2" not in lines[index - 1]:
-            continue
-        found_at_least_one = True
-        start = index
-        while start > 0:
-            previous = lines[start - 1]
-            if previous.endswith(":") or previous.startswith(jump_prefixes):
-                break
-            start -= 1
-        block = lines[start:index]
-        # The fix's contract: after ESI is loaded with the final
-        # cmds[i] value (``mov esi, eax``), nothing else in the
-        # setup block may re-write ESI — the second Index lowering
-        # (for cmds[j]) must have completed already, including all
-        # its `lea esi, [ebp-...]` / `add esi, ...` scratch writes.
-        # Different shape from the write test (which catches
-        # post-load overwrites by a sibling builtin Call) because
-        # pipeline2's bug surfaces as a mid-sequence Index-lowering
-        # overwrite.
-        final_esi_load = -1
-        for offset, instruction in enumerate(block):
-            if instruction == "mov esi, eax":
-                final_esi_load = offset
-        if final_esi_load < 0:
-            continue
-        tail = block[final_esi_load + 1 :]
-        bad = [
-            instruction
-            for instruction in tail
-            if instruction.startswith(("mov esi,", "lea esi,", "xor esi,", "add esi,", "sub esi,", "pop esi"))
-        ]
-        assert not bad, (
-            "builtin_pipeline2 re-wrote ESI after loading the left_path "
-            "pointer.  In the buggy sequential order, cmds[j]'s Index "
-            "lowering scratches ESI between the ESI load and the syscall, "
-            "wiping the left_path pointer.  The topological scheduler must "
-            "emit the right_path Index lowering BEFORE the ESI=left_path "
-            "load.  Offending tail:\n" + "\n".join(tail) + "\n--- full setup block ---\n" + "\n".join(block)
-        )
-    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_PIPELINE2; got asm:\n{asm}"
-
-
-def test_builtin_signal_loads_bx_after_clobbering_sibling() -> None:
-    """signal(signum, get_handler()) must load EBX last.
-
-    Regression: builtin_signal used to load EBX=signum first, then
-    ECX=handler.  When ``handler`` was a user-function call, the
-    Call's lowering (caller-save cdecl) clobbered EBX between the
-    load and the syscall.  The kernel signal handler then saw
-    garbage in EBX as the signal number.
-
-    Routing signal's arg loads through :meth:`_emit_builtin_arg_moves`
-    defers the EBX load until after every sibling whose evaluation
-    would clobber EBX.
-    """
-    asm = _user(
-        """
-        int get_handler() { return 1; }
-        int main() {
-            signal(2, get_handler());
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    lines = [line.strip() for line in asm.splitlines()]
-    # NOTE: "call" intentionally omitted from the block-break set —
-    # the bug we want to surface is a sibling user-function call
-    # clobbering EBX after it's been loaded, so walk-back must
-    # cross past calls.
-    jump_prefixes = ("jmp", "jge", "jle", "jl ", "jg ", "je ", "jne", "jz ", "jnz", "ja ", "jb ", "jae", "jbe", "jc ", "jnc")
-    found_at_least_one = False
-    for index, line in enumerate(lines):
-        if line != "int 30h":
-            continue
-        if index < 1 or "SYS_SYS_SIGNAL" not in lines[index - 1]:
-            continue
-        found_at_least_one = True
-        start = index
-        while start > 0:
-            previous = lines[start - 1]
-            if previous.endswith(":") or previous.startswith(jump_prefixes):
-                break
-            start -= 1
-        block = lines[start:index]
-        # After the LAST instruction that writes EBX (the signal
-        # input ``mov ebx, <signum>``), nothing else in the setup
-        # block may write EBX — a user-function call between that
-        # load and the syscall would clobber EBX as caller-save
-        # scratch.
-        ebx_writes = [
-            offset
-            for offset, instruction in enumerate(block)
-            if instruction.startswith(("mov ebx,", "lea ebx,", "xor ebx,", "add ebx,", "sub ebx,", "pop ebx"))
-        ]
-        if not ebx_writes:
-            continue
-        last_ebx_write = ebx_writes[-1]
-        tail = block[last_ebx_write + 1 :]
-        bad = [instruction for instruction in tail if instruction.startswith("call ")]
-        assert not bad, (
-            "builtin_signal loaded EBX before a sibling call that clobbers it. "
-            "The signal syscall will read garbage from EBX. Offending tail:\n"
-            + "\n".join(tail)
-            + "\n--- full setup block ---\n"
-            + "\n".join(block)
-        )
-    assert found_at_least_one, f"test source must compile to at least one SYS_SYS_SIGNAL; got asm:\n{asm}"
-
-
-def test_builtin_sys_break_emits_break_syscall() -> None:
-    """sys_break(addr) must load EBX from its arg and fire SYS_SYS_BREAK.
-
-    The kernel handler at kernel/arch/x86/syscall.asm:.sys_break reads EBX as
-    "new break" (0 = query) and returns the resulting break in EAX with
-    CF=0 always.  We pin the C contract end of that ABI here so future
-    codegen refactors can't silently change it.
-    """
-    asm = _user(
-        """
-        int main(int argc, char *argv[]) {
-            uint32_t current = sys_break(0);
-            uint32_t requested = current + 65536;
-            uint32_t got = sys_break(requested);
-            if (got != requested) {
-                die("oom\\n");
-            }
-            return 0;
-        }
-        """,
-        bits=32,
-    )
-    assert "mov ebx, 0" in asm or "xor ebx, ebx" in asm, f"sys_break(0) (query form) must zero EBX before firing the syscall.\nasm:\n{asm}"
-    assert "mov ah, SYS_SYS_BREAK" in asm, (
-        "sys_break codegen must emit `mov ah, SYS_SYS_BREAK` — the constant lives in "
-        "kernel/include/constants.asm and is the only stable contract with the kernel handler.\n"
-        f"asm:\n{asm}"
-    )
-    assert asm.count("mov ah, SYS_SYS_BREAK") == 2, (
-        f"expected exactly two SYS_SYS_BREAK firings (query + set); got {asm.count('mov ah, SYS_SYS_BREAK')}.\nasm:\n{asm}"
-    )
-
-
 def test_variadic_sum_compiles_with_stdarg() -> None:
     """A variadic ``sum(count, ...)`` function compiles via stdarg.h.
 
@@ -5957,3 +5902,58 @@ def test_variadic_sum_compiles_with_stdarg() -> None:
     assert "mov eax, 4" in main_body, f"expected count loaded into EAX (regparm):\n{main_body}"
     assert re.search(r"^\s*push 4\s*$", main_body, re.MULTILINE) is None, f"count must not be pushed once it's regparm-loaded:\n{main_body}"
     assert "add esp, 16" in main_body, f"caller cleans only the 4 variadic args (16 bytes):\n{main_body}"
+
+
+def test_void_cast_call_statement_emits_call() -> None:
+    """``(void)open(...);`` parses and emits the call, discarding the return."""
+    asm = _user("""
+        int main() {
+            (void)open("foo", 0);
+            return 0;
+        }
+    """)
+    assert "IO_OPEN" in asm or "SYS_IO_OPEN" in asm, f"expected open syscall to be emitted:\n{asm}"
+
+
+def test_void_cast_variable_compiles_to_no_op() -> None:
+    """``(void)x;`` parses and emits no code for the cast itself."""
+    asm = _user("""
+        int main() {
+            int x;
+            x = 5;
+            (void)x;
+            return x;
+        }
+    """)
+    # The variable read still has its assignment, but the (void) cast
+    # itself produces no instructions.
+    assert "main:" in asm
+
+
+def test_void_pointer_param_parses_and_compiles() -> None:
+    """``void *`` parses as a generic pointer parameter and call site.
+
+    cc.py has no real type system to distinguish pointee widths, so
+    ``void *`` is the opaque-pointer spelling C uses for generic
+    buffers (``memcpy``, ``read``, ``write``).  This test pins that
+    the parser accepts ``void *`` in a function prototype, in a
+    function-definition parameter list, and in a cast — without it,
+    every libbboeos header that declares an I/O routine fails to
+    parse on the very first include.
+    """
+    asm = _user("""
+        extern int read(int fd, void *buf, unsigned int n);
+        int copy(void *dst, void *src, unsigned int n) {
+            (void)dst;
+            (void)src;
+            (void)n;
+            return 0;
+        }
+        int main() {
+            char buf[8];
+            read(0, buf, 8);
+            return copy(buf, buf, 8);
+        }
+    """)
+    assert "copy:" in asm, f"expected copy() to be emitted:\n{asm}"
+    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"
