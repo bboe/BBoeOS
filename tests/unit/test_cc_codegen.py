@@ -1251,6 +1251,36 @@ def test_in_register_with_carry_return() -> None:
     assert "mov si," in asm, f"expected mov si for out_register\n{asm}"
 
 
+def test_increment_decrement_lowers_prefix_and_postfix() -> None:
+    """``++var`` / ``--var`` / ``var++`` / ``var--`` lower to inc / dec + value-recover.
+
+    Statement-form is just the in-place update.  Expression-form re-reads
+    the variable into the accumulator after the store so the value
+    survives the store's fast paths (which sometimes skip the
+    accumulator); postfix appends a ``sub`` / ``add`` to recover the
+    pre-update value.  ``while (n--)`` is the canonical reason this
+    feature exists — without postfix decrement in a condition, large
+    swathes of portable C don't parse.
+    """
+    asm = _kernel("""
+        void f() {
+            int n;
+            int pre;
+            int post;
+            n = 5;
+            pre = ++n;
+            post = n--;
+            while (n--) {
+                pre = pre + 1;
+            }
+        }
+        """)
+    assert "inc " in asm, f"expected an inc instruction for ++n / pre:\n{asm}"
+    assert "dec " in asm, f"expected a dec instruction for n-- and the while-condition:\n{asm}"
+    # Postfix form recovers the pre-update value via add/sub after the store.
+    assert " add " in asm or " sub " in asm, f"expected a postfix-recovery add/sub:\n{asm}"
+
+
 def test_int_local_compared_to_int_literal_compiles() -> None:
     """Plain ``int x; if (x == 0)`` is unaffected — both operands classify as integer."""
     asm = _kernel("""
