@@ -1639,51 +1639,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {addr}, {self.target.acc}")
 
-    def _resolve_member_index_layout(
-        self,
-        *,
-        line: int,
-        member_name: str,
-        object_name: str,
-    ) -> FieldInfo:
-        """Validate ``object_name`` is a struct pointer and look up ``member_name``."""
-        struct_type = self.variable_types.get(object_name)
-        if struct_type is None:
-            message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=line)
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=line)
-        tag = struct_type[7:-1]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=line)
-        if member_name not in layout:
-            message = f"struct '{tag}' has no field '{member_name}'"
-            raise CompileError(message, line=line)
-        return layout[member_name]
-
-    def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
-        """Return ``(element_size, is_pointer_field)`` for an indexed field access.
-
-        For inline-array fields (e.g. ``char buf[16]``) returns the
-        declared element size and ``False``.  For pointer fields (e.g.
-        ``char *buf``) returns the pointee size and ``True``: the
-        codegen path must load the field's pointer value rather than
-        compute an offset into the struct.
-        """
-        if "[" in info.type_name:
-            return info.element_size, False
-        if "*" in info.type_name:
-            # Pointer field: strip one trailing star to get the pointee type.
-            pointee = info.type_name.rstrip()
-            assert pointee.endswith("*"), pointee
-            pointee = pointee[:-1].rstrip()
-            return self._type_size(pointee), True
-        # Scalar struct field — not indexable.
-        return info.element_size, False
-
     def generate_member_index(self, expression: MemberIndex, /) -> None:
         """Generate code for ``ptr->field[index]`` as an rvalue.
 
@@ -1859,6 +1814,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        imul {acc}, {struct_size}")  # AX = index * struct_size
         self.emit(f"        mov {bx}, {acc}")  # BX = byte offset
 
+    def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
+        """Return ``(element_size, is_pointer_field)`` for an indexed field access.
+
+        For inline-array fields (e.g. ``char buf[16]``) returns the
+        declared element size and ``False``.  For pointer fields (e.g.
+        ``char *buf``) returns the pointee size and ``True``: the
+        codegen path must load the field's pointer value rather than
+        compute an offset into the struct.
+        """
+        if "[" in info.type_name:
+            return info.element_size, False
+        if "*" in info.type_name:
+            # Pointer field: strip one trailing star to get the pointee type.
+            pointee = info.type_name.rstrip()
+            assert pointee.endswith("*"), pointee
+            pointee = pointee[:-1].rstrip()
+            return self._type_size(pointee), True
+        # Scalar struct field — not indexable.
+        return info.element_size, False
+
     def _resolve_index_member_layout(self, name: str, member_name: str, line: int, /) -> tuple[str, int, int, int, int]:
         """Return layout tuple for a struct array member access.
 
@@ -1907,6 +1882,31 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         struct_size = self._type_size(type_name)
         info = layout[member_name]
         return const_base, struct_size, info.byte_offset, info.field_size, info.element_size
+
+    def _resolve_member_index_layout(
+        self,
+        *,
+        line: int,
+        member_name: str,
+        object_name: str,
+    ) -> FieldInfo:
+        """Validate ``object_name`` is a struct pointer and look up ``member_name``."""
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message, line=line)
+        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+            raise CompileError(message, line=line)
+        tag = struct_type[7:-1]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=line)
+        if member_name not in layout:
+            message = f"struct '{tag}' has no field '{member_name}'"
+            raise CompileError(message, line=line)
+        return layout[member_name]
 
     def generate_index_member_access(self, expression: IndexMemberAccess, /) -> None:
         """Generate code for ``arr[i].field`` as an rvalue.
