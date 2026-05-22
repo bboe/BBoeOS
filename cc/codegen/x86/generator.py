@@ -47,6 +47,7 @@ from cc.ast_nodes import (
     MemberAddressOf,
     MemberAssign,
     MemberIndex,
+    MemberIndexAssign,
     Node,
     Param,
     String,
@@ -100,6 +101,7 @@ class FieldInfo(NamedTuple):
     byte_offset: int
     element_size: int
     field_size: int
+    type_name: str
 
 
 class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
@@ -1637,72 +1639,216 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {addr}, {self.target.acc}")
 
-    def generate_member_index(self, expression: MemberIndex, /) -> None:
-        """Generate code for ``ptr->field[index]`` as an rvalue.
-
-        Loads one element (byte for ``element_size == 1``, word for
-        ``element_size == 2``) from ``base + field_offset + index *
-        element_size``.  Constant indices fold into the displacement.
-        """
-        if not expression.arrow:
-            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
-            raise CompileError(message, line=expression.line)
-        object_name = expression.object_name
+    def _resolve_member_index_layout(
+        self,
+        *,
+        line: int,
+        member_name: str,
+        object_name: str,
+    ) -> FieldInfo:
+        """Validate ``object_name`` is a struct pointer and look up ``member_name``."""
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
             message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=expression.line)
+            raise CompileError(message, line=line)
         if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
             message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=expression.line)
+            raise CompileError(message, line=line)
         tag = struct_type[7:-1]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=line)
+        if member_name not in layout:
+            message = f"struct '{tag}' has no field '{member_name}'"
+            raise CompileError(message, line=line)
+        return layout[member_name]
+
+    def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
+        """Return ``(element_size, is_pointer_field)`` for an indexed field access.
+
+        For inline-array fields (e.g. ``char buf[16]``) returns the
+        declared element size and ``False``.  For pointer fields (e.g.
+        ``char *buf``) returns the pointee size and ``True``: the
+        codegen path must load the field's pointer value rather than
+        compute an offset into the struct.
+        """
+        if "[" in info.type_name:
+            return info.element_size, False
+        if "*" in info.type_name:
+            # Pointer field: strip one trailing star to get the pointee type.
+            pointee = info.type_name.rstrip()
+            assert pointee.endswith("*"), pointee
+            pointee = pointee[:-1].rstrip()
+            return self._type_size(pointee), True
+        # Scalar struct field — not indexable.
+        return info.element_size, False
+
+    def generate_member_index(self, expression: MemberIndex, /) -> None:
+        """Generate code for ``ptr->field[index]`` as an rvalue.
+
+        For inline-array fields, loads one element from ``base +
+        field_offset + index * element_size``.  For pointer fields,
+        loads the pointer from ``[base + field_offset]`` and then
+        loads one element of the pointee type from ``ptr + index *
+        pointee_size``.  Supported element sizes: 1, 2, and 4 (the
+        last only for pointer fields with int/pointer pointee).
+        Constant indices fold into the displacement.
+        """
+        if not expression.arrow:
+            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
             raise CompileError(message, line=expression.line)
-        if expression.member_name not in layout:
-            message = f"struct '{tag}' has no field '{expression.member_name}'"
+        info = self._resolve_member_index_layout(
+            line=expression.line,
+            member_name=expression.member_name,
+            object_name=expression.object_name,
+        )
+        if info.bit_width is not None:
+            message = f"indexing bitfield '{expression.member_name}' is not supported"
             raise CompileError(message, line=expression.line)
-        info = layout[expression.member_name]
-        field_offset = info.byte_offset
-        element_size = info.element_size
-        if element_size not in (1, 2):
+        object_name = expression.object_name
+        element_size, is_pointer_field = self._member_index_element_size(info)
+        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
+        if element_size not in allowed_sizes:
             message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
             raise CompileError(message, line=expression.line)
-        # Constant index: fold offset + index*element_size into a single displacement.
+        field_offset = info.byte_offset
+
+        def emit_load(addr: str) -> None:
+            if element_size == 1:
+                self.emit_byte_load_zx(addr)
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+
+        # Constant index: fold offset + index*element_size into a single displacement
+        # (inline-array case) or into the pointer-load displacement (pointer case).
         if isinstance(expression.index, Int):
-            total_offset = field_offset + expression.index.value * element_size
             self.ax_clear()
             if self.si_local == object_name:
                 base_reg = self.target.si_register
             else:
                 self._emit_load_var(object_name, register=self.target.bx_register)
                 base_reg = self.target.bx_register
-            addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
-            if element_size == 1:
-                self.emit_byte_load_zx(addr)
+            if is_pointer_field:
+                # Load pointer, then offset by index*element_size.
+                ptr_addr = f"[{base_reg}+{field_offset}]" if field_offset else f"[{base_reg}]"
+                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+                disp = expression.index.value * element_size
+                addr = f"[{self.target.bx_register}+{disp}]" if disp else f"[{self.target.bx_register}]"
             else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
+                total_offset = field_offset + expression.index.value * element_size
+                addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
+            emit_load(addr)
             self.ax_clear()
             return
         # Variable index: AX = index, scale, add base+offset, load.
         self.ax_clear()
         self.generate_expression(expression.index)
-        if element_size == 2:
-            self.emit(f"        shl {self.target.acc}, 1")
+        if element_size in (2, 4):
+            shift = 1 if element_size == 2 else 2
+            self.emit(f"        shl {self.target.acc}, {shift}")
         # Save scaled index, load base.
         self.emit(f"        push {self.target.acc}")
         if self.si_local == object_name:
             self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
         else:
             self._emit_load_var(object_name, register=self.target.bx_register)
+        if is_pointer_field:
+            ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
         self.emit(f"        pop {self.target.acc}")
         self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
-        addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
-        if element_size == 1:
-            self.emit_byte_load_zx(addr)
+        if is_pointer_field:
+            addr = f"[{self.target.bx_register}]"
         else:
-            self.emit(f"        mov {self.target.acc}, {addr}")
+            addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+        emit_load(addr)
+        self.ax_clear()
+
+    def generate_member_index_assign(self, statement: MemberIndexAssign, /) -> None:
+        """Generate code for ``ptr->field[index] = expr;``.
+
+        Mirrors :meth:`generate_member_index` on the store side.  For
+        inline-array fields, stores at ``base + field_offset + index *
+        element_size``; for pointer fields, loads the pointer first
+        and stores at ``ptr + index * pointee_size``.  Bitfield index
+        assigns and the dot form on local struct values are rejected.
+        """
+        if not statement.arrow:
+            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
+            raise CompileError(message, line=statement.line)
+        info = self._resolve_member_index_layout(
+            line=statement.line,
+            member_name=statement.member_name,
+            object_name=statement.object_name,
+        )
+        if info.bit_width is not None:
+            message = f"indexed assignment to bitfield '{statement.member_name}' is not supported"
+            raise CompileError(message, line=statement.line)
+        object_name = statement.object_name
+        element_size, is_pointer_field = self._member_index_element_size(info)
+        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
+        if element_size not in allowed_sizes:
+            message = f"indexed assignment to '{statement.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=statement.line)
+        field_offset = info.byte_offset
+
+        def emit_store(addr: str) -> None:
+            if element_size == 1:
+                self.emit(f"        mov byte {addr}, al")
+            elif element_size == 2 and self.target.int_size == 4:
+                self.emit(f"        mov word {addr}, ax")
+            else:
+                self.emit(f"        mov {addr}, {self.target.acc}")
+
+        # Constant index: fold into displacement.
+        if isinstance(statement.index, Int):
+            self.ax_clear()
+            self.generate_expression(statement.expr)  # rhs → EAX
+            if self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_load_var(object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            if is_pointer_field:
+                ptr_addr = f"[{base_reg}+{field_offset}]" if field_offset else f"[{base_reg}]"
+                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+                disp = statement.index.value * element_size
+                addr = f"[{self.target.bx_register}+{disp}]" if disp else f"[{self.target.bx_register}]"
+            else:
+                total_offset = field_offset + statement.index.value * element_size
+                addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
+            emit_store(addr)
+            self.ax_clear()
+            return
+        # Variable index.  Evaluate rhs first into EAX, push to preserve
+        # across the index evaluation, then compute the address, then pop
+        # the value back into EAX for the store.
+        self.ax_clear()
+        self.generate_expression(statement.expr)
+        self.emit(f"        push {self.target.acc}")  # save rhs
+        self.ax_clear()
+        self.generate_expression(statement.index)  # AX = index
+        if element_size in (2, 4):
+            shift = 1 if element_size == 2 else 2
+            self.emit(f"        shl {self.target.acc}, {shift}")
+        # Save scaled index, load base.
+        self.emit(f"        push {self.target.acc}")
+        if self.si_local == object_name:
+            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
+        else:
+            self._emit_load_var(object_name, register=self.target.bx_register)
+        if is_pointer_field:
+            ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+        self.emit(f"        pop {self.target.acc}")  # scaled index
+        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
+        self.emit(f"        pop {self.target.acc}")  # restore rhs
+        if is_pointer_field:
+            addr = f"[{self.target.bx_register}]"
+        else:
+            addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+        emit_store(addr)
         self.ax_clear()
 
     def _emit_struct_element_offset(self, index: Node, struct_size: int, /) -> None:
@@ -2553,6 +2699,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                                 byte_offset=cursor,
                                 element_size=1,
                                 field_size=1,
+                                type_name="uint8_t",
                             )
                         run_bits += field.bit_width
                         continue
@@ -2577,6 +2724,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         byte_offset=cursor,
                         element_size=element_size,
                         field_size=field_size,
+                        type_name=ftype,
                     )
                     cursor += field_size
                 if run_bits > 0:

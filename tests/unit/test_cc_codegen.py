@@ -1967,6 +1967,74 @@ def test_member_access_via_cast_arrow_word_field_offset() -> None:
     assert "+2]" in body, f"expected +2 offset in frame load\n{asm}"
 
 
+def test_member_array_field_indexed_write_byte() -> None:
+    """Inline-array indexed write stores at base + offset + i.
+
+    ``s->buf[i] = c`` where buf is ``char buf[16]`` emits one byte
+    store at ``base + field_offset + i * 1`` with no second load.
+    """
+    asm = _user(
+        """
+        struct S {
+            int leading;
+            char buf[16];
+        };
+        void store(struct S *s, int i, char c) {
+            s->buf[i] = c;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("store:")[1].split("ret")[0]
+    # Inline-array: no second load through the field, just base + offset.
+    assert "mov byte [ebx+4], al" in body, f"Expected inline byte store at +4 offset\n{asm}"
+
+
+def test_member_pointer_field_indexed_read_byte() -> None:
+    """Pointer-field indexed read goes through the loaded pointer.
+
+    ``s->buf[i]`` where buf is ``char *`` loads the pointer into a
+    base register, then does a byte-zero-extended load at ``ptr + i``.
+    """
+    asm = _user(
+        """
+        struct S {
+            char *buf;
+        };
+        char load(struct S *s, int i) {
+            return s->buf[i];
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("load:")[1].split("ret")[0]
+    # Pointer field: load pointer into base, then byte-zero-extend at [base].
+    assert "mov ebx, [ebx]" in body, f"Expected pointer indirection load\n{asm}"
+    assert "movzx eax, byte [ebx]" in body, f"Expected byte-zero-extend at pointer\n{asm}"
+
+
+def test_member_pointer_field_indexed_write_byte() -> None:
+    """Pointer-field indexed write goes through the loaded pointer.
+
+    ``s->buf[i] = c`` where buf is ``char *`` loads the pointer into
+    a base register, then stores a byte at ``ptr + i``.
+    """
+    asm = _user(
+        """
+        struct S {
+            char *buf;
+        };
+        void store(struct S *s, int i, char c) {
+            s->buf[i] = c;
+        }
+    """,
+        bits=32,
+    )
+    body = asm.split("store:")[1].split("ret")[0]
+    assert "mov ebx, [ebx]" in body, f"Expected pointer indirection load\n{asm}"
+    assert "mov byte [ebx], al" in body, f"Expected byte store at pointer\n{asm}"
+
+
 def test_member_read_and_write_roundtrip() -> None:
     """p->flags = x; y = p->flags; compiles and assembles cleanly."""
     _compile_and_assemble(
