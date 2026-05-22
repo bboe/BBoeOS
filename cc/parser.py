@@ -1732,6 +1732,15 @@ class Parser:
         token = self.peek()
         if token[0] == "VOID":
             self.eat()
+            # ``void *`` is the opaque-pointer spelling C uses for
+            # generic buffers (``memcpy(void *, const void *, size_t)``,
+            # ``read(int, void *, size_t)``, etc.).  cc.py has no real
+            # type system to distinguish pointee widths, so ``void *``
+            # parses as the type string ``"void*"`` and codegen treats
+            # it like any other pointer.  Plain ``void`` (no star)
+            # keeps its existing return-type meaning.
+            if self.peek()[0] == "STAR":
+                return self._parse_pointer_suffix("void", max_stars=2)
             return "void"
         # ``uint8_t`` / ``uint16_t`` / ``uint32_t`` are no longer
         # built-in keywords — sources that want the standard fixed-width

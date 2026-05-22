@@ -5420,6 +5420,35 @@ def test_void_cast_variable_compiles_to_no_op() -> None:
     assert "main:" in asm
 
 
+def test_void_pointer_param_parses_and_compiles() -> None:
+    """``void *`` parses as a generic pointer parameter and call site.
+
+    cc.py has no real type system to distinguish pointee widths, so
+    ``void *`` is the opaque-pointer spelling C uses for generic
+    buffers (``memcpy``, ``read``, ``write``).  This test pins that
+    the parser accepts ``void *`` in a function prototype, in a
+    function-definition parameter list, and in a cast — without it,
+    every libbboeos header that declares an I/O routine fails to
+    parse on the very first include.
+    """
+    asm = _user("""
+        extern int read(int fd, void *buf, unsigned int n);
+        int copy(void *dst, void *src, unsigned int n) {
+            (void)dst;
+            (void)src;
+            (void)n;
+            return 0;
+        }
+        int main() {
+            char buf[8];
+            read(0, buf, 8);
+            return copy(buf, buf, 8);
+        }
+    """)
+    assert "copy:" in asm, f"expected copy() to be emitted:\n{asm}"
+    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"
+
+
 def test_builtin_read_emits_fd_last() -> None:
     """builtin_read must load `fd` into BX AFTER computing buf/count.
 
