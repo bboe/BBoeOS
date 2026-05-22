@@ -285,6 +285,18 @@ class Parser:
             self.eat("RPAREN")
             self.eat("RPAREN")
             return ("naked", True)
+        if attr_name == "noreturn":
+            # Accepted as a no-op marker so libbboeos headers
+            # (``void exit(int) __attribute__((noreturn));``,
+            # ``void abort(void) __attribute__((noreturn));``) parse
+            # under cc.py.  cc.py has no noreturn-aware codegen — it
+            # emits the call followed by whatever the caller had next,
+            # same as any other call — so the attribute does not
+            # affect output.  The dispatch site for this kind name
+            # also accepts and discards it.
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return ("noreturn", True)
         if attr_name == "in_register":
             self.eat("LPAREN")
             reg_token = self.eat("STRING")
@@ -1024,8 +1036,39 @@ class Parser:
 
         """
         type_string = self.parse_type()
-        name_token = self.eat("IDENT")
-        name = name_token[1]
+        if self.peek()[0] == "LPAREN":
+            # Function-pointer parameter: ``T (*name)(arg-list)``.  Used
+            # in standard-library prototypes like ``qsort(void *, size_t,
+            # size_t, int (*cmp)(const void *, const void *))``.  cc.py
+            # treats every function pointer as an opaque pointer-width
+            # value at the ABI level; the inner argument list is parsed
+            # and discarded for now (the type-tracking is in
+            # ``VarDecl.function_pointer_params`` for local
+            # function-pointer variables, but parameter-level callable
+            # support is future work — the prototype just needs to
+            # parse so the surrounding header doesn't tank).
+            self.eat("LPAREN")
+            self.eat("STAR")
+            name_token = self.eat("IDENT")
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            self.parse_parameters()
+            self.eat("RPAREN")
+            return Param(is_array=False, name=name_token[1], type="function_pointer")
+        # Parameter names are optional in prototype-only declarations
+        # (e.g. ``int (*cmp)(const void *, const void *)`` — the inner
+        # two params are unnamed).  Standard C accepts this anywhere a
+        # parameter list appears; cc.py only generates code for params
+        # that get referenced in a body, so synthesize a unique-looking
+        # placeholder name when the source omits one.  Function
+        # definitions with unnamed params would simply have no way to
+        # read them, which the body's name-resolution catches later.
+        if self.peek()[0] == "IDENT":
+            name_token = self.eat("IDENT")
+            name = name_token[1]
+        else:
+            name_token = (None, None, self.peek()[2])
+            name = f"_unnamed_param_{id(self.peek())}"
         in_register: str | None = None
         is_array = False
         out_register: str | None = None
@@ -1806,6 +1849,9 @@ class Parser:
                     always_inline = True
                 elif kind == "naked":
                     naked = True
+                elif kind == "noreturn":
+                    # No-op marker; cc.py has no noreturn-aware codegen.
+                    pass
                 elif kind == "preserve_register":
                     preserve_registers.append(value)
                 else:
