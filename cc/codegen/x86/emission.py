@@ -43,6 +43,7 @@ from cc.ast_nodes import (
     Function,
     Goto,
     If,
+    IncrementDecrement,
     Index,
     IndexAssign,
     IndexMemberAccess,
@@ -1711,6 +1712,30 @@ class EmissionMixin:
             self.generate_expression(expression.expression)
         elif isinstance(expression, PointerDereference):
             self._emit_pointer_dereference(expression)
+        elif isinstance(expression, IncrementDecrement):
+            # Lower ``var ± 1`` through the normal Assign store path so
+            # register-pinned locals, byte locals, frame-slot locals,
+            # and globals all share one codegen surface.  The store's
+            # fast paths (``inc reg``, ``add [mem], 1``) skip the
+            # accumulator entirely, so we reload ``var`` afterwards to
+            # guarantee acc holds the post-update value — what prefix
+            # ``++var`` evaluates to.  Postfix ``var++`` wants the
+            # pre-update value: ``sub acc, delta`` recovers it.
+            target = expression.target_name
+            self._check_defined(target, line=expression.line)
+            delta_value = abs(expression.delta)
+            update_expression = BinaryOperation(
+                left=Var(line=expression.line, name=target),
+                line=expression.line,
+                operation="+" if expression.delta > 0 else "-",
+                right=Int(line=expression.line, value=delta_value),
+            )
+            self.emit_store_local(expression=update_expression, name=target)
+            self.generate_expression(Var(line=expression.line, name=target))
+            if expression.is_postfix:
+                reverse = "sub" if expression.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -2722,6 +2747,14 @@ class EmissionMixin:
         elif isinstance(statement, Assign):
             self._check_defined(statement.name, line=statement.line)
             self.emit_store_local(expression=statement.expr, name=statement.name)
+        elif isinstance(statement, IncrementDecrement):
+            # ``var++;`` / ``--var;`` etc. at statement scope — value
+            # discarded.  Share the expression-form codegen; the
+            # accumulator load it produces is unused, but
+            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
+            # later read of ``var`` doesn't reuse a stale value.
+            self.generate_expression(statement)
+            self.ax_clear()
         elif isinstance(statement, IndexAssign):
             self.generate_index_assign(statement)
         elif isinstance(statement, Break):

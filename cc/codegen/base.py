@@ -38,6 +38,7 @@ from cc.ast_nodes import (
     DoubleIndex,
     EnumDecl,
     If,
+    IncrementDecrement,
     Index,
     Int,
     LogicalAnd,
@@ -779,8 +780,15 @@ class CodeGeneratorBase:
 
     @staticmethod
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
-        """Return True if an ``Assign(name=name, ...)`` occurs inside ``node``."""
-        return ast_contains(node, lambda n: isinstance(n, Assign) and n.name == name)
+        """Return True if *node* contains a write to a variable named *name*.
+
+        Writes are ``Assign(name=name, ...)`` or
+        ``IncrementDecrement(target_name=name)``.
+        """
+        return ast_contains(
+            node,
+            lambda n: (isinstance(n, Assign) and n.name == name) or (isinstance(n, IncrementDecrement) and n.target_name == name),
+        )
 
     @staticmethod
     def _node_references_var(*, name: str, node: Node) -> bool:
@@ -928,7 +936,7 @@ class CodeGeneratorBase:
                 if left_type == "pointer" or right_type == "pointer":
                     return "pointer"
             return "integer"
-        if isinstance(node, (Call, Conditional, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
+        if isinstance(node, (Call, Conditional, IncrementDecrement, LogicalAnd, LogicalOr, MemberAccess, SizeofType, SizeofVar)):
             return "integer"
         if isinstance(node, Cast):
             if node.target_type.endswith("*"):

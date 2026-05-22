@@ -27,6 +27,7 @@ from cc.ast_nodes import (
     Function,
     Goto,
     If,
+    IncrementDecrement,
     Index,
     IndexAssign,
     IndexMemberAccess,
@@ -933,6 +934,15 @@ class Parser:
         """
         token = self.peek()
         line = token[2]
+        if token[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Prefix ``++var`` / ``--var`` — target must be a plain
+            # name.  Postfix ``var++`` / ``var--`` is recognized after
+            # the Var is parsed, further down.  Other lvalues (``*p``,
+            # ``a[i]``, ``s.f``) are out of scope for the first cut.
+            operator_token = self.eat()
+            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            name_token = self.eat("IDENT")
+            return IncrementDecrement(delta=delta, is_postfix=False, line=line, target_name=name_token[1])
         if token[0] == "SIZEOF":
             return self.parse_sizeof()
         if token[0] == "NUMBER":
@@ -1038,6 +1048,13 @@ class Parser:
                 # constant_expression) sees a literal exactly like a
                 # ``#define``'d name would after preprocessing.
                 return Int(line=line, value=self.enum_constants[token[1]])
+            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                # Postfix ``var++`` / ``var--`` — expression evaluates
+                # to the pre-update value.  Bare Var targets only (no
+                # ``s.f++`` or ``a[i]--`` yet).
+                operator_token = self.eat()
+                delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+                return IncrementDecrement(delta=delta, is_postfix=True, line=line, target_name=token[1])
             return Var(line=line, name=token[1])
         if token[0] == "NOT":
             self.eat()
@@ -1309,6 +1326,15 @@ class Parser:
             self.parse_expression()
             self.eat("SEMI")
             return InlineAsm(content="", line=token[2])
+        if token[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Prefix ``++var;`` / ``--var;`` as a bare statement — value
+            # discarded.  Postfix shape (``var++;``) is handled in the
+            # IDENT branch below.
+            operator_token = self.eat()
+            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            name_token = self.eat("IDENT")
+            self.eat("SEMI")
+            return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "COLON":
@@ -1319,6 +1345,16 @@ class Parser:
                 return self.parse_assignment()
             if next_kind in COMPOUND_ASSIGN_OPERATORS:
                 return self.parse_compound_assignment()
+            if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
+                # Postfix ``var++;`` / ``var--;`` at statement scope.
+                # ``is_postfix=True`` matches the expression form so the
+                # codegen path is shared; the statement layer discards
+                # the produced value.
+                self.eat("IDENT")
+                operator_token = self.eat()
+                self.eat("SEMI")
+                delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+                return IncrementDecrement(delta=delta, is_postfix=True, line=token[2], target_name=token[1])
             if next_kind == "LBRACKET":
                 return self.parse_index_assignment()
             if next_kind in ("DOT", "ARROW"):

@@ -270,6 +270,23 @@ class If(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class IncrementDecrement(Node):
+    """``++var`` / ``--var`` / ``var++`` / ``var--`` on a plain local or global.
+
+    Always targets a bare name (no ``*p++``, no ``a[i]++`` yet — those
+    desugars are tracked as follow-ups).  ``delta`` is ``+1`` or ``-1``;
+    ``is_postfix`` selects whether the expression evaluates to the
+    pre- or post-update value.  In statement position the value is
+    discarded — codegen for the statement form skips the
+    accumulator-load step.
+    """
+
+    delta: int
+    is_postfix: bool
+    target_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class Index(Node):
     """Subscript expression ``array[index]``."""
 
