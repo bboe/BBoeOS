@@ -618,6 +618,18 @@ kernel_idle_pd_phys      resd 1
         ;; for the post-stream BSS-trailer peek.
 last_binary_frame_phys   resd 1
 
+        ;; Phys of the second-to-last loaded binary frame.  Used by
+        ;; program_enter's BSS-trailer peek when the 6-byte BSS_MAGIC32
+        ;; trailer straddles the last two frames (binsize mod 4096 in
+        ;; 1..5).  Zero when the binary fits in one frame.
+prev_binary_frame_phys   resd 1
+
+        ;; Scratch buffer (kernel BSS) used by program_enter to stage
+        ;; the binary's last 6 bytes contiguously before parsing the
+        ;; BSS-trailer.  Sized 8 to keep the dword load at offset 0
+        ;; from straying off the buffer when binsize < 6.
+bss_trailer_scratch      resb 8
+
         ;; OOM-recovery: 1 while shell_reload is bringing up the shell.
         ;; An OOM in that window is fatal (no fallback); user-program
         ;; loads run with the flag clear and recover by printing a

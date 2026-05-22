@@ -11,6 +11,23 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **kernel: stage the BSS trailer across the last two binary frames.**
+  ``program_enter``'s post-stream trailer peek only inspected the
+  *last* loaded binary frame.  When the binary ended 1..5 bytes into
+  that frame (binsize mod 4096 in 1..5), the 6-byte ``BSS_MAGIC32``
+  trailer straddled the page boundary — the loader's ``ECX >= 6``
+  check failed, the legacy 4-byte magic mismatched (``0xB032`` vs
+  ``0xB055``), and ``bss_size`` defaulted to 0.  No BSS pages got
+  mapped, and the program's first BSS write faulted with EXC0E.
+  The fix stages the binary's trailing 6 bytes into a kernel scratch
+  buffer (``bss_trailer_scratch``) across both frames, then parses
+  ``BSS_MAGIC32`` or the legacy ``BSS_MAGIC`` from the contiguous
+  copy.  Adds ``prev_binary_frame_phys`` alongside
+  ``last_binary_frame_phys`` so the staging can reach the previous
+  frame's tail.  Regression covered by
+  ``tests/programs/trailer_cross_page.c`` (added to ``FLAT_PROGRAMS``
+  so cc.py's flat path keeps the size-pinning padding the ccld
+  linker would otherwise strip).
 - **cc.py: clear `ax_local` after the pinned-right comparison fast path.**
   ``emit_comparison``'s pinned-right path emits ``mov ax,
   <pin_left>`` + ``cmp ax, <pin_right>``; the later

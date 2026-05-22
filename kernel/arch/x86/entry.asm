@@ -352,6 +352,7 @@ build_child_program_state:
         ;; the frame's direct-map alias.  Last binary frame's phys is
         ;; stashed so the trailer can be peeked after the loop.
         mov dword [last_binary_frame_phys], 0
+        mov dword [prev_binary_frame_phys], 0
         mov dword [virt_cursor], PROGRAM_BASE
 .binary_page_loop:
         mov eax, [virt_cursor]
@@ -361,6 +362,11 @@ build_child_program_state:
 
         call frame_alloc
         jc .oom
+        ;; Roll last → prev before stashing the new last.  prev is needed
+        ;; by the trailer peek below when the 6-byte trailer straddles
+        ;; the last two binary frames (binsize mod 4096 in 1..5).
+        mov edx, [last_binary_frame_phys]
+        mov [prev_binary_frame_phys], edx
         mov [last_binary_frame_phys], eax   ; remember for trailer peek
         mov [pending_frame_phys], eax       ; track for OOM cleanup
         call kmap_map                       ; EAX = kvirt
@@ -449,38 +455,116 @@ build_child_program_state:
         jmp .binary_page_loop
 .binary_done:
 
-        ;; --- Read BSS trailer from the last binary frame ---
+        ;; --- Read BSS trailer from the last 6 binary bytes ---
         ;; binsize is vfs_found_size; the trailer (6-byte BSS_MAGIC32 or
-        ;; legacy 4-byte BSS_MAGIC) sits at offset (binsize - N) within
-        ;; the file, which lands inside the last loaded frame at offset
-        ;; ((binsize - 1) & 0xFFF) + 1 - N.  The frame was kmap_unmap'd
-        ;; at the end of the binary stream — re-map it briefly for the peek.
+        ;; legacy 4-byte BSS_MAGIC) sits in the last 6 bytes of the file.
+        ;; When the last loaded frame holds < 6 valid bytes (i.e. binsize
+        ;; mod 4096 in 1..5), the 6-byte trailer straddles the last two
+        ;; binary frames.  Stage the trailing 6 bytes into
+        ;; ``bss_trailer_scratch`` so the parse below can ignore the
+        ;; page split.  Frames were kmap_unmap'd at the end of the
+        ;; binary stream; re-map briefly to copy.
         xor ebx, ebx                        ; default bss_size = 0
         mov eax, [last_binary_frame_phys]
         test eax, eax
         jz .have_bss_size                   ; empty file (no binary loaded)
-        call kmap_map                       ; EAX = trailer kvirt
-        push eax                            ; save kvirt for the unmap below
+
+        ;; Zero scratch so a binsize < 6 binary's stage leaves the
+        ;; unused high bytes at zero (legacy parse still works).
+        mov edi, bss_trailer_scratch
+        xor eax, eax
+        mov [edi], eax
+        mov [edi + 4], eax
+
+        ;; ECX = bytes in the last loaded binary frame = ((binsize - 1)
+        ;; & 0xFFF) + 1, clamped to binsize (only matters when binsize
+        ;; < 4096).
         mov ecx, [vfs_found_size]
-        sub ecx, 1
-        and ecx, 0xFFF
-        inc ecx                             ; ECX = valid bytes in last frame
-        ;; Try 6-byte trailer first (BSS_MAGIC32).
+        mov eax, ecx
+        dec eax
+        and eax, 0xFFF
+        inc eax
+        cmp eax, ecx
+        jbe .stage_bytes_in_last
+        mov eax, ecx
+.stage_bytes_in_last:
+        mov ecx, eax                        ; ECX = bytes available in last frame
+
         cmp ecx, 6
-        jb .check_old_trailer
-        cmp word [eax + ecx - 2], BSS_MAGIC32
-        jne .check_old_trailer
-        mov ebx, [eax + ecx - 6]
-        jmp .trailer_peek_done
-.check_old_trailer:
-        cmp ecx, 4
-        jb .trailer_peek_done
-        cmp word [eax + ecx - 2], BSS_MAGIC
-        jne .trailer_peek_done
-        movzx ebx, word [eax + ecx - 4]
-.trailer_peek_done:
-        pop eax                             ; trailer kvirt
+        jb .stage_cross_frame
+
+        ;; Single-frame trailer.  Copy 6 bytes from last_frame[ECX-6 .. ECX-1].
+        mov eax, [last_binary_frame_phys]
+        call kmap_map                       ; EAX = last kvirt
+        push eax                            ; save kvirt for unmap
+        mov esi, eax
+        add esi, ecx
+        sub esi, 6
+        mov edi, bss_trailer_scratch
+        mov ecx, 6
+        cld
+        rep movsb
+        pop eax
         call kmap_unmap
+        jmp .parse_bss_trailer
+
+.stage_cross_frame:
+        ;; ECX in {1..5}: trailer's first (6 - ECX) bytes sit at the
+        ;; tail of prev_binary_frame_phys, the last ECX bytes at the
+        ;; head of last_binary_frame_phys.  When the binary is so small
+        ;; that no prev frame exists, only a legacy 4-byte trailer can
+        ;; fit — fall through to the last-frame-only path with the
+        ;; bytes already in scratch (high bytes stay 0).
+        mov eax, [prev_binary_frame_phys]
+        test eax, eax
+        jz .stage_last_only
+
+        ;; -- prev frame tail -> scratch[0 .. 6-ECX) --
+        call kmap_map                       ; EAX = prev kvirt
+        push eax
+        mov esi, eax
+        mov edx, 6
+        sub edx, ecx                        ; EDX = bytes from prev = 6 - ECX
+        add esi, 0x1000
+        sub esi, edx                        ; ESI = prev_kvirt + (0x1000 - (6-ECX))
+        mov edi, bss_trailer_scratch
+        push ecx                            ; save ECX (last-frame byte count)
+        mov ecx, edx
+        cld
+        rep movsb
+        pop ecx
+        pop eax
+        call kmap_unmap
+
+.stage_last_only:
+        ;; -- last frame head -> scratch[6-ECX .. 6) --
+        mov eax, [last_binary_frame_phys]
+        call kmap_map                       ; EAX = last kvirt
+        push eax
+        mov esi, eax
+        mov edx, 6
+        sub edx, ecx                        ; EDX = scratch offset = 6 - ECX
+        mov edi, bss_trailer_scratch
+        add edi, edx
+        cld
+        rep movsb
+        pop eax
+        call kmap_unmap
+
+.parse_bss_trailer:
+        ;; scratch holds the binary's trailing 6 bytes (or fewer
+        ;; right-aligned when binsize < 6, high bytes zero).  Layout
+        ;; for BSS_MAGIC32: dd bss_size; dw 0xB032 → magic at +4, size
+        ;; dword at +0.  Layout for legacy BSS_MAGIC: dw bss_size; dw
+        ;; 0xB055 → magic at +4, size word at +2.
+        cmp word [bss_trailer_scratch + 4], BSS_MAGIC32
+        jne .check_legacy_trailer
+        mov ebx, [bss_trailer_scratch]
+        jmp .have_bss_size
+.check_legacy_trailer:
+        cmp word [bss_trailer_scratch + 4], BSS_MAGIC
+        jne .have_bss_size
+        movzx ebx, word [bss_trailer_scratch + 2]
 .have_bss_size:
 
         ;; --- Compute user_image_end ---
