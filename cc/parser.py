@@ -1439,19 +1439,19 @@ class Parser:
         functions: list[Node] = []
         globals_list: list[Node] = []
         while self.peek()[0] != "EOF":
-            declaration = self.parse_top_level_declaration()
-            if isinstance(declaration, Function):
-                functions.append(declaration)
-            elif isinstance(declaration, list):
-                # Multi-declarator file-scope variable declaration —
-                # ``extern T *a, *b;`` produces one VarDecl per name,
-                # all sharing the base type and the leading ``extern``
-                # storage class.  Single-declarator var/array decls
-                # also arrive as a one-element list for interface
-                # uniformity with the local-scope path.
-                globals_list.extend(declaration)
-            elif declaration is not None:
-                globals_list.append(declaration)
+            declarations = self.parse_top_level_declaration()
+            if declarations is None:
+                continue
+            # Each top-level statement yields a list (singleton for
+            # functions / struct / enum / inline-asm; one element per
+            # declarator for ``extern T *a, *b;``-style multi-decls).
+            # Functions go in their own bucket so the codegen can
+            # iterate them separately from data globals.
+            for node in declarations:
+                if isinstance(node, Function):
+                    functions.append(node)
+                else:
+                    globals_list.append(node)
         return Program(functions=functions, globals=globals_list, line=line)
 
     def parse_shift(self) -> Node:
@@ -1714,7 +1714,7 @@ class Parser:
         self.eat("RBRACE")
         return Switch(cases=cases, discriminant=discriminant, line=token[2])
 
-    def parse_top_level_declaration(self) -> Node | list[Node] | None:
+    def parse_top_level_declaration(self) -> list[Node] | None:
         """Parse a function definition, a file-scope variable / array, or a file-scope ``asm(...)``.
 
         Dispatches on the token after ``type IDENT``: ``(`` drives the
@@ -1722,22 +1722,18 @@ class Parser:
         bare ``asm("...");`` at the top level is emitted verbatim into
         the output's data tail — useful for raw tables and labels.
 
-        Returns:
-            - A :class:`Function` node for function definitions / prototypes.
-            - ``None`` for typedef / struct / enum top-level shapes that
-              register metadata but produce no AST node.
-            - An :class:`InlineAsm` node for file-scope ``asm("...");``.
-            - A ``list[Node]`` of :class:`VarDecl` / :class:`ArrayDecl`
-              for variable / array declarations.  The list has one
-              element for the common single-declarator case and several
-              for multi-declarator lines like
-              ``extern FILE *stderr, *stdin, *stdout;``.  All declarators
-              in a multi-decl share the base type and the leading
-              ``extern`` / ``static`` storage class.  ``__attribute__``
-              decorations are unsupported on multi-declarator lines
-              (raised at parse time when a COMMA follows an attributed
-              declaration).
-
+        Returns ``None`` for typedef shapes that register metadata but
+        produce no AST node, otherwise a ``list[Node]`` of one or more
+        top-level constructs.  Function definitions / prototypes return
+        ``[Function]``; struct / enum / inline-asm constructs return
+        their respective singleton lists; variable / array declarations
+        return one element per declarator so multi-decl lines like
+        ``extern FILE *stderr, *stdin, *stdout;`` get one
+        :class:`VarDecl` per name.  All declarators in a multi-decl
+        share the base type and the leading ``extern`` / ``static``
+        storage class.  ``__attribute__`` decorations are unsupported
+        on multi-declarator lines (raised at parse time when a COMMA
+        follows an attributed declaration).
         """
         line = self.peek()[2]
         if self.peek()[0] == "TYPEDEF":
@@ -1762,9 +1758,9 @@ class Parser:
             self.eat("SEMI")
             return None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
-            return self._parse_struct_declaration()
+            return [self._parse_struct_declaration()]
         if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
-            return self._parse_enum_declaration()
+            return [self._parse_enum_declaration()]
         if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
             self.eat("IDENT")
             self.eat("LPAREN")
@@ -1775,7 +1771,7 @@ class Parser:
                 content += self.eat()[1][1:-1]
             self.eat("RPAREN")
             self.eat("SEMI")
-            return InlineAsm(content=content, line=line)
+            return [InlineAsm(content=content, line=line)]
         # Optional leading ``__attribute__((...))`` directives.
         # ``asm_register("REG")`` applies to file-scope VarDecls (the
         # variable aliases the named CPU register).  ``carry_return``,
@@ -1915,11 +1911,26 @@ class Parser:
                 # functions called from C.  No code is emitted for
                 # prototype nodes.
                 self.eat("SEMI")
-                return Function(
+                return [
+                    Function(
+                        always_inline=always_inline,
+                        body=[],
+                        carry_return=carry_return,
+                        is_prototype=True,
+                        is_variadic=is_variadic,
+                        line=line,
+                        naked=naked,
+                        name=name,
+                        params=parameters,
+                        preserve_registers=preserve_registers,
+                    )
+                ]
+            self.eat("LBRACE")
+            return [
+                Function(
                     always_inline=always_inline,
-                    body=[],
+                    body=self.parse_block(),
                     carry_return=carry_return,
-                    is_prototype=True,
                     is_variadic=is_variadic,
                     line=line,
                     naked=naked,
@@ -1927,18 +1938,7 @@ class Parser:
                     params=parameters,
                     preserve_registers=preserve_registers,
                 )
-            self.eat("LBRACE")
-            return Function(
-                always_inline=always_inline,
-                body=self.parse_block(),
-                carry_return=carry_return,
-                is_variadic=is_variadic,
-                line=line,
-                naked=naked,
-                name=name,
-                params=parameters,
-                preserve_registers=preserve_registers,
-            )
+            ]
         if carry_return:
             message = "carry_return attribute is not valid on global variables"
             raise CompileError(message, line=line)
