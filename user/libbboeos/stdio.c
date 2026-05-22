@@ -286,7 +286,7 @@ int vprintf(const char *fmt, va_list ap) {
 
 int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
     struct sink s = {.buf = buf, .cap = cap, .fd = -1, .len = 0};
-    while (*fmt) {
+    while (*fmt != '\0') {
         if (*fmt != '%') {
             _emit(&s, *fmt++);
             continue;
