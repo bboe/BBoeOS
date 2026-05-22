@@ -1045,6 +1045,11 @@ TESTS: list[ProgramTest] = [
     ProgramTest("tr_delete_extra_arg", ["tr -d abc xyz; echo $?"], r"Usage: tr -d <set1>"),
     ProgramTest("tr_literal", ["echo abc | tr a x"], r"^xbc\r?\n\$"),
     ProgramTest("tr_mismatch", ["echo abc | tr abc xy; echo $?"], r"tr: set length mismatch"),
+    # Regression: program_enter's BSS trailer peek mis-handled binsize
+    # mod 4096 in {1..5}.  trailer_cross_page.c is padded so cc.py +
+    # nasm lands the flat binary at binsize = 4101 bytes (mod 4096 =
+    # 5), exercising the cross-frame stager.
+    ProgramTest("trailer_cross_page", ["trailer_cross_page"], r"^trailer_cross_page: OK$"),
     ProgramTest("true_chain", ["true && echo ran || echo skipped"], r"^ran$"),
     ProgramTest("uniq_basic", ["echo -e a\\na\\nb\\nb\\na | uniq"], r"^a\r?\nb\r?\na\r?\n\$"),
     ProgramTest("uniq_blank_lines", ["echo -n -e \\n\\n\\n | uniq -c"], r"^3 \r?\n\$"),

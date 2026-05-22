@@ -190,7 +190,7 @@ rm -rf "$PBUILD" && mkdir -p "$PBUILD"
 # linker.  Either path produces a flat binary loadable by
 # program_enter (same PROGRAM_BASE, same BSS trailer), so the shell
 # and runtime ABI don't change with the toolchain choice.
-FLAT_PROGRAMS="arp asm dns shell"
+FLAT_PROGRAMS="arp asm dns shell trailer_cross_page"
 
 compile_program_flat() {
     name=$1
