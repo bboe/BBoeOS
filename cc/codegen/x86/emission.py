@@ -58,6 +58,7 @@ from cc.ast_nodes import (
     MemberAccess,
     MemberAddressOf,
     MemberAssign,
+    MemberIncrementDecrement,
     MemberIndex,
     MemberIndexAssign,
     Node,
@@ -1737,6 +1738,47 @@ class EmissionMixin:
                 reverse = "sub" if expression.delta > 0 else "add"
                 self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
                 self.ax_clear()
+        elif isinstance(expression, MemberIncrementDecrement):
+            # Same lowering shape as IncrementDecrement, but for
+            # struct-member lvalues: synthesize ``s->f = s->f ± 1`` and
+            # route through generate_member_assign, then reload the
+            # member into acc so the surrounding expression sees the
+            # post-update value.  Postfix recovers the pre-value with
+            # one ``sub`` / ``add``.
+            delta_value = abs(expression.delta)
+            base_access = MemberAccess(
+                arrow=expression.arrow,
+                line=expression.line,
+                member_name=expression.member_name,
+                object_name=expression.object_name,
+            )
+            update_expression = BinaryOperation(
+                left=base_access,
+                line=expression.line,
+                operation="+" if expression.delta > 0 else "-",
+                right=Int(line=expression.line, value=delta_value),
+            )
+            self.generate_member_assign(
+                MemberAssign(
+                    arrow=expression.arrow,
+                    expr=update_expression,
+                    line=expression.line,
+                    member_name=expression.member_name,
+                    object_name=expression.object_name,
+                )
+            )
+            self.generate_expression(
+                MemberAccess(
+                    arrow=expression.arrow,
+                    line=expression.line,
+                    member_name=expression.member_name,
+                    object_name=expression.object_name,
+                )
+            )
+            if expression.is_postfix:
+                reverse = "sub" if expression.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -2754,6 +2796,11 @@ class EmissionMixin:
             # accumulator load it produces is unused, but
             # ``ax_clear()`` invalidates the AX-tracking shortcut so a
             # later read of ``var`` doesn't reuse a stale value.
+            self.generate_expression(statement)
+            self.ax_clear()
+        elif isinstance(statement, MemberIncrementDecrement):
+            # ``s->f++;`` / ``--s.f;`` at statement scope — value
+            # discarded; route through the expression-form codegen.
             self.generate_expression(statement)
             self.ax_clear()
         elif isinstance(statement, IndexAssign):

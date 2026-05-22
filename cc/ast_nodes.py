@@ -453,6 +453,27 @@ class MemberAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberIncrementDecrement(Node):
+    """``++ptr->field`` / ``--ptr->field`` / ``ptr->field++`` / ``ptr->field--``.
+
+    Mirrors :class:`IncrementDecrement` (bare Var lvalue) for struct
+    member lvalues.  ``delta`` is ``+1`` or ``-1``; ``is_postfix``
+    selects whether the expression evaluates to the pre- or
+    post-update value.  In statement position the value is discarded.
+    Lowers via the existing :class:`MemberAssign` store path, then
+    reloads through :class:`MemberAccess` so the surrounding
+    expression sees the post-update value (postfix recovers the
+    pre-value with a single ``sub`` / ``add`` on the accumulator).
+    """
+
+    arrow: bool
+    delta: int
+    is_postfix: bool
+    member_name: str
+    object_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class MemberIndex(Node):
     """Indexed access into a struct's array-typed member: ``ptr->field[i]``.
 
