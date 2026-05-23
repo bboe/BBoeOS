@@ -450,6 +450,22 @@ class CodeGeneratorBase:
         leaves.reverse()
         return leaves
 
+    def _global_label(self, name: str, /) -> str:
+        """Return the NASM label for file-scope variable *name*.
+
+        In object mode the symbol carries no prefix — globals are
+        exported under their C-conformant name (matching clang's ELF
+        output, ``.globl errno`` / ``errno:``) so external linkers
+        resolve them naturally.  In flat-binary mode the legacy ``_g_``
+        prefix is retained: cc.py's peephole matchers, self-host
+        byte-equivalence tests, and existing user-program build output
+        all bake the prefix into their expectations, and there is no
+        external linker to satisfy.
+        """
+        if self.object_mode:
+            return name
+        return f"_g_{name}"
+
     def _index_cache_key(self, expression: Node, /) -> tuple[str, int] | None:
         """Return the register cache key for an index expression, or None."""
         if isinstance(expression, Index) and isinstance(expression.index, Int) and expression.array.name in self.array_labels:
@@ -802,7 +818,7 @@ class CodeGeneratorBase:
 
         Checks :attr:`constant_aliases` first, then
         :attr:`NAMED_CONSTANTS`, then file-scope arrays (whose
-        ``_g_<name>`` label is itself a fixed address).  Used wherever
+        :meth:`_global_label` is itself a fixed address).  Used wherever
         the code needs to distinguish compile-time-constant bases from
         runtime variables.
         """
@@ -811,7 +827,7 @@ class CodeGeneratorBase:
         if name in self.NAMED_CONSTANTS:
             return name
         if name in self.global_arrays:
-            return f"_g_{name}"
+            return self._global_label(name)
         return None
 
     @staticmethod

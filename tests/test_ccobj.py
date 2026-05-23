@@ -129,22 +129,26 @@ def test_object_mode_emits_data_rodata_bss_sections(tmp_path: Path) -> None:
     )
 
     body = asm.read_text()
-    # Initialized globals → .data
+    # Initialized globals → .data; object mode exports the C-conformant
+    # symbol via ``global <name>`` (no ``_g_`` prefix), matching clang.
     assert "section .data" in body
-    assert "_g_g_init: dd 42" in body
-    assert "_g_g_array: dd 1, 2, 3" in body
+    assert "global g_init" in body
+    assert "g_init: dd 42" in body
+    assert "global g_array" in body
+    assert "g_array: dd 1, 2, 3" in body
     # Strings → .rodata
     assert "section .rodata" in body
     assert "_str_0:" in body
     # Zero-init globals → .bss via resb (no BSS trailer / no EQUs)
     assert "section .bss" in body
-    assert "_g_g_zero: resb 4" in body
+    assert "global g_zero" in body
+    assert "g_zero: resb 4" in body
     assert "dw 0B032h" not in body
-    assert "_g_g_zero equ" not in body
+    assert "g_zero equ" not in body
     # Data labels must not appear inside the .text body.
     text_section, _, _rest = body.partition("section .data")
-    assert "_g_g_init:" not in text_section
-    assert "_g_g_array:" not in text_section
+    assert "g_init:" not in text_section
+    assert "g_array:" not in text_section
     assert "_str_0:" not in text_section
 
 
@@ -298,17 +302,17 @@ def test_pack_ccobj_auto_relocates_cross_section_abs32(tmp_path: Path) -> None:
     # The cross-section references should produce abs32 relocations
     # for every in-TU symbol the .text body touches.
     reloc_symbols = {reloc["symbol"] for reloc in payload["relocations"]}
-    assert reloc_symbols >= {"_g_g_init", "_g_g_zero", "_str_0"}, reloc_symbols
+    assert reloc_symbols >= {"g_init", "g_zero", "_str_0"}, reloc_symbols
     for reloc in payload["relocations"]:
-        if reloc["symbol"] in {"_g_g_init", "_g_g_zero", "_str_0"}:
+        if reloc["symbol"] in {"g_init", "g_zero", "_str_0"}:
             assert reloc["type"] == "abs32", reloc
             assert reloc["section"] == "text", reloc
 
     # Every relocation target must be a defined symbol in this object.
     defined_symbols = set(payload["symbols"])
     assert reloc_symbols <= defined_symbols, reloc_symbols - defined_symbols
-    # ``_g_g_zero`` is BSS-only, so it lands in the ``.bss`` section.
-    assert payload["symbols"]["_g_g_zero"]["section"] == "bss"
+    # ``g_zero`` is BSS-only, so it lands in the ``.bss`` section.
+    assert payload["symbols"]["g_zero"]["section"] == "bss"
 
 
 def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
