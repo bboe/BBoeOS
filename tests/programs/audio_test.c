@@ -15,7 +15,7 @@
  *             drain the queue (MIDI_IOCTL_DRAIN) so the delayed
  *             KEY_OFF actually fires, close.  Previously play_midi.c.
  *
- * The midi mode's inline asm references `_g_midi_fd` at file scope —
+ * The midi mode's inline asm references `midi_fd` at file scope —
  * cc.py's userland inline-asm can't see locals. */
 
 char audio_buffer[2048];
@@ -91,7 +91,7 @@ void mode_midi() {
 
     /* MIDI_IOCTL_DRAIN: block until the kernel queue empties so the
        1 s-delayed KEY_OFF fires before close() drops it. */
-    asm("mov bx, [_g_midi_fd]\n"
+    asm("mov bx, [midi_fd]\n"
         "mov al, MIDI_IOCTL_DRAIN\n"
         "mov ah, SYS_IO_IOCTL\n"
         "int 30h\n");

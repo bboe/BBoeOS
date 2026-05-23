@@ -772,6 +772,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        or byte {addr}, {field_mask}")
 
+    def _emit_global_export(self, name: str, /) -> None:
+        """Emit the per-definition export directive matching the active mode.
+
+        Object mode emits ``global <name>`` so the C-conformant symbol
+        is visible to external linkers (the ``<name>:`` label follows
+        from :meth:`_global_label`).
+
+        Flat-binary / kernel mode emits ``<name> equ _g_<name>`` so
+        inline-asm callers that reference the C-conformant name resolve
+        to the same address as cc.py-internal references via
+        ``_g_<name>``.  NASM resolves the forward reference; the alias
+        adds no output bytes.  Mirrors the manual ``asm("name equ
+        _g_name");`` pattern several kernel drivers already use.
+        """
+        if self.object_mode:
+            self.emit(f"global {name}")
+        else:
+            self.emit(f"{name} equ _g_{name}")
+
     def _emit_bss_equs(self) -> None:
         """Emit BSS EQU definitions and ``_bss_end`` after ``_program_end:``.
 
@@ -795,14 +814,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             offset = 0
             for name, size_expr in self.bss_vars:
                 suffix = f" + {offset}" if offset else ""
-                self.emit(f"_g_{name} equ _program_end{suffix}")
+                self.emit(f"{self._global_label(name)} equ _program_end{suffix}")
+                self._emit_global_export(name)
                 offset += int(size_expr)
         else:
             # Non-literal sizes: use EQU chain and define _bss_total_size.
             prev_end = "_program_end"
             for name, size_expr in self.bss_vars:
-                self.emit(f"_g_{name} equ {prev_end}")
-                prev_end = f"_g_{name} + {size_expr}"
+                label = self._global_label(name)
+                self.emit(f"{label} equ {prev_end}")
+                self._emit_global_export(name)
+                prev_end = f"{label} + {size_expr}"
             self.emit(f"_bss_total_size equ {prev_end} - _program_end")
 
     def _emit_bss_trailer(self) -> None:
@@ -828,7 +850,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit()
             self.emit("section .bss")
             for name, size_expression in self.bss_vars:
-                self.emit(f"_g_{name}: resb {size_expression}")
+                self._emit_global_export(name)
+                self.emit(f"{self._global_label(name)}: resb {size_expression}")
             for name, size_expression in self.elided_local_bss_vars:
                 self.emit(f"_l_{name}: resb {size_expression}")
             return
@@ -1084,7 +1107,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 init_expression = self._constant_expression(declaration.init)
                 directive = "db" if self._is_byte_scalar_global(name) else int_directive
                 _emit_data_header()
-                self.emit(f"_g_{name}: {directive} {init_expression}")
+                self._emit_global_export(name)
+                self.emit(f"{self._global_label(name)}: {directive} {init_expression}")
         for name in sorted(self.global_arrays):
             declaration = self.global_arrays[name]
             if name in self.extern_globals:
@@ -1122,7 +1146,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 size_expression = self._constant_expression(declaration.size)
                 lines.append(f"times ({size_expression}-{count})*{stride} db 0")
                 _emit_data_header()
-                self.emit(f"_g_{name}: {lines[0]}")
+                self._emit_global_export(name)
+                self.emit(f"{self._global_label(name)}: {lines[0]}")
                 for line in lines[1:]:
                     self.emit(f"        {line}")
             elif declaration.init is not None:
@@ -1140,7 +1165,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     for element in declaration.init.elements
                 ]
                 _emit_data_header()
-                self.emit(f"_g_{name}: {directive} {', '.join(rendered)}")
+                self._emit_global_export(name)
+                self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
             else:
                 size_expression = self._constant_expression(declaration.size)
                 # Fold ``size * stride`` at compile time when the size is a
@@ -1172,7 +1198,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(";; --- kernel BSS (zero-initialized) ---")
         self.emit("section .bss")
         for name, size_expression in self.bss_vars:
-            self.emit(f"_g_{name}: resb {size_expression}")
+            self.emit(f"{self._global_label(name)}: resb {size_expression}")
         self.emit("section .text")
 
     def _type_size(self, type_name: str, /) -> int:
@@ -2187,7 +2213,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if name in self.asm_symbol_globals:
             return self.asm_symbol_globals[name]
         if name in self.global_scalars:
-            return f"_g_{name}"
+            return self._global_label(name)
         message = f"no address for '{name}' (not a local or global scalar)"
         raise CompileError(message)
 
@@ -2210,7 +2236,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         elif isinstance(arg, Var) and arg.name in self.constant_aliases:
             self.emit(f"        push {self.constant_aliases[arg.name]}")
         elif isinstance(arg, Var) and arg.name in self.global_arrays:
-            self.emit(f"        push _g_{arg.name}")
+            self.emit(f"        push {self._global_label(arg.name)}")
         elif isinstance(arg, Var) and arg.name in self.local_stack_arrays:
             if self.elide_frame:
                 self.emit(f"        push _l_{arg.name}")
@@ -2448,7 +2474,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         elif isinstance(arg, Var) and arg.name in self.constant_aliases:
             self.emit(f"        mov {target}, {self.constant_aliases[arg.name]}")
         elif isinstance(arg, Var) and arg.name in self.global_arrays:
-            self.emit(f"        mov {target}, _g_{arg.name}")
+            self.emit(f"        mov {target}, {self._global_label(arg.name)}")
         elif isinstance(arg, Var) and arg.name in self.local_stack_arrays:
             if self.elide_frame:
                 self.emit(f"        mov {target}, _l_{arg.name}")
@@ -3295,7 +3321,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        mov {register}, {self.constant_aliases[name]}")
                 return True
             if name in self.global_arrays:
-                self.emit(f"        mov {register}, _g_{name}")
+                self.emit(f"        mov {register}, {self._global_label(name)}")
                 return True
             if name in self.local_stack_arrays:
                 if self.elide_frame:

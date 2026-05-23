@@ -1200,9 +1200,11 @@ class EmissionMixin:
                 return
             if vname in self.global_arrays:
                 # A global array name decays to its base address — the
-                # ``_g_<name>`` label.  Load it as an immediate, not as a
-                # memory fetch from that address.
-                self.emit(f"        mov {self.target.acc}, _g_{vname}")
+                # file-scope label (``_g_<name>`` in flat mode or
+                # ``<name>`` in object mode, per ``_global_label``).
+                # Load it as an immediate, not as a memory fetch from
+                # that address.
+                self.emit(f"        mov {self.target.acc}, {self._global_label(vname)}")
                 self.ax_clear()
                 return
             if vname in self.local_stack_arrays:

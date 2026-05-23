@@ -10,7 +10,7 @@
 int esp_high;
 
 int main() {
-    asm("mov eax, esp\nshr eax, 24\nmov [_g_esp_high], eax");
+    asm("mov eax, esp\nshr eax, 24\nmov [esp_high], eax");
     printf("stacktop: high=%x\n", esp_high);
     return 0;
 }

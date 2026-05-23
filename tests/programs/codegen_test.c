@@ -71,7 +71,7 @@ void mode_bits() {
     printf("-=   = %u\n", y);
 
     /* Memory-allocated counter — forces cc.py to emit the
-       ``<op> word [_g_counter], imm`` shapes that
+       ``<op> word [counter], imm`` shapes that
        peephole_memory_arithmetic produces for load/modify/store
        triples on a global.  Each printf between ops clobbers AX so
        the next op must reload from memory. */

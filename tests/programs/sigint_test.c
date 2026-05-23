@@ -26,7 +26,7 @@ int main() {
         "mov ah, SYS_SYS_SIGNAL\n"
         "int 30h\n");
     asm("mov ebx, 0\n"
-        "mov edi, _g_read_buf\n"
+        "mov edi, read_buf\n"
         "mov ecx, 1\n"
         "mov ah, SYS_IO_READ\n"
         "int 30h\n");

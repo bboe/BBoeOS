@@ -61,12 +61,12 @@ void mode_kernel_buf() {
         "mov ecx, 16\n"
         "mov ah, SYS_IO_WRITE\n"
         "int 30h\n"
-        "mov [_g_result], eax\n"
+        "mov [result], eax\n"
         "mov eax, 0\n"
         "jnc .fault_test_no_cf\n"
         "mov eax, 1\n"
         ".fault_test_no_cf:\n"
-        "mov [_g_saw_cf], eax\n");
+        "mov [saw_cf], eax\n");
     if (saw_cf == 0) {
         printf("fail: CF=0\n");
         return;

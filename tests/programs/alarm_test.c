@@ -124,7 +124,7 @@ void mode_during_sleep() {
         "int 30h\n"
         "setc al\n"
         "movzx eax, al\n"
-        "mov [_g_sleep_cf], eax\n");
+        "mov [sleep_cf], eax\n");
     int elapsed = uptime_ms() - start;
     if (alarm_count == 1 && sleep_cf == 1 && elapsed >= 40 && elapsed <= 100) {
         printf("EINTR_OK elapsed=%d\n", elapsed);
@@ -138,7 +138,7 @@ void mode_nesting() {
     signal(SIGINT, nesting_sigint_handler);
     signal(SIGALRM, nesting_alarm_handler);
     asm("mov ebx, 0\n"
-        "mov edi, _g_read_buf\n"
+        "mov edi, read_buf\n"
         "mov ecx, 1\n"
         "mov ah, SYS_IO_READ\n"
         "int 30h\n");
