@@ -38,6 +38,15 @@ done
 # anchor; objcopy -O binary flattens the linked ELF into the on-disk
 # blob.
 mkdir -p build
+# Phase 6 of the shared-libbboeos design (design-specs/2026-05-20-shared-libbboeos-design.md):
+# cc.py compiles one libbboeos source file at a time.  errno.c is the
+# first port — pre-build the .o via cc.py + nasm -f elf32 before make
+# runs.  The libbboeos Makefile's ``%.o: %.c`` pattern rule sees the
+# .o is newer than the .c and skips the clang invocation, so no
+# Makefile change is needed; ar appends the cc.py-built object to
+# libbboeos.a like any other contribution.
+python3 cc.py --bits 32 --object user/libbboeos/errno.c build/errno.cc.asm || exit 1
+nasm -f elf32 -i kernel/include/ -o user/libbboeos/errno.o build/errno.cc.asm || exit 1
 make -C user/libbboeos libbboeos.a >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
 # --gc-sections drops every clang-compiled libbboeos function the
