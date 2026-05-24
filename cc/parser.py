@@ -12,6 +12,7 @@ from cc.ast_nodes import (
     ArrayDecl,
     ArrayInit,
     Assign,
+    AssignExpr,
     BinaryOperation,
     Break,
     Call,
@@ -353,6 +354,63 @@ class Parser:
             raise CompileError(message, line=token[2])
         return [self.parse_statement()]
 
+    def _parse_deref_assignment_no_semi(self) -> DerefAssign | DerefIncrementAssign | PointerDereferenceAssign:
+        """Parse ``*p = expr``, ``*p++ = expr``, ``*++p = expr``, or ``*(T*)e = expr`` without consuming the trailing semicolon.
+
+        The leading ``STAR`` token must NOT yet have been consumed.
+        """
+        star_token = self.eat("STAR")
+        # ``*(T *)expr = value`` — cast-then-assign through an arbitrary pointer.
+        if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
+            operand = self.parse_primary()
+            if not isinstance(operand, Cast):
+                message = "expected pointer cast after '*'"
+                raise CompileError(message, line=star_token[2])
+            cast_type = operand.target_type.rstrip()
+            if not cast_type.endswith("*"):
+                message = f"expected pointer type in '*(T *)expr = ...', got '{cast_type}'"
+                raise CompileError(message, line=star_token[2])
+            pointee_type = cast_type[:-1].rstrip()
+            self.eat("ASSIGN")
+            value = self.parse_expression()
+            return PointerDereferenceAssign(
+                address=operand.expression,
+                line=star_token[2],
+                target_type=pointee_type,
+                value=value,
+            )
+        # Prefix ``*++p = expr;`` / ``*--p = expr;``
+        if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            prefix_token = self.eat()
+            name_token = self.eat("IDENT")
+            self.eat("ASSIGN")
+            value = self.parse_expression()
+            return DerefIncrementAssign(
+                delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
+                expr=value,
+                is_postfix=False,
+                line=star_token[2],
+                target_name=name_token[1],
+            )
+        # Plain ``*p = expr`` or postfix ``*p++ = expr``
+        name_token = self.eat("IDENT")
+        next_kind = self.peek()[0]
+        if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
+            self.eat()
+            delta = 1 if next_kind == "PLUS_PLUS" else -1
+            self.eat("ASSIGN")
+            value = self.parse_expression()
+            return DerefIncrementAssign(
+                delta=delta,
+                expr=value,
+                is_postfix=True,
+                line=star_token[2],
+                target_name=name_token[1],
+            )
+        self.eat("ASSIGN")
+        expression = self.parse_expression()
+        return DerefAssign(expr=expression, line=star_token[2], pointer=Var(line=star_token[2], name=name_token[1]))
+
     def _parse_designated_struct_initializer(self) -> StructInitializer:
         """Parse ``{ 0 }`` zero-init, ``{ .field = expr, ... }`` designated, or ``{ e0, e1, ... }`` positional init.
 
@@ -440,6 +498,84 @@ class Parser:
         decl = EnumDecl(line=line, name=name, variants=variants)
         self.enum_decls[name] = decl
         return decl
+
+    def _parse_index_assignment_no_semi(self) -> IndexAssign | IndexMemberAssign | IndexMemberIndexAssign:
+        """Parse ``name[index] = expr`` or ``name[index].member[n] = expr`` without consuming the trailing semicolon."""
+        token = self.eat("IDENT")
+        name = token[1]
+        self.eat("LBRACKET")
+        index = self.parse_expression()
+        self.eat("RBRACKET")
+        if self.peek()[0] in ("DOT", "ARROW"):
+            arrow_token = self.eat()
+            arrow = arrow_token[0] == "ARROW"
+            member_token = self.eat("IDENT")
+            member_name = member_token[1]
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                elem_index = self.parse_expression()
+                self.eat("RBRACKET")
+                self.eat("ASSIGN")
+                expr = self.parse_expression()
+                return IndexMemberIndexAssign(
+                    arrow=arrow,
+                    elem_index=elem_index,
+                    expr=expr,
+                    index=index,
+                    line=token[2],
+                    member_name=member_name,
+                    name=name,
+                )
+            self.eat("ASSIGN")
+            expr = self.parse_expression()
+            return IndexMemberAssign(
+                arrow=arrow,
+                expr=expr,
+                index=index,
+                line=token[2],
+                member_name=member_name,
+                name=name,
+            )
+        self.eat("ASSIGN")
+        expr = self.parse_expression()
+        return IndexAssign(array=Var(line=token[2], name=name), expr=expr, index=index, line=token[2])
+
+    def _parse_member_assign_no_semi(self) -> MemberAssign | MemberIndexAssign:
+        """Parse ``name (. | ->) member = expr`` or the indexed variant without consuming the trailing semicolon.
+
+        Only the plain ``=`` assignment forms are supported here (not
+        compound assignments or increment/decrement).  Callers that need
+        the full statement form (including ``++``/``--`` and ``+=`` etc.)
+        should use :meth:`_parse_member_assignment` instead.
+        """
+        token = self.eat("IDENT")
+        object_name = token[1]
+        arrow_token = self.eat()
+        arrow = arrow_token[0] == "ARROW"
+        member_token = self.eat("IDENT")
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            index_expression = self.parse_expression()
+            self.eat("RBRACKET")
+            self.eat("ASSIGN")
+            value_expression = self.parse_expression()
+            return MemberIndexAssign(
+                arrow=arrow,
+                expr=value_expression,
+                index=index_expression,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
+        self.eat("ASSIGN")
+        expression = self.parse_expression()
+        return MemberAssign(
+            arrow=arrow,
+            expr=expression,
+            line=token[2],
+            member_name=member_token[1],
+            object_name=object_name,
+        )
 
     def _parse_member_assignment(self) -> MemberAssign | MemberIncrementDecrement | MemberIndexAssign:
         """Parse a struct member assignment statement.
@@ -591,6 +727,76 @@ class Parser:
             type_name=local_type_string,
         )
 
+    def _parse_paren_assignment(self) -> AssignExpr | None:
+        """Speculatively parse ``<lvalue> = <rhs>`` (no semicolon) as ``AssignExpr``.
+
+        Called from :meth:`parse_primary` immediately after the opening
+        ``LPAREN`` has been consumed.  On success, also consumes the
+        closing ``RPAREN`` and returns an :class:`AssignExpr` wrapping
+        the inner ``*Assign`` node.  On any mismatch, restores
+        :attr:`position` and returns ``None`` so the caller can fall
+        through to the ordinary parenthesised-expression branch.
+
+        Handles all lvalue shapes supported by the statement-form parsers:
+
+        - ``IDENT = rhs``                         → :class:`Assign`
+        - ``IDENT op= rhs``                       → :class:`Assign` (desugared)
+        - ``IDENT[i] = rhs``                      → :class:`IndexAssign`
+        - ``IDENT[i].m = rhs``                    → :class:`IndexMemberAssign`
+        - ``IDENT[i].m[j] = rhs``                 → :class:`IndexMemberIndexAssign`
+        - ``IDENT.m = rhs`` / ``IDENT->m = rhs``  → :class:`MemberAssign`
+        - ``IDENT.m[i] = rhs``                    → :class:`MemberIndexAssign`
+        - ``*p = rhs``                             → :class:`DerefAssign`
+        - ``*p++ = rhs`` / ``*++p = rhs``         → :class:`DerefIncrementAssign`
+        - ``*(T*)e = rhs``                         → :class:`PointerDereferenceAssign`
+
+        All eleven assignment operators (plain ``=`` plus the ten compound
+        forms) are accepted for the ``IDENT`` lvalue shape.
+        """
+        saved_position = self.position
+        try:
+            first_kind = self.peek()[0]
+            # Pointer-dereference lvalues: ``*p = rhs``, ``*p++ = rhs``, etc.
+            if first_kind == "STAR":
+                inner = self._parse_deref_assignment_no_semi()
+                if self.peek()[0] != "RPAREN":
+                    self.position = saved_position
+                    return None
+                self.eat("RPAREN")
+                return AssignExpr(inner=inner, line=inner.line)
+            # All remaining lvalue shapes start with an IDENT.
+            if first_kind != "IDENT":
+                return None
+            second_kind = self.peek(offset=1)[0]
+            # ``IDENT[i]...`` — array index (possibly with member chain).
+            if second_kind == "LBRACKET":
+                inner = self._parse_index_assignment_no_semi()
+                if self.peek()[0] != "RPAREN":
+                    self.position = saved_position
+                    return None
+                self.eat("RPAREN")
+                return AssignExpr(inner=inner, line=inner.line)
+            # ``IDENT. / IDENT->`` — member (possibly with index suffix).
+            if second_kind in ("DOT", "ARROW"):
+                inner = self._parse_member_assign_no_semi()
+                if self.peek()[0] != "RPAREN":
+                    self.position = saved_position
+                    return None
+                self.eat("RPAREN")
+                return AssignExpr(inner=inner, line=inner.line)
+            # ``IDENT =`` or ``IDENT op=`` — plain or compound assignment.
+            if second_kind != "ASSIGN" and second_kind not in COMPOUND_ASSIGN_OPERATORS:
+                return None
+            inner = self._parse_simple_assignment_no_semi()
+            if self.peek()[0] != "RPAREN":
+                self.position = saved_position
+                return None
+            self.eat("RPAREN")
+            return AssignExpr(inner=inner, line=inner.line)
+        except CompileError:
+            self.position = saved_position
+            return None
+
     def _parse_pointer_suffix(self, base: str, /, *, max_stars: int) -> str:
         """Greedily consume up to ``max_stars`` trailing ``*`` tokens.
 
@@ -625,6 +831,34 @@ class Parser:
                 break
         self.eat("RBRACE")
         return StructInitializer(line=line, positional=fields)
+
+    def _parse_simple_assignment_no_semi(self) -> Assign:
+        """Parse ``IDENT = expr`` or ``IDENT op= expr`` without consuming the trailing semicolon.
+
+        Handles both the plain ``=`` form and all ten compound assignment
+        operators.  The compound forms are desugared to
+        ``Assign(name=name, expr=BinaryOperation(left=Var(name), op, right=expr))``
+        exactly as :meth:`parse_compound_assignment` does for the statement form.
+
+        Returns:
+            An :class:`Assign` node for the assignment.
+
+        """
+        token = self.eat("IDENT")
+        name = token[1]
+        line = token[2]
+        operator_token = self.eat()
+        if operator_token[0] in COMPOUND_ASSIGN_OPERATORS:
+            operator = COMPOUND_ASSIGN_OPERATORS[operator_token[0]]
+            expression = self.parse_expression()
+            return Assign(
+                expr=BinaryOperation(left=Var(line=line, name=name), line=line, operation=operator, right=expression),
+                line=line,
+                name=name,
+            )
+        # Plain ``=``
+        expression = self.parse_expression()
+        return Assign(expr=expression, line=line, name=name)
 
     def _parse_struct_declaration(self) -> StructDecl:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
@@ -770,12 +1004,9 @@ class Parser:
             An AST node for the assignment.
 
         """
-        token = self.eat("IDENT")
-        name = token[1]
-        self.eat("ASSIGN")
-        expression = self.parse_expression()
+        node = self._parse_simple_assignment_no_semi()
         self.eat("SEMI")
-        return Assign(expr=expression, line=token[2], name=name)
+        return node
 
     def parse_bitwise_and(self) -> Node:
         """Parse a left-associative bitwise ``&`` expression.
@@ -963,47 +1194,9 @@ class Parser:
 
     def parse_index_assignment(self) -> Node:
         """Parse ``name[index] = expr;`` or ``name[index].member[n] = expr;``."""
-        token = self.eat("IDENT")
-        name = token[1]
-        self.eat("LBRACKET")
-        index = self.parse_expression()
-        self.eat("RBRACKET")
-        if self.peek()[0] in ("DOT", "ARROW"):
-            arrow_token = self.eat()
-            arrow = arrow_token[0] == "ARROW"
-            member_token = self.eat("IDENT")
-            member_name = member_token[1]
-            if self.peek()[0] == "LBRACKET":
-                self.eat("LBRACKET")
-                elem_index = self.parse_expression()
-                self.eat("RBRACKET")
-                self.eat("ASSIGN")
-                expr = self.parse_expression()
-                self.eat("SEMI")
-                return IndexMemberIndexAssign(
-                    arrow=arrow,
-                    elem_index=elem_index,
-                    expr=expr,
-                    index=index,
-                    line=token[2],
-                    member_name=member_name,
-                    name=name,
-                )
-            self.eat("ASSIGN")
-            expr = self.parse_expression()
-            self.eat("SEMI")
-            return IndexMemberAssign(
-                arrow=arrow,
-                expr=expr,
-                index=index,
-                line=token[2],
-                member_name=member_name,
-                name=name,
-            )
-        self.eat("ASSIGN")
-        expr = self.parse_expression()
+        node = self._parse_index_assignment_no_semi()
         self.eat("SEMI")
-        return IndexAssign(array=Var(line=token[2], name=name), expr=expr, index=index, line=token[2])
+        return node
 
     def parse_logical_and(self) -> Node:
         """Parse a left-associative ``&&`` expression.
@@ -1431,6 +1624,13 @@ class Parser:
                         object_name="",
                     )
                 return cast
+            # Parenthesised assignment-as-expression: ``(lvalue = rhs)``.
+            # Try the speculative parse before falling through to the plain
+            # parenthesised-expression branch — if it succeeds, the closing
+            # RPAREN has already been consumed.
+            assign_expression = self._parse_paren_assignment()
+            if assign_expression is not None:
+                return assign_expression
             expression = self.parse_expression()
             self.eat("RPAREN")
             # Postfix ``->field`` on a parenthesized pointer expression
@@ -1566,68 +1766,11 @@ class Parser:
         if token[0] == "WHILE":
             return self.parse_while()
         if token[0] == "STAR":
-            self.eat("STAR")
-            # ``*(T *)expr = value;`` — cast-then-assign through an
-            # arbitrary pointer.  Symmetric with the read-side
-            # :class:`PointerDereference` parse in :meth:`parse_primary`.
-            if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
-                operand = self.parse_primary()
-                if not isinstance(operand, Cast):
-                    message = "expected pointer cast after '*'"
-                    raise CompileError(message, line=token[2])
-                cast_type = operand.target_type.rstrip()
-                if not cast_type.endswith("*"):
-                    message = f"expected pointer type in '*(T *)expr = ...', got '{cast_type}'"
-                    raise CompileError(message, line=token[2])
-                pointee_type = cast_type[:-1].rstrip()
-                self.eat("ASSIGN")
-                value = self.parse_expression()
-                self.eat("SEMI")
-                return PointerDereferenceAssign(
-                    address=operand.expression,
-                    line=token[2],
-                    target_type=pointee_type,
-                    value=value,
-                )
-            # Prefix ``*++p = expr;`` / ``*--p = expr;`` — bump ``p``
-            # first, then write through the post-incremented pointer.
-            # Lowered through :class:`DerefIncrementAssign` with
-            # ``is_postfix=False`` so the existing codegen path picks
-            # the ordering.
-            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                prefix_token = self.eat()
-                name_token = self.eat("IDENT")
-                self.eat("ASSIGN")
-                value = self.parse_expression()
-                self.eat("SEMI")
-                return DerefIncrementAssign(
-                    delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
-                    expr=value,
-                    is_postfix=False,
-                    line=token[2],
-                    target_name=name_token[1],
-                )
-            name_token = self.eat("IDENT")
-            # Postfix ``*p++ = expr;`` / ``*p-- = expr;`` — write through
-            # the pre-update pointer, then bump ``p`` by sizeof(*p).
-            next_kind = self.peek()[0]
-            if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
-                self.eat()
-                delta = 1 if next_kind == "PLUS_PLUS" else -1
-                self.eat("ASSIGN")
-                value = self.parse_expression()
-                self.eat("SEMI")
-                return DerefIncrementAssign(
-                    delta=delta,
-                    expr=value,
-                    is_postfix=True,
-                    line=token[2],
-                    target_name=name_token[1],
-                )
-            self.eat("ASSIGN")
-            expr = self.parse_expression()
+            # Delegate to the shared no-semicolon helper (which does NOT eat
+            # the leading STAR yet), then consume the trailing semicolon here.
+            node = self._parse_deref_assignment_no_semi()
             self.eat("SEMI")
-            return DerefAssign(expr=expr, line=token[2], pointer=Var(line=token[2], name=name_token[1]))
+            return node
         if token[0] == "LPAREN" and self.peek(offset=1)[0] == "VOID" and self.peek(offset=2)[0] == "RPAREN":
             # ``(void)expr;`` — evaluate *expr* for side effects only and
             # discard the result.  Common in C to mark a value as

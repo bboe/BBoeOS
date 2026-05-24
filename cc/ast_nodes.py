@@ -72,6 +72,21 @@ class Assign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class AssignExpr(Node):
+    """A parenthesized assignment used as an expression.
+
+    Wraps an underlying ``*Assign`` AST node (``Assign``, ``DerefAssign``,
+    ``IndexAssign``, ``MemberAssign``, ``PointerDereferenceAssign``,
+    ``DerefIncrementAssign``, ``IndexMemberAssign``, ``MemberIndexAssign``,
+    ``IndexMemberIndexAssign``).  The value of the expression is the
+    post-assignment value of the lvalue; the lvalue itself is not produced
+    as an lvalue (chained ``a = b = c`` must be written ``a = (b = c)``).
+    """
+
+    inner: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class BinaryOperation(Node):
     """Binary operator expression ``left OPERATION right``."""
 
