@@ -2267,14 +2267,23 @@ class Parser:
         line = self.peek()[2]
         type_string = self.parse_type()
         declarations: list[Node] = [self._parse_one_declarator(line=line, type_string=type_string)]
+        shared_base_type = type_string
+        base_stars = len(shared_base_type) - len(shared_base_type.rstrip("*"))
         while self.peek()[0] == "COMMA":
             # Additional declarators share the base ``type_string`` and
-            # each parse their own optional ``[N]`` + ``= init``.
-            # Function-pointer declarators (``type (*name)(params)``)
-            # are single-declarator only — they hijack the LPAREN token
-            # before the name, so they can never appear after a COMMA.
+            # each parse their own optional pointer stars on top of the
+            # shared base (``const char *p = a, *q = b;``), plus the
+            # usual ``[N]`` + ``= init``.  Function-pointer declarators
+            # (``type (*name)(params)``) are single-declarator only —
+            # they hijack the LPAREN token before the name, so they can
+            # never appear after a COMMA.
             self.eat("COMMA")
-            declarations.append(self._parse_one_declarator(line=line, type_string=type_string))
+            extra_stars = 0
+            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
+                self.eat("STAR")
+                extra_stars += 1
+            declarator_type = shared_base_type + "*" * extra_stars
+            declarations.append(self._parse_one_declarator(line=line, type_string=declarator_type))
         self.eat("SEMI")
         return declarations
 

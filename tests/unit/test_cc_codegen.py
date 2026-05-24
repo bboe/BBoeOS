@@ -1671,6 +1671,25 @@ def test_file_scope_multi_declarator_extern_pointers_parse() -> None:
         assert f"_g_{name}:" not in output, f"extern must not emit storage for _g_{name}\n{output}"
 
 
+def test_file_scope_multi_declarator_per_declarator_pointer() -> None:
+    """``int *a = NULL, *b = NULL;`` at file scope parses with per-declarator stars.
+
+    Each declarator after the first may carry its own ``*`` on top of
+    the shared base type so portable shapes like
+    ``const unsigned char *p = a, *q = b;`` (libbboeos/string.c memcmp)
+    parse without forcing one declaration per line.
+    """
+    output = _kernel("""
+        int *pointer_a = 0, *pointer_b = 0;
+        int read_pair(int *result __attribute__((out_register("ax")))) {
+            *result = (int)pointer_a + (int)pointer_b;
+            return 1;
+        }
+    """)
+    assert "_g_pointer_a:" in output, f"expected _g_pointer_a storage\n{output}"
+    assert "_g_pointer_b:" in output, f"expected _g_pointer_b storage\n{output}"
+
+
 def test_file_scope_multi_declarator_with_attribute_rejected() -> None:
     """``__attribute__`` on a multi-declarator file-scope declaration is rejected.
 
@@ -3102,6 +3121,26 @@ def test_multi_declarator_local_decls_compile_to_independent_slots() -> None:
     # mov-of-literal stores show up.
     assert "1" in asm and "2" in asm and "3" in asm, f"expected all three init literals in:\n{asm}"
     assert "sum:" in asm, f"expected sum() to be emitted:\n{asm}"
+
+
+def test_multi_declarator_local_decls_per_declarator_pointer() -> None:
+    """``const unsigned char *p = a, *q = b;`` parses as two pointer locals.
+
+    Each declarator after the first may grow its own pointer depth on
+    top of the shared base type.  Forcing function is the memcmp loop
+    in ``user/libbboeos/string.c`` whose ``const unsigned char *p = a,
+    *q = b;`` previously tripped the comma-continuation.
+    """
+    asm = _kernel(
+        """
+        int memcmp_like(const unsigned char *a, const unsigned char *b) {
+            const unsigned char *p = a, *q = b;
+            return (int)*p - (int)*q;
+        }
+        """,
+        bits=32,
+    )
+    assert "memcmp_like:" in asm, f"expected memcmp_like() to be emitted:\n{asm}"
 
 
 def test_naked_if_else_dispatch_both_branches_tail_jmp() -> None:
