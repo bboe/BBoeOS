@@ -1213,23 +1213,92 @@ def test_deref_postfix_increment_int_pointer_read() -> None:
     assert "add dword [ebp-4], 4" in body, f"expected int* bump by 4\n{asm}"
 
 
-def test_deref_prefix_increment_rejected() -> None:
-    """Prefix ``*++p`` is rejected with a usable error.
+def test_deref_prefix_decrement_char_pointer_read() -> None:
+    """``*--p`` on ``char *p`` decs the slot first, then byte-loads through ESI.
 
-    Supporting prefix-deref requires a different lowering (deref the
-    post-incremented pointer) and the in-tree forcing functions
-    (stdio.c's ``_emit`` / ``_utoa``) only need the postfix form.
+    Mirror of the prefix-increment read-side test, locking down the
+    sign of the bump (``dec`` not ``inc``) and the bump-before-load
+    ordering.
     """
-    error = _kernel_error(
+    asm = _kernel(
         """
-        int f(int *p) {
+        int read_back(char *p) {
+            return *--p;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("read_back:", 1)[1]
+    decrement_index = body.find("dec dword [ebp-4]")
+    load_index = body.find("movzx eax, byte [esi]")
+    assert decrement_index != -1, f"expected dec on char* slot\n{asm}"
+    assert load_index != -1, f"expected byte-zero-extend load\n{asm}"
+    assert decrement_index < load_index, f"expected dec before load (prefix order)\n{asm}"
+
+
+def test_deref_prefix_increment_assign_char_pointer() -> None:
+    """``*++p = c`` on ``char *p`` bumps ``p`` first, then byte-stores via ESI.
+
+    Forcing function for the ``strncat`` / ``*++p = *src++;`` pattern.
+    Pinning the order: ``inc dword [ebp-4]`` must precede the
+    ``mov [esi], al`` store so the new byte lands at the incremented
+    position.
+    """
+    asm = _kernel(
+        """
+        void put(char *p, char c) {
+            *++p = c;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("put:", 1)[1]
+    increment_index = body.find("inc dword [ebp-4]")
+    store_index = body.find("mov [esi], al")
+    assert increment_index != -1, f"expected char* bump by 1\n{asm}"
+    assert store_index != -1, f"expected byte store through ESI\n{asm}"
+    assert increment_index < store_index, f"expected inc before store (prefix order)\n{asm}"
+
+
+def test_deref_prefix_increment_char_pointer_read() -> None:
+    """``*++p`` on ``char *p`` bumps ``p`` by 1, then byte-loads through ESI.
+
+    Counterpart to the postfix read-side test.  ``inc dword [ebp-4]``
+    must come before ``movzx eax, byte [esi]`` so the returned byte is
+    the one at the incremented position.
+    """
+    asm = _kernel(
+        """
+        int read_byte(char *p) {
             return *++p;
         }
         """,
         bits=32,
     )
-    assert "prefix" in error, f"expected 'prefix' in error message, got:\n{error}"
-    assert "*++p" in error or "*--p" in error, f"expected hint about *++p/*--p, got:\n{error}"
+    body = asm.split("read_byte:", 1)[1]
+    increment_index = body.find("inc dword [ebp-4]")
+    load_index = body.find("movzx eax, byte [esi]")
+    assert increment_index != -1, f"expected inc on char* slot\n{asm}"
+    assert load_index != -1, f"expected byte-zero-extend load\n{asm}"
+    assert increment_index < load_index, f"expected inc before load (prefix order)\n{asm}"
+
+
+def test_deref_prefix_increment_int_pointer_read() -> None:
+    """``*++p`` on ``int *p`` bumps ``p`` by 4, then 4-byte loads through ESI."""
+    asm = _kernel(
+        """
+        int read_word(int *p) {
+            return *++p;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("read_word:", 1)[1]
+    increment_index = body.find("add dword [ebp-4], 4")
+    load_index = body.find("mov eax, [esi]")
+    assert increment_index != -1, f"expected int* bump by 4\n{asm}"
+    assert load_index != -1, f"expected 4-byte load through ESI\n{asm}"
+    assert increment_index < load_index, f"expected bump before load (prefix order)\n{asm}"
 
 
 def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
@@ -2108,6 +2177,32 @@ def test_int_local_compared_to_int_literal_compiles() -> None:
         }
     """)
     assert "f:" in asm
+
+
+def test_integer_literal_suffixes_parse() -> None:
+    """C integer literal suffixes (``L`` / ``U`` / ``UL`` / ``LL`` / ``ULL``) lex as plain integers.
+
+    cc.py has no real long / unsigned distinction at the literal
+    level; the suffix just needs to lex so libbboeos sources can write
+    ``-1L``, ``0xFFFFFFFFu``, ``1ULL``, etc. without breaking the
+    parser.  Unblocks user/libbboeos/stdio.c which hits ``-1L`` inside
+    the ftell-style conditional ``pos == (off_t)-1 ? -1L : (long)pos``.
+    """
+    asm = _user("""
+        long with_l(void) { return -1L; }
+        unsigned int with_u(void) { return 1u; }
+        unsigned long with_ul(void) { return 0xFFFFFFFFUL; }
+        long with_ll(void) { return 1LL; }
+        unsigned long with_ull(void) { return 1uLL; }
+        int main(void) {
+            return (int)(with_l() + with_u() + with_ul() + with_ll() + with_ull());
+        }
+    """)
+    assert "with_l:" in asm, f"expected with_l() to be emitted:\n{asm}"
+    assert "with_u:" in asm, f"expected with_u() to be emitted:\n{asm}"
+    assert "with_ul:" in asm, f"expected with_ul() to be emitted:\n{asm}"
+    assert "with_ll:" in asm, f"expected with_ll() to be emitted:\n{asm}"
+    assert "with_ull:" in asm, f"expected with_ull() to be emitted:\n{asm}"
 
 
 def test_kernel_compiles_and_assembles() -> None:
@@ -6480,4 +6575,29 @@ def test_void_pointer_param_parses_and_compiles() -> None:
         }
     """)
     assert "copy:" in asm, f"expected copy() to be emitted:\n{asm}"
+    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"
+
+
+def test_volatile_qualifier_parses_as_noop() -> None:
+    """``volatile`` is accepted as a no-op type qualifier.
+
+    cc.py has no memory-model semantics, so ``volatile`` just needs to
+    parse so POSIX-style declarations (``typedef volatile int
+    sig_atomic_t;`` from ``<signal.h>``) survive.  Pin the parse over a
+    typedef, a global, a parameter, and a local — and a chained
+    ``const volatile`` qualifier sequence.
+    """
+    asm = _user("""
+        typedef volatile int sig_atomic_t;
+        volatile int g_flag;
+        int read_flag(volatile int *p) {
+            volatile int local = *p;
+            const volatile int folded = 0;
+            return local + folded + g_flag;
+        }
+        int main() {
+            return read_flag(&g_flag);
+        }
+    """)
+    assert "read_flag:" in asm, f"expected read_flag() to be emitted:\n{asm}"
     assert "main:" in asm, f"expected main() to be emitted:\n{asm}"

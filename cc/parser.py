@@ -1372,13 +1372,20 @@ class Parser:
                 # to get the pointee type that selects the load width.
                 pointee_type = cast_type[:-1].rstrip()
                 return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
-            # Reject prefix ``*++p`` / ``*--p`` — supporting that form
-            # requires a different lowering (deref the *post*-incremented
-            # pointer) and stdio.c doesn't need it.  Postfix below covers
-            # ``*p++`` / ``*p--``.
+            # Prefix ``*++p`` / ``*--p`` as an rvalue: bump ``p`` by
+            # sizeof(*p) first, then deref the post-incremented pointer.
+            # Lowered through :class:`DerefIncrement` with
+            # ``is_postfix=False`` so the existing codegen path picks the
+            # ordering.
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                message = "prefix '*++p' / '*--p' is not supported; use a temporary"
-                raise CompileError(message, line=line)
+                prefix_token = self.eat()
+                name_token = self.eat("IDENT")
+                return DerefIncrement(
+                    delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
+                    is_postfix=False,
+                    line=line,
+                    target_name=name_token[1],
+                )
             name_token = self.eat("IDENT")
             # Postfix ``*p++`` / ``*p--`` as an rvalue: deref the
             # pre-update pointer, then bump ``p`` by sizeof(*p).
@@ -1582,11 +1589,24 @@ class Parser:
                     target_type=pointee_type,
                     value=value,
                 )
-            # Reject prefix ``*++p = ...`` for parity with the rvalue
-            # parse in :meth:`parse_primary`.
+            # Prefix ``*++p = expr;`` / ``*--p = expr;`` — bump ``p``
+            # first, then write through the post-incremented pointer.
+            # Lowered through :class:`DerefIncrementAssign` with
+            # ``is_postfix=False`` so the existing codegen path picks
+            # the ordering.
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                message = "prefix '*++p' / '*--p' is not supported; use a temporary"
-                raise CompileError(message, line=token[2])
+                prefix_token = self.eat()
+                name_token = self.eat("IDENT")
+                self.eat("ASSIGN")
+                value = self.parse_expression()
+                self.eat("SEMI")
+                return DerefIncrementAssign(
+                    delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
+                    expr=value,
+                    is_postfix=False,
+                    line=token[2],
+                    target_name=name_token[1],
+                )
             name_token = self.eat("IDENT")
             # Postfix ``*p++ = expr;`` / ``*p-- = expr;`` — write through
             # the pre-update pointer, then bump ``p`` by sizeof(*p).
@@ -2115,9 +2135,13 @@ class Parser:
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
-        # ``const`` / ``signed`` are no-op leading qualifiers.  Loop so
-        # ``const signed int`` etc. drop both before we read the base.
-        while self.peek()[0] in {"CONST", "SIGNED"}:
+        # ``const`` / ``signed`` / ``volatile`` are no-op leading
+        # qualifiers.  Loop so ``const signed int`` /
+        # ``volatile int`` etc. drop them all before we read the base.
+        # ``volatile`` carries no memory-model semantics in cc.py;
+        # accepting the keyword just lets POSIX-style prototypes
+        # (e.g. ``typedef volatile int sig_atomic_t;``) parse.
+        while self.peek()[0] in {"CONST", "SIGNED", "VOLATILE"}:
             self.eat()
         token = self.peek()
         if token[0] == "VOID":

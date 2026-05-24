@@ -154,15 +154,14 @@ class DerefAssign(Node):
 
 @dataclass(kw_only=True, slots=True)
 class DerefIncrement(Node):
-    """Postfix ``*p++`` / ``*p--`` as an rvalue expression.
+    """``*p++`` / ``*p--`` / ``*++p`` / ``*--p`` as an rvalue expression.
 
-    Evaluates to the pointee read through ``target_name`` *before* the
-    pointer is bumped (postfix semantics).  ``delta`` is ``+1`` or
-    ``-1``; ``is_postfix`` is always ``True`` for now — prefix
-    ``*++p`` is rejected by the parser, so the field exists only for
-    symmetry with :class:`IncrementDecrement` and future-proofing.
-    The bump advances ``target_name`` by ``sizeof(*target_name)``
-    bytes, matching standard C pointer arithmetic.
+    Postfix (``is_postfix=True``) evaluates to the pointee read through
+    ``target_name`` *before* the pointer is bumped; prefix
+    (``is_postfix=False``) bumps first and then reads through the
+    updated pointer.  ``delta`` is ``+1`` or ``-1``.  The bump advances
+    ``target_name`` by ``sizeof(*target_name)`` bytes, matching standard
+    C pointer arithmetic.
     """
 
     delta: int
@@ -172,12 +171,14 @@ class DerefIncrement(Node):
 
 @dataclass(kw_only=True, slots=True)
 class DerefIncrementAssign(Node):
-    """Statement ``*p++ = expr;`` / ``*p-- = expr;``.
+    """Statement ``*p++ = expr;`` / ``*p-- = expr;`` / ``*++p = expr;`` / ``*--p = expr;``.
 
-    Writes ``expr`` through ``target_name`` (pointee-width store),
-    then advances ``target_name`` by ``sizeof(*target_name)``.  Used
-    in the ``_utoa`` digit-emit loop where ``*out++ = tmp[i];``
-    streams digits into the output buffer.
+    Postfix (``is_postfix=True``) writes ``expr`` through
+    ``target_name`` at pointee width, then advances ``target_name`` by
+    ``sizeof(*target_name)``.  Prefix (``is_postfix=False``) advances
+    first, then writes through the updated pointer.  Used in
+    standard digit-emit / copy loops (``*out++ = tmp[i];``) and the
+    ``*++p = *src++;`` pattern.
     """
 
     delta: int
