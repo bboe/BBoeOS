@@ -29,6 +29,7 @@ from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
     Assign,
+    AssignExpr,
     BinaryOperation,
     Break,
     Call,
@@ -1877,6 +1878,67 @@ class EmissionMixin:
                 reverse = "sub" if expression.delta > 0 else "add"
                 self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
                 self.ax_clear()
+        elif isinstance(expression, AssignExpr):
+            # Parenthesized assignment used as an expression (AST path — only
+            # reached for ``main`` and other functions that bypass the IR
+            # builder).  The IR path handles ``AssignExpr`` correctly via
+            # ``cc.ir.Builder._lower_assign_expr`` (evaluates the RHS into a
+            # temp, rewrites the *Assign, emits it as a statement).
+            #
+            # For the AST path: every store function evaluates the RHS into AX
+            # first and writes AX to the destination.  After the store, AX
+            # physically holds the stored value even when ``ax_clear()`` was
+            # called internally (that call only clears the *tracking* metadata,
+            # not the register).  Calling the store function directly (not
+            # through ``generate_statement``, which appends another
+            # ``ax_clear()``) leaves AX = assigned value as required.
+            # Plain ``Assign`` is a special case: ``emit_store_local`` does the
+            # evaluation + store and tracks ``ax_local``; reading the variable
+            # via ``generate_expression(Var(...))`` is then a no-op.
+            inner = expression.inner
+            if isinstance(inner, Assign):
+                self._check_defined(inner.name, line=inner.line)
+                self.emit_store_local(expression=inner.expr, name=inner.name)
+                self.generate_expression(Var(line=inner.line, name=inner.name))
+            elif isinstance(inner, DerefAssign):
+                # ``generate_statement`` on DerefAssign evaluates expr → AX,
+                # stores, then calls ax_clear().  AX still holds the value
+                # after the store.  Call the statement path and then force AX
+                # back to the value with a direct load (no re-evaluation of
+                # the RHS — use the already-written pointee read).
+                self.generate_statement(inner)
+                # AX is cleared by tracking but physically holds the value;
+                # restore tracking so the caller can rely on AX.
+                # Re-evaluate expr only if it is a trivial constant/variable
+                # (avoids double function-call).  For non-trivial RHSs, the
+                # physical AX value is already correct — just re-mark it via
+                # generate_expression on a Var if we know the name.
+                if isinstance(inner.expr, (Int, Var)):
+                    self.generate_expression(inner.expr)
+            elif isinstance(inner, DerefIncrementAssign):
+                # Same pattern as DerefAssign: the statement path evaluates
+                # expr → AX, stores, bumps pointer, clears AX tracking.  The
+                # assigned value (the expr value, not the post-bump pointer) is
+                # still physically in AX.  No re-evaluation needed.
+                self.generate_statement(inner)
+            elif isinstance(inner, PointerDereferenceAssign):
+                self._emit_pointer_dereference_assign(inner)
+            elif isinstance(inner, IndexAssign):
+                self.generate_index_assign(inner)
+            elif isinstance(inner, MemberAssign):
+                if self._member_assign_targets_bitfield(inner):
+                    message = "assignment-as-expression to bitfield fields is not supported"
+                    raise CompileError(message, line=expression.line)
+                self.generate_member_assign(inner)
+            elif isinstance(inner, MemberIndexAssign):
+                self.generate_member_index_assign(inner)
+            elif isinstance(inner, IndexMemberAssign):
+                self.generate_index_member_assign(inner)
+            elif isinstance(inner, IndexMemberIndexAssign):
+                self.generate_index_member_index_assign(inner)
+            else:
+                message = f"AssignExpr: unsupported inner node type '{type(inner).__name__}'"
+                raise CompileError(message, line=expression.line)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -1965,6 +2027,30 @@ class EmissionMixin:
                     self.emit(line)
             case ir.Block(node=node):
                 self.generate_statement(node)
+
+    def _member_assign_targets_bitfield(self, statement: MemberAssign, /) -> bool:
+        """Return True if *statement* writes to a bitfield member.
+
+        Uses the same ``struct_layouts`` / ``variable_types`` lookup as
+        :meth:`generate_member_assign` so the detection predicate is
+        consistent: ``info.bit_width is not None``.
+        """
+        struct_type = self.variable_types.get(statement.object_name, "")
+        if statement.arrow:
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                return False
+            tag = struct_type[7:-1]
+        else:
+            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
+                return False
+            tag = struct_type[7:]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            return False
+        info = layout.get(statement.member_name)
+        if info is None:
+            return False
+        return info.bit_width is not None
 
     def _node_contains_var(self, node: Node, name: str, /) -> bool:
         """Return True if node or any descendant is Var(name).

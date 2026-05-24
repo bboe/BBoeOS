@@ -16,6 +16,7 @@ form from the AST form.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 from cc import ast_nodes
@@ -218,23 +219,88 @@ class Builder:
 
     def build_program(self, program: ast_nodes.Program) -> Program:
         """Lower every function in *program* to IR."""
+        # Build a table of struct_name → frozenset of bitfield field names so
+        # _lower_assign_expr can reject bitfield assignment-as-expression.
+        self._struct_bitfield_names: dict[str, frozenset[str]] = {}
+        for node in program.globals:
+            if isinstance(node, ast_nodes.StructDecl):
+                bitfield_names = frozenset(
+                    field.field_name
+                    for field in node.fields
+                    if isinstance(field, ast_nodes.StructField) and field.bit_width is not None and field.field_name is not None
+                )
+                if bitfield_names:
+                    self._struct_bitfield_names[node.name] = bitfield_names
         return Program(functions=[self._build_function(f) for f in program.functions], globals=program.globals)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _assign_rhs_field_name(node: ast_nodes.Node) -> str:
+        """Return the attribute name that holds the RHS expression for any *Assign node.
+
+        Every ``*Assign`` dataclass in ``cc/ast_nodes.py`` exposes the RHS
+        as ``expr``, except :class:`~ast_nodes.PointerDereferenceAssign`
+        which uses ``value``.
+        """
+        if isinstance(node, ast_nodes.PointerDereferenceAssign):
+            return "value"
+        return "expr"
+
     def _is_carry_return_call(self, node: ast_nodes.Node) -> bool:
         """Return True if *node* is a :class:`ast_nodes.Call` to a carry_return function."""
         return isinstance(node, ast_nodes.Call) and node.name in self._carry_return_functions
 
-    def _tmp(self) -> str:
-        name = f"_ir_{self._counter}"
+    def _lbl(self, tag: str = "l") -> str:
+        name = f"._ir_{tag}{self._counter}"
         self._counter += 1
         return name
 
-    def _lbl(self, tag: str = "l") -> str:
-        name = f"._ir_{tag}{self._counter}"
+    def _lower_assign_expr(
+        self,
+        inner: ast_nodes.Node,
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> str:
+        """Lower a parenthesized assignment to IR; return the temp holding its value.
+
+        Strategy: evaluate the RHS into a temp, rewrite the wrapped
+        ``*Assign`` so its RHS is ``Var(temp)``, emit the rewritten
+        ``*Assign`` as a statement (reusing the existing per-lvalue store
+        paths), and return the temp as the expression value.  This
+        guarantees the original RHS expression is evaluated exactly once.
+        """
+        line = inner.line
+        rhs_field = self._assign_rhs_field_name(inner)
+        original_rhs = getattr(inner, rhs_field)
+        # ``unsigned long`` lvalues don't round-trip cleanly through
+        # int-typed temps.  Out-of-scope per the spec.
+        if isinstance(inner, ast_nodes.Assign) and self._var_types.get(inner.name) == "unsigned long":
+            message = "assignment-as-expression to 'unsigned long' is not supported"
+            raise CompileError(message, line=line)
+        # Bitfield member assignments clobber AX during the read-modify-write
+        # sequence, breaking the "AX = assigned value" contract.  Reject at
+        # compile time rather than silently miscompile.
+        if isinstance(inner, ast_nodes.MemberAssign):
+            struct_type = self._var_types.get(inner.object_name, "")
+            # Dot form: "struct TAG"; arrow form: "struct TAG*" — strip the "*".
+            tag = struct_type[7:].rstrip("*") if struct_type.startswith("struct ") else ""
+            bitfield_fields = self._struct_bitfield_names.get(tag, frozenset())
+            if inner.member_name in bitfield_fields:
+                message = "assignment-as-expression to bitfield fields is not supported"
+                raise CompileError(message, line=line)
+        rhs_value = self._build_expr(original_rhs, out, strings=strings)
+        temp = self._tmp()
+        out.append(Copy(destination=temp, source=rhs_value))
+        rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
+        self._build_stmt(rebound, out, break_tgt=None, cont_tgt=None, strings=strings)
+        return temp
+
+    def _tmp(self) -> str:
+        name = f"_ir_{self._counter}"
         self._counter += 1
         return name
 
@@ -560,6 +626,8 @@ class Builder:
                 # Pass through as-is so generate_call can detect out_register
                 # arguments (&var) without the node being replaced by a temp.
                 return expr
+            case ast_nodes.AssignExpr(inner=inner):
+                return self._lower_assign_expr(inner, out, strings=strings)
             case _:
                 # Complex: use a temp + Block to let AST codegen handle it.
                 temp = self._tmp()

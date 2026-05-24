@@ -11,40 +11,46 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: parenthesized assignment-as-expression.** Accept the classic `while
+  ((p = next()))`, `f((x = 7))`, `a = (b = c)` and similar forms.  The enclosing
+  parentheses are required and must be dedicated to the assignment — `if (x =
+  y)` and `f(x = y)` are still rejected, matching the GCC `-Wparentheses` idiom
+  and ruling out the typo by construction.  Covers all eleven assignment
+  operators (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
+  and every existing lvalue shape (`*p`, `*p++`, `a[i]`, `s.f`, `p->f`,
+  `a[i].f`, `p->a[i]`). Lowered through an IR temp so the RHS is evaluated
+  exactly once — `(*p = next())` calls `next` once, not twice.  Bitfield member
+  fields are rejected at compile time (the RMW store clobbers the AX result
+  register on the AST path); `unsigned long` lvalues remain statement-only.
 - **cc.py: auto-pin cost gate continues past first failed candidate.**
-  `_select_auto_pin_candidates` used to ``break`` out of the
-  body-candidate loop the first time a candidate failed its
-  matched-register cost gate, on the assumption that every later
-  (lower-ref) candidate was also doomed.  That conflates two
-  orderings — candidates are ranked by ref count, but registers are
-  ranked by clobber cost — so a lower-ref candidate can still beat a
-  cheaper leftover register (e.g. EDI/CX at zero clobber for a
-  function with no calls).  Switch to ``continue`` so those
-  candidates get a chance.  Shrinks asm.bin by 16 bytes and
-  kernel.bin by 8 bytes; ``lookup_ident_here`` / ``parse_operand``
-  in ``user/programs/asm.c`` and ``rtc_read_epoch`` /
-  ``ps2_handle_scancode`` in ``kernel/drivers/`` each pick up an
-  extra pin.  PR #471's ``ax_clear`` after the pinned-right cmp
-  fast path is the load-bearing safety belt for the extra pins this
-  produces; PR #478's cross-page BSS-trailer fix is what made it
-  safe to land at all.
+  `_select_auto_pin_candidates` used to ``break`` out of the body-candidate loop
+  the first time a candidate failed its matched-register cost gate, on the
+  assumption that every later (lower-ref) candidate was also doomed.  That
+  conflates two orderings — candidates are ranked by ref count, but registers
+  are ranked by clobber cost — so a lower-ref candidate can still beat a cheaper
+  leftover register (e.g. EDI/CX at zero clobber for a function with no calls).
+  Switch to ``continue`` so those candidates get a chance.  Shrinks asm.bin by
+  16 bytes and kernel.bin by 8 bytes; ``lookup_ident_here`` / ``parse_operand``
+  in ``user/programs/asm.c`` and ``rtc_read_epoch`` / ``ps2_handle_scancode`` in
+  ``kernel/drivers/`` each pick up an extra pin.  PR #471's ``ax_clear`` after
+  the pinned-right cmp fast path is the load-bearing safety belt for the extra
+  pins this produces; PR #478's cross-page BSS-trailer fix is what made it safe
+  to land at all.
 - **kernel: stage the BSS trailer across the last two binary frames.**
-  ``program_enter``'s post-stream trailer peek only inspected the
-  *last* loaded binary frame.  When the binary ended 1..5 bytes into
-  that frame (binsize mod 4096 in 1..5), the 6-byte ``BSS_MAGIC32``
-  trailer straddled the page boundary — the loader's ``ECX >= 6``
-  check failed, the legacy 4-byte magic mismatched (``0xB032`` vs
-  ``0xB055``), and ``bss_size`` defaulted to 0.  No BSS pages got
-  mapped, and the program's first BSS write faulted with EXC0E.
-  The fix stages the binary's trailing 6 bytes into a kernel scratch
-  buffer (``bss_trailer_scratch``) across both frames, then parses
-  ``BSS_MAGIC32`` or the legacy ``BSS_MAGIC`` from the contiguous
-  copy.  Adds ``prev_binary_frame_phys`` alongside
-  ``last_binary_frame_phys`` so the staging can reach the previous
-  frame's tail.  Regression covered by
-  ``tests/programs/trailer_cross_page.c`` (added to ``FLAT_PROGRAMS``
-  so cc.py's flat path keeps the size-pinning padding the ccld
-  linker would otherwise strip).
+  ``program_enter``'s post-stream trailer peek only inspected the *last* loaded
+  binary frame.  When the binary ended 1..5 bytes into that frame (binsize mod
+  4096 in 1..5), the 6-byte ``BSS_MAGIC32`` trailer straddled the page boundary
+  — the loader's ``ECX >= 6`` check failed, the legacy 4-byte magic mismatched
+  (``0xB032`` vs ``0xB055``), and ``bss_size`` defaulted to 0.  No BSS pages got
+  mapped, and the program's first BSS write faulted with EXC0E. The fix stages
+  the binary's trailing 6 bytes into a kernel scratch buffer
+  (``bss_trailer_scratch``) across both frames, then parses ``BSS_MAGIC32`` or
+  the legacy ``BSS_MAGIC`` from the contiguous copy.  Adds
+  ``prev_binary_frame_phys`` alongside ``last_binary_frame_phys`` so the staging
+  can reach the previous frame's tail.  Regression covered by
+  ``tests/programs/trailer_cross_page.c`` (added to ``FLAT_PROGRAMS`` so cc.py's
+  flat path keeps the size-pinning padding the ccld linker would otherwise
+  strip).
 - **cc.py: clear `ax_local` after the pinned-right comparison fast path.**
   ``emit_comparison``'s pinned-right path emits ``mov ax,
   <pin_left>`` + ``cmp ax, <pin_right>``; the later
