@@ -68,3 +68,13 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   multi-page blob → cc.py extern fallback → stub archive → vDSO
   retirement → cc.py-compiles-libbboeos).
   Status: design complete; implementation pending.
+- [2026-05-24 — cc.py assignment as expression (parens required)](./2026-05-24-cc-assignment-as-expression-design.md)
+  — accept assignments as expressions when wrapped in a dedicated
+  pair of parentheses (`while ((p = next))`, `f((x = y))`).  Covers
+  all eleven assignment operators across every existing lvalue
+  shape, with result value in EAX and the lvalue's type.  The paren
+  requirement is the feature, not a transitional restriction: it
+  preserves the parser's lookahead simplicity and rules out the
+  `if (x = y)` typo by construction.  Unblocks the `strcpy` idiom
+  in `user/libc/string.c`.
+  Status: design complete; implementation pending.
