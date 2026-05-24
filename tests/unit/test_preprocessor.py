@@ -15,7 +15,7 @@ Covers three feature areas:
 
 Limitations the tests deliberately encode:
 
-* Stringification (``#``) and token pasting (``##``) are not supported.
+* Token pasting (``##``) is not supported (stringify ``#`` is).
 * Variadic macros (``...`` / ``__VA_ARGS__``) are not supported.
 * ``#ifdef``, ``#if``, ``#else``, ``#elif``, ``#undef`` are not
   supported.
@@ -317,6 +317,50 @@ def test_repeated_invocation_in_one_expression() -> None:
     # Two ``3``s (one per occurrence of ``x`` in SQ(3)) and two ``4``s.
     assert numbers.count("3") == 2
     assert numbers.count("4") == 2
+
+
+def test_stringify_double_indirection_expands_object_macro_value() -> None:
+    """The ``STR(x) STR2(x)`` / ``STR2(x) #x`` trick stringifies the expanded value."""
+    source = (
+        "#define _SYSNUM_STR2(x) #x\n"
+        "#define SYSNUM_STR(x) _SYSNUM_STR2(x)\n"
+        "#define SYS_FOO 0x40\n"
+        "const char *literal = SYSNUM_STR(SYS_FOO);\n"
+    )
+    tokens = _expand(source)
+    assert ("STRING", '"0x40"') in tokens, f"expected '\"0x40\"' STRING token in {tokens}"
+
+
+def test_stringify_escapes_backslash_and_quote() -> None:
+    r"""``"`` and ``\`` in the argument tokens are escaped in the produced literal."""
+    # The argument is a STRING token whose text contains both a quote
+    # and a backslash; stringification must escape them so the result
+    # remains a valid C string literal.
+    source = '#define S(x) #x\nconst char *literal = S("a\\nb");\n'
+    tokens = _expand(source)
+    string_tokens = [text for kind, text in tokens if kind == "STRING"]
+    assert any(text == '"\\"a\\\\nb\\""' for text in string_tokens), f"expected escaped quote and backslash in {string_tokens}"
+
+
+def test_stringify_expression_argument_collapses_whitespace() -> None:
+    """Stringifying a multi-token argument joins tokens with single spaces."""
+    source = "#define S(x) #x\nconst char *literal = S(a + b);\n"
+    tokens = _expand(source)
+    assert ("STRING", '"a + b"') in tokens, f"expected '\"a + b\"' STRING token in {tokens}"
+
+
+def test_stringify_identifier_argument_produces_literal() -> None:
+    """``#x`` with a bare-identifier argument becomes a C string literal."""
+    source = "#define S(x) #x\nconst char *literal = S(hello);\n"
+    tokens = _expand(source)
+    assert ("STRING", '"hello"') in tokens, f"expected '\"hello\"' STRING token in {tokens}"
+
+
+def test_stringify_requires_parameter_name() -> None:
+    """``#`` not followed by a parameter name raises CompileError at define time."""
+    source = "#define BAD(x) #y\n"
+    with pytest.raises(CompileError, match="replacement-list"):
+        _expand(source)
 
 
 def test_unterminated_invocation_raises() -> None:
