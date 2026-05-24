@@ -35,9 +35,17 @@ Conditional compilation is supported in a very limited form:
   the same header can be ``#include``d from multiple translation-unit
   fragments without duplicate-definition fallout.
 
+Stringification (``#x``) is supported inside function-like macro
+bodies: a ``#`` immediately preceding a parameter name expands at the
+call site to a C string literal whose content is the unexpanded
+argument tokens joined with single spaces (C99 §6.10.3.2).  Internal
+whitespace collapses to a single space, leading / trailing whitespace
+is dropped, and every ``"`` and ``\`` in the argument text is
+escaped.  Used by ``kernel/include/syscalls.h``'s ``_SYSNUM_STR2``
+helper to expose syscall numbers as inline-asm operands.
+
 Out of scope for this version:
 
-* Stringification (``#x``)
 * Token pasting (``a ## b``)
 * Variadic macros (``...`` / ``__VA_ARGS__``)
 * ``#undef``
@@ -181,6 +189,8 @@ def _expand_function_macro(
     *,
     body_tokens: list[tuple[str, str, int]],
     call_line: int,
+    defines: dict[str, str],
+    function_defines: dict[str, tuple[tuple[str, ...], list[tuple[str, str, int]]]],
     invocation_args: list[list[tuple[str, str, int]]],
     name: str,
     params: tuple[str, ...],
@@ -189,17 +199,39 @@ def _expand_function_macro(
 
     Every IDENT in *body_tokens* whose text matches a parameter name
     is replaced by the corresponding entry in *invocation_args*; other
-    tokens are emitted verbatim.  All emitted tokens carry *call_line*
-    so diagnostics point at the use site rather than the define site.
+    tokens are emitted verbatim.  ``STRINGIFY`` sentinel tokens (parsed
+    from a ``#param`` in the macro body) expand to a single ``STRING``
+    token whose value is the unexpanded argument text joined with
+    single spaces, per C99 §6.10.3.2.  All emitted tokens carry
+    *call_line* so diagnostics point at the use site rather than the
+    define site.
     """
     if len(invocation_args) != len(params):
         message = f"macro {name!r} expects {len(params)} argument(s), got {len(invocation_args)}"
         raise CompileError(message, line=call_line)
     parameter_index = {parameter: index for index, parameter in enumerate(params)}
+    expanded_arguments: list[list[tuple[str, str, int]] | None] = [None] * len(invocation_args)
     expanded: list[tuple[str, str, int]] = []
     for kind, text, _line in body_tokens:
+        if kind == "STRINGIFY":
+            # C99 §6.10.3.2: stringify uses the *unexpanded* argument tokens.
+            argument_tokens = invocation_args[parameter_index[text]]
+            literal = _stringify_argument(tokens=argument_tokens)
+            expanded.append(("STRING", literal, call_line))
+            continue
         if kind == "IDENT" and text in parameter_index:
-            for arg_kind, arg_text, _arg_line in invocation_args[parameter_index[text]]:
+            # Non-stringify parameter substitution: the argument is
+            # fully macro-expanded before substitution so the standard
+            # double-indirection stringify trick
+            # (``STR(x) STR2(x)`` / ``STR2(x) #x``) works.
+            index = parameter_index[text]
+            if expanded_arguments[index] is None:
+                expanded_arguments[index] = apply_defines(
+                    defines=defines,
+                    function_defines=function_defines,
+                    tokens=list(invocation_args[index]),
+                )
+            for arg_kind, arg_text, _arg_line in expanded_arguments[index]:
                 expanded.append((arg_kind, arg_text, call_line))
         else:
             expanded.append((kind, text, call_line))
@@ -232,7 +264,21 @@ def _parse_function_define(
             message = f"duplicate #define parameter for {name!r}: {parameter!r}"
             raise CompileError(message, line=line_number)
         seen.add(parameter)
-    body_tokens = [tok for tok in tokenize(body_text) if tok[0] != _EOF_KIND]
+    parameter_set = set(raw_params)
+    body_tokens: list[tuple[str, str, int]] = []
+    cursor = 0
+    for match in re.finditer(r"#(\s*([A-Za-z_][A-Za-z_0-9]*)?)", body_text):
+        identifier = match.group(2)
+        if identifier is None or identifier not in parameter_set:
+            message = f"# in macro {name!r} replacement-list must precede a parameter"
+            raise CompileError(message, line=line_number)
+        prefix = body_text[cursor : match.start()]
+        if prefix:
+            body_tokens.extend(tok for tok in tokenize(prefix) if tok[0] != _EOF_KIND)
+        body_tokens.append(("STRINGIFY", identifier, line_number))
+        cursor = match.end()
+    if tail := body_text[cursor:]:
+        body_tokens.extend(tok for tok in tokenize(tail) if tok[0] != _EOF_KIND)
     return tuple(raw_params), body_tokens
 
 
@@ -264,6 +310,18 @@ def _splice_line_continuations(source: str) -> str:
         output.extend(["\n"] * joined)
         index += 1
     return "".join(output)
+
+
+def _stringify_argument(*, tokens: list[tuple[str, str, int]]) -> str:
+    r"""Render *tokens* as a C string literal per C99 §6.10.3.2 stringify rules.
+
+    Tokens are joined with a single space; the result has every ``"``
+    and ``\`` escaped and is wrapped in double quotes.  Empty
+    argument lists produce ``""``.
+    """
+    joined = " ".join(text for _kind, text, _line in tokens)
+    escaped = joined.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def apply_defines(
@@ -308,6 +366,8 @@ def apply_defines(
                     expanded = _expand_function_macro(
                         body_tokens=body_tokens,
                         call_line=line,
+                        defines=defines,
+                        function_defines=function_defines,
                         invocation_args=arguments,
                         name=text,
                         params=params,
