@@ -2151,8 +2151,11 @@ class Parser:
                 # through that for both width and codegen.
                 self.eat()
                 return self._parse_pointer_suffix("uint8_t", max_stars=2)
-            message = f"expected 'char', 'int', 'long', or 'short' after 'unsigned', got {following[1]!r}"
-            raise CompileError(message, line=token[2])
+            # Bare ``unsigned`` defaults to ``unsigned int`` per the C
+            # standard — covers cast expressions like ``(unsigned)c``
+            # and bare declarations ``unsigned x;`` / parameter lists
+            # ``void f(unsigned n)`` / pointer types ``unsigned *p``.
+            return self._parse_pointer_suffix("unsigned int", max_stars=2)
         if token[0] == "LONG":
             # Treat bare ``long`` / ``long long`` as the canonical 32-bit
             # unsigned spelling so ``typedef long off_t;`` and ``typedef
@@ -2163,7 +2166,23 @@ class Parser:
             self.eat()
             if self.peek()[0] == "LONG":
                 self.eat()
+            if self.peek()[0] == "DOUBLE":
+                # ``long double`` collapses to plain ``double`` (cc.py
+                # has no floating-point codegen; the spelling parses so
+                # prototypes carrying it survive).
+                self.eat()
+                return self._parse_pointer_suffix("double", max_stars=2)
             return self._parse_pointer_suffix(self._unsigned32, max_stars=2)
+        if token[0] == "DOUBLE":
+            # ``double`` is accepted as a type spelling so transitive
+            # includes that surface prototypes like ``double atof(const
+            # char *s);`` parse without forcing every libbboeos consumer
+            # to ``#ifdef`` around them.  No floating-point codegen
+            # exists yet — any actual use (locals, arithmetic, return
+            # values) will fail downstream at the use site, which is
+            # the desired behavior until x87 / soft-float lands.
+            self.eat()
+            return self._parse_pointer_suffix("double", max_stars=2)
         if token[0] == "STRUCT":
             self.eat()
             tag_token = self.eat("IDENT")
