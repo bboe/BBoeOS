@@ -1763,6 +1763,33 @@ def test_function_pointer_struct_field_type() -> None:
     assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
 
 
+def test_function_pointer_typedef_parses_and_casts() -> None:
+    """``typedef <ret> (*alias)(<args>);`` parses and the alias works as a type.
+
+    Forcing function: ``user/libbboeos/include/signal.h`` declares
+    ``typedef void (*sighandler_t)(int);`` and ``<signal.h>`` consumers
+    use the alias as a parameter type, a return type, and inside a cast
+    (``#define SIG_DFL ((sighandler_t)0)``).  The alias resolves to the
+    opaque ``"function_pointer"`` spelling and casts to it pass through
+    unchanged (Cast is identity codegen for non-struct-pointer targets).
+    """
+    asm = _kernel("""
+        typedef void (*sighandler_t)(int);
+        typedef int (*cmp_t)(const char *, const char *);
+        sighandler_t signal_stub(int signum, sighandler_t handler) {
+            (void)signum;
+            return (sighandler_t)handler;
+        }
+        int f(void) {
+            sighandler_t h = (sighandler_t)0;
+            (void)h;
+            return 0;
+        }
+        """)
+    assert "signal_stub:" in asm, f"expected signal_stub to be emitted:\n{asm}"
+    assert "f:" in asm, f"expected f to be emitted:\n{asm}"
+
+
 def test_function_pointer_with_in_register_param_moves_arg_before_call() -> None:
     """An function_pointer with an in_register param loads that register before 'call ax'."""
     asm = _kernel("""

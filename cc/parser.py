@@ -113,8 +113,11 @@ class Parser:
         # parse_type expands the alias inline so the rest of the compiler
         # never sees the alias name.  Pointer-suffix typedefs are supported
         # (``typedef char *string_t;`` -> ``string_t s;`` parses the same
-        # as ``char *s;``), but function-pointer typedefs aren't yet — they
-        # need their own VarDecl/Function machinery.
+        # as ``char *s;``).  Function-pointer typedefs
+        # (``typedef void (*sighandler_t)(int);``) resolve to the opaque
+        # ``"function_pointer"`` spelling — same width as a regular
+        # pointer, no callable-through-typedef-name machinery beyond
+        # what parse_parameter / Cast already do.
         self.typedef_aliases: dict[str, str] = {}
 
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
@@ -1739,6 +1742,27 @@ class Parser:
         if self.peek()[0] == "TYPEDEF":
             self.eat("TYPEDEF")
             target_type = self.parse_type()
+            # Function-pointer typedef: ``typedef <ret> (*<alias>)(<args>);``.
+            # ``<signal.h>`` uses this for ``sighandler_t``, ``<stdlib.h>``
+            # for ``atexit`` / ``qsort`` compare callbacks.  cc.py treats
+            # every function pointer as an opaque pointer-width value
+            # (b2ccf5de added the matching parameter shape), so the
+            # alias resolves to the same ``"function_pointer"`` spelling
+            # that parse_parameter produces.  The inner argument list is
+            # parsed and discarded — cc.py has no per-typedef callable
+            # machinery yet, so calling through a typedef'd function
+            # pointer still requires the local-variable shape.
+            if self.peek()[0] == "LPAREN":
+                self.eat("LPAREN")
+                self.eat("STAR")
+                alias_name = self.eat("IDENT")[1]
+                self.eat("RPAREN")
+                self.eat("LPAREN")
+                self.parse_parameters()
+                self.eat("RPAREN")
+                self.eat("SEMI")
+                self.typedef_aliases[alias_name] = "function_pointer"
+                return None
             # The alias name is usually a fresh IDENT, but stdint.h does
             # ``typedef unsigned short uint16_t;`` even though cc.py
             # already has ``uint16_t`` as a built-in keyword.  Accept
