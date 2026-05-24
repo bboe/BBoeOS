@@ -77,4 +77,5 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   preserves the parser's lookahead simplicity and rules out the
   `if (x = y)` typo by construction.  Unblocks the `strcpy` idiom
   in `user/libc/string.c`.
-  Status: design complete; implementation pending.
+  Plan: [2026-05-24-cc-assignment-as-expression-plan.md](./2026-05-24-cc-assignment-as-expression-plan.md).
+  Status: design + plan complete; implementation pending.
