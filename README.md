@@ -67,7 +67,8 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   Seven-phase migration (source-dir rename → header cleanup →
   multi-page blob → cc.py extern fallback → stub archive → vDSO
   retirement → cc.py-compiles-libbboeos).
-  Status: design complete; implementation pending.
+  Plan: [2026-05-24-va-arg-double-sizeof-expr-plan.md](./2026-05-24-va-arg-double-sizeof-expr-plan.md).
+  Status: design + plan complete; implementation pending.
 - [2026-05-24 — cc.py assignment as expression (parens required)](./2026-05-24-cc-assignment-as-expression-design.md)
   — accept assignments as expressions when wrapped in a dedicated
   pair of parentheses (`while ((p = next))`, `f((x = y))`).  Covers
@@ -85,4 +86,5 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   semantics), unblocking `stdio.c`; (2) `sizeof(expression)` via
   a new `SizeofExpr` AST node + codegen-time `_expression_type`
   helper, unblocking `dirent.c`.
-  Status: design complete; implementation pending.
+  Plan: [2026-05-24-va-arg-double-sizeof-expr-plan.md](./2026-05-24-va-arg-double-sizeof-expr-plan.md).
+  Status: design + plan complete; implementation pending.
