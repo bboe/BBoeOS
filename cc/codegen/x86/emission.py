@@ -897,7 +897,18 @@ class EmissionMixin:
         # Indirect call through a function pointer variable.
         if name in self.variable_types and self.variable_types[name] == "function_pointer":
             function_pointer_in_regs = self.function_pointer_in_registers.get(name, {})
-            if len(arguments) != len(function_pointer_in_regs):
+            # A fn-pointer with an in_register map (declared with
+            # ``__attribute__((in_register(...)))`` on each inner
+            # parameter) routes every argument through a register and
+            # arg count must match the map.  A fn-pointer without
+            # such a map (the qsort/bsearch shape — parameter typed
+            # ``int (*cmp)(const void *, const void *)`` or a local
+            # whose VarDecl carries no in_register annotations) uses
+            # the standard cdecl stack convention; any arg count is
+            # accepted since the parser discards the inner-parameter
+            # list for fn-pointer params and locals don't enforce
+            # arity here.
+            if function_pointer_in_regs and len(arguments) != len(function_pointer_in_regs):
                 message = f"function_pointer '{name}' expects {len(function_pointer_in_regs)} argument(s), got {len(arguments)}"
                 raise CompileError(message, line=statement.line)
             clobbers: frozenset[str] = frozenset(self.target.register_pool)
@@ -908,11 +919,18 @@ class EmissionMixin:
             else:
                 for register in saved:
                     self.emit(f"        push {register}")
+            stack_arguments: list[Node] = []
             if function_pointer_in_regs:
                 register_args = [(function_pointer_in_regs[i], arg) for i, arg in enumerate(arguments)]
                 self._emit_register_arg_moves(register_args)
+            else:
+                stack_arguments = list(arguments)
+                for arg in reversed(stack_arguments):
+                    self._emit_push_arg(arg)
             self._emit_load_var(name, register=self.target.acc)
             self.emit(f"        call {self.target.acc}")
+            if stack_arguments:
+                self.emit(f"        add {self.target.stack_register}, {len(stack_arguments) * self.target.int_size}")
             if use_pusha:
                 self.emit("        popa")
             else:
@@ -2186,7 +2204,7 @@ class EmissionMixin:
                 caller_push_index += 1
 
         self.discover_virtual_long_locals(body)
-        self.safe_pin_registers = self.compute_safe_pin_registers(body)
+        self.safe_pin_registers = self.compute_safe_pin_registers(body, parameters=parameters)
         # Exclude regparm params from auto-pin candidates — they're spilled
         # to the stack at prologue entry and the body accesses them through
         # those slots like any other local.

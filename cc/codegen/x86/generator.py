@@ -372,7 +372,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for function in functions:
             if function.name == "main" or function.is_prototype:
                 continue
-            self.safe_pin_registers = self.compute_safe_pin_registers(function.body)
+            self.safe_pin_registers = self.compute_safe_pin_registers(function.body, parameters=function.params)
             # Fastcall param 0 lives in AX on entry and is spilled
             # to a local stack slot in the prologue; it never becomes a pin
             # candidate so auto-pin selection skips it entirely.  Params 1..N
@@ -517,8 +517,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
 
-    def _collect_function_pointer_vars(self, body: list[Node], /) -> set[str]:
-        """Return every name that names a function_pointer (locals + file-scope globals).
+    def _collect_function_pointer_vars(self, body: list[Node], /, *, parameters: list | None = None) -> set[str]:
+        """Return every name that names a function_pointer (params + locals + file-scope globals).
 
         Shared by :meth:`compute_safe_pin_registers` (per-call clobber
         tally) and :meth:`_select_auto_pin_candidates` (per-candidate
@@ -526,6 +526,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         same way.
         """
         function_pointer_vars: set[str] = set()
+        if parameters is not None:
+            for param in parameters:
+                if param.type == "function_pointer":
+                    function_pointer_vars.add(param.name)
 
         def visit(statements: list[Node]) -> None:
             for statement in statements:
@@ -2944,7 +2948,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         body_candidates: list[tuple[str, int]] = []
         order = 0
-        function_pointer_vars: set[str] = self._collect_function_pointer_vars(body)
+        function_pointer_vars: set[str] = self._collect_function_pointer_vars(body, parameters=parameters)
 
         def call_clobbers(call_node: Call) -> tuple[str, ...] | frozenset[str]:
             """Mirror :meth:`compute_safe_pin_registers`'s per-call clobber set."""
@@ -3686,7 +3690,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return statement.name in self.switch_pin_overrides
         return True
 
-    def compute_safe_pin_registers(self, body: list[Node], /) -> tuple[str, ...]:
+    def compute_safe_pin_registers(self, body: list[Node], /, *, parameters: list | None = None) -> tuple[str, ...]:
         """Return the pinnable register pool ordered by clobber cost.
 
         All registers in the pool are pinnable; :meth:`generate_call`
@@ -3713,7 +3717,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pool = (*self.target.register_pool, self.target.base_register) if self.elide_frame else self.target.register_pool
         clobber_counts: dict[str, int] = dict.fromkeys(pool, 0)
 
-        function_pointer_vars = self._collect_function_pointer_vars(body)
+        function_pointer_vars = self._collect_function_pointer_vars(body, parameters=parameters)
 
         def visit(node: Node) -> None:
             if isinstance(node, Call):

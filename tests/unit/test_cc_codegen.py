@@ -1747,6 +1747,25 @@ def test_function_pointer_local_emits_call_ax() -> None:
     assert "call ax" in asm, "indirect call through function_pointer must emit 'call ax'"
 
 
+def test_function_pointer_parameter_emits_indirect_call_with_stack_args() -> None:
+    """A function_pointer parameter resolves at call sites and pushes args on the stack.
+
+    Spelling ``int (*cmp)(const void *, const void *)`` as a function
+    parameter and then invoking ``cmp(a, b)`` must emit an indirect
+    ``call ax`` with the two arguments pushed right-to-left and an
+    ``add sp, 4`` cleanup — the same cdecl shape as a direct user
+    call.  Without parameter-typed fn-pointer support, the compiler
+    raised ``unknown function: cmp`` at the call site.
+    """
+    asm = _kernel("""
+        int call_via(int (*cmp)(int, int), int a, int b) {
+            return cmp(a, b);
+        }
+    """)
+    assert "call ax" in asm, f"indirect call through fn-pointer param must emit 'call ax'\n{asm}"
+    assert "add sp, 4" in asm, f"stack-arg cdecl cleanup must pop 4 bytes after the call\n{asm}"
+
+
 def test_function_pointer_struct_field_type() -> None:
     """A struct with an function_pointer field compiles and the field has width 2."""
     asm = _kernel("""
