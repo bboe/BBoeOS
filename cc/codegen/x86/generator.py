@@ -195,6 +195,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         constant_values: dict[str, int] | None = None,
         defines: dict[str, str] | None = None,
         object_mode: bool = False,
+        per_function_sections: bool = False,
         target_mode: str = "user",
     ) -> None:
         """Initialize code generator state.
@@ -276,6 +277,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # Populated during the first pass over function definitions in generate().
         self.in_register_params: dict[str, dict[int, str]] = {}
         self.object_mode: bool = object_mode
+        self.per_function_sections: bool = per_function_sections
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}

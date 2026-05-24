@@ -24,6 +24,7 @@ def _compile(
     input_path: Path,
     object_mode: bool,
     output_path: Path | None,
+    per_function_sections: bool = False,
     target_mode: str,
 ) -> int:
     """Translate a C source file to NASM assembly.
@@ -78,6 +79,7 @@ def _compile(
             constant_values=constant_values,
             defines=defines,
             object_mode=object_mode,
+            per_function_sections=per_function_sections,
             target_mode=target_mode,
         ).generate(ast)
     except CompileError as error:
@@ -147,6 +149,18 @@ def main() -> int:
         metavar="PATH",
     )
     compile_parser.add_argument(
+        "--per-function-sections",
+        action="store_true",
+        help=(
+            "emit each function into its own ``section .text.<name> exec``"
+            " (analog of clang's ``-ffunction-sections``).  Lets ld's"
+            " ``--gc-sections`` drop unreferenced functions individually."
+            " Only meaningful with ``--object`` targeting nasm -f elf32 +"
+            " ld; the cc.py ccld pipeline expects monolithic .text and"
+            " does not consume per-function sections."
+        ),
+    )
+    compile_parser.add_argument(
         "--target",
         choices=("user", "kernel"),
         default="user",
@@ -187,5 +201,6 @@ def main() -> int:
         input_path=Path(arguments.input),
         object_mode=arguments.object,
         output_path=Path(arguments.output) if arguments.output is not None else None,
+        per_function_sections=arguments.per_function_sections,
         target_mode=arguments.target,
     )

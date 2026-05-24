@@ -45,8 +45,13 @@ mkdir -p build
 # .o is newer than the .c and skips the clang invocation, so no
 # Makefile change is needed; ar appends the cc.py-built object to
 # libbboeos.a like any other contribution.
-python3 cc.py --bits 32 --object user/libbboeos/errno.c build/errno.cc.asm || exit 1
-nasm -f elf32 -i kernel/include/ -o user/libbboeos/errno.o build/errno.cc.asm || exit 1
+build_libbboeos_ccpy() {
+    name=$1
+    python3 cc.py --bits 32 --object --per-function-sections "user/libbboeos/$name.c" "build/$name.cc.asm" || return 1
+    nasm -f elf32 -i kernel/include/ -o "user/libbboeos/$name.o" "build/$name.cc.asm" || return 1
+}
+build_libbboeos_ccpy errno || exit 1
+build_libbboeos_ccpy ctype || exit 1
 make -C user/libbboeos libbboeos.a >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
 # --gc-sections drops every clang-compiled libbboeos function the

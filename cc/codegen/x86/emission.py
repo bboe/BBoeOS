@@ -2279,6 +2279,18 @@ class EmissionMixin:
                 self.locals[param.name] = -(self.target.param_slot_base + stack_position * self.target.int_size)
                 stack_position += 1
 
+        if self.object_mode and self.per_function_sections:
+            # Per-function section (analog of clang's ``-ffunction-
+            # sections``) so ``ld --gc-sections`` can drop unreferenced
+            # functions individually.  Required for the libbboeos blob:
+            # ctype's ``isalpha`` / ``isdigit`` / etc. are not in
+            # ``FUNCTION_POINTER_TABLE`` and must be GC'd to keep
+            # ``.libbboeos.rodata`` below the fixed pointer-table
+            # anchor at FUNCTION_TABLE + 0xE00.  Off by default because
+            # the cc.py ccld pipeline (user programs) expects a
+            # monolithic ``.text`` and gets confused by per-function
+            # sections.
+            self.emit(f"section .text.{name} exec")
         if self.object_mode:
             self.emit(f"global {name}")
         self.emit(f"{name}:")
