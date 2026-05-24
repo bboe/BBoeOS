@@ -353,6 +353,54 @@ class Parser:
             raise CompileError(message, line=token[2])
         return [self.parse_statement()]
 
+    def _parse_designated_struct_initializer(self) -> StructInitializer:
+        """Parse ``{ 0 }`` zero-init, ``{ .field = expr, ... }`` designated, or ``{ e0, e1, ... }`` positional init.
+
+        Positional initializers fill struct fields in declaration
+        order, matching standard C semantics.  cc.py routes them
+        through the existing designated codegen path by tagging the
+        ``StructInitializer`` node with the ``positional`` list — the
+        emission side (file-scope and local) resolves field names
+        from the struct layout when ``designated`` is None.
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        if self.peek()[0] == "NUMBER" and self.peek()[1] == "0" and self.peek(offset=1)[0] == "RBRACE":
+            # Zero-init shorthand: ``{ 0 }``.  A single ``0`` followed
+            # immediately by ``}`` zero-fills the struct.  When the
+            # source continues with more values (``{ 0, 0, 2 }``) the
+            # positional branch below takes over instead.
+            self.eat("NUMBER")
+            self.eat("RBRACE")
+            return StructInitializer(designated={}, line=line)
+        if self.peek()[0] == "DOT":
+            fields: dict[str, Node] = {}
+            while self.peek()[0] != "RBRACE":
+                if self.peek()[0] != "DOT":
+                    message = f"mixed designated and positional struct initializers are not supported at line {self.peek()[2]}"
+                    raise SyntaxError(message)
+                self.eat("DOT")
+                field_name = self.eat("IDENT")[1]
+                self.eat("ASSIGN")
+                field_value = self.parse_expression()
+                if field_name in fields:
+                    message = f"duplicate initializer for field '{field_name}' at line {self.peek()[2]}"
+                    raise SyntaxError(message)
+                fields[field_name] = field_value
+                if self.peek()[0] == "COMMA":
+                    self.eat("COMMA")
+            self.eat("RBRACE")
+            return StructInitializer(designated=fields, line=line)
+        positional: list[Node] = []
+        while self.peek()[0] != "RBRACE":
+            positional.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInitializer(line=line, positional=positional)
+
     def _parse_enum_declaration(self) -> EnumDecl:
         """Parse ``enum NAME { A, B = 5, C, ... };`` at file scope.
 
@@ -556,6 +604,28 @@ class Parser:
             stars += 1
         return base + ("*" * stars)
 
+    def _parse_positional_struct_initializer(self) -> Node:
+        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
+
+        Used only for array-of-struct elements; ``{ 0 }`` and designated
+        forms are not accepted here.  Trailing commas are accepted.
+
+        Returns:
+            A ``StructInitializer`` with ``positional`` populated.
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        fields = []
+        while self.peek()[0] != "RBRACE":
+            fields.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInitializer(line=line, positional=fields)
+
     def _parse_struct_declaration(self) -> StructDecl:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
         line = self.peek()[2]
@@ -615,60 +685,6 @@ class Parser:
         decl = StructDecl(fields=fields, line=line, name=name)
         self.struct_decls[name] = decl
         return decl
-
-    def _parse_designated_struct_initializer(self) -> StructInitializer:
-        """Parse ``{ 0 }`` zero-init or ``{ .field = expr, ... }`` designated init."""
-        line = self.peek()[2]
-        self.eat("LBRACE")
-        fields: dict[str, Node] = {}
-        if self.peek()[0] == "NUMBER" and self.peek()[1] == "0":
-            # Zero-init shorthand: { 0 }.  Must be followed immediately by RBRACE.
-            self.eat("NUMBER")
-            if self.peek()[0] != "RBRACE":
-                message = f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
-                raise SyntaxError(message)
-        else:
-            # Designated: { .field = expr, ... }.  At least one entry required.
-            while self.peek()[0] != "RBRACE":
-                if self.peek()[0] != "DOT":
-                    message = (
-                        f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
-                    )
-                    raise SyntaxError(message)
-                self.eat("DOT")
-                field_name = self.eat("IDENT")[1]
-                self.eat("ASSIGN")
-                field_value = self.parse_expression()
-                if field_name in fields:
-                    message = f"duplicate initializer for field '{field_name}' at line {self.peek()[2]}"
-                    raise SyntaxError(message)
-                fields[field_name] = field_value
-                if self.peek()[0] == "COMMA":
-                    self.eat("COMMA")
-        self.eat("RBRACE")
-        return StructInitializer(designated=fields, line=line)
-
-    def _parse_positional_struct_initializer(self) -> Node:
-        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
-
-        Used only for array-of-struct elements; ``{ 0 }`` and designated
-        forms are not accepted here.  Trailing commas are accepted.
-
-        Returns:
-            A ``StructInitializer`` with ``positional`` populated.
-
-        """
-        line = self.peek()[2]
-        self.eat("LBRACE")
-        fields = []
-        while self.peek()[0] != "RBRACE":
-            fields.append(self.parse_expression())
-            if self.peek()[0] == "COMMA":
-                self.eat("COMMA")
-            else:
-                break
-        self.eat("RBRACE")
-        return StructInitializer(line=line, positional=fields)
 
     def _parse_tail_call(self) -> Node:
         """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.

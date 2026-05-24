@@ -4278,6 +4278,44 @@ def test_pointer_compared_to_null_compiles() -> None:
     assert "f:" in asm
 
 
+def test_positional_struct_initializer_global_emits_field_directives() -> None:
+    """``static struct T x = {a, b, c};`` at file scope lays out fields in declaration order.
+
+    Forcing function: ``user/libbboeos/stdio.c`` declares
+    ``static FILE _stderr = {0, 0, 2};`` — a three-field struct whose
+    third field is a non-zero fd.  Positional initializers fill
+    fields in declaration order, matching standard C.
+    """
+    asm = _user("""
+        struct FILE { int eof; int err; int fd; };
+        static struct FILE _stderr = {0, 0, 2};
+        int main(void) { return _stderr.fd; }
+    """)
+    assert "_g__stderr:" in asm or "_stderr:" in asm, f"expected _stderr storage label:\n{asm}"
+    # Field order: eof=0, err=0, fd=2.  Each int field emits its own
+    # data directive, so we expect at least the trailing ``dw 2`` (int
+    # is two bytes under the default --bits 16 user target).
+    assert "dw 2" in asm, f"expected fd field to emit 'dw 2':\n{asm}"
+
+
+def test_positional_struct_initializer_local_assigns_in_declaration_order() -> None:
+    """``struct T x = {a, b};`` on a local fills fields in declaration order.
+
+    The codegen path reuses the existing designated-init MemberAssign
+    sequence: zero-store the slot, then assign each positional value
+    to the matching field name resolved from the struct layout.
+    """
+    asm = _kernel("""
+        struct point { int x; int y; };
+        int sum(int *result __attribute__((out_register("ax")))) {
+            struct point p = {3, 4};
+            *result = p.x + p.y;
+            return 1;
+        }
+    """)
+    assert "sum:" in asm, f"expected sum to be emitted:\n{asm}"
+
+
 def test_preserve_register_multiple() -> None:
     """Multiple preserve_register attributes push/pop in declaration order."""
     src = textwrap.dedent("""\

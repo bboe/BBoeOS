@@ -248,16 +248,6 @@ def test_dot_read_write_regular_field(*, work: Path) -> None:
     assert "mov eax, [ebp-" in wrap_body.lower(), f"expected 'mov eax, [ebp-N]' load for c.x read in wrap body:\n{wrap_body}"
 
 
-def test_positional_init_rejected(*, work: Path) -> None:
-    """A positional struct initializer like ``{ 1 }`` must be rejected."""
-    compile_expect_fail(
-        message_fragment="positional struct initializers not supported",
-        name="positional_init",
-        source=("struct point { int x; int y; };\nint main() {\n    struct point c = { 1 };\n    return c.x;\n}\n"),
-        work=work,
-    )
-
-
 def test_sizeof_local_struct(*, work: Path) -> None:
     """``sizeof(c)`` on a local struct variable returns the struct's byte size."""
     asm = compile_snippet(
@@ -293,7 +283,6 @@ TESTS = (
     test_designated_init_multi_field_const_fold,
     test_designated_init_single_bitfield,
     test_dot_read_write_regular_field,
-    test_positional_init_rejected,
     test_sizeof_local_struct,
     test_zero_init_emits_byte_stores,
 )
