@@ -78,4 +78,11 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   `if (x = y)` typo by construction.  Unblocks the `strcpy` idiom
   in `user/libc/string.c`.
   Plan: [2026-05-24-cc-assignment-as-expression-plan.md](./2026-05-24-cc-assignment-as-expression-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #496.
+- [2026-05-24 — cc.py va_arg(ap, double) + sizeof(expression)](./2026-05-24-va-arg-double-sizeof-expr-design.md)
+  — two small features bundled: (1) `va_arg(ap, double)` advances
+  the va-list cursor by 8 bytes instead of 4 (correct i386 cdecl
+  semantics), unblocking `stdio.c`; (2) `sizeof(expression)` via
+  a new `SizeofExpr` AST node + codegen-time `_expression_type`
+  helper, unblocking `dirent.c`.
+  Status: design complete; implementation pending.
