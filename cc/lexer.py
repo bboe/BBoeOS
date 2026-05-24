@@ -32,6 +32,18 @@ def tokenize(source: str, /) -> list[tuple[str, str, int]]:
         else:
             if kind == "IDENT" and text in KEYWORDS:
                 kind = text.upper()
+            elif kind == "NUMBER":
+                # Strip any C integer literal suffix (``u`` / ``l`` /
+                # ``ul`` / ``ll`` / ``ull`` etc., any case).  cc.py has
+                # no real long / unsigned distinction at the literal
+                # level; the suffix just needs to lex so headers can
+                # write ``-1L`` / ``0xFFFFFFFFu`` without breaking the
+                # parser.
+                stripped_index = len(text)
+                while stripped_index > 0 and text[stripped_index - 1] in "uUlL":
+                    stripped_index -= 1
+                if stripped_index < len(text):
+                    text = text[:stripped_index]
             tokens.append((kind, text, line))
         position = match.end()
     tokens.append(("EOF", "", line))

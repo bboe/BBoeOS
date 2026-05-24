@@ -88,7 +88,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<LINE_COMMENT>//[^\n]*)
   | (?P<CHAR_LIT>'(?:[^'\\]|\\x[0-9a-fA-F]{1,2}|\\.)')
   | (?P<IDENT>[A-Za-z_][A-Za-z_0-9]*)
-  | (?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)
+  | (?P<NUMBER>(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:[uU][lL][lL]?|[lL][lL]?[uU]?|[uU])?)
   | (?P<STRING>"(?:[^"\\]|\\.)*")
   | (?P<EQ>==)
   | (?P<GE>>=)

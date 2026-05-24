@@ -2179,6 +2179,32 @@ def test_int_local_compared_to_int_literal_compiles() -> None:
     assert "f:" in asm
 
 
+def test_integer_literal_suffixes_parse() -> None:
+    """C integer literal suffixes (``L`` / ``U`` / ``UL`` / ``LL`` / ``ULL``) lex as plain integers.
+
+    cc.py has no real long / unsigned distinction at the literal
+    level; the suffix just needs to lex so libbboeos sources can write
+    ``-1L``, ``0xFFFFFFFFu``, ``1ULL``, etc. without breaking the
+    parser.  Unblocks user/libbboeos/stdio.c which hits ``-1L`` inside
+    the ftell-style conditional ``pos == (off_t)-1 ? -1L : (long)pos``.
+    """
+    asm = _user("""
+        long with_l(void) { return -1L; }
+        unsigned int with_u(void) { return 1u; }
+        unsigned long with_ul(void) { return 0xFFFFFFFFUL; }
+        long with_ll(void) { return 1LL; }
+        unsigned long with_ull(void) { return 1uLL; }
+        int main(void) {
+            return (int)(with_l() + with_u() + with_ul() + with_ll() + with_ull());
+        }
+    """)
+    assert "with_l:" in asm, f"expected with_l() to be emitted:\n{asm}"
+    assert "with_u:" in asm, f"expected with_u() to be emitted:\n{asm}"
+    assert "with_ul:" in asm, f"expected with_ul() to be emitted:\n{asm}"
+    assert "with_ll:" in asm, f"expected with_ll() to be emitted:\n{asm}"
+    assert "with_ull:" in asm, f"expected with_ull() to be emitted:\n{asm}"
+
+
 def test_kernel_compiles_and_assembles() -> None:
     """A realistic kernel-mode snippet compiles and assembles with nasm."""
     source = """
