@@ -362,13 +362,10 @@ class EmissionMixin:
     def _emit_struct_initializer(self, name: str, init: StructInitializer) -> None:
         """Emit zero-store prelude + per-field assignments for a struct local.
 
-        Expects the designated form (``init.designated`` populated); the
-        positional form is for array element initializers and is handled by
-        the global-array path in the generator.
+        Accepts both the designated form (``{.field = expr, ...}``) and
+        the positional form (``{a, b, c}``); positional values are
+        matched to fields in declaration order via the struct layout.
         """
-        if init.designated is None:
-            message = f"positional struct initializer on local '{name}' is not supported"
-            raise CompileError(message, line=init.line)
         type_name = self.variable_types[name]
         if not type_name.startswith("struct ") or "[" in type_name:
             message = f"initializer on non-struct or array local '{name}' is not supported"
@@ -383,9 +380,18 @@ class EmissionMixin:
             else:
                 address = f"[ebp-{frame_offset}+{byte_index}]"
             self.emit(f"        mov byte {address}, 0")
-        # Per-field designated assignments via the existing member-assign
-        # codegen path.  Synthesize MemberAssign nodes and dispatch.
-        for field_name, value_node in init.designated.items():
+        if init.designated is not None:
+            assignments = list(init.designated.items())
+        else:
+            assert init.positional is not None
+            field_names = list(self.struct_layouts[tag].keys())
+            if len(init.positional) > len(field_names):
+                message = f"too many initializers for 'struct {tag}'"
+                raise CompileError(message, line=init.line)
+            assignments = list(zip(field_names, init.positional, strict=False))
+        # Per-field assignments via the existing member-assign codegen
+        # path.  Synthesize MemberAssign nodes and dispatch.
+        for field_name, value_node in assignments:
             synthetic = MemberAssign(
                 arrow=False,
                 expr=value_node,

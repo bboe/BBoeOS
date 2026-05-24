@@ -113,8 +113,11 @@ class Parser:
         # parse_type expands the alias inline so the rest of the compiler
         # never sees the alias name.  Pointer-suffix typedefs are supported
         # (``typedef char *string_t;`` -> ``string_t s;`` parses the same
-        # as ``char *s;``), but function-pointer typedefs aren't yet — they
-        # need their own VarDecl/Function machinery.
+        # as ``char *s;``).  Function-pointer typedefs
+        # (``typedef void (*sighandler_t)(int);``) resolve to the opaque
+        # ``"function_pointer"`` spelling — same width as a regular
+        # pointer, no callable-through-typedef-name machinery beyond
+        # what parse_parameter / Cast already do.
         self.typedef_aliases: dict[str, str] = {}
 
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
@@ -350,6 +353,54 @@ class Parser:
             raise CompileError(message, line=token[2])
         return [self.parse_statement()]
 
+    def _parse_designated_struct_initializer(self) -> StructInitializer:
+        """Parse ``{ 0 }`` zero-init, ``{ .field = expr, ... }`` designated, or ``{ e0, e1, ... }`` positional init.
+
+        Positional initializers fill struct fields in declaration
+        order, matching standard C semantics.  cc.py routes them
+        through the existing designated codegen path by tagging the
+        ``StructInitializer`` node with the ``positional`` list — the
+        emission side (file-scope and local) resolves field names
+        from the struct layout when ``designated`` is None.
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        if self.peek()[0] == "NUMBER" and self.peek()[1] == "0" and self.peek(offset=1)[0] == "RBRACE":
+            # Zero-init shorthand: ``{ 0 }``.  A single ``0`` followed
+            # immediately by ``}`` zero-fills the struct.  When the
+            # source continues with more values (``{ 0, 0, 2 }``) the
+            # positional branch below takes over instead.
+            self.eat("NUMBER")
+            self.eat("RBRACE")
+            return StructInitializer(designated={}, line=line)
+        if self.peek()[0] == "DOT":
+            fields: dict[str, Node] = {}
+            while self.peek()[0] != "RBRACE":
+                if self.peek()[0] != "DOT":
+                    message = f"mixed designated and positional struct initializers are not supported at line {self.peek()[2]}"
+                    raise SyntaxError(message)
+                self.eat("DOT")
+                field_name = self.eat("IDENT")[1]
+                self.eat("ASSIGN")
+                field_value = self.parse_expression()
+                if field_name in fields:
+                    message = f"duplicate initializer for field '{field_name}' at line {self.peek()[2]}"
+                    raise SyntaxError(message)
+                fields[field_name] = field_value
+                if self.peek()[0] == "COMMA":
+                    self.eat("COMMA")
+            self.eat("RBRACE")
+            return StructInitializer(designated=fields, line=line)
+        positional: list[Node] = []
+        while self.peek()[0] != "RBRACE":
+            positional.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInitializer(line=line, positional=positional)
+
     def _parse_enum_declaration(self) -> EnumDecl:
         """Parse ``enum NAME { A, B = 5, C, ... };`` at file scope.
 
@@ -553,6 +604,28 @@ class Parser:
             stars += 1
         return base + ("*" * stars)
 
+    def _parse_positional_struct_initializer(self) -> Node:
+        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
+
+        Used only for array-of-struct elements; ``{ 0 }`` and designated
+        forms are not accepted here.  Trailing commas are accepted.
+
+        Returns:
+            A ``StructInitializer`` with ``positional`` populated.
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        fields = []
+        while self.peek()[0] != "RBRACE":
+            fields.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return StructInitializer(line=line, positional=fields)
+
     def _parse_struct_declaration(self) -> StructDecl:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
         line = self.peek()[2]
@@ -612,60 +685,6 @@ class Parser:
         decl = StructDecl(fields=fields, line=line, name=name)
         self.struct_decls[name] = decl
         return decl
-
-    def _parse_designated_struct_initializer(self) -> StructInitializer:
-        """Parse ``{ 0 }`` zero-init or ``{ .field = expr, ... }`` designated init."""
-        line = self.peek()[2]
-        self.eat("LBRACE")
-        fields: dict[str, Node] = {}
-        if self.peek()[0] == "NUMBER" and self.peek()[1] == "0":
-            # Zero-init shorthand: { 0 }.  Must be followed immediately by RBRACE.
-            self.eat("NUMBER")
-            if self.peek()[0] != "RBRACE":
-                message = f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
-                raise SyntaxError(message)
-        else:
-            # Designated: { .field = expr, ... }.  At least one entry required.
-            while self.peek()[0] != "RBRACE":
-                if self.peek()[0] != "DOT":
-                    message = (
-                        f"positional struct initializers not supported; use {{ 0 }} or designated initializers at line {self.peek()[2]}"
-                    )
-                    raise SyntaxError(message)
-                self.eat("DOT")
-                field_name = self.eat("IDENT")[1]
-                self.eat("ASSIGN")
-                field_value = self.parse_expression()
-                if field_name in fields:
-                    message = f"duplicate initializer for field '{field_name}' at line {self.peek()[2]}"
-                    raise SyntaxError(message)
-                fields[field_name] = field_value
-                if self.peek()[0] == "COMMA":
-                    self.eat("COMMA")
-        self.eat("RBRACE")
-        return StructInitializer(designated=fields, line=line)
-
-    def _parse_positional_struct_initializer(self) -> Node:
-        """Parse a brace-enclosed struct element initializer ``{a, b, ...}``.
-
-        Used only for array-of-struct elements; ``{ 0 }`` and designated
-        forms are not accepted here.  Trailing commas are accepted.
-
-        Returns:
-            A ``StructInitializer`` with ``positional`` populated.
-
-        """
-        line = self.peek()[2]
-        self.eat("LBRACE")
-        fields = []
-        while self.peek()[0] != "RBRACE":
-            fields.append(self.parse_expression())
-            if self.peek()[0] == "COMMA":
-                self.eat("COMMA")
-            else:
-                break
-        self.eat("RBRACE")
-        return StructInitializer(line=line, positional=fields)
 
     def _parse_tail_call(self) -> Node:
         """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.
@@ -1739,6 +1758,27 @@ class Parser:
         if self.peek()[0] == "TYPEDEF":
             self.eat("TYPEDEF")
             target_type = self.parse_type()
+            # Function-pointer typedef: ``typedef <ret> (*<alias>)(<args>);``.
+            # ``<signal.h>`` uses this for ``sighandler_t``, ``<stdlib.h>``
+            # for ``atexit`` / ``qsort`` compare callbacks.  cc.py treats
+            # every function pointer as an opaque pointer-width value
+            # (b2ccf5de added the matching parameter shape), so the
+            # alias resolves to the same ``"function_pointer"`` spelling
+            # that parse_parameter produces.  The inner argument list is
+            # parsed and discarded — cc.py has no per-typedef callable
+            # machinery yet, so calling through a typedef'd function
+            # pointer still requires the local-variable shape.
+            if self.peek()[0] == "LPAREN":
+                self.eat("LPAREN")
+                self.eat("STAR")
+                alias_name = self.eat("IDENT")[1]
+                self.eat("RPAREN")
+                self.eat("LPAREN")
+                self.parse_parameters()
+                self.eat("RPAREN")
+                self.eat("SEMI")
+                self.typedef_aliases[alias_name] = "function_pointer"
+                return None
             # The alias name is usually a fresh IDENT, but stdint.h does
             # ``typedef unsigned short uint16_t;`` even though cc.py
             # already has ``uint16_t`` as a built-in keyword.  Accept

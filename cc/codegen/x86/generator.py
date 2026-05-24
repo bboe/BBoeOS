@@ -1103,8 +1103,39 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # owning .c file emits).
                 continue
             if declaration.init is None:
-                stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
+                if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
+                    stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
+                else:
+                    stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
                 self.bss_vars.append((name, str(stride)))
+            elif isinstance(declaration.init, StructInitializer):
+                tag = declaration.type_name[len("struct ") :]
+                layout = self.struct_layouts[tag]
+                init = declaration.init
+                if init.designated is not None:
+                    value_by_field = init.designated
+                else:
+                    assert init.positional is not None
+                    field_order = list(layout.keys())
+                    value_by_field = dict(zip(field_order, init.positional, strict=False))
+                directives = []
+                for field_name, info in layout.items():
+                    field_size = info.field_size
+                    value_node = value_by_field.get(field_name)
+                    value = self._constant_expression(value_node) if value_node is not None else "0"
+                    if field_size == 1:
+                        directives.append(f"db {value}")
+                    elif field_size == 2:
+                        directives.append(f"dw {value}")
+                    elif field_size == 4:
+                        directives.append(f"dd {value}")
+                    else:
+                        directives.append(f"times {field_size} db 0")
+                _emit_data_header()
+                self._emit_global_export(name)
+                self.emit(f"{self._global_label(name)}: {directives[0]}")
+                for directive in directives[1:]:
+                    self.emit(f"        {directive}")
             else:
                 init_expression = self._constant_expression(declaration.init)
                 directive = "db" if self._is_byte_scalar_global(name) else int_directive
@@ -1246,6 +1277,34 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = "global array initializer elements must be constants"
                 raise CompileError(message, line=element.line)
             for reference in self._collect_constant_references(element):
+                self.emit_constant_reference(reference)
+
+    def _validate_struct_global_initializer(self, declaration: VarDecl, *, name: str) -> None:
+        """Check the struct global's brace initializer fields are constants."""
+        init = declaration.init
+        assert isinstance(init, StructInitializer)
+        tag = declaration.type_name[len("struct ") :]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}' for global '{name}'"
+            raise CompileError(message, line=declaration.line)
+        field_names = list(layout.keys())
+        if init.designated is not None:
+            field_values = init.designated.items()
+        else:
+            assert init.positional is not None
+            if len(init.positional) > len(field_names):
+                message = f"too many initializers for 'struct {tag}'"
+                raise CompileError(message, line=declaration.line)
+            field_values = zip(field_names, init.positional, strict=False)
+        for field_name, value_node in field_values:
+            if field_name not in layout:
+                message = f"unknown field '{field_name}' in 'struct {tag}'"
+                raise CompileError(message, line=value_node.line)
+            if self._constant_expression(value_node) is None:
+                message = f"struct global '{name}' field initializers must be constants"
+                raise CompileError(message, line=value_node.line)
+            for reference in self._collect_constant_references(value_node):
                 self.emit_constant_reference(reference)
 
     def generate_member_access(self, expression: MemberAccess, /) -> None:
@@ -2777,10 +2836,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if declaration.type_name == "void":
                     message = f"global '{name}' cannot have type void"
                     raise CompileError(message, line=declaration.line)
-                if declaration.init is not None and self._constant_expression(declaration.init) is None:
+                is_struct_value = declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*")
+                if declaration.init is not None and isinstance(declaration.init, StructInitializer):
+                    if not is_struct_value:
+                        message = f"global '{name}' has a brace initializer but is not a struct"
+                        raise CompileError(message, line=declaration.line)
+                    self._validate_struct_global_initializer(declaration, name=name)
+                elif declaration.init is not None and self._constant_expression(declaration.init) is None:
                     message = f"global '{name}' initializer must be a constant expression"
                     raise CompileError(message, line=declaration.line)
-                if declaration.init is not None:
+                if declaration.init is not None and not isinstance(declaration.init, StructInitializer):
                     for constant in self._collect_constant_references(declaration.init):
                         self.emit_constant_reference(constant)
                 if declaration.asm_register is not None:
