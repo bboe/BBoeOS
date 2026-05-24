@@ -6481,3 +6481,28 @@ def test_void_pointer_param_parses_and_compiles() -> None:
     """)
     assert "copy:" in asm, f"expected copy() to be emitted:\n{asm}"
     assert "main:" in asm, f"expected main() to be emitted:\n{asm}"
+
+
+def test_volatile_qualifier_parses_as_noop() -> None:
+    """``volatile`` is accepted as a no-op type qualifier.
+
+    cc.py has no memory-model semantics, so ``volatile`` just needs to
+    parse so POSIX-style declarations (``typedef volatile int
+    sig_atomic_t;`` from ``<signal.h>``) survive.  Pin the parse over a
+    typedef, a global, a parameter, and a local — and a chained
+    ``const volatile`` qualifier sequence.
+    """
+    asm = _user("""
+        typedef volatile int sig_atomic_t;
+        volatile int g_flag;
+        int read_flag(volatile int *p) {
+            volatile int local = *p;
+            const volatile int folded = 0;
+            return local + folded + g_flag;
+        }
+        int main() {
+            return read_flag(&g_flag);
+        }
+    """)
+    assert "read_flag:" in asm, f"expected read_flag() to be emitted:\n{asm}"
+    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"

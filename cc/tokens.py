@@ -60,6 +60,7 @@ KEYWORDS = frozenset({
     "typedef",
     "unsigned",
     "void",
+    "volatile",
     "while",
 })
 
@@ -150,4 +151,5 @@ TYPE_TOKENS = frozenset({
     "STRUCT",
     "UNSIGNED",
     "VOID",
+    "VOLATILE",
 })

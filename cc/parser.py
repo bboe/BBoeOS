@@ -2115,9 +2115,13 @@ class Parser:
                 ``long`` / ``unsigned`` without ``long`` appears.
 
         """
-        # ``const`` / ``signed`` are no-op leading qualifiers.  Loop so
-        # ``const signed int`` etc. drop both before we read the base.
-        while self.peek()[0] in {"CONST", "SIGNED"}:
+        # ``const`` / ``signed`` / ``volatile`` are no-op leading
+        # qualifiers.  Loop so ``const signed int`` /
+        # ``volatile int`` etc. drop them all before we read the base.
+        # ``volatile`` carries no memory-model semantics in cc.py;
+        # accepting the keyword just lets POSIX-style prototypes
+        # (e.g. ``typedef volatile int sig_atomic_t;``) parse.
+        while self.peek()[0] in {"CONST", "SIGNED", "VOLATILE"}:
             self.eat()
         token = self.peek()
         if token[0] == "VOID":
