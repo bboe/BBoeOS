@@ -96,3 +96,12 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   (`arr[i]()`), via a new `IndexedCall` AST node.
   Plan: [2026-05-25-cc-array-of-function-pointers-plan.md](./2026-05-25-cc-array-of-function-pointers-plan.md).
   Status: design + plan complete; implementation pending.
+- [2026-05-25 — cc.py GCC extended inline asm](./2026-05-25-cc-extended-inline-asm-design.md)
+  — statement-level `__asm__ volatile("..." : outputs : inputs :
+  clobbers)` with the full constraint set used by signal.c,
+  syscall.c, and math.c: integer GP register constraints
+  (`=a`/`+b`/`g`/`=&q`), x87 FP constraints (`=t`/`u`/`0`),
+  memory output (`=m`), named operands, operand substitution
+  (`%[name]`/`%b`/`%%`), and clobber lists.  Unblocks both
+  remaining libbboeos files.
+  Status: design complete; implementation pending.
