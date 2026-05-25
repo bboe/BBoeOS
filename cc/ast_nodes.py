@@ -638,6 +638,13 @@ class Return(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class SizeofExpr(Node):
+    """``sizeof(expression)`` — compile-time size of the expression's inferred type."""
+
+    expression: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class SizeofType(Node):
     """``sizeof(type_name)`` expression."""
 
@@ -758,6 +765,21 @@ class TailCall(Node):
 
     args: list[Node]
     fn: str
+
+
+@dataclass(kw_only=True, slots=True)
+class VaArg(Node):
+    """``va_arg(ap, T)`` expression — read the next variadic argument of type ``T``.
+
+    ``cursor`` is the ``va_list`` variable expression; ``type_name`` is the
+    type string returned by :meth:`Parser.parse_type` (e.g. ``"int"``,
+    ``"double"``, ``"uint32_t"``).  Codegen reads ``*cursor`` into the
+    accumulator and advances ``cursor`` by ``sizeof(T)`` so that the next
+    ``va_arg`` call reads the following stack slot.
+    """
+
+    cursor: Node
+    type_name: str
 
 
 @dataclass(kw_only=True, slots=True)

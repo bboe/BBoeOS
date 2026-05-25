@@ -50,6 +50,10 @@ from cc.ast_nodes import (
     MemberIndexAssign,
     Node,
     Param,
+    PointerDereference,
+    SizeofExpr,
+    SizeofType,
+    SizeofVar,
     String,
     StructDecl,
     StructInitializer,
@@ -2234,6 +2238,76 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
             return self.NAMED_CONSTANT_VALUES[size.name] * stride
         return None
+
+    def _expression_type(self, node: Node, /) -> str:
+        """Infer the compile-time type of *node* for ``sizeof(expression)``.
+
+        The expression is NEVER evaluated at runtime — sizeof is a
+        compile-time constant.  Walks the AST shape to produce a type
+        string in the same form as :attr:`variable_types` entries.
+        """
+        if isinstance(node, Var):
+            variable_type = self.variable_types.get(node.name)
+            if variable_type is None:
+                message = f"sizeof: unknown variable '{node.name}'"
+                raise CompileError(message, line=node.line)
+            return variable_type
+        if isinstance(node, Index):
+            array_type = self._expression_type(node.array)
+            if array_type.endswith("*"):
+                return array_type[:-1].rstrip()
+            if "[" in array_type:
+                # Local array type like "int [10]" — strip the "[N]" suffix.
+                return array_type[: array_type.index("[")].rstrip()
+            message = f"sizeof: cannot dereference non-pointer type '{array_type}'"
+            raise CompileError(message, line=node.line)
+        if isinstance(node, (MemberAccess, IndexMemberAccess)):
+            # p->field or arr[i].field — look up the field's declared type.
+            if isinstance(node, MemberAccess):
+                if node.object_name:
+                    base_type = self.variable_types.get(node.object_name, "")
+                elif node.base_expr is not None:
+                    base_type = self._expression_type(node.base_expr)
+                else:
+                    message = "sizeof: cannot determine struct type for member access"
+                    raise CompileError(message, line=node.line)
+            else:  # IndexMemberAccess
+                base_type = self.variable_types.get(node.name, "")
+            if node.arrow:
+                if not base_type.endswith("*"):
+                    message = f"sizeof: arrow on non-pointer type '{base_type}'"
+                    raise CompileError(message, line=node.line)
+                tag = base_type[7:-1].rstrip() if base_type.startswith("struct ") else ""
+            else:
+                tag = base_type[7:] if base_type.startswith("struct ") else ""
+            layout = self.struct_layouts.get(tag)
+            if layout is None:
+                message = f"sizeof: unknown struct tag '{tag}'"
+                raise CompileError(message, line=node.line)
+            field_info = layout.get(node.member_name)
+            if field_info is None:
+                message = f"sizeof: unknown field '{node.member_name}' in struct '{tag}'"
+                raise CompileError(message, line=node.line)
+            return field_info.type_name
+        if isinstance(node, Cast):
+            return node.target_type
+        if isinstance(node, Int):
+            return "int"
+        if isinstance(node, Char):
+            return "char"
+        if isinstance(node, String):
+            return "char *"
+        if isinstance(node, AddressOf):
+            variable_type = self._expression_type(node.var)
+            return f"{variable_type} *"
+        if isinstance(node, PointerDereference):
+            return node.target_type
+        if isinstance(node, BinaryOperation):
+            return "int"
+        if isinstance(node, (SizeofType, SizeofVar, SizeofExpr)):
+            return "int"
+        message = f"sizeof: cannot determine type of {type(node).__name__}"
+        raise CompileError(message, line=node.line)
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.

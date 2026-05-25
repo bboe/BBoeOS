@@ -51,35 +51,35 @@ class BuiltinsMixin:
         message = f"{builtin_name}() first argument '{cursor_name}' is not a local"
         raise CompileError(message, line=cursor.line)
 
-    def builtin___builtin_va_arg(self, arguments: list[Node], /) -> None:
-        """Generate code for ``__builtin_va_arg(ap, T)`` — read one int-sized arg and advance ``ap``.
+    def builtin___builtin_va_arg(self, arguments: list[Node], /, *, advance_size: int | None = None) -> None:
+        """Generate code for ``__builtin_va_arg(ap, T)`` — read one arg and advance ``ap``.
 
-        The type argument ``T`` is stripped at parse time (cc.py only
-        widens through int — the cast is a no-op for every int-sized
-        type, and wider types aren't yet supported), so the codegen
-        sees a single-arg call: ``ap`` is the variadic-argument
-        cursor (a ``va_list`` local that points to the next stack
-        slot), the builtin reads ``*ap`` into EAX, then advances
-        ``ap`` by ``sizeof(int)`` so the next call reads the
-        following slot.  Same intrinsic name clang uses so the same
-        ``<stdarg.h>`` text serves both compilers — clang has its
-        own native lowering of this builtin and never sees cc.py's
-        codegen here.
+        ``ap`` is the variadic-argument cursor (a ``va_list`` local that
+        points to the next stack slot); the builtin reads ``*ap`` into
+        EAX, then advances ``ap`` by ``advance_size`` bytes so the next
+        call reads the following slot.  ``advance_size`` defaults to
+        ``int_size`` (4 bytes on i386) for int-sized types; pass 8 for
+        ``double`` and other 8-byte types.
+
+        Same intrinsic name clang uses so the same ``<stdarg.h>`` text
+        serves both compilers — clang has its own native lowering and
+        never sees cc.py's codegen here.
         """
         self._check_argument_count(arguments=arguments, expected=1, name="__builtin_va_arg")
         cursor = arguments[0]
         cursor_register, cursor_address = self._va_list_destination(cursor, builtin_name="__builtin_va_arg")
         acc = self.target.acc
         int_size = self.target.int_size
+        step = advance_size if advance_size is not None else int_size
         if cursor_register is not None:
             # ap lives in a register: read through it directly, then bump.
             self.emit(f"        mov {acc}, [{cursor_register}]")
-            self.emit(f"        add {cursor_register}, {int_size}")
+            self.emit(f"        add {cursor_register}, {step}")
         else:
             bx = self.target.bx_register
             self.emit(f"        mov {bx}, [{cursor_address}]")
             self.emit(f"        mov {acc}, [{bx}]")
-            self.emit(f"        add {bx}, {int_size}")
+            self.emit(f"        add {bx}, {step}")
             self.emit(f"        mov [{cursor_address}], {bx}")
         self.ax_clear()
 

@@ -11,6 +11,18 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: `va_arg(ap, double)` advances cursor by 8 bytes.** Previously
+  `__builtin_va_arg` always advanced by `int_size` (4) regardless of type.  A
+  new `VaArg` AST node retains the type string so codegen can pick the correct
+  advance size from `_type_size`.  Unblocks `user/libbboeos/stdio.c`.
+- **cc.py: `sizeof(expression)` and unparenthesised `sizeof expr`.** A new
+  `SizeofExpr` AST node plus a codegen-time `_expression_type` helper infers the
+  compile-time type of an arbitrary expression by walking the AST, then
+  delegates to `_type_size` for the constant.  Covers pointer dereference
+  (`sizeof *p`), subscript (`sizeof p[0]`), member access (`sizeof p->f`,
+  `sizeof s.f`), casts, binary ops, and literals. `sizeof(array_name)` retains
+  its existing full-array-size semantics via the `SizeofVar` path.  Unblocks
+  `user/libbboeos/dirent.c`.
 - **cc.py: parenthesized assignment-as-expression.** Accept the classic `while
   ((p = next()))`, `f((x = 7))`, `a = (b = c)` and similar forms.  The enclosing
   parentheses are required and must be dedicated to the assignment — `if (x =
