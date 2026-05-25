@@ -419,6 +419,8 @@ class Builder:
                 else:
                     v = self._build_expr(value, out, strings=strings) if value is not None else None
                     out.append(Return(value=v))
+            case ast_nodes.IndexedCall():
+                out.append(Block(node=stmt))
             case ast_nodes.InlineAsm(content=content):
                 out.append(InlineAsm(content=content))
             case _:

@@ -33,6 +33,7 @@ from cc.ast_nodes import (
     IncrementDecrement,
     Index,
     IndexAssign,
+    IndexedCall,
     IndexMemberAccess,
     IndexMemberAssign,
     IndexMemberIndex,
@@ -671,11 +672,19 @@ class Parser:
         """
         function_pointer_params_list: list[Param] | None = None
         local_type_string = type_string
+        local_fptr_array_size: Node | None = None
         if self.peek()[0] == "LPAREN":
             # Function pointer variable: type (*name)(params)
+            # or array-of-function-pointer: type (*name[N])(params)
             self.eat("LPAREN")
             self.eat("STAR")
             name = self.eat("IDENT")[1]
+            # Check for array-of-function-pointer declarator: ``(*name[N])(params)``
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                if self.peek()[0] != "RBRACKET":
+                    local_fptr_array_size = self.parse_expression()
+                self.eat("RBRACKET")
             self.eat("RPAREN")
             self.eat("LPAREN")
             function_pointer_params_list, _ = self.parse_parameters()
@@ -700,10 +709,13 @@ class Parser:
         if pinned_register_value is not None and local_type_string == "unsigned long":
             message = "pinned_register attribute is not supported on 'unsigned long' (spans two registers)"
             raise CompileError(message, line=line)
-        # Optional [] or [N] for array declarations
-        is_array = False
-        size_expression: Node | None = None
-        if self.peek()[0] == "LBRACKET":
+        # Optional [] or [N] for array declarations.
+        # ``local_fptr_array_size`` is set when the declarator used the
+        # ``(*name[N])(params)`` syntax — the ``[N]`` was already consumed
+        # inside the parenthesised group, so no outer ``LBRACKET`` check runs.
+        is_array = local_fptr_array_size is not None
+        size_expression: Node | None = local_fptr_array_size
+        if not is_array and self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             is_array = True
             if self.peek()[0] != "RBRACKET":
@@ -1459,6 +1471,10 @@ class Parser:
                         inner_index=inner_index,
                         line=line,
                     )
+                if self.peek()[0] == "LPAREN":
+                    self.eat("LPAREN")
+                    arguments = self.parse_arguments()
+                    return IndexedCall(args=arguments, array=Var(line=line, name=token[1]), index=index, line=line)
                 return Index(array=Var(line=line, name=token[1]), index=index, line=line)
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
@@ -1859,6 +1875,17 @@ class Parser:
                 delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
                 return IncrementDecrement(delta=delta, is_postfix=True, line=token[2], target_name=token[1])
             if next_kind == "LBRACKET":
+                saved_position = self.position
+                self.eat("IDENT")
+                self.eat("LBRACKET")
+                index_expression = self.parse_expression()
+                self.eat("RBRACKET")
+                if self.peek()[0] == "LPAREN":
+                    self.eat("LPAREN")
+                    arguments = self.parse_arguments()
+                    self.eat("SEMI")
+                    return IndexedCall(args=arguments, array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2])
+                self.position = saved_position
                 return self.parse_index_assignment()
             if next_kind in ("DOT", "ARROW"):
                 return self._parse_member_assignment()
@@ -2058,11 +2085,38 @@ class Parser:
             self.eat("LPAREN")
             self.eat("STAR")
             name = self.eat("IDENT")[1]
+            # Check for array-of-function-pointer: ``type (*name[N])(params)``
+            array_size_expression: Node | None = None
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                if self.peek()[0] != "RBRACKET":
+                    array_size_expression = self.parse_expression()
+                self.eat("RBRACKET")
             self.eat("RPAREN")
             self.eat("LPAREN")
             function_pointer_params_list, _ = self.parse_parameters()
             self.eat("RPAREN")
-            init: Node | None = None
+            if array_size_expression is not None:
+                # Array-of-function-pointer declaration.
+                init: Node | None = None
+                if self.peek()[0] == "ASSIGN":
+                    self.eat("ASSIGN")
+                    init = self.parse_array_init()
+                self.eat("SEMI")
+                if is_extern and init is not None:
+                    message = "extern declarations may not have an initializer"
+                    raise CompileError(message, line=line)
+                return [
+                    ArrayDecl(
+                        init=init,
+                        is_extern=is_extern,
+                        line=line,
+                        name=name,
+                        size=array_size_expression,
+                        type_name="function_pointer",
+                    ),
+                ]
+            init = None
             if self.peek()[0] == "ASSIGN":
                 self.eat("ASSIGN")
                 init = self.parse_expression()

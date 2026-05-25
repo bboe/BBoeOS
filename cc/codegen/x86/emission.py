@@ -49,6 +49,7 @@ from cc.ast_nodes import (
     IncrementDecrement,
     Index,
     IndexAssign,
+    IndexedCall,
     IndexMemberAccess,
     IndexMemberAssign,
     IndexMemberIndex,
@@ -1529,6 +1530,8 @@ class EmissionMixin:
             )
         elif isinstance(expression, Call):
             self.generate_call(expression)
+        elif isinstance(expression, IndexedCall):
+            self.generate_indexed_call(expression)
         elif isinstance(expression, BinaryOperation):
             # Fold an entirely-constant subtree (named constants and
             # integer literals) into a single ``mov ax, <expr>`` so the
@@ -2857,6 +2860,139 @@ class EmissionMixin:
                 self.emit(f"        mov [{si}], {store_acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
+    def generate_indexed_call(self, statement: IndexedCall, /, *, discard_return: bool = False) -> None:
+        """Generate assembly for a call through a function-pointer array element.
+
+        Mirrors the indirect-call path in :meth:`generate_call` (the
+        ``function_pointer`` variable case) but computes the callee
+        address as ``base + index * int_size`` instead of loading a
+        named scalar.
+
+        Address computation strategy (mirrors :meth:`generate_index_assign`):
+
+        - Global array: ``lea acc, [_g_name + index*int_size]`` then
+          ``mov acc, [acc]`` to load the function pointer.
+        - Local stack array: ``lea acc, [bp-offset + index*int_size]``
+          then ``mov acc, [acc]``.
+        - Either: push args cdecl right-to-left, load the callee
+          address into ``acc``, ``call acc``, caller pops args.
+
+        The accumulator is used as the scratch pointer so the call
+        sequence matches the existing ``function_pointer`` variable
+        path in :meth:`generate_call` and avoids any SI-alias
+        interactions.  Args are pushed before the element-address
+        computation to free up the accumulator for the address load.
+        """
+        name = statement.array.name
+        self._check_defined(name, line=statement.line)
+        arguments = statement.args
+        self.si_local = None
+        clobbers: frozenset[str] = frozenset(self.target.register_pool)
+        saved = self._pinned_registers_to_save(clobbers)
+        use_pusha = discard_return and len(saved) >= 3
+        if use_pusha:
+            self.emit("        pusha")
+        else:
+            for register in saved:
+                self.emit(f"        push {register}")
+        # Push stack arguments right-to-left (cdecl convention).
+        for arg in reversed(arguments):
+            self._emit_push_arg(arg)
+        # Compute element address into acc (EAX/AX): base + index * int_size.
+        # The acc register is free here — all args have been pushed already.
+        acc = self.target.acc
+        si = self.target.si_register
+        index_expression = statement.index
+        if name in self.global_arrays:
+            global_base = self._global_label(name)
+            if isinstance(index_expression, Int):
+                element_offset = index_expression.value * self.target.int_size
+                addr = f"{global_base}+{element_offset}" if element_offset else global_base
+                self.emit(f"        mov {acc}, [{addr}]")
+            else:
+                # Variable index: evaluate into acc, scale, add to base address.
+                # Use SI as base scratch so generate_expression can use acc freely.
+                guarded = self._si_scratch_guard_begin(name)
+                self.emit(f"        lea {si}, [{global_base}]")
+                self.generate_expression(index_expression)
+                self._emit_scale_index(acc, scale=self.target.int_size)
+                self.emit(f"        add {acc}, {si}")
+                self.emit(f"        mov {acc}, [{acc}]")
+                self._si_scratch_guard_end(guarded=guarded)
+                self.emit(f"        call {acc}")
+                if arguments:
+                    self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+                if use_pusha:
+                    self.emit("        popa")
+                else:
+                    for register in reversed(saved):
+                        self.emit(f"        pop {register}")
+                self.ax_clear()
+                return
+        elif name in self.local_stack_arrays:
+            if self.elide_frame:
+                base_operand = f"_l_{name}"
+            else:
+                offset_from_bp = self.locals[name]
+                base_operand = f"{self.target.base_register}-{offset_from_bp}"
+            if isinstance(index_expression, Int):
+                element_offset = index_expression.value * self.target.int_size
+                addr = f"{base_operand}+{element_offset}" if element_offset else base_operand
+                self.emit(f"        mov {acc}, [{addr}]")
+            else:
+                guarded = self._si_scratch_guard_begin(name)
+                self.emit(f"        lea {si}, [{base_operand}]")
+                self.generate_expression(index_expression)
+                self._emit_scale_index(acc, scale=self.target.int_size)
+                self.emit(f"        add {acc}, {si}")
+                self.emit(f"        mov {acc}, [{acc}]")
+                self._si_scratch_guard_end(guarded=guarded)
+                self.emit(f"        call {acc}")
+                if arguments:
+                    self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+                if use_pusha:
+                    self.emit("        popa")
+                else:
+                    for register in reversed(saved):
+                        self.emit(f"        pop {register}")
+                self.ax_clear()
+                return
+        # Pointer variable: load base pointer, add scaled index, load function pointer.
+        elif isinstance(index_expression, Int):
+            element_offset = index_expression.value * self.target.int_size
+            self._emit_load_var(name, register=acc)
+            if element_offset:
+                self.emit(f"        add {acc}, {element_offset}")
+            self.emit(f"        mov {acc}, [{acc}]")
+        else:
+            guarded = self._si_scratch_guard_begin(name)
+            self._emit_load_var(name, register=si)
+            self.generate_expression(index_expression)
+            self._emit_scale_index(acc, scale=self.target.int_size)
+            self.emit(f"        add {acc}, {si}")
+            self.emit(f"        mov {acc}, [{acc}]")
+            self._si_scratch_guard_end(guarded=guarded)
+            self.emit(f"        call {acc}")
+            if arguments:
+                self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+            if use_pusha:
+                self.emit("        popa")
+            else:
+                for register in reversed(saved):
+                    self.emit(f"        pop {register}")
+            self.ax_clear()
+            return
+        # Simple constant-index case: acc already holds the loaded function pointer.
+        self.emit(f"        call {acc}")
+        if arguments:
+            self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+        if use_pusha:
+            self.emit("        popa")
+        else:
+            for register in reversed(saved):
+                self.emit(f"        pop {register}")
+        self.ax_clear()
+
     def generate_long_expression(self, expression: Node, /) -> None:
         """Generate code for an ``unsigned long`` expression, leaving the result in DX:AX.
 
@@ -3087,6 +3223,9 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, IndexAssign):
             self.generate_index_assign(statement)
+        elif isinstance(statement, IndexedCall):
+            self.generate_indexed_call(statement, discard_return=True)
+            self.ax_clear()
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
