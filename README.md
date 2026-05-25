@@ -104,4 +104,5 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   memory output (`=m`), named operands, operand substitution
   (`%[name]`/`%b`/`%%`), and clobber lists.  Unblocks both
   remaining libbboeos files.
-  Status: design complete; implementation pending.
+  Plan: [2026-05-25-cc-extended-inline-asm-plan.md](./2026-05-25-cc-extended-inline-asm-plan.md).
+  Status: design + plan complete; implementation pending.
