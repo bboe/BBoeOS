@@ -57,6 +57,7 @@ from cc.ast_nodes import (
     Param,
     PointerDereferenceAssign,
     Return,
+    SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
@@ -146,8 +147,8 @@ class LivenessAnalyzer:
         """
         if expression is None:
             return
-        if isinstance(expression, (Int, Char, String, SizeofType, SizeofVar)):
-            # Leaf literals — no Var uses.
+        if isinstance(expression, (Int, Char, SizeofExpr, SizeofType, SizeofVar, String)):
+            # Leaf literals and sizeof (compile-time, no runtime Var uses).
             return
         if isinstance(expression, Var):
             accumulator.add(expression.name)

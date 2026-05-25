@@ -68,6 +68,7 @@ from cc.ast_nodes import (
     PointerDereference,
     PointerDereferenceAssign,
     Return,
+    SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
@@ -75,6 +76,7 @@ from cc.ast_nodes import (
     Switch,
     SwitchCase,
     TailCall,
+    VaArg,
     Var,
     VarDecl,
     While,
@@ -811,7 +813,7 @@ class EmissionMixin:
         to decide whether eliding the then-branch (which by the textual
         macro semantics would otherwise be re-evaluated) is safe.
         """
-        if isinstance(node, (Int, String, Var, SizeofType, SizeofVar, AddressOf, MemberAddressOf)):
+        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, MemberAddressOf)):
             return True
         if isinstance(node, BinaryOperation):
             return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
@@ -1484,6 +1486,10 @@ class EmissionMixin:
                 else:
                     self.emit(f"        mov {self.target.acc}, [{si}]")
             self.ax_clear()
+        elif isinstance(expression, SizeofExpr):
+            self.ax_clear()
+            inferred_type = self._expression_type(expression.expression)
+            self.emit(f"        mov {self.target.acc}, {self._type_size(inferred_type)}")
         elif isinstance(expression, SizeofType):
             self.ax_clear()
             self.emit(f"        mov {self.target.acc}, {self._type_size(expression.type_name)}")
@@ -1499,6 +1505,9 @@ class EmissionMixin:
                 else:
                     size_expression = self._constant_expression(declaration.size)
                     self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
+            elif vname in self.local_stack_arrays:
+                size = self.local_stack_arrays[vname]
+                self.emit(f"        mov {self.target.acc}, {size}")
             elif vname in self.array_sizes:
                 size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
                 self.emit(f"        mov {self.target.acc}, {size}")
@@ -1513,6 +1522,11 @@ class EmissionMixin:
             else:
                 size = self.target.int_size  # all non-array variables are word-sized
                 self.emit(f"        mov {self.target.acc}, {size}")
+        elif isinstance(expression, VaArg):
+            self.builtin___builtin_va_arg(
+                [expression.cursor],
+                advance_size=self._va_arg_advance_size(expression.type_name),
+            )
         elif isinstance(expression, Call):
             self.generate_call(expression)
         elif isinstance(expression, BinaryOperation):
@@ -2111,6 +2125,78 @@ class EmissionMixin:
         # the tail jmp is valid and the named register's stale value
         # is never used.
         return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
+    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
+        """Elide the then-branch when it duplicates the comparison's left operand.
+
+        Returns True when the ternary matched the pure-then-equals-cond.left
+        shape and the lowering was emitted; the caller (``_generate_conditional``)
+        then skips its default cond-jump / then / jmp / else / end layout.
+
+        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
+        after function-like macro expansion):
+
+            Conditional(
+                condition=BinaryOperation(left=X, op=COMP, right=Y),
+                then_expr=X,                 # structurally equal to cond.left
+                else_expr=anything,
+            )
+
+        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
+        AX = X.  A *true*-jump to the merge label therefore skips the
+        else branch with no re-evaluation of X — which is exactly the
+        savings the textual macro pattern needs (``MIN(a-b, K)`` would
+        otherwise emit ``a-b`` twice).
+
+        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
+        textual macro semantics require evaluating the chosen branch in
+        full, side effects included.  Refused too for ``&&`` / ``||``
+        condition shapes (those go through the general
+        :meth:`emit_condition_false_jump` short-circuit machinery, which
+        doesn't leave a single representative value in AX), for unsigned
+        long destinations (32-bit accumulator handling differs), and for
+        byte-byte comparisons (AL holds the left byte but AH is stale,
+        so falling through with AX as the result needs a zero-extend
+        the standard path already issues separately).
+        """
+        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
+            return False
+        if expression.then_expr != condition.left:
+            return False
+        if not self._is_pure_expression(expression.then_expr):
+            return False
+        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
+            return False
+        operator, unsigned = self.emit_condition(condition=condition, context="ast")
+        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
+        # ``emit_condition`` may have returned the synthetic "carry" /
+        # "not_carry" operator for a ``carry_return`` callee — there's
+        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
+        # this fast track depends on wasn't taken.  Bail.
+        if operator not in table:
+            return False
+        end_label = f".cond_end_{self.new_label()}"
+        self.emit(f"        {table[operator]} {end_label}")
+        # Cond is false here — load else_expr into AX.  Clear ax_local
+        # first so a Var(then_expr.name) shape inside else_expr doesn't
+        # short-circuit on stale tracking.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # Merge: AX holds whichever branch's value ran, but the
+        # cross-path variable tracking is no longer guaranteed.
+        self.ax_clear()
+        return True
+
+    def _va_arg_advance_size(self, type_name: str, /) -> int:
+        """Return the number of bytes to advance a ``va_list`` cursor for *type_name*.
+
+        Delegates to :meth:`_type_size` for all known types.  On i386
+        cdecl, ``double`` occupies 8 bytes on the caller's stack; every
+        other currently-supported type fits in one native word (4 bytes
+        under ``--bits 32``, 2 under ``--bits 16``).
+        """
+        return self._type_size(type_name)
 
     def generate_function(self, function: Function | ir.Function, /) -> None:
         """Generate assembly for a single function definition."""
@@ -3121,6 +3207,11 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, TailCall):
             self.generate_tail_call(statement)
+        elif isinstance(statement, VaArg):
+            # ``va_arg(ap, T);`` at statement scope — advance the cursor
+            # (side effect) and discard the loaded value.
+            self.generate_expression(statement)
+            self.ax_clear()
         elif isinstance(statement, InlineAsm):
             # Empty / inline-asm statement (produced by ``(void)expr;``
             # discard sites and any future statement-level asm escape).
@@ -3362,68 +3453,6 @@ class EmissionMixin:
             for reg in reversed(self.current_preserve_registers):
                 self.emit(f"        pop {reg}")
         self.emit(f"        jmp {target_register}")
-
-    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
-        """Elide the then-branch when it duplicates the comparison's left operand.
-
-        Returns True when the ternary matched the pure-then-equals-cond.left
-        shape and the lowering was emitted; the caller (``_generate_conditional``)
-        then skips its default cond-jump / then / jmp / else / end layout.
-
-        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
-        after function-like macro expansion):
-
-            Conditional(
-                condition=BinaryOperation(left=X, op=COMP, right=Y),
-                then_expr=X,                 # structurally equal to cond.left
-                else_expr=anything,
-            )
-
-        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
-        AX = X.  A *true*-jump to the merge label therefore skips the
-        else branch with no re-evaluation of X — which is exactly the
-        savings the textual macro pattern needs (``MIN(a-b, K)`` would
-        otherwise emit ``a-b`` twice).
-
-        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
-        textual macro semantics require evaluating the chosen branch in
-        full, side effects included.  Refused too for ``&&`` / ``||``
-        condition shapes (those go through the general
-        :meth:`emit_condition_false_jump` short-circuit machinery, which
-        doesn't leave a single representative value in AX), for unsigned
-        long destinations (32-bit accumulator handling differs), and for
-        byte-byte comparisons (AL holds the left byte but AH is stale,
-        so falling through with AX as the result needs a zero-extend
-        the standard path already issues separately).
-        """
-        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
-            return False
-        if expression.then_expr != condition.left:
-            return False
-        if not self._is_pure_expression(expression.then_expr):
-            return False
-        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
-            return False
-        operator, unsigned = self.emit_condition(condition=condition, context="ast")
-        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
-        # ``emit_condition`` may have returned the synthetic "carry" /
-        # "not_carry" operator for a ``carry_return`` callee — there's
-        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
-        # this fast track depends on wasn't taken.  Bail.
-        if operator not in table:
-            return False
-        end_label = f".cond_end_{self.new_label()}"
-        self.emit(f"        {table[operator]} {end_label}")
-        # Cond is false here — load else_expr into AX.  Clear ax_local
-        # first so a Var(then_expr.name) shape inside else_expr doesn't
-        # short-circuit on stale tracking.
-        self.ax_clear()
-        self.generate_expression(expression.else_expr)
-        self.emit(f"{end_label}:")
-        # Merge: AX holds whichever branch's value ran, but the
-        # cross-path variable tracking is no longer guaranteed.
-        self.ax_clear()
-        return True
 
     def generate_while(self, statement: While, /) -> None:
         """Generate assembly for a while loop.

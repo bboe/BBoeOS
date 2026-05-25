@@ -54,6 +54,7 @@ from cc.ast_nodes import (
     PointerDereferenceAssign,
     Program,
     Return,
+    SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
@@ -63,6 +64,7 @@ from cc.ast_nodes import (
     Switch,
     SwitchCase,
     TailCall,
+    VaArg,
     Var,
     VarDecl,
     While,
@@ -1066,16 +1068,29 @@ class Parser:
     def parse_call_statement(self) -> Node:
         """Parse a function call statement.
 
+        ``__builtin_va_arg(ap, T)`` is special-cased because its second
+        argument is a type literal, not an expression; the general
+        ``parse_arguments`` path would reject any keyword type token as
+        "expected expression".
+
         Returns:
             An AST node for the call statement.
 
         """
         token = self.eat("IDENT")
         name = token[1]
+        line = token[2]
         self.eat("LPAREN")
+        if name == "__builtin_va_arg":
+            cursor_arg = self.parse_expression()
+            self.eat("COMMA")
+            type_name = self.parse_type()
+            self.eat("RPAREN")
+            self.eat("SEMI")
+            return VaArg(cursor=cursor_arg, line=line, type_name=type_name)
         arguments = self.parse_arguments()
         self.eat("SEMI")
-        return Call(args=arguments, line=token[2], name=name)
+        return Call(args=arguments, line=line, name=name)
 
     def parse_comparison(self) -> Node:
         """Parse a comparison expression.
@@ -1398,9 +1413,9 @@ class Parser:
                     self.eat("LPAREN")
                     cursor_arg = self.parse_expression()
                     self.eat("COMMA")
-                    self.parse_type()  # T parsed and discarded
+                    type_name = self.parse_type()
                     self.eat("RPAREN")
-                    return Call(args=[cursor_arg], line=line, name=token[1])
+                    return VaArg(cursor=cursor_arg, line=line, type_name=type_name)
                 self.eat("LPAREN")
                 return Call(args=self.parse_arguments(), line=line, name=token[1])
             if self.peek()[0] == "LBRACKET":
@@ -1696,20 +1711,33 @@ class Parser:
     def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
 
-        Returns:
-            An AST node for sizeof(type) or sizeof(variable).
-
+        Accepted forms:
+        - ``sizeof(T)``   → :class:`SizeofType`
+        - ``sizeof(var)`` → :class:`SizeofVar` (preserves array-size semantics)
+        - ``sizeof(expr)`` → :class:`SizeofExpr`
+        - ``sizeof expr`` (unparenthesised) → :class:`SizeofExpr`
         """
         token = self.eat("SIZEOF")
+        if self.peek()[0] != "LPAREN":
+            # Unparenthesised: sizeof <unary-expression>.
+            expression = self.parse_primary()
+            return SizeofExpr(expression=expression, line=token[2])
         self.eat("LPAREN")
-        # sizeof(type) or sizeof(variable)
         if self._is_type_start():
             type_string = self.parse_type()
             self.eat("RPAREN")
             return SizeofType(line=token[2], type_name=type_string)
-        name = self.eat("IDENT")[1]
+        # Could be sizeof(var) or sizeof(expr). Bare IDENT followed by RPAREN
+        # keeps the SizeofVar path for backwards-compat (handles arrays
+        # specially — element-count * stride, not pointer size).
+        if self.peek()[0] == "IDENT" and self.peek(offset=1)[0] == "RPAREN":
+            name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            return SizeofVar(line=token[2], name=name)
+        # General expression.
+        expression = self.parse_expression()
         self.eat("RPAREN")
-        return SizeofVar(line=token[2], name=name)
+        return SizeofExpr(expression=expression, line=token[2])
 
     def parse_statement(self) -> Node | list[Node]:
         """Parse a single statement.

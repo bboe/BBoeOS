@@ -48,6 +48,7 @@ from cc.ast_nodes import (
     MemberIncrementDecrement,
     Node,
     Return,
+    SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
@@ -968,7 +969,18 @@ class CodeGeneratorBase:
             return "integer"
         if isinstance(
             node,
-            (Call, Conditional, IncrementDecrement, LogicalAnd, LogicalOr, MemberAccess, MemberIncrementDecrement, SizeofType, SizeofVar),
+            (
+                Call,
+                Conditional,
+                IncrementDecrement,
+                LogicalAnd,
+                LogicalOr,
+                MemberAccess,
+                MemberIncrementDecrement,
+                SizeofExpr,
+                SizeofType,
+                SizeofVar,
+            ),
         ):
             return "integer"
         if isinstance(node, Cast):
