@@ -87,4 +87,11 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   a new `SizeofExpr` AST node + codegen-time `_expression_type`
   helper, unblocking `dirent.c`.
   Plan: [2026-05-24-va-arg-double-sizeof-expr-plan.md](./2026-05-24-va-arg-double-sizeof-expr-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #497.
+- [2026-05-25 — cc.py array of function pointers](./2026-05-25-cc-array-of-function-pointers-design.md)
+  — three sub-features to unblock `stdlib.c`: (1) parse the
+  `void (*name[N])(params)` declarator at file and local scope
+  (plus the typedef path); (2) store to indexed elements
+  (`arr[i] = fn`); (3) call through indexed elements
+  (`arr[i]()`), via a new `IndexedCall` AST node.
+  Status: design complete; implementation pending.
