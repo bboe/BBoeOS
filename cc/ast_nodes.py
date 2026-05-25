@@ -354,6 +354,15 @@ class IndexAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class IndexedCall(Node):
+    """Call through a function-pointer array element: ``array[index](args)``."""
+
+    args: list[Node]
+    array: Var
+    index: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class IndexMemberAccess(Node):
     """Rvalue ``arr[i].field`` or ``arr[i]->field`` (struct array element member read)."""
 

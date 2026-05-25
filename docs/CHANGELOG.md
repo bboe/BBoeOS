@@ -11,6 +11,11 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: arrays of function pointers.** Supports the direct declarator syntax
+  (`void (*arr[N])(void)`) and the typedef path (`typedef void (*handler)(void);
+  handler arr[N]`) at both file scope and local scope.  A new `IndexedCall` AST
+  node handles calling through an array element (`arr[i](args)`) via an indirect
+  `call [reg]`.  Unblocks `user/libbboeos/stdlib.c`.
 - **cc.py: `va_arg(ap, double)` advances cursor by 8 bytes.** Previously
   `__builtin_va_arg` always advanced by `int_size` (4) regardless of type.  A
   new `VaArg` AST node retains the type string so codegen can pick the correct
