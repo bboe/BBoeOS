@@ -1849,7 +1849,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov {addr}, {self.target.acc}")
 
     def generate_member_index(self, expression: MemberIndex, /) -> None:
-        """Generate code for ``ptr->field[index]`` as an rvalue.
+        """Generate code for ``ptr->field[index]`` or ``obj.field[index]``.
 
         For inline-array fields, loads one element from ``base +
         field_offset + index * element_size``.  For pointer fields,
@@ -1859,10 +1859,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         last only for pointer fields with int/pointer pointee).
         Constant indices fold into the displacement.
         """
-        if not expression.arrow:
-            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
-            raise CompileError(message, line=expression.line)
         info = self._resolve_member_index_layout(
+            arrow=expression.arrow,
             line=expression.line,
             member_name=expression.member_name,
             object_name=expression.object_name,
@@ -1888,10 +1886,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # (inline-array case) or into the pointer-load displacement (pointer case).
         if isinstance(expression.index, Int):
             self.ax_clear()
-            if self.si_local == object_name:
+            if expression.arrow and self.si_local == object_name:
                 base_reg = self.target.si_register
             else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
+                self._emit_member_index_base(arrow=expression.arrow, object_name=object_name, register=self.target.bx_register)
                 base_reg = self.target.bx_register
             if is_pointer_field:
                 # Load pointer, then offset by index*element_size.
@@ -1913,10 +1911,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        shl {self.target.acc}, {shift}")
         # Save scaled index, load base.
         self.emit(f"        push {self.target.acc}")
-        if self.si_local == object_name:
+        if expression.arrow and self.si_local == object_name:
             self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
         else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
+            self._emit_member_index_base(arrow=expression.arrow, object_name=object_name, register=self.target.bx_register)
         if is_pointer_field:
             ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
             self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
@@ -1938,10 +1936,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         and stores at ``ptr + index * pointee_size``.  Bitfield index
         assigns and the dot form on local struct values are rejected.
         """
-        if not statement.arrow:
-            message = "dot member index on local struct values is not yet supported; use a pointer and '->'"
-            raise CompileError(message, line=statement.line)
         info = self._resolve_member_index_layout(
+            arrow=statement.arrow,
             line=statement.line,
             member_name=statement.member_name,
             object_name=statement.object_name,
@@ -1969,10 +1965,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(statement.index, Int):
             self.ax_clear()
             self.generate_expression(statement.expr)  # rhs → EAX
-            if self.si_local == object_name:
+            if statement.arrow and self.si_local == object_name:
                 base_reg = self.target.si_register
             else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
+                self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
                 base_reg = self.target.bx_register
             if is_pointer_field:
                 ptr_addr = f"[{base_reg}+{field_offset}]" if field_offset else f"[{base_reg}]"
@@ -1998,10 +1994,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        shl {self.target.acc}, {shift}")
         # Save scaled index, load base.
         self.emit(f"        push {self.target.acc}")
-        if self.si_local == object_name:
+        if statement.arrow and self.si_local == object_name:
             self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
         else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
+            self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
         if is_pointer_field:
             ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
             self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
@@ -2095,19 +2091,26 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     def _resolve_member_index_layout(
         self,
         *,
+        arrow: bool = True,
         line: int,
         member_name: str,
         object_name: str,
     ) -> FieldInfo:
-        """Validate ``object_name`` is a struct pointer and look up ``member_name``."""
+        """Validate ``object_name`` is a struct (pointer or value) and look up ``member_name``."""
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
             message = f"undefined variable '{object_name}'"
             raise CompileError(message, line=line)
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=line)
-        tag = struct_type[7:-1]
+        if arrow:
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+                raise CompileError(message, line=line)
+            tag = struct_type[7:-1]
+        else:
+            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=line)
+            tag = struct_type[7:]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
@@ -2313,6 +2316,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         for instruction in getattr(self.target, "LONG_TO_EAX", ()):
             self.emit(f"        {instruction}")
+
+    def _emit_member_index_base(self, *, arrow: bool, object_name: str, register: str) -> None:
+        """Load the struct base address into *register* for member-index codegen.
+
+        Arrow form: loads the pointer value from the variable.
+        Dot form: loads the frame address of the local struct via LEA.
+        """
+        if arrow:
+            self._emit_load_var(object_name, register=register)
+        elif object_name in self.locals:
+            local_addr = self._local_address(object_name)
+            self.emit(f"        lea {register}, [{local_addr}]")
+        elif object_name in self.global_scalars:
+            global_addr = self._local_address(object_name)
+            self.emit(f"        lea {register}, [{global_addr}]")
+        else:
+            message = f"undefined variable '{object_name}'"
+            raise CompileError(message)
 
     def _emit_syscall(self, name: str, /) -> None:
         """Emit the invocation sequence for a named kernel syscall.
