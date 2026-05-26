@@ -127,7 +127,7 @@ FILE *fopen(const char *path, const char *mode) {
     if (fd < 0)
         return NULL;
     FILE *fp = malloc(sizeof(FILE));
-    if (!fp) {
+    if (fp == NULL) {
         close(fd);
         return NULL;
     }
@@ -381,7 +381,7 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
             break;
         case 's': {
             const char *p = va_arg(ap, const char *);
-            if (!p)
+            if (p == NULL)
                 p = "(null)";
             int n = (int)strlen(p);
             if (prec >= 0 && n > prec)
@@ -411,7 +411,7 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
             continue;
         }
 
-        int prefix_len = (prefix[0] != 0) + (prefix[1] != 0);
+        int prefix_len = (prefix[0] != '\0') + (prefix[1] != '\0');
         int total = body_len + prefix_len;
         int pad = width > total ? width - total : 0;
         if (!left && !zero)

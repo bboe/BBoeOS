@@ -28,6 +28,7 @@ from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
     Assign,
+    AssignExpr,
     BinaryOperation,
     Break,
     Call,
@@ -404,6 +405,12 @@ class CodeGeneratorBase:
             right = self._constant_expression(init.right)
             if left is not None and right is not None:
                 return f"({left}{init.operation}{right})"
+        if isinstance(init, AddressOf) and isinstance(init.var, Var):
+            name = init.var.name
+            if name in self.global_scalars or name in self.global_arrays:
+                return self._local_address(name)
+        if isinstance(init, Cast) and isinstance(init.expression, Int):
+            return str(init.expression.value)
         return None
 
     def _dispatch_chain_var(self, statement: If, /) -> str | None:
@@ -944,7 +951,7 @@ class CodeGeneratorBase:
             if node.name == "NULL":
                 return "null"
             variable_type = self.variable_types.get(node.name)
-            if variable_type in ("char*", "uint8_t*", "char**", "uint8_t**", "int**"):
+            if variable_type is not None and variable_type.endswith("*"):
                 return "pointer"
             if variable_type == "char":
                 return "char"
@@ -997,6 +1004,10 @@ class CodeGeneratorBase:
             if node.target_type == "char":
                 return "char"
             return "integer"
+        if isinstance(node, AssignExpr):
+            return "integer"
+        if isinstance(node, AddressOf):
+            return "pointer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
 

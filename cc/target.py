@@ -173,6 +173,7 @@ class X86CodegenTarget(CodegenTarget):
     type_sizes: ClassVar[dict[str, int]] = {
         "char": 1,
         "double": 8,
+        "float": 4,
         "uint8_t": 1,
         "uint16_t": 2,
         "uint32_t": 4,

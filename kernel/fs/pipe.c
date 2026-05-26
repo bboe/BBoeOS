@@ -146,7 +146,7 @@ void pipe_release(struct pipe *p) {
 void pipe_release_by_index(int index) {
     struct pipe *p;
     p = pipe_at(index);
-    if (p == 0) {
+    if (p == NULL) {
         return;
     }
     pipe_release(p);

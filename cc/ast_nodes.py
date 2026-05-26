@@ -266,6 +266,23 @@ class ExtendedAsm(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class For(Node):
+    """``for (init; cond; step) { body }`` loop.
+
+    ``init`` is a list of statements executed once before the loop
+    (may be empty for ``for (;``).  ``cond`` is the loop condition
+    (``None`` for an unconditional ``for(;;)``).  ``step`` is a list
+    of statements executed after each iteration (before the condition
+    re-test), which is where ``continue`` jumps to in a for-loop.
+    """
+
+    body: list[Node]
+    cond: Node | None
+    init: list[Node]
+    step: list[Node]
+
+
+@dataclass(kw_only=True, slots=True)
 class Function(Node):
     """Function definition: name, parameter list, and body.
 
@@ -507,13 +524,15 @@ class MemberAccess(Node):
 
 @dataclass(kw_only=True, slots=True)
 class MemberAddressOf(Node):
-    """Address-of a struct member: ``&obj.field``.
+    """Address-of a struct member: ``&obj.field`` or ``&ptr->field``.
 
+    ``arrow=True`` for the ``->`` form; ``False`` for ``.``.
     Rejected at codegen when ``field`` is a bitfield (bitfields have no
     addressable storage).  For non-bitfield members the address is the
     byte address of the containing struct plus the field's byte offset.
     """
 
+    arrow: bool
     member_name: str
     object_name: str
 
@@ -523,12 +542,18 @@ class MemberAssign(Node):
     """Member assignment statement: ``ptr->field = expr;``.
 
     Like :class:`MemberAccess` but with an ``expr`` to store.
+    When ``base_expr`` is set the target is a chained access
+    (e.g. ``ptr->inner.field = expr;``): ``base_expr`` resolves to
+    the address of the inner struct value (a :class:`MemberAccess`),
+    ``arrow`` is always ``False``, and ``object_name`` is the empty
+    string.
     """
 
     arrow: bool
     expr: Node
     member_name: str
     object_name: str
+    base_expr: Node | None = None
 
 
 @dataclass(kw_only=True, slots=True)

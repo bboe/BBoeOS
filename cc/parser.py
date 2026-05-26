@@ -29,6 +29,7 @@ from cc.ast_nodes import (
     DoWhile,
     EnumDecl,
     ExtendedAsm,
+    For,
     Function,
     Goto,
     If,
@@ -624,6 +625,7 @@ class Parser:
     def _parse_member_assign_no_semi(self) -> MemberAssign | MemberIndexAssign:
         """Parse ``name (. | ->) member = expr`` or the indexed variant without consuming the trailing semicolon.
 
+        Also handles chained access: ``name->field.field2 = expr``.
         Only the plain ``=`` assignment forms are supported here (not
         compound assignments or increment/decrement).  Callers that need
         the full statement form (including ``++``/``--`` and ``+=`` etc.)
@@ -634,6 +636,36 @@ class Parser:
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
+        if self.peek()[0] in ("DOT", "ARROW"):
+            base: Node = MemberAccess(
+                arrow=arrow,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
+            while self.peek()[0] in ("DOT", "ARROW"):
+                chain_arrow_token = self.eat()
+                chain_arrow = chain_arrow_token[0] == "ARROW"
+                chain_member = self.eat("IDENT")
+                if self.peek()[0] in ("DOT", "ARROW"):
+                    base = MemberAccess(
+                        arrow=chain_arrow,
+                        base_expr=base,
+                        line=token[2],
+                        member_name=chain_member[1],
+                        object_name="",
+                    )
+                else:
+                    self.eat("ASSIGN")
+                    expression = self.parse_expression()
+                    return MemberAssign(
+                        arrow=chain_arrow,
+                        base_expr=base,
+                        expr=expression,
+                        line=token[2],
+                        member_name=chain_member[1],
+                        object_name="",
+                    )
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
@@ -663,8 +695,10 @@ class Parser:
 
         Accepts ``name (. | ->) member = expr ;``, the indexed form
         ``name (. | ->) member [ index ] = expr ;`` (yielding
-        :class:`MemberIndexAssign`), and the postfix increment/decrement
-        forms ``name (. | ->) member ++ ;`` / ``name (. | ->) member -- ;``
+        :class:`MemberIndexAssign`), chained member access
+        ``name (. | ->) member (. | ->) member2 ... = expr ;``, and
+        the postfix increment/decrement forms
+        ``name (. | ->) member ++ ;`` / ``name (. | ->) member -- ;``
         (yielding :class:`MemberIncrementDecrement` with
         ``is_postfix=True``).
         """
@@ -673,6 +707,41 @@ class Parser:
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
+        # Chained member access: ``a->b.c = expr;``.  Build a
+        # MemberAccess chain for the intermediate accesses; the final
+        # member becomes the assignment target.
+        if self.peek()[0] in ("DOT", "ARROW"):
+            base: Node = MemberAccess(
+                arrow=arrow,
+                line=token[2],
+                member_name=member_token[1],
+                object_name=object_name,
+            )
+            while self.peek()[0] in ("DOT", "ARROW"):
+                chain_arrow_token = self.eat()
+                chain_arrow = chain_arrow_token[0] == "ARROW"
+                chain_member = self.eat("IDENT")
+                if self.peek()[0] in ("DOT", "ARROW"):
+                    base = MemberAccess(
+                        arrow=chain_arrow,
+                        base_expr=base,
+                        line=token[2],
+                        member_name=chain_member[1],
+                        object_name="",
+                    )
+                else:
+                    # Final member — this is the assignment target.
+                    self.eat("ASSIGN")
+                    expression = self.parse_expression()
+                    self.eat("SEMI")
+                    return MemberAssign(
+                        arrow=chain_arrow,
+                        base_expr=base,
+                        expr=expression,
+                        line=token[2],
+                        member_name=chain_member[1],
+                        object_name="",
+                    )
         if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
             operator_token = self.eat()
             self.eat("SEMI")
@@ -1287,6 +1356,47 @@ class Parser:
         """
         return self.parse_conditional()
 
+    def parse_for(self) -> Node:
+        """Parse a ``for (init; cond; step) { body }`` loop.
+
+        Each clause may be empty: ``for (;;)`` is an infinite loop,
+        ``for (; cond;)`` omits init and step.  The init clause may be
+        a declaration (``for (int i = 0; ...)``) or a plain expression
+        statement.  The step clause is a comma-separated list of
+        expression statements.
+        """
+        token = self.eat("FOR")
+        self.eat("LPAREN")
+        # --- init ---
+        init: list[Node] = []
+        if self.peek()[0] == "SEMI":
+            self.eat("SEMI")
+        elif self.peek()[0] in TYPE_TOKENS or (self.peek()[0] == "IDENT" and self.peek()[1] in self.typedef_aliases):
+            init = self.parse_variable_declaration()
+        elif self.peek()[0] == "IDENT" and self.peek(offset=1)[0] == "ASSIGN":
+            name_token = self.eat("IDENT")
+            self.eat("ASSIGN")
+            value = self.parse_expression()
+            self.eat("SEMI")
+            init.append(Assign(expr=value, line=name_token[2], name=name_token[1]))
+        else:
+            init_expr = self.parse_expression()
+            self.eat("SEMI")
+            init.append(init_expr)
+        # --- cond ---
+        cond: Node | None = None
+        if self.peek()[0] != "SEMI":
+            cond = self.parse_expression()
+        self.eat("SEMI")
+        # --- step ---
+        step: list[Node] = []
+        while self.peek()[0] != "RPAREN":
+            step.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+        self.eat("RPAREN")
+        return For(body=self._parse_control_body(), cond=cond, init=init, line=token[2], step=step)
+
     def parse_if(self) -> Node:
         """Parse an if statement.
 
@@ -1594,12 +1704,25 @@ class Parser:
                         member_name=member_token[1],
                         object_name=token[1],
                     )
-                return MemberAccess(
+                result: Node = MemberAccess(
                     arrow=arrow,
                     line=line,
                     member_name=member_token[1],
                     object_name=token[1],
                 )
+                # Chained member access: ``a->b.c``, ``a->b.c.d``, etc.
+                while self.peek()[0] in ("DOT", "ARROW"):
+                    chain_arrow_token = self.eat()
+                    chain_arrow = chain_arrow_token[0] == "ARROW"
+                    chain_member = self.eat("IDENT")
+                    result = MemberAccess(
+                        arrow=chain_arrow,
+                        base_expr=result,
+                        line=line,
+                        member_name=chain_member[1],
+                        object_name="",
+                    )
+                return result
             if token[1] in self.enum_constants:
                 # Enum variant used as a bare value: fold to its integer
                 # constant so downstream code (case labels, array sizes,
@@ -1648,14 +1771,14 @@ class Parser:
                     operation="+",
                     right=index,
                 )
-            # ``&obj.field`` — address of a struct member.  Codegen rejects
-            # bitfield members (no addressable storage); regular fields are
-            # not yet fully supported but parse correctly so the error is
-            # reported at codegen rather than at parse time.
-            if self.peek()[0] == "DOT":
-                self.eat("DOT")
+            # ``&obj.field`` or ``&ptr->field`` — address of a struct
+            # member.  Codegen rejects bitfield members (no addressable
+            # storage).
+            if self.peek()[0] in ("DOT", "ARROW"):
+                arrow_token = self.eat()
                 member_token = self.eat("IDENT")
                 return MemberAddressOf(
+                    arrow=arrow_token[0] == "ARROW",
                     line=line,
                     member_name=member_token[1],
                     object_name=name_token[1],
@@ -1882,6 +2005,8 @@ class Parser:
             return Continue(line=token[2])
         if token[0] == "DO":
             return self.parse_do_while()
+        if token[0] == "FOR":
+            return self.parse_for()
         if token[0] == "GOTO":
             self.eat("GOTO")
             name_token = self.eat("IDENT")
@@ -2575,6 +2700,12 @@ class Parser:
             # the desired behavior until x87 / soft-float lands.
             self.eat()
             return self._parse_pointer_suffix("double", max_stars=2)
+        if token[0] == "FLOAT":
+            # ``float`` collapses to ``double`` — x87 operates in 80-bit
+            # extended precision internally; the distinction is invisible
+            # at our codegen level.
+            self.eat()
+            return self._parse_pointer_suffix("double", max_stars=2)
         if token[0] == "STRUCT":
             self.eat()
             tag_token = self.eat("IDENT")
@@ -2620,21 +2751,29 @@ class Parser:
         type_string = self.parse_type()
         declarations: list[Node] = [self._parse_one_declarator(line=line, type_string=type_string)]
         shared_base_type = type_string
-        base_stars = len(shared_base_type) - len(shared_base_type.rstrip("*"))
+        # In ``int *a, *b;`` the base type from parse_type() is ``int*``
+        # (stars from the first declarator are absorbed).  For subsequent
+        # declarators the stars in the source specify the TOTAL pointer
+        # depth, not additional depth on top of the shared base.  Strip
+        # the first declarator's stars to recover the unadorned base
+        # (``int``), then let each subsequent declarator re-specify its
+        # own stars.
+        stripped_base = shared_base_type.rstrip("*")
+        max_stars = len(shared_base_type) - len(stripped_base)
+        max_stars = max(max_stars, 2)
         while self.peek()[0] == "COMMA":
             # Additional declarators share the base ``type_string`` and
-            # each parse their own optional pointer stars on top of the
-            # shared base (``const char *p = a, *q = b;``), plus the
-            # usual ``[N]`` + ``= init``.  Function-pointer declarators
-            # (``type (*name)(params)``) are single-declarator only —
-            # they hijack the LPAREN token before the name, so they can
-            # never appear after a COMMA.
+            # each parse their own pointer stars (``const char *p = a,
+            # *q = b;``), plus the usual ``[N]`` + ``= init``.
+            # Function-pointer declarators (``type (*name)(params)``)
+            # are single-declarator only — they hijack the LPAREN token
+            # before the name, so they can never appear after a COMMA.
             self.eat("COMMA")
-            extra_stars = 0
-            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
+            declarator_stars = 0
+            while declarator_stars < max_stars and self.peek()[0] == "STAR":
                 self.eat("STAR")
-                extra_stars += 1
-            declarator_type = shared_base_type + "*" * extra_stars
+                declarator_stars += 1
+            declarator_type = stripped_base + "*" * declarator_stars
             declarations.append(self._parse_one_declarator(line=line, type_string=declarator_type))
         self.eat("SEMI")
         return declarations

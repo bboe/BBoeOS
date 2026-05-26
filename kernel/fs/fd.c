@@ -256,7 +256,7 @@ __attribute__((carry_return)) int fd_close(int fd_num
 void fd_close_pipe(struct fd *entry) {
     struct pipe *p;
     p = pipe_at(entry->start);
-    if (p == 0) {
+    if (p == NULL) {
         // entry->start out of range — shouldn't happen if sys_pipeline2
         // always installs a valid pool index; fd_close's memset still
         // clears the slot after we return.
@@ -632,7 +632,7 @@ fd_read_pipe(int *result __attribute__((out_register("ax"))),
         return 1;
     }
     p = pipe_at(entry->start);
-    if (p == 0) {
+    if (p == NULL) {
         *result = -1;
         return 0;
     }
@@ -747,7 +747,7 @@ fd_write_pipe(int *result __attribute__((out_register("ax"))),
     int total;
     u8 *cursor;
     p = pipe_at(entry->start);
-    if (p == 0) {
+    if (p == NULL) {
         *result = -1;
         return 0;
     }

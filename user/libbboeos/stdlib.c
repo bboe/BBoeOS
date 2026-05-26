@@ -91,17 +91,17 @@ static void release(block_header *block) {
         curr = curr->next;
     }
     /* Coalesce upward (block adjoins curr). */
-    if (curr && (char *)block + block->bytes == (char *)curr) {
+    if (curr != NULL && (char *)block + block->bytes == (char *)curr) {
         block->bytes += curr->bytes;
         block->next = curr->next;
     } else {
         block->next = curr;
     }
     /* Coalesce downward (prev adjoins block). */
-    if (prev && (char *)prev + prev->bytes == (char *)block) {
+    if (prev != NULL && (char *)prev + prev->bytes == (char *)block) {
         prev->bytes += block->bytes;
         prev->next = block->next;
-    } else if (prev) {
+    } else if (prev != NULL) {
         prev->next = block;
     } else {
         free_list = block;
@@ -156,7 +156,7 @@ void *bsearch(const void *key, const void *base, size_t n, size_t size,
 void *calloc(size_t nmemb, size_t size) {
     size_t bytes = nmemb * size;
     void *p = malloc(bytes);
-    if (p)
+    if (p != NULL)
         memset(p, 0, bytes);
     return p;
 }
@@ -168,7 +168,7 @@ void exit(int status) {
 }
 
 void free(void *payload) {
-    if (!payload)
+    if (payload == NULL)
         return;
     block_header *block =
         (block_header *)((char *)payload - sizeof(block_header));
@@ -193,7 +193,7 @@ void *malloc(size_t bytes) {
             prev = curr;
             curr = curr->next;
         }
-        if (curr)
+        if (curr != NULL)
             break;
         if (!grow_heap(total))
             return NULL;
@@ -205,12 +205,12 @@ void *malloc(size_t bytes) {
         tail->bytes = curr->bytes - total;
         tail->next = curr->next;
         curr->bytes = total;
-        if (prev)
+        if (prev != NULL)
             prev->next = tail;
         else
             free_list = tail;
     } else {
-        if (prev)
+        if (prev != NULL)
             prev->next = curr->next;
         else
             free_list = curr->next;
@@ -292,7 +292,7 @@ int rand(void) {
 }
 
 void *realloc(void *payload, size_t bytes) {
-    if (!payload)
+    if (payload == NULL)
         return malloc(bytes);
     if (bytes == 0) {
         free(payload);
@@ -304,7 +304,7 @@ void *realloc(void *payload, size_t bytes) {
     if (bytes <= old_payload)
         return payload;
     void *fresh = malloc(bytes);
-    if (fresh) {
+    if (fresh != NULL) {
         memcpy(fresh, payload, old_payload);
         free(payload);
     }
@@ -333,7 +333,7 @@ long strtol(const char *s, char **end, int base) {
     } else if (base == 0)
         base = 10;
     long acc = 0;
-    while (*s) {
+    while (*s != '\0') {
         int d;
         if (*s >= '0' && *s <= '9')
             d = *s - '0';
@@ -348,7 +348,7 @@ long strtol(const char *s, char **end, int base) {
         acc = acc * base + d;
         s++;
     }
-    if (end)
+    if (end != NULL)
         *end = (char *)s;
     return neg ? -acc : acc;
 }
