@@ -407,13 +407,13 @@ def qemu_session(
             snapshot=snapshot,
             with_net=with_net,
         )
-        process: subprocess.Popen | None = None
-        output_fd: int | None = None
-        try:
+        with contextlib.ExitStack() as stack:
             process = subprocess.Popen(qemu_args)
+            stack.callback(_terminate, process=process)
             if monitor_path is not None:
                 _wait_path(path=monitor_path, timeout=5.0)
             output_fd = os.open(f"{serial_base}.out", os.O_RDONLY | os.O_NONBLOCK)
+            stack.callback(os.close, output_fd)
             session = QemuSession(
                 monitor_path=monitor_path,
                 process=process,
@@ -425,11 +425,6 @@ def qemu_session(
                 session.wait_for_substring(PROMPT, timeout=boot_timeout)
                 session.boot_time = time.monotonic() - boot_start
             yield session
-        finally:
-            if output_fd is not None:
-                os.close(output_fd)
-            if process is not None:
-                _terminate(process=process)
 
 
 def _wait_path(*, path: Path, timeout: float) -> None:

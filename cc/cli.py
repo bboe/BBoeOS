@@ -31,57 +31,16 @@ def _compile(
 
     Output is written to ``output_path``, or to stdout when None.
     """
+    search_paths = _discover_include_paths(extra_include_paths=extra_include_paths, input_path=input_path)
     try:
-        source = input_path.read_text(encoding="utf-8")
-        # Walk up from the source's directory collecting include dirs from
-        # both sides of the tree.  The kernel side holds ``constants.asm`` +
-        # kernel-only headers in ``kernel/include/``; the user side holds
-        # shared C headers in ``user/libbboeos/include/``.  A user program
-        # needs both — its own libbboeos headers plus the kernel's
-        # constants.asm — so we don't break on first hit; we ascend to the
-        # repo root, picking up every relevant ``include/`` along the way.
-        kernel_includes: list[Path] = []
-        user_includes: list[Path] = []
-        cursor = input_path.parent.resolve()
-        while True:
-            for candidate in (cursor / "include", cursor / "kernel" / "include"):
-                if candidate.is_dir() and candidate not in kernel_includes:
-                    kernel_includes.append(candidate)
-            for candidate in (cursor / "libbboeos" / "include", cursor / "user" / "libbboeos" / "include"):
-                if candidate.is_dir() and candidate not in user_includes:
-                    user_includes.append(candidate)
-            if cursor.parent == cursor:
-                break
-            cursor = cursor.parent
-        # Kernel includes win on collision (they're the legacy inline-impl
-        # location); libbboeos prototype headers are the supplement.  Any
-        # explicit ``-I`` paths come last (lowest priority) so they can
-        # provide standard-C headers like ``<stdint.h>`` for sources that
-        # live outside the repo tree (e.g. tempdir test inputs) without
-        # overriding repo-local copies.
-        search_paths: tuple[Path, ...] = (*kernel_includes, *user_includes, *extra_include_paths)
-        source, defines, function_defines = preprocess(
-            source,
+        output = _translate(
             bits=bits,
-            include_base=input_path.parent,
-            search_paths=search_paths,
-        )
-        tokens = tokenize(source)
-        tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
-        ast = Parser(tokens, bits=bits).parse_program()
-        constants_asm = next(
-            (path / "constants.asm" for path in search_paths if (path / "constants.asm").is_file()),
-            None,
-        )
-        constant_values = parse_asm_constants(constants_asm) if constants_asm is not None else {}
-        output = X86CodeGenerator(
-            bits=bits,
-            constant_values=constant_values,
-            defines=defines,
+            input_path=input_path,
             object_mode=object_mode,
             per_function_sections=per_function_sections,
+            search_paths=search_paths,
             target_mode=target_mode,
-        ).generate(ast)
+        )
     except CompileError as error:
         location = f"{input_path}:{error.line}" if error.line else str(input_path)
         print(f"{location}: error: {error.message}", file=sys.stderr)
@@ -92,6 +51,74 @@ def _compile(
     else:
         sys.stdout.write(output)
     return 0
+
+
+def _discover_include_paths(*, extra_include_paths: tuple[Path, ...], input_path: Path) -> tuple[Path, ...]:
+    """Walk up from the source's directory collecting include dirs from both sides of the tree.
+
+    The kernel side holds ``constants.asm`` + kernel-only headers in
+    ``kernel/include/``; the user side holds shared C headers in
+    ``user/libbboeos/include/``.  A user program needs both — its own
+    libbboeos headers plus the kernel's constants.asm — so we don't
+    break on first hit; we ascend to the repo root, picking up every
+    relevant ``include/`` along the way.
+
+    Kernel includes win on collision (they're the legacy inline-impl
+    location); libbboeos prototype headers are the supplement.  Any
+    explicit ``-I`` paths come last (lowest priority) so they can
+    provide standard-C headers like ``<stdint.h>`` for sources that
+    live outside the repo tree (e.g. tempdir test inputs) without
+    overriding repo-local copies.
+    """
+    kernel_includes: list[Path] = []
+    user_includes: list[Path] = []
+    cursor = input_path.parent.resolve()
+    while True:
+        for candidate in (cursor / "include", cursor / "kernel" / "include"):
+            if candidate.is_dir() and candidate not in kernel_includes:
+                kernel_includes.append(candidate)
+        for candidate in (cursor / "libbboeos" / "include", cursor / "user" / "libbboeos" / "include"):
+            if candidate.is_dir() and candidate not in user_includes:
+                user_includes.append(candidate)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    return (*kernel_includes, *user_includes, *extra_include_paths)
+
+
+def _translate(
+    *,
+    bits: int,
+    input_path: Path,
+    object_mode: bool,
+    per_function_sections: bool,
+    search_paths: tuple[Path, ...],
+    target_mode: str,
+) -> str:
+    """Run the preprocess → tokenize → parse → codegen pipeline; may raise :class:`CompileError`."""
+    source = input_path.read_text(encoding="utf-8")
+    source, defines, function_defines = preprocess(
+        source,
+        bits=bits,
+        include_base=input_path.parent,
+        search_paths=search_paths,
+    )
+    tokens = tokenize(source)
+    tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
+    ast = Parser(tokens, bits=bits).parse_program()
+    constants_asm = next(
+        (path / "constants.asm" for path in search_paths if (path / "constants.asm").is_file()),
+        None,
+    )
+    constant_values = parse_asm_constants(constants_asm) if constants_asm is not None else {}
+    return X86CodeGenerator(
+        bits=bits,
+        constant_values=constant_values,
+        defines=defines,
+        object_mode=object_mode,
+        per_function_sections=per_function_sections,
+        target_mode=target_mode,
+    ).generate(ast)
 
 
 def main() -> int:

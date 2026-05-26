@@ -847,47 +847,58 @@ class Parser:
         """
         saved_position = self.position
         try:
-            first_kind = self.peek()[0]
-            # Pointer-dereference lvalues: ``*p = rhs``, ``*p++ = rhs``, etc.
-            if first_kind == "STAR":
-                inner = self._parse_deref_assignment_no_semi()
-                if self.peek()[0] != "RPAREN":
-                    self.position = saved_position
-                    return None
-                self.eat("RPAREN")
-                return AssignExpr(inner=inner, line=inner.line)
-            # All remaining lvalue shapes start with an IDENT.
-            if first_kind != "IDENT":
-                return None
-            second_kind = self.peek(offset=1)[0]
-            # ``IDENT[i]...`` — array index (possibly with member chain).
-            if second_kind == "LBRACKET":
-                inner = self._parse_index_assignment_no_semi()
-                if self.peek()[0] != "RPAREN":
-                    self.position = saved_position
-                    return None
-                self.eat("RPAREN")
-                return AssignExpr(inner=inner, line=inner.line)
-            # ``IDENT. / IDENT->`` — member (possibly with index suffix).
-            if second_kind in ("DOT", "ARROW"):
-                inner = self._parse_member_assign_no_semi()
-                if self.peek()[0] != "RPAREN":
-                    self.position = saved_position
-                    return None
-                self.eat("RPAREN")
-                return AssignExpr(inner=inner, line=inner.line)
-            # ``IDENT =`` or ``IDENT op=`` — plain or compound assignment.
-            if second_kind != "ASSIGN" and second_kind not in COMPOUND_ASSIGN_OPERATORS:
-                return None
-            inner = self._parse_simple_assignment_no_semi()
+            return self._parse_paren_assignment_body(saved_position=saved_position)
+        except CompileError:
+            self.position = saved_position
+            return None
+
+    def _parse_paren_assignment_body(self, *, saved_position: int) -> AssignExpr | None:
+        """Inner dispatcher for :meth:`_parse_paren_assignment`.
+
+        Returns the parsed :class:`AssignExpr` on success, or ``None``
+        after restoring ``self.position`` to ``saved_position`` when the
+        token shape rules out an assignment.  Raises :class:`CompileError`
+        on a deeper parse failure; the caller restores position and
+        returns ``None`` so speculation falls through cleanly.
+        """
+        first_kind = self.peek()[0]
+        # Pointer-dereference lvalues: ``*p = rhs``, ``*p++ = rhs``, etc.
+        if first_kind == "STAR":
+            inner = self._parse_deref_assignment_no_semi()
             if self.peek()[0] != "RPAREN":
                 self.position = saved_position
                 return None
             self.eat("RPAREN")
             return AssignExpr(inner=inner, line=inner.line)
-        except CompileError:
+        # All remaining lvalue shapes start with an IDENT.
+        if first_kind != "IDENT":
+            return None
+        second_kind = self.peek(offset=1)[0]
+        # ``IDENT[i]...`` — array index (possibly with member chain).
+        if second_kind == "LBRACKET":
+            inner = self._parse_index_assignment_no_semi()
+            if self.peek()[0] != "RPAREN":
+                self.position = saved_position
+                return None
+            self.eat("RPAREN")
+            return AssignExpr(inner=inner, line=inner.line)
+        # ``IDENT. / IDENT->`` — member (possibly with index suffix).
+        if second_kind in ("DOT", "ARROW"):
+            inner = self._parse_member_assign_no_semi()
+            if self.peek()[0] != "RPAREN":
+                self.position = saved_position
+                return None
+            self.eat("RPAREN")
+            return AssignExpr(inner=inner, line=inner.line)
+        # ``IDENT =`` or ``IDENT op=`` — plain or compound assignment.
+        if second_kind != "ASSIGN" and second_kind not in COMPOUND_ASSIGN_OPERATORS:
+            return None
+        inner = self._parse_simple_assignment_no_semi()
+        if self.peek()[0] != "RPAREN":
             self.position = saved_position
             return None
+        self.eat("RPAREN")
+        return AssignExpr(inner=inner, line=inner.line)
 
     def _parse_pointer_suffix(self, base: str, /, *, max_stars: int) -> str:
         """Greedily consume up to ``max_stars`` trailing ``*`` tokens.

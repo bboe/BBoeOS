@@ -109,6 +109,45 @@ def _measure_wav(*, wav_path: Path) -> dict:
     return {"duration": frame_count / rate, "rms": rms}
 
 
+def _run_music_check(*, wav_path: Path) -> None:
+    """Boot doom under QEMU+SB16, drain serial, and assert the music marker + non-silent WAV."""
+    with qemu_session(
+        memory="64",
+        extra_qemu_args=[
+            "-audiodev",
+            f"wav,id=a,path={wav_path}",
+            "-device",
+            "sb16,audiodev=a",
+        ],
+    ) as session:
+        session.write_serial("doom\r")
+        # Drain serial for the same window as the sound test.
+        # The engine prints the music init marker early in boot
+        # (before the title screen), so a 25 s window is plenty.
+        session.drain_serial(seconds=25)
+        output = session.output
+    metrics = _measure_wav(wav_path=wav_path)
+    print(f"doom music metrics: {metrics}")
+    if MUSIC_UNAVAILABLE_MARKER in output:
+        sys.exit(
+            f"FAIL: saw {MUSIC_UNAVAILABLE_MARKER!r} in serial output — "
+            f"music subsystem reported failure (check kernel /dev/midi "
+            f"and OPL3 probe path)",
+        )
+    if MUSIC_ENABLED_MARKER not in output:
+        tail = output[-600:] if output else "<empty>"
+        sys.exit(
+            f"FAIL: never saw {MUSIC_ENABLED_MARKER!r} in serial output; "
+            f"the music init marker is missing (engine may have crashed "
+            f"before init or the marker print was removed). tail={tail!r}",
+        )
+    if metrics["duration"] < 20.0:
+        sys.exit(f"FAIL: duration {metrics['duration']:.2f} s < 20 s")
+    if metrics["rms"] < 100.0:
+        sys.exit(f"FAIL: RMS {metrics['rms']:.0f} too low — likely silent")
+    print("doom music test pass")
+
+
 def _test_music_with_wad() -> None:
     """Run doom under QEMU+SB16 and verify music init via a serial-log marker."""
     if not WAD_FILE.is_file():
@@ -122,41 +161,7 @@ def _test_music_with_wad() -> None:
     # left behind so QEMU sees a clean creation path.
     wav_path.unlink()
     try:
-        with qemu_session(
-            memory="64",
-            extra_qemu_args=[
-                "-audiodev",
-                f"wav,id=a,path={wav_path}",
-                "-device",
-                "sb16,audiodev=a",
-            ],
-        ) as session:
-            session.write_serial("doom\r")
-            # Drain serial for the same window as the sound test.
-            # The engine prints the music init marker early in boot
-            # (before the title screen), so a 25 s window is plenty.
-            session.drain_serial(seconds=25)
-            output = session.output
-        metrics = _measure_wav(wav_path=wav_path)
-        print(f"doom music metrics: {metrics}")
-        if MUSIC_UNAVAILABLE_MARKER in output:
-            sys.exit(
-                f"FAIL: saw {MUSIC_UNAVAILABLE_MARKER!r} in serial output — "
-                f"music subsystem reported failure (check kernel /dev/midi "
-                f"and OPL3 probe path)",
-            )
-        if MUSIC_ENABLED_MARKER not in output:
-            tail = output[-600:] if output else "<empty>"
-            sys.exit(
-                f"FAIL: never saw {MUSIC_ENABLED_MARKER!r} in serial output; "
-                f"the music init marker is missing (engine may have crashed "
-                f"before init or the marker print was removed). tail={tail!r}",
-            )
-        if metrics["duration"] < 20.0:
-            sys.exit(f"FAIL: duration {metrics['duration']:.2f} s < 20 s")
-        if metrics["rms"] < 100.0:
-            sys.exit(f"FAIL: RMS {metrics['rms']:.0f} too low — likely silent")
-        print("doom music test pass")
+        _run_music_check(wav_path=wav_path)
     finally:
         if wav_path.exists():
             wav_path.unlink()

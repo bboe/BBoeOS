@@ -419,21 +419,7 @@ class LivenessAnalyzer:
             # after-switch (when no case matches).
             self._switch_break_stack.append(fallthrough)
             try:
-                case_entries: list[int] = []
-                for index, case in enumerate(statement.cases):
-                    next_case_first = (
-                        self.node_to_id[id(statement.cases[index + 1].body[0])]
-                        if index + 1 < len(statement.cases) and statement.cases[index + 1].body
-                        else fallthrough
-                    )
-                    case_fallthrough = next_case_first
-                    body_entry = self._build_control_flow_graph(case.body, fallthrough=case_fallthrough)
-                    case_entries.append(body_entry)
-                has_default = any(case.value is None for case in statement.cases)
-                successors = list(case_entries)
-                if not has_default:
-                    successors.append(fallthrough)
-                statement_info.successors = successors
+                self._wire_switch_successors(fallthrough=fallthrough, statement=statement, statement_info=statement_info)
             finally:
                 self._switch_break_stack.pop()
             return
@@ -450,6 +436,24 @@ class LivenessAnalyzer:
         # ``_collect_use_def`` pass raises ``LivenessAnalysisError`` on
         # the same nodes, so the unknown shape is caught loudly there.
         statement_info.successors = [fallthrough]
+
+    def _wire_switch_successors(self, *, fallthrough: int, statement: Switch, statement_info: StatementInfo) -> None:
+        """Compute and assign the successor list for a ``Switch`` node."""
+        case_entries: list[int] = []
+        for index, case in enumerate(statement.cases):
+            next_case_first = (
+                self.node_to_id[id(statement.cases[index + 1].body[0])]
+                if index + 1 < len(statement.cases) and statement.cases[index + 1].body
+                else fallthrough
+            )
+            case_fallthrough = next_case_first
+            body_entry = self._build_control_flow_graph(case.body, fallthrough=case_fallthrough)
+            case_entries.append(body_entry)
+        has_default = any(case.value is None for case in statement.cases)
+        successors = list(case_entries)
+        if not has_default:
+            successors.append(fallthrough)
+        statement_info.successors = successors
 
     def analyze(self) -> dict[int, StatementInfo]:
         """Run the analysis; return the per-statement state map.

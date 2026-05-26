@@ -88,6 +88,31 @@ def _measure_wav(*, wav_path: Path) -> dict:
     }
 
 
+def _run_sound_check(*, wav_path: Path) -> None:
+    """Boot doom under QEMU+SB16, capture WAV, and assert duration/RMS/zero-crossings thresholds."""
+    with qemu_session(
+        memory="64",
+        extra_qemu_args=[
+            "-audiodev",
+            f"wav,id=a,path={wav_path}",
+            "-device",
+            "sb16,audiodev=a",
+        ],
+    ) as session:
+        session.write_serial("doom\r")
+        session.drain_serial(seconds=30)
+    # qemu_session's __exit__ kills QEMU, which flushes the WAV file.
+    metrics = _measure_wav(wav_path=wav_path)
+    print(f"doom sound metrics: {metrics}")
+    if metrics["duration"] < 25.0:
+        sys.exit(f"FAIL: duration {metrics['duration']:.2f} s < 25 s")
+    if metrics["rms"] < 100.0:
+        sys.exit(f"FAIL: RMS {metrics['rms']:.0f} too low — likely silent")
+    if metrics["zero_crossings"] < 100:
+        sys.exit(f"FAIL: zero crossings {metrics['zero_crossings']} too few — likely DC level")
+    print("doom sound test pass")
+
+
 def _test_sound_with_wad() -> None:
     """Run doom under QEMU+SB16, capture WAV, check it has real audio."""
     if not WAD_FILE.is_file():
@@ -101,27 +126,7 @@ def _test_sound_with_wad() -> None:
     # left behind so QEMU sees a clean creation path.
     wav_path.unlink()
     try:
-        with qemu_session(
-            memory="64",
-            extra_qemu_args=[
-                "-audiodev",
-                f"wav,id=a,path={wav_path}",
-                "-device",
-                "sb16,audiodev=a",
-            ],
-        ) as session:
-            session.write_serial("doom\r")
-            session.drain_serial(seconds=30)
-        # qemu_session's __exit__ kills QEMU, which flushes the WAV file.
-        metrics = _measure_wav(wav_path=wav_path)
-        print(f"doom sound metrics: {metrics}")
-        if metrics["duration"] < 25.0:
-            sys.exit(f"FAIL: duration {metrics['duration']:.2f} s < 25 s")
-        if metrics["rms"] < 100.0:
-            sys.exit(f"FAIL: RMS {metrics['rms']:.0f} too low — likely silent")
-        if metrics["zero_crossings"] < 100:
-            sys.exit(f"FAIL: zero crossings {metrics['zero_crossings']} too few — likely DC level")
-        print("doom sound test pass")
+        _run_sound_check(wav_path=wav_path)
     finally:
         if wav_path.exists():
             wav_path.unlink()
