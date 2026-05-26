@@ -50,8 +50,10 @@ build_libbboeos_ccpy() {
     python3 cc.py --bits 32 --object --per-function-sections "user/libbboeos/$name.c" "build/$name.cc.asm" || return 1
     nasm -f elf32 -i kernel/include/ -o "user/libbboeos/$name.o" "build/$name.cc.asm" || return 1
 }
-build_libbboeos_ccpy errno || exit 1
-build_libbboeos_ccpy ctype || exit 1
+python3 tools/generate_syscalls_h.py
+for name in ctype dirent errno math signal stdio stdlib string; do
+    build_libbboeos_ccpy "$name" || exit 1
+done
 make -C user/libbboeos libbboeos.a >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
 # --gc-sections drops every clang-compiled libbboeos function the
