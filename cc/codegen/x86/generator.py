@@ -831,7 +831,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         _g_name");`` pattern several kernel drivers already use.
         """
         if self.object_mode:
-            self.emit(f"global {name}")
+            self.emit(f"global {self._nasm_symbol(name)}")
         else:
             self.emit(f"{name} equ _g_{name}")
 

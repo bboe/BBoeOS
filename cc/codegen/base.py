@@ -75,6 +75,36 @@ class CodeGeneratorBase:
     logic specific to their ISA.
     """
 
+    #: Byte-element type names.  ``uint8_t`` shares the ``char``
+    #: codegen path (byte array stride, byte-wide load with zero
+    #: extend) but is classified as ``integer`` for comparison
+    #: type-checking, so ``uint8_t b; if (b == 0x45)`` works without
+    #: pretending the literal is a character.
+    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
+    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
+
+    #: Primitive element types accepted for file-scope arrays.  Byte
+    #: types (``char`` / ``uint8_t``) use the byte path; ``uint16_t``
+    #: uses the halfword path; the rest use the full-int path.  Pointer
+    #: (``*``) and ``struct`` element types are accepted separately at
+    #: the validation site since both require different codegen
+    #: treatment.
+    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({
+        "char",
+        "function_pointer",
+        "int",
+        "uint16_t",
+        "uint32_t",
+        "uint8_t",
+        "unsigned int",
+    })
+
+    #: Named constants that, when referenced, require a NASM %include
+    #: directive in the generated output to provide their symbol.
+    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
+        "arp_frame": "arp_frame.asm",
+    }
+
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
     #: them from ``constants.asm``.  BBoeOS-specific but arch-agnostic:
@@ -169,35 +199,7 @@ class CodeGeneratorBase:
         "VIDEO_MODE_VGA_640x480_16",
     })
 
-    #: Named constants that, when referenced, require a NASM %include
-    #: directive in the generated output to provide their symbol.
-    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
-        "arp_frame": "arp_frame.asm",
-    }
-
-    #: Byte-element type names.  ``uint8_t`` shares the ``char``
-    #: codegen path (byte array stride, byte-wide load with zero
-    #: extend) but is classified as ``integer`` for comparison
-    #: type-checking, so ``uint8_t b; if (b == 0x45)`` works without
-    #: pretending the literal is a character.
-    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
-    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
-
-    #: Primitive element types accepted for file-scope arrays.  Byte
-    #: types (``char`` / ``uint8_t``) use the byte path; ``uint16_t``
-    #: uses the halfword path; the rest use the full-int path.  Pointer
-    #: (``*``) and ``struct`` element types are accepted separately at
-    #: the validation site since both require different codegen
-    #: treatment.
-    GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({
-        "char",
-        "function_pointer",
-        "int",
-        "uint16_t",
-        "uint32_t",
-        "uint8_t",
-        "unsigned int",
-    })
+    NASM_RESERVED_WORDS: ClassVar[frozenset[str]] = frozenset({"abs", "seg", "wrt"})
 
     #: Non-pointer scalar type names whose values are unsigned in
     #: comparisons.  Pointers are handled separately by
@@ -479,7 +481,7 @@ class CodeGeneratorBase:
         external linker to satisfy.
         """
         if self.object_mode:
-            return name
+            return self._nasm_symbol(name)
         return f"_g_{name}"
 
     def _index_cache_key(self, expression: Node, /) -> tuple[str, int] | None:
@@ -823,6 +825,12 @@ class CodeGeneratorBase:
             node,
             lambda n: (isinstance(n, Assign) and n.name == name) or (isinstance(n, IncrementDecrement) and n.target_name == name),
         )
+
+    def _nasm_symbol(self, name: str, /) -> str:
+        """Escape *name* with a ``$`` prefix when it clashes with a NASM reserved word."""
+        if name in self.NASM_RESERVED_WORDS:
+            return f"${name}"
+        return name
 
     @staticmethod
     def _node_references_var(*, name: str, node: Node) -> bool:

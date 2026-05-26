@@ -91,6 +91,10 @@ from cc.target import CodegenTarget, X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
 
+_ATT_REGISTERS = "eax|ebx|ecx|edx|esi|edi|esp|ebp|ax|bx|cx|dx|si|di|sp|bp|ah|al|bh|bl|ch|cl|dh|dl"
+_ATT_REGISTER = re.compile(rf"%({_ATT_REGISTERS})\b")
+_ATT_IMMEDIATE = re.compile(r"\$((?:0x[0-9a-fA-F]+|[0-9]+))\b")
+
 #: Lines that look like a function label: bare identifier at column 0
 #: followed by ``:`` and nothing else.  Used by :func:`_elide_dead_frames`
 #: to split the global line stream into per-function ranges.  Anchors,
@@ -106,6 +110,84 @@ _FUNCTION_LABEL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*:$")
 #: ``uint32_t *`` form silently reads only the low 16 bits on the
 #: 16-bit target.
 _LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
+
+_SINGLE_OPERAND_MNEMONICS = frozenset({
+    "call",
+    "dec",
+    "inc",
+    "int",
+    "ja",
+    "jae",
+    "jb",
+    "jbe",
+    "jc",
+    "je",
+    "jg",
+    "jge",
+    "jl",
+    "jle",
+    "jmp",
+    "jnc",
+    "jne",
+    "jno",
+    "jnp",
+    "jns",
+    "jnz",
+    "jo",
+    "jp",
+    "js",
+    "jz",
+    "neg",
+    "not",
+    "pop",
+    "push",
+    "ret",
+    "seta",
+    "setae",
+    "setb",
+    "setbe",
+    "setc",
+    "sete",
+    "setg",
+    "setge",
+    "setl",
+    "setle",
+    "setnc",
+    "setne",
+    "setno",
+    "setnp",
+    "setns",
+    "setnz",
+    "seto",
+    "setp",
+    "sets",
+    "setz",
+})
+
+
+def _att_to_intel(line: str) -> str:
+    """Convert one AT&T-syntax asm line to Intel syntax (NASM).
+
+    Only fires when the line contains AT&T markers (``%reg`` or
+    ``$imm``); Intel-syntax lines pass through unchanged.
+    """
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith(";"):
+        return line
+    if not _ATT_REGISTER.search(stripped) and not _ATT_IMMEDIATE.search(stripped):
+        return line
+    indent = line[: len(line) - len(stripped)]
+    parts = stripped.split(None, 1)
+    mnemonic = parts[0].rstrip(",")
+    operand_text = parts[1] if len(parts) > 1 else ""
+    operand_text = _ATT_REGISTER.sub(r"\1", operand_text)
+    operand_text = _ATT_IMMEDIATE.sub(r"\1", operand_text)
+    if not operand_text:
+        return f"{indent}{mnemonic}"
+    operands = [operand.strip() for operand in operand_text.split(",")]
+    if len(operands) == 2 and mnemonic not in _SINGLE_OPERAND_MNEMONICS:
+        operands.reverse()
+    return f"{indent}{mnemonic} {', '.join(operands)}"
 
 
 def _elide_dead_frames(*, lines: list[str], target: CodegenTarget) -> list[str]:
@@ -495,7 +577,8 @@ class EmissionMixin:
             for name in sorted(self.defines):
                 self.emit(f"%define {name} {self.defines[name]}")
         self.emit()
-        self._apply_default_regparm(ast.functions)
+        if not self.per_function_sections:
+            self._apply_default_regparm(ast.functions)
         for function in ast.functions:
             if function.name == "main":
                 if self.target_mode == "kernel":
@@ -529,7 +612,14 @@ class EmissionMixin:
                 if param.in_register is not None:
                     self.in_register_params.setdefault(function.name, {})[index] = param.in_register
         self._register_globals(ast.globals)
-        self._analyze_user_function_conventions(ast.functions)
+        if not self.per_function_sections:
+            self._analyze_user_function_conventions(ast.functions)
+        else:
+            self.user_function_pin_params = {}
+            self.register_convention_functions = set()
+        if self.object_mode and self.extern_globals:
+            for name in sorted(self.extern_globals):
+                self.emit(f"extern {self._nasm_symbol(name)}")
 
         # Build IR for all non-main, non-always-inline functions.  The IR
         # is consumed by generate_function; main keeps the AST path because
@@ -2292,8 +2382,11 @@ class EmissionMixin:
         # --- Phase 3: substitute template and emit ---
         template_text = decode_string_escapes(statement.template)
         substituted = _substitute_template(template_text)
+        # GCC inline asm uses AT&T x87 register syntax (%st(N));
+        # convert to NASM's stN form.
+        substituted = re.sub(r"%st\((\d)\)", r"st\1", substituted)
         for line in substituted.splitlines():
-            self.emit(line)
+            self.emit(_att_to_intel(line))
 
         # --- Phase 4: post-template: store register outputs back to memory ---
         for output_index, output_operand in enumerate(statement.outputs):
@@ -2871,8 +2964,11 @@ class EmissionMixin:
             # sections.
             self.emit(f"section .text.{name} exec")
         if self.object_mode:
-            self.emit(f"global {name}")
-        self.emit(f"{name}:")
+            symbol = self._nasm_symbol(name)
+            self.emit(f"global {symbol}")
+            self.emit(f"{symbol}:")
+        else:
+            self.emit(f"{name}:")
         if not self.elide_frame:
             for reg in self.current_preserve_registers:
                 self.emit(f"        push {reg}")
