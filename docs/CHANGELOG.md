@@ -11,6 +11,13 @@ time.
 
 ## [Unreleased](https://github.com/bboe/BBoeOS/compare/0.11.0...main)
 
+- **cc.py: GCC extended inline asm.** Statement-level `__asm__ volatile("..." :
+  outputs : inputs : clobbers)` with the full constraint set used by `signal.c`,
+  `syscall.c`, and `math.c`: integer GP register constraints
+  (`=a`/`+b`/`g`/`=&q`), x87 FP constraints (`=t`/`u`/`0`-tied), memory output
+  (`=m`), named operands (`[name]`), positional and byte-part substitution
+  (`%[name]`/`%N`/`%b`/`%%`), and clobber lists.  Unblocks the last two
+  `user/libbboeos/` files: `signal.c` and `math.c`.
 - **cc.py: arrays of function pointers.** Supports the direct declarator syntax
   (`void (*arr[N])(void)`) and the typedef path (`typedef void (*handler)(void);
   handler arr[N]`) at both file scope and local scope.  A new `IndexedCall` AST
