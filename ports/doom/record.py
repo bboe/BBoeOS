@@ -50,7 +50,7 @@ from record_demo import (  # noqa: E402
     capture_loop,
     type_at_human_pace,
 )
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import QemuSession, qemu_session  # noqa: E402
 
 # Wall-clock budget per phase.  Total ~30s end-to-end; tweak in one
 # place rather than scattering sleeps through main().
@@ -175,6 +175,71 @@ def _build_trim_concat_filter(
         f"[a1][a2]concat=n=2:v=0:a=1[a]"
     )
     return f"{video_chain};{audio_chain}", "[v]", "[a]"
+
+
+def _drive_doom_session(*, session: QemuSession) -> tuple[float, float, float]:
+    """Drive the boot → doom → quit → reboot sequence on *session*.
+
+    Returns ``(t_audio_start, bios_window_start, bios_window_end)``
+    — wall-clock timestamps the encoders use to align the audio adelay
+    and excise the SeaBIOS interlude from the final clip.
+    """
+    session.wait_for_substring(b"$ ", timeout=15.0)
+    # Linger on the welcome banner so the viewer can read it
+    # before any input arrives.
+    time.sleep(INITIAL_LINGER_SECONDS)
+    doom_buffer_offset = len(session.buffer)
+    # Type "doom" character-by-character (with the standard
+    # human-feel pacing from record_demo) so the command
+    # appears on screen rather than blinking past in a single
+    # frame.  type_at_human_pace's pre_terminator pause keeps
+    # the typed line on screen briefly before \r executes it.
+    type_at_human_pace(text="doom", writer=session.write_serial)
+    # Wait for Doom's audio-init marker before snapping
+    # t_audio_start.  ``[bboeos doom] OPL music`` prints
+    # right after the SB16 fd opens and OPL3 detection runs
+    # — within a fraction of a second of the first WAV
+    # sample being written, so the adelay we hand ffmpeg
+    # tracks the actual audio start across QEMU builds with
+    # different load times (custom OPL3-patched QEMU is
+    # noticeably slower than stock).
+    session.wait_for_substring(
+        DOOM_AUDIO_READY_NEEDLE,
+        start=doom_buffer_offset,
+        timeout=20.0,
+    )
+    t_audio_start = time.time()
+    # Title screen + demo loop play.
+    time.sleep(GAMEPLAY_SECONDS)
+    # Quit menu via PS/2 sendkey (Doom reads BBKEY events from
+    # the per-fd PS/2 ring; serial input goes through the cooked
+    # ASCII path, which doesn't reach DG_GetKey).  Esc opens the
+    # main menu (cursor on "New Game"), Up wraps to the bottom
+    # entry "Quit Game", Enter brings up the "Press Y to quit"
+    # confirmation, Y exits cleanly back to the shell.
+    for key in ("esc", "up", "ret", "y"):
+        session.sendkey(key)
+        time.sleep(QUIT_KEY_DELAY)
+    # Wait for the post-Doom shell prompt so the text-mode
+    # return is captured, then linger so the viewer registers
+    # the clean exit before the next command starts typing.
+    session.wait_for_substring(b"$ ", start=doom_buffer_offset, timeout=10.0)
+    time.sleep(POST_DOOM_LINGER_SECONDS)
+    # Reboot — bookend the recording on the welcome banner
+    # (matches the opening frame; visually closes the loop).
+    # Same human-pace typing so "reboot" is readable on screen
+    # before the BIOS takes over.  Bracket the BIOS-takes-over
+    # interlude with wall-clock timestamps so we can drop the
+    # SeaBIOS / "Booting from..." frames in post-processing —
+    # they render at 720x400 (same as our text mode) so we
+    # can't filter them by dimension.
+    reboot_buffer_offset = len(session.buffer)
+    type_at_human_pace(text="reboot", writer=session.write_serial)
+    bios_window_start = time.time()
+    session.wait_for_substring(WELCOME_NEEDLE, start=reboot_buffer_offset, timeout=15.0)
+    bios_window_end = time.time()
+    time.sleep(WELCOME_LINGER_SECONDS)
+    return t_audio_start, bios_window_start, bios_window_end
 
 
 def _encode_doom_gif(
@@ -426,7 +491,7 @@ def _normalize_to_max_size(*, frame_directory: Path) -> int:
     return len(frames)
 
 
-def main() -> int:  # noqa: PLR0915
+def main() -> int:
     """Record + encode the Doom clip in the requested format(s)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -491,61 +556,7 @@ def main() -> int:  # noqa: PLR0915
         )
         capture.start()
         try:
-            session.wait_for_substring(b"$ ", timeout=15.0)
-            # Linger on the welcome banner so the viewer can read it
-            # before any input arrives.
-            time.sleep(INITIAL_LINGER_SECONDS)
-            doom_buffer_offset = len(session.buffer)
-            # Type "doom" character-by-character (with the standard
-            # human-feel pacing from record_demo) so the command
-            # appears on screen rather than blinking past in a single
-            # frame.  type_at_human_pace's pre_terminator pause keeps
-            # the typed line on screen briefly before \r executes it.
-            type_at_human_pace(text="doom", writer=session.write_serial)
-            # Wait for Doom's audio-init marker before snapping
-            # t_audio_start.  ``[bboeos doom] OPL music`` prints
-            # right after the SB16 fd opens and OPL3 detection runs
-            # — within a fraction of a second of the first WAV
-            # sample being written, so the adelay we hand ffmpeg
-            # tracks the actual audio start across QEMU builds with
-            # different load times (custom OPL3-patched QEMU is
-            # noticeably slower than stock).
-            session.wait_for_substring(
-                DOOM_AUDIO_READY_NEEDLE,
-                start=doom_buffer_offset,
-                timeout=20.0,
-            )
-            t_audio_start = time.time()
-            # Title screen + demo loop play.
-            time.sleep(GAMEPLAY_SECONDS)
-            # Quit menu via PS/2 sendkey (Doom reads BBKEY events from
-            # the per-fd PS/2 ring; serial input goes through the cooked
-            # ASCII path, which doesn't reach DG_GetKey).  Esc opens the
-            # main menu (cursor on "New Game"), Up wraps to the bottom
-            # entry "Quit Game", Enter brings up the "Press Y to quit"
-            # confirmation, Y exits cleanly back to the shell.
-            for key in ("esc", "up", "ret", "y"):
-                session.sendkey(key)
-                time.sleep(QUIT_KEY_DELAY)
-            # Wait for the post-Doom shell prompt so the text-mode
-            # return is captured, then linger so the viewer registers
-            # the clean exit before the next command starts typing.
-            session.wait_for_substring(b"$ ", start=doom_buffer_offset, timeout=10.0)
-            time.sleep(POST_DOOM_LINGER_SECONDS)
-            # Reboot — bookend the recording on the welcome banner
-            # (matches the opening frame; visually closes the loop).
-            # Same human-pace typing so "reboot" is readable on screen
-            # before the BIOS takes over.  Bracket the BIOS-takes-over
-            # interlude with wall-clock timestamps so we can drop the
-            # SeaBIOS / "Booting from..." frames in post-processing —
-            # they render at 720x400 (same as our text mode) so we
-            # can't filter them by dimension.
-            reboot_buffer_offset = len(session.buffer)
-            type_at_human_pace(text="reboot", writer=session.write_serial)
-            bios_window_start = time.time()
-            session.wait_for_substring(WELCOME_NEEDLE, start=reboot_buffer_offset, timeout=15.0)
-            bios_window_end = time.time()
-            time.sleep(WELCOME_LINGER_SECONDS)
+            t_audio_start, bios_window_start, bios_window_end = _drive_doom_session(session=session)
         finally:
             stop.set()
             capture.join(timeout=5.0)

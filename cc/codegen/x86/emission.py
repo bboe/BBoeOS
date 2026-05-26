@@ -406,6 +406,67 @@ class EmissionMixin:
             )
             self.generate_member_assign(synthetic)
 
+    def _emit_switch_interleaved_arms(
+        self,
+        *,
+        case_label_node: type[Char | Int],
+        default_case: SwitchCase | None,
+        discriminant: Node,
+        discriminant_line: int,
+        groups: list[list[SwitchCase]],
+        label_index: int,
+    ) -> None:
+        """Emit interleaved-dispatch switch bodies (cmp/jne/body per group)."""
+        for group_index, group in enumerate(groups):
+            body_label = f".switch_{label_index}_case_{group_index}"
+            next_label = f".switch_{label_index}_next_{group_index}"
+            for case in group[:-1]:
+                # Leading multi-label entries: jump TO the shared body
+                # on match (the terminal case's jne will fall through
+                # to .next if all labels miss).
+                true_jump = BinaryOperation(
+                    left=discriminant,
+                    line=discriminant_line,
+                    operation="==",
+                    right=case_label_node(line=discriminant_line, value=case.value),
+                )
+                self.emit_condition_true_jump(condition=true_jump, context="switch", success_label=body_label)
+            # Terminal label of the group: jne to next group on mismatch.
+            terminal = group[-1]
+            skip_jump = BinaryOperation(
+                left=discriminant,
+                line=discriminant_line,
+                operation="!=",
+                right=case_label_node(line=discriminant_line, value=terminal.value),
+            )
+            self.emit_condition_true_jump(condition=skip_jump, context="switch", success_label=next_label)
+            if len(group) > 1:
+                self.emit(f"{body_label}:")
+            self.ax_clear()
+            self.generate_body(terminal.body, scoped=True)
+            self.emit(f"{next_label}:")
+        if default_case is not None:
+            self.ax_clear()
+            self.generate_body(default_case.body, scoped=True)
+
+    def _emit_switch_separated_arms(
+        self,
+        *,
+        case_arms: list[SwitchCase],
+        case_labels: list[str],
+        default_case: SwitchCase | None,
+        default_label: str,
+    ) -> None:
+        """Emit separated-dispatch switch bodies (each arm at its label)."""
+        for case, arm_label in zip(case_arms, case_labels, strict=True):
+            self.emit(f"{arm_label}:")
+            self.ax_clear()
+            self.generate_body(case.body, scoped=True)
+        if default_case is not None:
+            self.emit(f"{default_label}:")
+            self.ax_clear()
+            self.generate_body(default_case.body, scoped=True)
+
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
 
@@ -3757,37 +3818,14 @@ class EmissionMixin:
                     current = []
             self.loop_end_labels.append(end_label)
             try:
-                for group_index, group in enumerate(groups):
-                    body_label = f".switch_{label_index}_case_{group_index}"
-                    next_label = f".switch_{label_index}_next_{group_index}"
-                    for case in group[:-1]:
-                        # Leading multi-label entries: jump TO the shared body
-                        # on match (the terminal case's jne will fall through
-                        # to .next if all labels miss).
-                        true_jump = BinaryOperation(
-                            left=discriminant,
-                            line=discriminant_line,
-                            operation="==",
-                            right=case_label_node(line=discriminant_line, value=case.value),
-                        )
-                        self.emit_condition_true_jump(condition=true_jump, context="switch", success_label=body_label)
-                    # Terminal label of the group: jne to next group on mismatch.
-                    terminal = group[-1]
-                    skip_jump = BinaryOperation(
-                        left=discriminant,
-                        line=discriminant_line,
-                        operation="!=",
-                        right=case_label_node(line=discriminant_line, value=terminal.value),
-                    )
-                    self.emit_condition_true_jump(condition=skip_jump, context="switch", success_label=next_label)
-                    if len(group) > 1:
-                        self.emit(f"{body_label}:")
-                    self.ax_clear()
-                    self.generate_body(terminal.body, scoped=True)
-                    self.emit(f"{next_label}:")
-                if default_case is not None:
-                    self.ax_clear()
-                    self.generate_body(default_case.body, scoped=True)
+                self._emit_switch_interleaved_arms(
+                    case_label_node=case_label_node,
+                    default_case=default_case,
+                    discriminant=discriminant,
+                    discriminant_line=discriminant_line,
+                    groups=groups,
+                    label_index=label_index,
+                )
             finally:
                 self.loop_end_labels.pop()
             self.emit(f"{end_label}:")
@@ -3810,14 +3848,12 @@ class EmissionMixin:
         # — we don't push a continue label here.
         self.loop_end_labels.append(end_label)
         try:
-            for case, arm_label in zip(case_arms, case_labels, strict=True):
-                self.emit(f"{arm_label}:")
-                self.ax_clear()
-                self.generate_body(case.body, scoped=True)
-            if default_case is not None:
-                self.emit(f"{default_label}:")
-                self.ax_clear()
-                self.generate_body(default_case.body, scoped=True)
+            self._emit_switch_separated_arms(
+                case_arms=case_arms,
+                case_labels=case_labels,
+                default_case=default_case,
+                default_label=default_label,
+            )
         finally:
             self.loop_end_labels.pop()
         self.emit(f"{end_label}:")
