@@ -11,6 +11,7 @@ from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
     ArrayInit,
+    AsmOperand,
     Assign,
     AssignExpr,
     BinaryOperation,
@@ -27,6 +28,7 @@ from cc.ast_nodes import (
     DoubleIndex,
     DoWhile,
     EnumDecl,
+    ExtendedAsm,
     Function,
     Goto,
     If,
@@ -239,6 +241,46 @@ class Parser:
         if token[0] in TYPE_TOKENS:
             return True
         return token[0] == "IDENT" and token[1] in self.typedef_aliases
+
+    def _parse_asm_clobbers(self) -> list[str]:
+        """Parse a comma-separated list of clobber string literals."""
+        clobbers: list[str] = []
+        while self.peek()[0] == "STRING":
+            clobber_token = self.eat("STRING")
+            clobbers.append(clobber_token[1][1:-1])
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        return clobbers
+
+    def _parse_asm_operands(self) -> list[AsmOperand]:
+        """Parse a comma-separated list of asm output or input operands."""
+        operands: list[AsmOperand] = []
+        while self.peek()[0] in ("LBRACKET", "STRING"):
+            name: str | None = None
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                name = self.eat("IDENT")[1]
+                self.eat("RBRACKET")
+            constraint_token = self.eat("STRING")
+            constraint = constraint_token[1][1:-1]
+            self.eat("LPAREN")
+            expression = self.parse_expression()
+            self.eat("RPAREN")
+            operands.append(
+                AsmOperand(
+                    constraint=constraint,
+                    expression=expression,
+                    line=constraint_token[2],
+                    name=name,
+                )
+            )
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        return operands
 
     def _parse_attribute(self, *, line: int) -> tuple[str, object]:
         """Consume a single ``__attribute__((name(args)))`` directive.
@@ -501,6 +543,42 @@ class Parser:
         decl = EnumDecl(line=line, name=name, variants=variants)
         self.enum_decls[name] = decl
         return decl
+
+    def _parse_extended_asm(self) -> ExtendedAsm:
+        """Parse an extended asm statement: asm volatile("..." : outs : ins : clobbers)."""
+        line = self.peek()[2]
+        self.eat("IDENT")  # "asm" or "__asm__"
+        is_volatile = False
+        if self.peek()[0] == "VOLATILE":
+            self.eat("VOLATILE")
+            is_volatile = True
+        self.eat("LPAREN")
+        template_token = self.eat("STRING")
+        template = template_token[1][1:-1]
+        while self.peek()[0] == "STRING":
+            template += self.eat("STRING")[1][1:-1]
+        outputs: list[AsmOperand] = []
+        inputs: list[AsmOperand] = []
+        clobbers: list[str] = []
+        if self.peek()[0] == "COLON":
+            self.eat("COLON")
+            outputs = self._parse_asm_operands()
+            if self.peek()[0] == "COLON":
+                self.eat("COLON")
+                inputs = self._parse_asm_operands()
+                if self.peek()[0] == "COLON":
+                    self.eat("COLON")
+                    clobbers = self._parse_asm_clobbers()
+        self.eat("RPAREN")
+        self.eat("SEMI")
+        return ExtendedAsm(
+            clobbers=clobbers,
+            inputs=inputs,
+            is_volatile=is_volatile,
+            line=line,
+            outputs=outputs,
+            template=template,
+        )
 
     def _parse_index_assignment_no_semi(self) -> IndexAssign | IndexMemberAssign | IndexMemberIndexAssign:
         """Parse ``name[index] = expr`` or ``name[index].member[n] = expr`` without consuming the trailing semicolon."""
@@ -1854,6 +1932,20 @@ class Parser:
                 )
             self.eat("SEMI")
             return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])
+        if token[0] == "IDENT" and token[1] in ("asm", "__asm__"):
+            # Detect extended asm: peek past optional "volatile" to find LPAREN,
+            # then peek past template string(s) for a COLON.
+            offset = 1
+            if self.peek(offset=offset)[0] == "VOLATILE":
+                offset += 1
+            if self.peek(offset=offset)[0] == "LPAREN":
+                scan = offset + 1
+                while self.peek(offset=scan)[0] == "STRING":
+                    scan += 1
+                if self.peek(offset=scan)[0] == "COLON" or offset > 1:
+                    # Has colons after template, or has "volatile" keyword — extended asm.
+                    return self._parse_extended_asm()
+            # Otherwise fall through to normal IDENT dispatch (handles simple asm("...") via Call).
         if token[0] == "IDENT":
             next_kind = self.peek(offset=1)[0]
             if next_kind == "COLON":
@@ -2019,7 +2111,7 @@ class Parser:
             return [self._parse_struct_declaration()]
         if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return [self._parse_enum_declaration()]
-        if self.peek()[0] == "IDENT" and self.peek()[1] == "asm" and self.peek(offset=1)[0] == "LPAREN":
+        if self.peek()[0] == "IDENT" and self.peek()[1] in ("asm", "__asm__") and self.peek(offset=1)[0] == "LPAREN":
             self.eat("IDENT")
             self.eat("LPAREN")
             string_token = self.eat("STRING")

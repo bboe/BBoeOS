@@ -43,6 +43,7 @@ from cc.ast_nodes import (
     DerefIncrementAssign,
     DoubleIndex,
     DoWhile,
+    ExtendedAsm,
     Function,
     Goto,
     If,
@@ -1960,6 +1961,273 @@ class EmissionMixin:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
 
+    def generate_extended_asm(self, statement: ExtendedAsm, /) -> None:
+        """Generate assembly for a GCC extended inline asm statement.
+
+        Handles integer GP register constraints (a/b/c/d), byte-register
+        constraints (q/qm), memory constraints (g/m), x87 FP constraints
+        (t/u), tied operands (0), and named operand references (%[name] /
+        %bN / %N).
+
+        Phase 1 — build operand location map.
+        Phase 2 — pre-template: load inputs into registers where needed,
+                  including x87 FP stack pushes.
+        Phase 3 — substitute operand tokens and emit template lines.
+        Phase 4 — post-template: store register outputs back to memory,
+                  including x87 ST0 pop for =t outputs.
+        Phase 5 — invalidate AX tracking.
+        """
+        constraint_register_32 = {"a": "eax", "b": "ebx", "c": "ecx", "d": "edx"}
+        constraint_register_byte = {"a": "al", "b": "bl", "c": "cl", "d": "dl"}
+
+        def _operand_location_for_var(name: str) -> str:
+            """Return the storage location for a variable name.
+
+            For register-aliased globals and auto-pinned locals, returns
+            the register name directly.  For constant-aliased locals (int
+            x = 10 with no later writes), returns the immediate value
+            string.  For frame-allocated locals and globals, returns a
+            bracketed memory operand.
+            """
+            if (register_alias := self.register_aliased_globals.get(name)) is not None:
+                return register_alias
+            if (pinned := self.pinned_register.get(name)) is not None:
+                return pinned
+            if (constant_value := self.constant_aliases.get(name)) is not None:
+                return str(constant_value)
+            return f"[{self._local_address(name)}]"
+
+        def _operand_memory_address(expression: Node) -> str:
+            """Return the storage location (register or memory) for a variable expression."""
+            name = _unwrap_var_name(expression)
+            return _operand_location_for_var(name)
+
+        def _substitute_template(text: str) -> str:
+            """Substitute %%/%%N/%[name]/%bN/%N with resolved operand locations."""
+            result_parts: list[str] = []
+            position = 0
+            length = len(text)
+            while position < length:
+                character = text[position]
+                if character != "%":
+                    result_parts.append(character)
+                    position += 1
+                    continue
+                # We are at a '%' — look ahead.
+                position += 1
+                if position >= length:
+                    result_parts.append("%")
+                    break
+                next_character = text[position]
+                if next_character == "%":
+                    # %% -> literal %
+                    result_parts.append("%")
+                    position += 1
+                elif next_character == "b":
+                    # Possible %b[name] or %bN (byte sub-register form).
+                    position += 1
+                    if position < length and text[position] == "[":
+                        # %b[name] form
+                        close_bracket = text.find("]", position + 1)
+                        if close_bracket == -1:
+                            result_parts.append("%b[")
+                            position += 1
+                        else:
+                            operand_name = text[position + 1 : close_bracket]
+                            position = close_bracket + 1
+                            operand_index = name_to_index.get(operand_name)
+                            if operand_index is not None and operand_index < len(operand_byte_locations):
+                                result_parts.append(operand_byte_locations[operand_index])
+                            else:
+                                result_parts.append(f"%b[{operand_name}]")
+                    elif position < length and text[position].isdigit():
+                        # %bN form
+                        operand_index = int(text[position])
+                        position += 1
+                        if operand_index < len(operand_byte_locations):
+                            result_parts.append(operand_byte_locations[operand_index])
+                        else:
+                            result_parts.append(f"%b{operand_index}")
+                    else:
+                        result_parts.append("%b")
+                elif next_character == "[":
+                    # %[name] form
+                    close_bracket = text.find("]", position + 1)
+                    if close_bracket == -1:
+                        result_parts.append("%[")
+                        position += 1
+                    else:
+                        operand_name = text[position + 1 : close_bracket]
+                        position = close_bracket + 1
+                        operand_index = name_to_index.get(operand_name)
+                        if operand_index is not None and operand_index < len(operand_locations):
+                            result_parts.append(operand_locations[operand_index])
+                        else:
+                            result_parts.append(f"%[{operand_name}]")
+                elif next_character.isdigit():
+                    # %N positional form
+                    operand_index = int(next_character)
+                    position += 1
+                    if operand_index < len(operand_locations):
+                        result_parts.append(operand_locations[operand_index])
+                    else:
+                        result_parts.append(f"%{operand_index}")
+                else:
+                    # Not a recognized escape — emit literally.
+                    result_parts.append("%")
+                    # Do not advance past next_character; it will be processed next iteration.
+            return "".join(result_parts)
+
+        def _unwrap_var_name(expression: Node) -> str:
+            """Return the variable name from a Var or Cast(Var) node."""
+            if isinstance(expression, Cast):
+                return _unwrap_var_name(expression.expression)
+            return expression.name  # type: ignore[attr-defined]
+
+        # --- Phase 1: build operand location lists ---
+        # All operands: outputs first, then inputs.
+        all_operands = list(statement.outputs) + list(statement.inputs)
+
+        operand_locations: list[str] = []
+        operand_byte_locations: list[str] = []
+        name_to_index: dict[str, int] = {}
+
+        # Track which byte registers have been claimed by q/qm constraints
+        # so we can avoid assigning the same register twice.
+        claimed_byte_registers: list[str] = []
+
+        for index, operand in enumerate(all_operands):
+            if operand.name is not None:
+                name_to_index[operand.name] = index
+
+            constraint = operand.constraint
+            # Strip leading modifiers: =, +, &, combinations thereof
+            core = constraint.lstrip("=+&")
+
+            if core in constraint_register_32:
+                reg32 = constraint_register_32[core]
+                reg8 = constraint_register_byte[core]
+                operand_locations.append(reg32)
+                operand_byte_locations.append(reg8)
+            elif core in ("q", "qm"):
+                # Pick the first available byte register not yet claimed.
+                # Default preference: cl, al, bl, dl.
+                for candidate_byte in ("cl", "al", "bl", "dl"):
+                    if candidate_byte not in claimed_byte_registers:
+                        chosen_byte = candidate_byte
+                        break
+                else:
+                    chosen_byte = "cl"
+                claimed_byte_registers.append(chosen_byte)
+                # The 32-bit parent of the chosen byte register.
+                byte_to_32 = {"al": "eax", "bl": "ebx", "cl": "ecx", "dl": "edx"}
+                chosen_32 = byte_to_32[chosen_byte]
+                operand_locations.append(chosen_32)
+                operand_byte_locations.append(chosen_byte)
+            elif core == "g":
+                memory_address = _operand_memory_address(operand.expression)
+                operand_locations.append(memory_address)
+                operand_byte_locations.append(memory_address)
+            elif core == "m":
+                # Memory operand: the template uses %N directly as a memory
+                # address, so the substituted text must include brackets.
+                # _local_address returns ``ebp-N`` or ``_g_name`` (no
+                # brackets); wrap here so NASM sees ``[ebp-N]`` /
+                # ``[_g_name]`` in the substituted template.
+                mem_name = _unwrap_var_name(operand.expression)
+                bracketed = f"[{self._local_address(mem_name)}]"
+                operand_locations.append(bracketed)
+                operand_byte_locations.append(bracketed)
+            elif core == "0":
+                # Tied to output operand 0 — share its location.
+                if operand_locations:
+                    operand_locations.append(operand_locations[0])
+                    operand_byte_locations.append(operand_byte_locations[0])
+                else:
+                    operand_locations.append("eax")
+                    operand_byte_locations.append("al")
+            elif core in ("t", "u"):
+                # x87 FP stack slots: implicit (no template substitution).
+                # Use a sentinel; the template does not reference these
+                # operands with % tokens directly — the FP stack is managed
+                # by the pre/post fld/fstp sequences emitted in phases 2/4.
+                operand_locations.append("__x87_st0__" if core == "t" else "__x87_st1__")
+                operand_byte_locations.append("__x87_st0__" if core == "t" else "__x87_st1__")
+            else:
+                # Unknown constraint: emit a placeholder rather than crash.
+                operand_locations.append(f"__constraint_{core}__")
+                operand_byte_locations.append(f"__constraint_{core}__")
+
+        # --- Phase 2: pre-template loads ---
+        for output_index, output_operand in enumerate(statement.outputs):
+            constraint = output_operand.constraint
+            if constraint.startswith("+"):
+                # Read-modify-write: load variable into its designated register.
+                location = operand_locations[output_index]
+                memory_address = _operand_memory_address(output_operand.expression)
+                self.emit(f"        mov {location}, {memory_address}")
+
+        for input_operand in statement.inputs:
+            constraint = input_operand.constraint
+            core = constraint.lstrip("=+&")
+            if core == "0":
+                # Tied to output 0: load into output 0's register only when
+                # output 0 is a GP register constraint (not x87 "=t").
+                output_0_core = statement.outputs[0].constraint.lstrip("=+&") if statement.outputs else ""
+                if output_0_core != "t":
+                    location = operand_locations[0] if operand_locations else "eax"
+                    memory_address = _operand_memory_address(input_operand.expression)
+                    self.emit(f"        mov {location}, {memory_address}")
+            # g/m constraints need no pre-load (template accesses memory directly).
+
+        # Pre-template x87 FP loads: "u" first (pushes to ST0, becomes ST1
+        # after the "0"-tied load), then "0"-tied-to-"=t" (pushes to ST0).
+        # This ordering ensures ST0 = "0"-tied value, ST1 = "u" value —
+        # the arrangement expected by fpatan and similar two-operand x87
+        # instructions.
+        for input_operand in statement.inputs:
+            core = input_operand.constraint.lstrip("=+&")
+            if core == "u":
+                fp_name = _unwrap_var_name(input_operand.expression)
+                self.emit(f"        fld qword [{self._local_address(fp_name)}]")
+
+        for input_operand in statement.inputs:
+            core = input_operand.constraint.lstrip("=+&")
+            if core == "0":
+                output_0_core = statement.outputs[0].constraint.lstrip("=+&") if statement.outputs else ""
+                if output_0_core == "t":
+                    fp_name = _unwrap_var_name(input_operand.expression)
+                    self.emit(f"        fld qword [{self._local_address(fp_name)}]")
+
+        # --- Phase 3: substitute template and emit ---
+        template_text = decode_string_escapes(statement.template)
+        substituted = _substitute_template(template_text)
+        for line in substituted.splitlines():
+            self.emit(line)
+
+        # --- Phase 4: post-template: store register outputs back to memory ---
+        for output_index, output_operand in enumerate(statement.outputs):
+            constraint = output_operand.constraint
+            core = constraint.lstrip("=+&")
+            location = operand_locations[output_index]
+            if core in constraint_register_32 or (constraint.startswith("+") and core in constraint_register_32):
+                memory_address = _operand_memory_address(output_operand.expression)
+                self.emit(f"        mov {memory_address}, {location}")
+            elif core in ("q", "qm"):
+                byte_location = operand_byte_locations[output_index]
+                memory_address = _operand_memory_address(output_operand.expression)
+                self.emit(f"        movzx eax, {byte_location}")
+                self.emit(f"        mov {memory_address}, eax")
+            elif core == "t":
+                # =t: ST0 holds the result — pop it to the variable's memory slot.
+                fp_name = _unwrap_var_name(output_operand.expression)
+                self.emit(f"        fstp qword [{self._local_address(fp_name)}]")
+            # g/m: template wrote directly to memory — no post-store needed.
+            # u: x87 ST1 — caller manages (the template consumed it).
+
+        # --- Phase 5: invalidate AX tracking ---
+        self.ax_clear()
+
     # ------------------------------------------------------------------
     # IR lowering
     # ------------------------------------------------------------------
@@ -3358,6 +3626,8 @@ class EmissionMixin:
             # per line; empty content emits nothing.
             for line in decode_string_escapes(statement.content).splitlines():
                 self.emit(line)
+        elif isinstance(statement, ExtendedAsm):
+            self.generate_extended_asm(statement)
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)

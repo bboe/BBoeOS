@@ -87,6 +87,15 @@ class AssignExpr(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class AsmOperand(Node):
+    """A single output or input operand in an extended asm statement."""
+
+    constraint: str
+    expression: Node
+    name: str | None = field(default=None)
+
+
+@dataclass(kw_only=True, slots=True)
 class BinaryOperation(Node):
     """Binary operator expression ``left OPERATION right``."""
 
@@ -243,6 +252,17 @@ class EnumDecl(Node):
 
     name: str
     variants: list[tuple[str, int]]
+
+
+@dataclass(kw_only=True, slots=True)
+class ExtendedAsm(Node):
+    """Statement-level GCC extended inline asm with operand constraints."""
+
+    clobbers: list[str]
+    inputs: list[AsmOperand]
+    is_volatile: bool
+    outputs: list[AsmOperand]
+    template: str
 
 
 @dataclass(kw_only=True, slots=True)

@@ -1113,8 +1113,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if declaration.init is None:
                 if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
                     stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
+                elif self._is_byte_scalar_global(name):
+                    stride = 1
                 else:
-                    stride = 1 if self._is_byte_scalar_global(name) else self.target.int_size
+                    # Use _type_size so double (8 bytes), uint16_t (2 bytes),
+                    # etc. get the correct allocation rather than always
+                    # falling back to int_size (4 bytes on x86-32).
+                    try:
+                        stride = self._type_size(declaration.type_name)
+                    except CompileError:
+                        stride = self.target.int_size
                 self.bss_vars.append((name, str(stride)))
             elif isinstance(declaration.init, StructInitializer):
                 tag = declaration.type_name[len("struct ") :]
