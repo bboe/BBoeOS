@@ -44,6 +44,7 @@ from cc.ast_nodes import (
     DoubleIndex,
     DoWhile,
     ExtendedAsm,
+    For,
     Function,
     Goto,
     If,
@@ -1961,6 +1962,34 @@ class EmissionMixin:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
 
+    def generate_for(self, statement: For, /) -> None:
+        """Generate assembly for a ``for (init; cond; step) { body }`` loop.
+
+        ``continue`` jumps to the step label (not the condition test) so
+        that the step expressions are always executed.
+        """
+        label_index = self.new_label()
+        top_label = f".for_{label_index}"
+        step_label = f".for_{label_index}_step"
+        end_label = f".for_{label_index}_end"
+        for init_statement in statement.init:
+            self.generate_statement(init_statement)
+        self.emit(f"{top_label}:")
+        self.loop_end_labels.append(end_label)
+        self.loop_continue_labels.append(step_label)
+        if statement.cond is not None:
+            self.emit_condition_false_jump(condition=statement.cond, context="for", fail_label=end_label)
+        self.generate_body(statement.body, scoped=True)
+        self.emit(f"{step_label}:")
+        for step_expression in statement.step:
+            self.generate_expression(step_expression)
+            self.ax_clear()
+        self.emit(f"        jmp {top_label}")
+        self.emit(f"{end_label}:")
+        self.loop_continue_labels.pop()
+        self.loop_end_labels.pop()
+        self.ax_clear()
+
     def generate_extended_asm(self, statement: ExtendedAsm, /) -> None:
         """Generate assembly for a GCC extended inline asm statement.
 
@@ -2310,6 +2339,13 @@ class EmissionMixin:
             case ir.InlineAsm(content=content):
                 for line in decode_string_escapes(content).splitlines():
                     self.emit(line)
+            case ir.LoopBoundary(continue_label=continue_label, end_label=end_label, push=push):
+                if push:
+                    self.loop_continue_labels.append(continue_label)
+                    self.loop_end_labels.append(end_label)
+                else:
+                    self.loop_continue_labels.pop()
+                    self.loop_end_labels.pop()
             case ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -2320,6 +2356,8 @@ class EmissionMixin:
         :meth:`generate_member_assign` so the detection predicate is
         consistent: ``info.bit_width is not None``.
         """
+        if statement.base_expr is not None:
+            return False
         struct_type = self.variable_types.get(statement.object_name, "")
         if statement.arrow:
             if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
@@ -3522,6 +3560,9 @@ class EmissionMixin:
         elif isinstance(statement, DoWhile):
             self.ax_clear()
             self.generate_do_while(statement)
+        elif isinstance(statement, For):
+            self.ax_clear()
+            self.generate_for(statement)
         elif isinstance(statement, If):
             self.generate_if(statement)
         elif isinstance(statement, Switch):

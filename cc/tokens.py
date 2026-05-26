@@ -46,6 +46,8 @@ KEYWORDS = frozenset({
     "else",
     "enum",
     "extern",
+    "float",
+    "for",
     "goto",
     "if",
     "int",
@@ -88,7 +90,7 @@ TOKEN_PATTERN = re.compile(
   | (?P<LINE_COMMENT>//[^\n]*)
   | (?P<CHAR_LIT>'(?:[^'\\]|\\x[0-9a-fA-F]{1,2}|\\.)')
   | (?P<IDENT>[A-Za-z_][A-Za-z_0-9]*)
-  | (?P<NUMBER>(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:[uU][lL][lL]?|[lL][lL]?[uU]?|[uU])?)
+  | (?P<NUMBER>(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)(?:[fF]|[uU][lL][lL]?|[lL][lL]?[uU]?|[uU])?)
   | (?P<STRING>"(?:[^"\\]|\\.)*")
   | (?P<EQ>==)
   | (?P<GE>>=)
@@ -143,7 +145,9 @@ TOKEN_PATTERN = re.compile(
 TYPE_TOKENS = frozenset({
     "CHAR",
     "CONST",
+    "DOUBLE",
     "ENUM",
+    "FLOAT",
     "INT",
     "LONG",
     "SHORT",

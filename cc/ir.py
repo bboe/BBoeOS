@@ -166,7 +166,35 @@ class Block:
     node: ast_nodes.Node
 
 
-Instruction = BinaryOperation | Copy | Call | Index | IndexAssign | Label | Jump | BranchFalse | CarryBranch | Return | InlineAsm | Block
+@dataclass(frozen=True, kw_only=True, slots=True)
+class LoopBoundary:
+    """Push or pop loop label context for the emission layer.
+
+    Emitted around loop bodies so that ``Continue`` / ``Break`` nodes
+    inside ``Block``-wrapped AST statements (e.g. a Switch inside a
+    while loop) can resolve to the correct jump targets.
+    """
+
+    continue_label: str
+    end_label: str
+    push: bool
+
+
+Instruction = (
+    BinaryOperation
+    | Copy
+    | Call
+    | Index
+    | IndexAssign
+    | Label
+    | Jump
+    | BranchFalse
+    | CarryBranch
+    | Return
+    | InlineAsm
+    | Block
+    | LoopBoundary
+)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -284,7 +312,7 @@ class Builder:
         # Bitfield member assignments clobber AX during the read-modify-write
         # sequence, breaking the "AX = assigned value" contract.  Reject at
         # compile time rather than silently miscompile.
-        if isinstance(inner, ast_nodes.MemberAssign):
+        if isinstance(inner, ast_nodes.MemberAssign) and inner.base_expr is None:
             struct_type = self._var_types.get(inner.object_name, "")
             # Dot form: "struct TAG"; arrow form: "struct TAG*" — strip the "*".
             tag = struct_type[7:].rstrip("*") if struct_type.startswith("struct ") else ""
@@ -392,6 +420,8 @@ class Builder:
                 self._build_while(cond, body, out, strings=strings)
             case ast_nodes.DoWhile(cond=cond, body=body):
                 self._build_do_while(cond, body, out, strings=strings)
+            case ast_nodes.For(init=init, cond=cond, step=step, body=body):
+                self._build_for(init, cond, step, body, out, strings=strings)
             case ast_nodes.Break():
                 assert break_tgt is not None, "break outside loop"
                 out.append(Jump(target=break_tgt))
@@ -468,7 +498,9 @@ class Builder:
         # both shapes have to be recognised.
         if not _is_constant_true(cond):
             self._build_cond_false(cond, end_lbl, out, strings=strings)
+        out.append(LoopBoundary(continue_label=loop_lbl, end_label=end_lbl, push=True))
         self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=loop_lbl, strings=strings)
+        out.append(LoopBoundary(continue_label=loop_lbl, end_label=end_lbl, push=False))
         out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
     def _build_do_while(
@@ -482,11 +514,44 @@ class Builder:
         loop_lbl = self._lbl("dloop")
         cond_lbl = self._lbl("dcond")
         end_lbl = self._lbl("dend")
-        out.append(Label(name=loop_lbl))
+        out.extend([
+            Label(name=loop_lbl),
+            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=True),
+        ])
         self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
-        out.append(Label(name=cond_lbl))
+        out.extend([
+            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=False),
+            Label(name=cond_lbl),
+        ])
         self._build_cond_true(cond, loop_lbl, out, strings=strings)
         out.append(Label(name=end_lbl))
+
+    def _build_for(
+        self,
+        init: list[ast_nodes.Node],
+        cond: ast_nodes.Node | None,
+        step: list[ast_nodes.Node],
+        body: list[ast_nodes.Node],
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        self._build_stmts(init, out, break_tgt=None, cont_tgt=None, strings=strings)
+        loop_lbl = self._lbl("floop")
+        step_lbl = self._lbl("fstep")
+        end_lbl = self._lbl("fend")
+        out.append(Label(name=loop_lbl))
+        if cond is not None and not _is_constant_true(cond):
+            self._build_cond_false(cond, end_lbl, out, strings=strings)
+        out.append(LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=True))
+        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=step_lbl, strings=strings)
+        out.extend([
+            LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=False),
+            Label(name=step_lbl),
+        ])
+        for step_expr in step:
+            self._build_expr(step_expr, out, strings=strings)
+        out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
     # ------------------------------------------------------------------
     # Condition helpers (emit branch-when-false / branch-when-true)

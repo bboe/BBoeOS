@@ -31,6 +31,8 @@ from cc.ast_nodes import (
     DoubleIndex,
     DoWhile,
     EnumDecl,
+    ExtendedAsm,
+    For,
     Function,
     If,
     Index,
@@ -520,6 +522,38 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return None
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
+
+    @staticmethod
+    def _collect_asm_operand_vars(body: list[Node], /) -> set[str]:
+        """Return variable names that appear in ExtendedAsm operands.
+
+        Variables referenced by inline asm operands (especially memory
+        constraints ``=m`` / ``m``) must not be auto-pinned to registers
+        because the asm template may require a memory operand.
+        """
+        result: set[str] = set()
+
+        def _walk(statements: list[Node]) -> None:
+            for statement in statements:
+                if isinstance(statement, ExtendedAsm):
+                    for operand in (*statement.inputs, *statement.outputs):
+                        if isinstance(operand.expression, Var):
+                            result.add(operand.expression.name)
+                elif isinstance(statement, If):
+                    _walk(statement.body)
+                    if statement.else_body is not None:
+                        _walk(statement.else_body)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    _walk(statement.body)
+                elif isinstance(statement, For):
+                    _walk(statement.init)
+                    _walk(statement.body)
+                elif isinstance(statement, Switch):
+                    for case in statement.cases:
+                        _walk(case.body)
+
+        _walk(body)
+        return result
 
     def _collect_function_pointer_vars(self, body: list[Node], /, *, parameters: list | None = None) -> set[str]:
         """Return every name that names a function_pointer (params + locals + file-scope globals).
@@ -1272,6 +1306,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = f"unknown struct '{tag}'"
                 raise CompileError(message)
             return self.struct_sizes[tag]
+        if "[" in type_name:
+            bracket = type_name.index("[")
+            element_type = type_name[:bracket]
+            count = int(type_name[bracket + 1 : -1])
+            return self._type_size(element_type) * count
         message = f"unknown type '{type_name}'"
         raise CompileError(message)
 
@@ -1374,8 +1413,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             field_size = info.field_size
             element_size = info.element_size
             is_array_field = field_size != element_size
+            is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
             self.ax_clear()
-            if is_array_field:
+            if is_array_field or is_struct_value:
                 if object_name in self.global_scalars:
                     # Global: load address as immediate (label arithmetic).
                     if offset:
@@ -1421,10 +1461,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         field_size = info.field_size
         element_size = info.element_size
         is_array_field = field_size != element_size
-        # Array fields evaluate to the field's address (so callers can pass
-        # them to memcpy / memcmp / a function expecting a pointer).  Element
-        # access uses the dedicated MemberIndex node.
-        if is_array_field:
+        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
+        # Array fields and embedded struct values evaluate to the
+        # field's address (so callers can chain ``.subfield``, pass
+        # them to memcpy / memcmp, or a function expecting a pointer).
+        if is_array_field or is_struct_value:
             self.ax_clear()
             if self.si_local == object_name:
                 base_reg = self.target.si_register
@@ -1463,25 +1504,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.ax_clear()
 
     def _generate_member_access_via_expr(self, expression: MemberAccess, /) -> None:
-        """Generate code for ``((struct T *)expr)->field``.
+        """Generate code for member access through an expression base.
 
-        The base is an arbitrary pointer expression (today: always a
-        ``Cast`` to a ``struct T *``; the cast's target type tells us
-        which struct layout to use for the field offset).  Evaluates
-        the cast's inner expression into BX/EBX, then loads the field
-        with the same offset / bitfield / byte-width handling as the
-        named-pointer form.
+        Handles both the ``((struct T *)expr)->field`` cast form and
+        the chained ``a->b.c`` form (where ``base_expr`` is itself a
+        :class:`MemberAccess`).  Evaluates the base expression into
+        BX/EBX, then loads the field with the same offset / bitfield /
+        byte-width handling as the named-pointer form.
         """
         base = expression.base_expr
         assert base is not None
-        if not isinstance(base, Cast):
-            message = "'->' on a non-cast expression base is not supported"
-            raise CompileError(message, line=expression.line)
-        target_type = base.target_type.rstrip()
-        if not (target_type.startswith("struct ") and target_type.endswith("*")):
-            message = f"'->' requires a struct-pointer cast, got '{target_type}'"
-            raise CompileError(message, line=expression.line)
-        tag = target_type[7:-1].rstrip()
+        base_type = self._expression_type(base)
+        if expression.arrow:
+            if not (base_type.startswith("struct ") and base_type.endswith("*")):
+                message = f"'->' requires a struct-pointer cast, got '{base_type}'"
+                raise CompileError(message, line=expression.line)
+            tag = base_type[7:-1].rstrip()
+        else:
+            if not base_type.startswith("struct ") or base_type.endswith("*"):
+                message = f"'.' requires a struct value, got type '{base_type}'"
+                raise CompileError(message, line=expression.line)
+            tag = base_type[7:]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
@@ -1494,20 +1537,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         field_size = info.field_size
         element_size = info.element_size
         is_array_field = field_size != element_size
-        # Fast path: when the cast wraps ``&local`` (the port-IO bridge
-        # idiom ``((struct T *)&raw)->field``), the base pointer is a
-        # known frame address — skip the ``lea + mov ebx, eax + mov al,
-        # [ebx]`` indirection and load directly from ``[ebp-K+offset]``.
-        # Saves ~5 bytes per call site versus going through EBX.  Falls
-        # through to the general path for non-AddressOf bases or for
-        # AddressOf of something other than a known local (globals,
-        # parameters not in locals, etc.).
+        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
+        # Fast path: when the base is a Cast wrapping ``&local`` (the
+        # port-IO bridge idiom ``((struct T *)&raw)->field``), the base
+        # pointer is a known frame address — skip the ``lea + mov ebx,
+        # eax + mov al, [ebx]`` indirection and load directly from
+        # ``[ebp-K+offset]``.
         direct_address: str | None = None
-        if isinstance(base.expression, AddressOf) and base.expression.var.name in self.locals:
+        if isinstance(base, Cast) and isinstance(base.expression, AddressOf) and base.expression.var.name in self.locals:
             direct_address = self._local_address(base.expression.var.name)
         if direct_address is not None:
             self.ax_clear()
-            if is_array_field:
+            if is_array_field or is_struct_value:
                 if offset:
                     self.emit(f"        lea {self.target.acc}, [{direct_address}+{offset}]")
                 else:
@@ -1530,15 +1571,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        mov {self.target.acc}, {addr}")
             self.ax_clear()
             return
-        # General path: materialise the base pointer into BX/EBX.
-        # generate_expression leaves the value in AX/EAX; move to BX so
-        # the field-load addressing modes ([bx+N] / [ebx+N]) match the
-        # named-pointer path below.
-        self.generate_expression(base.expression)
+        # General path: materialise the base address into BX/EBX.
+        self.generate_expression(base)
         self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
         base_reg = self.target.bx_register
         self.ax_clear()
-        if is_array_field:
+        if is_array_field or is_struct_value:
             if offset:
                 self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
             else:
@@ -1561,26 +1599,79 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        mov {self.target.acc}, {addr}")
         self.ax_clear()
 
+    def _generate_member_assign_via_expr(self, statement: MemberAssign, /) -> None:
+        """Generate code for chained member assignment ``a->b.c = expr;``.
+
+        Evaluates ``base_expr`` (a :class:`MemberAccess` chain) to
+        produce the address of the intermediate struct, then stores the
+        RHS into the final field at the appropriate offset.
+        """
+        assert statement.base_expr is not None
+        base_type = self._expression_type(statement.base_expr)
+        if statement.arrow:
+            if not base_type.endswith("*") or not base_type.startswith("struct "):
+                message = f"'->' requires a pointer to struct, got type '{base_type}'"
+                raise CompileError(message, line=statement.line)
+            tag = base_type[7:-1].rstrip()
+        else:
+            if not base_type.startswith("struct ") or base_type.endswith("*"):
+                message = f"'.' requires a struct value, got type '{base_type}'"
+                raise CompileError(message, line=statement.line)
+            tag = base_type[7:]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=statement.line)
+        if statement.member_name not in layout:
+            message = f"struct '{tag}' has no field '{statement.member_name}'"
+            raise CompileError(message, line=statement.line)
+        info = layout[statement.member_name]
+        offset = info.byte_offset
+        field_size = info.field_size
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=statement.line)
+        self.ax_clear()
+        self.generate_expression(statement.base_expr)
+        self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+        self.ax_clear()
+        self.generate_expression(statement.expr)
+        addr = f"[{self.target.bx_register}+{offset}]" if offset else f"[{self.target.bx_register}]"
+        if field_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
+        else:
+            self.emit(f"        mov {addr}, {self.target.acc}")
+
     def generate_member_address_of(self, expression: MemberAddressOf, /) -> None:
-        """Generate code for ``&obj.field``.
+        """Generate code for ``&obj.field`` or ``&ptr->field``.
 
         Bitfield members have no addressable storage and are always rejected
         with a :class:`~cc.errors.CompileError`.  Both file-scope struct
         globals (``_g_obj + offset`` via ``mov``) and local struct values
-        (``[ebp-N+offset]`` via ``lea``) are supported.
+        (``[ebp-N+offset]`` via ``lea``) are supported.  The arrow form
+        loads the base pointer first and then adds the field offset.
         """
         object_name = expression.object_name
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
             message = f"undefined variable '{object_name}'"
             raise CompileError(message, line=expression.line)
-        if struct_type.endswith("*"):
-            message = "'&obj.field' requires a struct value, not a pointer; use '&ptr->field' or '&(*ptr).field'"
-            raise CompileError(message, line=expression.line)
-        if not struct_type.startswith("struct "):
-            message = f"'.' requires a struct value, got type '{struct_type}'"
-            raise CompileError(message, line=expression.line)
-        tag = struct_type[7:]
+        if expression.arrow:
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+                raise CompileError(message, line=expression.line)
+            tag = struct_type[7:-1]
+        else:
+            if struct_type.endswith("*"):
+                message = "'&obj.field' requires a struct value, not a pointer; use '&ptr->field' or '&(*ptr).field'"
+                raise CompileError(message, line=expression.line)
+            if not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=expression.line)
+            tag = struct_type[7:]
         layout = self.struct_layouts.get(tag)
         if layout is None:
             message = f"unknown struct '{tag}'"
@@ -1592,7 +1683,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             message = f"cannot take address of bitfield '{expression.member_name}'"
             raise CompileError(message, line=expression.line)
-        # Non-bitfield: emit the field address.
+        if expression.arrow:
+            self.ax_clear()
+            self._emit_load_var(object_name, register=self.target.acc)
+            if info.byte_offset:
+                self.emit(f"        add {self.target.acc}, {info.byte_offset}")
+            self.ax_clear()
+            return
+        # Non-bitfield dot form: emit the field address.
         if object_name in self.global_scalars:
             base_label = self._local_address(object_name)
             if info.byte_offset:
@@ -1615,7 +1713,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         The dot form is supported on file-scope struct globals; the
         target address resolves to ``[_g_obj+offset]`` directly.
+
+        When ``base_expr`` is set (chained access like ``a->b.c = v;``),
+        the base expression is evaluated first to produce the address of
+        the intermediate struct, then the final field store proceeds at
+        the appropriate offset from that address.
         """
+        if statement.base_expr is not None:
+            self._generate_member_assign_via_expr(statement)
+            return
         object_name = statement.object_name
         struct_type = self.variable_types.get(object_name)
         if struct_type is None:
@@ -2913,8 +3019,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = f"global '{name}' collides with a function name"
                 raise CompileError(message, line=declaration.line)
             if name in self.global_scalars or name in self.global_arrays:
-                message = f"duplicate global declaration: {name}"
-                raise CompileError(message, line=declaration.line)
+                # An ``extern`` forward declaration followed by the real
+                # definition is standard C — allow the definition to
+                # supersede the earlier extern.  Duplicate non-extern
+                # declarations remain an error.
+                prior_is_extern = name in self.extern_globals
+                current_is_extern = getattr(declaration, "is_extern", False)
+                if not prior_is_extern or current_is_extern:
+                    message = f"duplicate global declaration: {name}"
+                    raise CompileError(message, line=declaration.line)
+                self.extern_globals.discard(name)
+                self.global_scalars.pop(name, None)
+                self.global_arrays.pop(name, None)
             if isinstance(declaration, VarDecl):
                 if declaration.type_name == "unsigned long":
                     message = "unsigned long globals are not supported"
@@ -3060,11 +3176,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         collect(statement.else_body, top_level=False)
                 elif isinstance(statement, (Compound, DoWhile, While)):
                     collect(statement.body, top_level=False)
+                elif isinstance(statement, For):
+                    collect(statement.init, top_level=False)
+                    collect(statement.body, top_level=False)
                 elif isinstance(statement, Switch):
                     for case in statement.cases:
                         collect(case.body, top_level=False)
 
         collect(body, top_level=True)
+
+        asm_operand_vars = self._collect_asm_operand_vars(body)
+        body_candidates = [(name, o) for name, o in body_candidates if name not in asm_operand_vars]
 
         counts: dict[str, int] = {}
         index_uses: dict[str, int] = {}
@@ -4585,7 +4707,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         if include is not None:
                             self.required_includes.add(include)
                     continue
-                if statement.type_name not in ("unsigned long", "function_pointer") and statement.name in self.auto_pin_candidates:
+                if (
+                    statement.type_name not in ("double", "unsigned long", "function_pointer")
+                    and statement.name in self.auto_pin_candidates
+                ):
                     following = statements[index + 1] if index + 1 < len(statements) else None
                     if self.can_auto_pin(following_statement=following, statement=statement):
                         self.pinned_register[statement.name] = self.auto_pin_candidates[statement.name]
@@ -4624,6 +4749,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if statement.else_body is not None:
                     self.scan_locals(statement.else_body, top_level=False)
             elif isinstance(statement, (DoWhile, While)):
+                self.scan_locals(statement.body, top_level=False)
+            elif isinstance(statement, For):
+                self.scan_locals(statement.init, top_level=False)
                 self.scan_locals(statement.body, top_level=False)
             elif isinstance(statement, Switch):
                 for case in statement.cases:

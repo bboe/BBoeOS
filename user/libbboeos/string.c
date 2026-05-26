@@ -65,7 +65,8 @@ void *memset(void *dst, int c, size_t n) {
 }
 
 int strcasecmp(const char *a, const char *b) {
-    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+    while (*a != '\0' &&
+           tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
         a++;
         b++;
     }
@@ -78,16 +79,16 @@ char *strcat(char *dst, const char *src) {
 }
 
 char *strchr(const char *s, int c) {
-    while (*s) {
+    while (*s != '\0') {
         if (*s == (char)c)
             return (char *)s;
         s++;
     }
-    return c == 0 ? (char *)s : NULL;
+    return c == '\0' ? (char *)s : NULL;
 }
 
 int strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) {
+    while (*a != '\0' && *a == *b) {
         a++;
         b++;
     }
@@ -104,7 +105,7 @@ char *strcpy(char *dst, const char *src) {
 char *strdup(const char *s) {
     size_t n = strlen(s) + 1;
     char *r = malloc(n);
-    if (r)
+    if (r != NULL)
         memcpy(r, s, n);
     return r;
 }
@@ -151,13 +152,13 @@ char *strerror(int errnum) {
 
 size_t strlen(const char *s) {
     const char *p = s;
-    while (*p)
+    while (*p != '\0')
         p++;
     return p - s;
 }
 
 int strncasecmp(const char *a, const char *b, size_t n) {
-    while (n && *a &&
+    while (n && *a != '\0' &&
            tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
         a++;
         b++;
@@ -176,7 +177,7 @@ char *strncat(char *dst, const char *src, size_t n) {
 }
 
 int strncmp(const char *a, const char *b, size_t n) {
-    while (n && *a && *a == *b) {
+    while (n && *a != '\0' && *a == *b) {
         a++;
         b++;
         n--;
@@ -194,7 +195,7 @@ char *strncpy(char *dst, const char *src, size_t n) {
      * <8-char name (e.g. "PNAMES") clobbered the low byte of the
      * adjacent wad_file pointer in the lumpinfo_t struct. */
     size_t i = 0;
-    while (i < n && src[i]) {
+    while (i < n && src[i] != '\0') {
         dst[i] = src[i];
         i++;
     }
@@ -207,26 +208,26 @@ char *strncpy(char *dst, const char *src, size_t n) {
 
 char *strrchr(const char *s, int c) {
     const char *last = NULL;
-    while (*s) {
+    while (*s != '\0') {
         if (*s == (char)c)
             last = s;
         s++;
     }
-    if (c == 0)
+    if (c == '\0')
         return (char *)s;
     return (char *)last;
 }
 
 char *strstr(const char *h, const char *n) {
-    if (!*n)
+    if (*n == '\0')
         return (char *)h;
-    for (; *h; h++) {
+    for (; *h != '\0'; h++) {
         const char *a = h, *b = n;
-        while (*a && *b && *a == *b) {
+        while (*a != '\0' && *b != '\0' && *a == *b) {
             a++;
             b++;
         }
-        if (!*b)
+        if (*b == '\0')
             return (char *)h;
     }
     return NULL;
