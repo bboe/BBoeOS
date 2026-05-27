@@ -137,7 +137,8 @@ pmode_irq3_handler:
         ;; resolves to ISR, not the page-1 CURR register.
         pushad
         mov al, 0xFF
-        out 0x307, al
+        mov dx, 0x307
+        out dx, al
         mov al, PIC_EOI
         out PIC1_CMD_PORT, al
         SIGNAL_TAIL_CHECK

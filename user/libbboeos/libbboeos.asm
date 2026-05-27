@@ -66,6 +66,7 @@
 ;;; -----------------------------------------------------------------------
 
         section .libbboeos.function_table progbits alloc exec nowrite
+        global function_table
 function_table:
         jmp strict near shared_die              ; FUNCTION_DIE              (+0)
         jmp strict near shared_exit             ; FUNCTION_EXIT             (+5)
