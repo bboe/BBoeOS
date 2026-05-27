@@ -121,28 +121,61 @@ CFLAGS = (
 
 
 def _build_libbboeos() -> None:
-    """Run make -C user/libbboeos to produce libbboeos.a + _start.o.
+    """Pre-compile libbboeos C sources via cc.py, then run make to archive.
+
+    cc.py compiles every libbboeos .c file into an ELF .o (via nasm
+    -f elf32).  The Makefile only assembles the .asm files and archives
+    everything into libbboeos.a.
 
     Forwards a GNU-compatible ``AR`` so the archive's symbol index is
     in the format ld.lld / x86_64-elf-ld expects.  macOS's BSD ``ar``
     produces a ``__.SYMDEF`` index that the cross-linker can read but
     sometimes silently mis-indexes for objects with our --target,
     surfacing as undefined-reference errors at link time.
-
-    Generates user/libbboeos/include/syscalls.h first so both libc itself
-    and Doom (which inherits the same -Iuser/libbboeos/include) compile
-    against fresh syscall numbers.  Idempotent — the generator only
-    rewrites the header when the asm side actually changed.
     """
     subprocess.check_call(
         ["python3", str(REPO / "tools" / "generate_syscalls_h.py")],
     )
+    BUILD.mkdir(parents=True, exist_ok=True)
+    for name in [
+        "builtins",
+        "ctype",
+        "dirent",
+        "errno",
+        "math",
+        "signal",
+        "stdio",
+        "stdlib",
+        "string",
+        "syscall",
+    ]:
+        asm_output = BUILD / f"{name}.cc.asm"
+        subprocess.check_call([
+            "python3",
+            str(REPO / "cc.py"),
+            "--bits",
+            "32",
+            "--object",
+            "--per-function-sections",
+            str(LIBBBOEOS / f"{name}.c"),
+            str(asm_output),
+        ])
+        subprocess.check_call([
+            "nasm",
+            "-f",
+            "elf32",
+            "-i",
+            str(REPO / "kernel" / "include") + "/",
+            "-o",
+            str(LIBBBOEOS / f"{name}.o"),
+            str(asm_output),
+        ])
     archiver = _find_tool(
         candidates=("x86_64-elf-ar", "i686-elf-ar", "llvm-ar", "ar"),
         purpose="GNU-compatible ar",
     )
-    env = os.environ | {"AR": archiver}
-    subprocess.check_call(["make", "-C", str(LIBBBOEOS)], env=env)
+    environment = os.environ | {"AR": archiver}
+    subprocess.check_call(["make", "-C", str(LIBBBOEOS)], env=environment)
 
 
 def _compile_one(*, source: Path, extra_cflags: tuple[str, ...] = ()) -> Path:
@@ -235,8 +268,8 @@ def _link(*, objects: list[Path]) -> None:
         str(LIBBBOEOS / "_start.o"),
         *[str(obj) for obj in objects],
         # libbboeos_stubs.o MUST come before libbboeos.a so each
-        # FUNCTION_*_PTR export is defined by a 6-byte `jmp [absolute]`
-        # thunk into the shared blob; otherwise ld would pull the full
+        # FUNCTION_*_PTR export resolves to a cdecl-to-regparm shim
+        # into the shared blob; otherwise ld would pull the full
         # string.c (etc.) bodies out of the archive into every program.
         str(LIBBBOEOS / "libbboeos_stubs.o"),
         str(LIBBBOEOS / "libbboeos.a"),

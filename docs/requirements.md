@@ -11,8 +11,8 @@ External tools the build, the OS image, and the test suites depend on.
 
 Always required:
 
-- **`nasm`** — assembles `boot.bin`, `kernel.bin`, every cc.py-emitted `.asm`,
-  and the user programs.
+- **`nasm`** — assembles `boot.bin`, `kernel.bin`, the libbboeos `.asm` files,
+  every cc.py-emitted `.asm`, and the user programs.
 - **POSIX shell utilities** — `cat`, `dd`, `dirname`, `find`, `mkdir`, `printf`,
   `rm`, `sed`, `sort`, `tr`, `wc`. All are part of the macOS and Linux base
   systems.
@@ -62,24 +62,27 @@ same binary the hook uses.
 The libbboeos tests need **`clang`**:
 
 - `tests/unit/test_libbboeos.py` runs clang in its host-native default mode to
-  compile each unit test's tiny C program.  Same compiler as the smoke test
-  below, so installing one covers both.
-- `tests/test_libbboeos_qemu.py` (the libbboeos on-OS smoke test) drives the
-  freestanding cross-compile (`--target=i386-pc-none-elf -m32 -ffreestanding
-  -nostdinc -nostdlib`) plus a few build-system tools:
+  compile each unit test's tiny C program.
+- `tests/test_libbboeos_qemu.py` (the libbboeos on-OS smoke test) compiles a
+  test program with clang (`--target=i386-pc-none-elf -m32 -ffreestanding
+  -nostdinc -nostdlib`) and links it against `libbboeos.a`.  Build-system tools:
 
-  - **`make`** — invoked as `make -C user/libbboeos`; reuses the Makefile's CFLAGS
-    so the test doesn't duplicate them.
+  - **`make`** — invoked as `make -C user/libbboeos`; assembles the `.asm` files
+    and archives the objects.
   - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against
     `libbboeos.a` and the `user/libbboeos/program.ld` linker script.
   - **`ar`** (GNU `ar`, also from `binutils`) — packs the libbboeos objects into
     `libbboeos.a`.
 
+Note: the libbboeos C sources themselves are compiled by `cc.py` + `nasm` (no
+clang needed).  Clang is only required for the test harness programs and the
+Doom port.
+
 ## Doom port (`ports/doom/build.py`)
 
-The Doom build needs the libbboeos deps above (clang, make, ar) plus a GNU-compatible
-linker + objcopy.  `build.py` auto-picks the first one it finds on `$PATH`,
-in order:
+The Doom build needs **`clang`** (for its own `.c` files), **`make`**, **`ar`**,
+plus a GNU-compatible linker + objcopy.  `build.py` auto-picks the first one it
+finds on `$PATH`, in order:
 
 - `x86_64-elf-ld` / `x86_64-elf-objcopy` (GNU cross-binutils — typical macOS
   install)
