@@ -32,7 +32,7 @@ PROTOTYPE = re.compile(
 )
 
 REPO = Path(__file__).resolve().parent.parent
-DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.S"
+DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.asm"
 INCLUDE_DIRECTORY = REPO / "user" / "libbboeos" / "include"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
@@ -87,33 +87,30 @@ def _collect_prototype_parameter_counts() -> dict[str, int | None]:
 
 
 def _render_stubs(*, exports: list[tuple[str, int, int | None]]) -> str:
-    """Render libbboeos_stubs.S for the given (name, address, parameter_count) tuples."""
+    """Render libbboeos_stubs.asm for the given (name, address, parameter_count) tuples."""
     lines = [
-        "/* user/libbboeos/libbboeos_stubs.S — auto-generated.  DO NOT EDIT.",
-        " *",
-        " * Regenerate with `python3 tools/generate_libbboeos_stubs.py`.",
-        " * Each stub shuffles cdecl stack arguments into regparm",
-        " * registers (EAX/EDX/ECX) then jumps to the shared",
-        " * libbboeos blob via `jmp [FUNCTION_<NAME>_PTR]`.",
-        " * Clang programs link this file BEFORE libbboeos.a so ld",
-        " * resolves each export to the stub and never pulls the",
-        " * full body out of the archive.",
-        " *",
-        " * Source of truth: FUNCTION_<NAME>_PTR offsets in",
-        " * kernel/include/constants.asm + prototypes in",
-        " * user/libbboeos/include/*.h.  Sorted alphabetically.",
-        " */",
+        "; user/libbboeos/libbboeos_stubs.asm — auto-generated.  DO NOT EDIT.",
+        ";",
+        "; Regenerate with `python3 tools/generate_libbboeos_stubs.py`.",
+        "; Each stub shuffles cdecl stack arguments into regparm",
+        "; registers (EAX/EDX/ECX) then jumps to the shared",
+        "; libbboeos blob via `jmp [FUNCTION_<NAME>_PTR]`.",
+        "; Clang programs link this file BEFORE libbboeos.a so ld",
+        "; resolves each export to the stub and never pulls the",
+        "; full body out of the archive.",
+        ";",
+        "; Source of truth: FUNCTION_<NAME>_PTR offsets in",
+        "; kernel/include/constants.asm + prototypes in",
+        "; user/libbboeos/include/*.h.  Sorted alphabetically.",
         "",
-        "        .intel_syntax noprefix",
-        '        .section .text.libbboeos_stubs, "ax", @progbits',
+        "        section .text",
         "",
     ]
     regparm_registers = ["eax", "edx", "ecx"]
     for name, address, parameter_count in exports:
         symbol = name.lower()
         lines.extend([
-            f"        .globl {symbol}",
-            f"        .type  {symbol}, @function",
+            f"        global {symbol}",
             f"{symbol}:",
         ])
         if parameter_count is not None and parameter_count > 0:
@@ -122,8 +119,7 @@ def _render_stubs(*, exports: list[tuple[str, int, int | None]]) -> str:
                 offset = 4 + i * 4
                 lines.append(f"        mov {regparm_registers[i]}, [esp+{offset}]")
         lines.extend([
-            f"        jmp [0x{address:08x}]    /* FUNCTION_{name}_PTR */",
-            f"        .size {symbol}, . - {symbol}",
+            f"        jmp [0x{address:08x}]    ; FUNCTION_{name}_PTR",
             "",
         ])
     return "\n".join(lines)

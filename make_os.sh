@@ -51,13 +51,9 @@ done
 # anchor; objcopy -O binary flattens the linked ELF into the on-disk
 # blob.
 mkdir -p build
-# Phase 6 of the shared-libbboeos design (design-specs/2026-05-20-shared-libbboeos-design.md):
-# cc.py compiles one libbboeos source file at a time.  errno.c is the
-# first port — pre-build the .o via cc.py + nasm -f elf32 before make
-# runs.  The libbboeos Makefile's ``%.o: %.c`` pattern rule sees the
-# .o is newer than the .c and skips the clang invocation, so no
-# Makefile change is needed; ar appends the cc.py-built object to
-# libbboeos.a like any other contribution.
+# cc.py compiles every libbboeos C source into an ELF .o (via nasm -f
+# elf32) before make runs.  The Makefile only assembles the .asm files
+# and archives everything into libbboeos.a.
 build_libbboeos_ccpy() {
     name=$1
     python3 cc.py --bits 32 --object --per-function-sections "user/libbboeos/$name.c" "build/$name.cc.asm" || return 1
@@ -69,9 +65,8 @@ for name in builtins ctype dirent errno math signal stdio stdlib string syscall;
 done
 make -C user/libbboeos libbboeos.a AR="$CROSS_AR" >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
-# --gc-sections drops every clang-compiled libbboeos function the
-# pointer-table LONG()s don't reference, so the blob pays only for
-# what it actually exports.
+# --gc-sections drops every libbboeos function the pointer-table
+# LONG()s don't reference, so the blob pays only for what it exports.
 $CROSS_LD -m elf_i386 -T user/libbboeos/libbboeos.ld -Map=build/libbboeos.map \
     --gc-sections -o build/libbboeos.elf \
     build/libbboeos.o user/libbboeos/libbboeos.a || exit 1
