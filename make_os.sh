@@ -51,7 +51,7 @@ build_libbboeos_ccpy() {
     nasm -f elf32 -i kernel/include/ -o "user/libbboeos/$name.o" "build/$name.cc.asm" || return 1
 }
 python3 tools/generate_syscalls_h.py
-for name in ctype dirent errno math signal stdio stdlib string; do
+for name in builtins ctype dirent errno math signal stdio stdlib string syscall; do
     build_libbboeos_ccpy "$name" || exit 1
 done
 make -C user/libbboeos libbboeos.a >/dev/null || exit 1
