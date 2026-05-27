@@ -516,8 +516,7 @@ class EmissionMixin:
             for name in sorted(self.defines):
                 self.emit(f"%define {name} {self.defines[name]}")
         self.emit()
-        if not self.per_function_sections:
-            self._apply_default_regparm(ast.functions)
+        self._apply_default_regparm(ast.functions)
         for function in ast.functions:
             if function.name == "main":
                 if self.target_mode == "kernel":
@@ -531,7 +530,7 @@ class EmissionMixin:
             # direct/CCREL call.
             pointer_constant = f"FUNCTION_{function.name.upper()}_PTR"
             if function.is_prototype and self.target_mode == "user" and pointer_constant in self.NAMED_CONSTANT_VALUES:
-                self.libbboeos_extern_declarations.add(function.name)
+                self.libbboeos_extern_declarations[function.name] = len(function.params)
                 continue
             self.user_functions[function.name] = len(function.params)
             if function.is_variadic:
@@ -551,11 +550,7 @@ class EmissionMixin:
                 if param.in_register is not None:
                     self.in_register_params.setdefault(function.name, {})[index] = param.in_register
         self._register_globals(ast.globals)
-        if not self.per_function_sections:
-            self._analyze_user_function_conventions(ast.functions)
-        else:
-            self.user_function_pin_params = {}
-            self.register_convention_functions = set()
+        self._analyze_user_function_conventions(ast.functions)
         if self.object_mode and self.extern_globals:
             for name in sorted(self.extern_globals):
                 self.emit(f"extern {self._nasm_symbol(name)}")
@@ -1198,11 +1193,26 @@ class EmissionMixin:
             # Libbboeos extern call.  The prototype-registration pass put
             # the name in libbboeos_extern_declarations after seeing
             # `int strcmp(const char *, const char *);` (or equivalent
-            # via `#include "string.h"`).  Emit a cdecl indirect call
-            # through the pointer table — args pushed right-to-left,
-            # `call [FUNCTION_<NAME>_PTR]`, caller pops args.
+            # via `#include "string.h"`).  Emit a regparm(3) indirect
+            # call through the pointer table — first 3 args in
+            # EAX/EDX/ECX, remainder pushed right-to-left,
+            # `call [FUNCTION_<NAME>_PTR]`, caller pops stack args.
             if name in self.libbboeos_extern_declarations:
                 pointer_constant = f"FUNCTION_{name.upper()}_PTR"
+                param_count = self.libbboeos_extern_declarations[name]
+                regparm_count = min(3, param_count)
+                regparm_registers = (self.target.acc, self.target.dx_register, self.target.count_register)
+                fastcall_ax_arg: Node | None = None
+                register_args: list[tuple[str, Node]] = []
+                stack_args: list[Node] = []
+                for index, arg in enumerate(arguments):
+                    if index < regparm_count:
+                        if index == 0:
+                            fastcall_ax_arg = arg
+                        else:
+                            register_args.append((regparm_registers[index], arg))
+                    else:
+                        stack_args.append(arg)
                 clobbers: frozenset[str] = frozenset(self.target.register_pool)
                 saved = self._pinned_registers_to_save(clobbers)
                 use_pusha = discard_return and len(saved) >= 3
@@ -1211,11 +1221,14 @@ class EmissionMixin:
                 else:
                     for register in saved:
                         self.emit(f"        push {register}")
-                for arg in reversed(arguments):
+                for arg in reversed(stack_args):
                     self._emit_push_arg(arg)
+                self._emit_register_arg_moves(register_args)
+                if fastcall_ax_arg is not None:
+                    self.emit_register_from_argument(argument=fastcall_ax_arg, register=self.target.acc)
                 self.emit(f"        call [{pointer_constant}]")
-                if arguments:
-                    self.emit(f"        add {self.target.stack_register}, {len(arguments) * self.target.int_size}")
+                if stack_args:
+                    self.emit(f"        add {self.target.stack_register}, {len(stack_args) * self.target.int_size}")
                 if use_pusha:
                     self.emit("        popa")
                 else:
