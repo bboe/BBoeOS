@@ -4231,6 +4231,32 @@ def test_peephole_register_arithmetic_skips_when_ax_read_after() -> None:
     assert any("mov dx, ax" in line for line in out), f"pinned-reg copy dropped: {out}"
 
 
+def test_peephole_register_arithmetic_skips_when_ax_read_past_non_ax_instructions() -> None:
+    """Peephole must not fuse when AX is read past non-AX instructions.
+
+    Regression for the PS/2 Ctrl+D bug: ``upper = ascii & 0x5F``
+    produced ``mov ax, dx / and ax, 95 / mov cx, ax``, and the later
+    ``sub ax, 64`` (from ``ascii = upper - 64``) consumed the AX
+    value.  Intervening ``cmp cx, 65 / jl`` instructions that don't
+    touch AX caused the forward scan to break early, missing the
+    downstream AX read and incorrectly firing the transform.
+    """
+    out = _peephole_run([
+        "        mov ax, dx",
+        "        and ax, 95",
+        "        mov cx, ax",
+        "        cmp cx, 65",
+        "        jl .skip",
+        "        cmp cx, 90",
+        "        jg .skip",
+        "        sub ax, 64",
+        "        mov dx, ax",
+        ".skip:",
+    ])
+    assert any("mov ax, dx" in line for line in out), f"AX load clobbered: {out}"
+    assert any("and ax, 95" in line for line in out), f"AX operation clobbered: {out}"
+
+
 def test_peephole_self_move_drops_no_op() -> None:
     """``mov X, X`` is dropped."""
     out = _peephole_run([

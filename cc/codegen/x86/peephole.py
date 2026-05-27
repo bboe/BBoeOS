@@ -1533,13 +1533,14 @@ class Peepholer:
             # Skip when AX is consumed downstream — either by an
             # explicit read (e.g., ``mov dx, ax ; cmp ax, bx``) or by
             # ``ret`` (System V calling convention: EAX is the return-
-            # value register).  Scan forward past AX-preserving frame
-            # teardown (``mov esp, ebp`` / ``pop`` of a non-AX register)
-            # so a ``ret`` after the teardown is still detected.  If the
-            # peephole fires past a consumer, AX retains its pre-sequence
-            # value and the consumer sees the wrong number — for ``ret``
-            # this manifests as the function returning whatever happened
-            # to be in AX before the increment instead of the new value.
+            # value register).  Scan forward past instructions that
+            # neither read nor write AX so that a distant consumer
+            # (``sub ax, 64`` past several ``cmp cx, ...`` / ``jl``
+            # lines) is still detected.  Stop at labels (merge points
+            # where AX's value is unknown), ``call`` (clobbers AX —
+            # safe), unconditional ``jmp`` (can't trace further), and
+            # full AX writes (``mov ax, ...`` / ``xor ax, ax`` —
+            # safe).
             ax_consumed = False
             j = i + 3
             while j < len(self.lines):
@@ -1547,12 +1548,9 @@ class Peepholer:
                 if next_line == "ret" or self._reads_acc(next_line):
                     ax_consumed = True
                     break
-                if next_line.startswith(f"mov {self.target.stack_register}, {self.target.base_register}") or (
-                    next_line.startswith("pop ") and not next_line.endswith(f" {self.target.acc}")
-                ):
-                    j += 1
-                    continue
-                break
+                if not next_line or next_line.endswith(":") or next_line.startswith(("call ", "jmp ")):
+                    break
+                j += 1
             if ax_consumed:
                 i += 1
                 continue
