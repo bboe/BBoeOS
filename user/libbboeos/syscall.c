@@ -123,7 +123,7 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
      * for both fields — Doom only cares about deltas for frame timing,
      * not absolute wall-clock.  tz is ignored (POSIX-compliant). */
     (void)tz;
-    if (tv == 0)
+    if (tv == NULL)
         return 0;
     unsigned int total_ms;
     __asm__ volatile("mov $" SYSNUM_STR(SYS_RTC_MILLIS) ", %%ah\n\t"
@@ -147,7 +147,7 @@ int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg) {
         (unsigned int)((SYS_IO_IOCTL << 8) | (cmd & 0xFF));
     unsigned char cf;
     __asm__ volatile("int $0x30\n\t"
-                     "setc %[cf]\n\t"
+                     "setc %b[cf]\n\t"
                      : "+a"(eax_in_out), [cf] "=&qm"(cf), "+b"(fd),
                        "+c"(ecx_arg), "+d"(edx_arg));
     if (cf & 1) {
@@ -300,7 +300,7 @@ void *video_map(void) {
     unsigned char cf;
     __asm__ volatile("mov $" SYSNUM_STR(SYS_VIDEO_MAP) ", %%ah\n\t"
                                                        "int $0x30\n\t"
-                                                       "setc %[cf]\n\t"
+                                                       "setc %b[cf]\n\t"
                      : "=a"(va), [cf] "=&qm"(cf));
     if (cf & 1) {
         errno = ENOMEM;
