@@ -92,10 +92,10 @@ precursor — it's effectively a one-pass approximation of the same idea.
 
 **Size:** small.
 
-The pointer classifier covers `char**`, `uint8_t**`, and `int**` but not `struct
-foo**` or other pointer-to-pointer types we may grow.  Each new shape needs a
-tuple-literal addition in `_type_of_operand` until we replace the hardcoded set
-with a "ends in `**`" check.
+The pointer classifier covers `char**`, `unsigned char**`, and `int**` but not
+`struct foo**` or other pointer-to-pointer types we may grow.  Each new shape
+needs a tuple-literal addition in `_type_of_operand` until we replace the
+hardcoded set with a "ends in `**`" check.
 
 ### BinaryOperation type inference beyond `+` / `-`
 
@@ -180,8 +180,8 @@ Today only `unsigned long` is in the type table; `unsigned int`, `unsigned
 char`, and `unsigned short` parse as `expected type, got IDENT ('unsigned')`.
 The cleanest fix is to treat `unsigned` as a modifier that the type parser
 consumes ahead of `char`/`short`/`int`/`long`, then dispatches to the existing
-`uint8_t`/`uint16_t`/`uint32_t`/`unsigned long` slots.  No new codegen — the
-type names already exist; only the spelling changes.
+`unsigned char`/`unsigned short`/`unsigned int`/`unsigned long` slots. No new
+codegen — the type names already exist; only the spelling changes.
 
 Lands as a prerequisite for compiling any libc-style source that uses the
 standard short names instead of the fixed-width aliases.

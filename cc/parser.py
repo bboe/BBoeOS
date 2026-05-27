@@ -93,11 +93,11 @@ class Parser:
         """Initialize the parser with a token list.
 
         *bits* is the target CPU mode (16 or 32).  Under --bits 32 the
-        three 32-bit-unsigned type spellings (``unsigned int`` /
-        ``unsigned long`` / ``uint32_t``) collapse to ``unsigned int``
-        at parse time so the codegen sees a single canonical type — the
-        DX:AX-pair codegen for ``unsigned long`` is a --bits 16
-        artifact and never runs under --bits 32.
+        two 32-bit-unsigned type spellings (``unsigned int`` /
+        ``unsigned long``) collapse to ``unsigned int`` at parse time
+        so the codegen sees a single canonical type — the DX:AX-pair
+        codegen for ``unsigned long`` is a --bits 16 artifact and never
+        runs under --bits 32.
         """
         self.tokens = tokens
         self.position = 0
@@ -1055,7 +1055,7 @@ class Parser:
                 self.eat("RPAREN")
                 field_type = "function_pointer"
             elif self.peek()[0] == "COLON":
-                # Anonymous bitfield: ``uint8_t : N;``
+                # Anonymous bitfield: ``unsigned char : N;``
                 self.eat("COLON")
                 bit_width = int(self.eat("NUMBER")[1])
                 field_name = None
@@ -1071,8 +1071,8 @@ class Parser:
                 self.eat("RBRACKET")
                 field_type = f"{field_type}[{count_token[1]}]"
             if bit_width is not None:
-                if field_type != "uint8_t":
-                    message = f"bitfield container must be uint8_t (got {field_type!r}) at line {line}"
+                if field_type != "unsigned char":
+                    message = f"bitfield container must be unsigned char (got {field_type!r}) at line {line}"
                     raise SyntaxError(message)
                 if not 1 <= bit_width <= 8:
                     message = f"bitfield width must be 1..8 (got {bit_width}) at line {line}"
@@ -1793,7 +1793,7 @@ class Parser:
             # 2. ``*(T *)expr`` — operand starts with a cast.  Wrap the
             #    cast as a :class:`PointerDereference` whose ``target_type``
             #    picks the load width.  This is the port-IO bridge
-            #    idiom ``*(uint8_t *)&s`` for byte-sized bitfield structs.
+            #    idiom ``*(unsigned char *)&s`` for byte-sized bitfield structs.
             self.eat()
             if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
                 operand = self.parse_primary()
@@ -2225,12 +2225,11 @@ class Parser:
                 self.eat("SEMI")
                 self.typedef_aliases[alias_name] = "function_pointer"
                 return None
-            # The alias name is usually a fresh IDENT, but stdint.h does
-            # ``typedef unsigned short uint16_t;`` even though cc.py
-            # already has ``uint16_t`` as a built-in keyword.  Accept
-            # the typedef silently in that case (the alias resolves to
-            # the same underlying type either way) instead of forcing
-            # the header to fork between clang and cc.py builds.
+            # The alias name is usually a fresh IDENT, but it may
+            # collide with a keyword token (e.g. ``typedef int int;``
+            # in a header used by both clang and cc.py).  Accept the
+            # typedef silently in that case instead of forcing the
+            # header to fork between clang and cc.py builds.
             alias_kind = self.peek()[0]
             if alias_kind == "IDENT":
                 alias_name = self.eat("IDENT")[1]
@@ -2464,7 +2463,7 @@ class Parser:
         if preserve_registers:
             message = "preserve_register attribute is not valid on global variables"
             raise CompileError(message, line=line)
-        # Trailing ``__attribute__`` on the variable name (e.g. ``uint16_t x __attribute__((asm_name("sym")))``)
+        # Trailing ``__attribute__`` on the variable name (e.g. ``unsigned short x __attribute__((asm_name("sym")))``)
         # is equivalent to a leading one for global variable declarations.
         # Only consumed for the first declarator; multi-declarator lines
         # (``T a, b;``) reject attributes because the per-declarator
@@ -2567,7 +2566,7 @@ class Parser:
         return declarations
 
     def parse_type(self) -> str:
-        """Parse a type specifier (void, int, char, char*, uint8_t, uint8_t*, uint16_t, uint16_t*, uint32_t, uint32_t*, unsigned long).
+        """Parse a type specifier (void, int, char, char*, unsigned char, unsigned short, unsigned int, unsigned long).
 
         An optional leading ``const`` is accepted and discarded — the C
         subset has no notion of const-ness but tolerating the keyword
@@ -2609,16 +2608,6 @@ class Parser:
             if self.peek()[0] == "STAR":
                 return self._parse_pointer_suffix("void", max_stars=2)
             return "void"
-        # ``uint8_t`` / ``uint16_t`` / ``uint32_t`` are no longer
-        # built-in keywords — sources that want the standard fixed-width
-        # names must ``#include <stdint.h>`` (cc.py's preprocessor
-        # exposes the matching ``__UINT*_TYPE__`` width macros and
-        # ``user/libbboeos/include/stdint.h`` typedefs them onto
-        # ``unsigned char`` / ``unsigned short`` / the bits-mode-aware
-        # 32-bit unsigned spelling).  This matches standard C and
-        # removes a non-standard convenience that papered over the
-        # missing typedef machinery (cc.py supports ``typedef`` since
-        # PR #453).
         pointer_bases = {
             "INT": "int",
             "CHAR": "char",
@@ -2640,12 +2629,11 @@ class Parser:
             self.eat()
             following = self.peek()
             if following[0] == "SHORT":
-                # ``unsigned short`` — width matches uint16_t, so route
-                # through that for both width and codegen.
+                # ``unsigned short`` — 2-byte unsigned type.
                 self.eat()
                 if self.peek()[0] == "INT":
                     self.eat()
-                return self._parse_pointer_suffix("uint16_t", max_stars=2)
+                return self._parse_pointer_suffix("unsigned short", max_stars=2)
             if following[0] == "LONG":
                 self.eat()
                 # ``unsigned long long`` collapses to ``unsigned long``
@@ -2664,10 +2652,9 @@ class Parser:
                 self.eat()
                 return self._parse_pointer_suffix("unsigned int", max_stars=2)
             if following[0] == "CHAR":
-                # ``unsigned char`` — width matches uint8_t, so route
-                # through that for both width and codegen.
+                # ``unsigned char`` — 1-byte unsigned type.
                 self.eat()
-                return self._parse_pointer_suffix("uint8_t", max_stars=2)
+                return self._parse_pointer_suffix("unsigned char", max_stars=2)
             # Bare ``unsigned`` defaults to ``unsigned int`` per the C
             # standard — covers cast expressions like ``(unsigned)c``
             # and bare declarations ``unsigned x;`` / parameter lists

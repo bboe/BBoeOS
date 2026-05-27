@@ -1,10 +1,10 @@
 """Saturation / underflow behaviour of MAX with unsigned operands.
 
-Standard C integer-promotion rules apply: ``uint8_t`` (and any other
+Standard C integer-promotion rules apply: ``unsigned char`` (and any other
 unsigned type narrower than ``int``) promotes to ``int`` in arithmetic
-contexts, so ``MAX(x - 1, 0)`` where ``x`` is ``uint8_t`` correctly
+contexts, so ``MAX(x - 1, 0)`` where ``x`` is ``unsigned char`` correctly
 saturates at 0 — the subtraction happens in signed int and the
-comparison uses signed ``jg``.  But ``uint32_t`` does NOT promote
+comparison uses signed ``jg``.  But ``unsigned int`` does NOT promote
 (it's the same width as ``int``); the usual arithmetic conversions
 make the comparison unsigned, ``0 - 1 == 0xFFFFFFFF``, and
 ``MAX(0xFFFFFFFF, 0) == 0xFFFFFFFF`` — the saturation breaks
@@ -12,7 +12,7 @@ silently.
 
 These tests pin both behaviours in cc.py's generated asm so a future
 codegen change that "fixes" unsigned types to use signed compares (or
-breaks ``uint8_t`` promotion) is caught immediately.
+breaks ``unsigned char`` promotion) is caught immediately.
 
 The documented workaround for callers that need saturation on a
 type ≥ ``int`` width: cast to signed first — ``MAX((int)x - 1, 0)``.
@@ -61,7 +61,7 @@ def _compile_32bit(source_text: str, /) -> str:
 
 
 def test_max_via_signed_int_local_saturates() -> None:
-    """Copying through an ``int`` local restores saturation on uint32_t.
+    """Copying through an ``int`` local restores saturation on unsigned int.
 
     cc.py treats C-style integer casts as no-ops — ``(int)g_count``
     does NOT change the operand's signedness at the comparison site.
@@ -77,10 +77,10 @@ def test_max_via_signed_int_local_saturates() -> None:
     asm = _compile_32bit("""
         #include "macros.h"
 
-        uint32_t g_count;
+        unsigned int g_count;
 
         int main(int argc, char *argv[]) {
-            g_count = (uint32_t)argc;
+            g_count = (unsigned int)argc;
             int signed_count = g_count;
             int r = MAX(signed_count - 1, 0);
             return r;
@@ -89,10 +89,10 @@ def test_max_via_signed_int_local_saturates() -> None:
     assert "jg ." in asm, f"expected signed `jg` branch after `int` local copy; got:\n{asm}"
 
 
-def test_max_with_uint32_underflows_via_unsigned_compare() -> None:
-    """``MAX(uint32_t_var - 1, 0)`` uses ``ja`` (unsigned compare) — BROKEN.
+def test_max_with_unsigned_int_underflows_via_unsigned_compare() -> None:
+    """``MAX(unsigned int_var - 1, 0)`` uses ``ja`` (unsigned compare) — BROKEN.
 
-    Standard C integer-promotion rules: ``uint32_t`` is the same width
+    Standard C integer-promotion rules: ``unsigned int`` is the same width
     as ``int``, so the usual arithmetic conversions promote the ``0``
     literal to ``unsigned int`` (not the other way around).  The
     comparison is then unsigned: ``0u - 1u == 0xFFFFFFFF``, and
@@ -100,7 +100,7 @@ def test_max_with_uint32_underflows_via_unsigned_compare() -> None:
     saturating at 0.
 
     The generated asm pattern is:
-        mov  eax, [global]   ; uint32_t into eax
+        mov  eax, [global]   ; unsigned int into eax
         dec  eax              ; arithmetic: 0 - 1 = 0xFFFFFFFF
         test eax, eax
         ja   .cond_end_*      ; unsigned above — taken for 0xFFFFFFFF
@@ -113,10 +113,10 @@ def test_max_with_uint32_underflows_via_unsigned_compare() -> None:
     asm = _compile_32bit("""
         #include "macros.h"
 
-        uint32_t g_count;
+        unsigned int g_count;
 
         int main(int argc, char *argv[]) {
-            g_count = (uint32_t)argc;
+            g_count = (unsigned int)argc;
             int r = MAX(g_count - 1, 0);
             return r;
         }
@@ -127,16 +127,16 @@ def test_max_with_uint32_underflows_via_unsigned_compare() -> None:
     # branches for unsigned operands would break C compatibility with
     # clang/gcc; if such a change ever lands it would also break this
     # test and prompt a docs update in macros.h.
-    assert "ja ." in asm, f"expected unsigned `ja` branch in MAX(uint32_t - 1, 0); got:\n{asm}"
+    assert "ja ." in asm, f"expected unsigned `ja` branch in MAX(unsigned int - 1, 0); got:\n{asm}"
 
 
-def test_max_with_uint8_saturates_via_signed_compare() -> None:
-    """``MAX(uint8_t_var - 1, 0)`` uses ``jg`` (signed compare).
+def test_max_with_unsigned_char_saturates_via_signed_compare() -> None:
+    """``MAX(unsigned char_var - 1, 0)`` uses ``jg`` (signed compare).
 
-    Standard C promotes ``uint8_t`` to ``int`` for arithmetic, so
+    Standard C promotes ``unsigned char`` to ``int`` for arithmetic, so
     ``0 - 1`` evaluates as ``-1`` and ``MAX(-1, 0) == 0`` saturates
     correctly.  The generated asm pattern is:
-        movzx eax, byte [...]   ; zero-extend uint8_t to int
+        movzx eax, byte [...]   ; zero-extend unsigned char to int
         dec eax                  ; signed int math: 0 - 1 = -1
         test eax, eax
         jg  .cond_end_*          ; signed greater-than
@@ -146,12 +146,12 @@ def test_max_with_uint8_saturates_via_signed_compare() -> None:
         #include "macros.h"
 
         struct holder {
-            uint8_t count;
+            unsigned char count;
         };
         struct holder g_holder;
 
         int main(int argc, char *argv[]) {
-            g_holder.count = (uint8_t)argc;
+            g_holder.count = (unsigned char)argc;
             int r = MAX(g_holder.count - 1, 0);
             return r;
         }
@@ -160,5 +160,7 @@ def test_max_with_uint8_saturates_via_signed_compare() -> None:
     # emits ``ja`` (unsigned) here would silently break the saturation
     # because ``0xFF > 0`` is true unsigned but ``-1 > 0`` is false
     # signed.
-    assert "jg ." in asm, f"expected signed `jg` branch in MAX(uint8_t - 1, 0); got:\n{asm}"
-    assert "ja ." not in asm or "jge ." in asm.replace("jg .", ""), f"unexpected unsigned `ja` branch in MAX(uint8_t - 1, 0); got:\n{asm}"
+    assert "jg ." in asm, f"expected signed `jg` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
+    assert "ja ." not in asm or "jge ." in asm.replace("jg .", ""), (
+        f"unexpected unsigned `ja` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
+    )

@@ -219,7 +219,7 @@ def test_reject_bitfield_assign_as_expression() -> None:
     with tempfile.TemporaryDirectory() as work:
         expect_reject(
             name="bitfield_assign",
-            source="struct S { uint8_t f : 3; }; int main(void){ struct S s; return (s.f = 5); }",
+            source="struct S { unsigned char f : 3; }; int main(void){ struct S s; return (s.f = 5); }",
             work=Path(work),
             needle="bitfield",  # the error message should mention bitfield
         )

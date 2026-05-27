@@ -21,7 +21,7 @@ CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 
-# Auto-prepended so inline C snippets get ``uint*_t`` typedefs without
+# Auto-prepended so inline C snippets get standard typedefs without
 # each test repeating the include directive.
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
 
@@ -78,9 +78,9 @@ def main() -> int:
 
 
 def test_byte_dereference_after_cast(*, work: Path) -> None:
-    """``*(uint8_t *)expr`` parses and emits a byte load with zero-extension.
+    """``*(unsigned char *)expr`` parses and emits a byte load with zero-extension.
 
-    The ``AddressOf(Var)`` shortcut folds ``*(uint8_t *)&local`` into a
+    The ``AddressOf(Var)`` shortcut folds ``*(unsigned char *)&local`` into a
     direct frame-relative byte load, skipping the intermediate ``lea``.
 
     Uses a runtime-sourced value (``source()`` call) to keep the byte
@@ -91,13 +91,13 @@ def test_byte_dereference_after_cast(*, work: Path) -> None:
     asm = compile_snippet(
         name="byte_dereference_after_cast",
         source=(
-            "struct foo { uint8_t a : 1; uint8_t b : 7; };\n"
-            "uint8_t source() { return 11; }\n"
-            "uint8_t leak(uint8_t value) { return value; }\n"
+            "struct foo { unsigned char a : 1; unsigned char b : 7; };\n"
+            "unsigned char source() { return 11; }\n"
+            "unsigned char leak(unsigned char value) { return value; }\n"
             "void caller() {\n"
             "    struct foo s;\n"
-            "    *(uint8_t *)&s = source();\n"
-            "    leak(*(uint8_t *)&s);\n"
+            "    *(unsigned char *)&s = source();\n"
+            "    leak(*(unsigned char *)&s);\n"
             "}\n"
         ),
         work=work,
@@ -108,7 +108,7 @@ def test_byte_dereference_after_cast(*, work: Path) -> None:
 
 
 def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
-    """``*(uint8_t *)&local = value`` parses cleanly and fully folds when the slot is dead.
+    """``*(unsigned char *)&local = value`` parses cleanly and fully folds when the slot is dead.
 
     Models the driver-side read-modify-write port idiom: load a byte
     from a port into a struct local, flip one bitfield, write the byte
@@ -129,14 +129,14 @@ def test_byte_dereference_assign_after_cast(*, work: Path) -> None:
     asm = compile_snippet(
         name="byte_dereference_assign_after_cast",
         source=(
-            "struct foo { uint8_t a : 1; uint8_t b : 7; };\n"
-            "uint8_t source() { return 42; }\n"
-            "uint8_t sink(uint8_t value) { return value; }\n"
+            "struct foo { unsigned char a : 1; unsigned char b : 7; };\n"
+            "unsigned char source() { return 42; }\n"
+            "unsigned char sink(unsigned char value) { return value; }\n"
             "void caller() {\n"
             "    struct foo s;\n"
-            "    *(uint8_t *)&s = source();\n"
+            "    *(unsigned char *)&s = source();\n"
             "    s.a = 1;\n"
-            "    sink(*(uint8_t *)&s);\n"
+            "    sink(*(unsigned char *)&s);\n"
             "}\n"
         ),
         work=work,
@@ -156,7 +156,7 @@ def test_cast_in_comparison(*, work: Path) -> None:
             "int main() {\n"
             "    int chunk = 100;\n"
             "    int free_bytes = 50;\n"
-            "    if ((uint32_t)chunk > free_bytes) { return 1; }\n"
+            "    if ((unsigned int)chunk > free_bytes) { return 1; }\n"
             "    return 0;\n"
             "}\n"
         ),
@@ -168,7 +168,7 @@ def test_pointer_cast_is_identity(*, work: Path) -> None:
     """Pointer cast through &local must round-trip through cc.py + nasm."""
     compile_snippet(
         name="pointer_cast",
-        source=("int main() {\n    uint8_t b = 7;\n    uint8_t *p = (uint8_t *)&b;\n    return *p;\n}\n"),
+        source=("int main() {\n    unsigned char b = 7;\n    unsigned char *p = (unsigned char *)&b;\n    return *p;\n}\n"),
         work=work,
     )
 
@@ -178,17 +178,18 @@ def test_struct_pointer_cast(*, work: Path) -> None:
     compile_snippet(
         name="struct_pointer_cast",
         source=(
-            "struct foo { uint8_t x; };\nint main() {\n    uint8_t b = 7;\n    struct foo *f = (struct foo *)&b;\n    return f->x;\n}\n"
+            "struct foo { unsigned char x; };\n"
+            "int main() {\n    unsigned char b = 7;\n    struct foo *f = (struct foo *)&b;\n    return f->x;\n}\n"
         ),
         work=work,
     )
 
 
 def test_value_cast_is_identity(*, work: Path) -> None:
-    """(uint8_t)int_expr emits no truncation in main's body."""
+    """(unsigned char)int_expr emits no truncation in main's body."""
     asm = compile_snippet(
         name="value_cast",
-        source="int main() { int x = 42; return (uint8_t)x; }\n",
+        source="int main() { int x = 42; return (unsigned char)x; }\n",
         work=work,
     )
     # Isolate main's body so we don't trip on string-table or epilogue tokens.

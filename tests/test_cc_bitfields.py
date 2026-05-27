@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """cc.py bitfield codegen + negative-case coverage.
 
-Runs cc.py over small C snippets that exercise uint8_t bitfield reads,
+Runs cc.py over small C snippets that exercise unsigned char bitfield reads,
 writes, sizeof, and the 1-bit literal-store peephole, plus negative
-cases (run overflow, non-uint8_t container, width out of range,
+cases (run overflow, non-unsigned char container, width out of range,
 &bitfield).
 
 Usage:
@@ -22,7 +22,7 @@ CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 
-# Auto-prepended to every inline C snippet so tests can use ``uint*_t``
+# Auto-prepended to every inline C snippet so tests get standard typedefs
 # without each snippet repeating the ``#include <stdint.h>``.
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
 
@@ -98,7 +98,7 @@ def test_addressof_bitfield_rejected(*, work: Path) -> None:
     compile_expect_fail(
         message_fragment="cannot take address of bitfield",
         name="addressof_bitfield",
-        source=("struct f { uint8_t a : 1; };\nstruct f global_x;\nint main() { uint8_t *p = &global_x.a; return 0; }\n"),
+        source=("struct f { unsigned char a : 1; };\nstruct f global_x;\nint main() { unsigned char *p = &global_x.a; return 0; }\n"),
         work=work,
     )
 
@@ -107,7 +107,10 @@ def test_anonymous_padding_advances_offset(*, work: Path) -> None:
     """Anonymous bitfield gap advances bit_offset so the next named field is correct."""
     asm = compile_snippet(
         name="anon_padding",
-        source=("struct s { uint8_t a : 1; uint8_t : 3; uint8_t b : 4; };\nstruct s global_f;\nint main() { return global_f.b; }\n"),
+        source=(
+            "struct s { unsigned char a : 1; unsigned char : 3; unsigned char b : 4; };\n"
+            "struct s global_f;\nint main() { return global_f.b; }\n"
+        ),
         work=work,
     )
     # b starts at bit_offset 4 (1 + 3 anonymous padding bits).
@@ -117,11 +120,11 @@ def test_anonymous_padding_advances_offset(*, work: Path) -> None:
 
 
 def test_non_uint8_container_rejected(*, work: Path) -> None:
-    """A bitfield container other than uint8_t must be rejected."""
+    """A bitfield container other than unsigned char must be rejected."""
     compile_expect_fail(
-        message_fragment="must be uint8_t",
+        message_fragment="must be unsigned char",
         name="non_uint8_container",
-        source="struct bad { uint16_t a : 4; };\nint main() { return 0; }\n",
+        source="struct bad { unsigned short a : 4; };\nint main() { return 0; }\n",
         work=work,
     )
 
@@ -130,7 +133,7 @@ def test_read_1bit_at_offset_0(*, work: Path) -> None:
     """Reading a 1-bit field at bit_offset 0 emits 'and al, 1' and no shr."""
     asm = compile_snippet(
         name="read_1bit_offset0",
-        source=("struct s { uint8_t a : 1; };\nstruct s global_f;\nint main() { return global_f.a; }\n"),
+        source=("struct s { unsigned char a : 1; };\nstruct s global_f;\nint main() { return global_f.a; }\n"),
         work=work,
     )
     body = asm.split("main:", 1)[1]
@@ -143,7 +146,7 @@ def test_read_4bit_at_offset_4(*, work: Path) -> None:
     """Reading a 4-bit field at bit_offset 4 emits shr then and-mask."""
     asm = compile_snippet(
         name="read_4bit_offset4",
-        source=("struct s { uint8_t a : 4; uint8_t c : 4; };\nstruct s global_f;\nint main() { return global_f.c; }\n"),
+        source=("struct s { unsigned char a : 4; unsigned char c : 4; };\nstruct s global_f;\nint main() { return global_f.c; }\n"),
         work=work,
     )
     body = asm.split("main:", 1)[1]
@@ -157,7 +160,7 @@ def test_run_overflow_rejected(*, work: Path) -> None:
     compile_expect_fail(
         message_fragment="run exceeds 8 bits",
         name="run_overflow",
-        source="struct bad { uint8_t a : 4; uint8_t b : 5; };\nint main() { return 0; }\n",
+        source="struct bad { unsigned char a : 4; unsigned char b : 5; };\nint main() { return 0; }\n",
         work=work,
     )
 
@@ -166,7 +169,7 @@ def test_sizeof_mixed_run(*, work: Path) -> None:
     """Sizeof a struct with a bitfield run plus a regular byte field returns 2."""
     asm = compile_snippet(
         name="sizeof_mixed",
-        source=("struct s { uint8_t a : 4; uint8_t : 4; uint8_t b; };\nint main() { return sizeof(struct s); }\n"),
+        source=("struct s { unsigned char a : 4; unsigned char : 4; unsigned char b; };\nint main() { return sizeof(struct s); }\n"),
         work=work,
     )
     body = asm.split("main:", 1)[1]
@@ -178,7 +181,7 @@ def test_sizeof_packed_byte(*, work: Path) -> None:
     """Sizeof a struct whose bitfields sum to exactly 8 bits returns 1."""
     asm = compile_snippet(
         name="sizeof_packed",
-        source=("struct s { uint8_t a : 4; uint8_t b : 4; };\nint main() { return sizeof(struct s); }\n"),
+        source=("struct s { unsigned char a : 4; unsigned char b : 4; };\nint main() { return sizeof(struct s); }\n"),
         work=work,
     )
     body = asm.split("main:", 1)[1]
@@ -191,7 +194,7 @@ def test_width_too_large_rejected(*, work: Path) -> None:
     compile_expect_fail(
         message_fragment="width must be 1..8",
         name="width_too_large",
-        source="struct bad { uint8_t a : 9; };\nint main() { return 0; }\n",
+        source="struct bad { unsigned char a : 9; };\nint main() { return 0; }\n",
         work=work,
     )
 
@@ -200,7 +203,7 @@ def test_write_1bit_literal_0_peephole(*, work: Path) -> None:
     """Writing literal 0 to a 1-bit field emits the 'and byte' peephole."""
     asm = compile_snippet(
         name="write_1bit_0",
-        source=("struct s { uint8_t a : 1; };\nstruct s global_f;\nint main() { global_f.a = 0; return 0; }\n"),
+        source=("struct s { unsigned char a : 1; };\nstruct s global_f;\nint main() { global_f.a = 0; return 0; }\n"),
         work=work,
     )
     assert "and byte" in asm.lower(), f"expected 'and byte' peephole in asm:\n{asm}"
@@ -210,7 +213,7 @@ def test_write_1bit_literal_1_peephole(*, work: Path) -> None:
     """Writing literal 1 to a 1-bit field emits the 'or byte' peephole."""
     asm = compile_snippet(
         name="write_1bit_1",
-        source=("struct s { uint8_t a : 1; };\nstruct s global_f;\nint main() { global_f.a = 1; return 0; }\n"),
+        source=("struct s { unsigned char a : 1; };\nstruct s global_f;\nint main() { global_f.a = 1; return 0; }\n"),
         work=work,
     )
     assert "or byte" in asm.lower(), f"expected 'or byte' peephole in asm:\n{asm}"
@@ -227,7 +230,8 @@ def test_write_multibit_through_ebx_preserves_base(*, work: Path) -> None:
     asm = compile_snippet(
         name="write_multibit_ebx",
         source=(
-            "struct s { uint8_t a : 1; uint8_t r : 3; uint8_t p : 2; };\nvoid set_r(struct s *c) { c->r = 5; }\nint main() { return 0; }\n"
+            "struct s { unsigned char a : 1; unsigned char r : 3; unsigned char p : 2; };\n"
+            "void set_r(struct s *c) { c->r = 5; }\nint main() { return 0; }\n"
         ),
         work=work,
     )

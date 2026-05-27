@@ -585,7 +585,7 @@ class Peepholer:
         """Fold ``mov byte [bp-N], <imm>`` + later ``movzx <reg>, byte [bp-N]`` to ``mov <reg>, <imm>``.
 
         Motivating idiom: a bitfield-struct local whose only use is
-        ``*(uint8_t *)&local`` (the driver port-I/O pattern).  cc.py's
+        ``*(unsigned char *)&local`` (the driver port-I/O pattern).  cc.py's
         const-fold emits a byte store of the designated-init constant,
         followed eventually by the pointer-deref load.  Intervening
         instructions are common — sibling designated-init stores, the
@@ -661,7 +661,7 @@ class Peepholer:
         Motivating idiom: ``ne2k_init`` does six designated-init byte
         stores at the top of the function (one per bitfield struct
         local), then walks through a loop and consumes each value via
-        ``*(uint8_t *)&local`` far below.  The block-local fold gave
+        ``*(unsigned char *)&local`` far below.  The block-local fold gave
         up at the first ``._ir_wloopK:`` label; this pass folds
         regardless.
         """
@@ -1178,7 +1178,7 @@ class Peepholer:
         Saves 4-5 bytes per compound-assign site on a byte-scalar
         global — the reason cc.py can keep ``include_depth`` /
         ``iteration_count`` / similar arithmetic-heavy byte globals
-        as ``uint8_t`` without regressing binary size.
+        as ``unsigned char`` without regressing binary size.
         """
 
         def fits_imm8(literal: str, /) -> bool:
