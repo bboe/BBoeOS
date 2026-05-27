@@ -24,12 +24,12 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |
-| dns     | 724            | 1189        | 1294      | +105  |
-| edit    | 2018           | 2659        | 3294      | +635  |
-| ls      | 135            | 412         | 694       | +282  |
+| dns     | 724            | 1189        | 1306      | +117  |
+| edit    | 2018           | 2659        | 3304      | +645  |
+| ls      | 135            | 412         | 698       | +286  |
 | mkdir   | 123            | 142         | 163       | +21   |
 | mv      | 217            | 242         | 270       | +28   |
-| ping    | 1034           | 1230        | 1517      | +287  |
+| ping    | 1034           | 1230        | 1523      | +293  |
 | uptime  | 50             | 67          | 102       | +35   |
 
 **arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
@@ -53,7 +53,7 @@ stack (``[esp+4]`` for argv[1], ``[esp+8]`` for argv[2]); cc.py's 32-bit codegen
 for the per-character check sequence carries proportionally more byte-load +
 zero-extend overhead than 16-bit, so the delta inflates from +25 to +53.
 
-**dns (+116):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
+**dns (+117):** All four buffers (`cname_buffer[128]`, `dns_ip[4]`,
 `name_buffer[128]`, `query_buffer[512]`) are file-scope BSS globals; the
 assembly version reused `SECTOR_BUFFER` and `BUFFER`, but with `BUFFER` retired
 (see the arp note) the asm now declares its own `rr_name_buf` and `cname_buf` as
@@ -79,7 +79,7 @@ the asm version now carries 256 bytes of decode-target buffers inline that the C
 version keeps in BSS, so the asm-side image grew enough to outweigh those
 per-byte differences.
 
-**edit (+670):** Restored from git history (retired during the pmode merge
+**edit (+645):** Restored from git history (retired during the pmode merge
 because the 16-bit C build couldn't represent a 256 KB buffer base).  The 32-bit
 asm rewrites the gap buffer to live at ``EDIT_BUFFER_BASE = 0x100000`` (1 MB
 mark, past the VGA / BIOS regions) with a 1 MB ``EDIT_BUFFER_SIZE`` and
@@ -95,7 +95,7 @@ every increment / compare where the asm hits memory directly.  The deep call
 graph (``move_*``, ``buf_*``, ``check_*``, ``do_*`` helpers) also pays for
 register spilling cc.py's IR-based codegen does at every helper boundary.
 
-**ls (+19):** The assembly version uses inline `repne scasb` with a 25-byte cap
+**ls (+286):** The assembly version uses inline `repne scasb` with a 25-byte cap
 to find the name length, then `FUNCTION_WRITE_STDOUT` directly; the C version
 routes through `strlen()` and `write(STDOUT, ...)`.
 `entry[DIRECTORY_ENTRY_SIZE]` is a local stack array, triggering a BP frame for
@@ -114,7 +114,7 @@ leaving DF undefined in practice (typically clear via boot defaults).
 overhead; the +20 here picks up cc.py's frame setup and 32-bit prologue/epilogue
 cost too.
 
-**ping (+327):** Both versions build ICMP echo requests in userspace over the
+**ping (+293):** Both versions build ICMP echo requests in userspace over the
 same ``SYS_NET_OPEN (SOCK_DGRAM, IPPROTO_ICMP)`` / ``SYS_NET_SENDTO`` /
 ``SYS_NET_RECVFROM`` path.  The four scratch arrays (``dns_ip[4]``,
 ``packet_buffer[128]``, ``query_buffer[512]``, ``target_ip[4]``) are local stack
