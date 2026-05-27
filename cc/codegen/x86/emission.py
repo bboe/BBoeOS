@@ -614,7 +614,12 @@ class EmissionMixin:
         self._analyze_user_function_conventions(ast.functions)
         if self.object_mode and self.extern_globals:
             for name in sorted(self.extern_globals):
-                self.emit(f"extern {self._nasm_symbol(name)}")
+                if name in self.NASM_RESERVED_WORDS:
+                    alias = f"__nasm_extern_{name}"
+                    self.emit(f'%deftok {alias} "{name}"')
+                    self.emit(f"extern {alias}")
+                else:
+                    self.emit(f"extern {name}")
 
         # Build IR for all non-main, non-always-inline functions.  The IR
         # is consumed by generate_function; main keeps the AST path because
@@ -2978,7 +2983,7 @@ class EmissionMixin:
             self.emit(f"section .text.{name} exec")
         if self.object_mode:
             symbol = self._nasm_symbol(name)
-            self.emit(f"global {symbol}")
+            self._emit_global_export(name)
             self.emit(f"{symbol}:")
         else:
             self.emit(f"{name}:")

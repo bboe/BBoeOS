@@ -821,7 +821,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         Object mode emits ``global <name>`` so the C-conformant symbol
         is visible to external linkers (the ``<name>:`` label follows
-        from :meth:`_global_label`).
+        from :meth:`_global_label`).  NASM reserved words (``abs``,
+        ``seg``, ``wrt``) need special handling: ``global $abs`` is
+        rejected by NASM >= 3.x, so we use ``%deftok`` to mint a
+        non-reserved alias whose expansion carries the raw token
+        through the ``global`` directive parser.
 
         Flat-binary / kernel mode emits ``<name> equ _g_<name>`` so
         inline-asm callers that reference the C-conformant name resolve
@@ -831,7 +835,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         _g_name");`` pattern several kernel drivers already use.
         """
         if self.object_mode:
-            self.emit(f"global {self._nasm_symbol(name)}")
+            if name in self.NASM_RESERVED_WORDS:
+                alias = f"__nasm_global_{name}"
+                self.emit(f'%deftok {alias} "{name}"')
+                self.emit(f"global {alias}")
+            else:
+                self.emit(f"global {name}")
         else:
             self.emit(f"{name} equ _g_{name}")
 
