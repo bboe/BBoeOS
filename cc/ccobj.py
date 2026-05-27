@@ -49,6 +49,8 @@ RE_BYTES_TOKEN = re.compile(
     r"|\(([0-9A-Fa-f]+)\)"  # parenthesised absolute (group 3)
 )
 RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
+_NASM_GLOBAL_PREFIX = "__nasm_global_"
+RE_GLOBAL = re.compile(r"^global\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 # Generic identifier scanner over the source column of a NASM listing
 # row.  When the bytes column carried a ``[YYYYYYYY]`` cross-section
 # placeholder, ``pack_ccobj`` intersects the identifiers found on that
@@ -58,8 +60,6 @@ RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
 # means asm-symbol-globals like ``arp_frame`` resolve as cleanly as
 # cc.py-prefixed symbols like ``_g_x`` / ``_str_0`` / ``_ir_s0``.
 RE_IDENTIFIER = re.compile(r"(?<![A-Za-z0-9_.])([.A-Za-z_][A-Za-z0-9_.]*)")
-RE_GLOBAL = re.compile(r"^global\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
-_NASM_GLOBAL_PREFIX = "__nasm_global_"
 RE_LABEL = re.compile(r"^\$?([A-Za-z_.][A-Za-z0-9_.]*):")
 # NASM accepts a colon-less label form when the row begins with an
 # identifier directly followed by a data / reservation / EQU
