@@ -265,7 +265,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # in EmissionMixin and consumed by the Call AST visitor.  A bare
         # libbboeos call without a prior prototype declaration is a
         # CompileError under --target user — strict-on-libbboeos hygiene.
-        self.libbboeos_extern_declarations: set[str] = set()
+        self.libbboeos_extern_declarations: dict[str, int] = {}
         self.ax_is_byte: bool = False
         self.ax_literal: int | None = None
         self.ax_local: str | None = None

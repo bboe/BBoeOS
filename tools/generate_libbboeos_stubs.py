@@ -26,9 +26,14 @@ import sys
 from pathlib import Path
 
 ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>.+?)\s*(?:;.*)?$")
+PROTOTYPE = re.compile(
+    r"^[\w\s\*]+?\b(\w+)\s*\(([^)]*)\)\s*;",
+    re.MULTILINE,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.S"
+INCLUDE_DIRECTORY = REPO / "user" / "libbboeos" / "include"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
@@ -61,33 +66,62 @@ def _collect_function_constants() -> dict[str, int]:
     return {name: value for name, value in resolved.items() if name.startswith("FUNCTION_")}
 
 
-def _render_stubs(*, exports: list[tuple[str, int]]) -> str:
-    """Render libbboeos_stubs.S for the given (export_name, pointer_address) pairs."""
+def _collect_prototype_parameter_counts() -> dict[str, int | None]:
+    """Return {function_name: parameter_count} from libbboeos headers.
+
+    Variadic prototypes (``...``) map to None — they stay cdecl.
+    ``(void)`` maps to 0.
+    """
+    result: dict[str, int | None] = {}
+    for header in sorted(INCLUDE_DIRECTORY.glob("*.h")):
+        for match in PROTOTYPE.finditer(header.read_text()):
+            name = match.group(1)
+            parameters = match.group(2).strip()
+            if "..." in parameters:
+                result[name] = None
+            elif parameters in {"", "void"}:
+                result[name] = 0
+            else:
+                result[name] = parameters.count(",") + 1
+    return result
+
+
+def _render_stubs(*, exports: list[tuple[str, int, int | None]]) -> str:
+    """Render libbboeos_stubs.S for the given (name, address, parameter_count) tuples."""
     lines = [
         "/* user/libbboeos/libbboeos_stubs.S — auto-generated.  DO NOT EDIT.",
         " *",
         " * Regenerate with `python3 tools/generate_libbboeos_stubs.py`.",
-        " * Each stub is a 6-byte `jmp [FUNCTION_<NAME>_PTR]` thunk into the",
-        " * shared libbboeos blob.  Clang programs link this file BEFORE",
-        " * libbboeos.a so ld resolves each export to the stub and never",
-        " * pulls the full body out of the archive — that's the Phase 4",
-        " * binary-size win (per-program string.c bodies retire to the",
-        " * shared blob).",
+        " * Each stub shuffles cdecl stack arguments into regparm",
+        " * registers (EAX/EDX/ECX) then jumps to the shared",
+        " * libbboeos blob via `jmp [FUNCTION_<NAME>_PTR]`.",
+        " * Clang programs link this file BEFORE libbboeos.a so ld",
+        " * resolves each export to the stub and never pulls the",
+        " * full body out of the archive.",
         " *",
         " * Source of truth: FUNCTION_<NAME>_PTR offsets in",
-        " * kernel/include/constants.asm.  Sorted alphabetically to match.",
+        " * kernel/include/constants.asm + prototypes in",
+        " * user/libbboeos/include/*.h.  Sorted alphabetically.",
         " */",
         "",
         "        .intel_syntax noprefix",
         '        .section .text.libbboeos_stubs, "ax", @progbits',
         "",
     ]
-    for name, address in exports:
+    regparm_registers = ["eax", "edx", "ecx"]
+    for name, address, parameter_count in exports:
         symbol = name.lower()
         lines.extend([
             f"        .globl {symbol}",
             f"        .type  {symbol}, @function",
             f"{symbol}:",
+        ])
+        if parameter_count is not None and parameter_count > 0:
+            regparm_count = min(3, parameter_count)
+            for i in range(regparm_count):
+                offset = 4 + i * 4
+                lines.append(f"        mov {regparm_registers[i]}, [esp+{offset}]")
+        lines.extend([
             f"        jmp [0x{address:08x}]    /* FUNCTION_{name}_PTR */",
             f"        .size {symbol}, . - {symbol}",
             "",
@@ -130,7 +164,13 @@ def main() -> int:
         exports.append((base, address))
     exports.sort()
 
-    new = _render_stubs(exports=exports)
+    prototypes = _collect_prototype_parameter_counts()
+    exports_with_parameters: list[tuple[str, int, int | None]] = []
+    for name, address in exports:
+        parameter_count = prototypes.get(name.lower())
+        exports_with_parameters.append((name, address, parameter_count))
+
+    new = _render_stubs(exports=exports_with_parameters)
     if DESTINATION.exists() and DESTINATION.read_text() == new:
         return 0
     DESTINATION.write_text(new)
