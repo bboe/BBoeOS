@@ -123,7 +123,7 @@ class Cast(Node):
 
     ``target_type`` is a type string in the same shape as
     ``StructField.type_name`` and parser-internal type names: e.g.
-    ``"uint8_t"``, ``"int *"``, ``"struct foo *"``.  Casts emit no
+    ``"unsigned char"``, ``"int *"``, ``"struct foo *"``.  Casts emit no
     runtime instructions; the node exists so the code generator can
     pick the right load/store width and the right struct field
     offsets when the cast result feeds into ``*`` or ``->``.
@@ -216,7 +216,7 @@ class DoubleIndex(Node):
     """Chained subscript ``name[outer][inner]``.
 
     Used when *name* is an array of pointers (``char *foo[N]``,
-    ``uint8_t *bar[N]``, etc.).  The outer subscript loads a pointer
+    ``unsigned char *bar[N]``, etc.).  The outer subscript loads a pointer
     from the array, the inner subscript indexes into the pointee.
     Codegen consults :meth:`_index_pointee_size` to size the inner
     load.  Assignment to a double-subscript LHS is not (yet) supported.
@@ -638,9 +638,9 @@ class PointerDereference(Node):
     """Read through a pointer expression: ``*(T *)expr``.
 
     Used for the port-IO bridge idiom where a bitfield struct is read
-    out as a raw byte: ``uint8_t raw = *(uint8_t *)&s;``.  ``expression``
-    evaluates to an address; ``target_type`` selects the load width
-    (``uint8_t``, ``uint16_t``, or pointer width).
+    out as a raw byte: ``unsigned char raw = *(unsigned char *)&s;``.
+    ``expression`` evaluates to an address; ``target_type`` selects the
+    load width (``unsigned char``, ``unsigned short``, or pointer width).
 
     Unlike :class:`Index` (which assumes ``array`` is a :class:`Var`
     holding a pointer), this node evaluates an arbitrary address
@@ -658,7 +658,7 @@ class PointerDereferenceAssign(Node):
     Write-side counterpart of :class:`PointerDereference`.  Used for the
     port-IO bridge idiom where a bitfield struct receives a fresh byte
     read from a hardware port:
-    ``*(uint8_t *)&imr = kernel_inb(IMR_PORT);``.
+    ``*(unsigned char *)&imr = kernel_inb(IMR_PORT);``.
 
     ``address`` is the inner address expression (without the leading
     ``*(T *)``); ``target_type`` selects the store width;  ``value`` is
@@ -827,7 +827,7 @@ class VaArg(Node):
 
     ``cursor`` is the ``va_list`` variable expression; ``type_name`` is the
     type string returned by :meth:`Parser.parse_type` (e.g. ``"int"``,
-    ``"double"``, ``"uint32_t"``).  Codegen reads ``*cursor`` into the
+    ``"double"``, ``"unsigned int"``).  Codegen reads ``*cursor`` into the
     accumulator and advances ``cursor`` by ``sizeof(T)`` so that the next
     ``va_arg`` call reads the following stack slot.
     """

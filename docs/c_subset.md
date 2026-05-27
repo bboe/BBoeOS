@@ -53,7 +53,7 @@ Errors land on stderr as `<file>:<line>: error: <message>` and the process exits
 | `char` | 8-bit signed; zero-extends on load. |
 | `uint8_t`, `uint16_t`, `uint32_t` | Fixed-width unsigned; sources must `#include <stdint.h>` to use these names (cc.py no longer ships them as built-in keywords — the typedef path produces identical code). |
 | `unsigned long` | Always 32-bit unsigned (held in `DX:AX` under `--bits 16`). Locals only — file-scope `unsigned long` globals are rejected.  Bare `long` / `long long` / `unsigned long long` all parse as `unsigned long` (so stdint.h's `typedef long off_t;` and `typedef unsigned long long uint64_t;` work, though int64_t storage stays 32 bits — width-faithful int64 is future work). |
-| `short` | Parses but aliases to `int` (machine word) — width-faithful int16_t is future work.  `unsigned short` routes through `uint16_t` (correct width).  `unsigned char` routes through `uint8_t` (correct width). |
+| `short` | Parses but aliases to `int` (machine word) — width-faithful int16_t is future work.  `unsigned short` is a 2-byte unsigned type.  `unsigned char` is a 1-byte unsigned type. |
 | `void` | Function return only; or `void *`. |
 | `struct NAME` | Layout matches positional declaration. Member access uses `.` for values, `->` through pointers. |
 

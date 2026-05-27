@@ -96,8 +96,8 @@ _EOF_KIND = "EOF"
 #: Object-like macros every translation unit gets for free.  Mirrors the
 #: width-type built-ins clang predefines for the i386 target — these
 #: are the ``__SIZE_TYPE__`` / ``__UINT32_TYPE__`` / etc. macros that
-#: ``<stddef.h>`` and ``<stdint.h>`` use to typedef ``size_t`` /
-#: ``uint32_t`` / etc. in a way that stays portable across:
+#: ``<stddef.h>`` and ``<stdint.h>`` consume via ``typedef`` in a way
+#: that stays portable across:
 #:
 #: 1. cc.py's --bits 16 (bootloader) and --bits 32 (production) modes;
 #: 2. clang building the same source for the bboeos i386 target; and
@@ -113,7 +113,7 @@ _EOF_KIND = "EOF"
 #: for the active bits mode.
 def _builtin_defines(*, bits: int) -> dict[str, str]:
     """Return clang-style width-type predefines for the active --bits mode."""
-    uint32_type = "unsigned int" if bits == 32 else "unsigned long"
+    unsigned_32bit_spelling = "unsigned int" if bits == 32 else "unsigned long"
     return {
         "__INT16_TYPE__": "signed short",
         "__INT32_TYPE__": "signed int",
@@ -122,7 +122,7 @@ def _builtin_defines(*, bits: int) -> dict[str, str]:
         "__PTRDIFF_TYPE__": "int",
         "__SIZE_TYPE__": "unsigned int",
         "__UINT16_TYPE__": "unsigned short",
-        "__UINT32_TYPE__": uint32_type,
+        "__UINT32_TYPE__": unsigned_32bit_spelling,
         "__UINT64_TYPE__": "unsigned long long",
         "__UINT8_TYPE__": "unsigned char",
         # clang spells va_list's underlying type as ``__builtin_va_list``;

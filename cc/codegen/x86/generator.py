@@ -467,14 +467,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
           element type's byte size.
         - Pointer variables (type ends with ``*``): element size is the
           pointed-to type's byte size.
-        - Byte types (``char``, ``uint8_t``) always return 1 so byte-string
+        - Byte types (``char``, ``unsigned char``) always return 1 so byte-string
           arithmetic is never scaled.
         - Unknown or non-pointer scalars: return 1 (no scaling).
         """
         type_name = self.variable_types.get(var_name, "")
         if var_name in self.variable_arrays:
             # Array: element type is the stored type_name directly.
-            if type_name in ("char", "uint8_t") or type_name in self.BYTE_TYPES:
+            if type_name in self.BYTE_TYPES:
                 return 1
             if type_name.startswith("struct "):
                 tag = type_name[7:]
@@ -485,7 +485,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.type_size(type_name)
         if type_name.endswith("*"):
             base = type_name[:-1]
-            if base in ("char", "uint8_t") or base in self.BYTE_TYPES:
+            if base in self.BYTE_TYPES:
                 return 1
             if base.startswith("struct "):
                 tag = base[7:]
@@ -1047,7 +1047,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``index_uses`` to keep heavily-subscripted vars off BP.
 
         Callers pass *element_size* (the stride in bytes — 1 for byte
-        arrays, 2 for ``uint16_t``, 4 for full-int / pointer-target on
+        arrays, 2 for ``unsigned short``, 4 for full-int / pointer-target on
         32-bit, etc.) which drives both the displacement folding and
         the index-register scaling.  The legacy *is_byte* alias is kept
         for callers that haven't been migrated; it maps to
@@ -1159,7 +1159,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 elif self._is_byte_scalar_global(name):
                     stride = 1
                 else:
-                    # Use _type_size so double (8 bytes), uint16_t (2 bytes),
+                    # Use _type_size so double (8 bytes), unsigned short (2 bytes),
                     # etc. get the correct allocation rather than always
                     # falling back to int_size (4 bytes on x86-32).
                     try:
@@ -1210,11 +1210,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             is_byte = declaration.type_name in self.BYTE_TYPES
             is_struct = declaration.type_name.startswith("struct ")
             # Stride is sizeof(element) for every shape: structs sum
-            # field widths, ``char`` / ``uint8_t`` resolve to 1,
-            # ``uint16_t`` to 2, pointer / ``int`` / ``uint32_t`` to
+            # field widths, ``char`` / ``unsigned char`` resolve to 1,
+            # ``unsigned short`` to 2, pointer / ``int`` / ``unsigned int`` to
             # ``int_size``.  Unifies what used to be a binary
             # byte-vs-int_size switch that silently miscompiled
-            # ``uint16_t`` globals.
+            # ``unsigned short`` globals.
             stride = self._type_size(declaration.type_name)
             if is_struct and declaration.init is not None:
                 struct_name = declaration.type_name[len("struct ") :]
@@ -1244,7 +1244,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.emit(f"        {line}")
             elif declaration.init is not None:
                 # Match the data-cell width to the element width:
-                # ``db`` for byte, ``dw`` for halfword (``uint16_t``),
+                # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
                 # ``dd`` / ``dw`` for full-int (``int_directive``).
                 if is_byte:
                     directive = "db"
@@ -2955,7 +2955,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
         Scalars are stashed in :attr:`global_scalars`; arrays in
         :attr:`global_arrays`.  Byte-element arrays (``char`` or
-        ``uint8_t``) are additionally tracked in
+        ``unsigned char``) are additionally tracked in
         :attr:`global_byte_arrays` so :meth:`_is_byte_var` reports
         byte-wide element access (``int`` arrays keep word access).
         """
@@ -3008,7 +3008,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                                 byte_offset=cursor,
                                 element_size=1,
                                 field_size=1,
-                                type_name="uint8_t",
+                                type_name="unsigned char",
                             )
                         run_bits += field.bit_width
                         continue
@@ -4367,7 +4367,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Validate a condition, emit a comparison, and return ``(operator, unsigned)``.
 
         ``unsigned`` is True when at least one operand is an unsigned
-        type (``uint8_t`` / ``uint16_t`` / ``uint32_t`` / ``unsigned
+        type (``unsigned char`` / ``unsigned short`` / ``unsigned int`` / ``unsigned
         long``, plus the corresponding pointers).  Callers pick the
         signed or unsigned jump table accordingly.
 
@@ -4818,7 +4818,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``c != '\0'`` and ``c < ' '``).  Comparing a pointer to a
         non-``NULL`` integer (``if (p == 0)``) is a common C bug, so
         the compiler requires the explicit ``NULL`` spelling.  A
-        ``Char`` literal may appear opposite a ``uint8_t`` / ``int``
+        ``Char`` literal may appear opposite a ``unsigned char`` / ``int``
         operand — it's just a small integer, and forcing hex spelling
         there hurts readability (``byte >= '\xC0'`` stays legal).
         """

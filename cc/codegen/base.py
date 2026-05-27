@@ -75,28 +75,27 @@ class CodeGeneratorBase:
     logic specific to their ISA.
     """
 
-    #: Byte-element type names.  ``uint8_t`` shares the ``char``
+    #: Byte-element type names.  ``unsigned char`` shares the ``char``
     #: codegen path (byte array stride, byte-wide load with zero
     #: extend) but is classified as ``integer`` for comparison
-    #: type-checking, so ``uint8_t b; if (b == 0x45)`` works without
-    #: pretending the literal is a character.
-    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "uint8_t"})
-    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "uint8_t", "uint8_t*"})
+    #: type-checking, so ``unsigned char b; if (b == 0x45)`` works
+    #: without pretending the literal is a character.
+    BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "unsigned char"})
+    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "unsigned char", "unsigned char*"})
 
     #: Primitive element types accepted for file-scope arrays.  Byte
-    #: types (``char`` / ``uint8_t``) use the byte path; ``uint16_t``
-    #: uses the halfword path; the rest use the full-int path.  Pointer
-    #: (``*``) and ``struct`` element types are accepted separately at
-    #: the validation site since both require different codegen
-    #: treatment.
+    #: types (``char`` / ``unsigned char``) use the byte path;
+    #: ``unsigned short`` uses the halfword path; the rest use the
+    #: full-int path.  Pointer (``*``) and ``struct`` element types are
+    #: accepted separately at the validation site since both require
+    #: different codegen treatment.
     GLOBAL_ARRAY_PRIMITIVE_TYPES: ClassVar[frozenset[str]] = frozenset({
         "char",
         "function_pointer",
         "int",
-        "uint16_t",
-        "uint32_t",
-        "uint8_t",
+        "unsigned char",
         "unsigned int",
+        "unsigned short",
     })
 
     #: Named constants that, when referenced, require a NASM %include
@@ -200,20 +199,6 @@ class CodeGeneratorBase:
     })
 
     NASM_RESERVED_WORDS: ClassVar[frozenset[str]] = frozenset({"abs", "seg", "wrt"})
-
-    #: Non-pointer scalar type names whose values are unsigned in
-    #: comparisons.  Pointers are handled separately by
-    #: :meth:`_is_unsigned_type` (any type ending in ``*`` is treated as
-    #: unsigned because pointers compare as non-negative offsets).
-    #: ``int`` stays signed (the C subset's default integer type),
-    #: ``char`` stays signed by historical convention.
-    UNSIGNED_TYPES: ClassVar[frozenset[str]] = frozenset({
-        "uint8_t",
-        "uint16_t",
-        "uint32_t",
-        "unsigned int",
-        "unsigned long",
-    })
 
     def __init__(
         self,
@@ -500,7 +485,7 @@ class CodeGeneratorBase:
         default — ``int*`` / a bare ``arr[i]`` of int-typed elements
         loads a full word).
 
-        Byte-sized cases (``char`` / ``uint8_t`` pointee and byte arrays)
+        Byte-sized cases (``char`` / ``unsigned char`` pointee and byte arrays)
         still route through :meth:`_is_byte_var` for the byte-load
         fast path; this helper is consulted only when the load width is
         a full machine word or wider.
@@ -517,7 +502,7 @@ class CodeGeneratorBase:
         # pointer distinction has to come from
         # :attr:`variable_arrays` / :attr:`local_stack_arrays`.  For
         # array-of-T*, ``type_size("T*")`` correctly returns
-        # ``int_size``; for array-of-uint16_t it returns 2.
+        # ``int_size``; for array-of-unsigned-short it returns 2.
         if name in self.variable_arrays or name in self.local_stack_arrays:
             try:
                 return self.target.type_size(type_name)
@@ -561,7 +546,7 @@ class CodeGeneratorBase:
         return self._is_byte_scalar_global(name) or self._is_byte_scalar_local(name)
 
     def _is_byte_scalar_global(self, name: str, /) -> bool:
-        """Return True if *name* is a byte-typed (``char`` / ``uint8_t``) scalar global.
+        """Return True if *name* is a byte-typed (``char`` / ``unsigned char``) scalar global.
 
         Byte-scalar globals store as a single ``db`` cell at
         ``_g_<name>``; load and store go through the byte-wide path
@@ -619,25 +604,26 @@ class CodeGeneratorBase:
             return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
         return False
 
-    def _is_unsigned_type(self, type_name: str | None, /) -> bool:
+    @staticmethod
+    def _is_unsigned_type(type_name: str | None, /) -> bool:
         """Return True if *type_name* compares as unsigned.
 
         Pointers (any type spelled with a trailing ``*``) are unsigned —
         they compare as non-negative offsets within the program's
-        address space.  Non-pointer scalars are checked against
-        :attr:`UNSIGNED_TYPES`.  ``None`` (unknown type) falls back to
-        signed.
+        address space.  Non-pointer scalars are unsigned when the type
+        name starts with ``unsigned``.  ``None`` (unknown type) falls
+        back to signed.
         """
         if type_name is None:
             return False
         if type_name.endswith("*"):
             return True
-        return type_name in self.UNSIGNED_TYPES
+        return type_name.startswith("unsigned")
 
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.
 
-        Covers ``char`` / ``uint8_t`` scalars and pointers,
+        Covers ``char`` / ``unsigned char`` scalars and pointers,
         file-scope byte-element arrays (``char NAME[SIZE];``), and
         local stack arrays with byte element types.  ``int``-typed
         globals and arrays keep word-sized element access.
@@ -923,8 +909,8 @@ class CodeGeneratorBase:
         ``"integer"``.  Every AST node that can legally appear inside
         a comparison must classify into one of the four buckets;
         anything else raises ``CompileError`` so no operand silently
-        slips through the type check.  ``uint8_t`` values are byte-sized
-        like ``char`` but classify as ``integer`` so they compose freely
+        slips through the type check.  ``unsigned char`` values are
+        byte-sized like ``char`` but classify as ``integer`` so they compose freely
         with integer literals — ``char`` stays restricted to catch
         ``c == 0`` typos.
         """
@@ -949,7 +935,7 @@ class CodeGeneratorBase:
         if isinstance(node, DoubleIndex):
             # ``name[outer][inner]`` for ``T *name[N]`` yields the
             # pointee type of ``T*`` — that's ``char`` for ``char *foo[]``,
-            # ``integer`` for ``int *foo[]`` / ``uint*_t *foo[]``.
+            # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
             name = node.array.name
             variable_type = self.variable_types.get(name)
             if variable_type == "char*":
@@ -980,7 +966,7 @@ class CodeGeneratorBase:
             return "integer"
         if isinstance(node, DerefIncrement):
             # ``*p++`` rvalue classifies as the pointee type stripped
-            # of one ``*``: ``char *`` → ``"char"``, ``uint8_t *`` /
+            # of one ``*``: ``char *`` → ``"char"``, ``unsigned char *`` /
             # ``int *`` / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
             holder_type = self.variable_types.get(node.target_name)
             if holder_type and holder_type.endswith("*"):

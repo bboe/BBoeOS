@@ -23,16 +23,6 @@ from cc import ast_nodes
 from cc.errors import CompileError
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
-#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
-#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
-#: (both 4-byte unsigned); on the 32-bit target they are also both
-#: 4-byte, and the special-case load is harmless there.  Either
-#: spelling must trigger the long-pointee dispatch — otherwise
-#: ``uint32_t *p; x = p[0];`` silently reads only the low 16 bits on
-#: the 16-bit target while the ``unsigned long *`` form reads all
-#: four.
-_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
-
 Value = int | str | ast_nodes.AddressOf
 
 
@@ -737,4 +727,4 @@ class Builder:
         if not isinstance(expression.array, ast_nodes.Var):
             return False
         base_type = self._var_types.get(expression.array.name)
-        return base_type in _LONG_POINTER_TYPES
+        return base_type == "unsigned long*"

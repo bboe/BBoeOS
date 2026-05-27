@@ -101,16 +101,6 @@ _ATT_IMMEDIATE = re.compile(r"\$((?:0x[0-9a-fA-F]+|[0-9]+))\b")
 #: directives, and inline comments don't match.
 _FUNCTION_LABEL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*:$")
 
-#: Pointer types whose pointee is a 4-byte unsigned integer.  On the
-#: 16-bit target ``unsigned long`` and ``uint32_t`` are the same type
-#: (both 4-byte unsigned); on the 32-bit target they are also both
-#: 4-byte, and the special-case load path is harmless there.  Either
-#: spelling must route through :meth:`generate_long_expression` so the
-#: full DX:AX (16-bit) / EAX (32-bit) value is loaded — otherwise the
-#: ``uint32_t *`` form silently reads only the low 16 bits on the
-#: 16-bit target.
-_LONG_POINTER_TYPES = frozenset({"uint32_t*", "unsigned long*"})
-
 _SINGLE_OPERAND_MNEMONICS = frozenset({
     "call",
     "dec",
@@ -322,7 +312,7 @@ class EmissionMixin:
         either ``inc reg`` / ``add reg, N`` for a pinned-register
         pointer, or ``inc dword [ebp-N]`` / ``add dword [ebp-N], N`` for
         a frame-slot pointer.  Pointee width comes from the recorded
-        pointer type (``char *`` → 1, ``uint16_t *`` → 2, anything else
+        pointer type (``char *`` → 1, ``unsigned short *`` → 2, anything else
         → ``int_size``).  Skips the accumulator-tracking invalidation
         the caller needs (so the freshly-loaded ``*p`` value remains
         valid in acc); the caller decides whether to ``ax_clear()``.
@@ -358,20 +348,20 @@ class EmissionMixin:
 
         Codegen: evaluate ``expression.expression`` into the accumulator
         (an address), then load through it.  Width is chosen by
-        ``target_type``: ``uint8_t`` → byte load with zero-extension;
+        ``target_type``: ``unsigned char`` → byte load with zero-extension;
         anything else → full int_size load.
 
         Shortcut: when the inner expression is ``AddressOf(Var)`` of a
         local, fold the ``lea + load`` pair into a single frame-relative
         load.  This is the hot path for the port-IO bridge idiom
-        ``*(uint8_t *)&local_struct``.
+        ``*(unsigned char *)&local_struct``.
         """
         inner = expression.expression
         if isinstance(inner, AddressOf) and inner.var.name in self.locals:
             address = f"[{self._local_address(inner.var.name)}]"
-            if expression.target_type == "uint8_t":
+            if expression.target_type == "unsigned char":
                 self.emit_byte_load_zx(address)
-            elif expression.target_type == "uint16_t" and self.target.int_size > 2:
+            elif expression.target_type == "unsigned short" and self.target.int_size > 2:
                 self.emit(f"        movzx {self.target.acc}, word {address}")
             else:
                 self.emit(f"        mov {self.target.acc}, {address}")
@@ -379,10 +369,10 @@ class EmissionMixin:
             return
         self.generate_expression(inner)
         address_register = self.target.acc
-        if expression.target_type == "uint8_t":
+        if expression.target_type == "unsigned char":
             self.emit(f"        mov al, [{address_register}]")
             self.emit_accumulator_zx_from_al()
-        elif expression.target_type == "uint16_t" and self.target.int_size > 2:
+        elif expression.target_type == "unsigned short" and self.target.int_size > 2:
             self.emit(f"        movzx {address_register}, word [{address_register}]")
         else:
             self.emit(f"        mov {address_register}, [{address_register}]")
@@ -396,15 +386,15 @@ class EmissionMixin:
         ``target_type`` width.  Shortcut: when ``address`` is
         ``AddressOf(Var)`` of a local, fold the store directly to
         ``[ebp-N]`` (no lea / scratch register).  This is the hot path
-        for the port-IO bridge idiom ``*(uint8_t *)&local = inb(...);``.
+        for the port-IO bridge idiom ``*(unsigned char *)&local = inb(...);``.
         """
         self.generate_expression(statement.value)
         accumulator = self.target.acc
         if isinstance(statement.address, AddressOf) and statement.address.var.name in self.locals:
             destination = f"[{self._local_address(statement.address.var.name)}]"
-            if statement.target_type == "uint8_t":
+            if statement.target_type == "unsigned char":
                 self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
-            elif statement.target_type == "uint16_t" and self.target.int_size > 2:
+            elif statement.target_type == "unsigned short" and self.target.int_size > 2:
                 self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
             else:
                 self.emit(f"        mov {destination}, {accumulator}")
@@ -415,9 +405,9 @@ class EmissionMixin:
         self.generate_expression(statement.address)
         self.emit(f"        mov {scratch}, {accumulator}")
         self.emit(f"        pop {accumulator}")
-        if statement.target_type == "uint8_t":
+        if statement.target_type == "unsigned char":
             self.emit(f"        mov [{scratch}], {self.target.low_byte(accumulator)}")
-        elif statement.target_type == "uint16_t" and self.target.int_size > 2:
+        elif statement.target_type == "unsigned short" and self.target.int_size > 2:
             self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
         else:
             self.emit(f"        mov [{scratch}], {accumulator}")
@@ -1456,7 +1446,7 @@ class EmissionMixin:
             index_expression = expression.index
             self._check_defined(vname, line=expression.line)
             # Pointee / element width selects the load encoding.  For
-            # ``uint16_t *p`` on the 32-bit target ``mov eax, [esi]``
+            # ``unsigned short *p`` on the 32-bit target ``mov eax, [esi]``
             # would read 4 bytes; we must emit ``movzx eax, word [esi]``
             # to read exactly the 2-byte element.  Constant-index
             # offsets also scale by the pointee width, not the target
@@ -1543,7 +1533,7 @@ class EmissionMixin:
                     self._emit_load_var(vname, register=self.target.si_register)
                     si = self.target.si_register
                     # Index scaling: ``p[i]`` advances by sizeof(*p)
-                    # bytes per ``i``, so a narrow pointee (uint16_t* on
+                    # bytes per ``i``, so a narrow pointee (unsigned short* on
                     # the 32-bit target) needs scale=2 not the acc's 4.
                     if narrow_word:
                         scale_size = pointee_size
@@ -1718,7 +1708,7 @@ class EmissionMixin:
             operator, left, right = expression.operation, expression.left, expression.right
             # Pointer arithmetic: scale the right operand by the element size when
             # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
-            # For byte pointers (char*, uint8_t*) element_size is 1 so nothing changes.
+            # For byte pointers (char*, unsigned char*) element_size is 1 so nothing changes.
             if operator in ("+", "-") and isinstance(left, Var):
                 element_size = self._arithmetic_element_size(left.name)
                 if element_size > 1:
@@ -3012,7 +3002,7 @@ class EmissionMixin:
                     # uninitialised stack bytes.  For full-width E-register
                     # pins the named register already covers the slot.
                     #
-                    # Byte-typed parameters (``char`` / ``uint8_t``) treat
+                    # Byte-typed parameters (``char`` / ``unsigned char``) treat
                     # the named register as the *byte* alias — only AL is
                     # the value, AH is undefined per the asm-side calling
                     # convention (e.g. ``lodsb; call f``).  Widening from
@@ -3257,7 +3247,7 @@ class EmissionMixin:
         self._check_defined(name, line=statement.line)
         # Pick element width.  Byte arrays / pointers stay on the byte
         # fast path; otherwise consult ``_index_pointee_size`` so
-        # halfword (``uint16_t``) targets get a 2-byte store instead of
+        # halfword (``unsigned short``) targets get a 2-byte store instead of
         # the historical full ``int_size`` store that silently overwrote
         # the next element.  Clamp to ``int_size`` because pointee
         # widths > acc width are handled by ``generate_long_expression``.
@@ -3492,7 +3482,7 @@ class EmissionMixin:
             # supported; more complex index expressions fall through to
             # the unsupported-shape error below.
             base = expression.array
-            if isinstance(base, Var) and self.variable_types.get(base.name) in _LONG_POINTER_TYPES:
+            if isinstance(base, Var) and self.variable_types.get(base.name) == "unsigned long*":
                 vname = base.name
                 self._check_defined(vname, line=expression.line)
                 guarded = self._si_scratch_guard_begin(vname)
@@ -3535,8 +3525,8 @@ class EmissionMixin:
                 # through to the unsupported-shape error.
         if isinstance(expression, Var):
             vname = expression.name
-            # Under --bits 32 the parser folds ``unsigned long`` (and
-            # ``uint32_t``) into ``unsigned int`` — same width, single
+            # Under --bits 32 the parser folds ``unsigned long`` into
+            # ``unsigned int`` — same width, single
             # codegen path.  Accept either spelling here so long-returning
             # builtins (``datetime`` / ``print_datetime`` / ``time``) can
             # consume a normal int local just as well as the legacy
@@ -3637,7 +3627,7 @@ class EmissionMixin:
             if (
                 isinstance(statement.value, Index)
                 and isinstance(statement.value.array, Var)
-                and self.variable_types.get(statement.value.array.name) in _LONG_POINTER_TYPES
+                and self.variable_types.get(statement.value.array.name) == "unsigned long*"
             ):
                 self.generate_long_expression(statement.value)
             else:
@@ -3778,7 +3768,7 @@ class EmissionMixin:
                 pointee_type = holder_type[:-1]
                 self.generate_expression(statement.expr)
                 self._emit_load_var(statement.pointer.name, register=self.target.si_register)
-                if pointee_type in ("char", "uint8_t"):
+                if pointee_type in self.BYTE_TYPES:
                     self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
                 else:
                     self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
@@ -3804,9 +3794,9 @@ class EmissionMixin:
                 self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
             self.generate_expression(statement.expr)
             self._emit_load_var(target, register=self.target.si_register)
-            if pointee_type in ("char", "uint8_t"):
+            if pointee_type in self.BYTE_TYPES:
                 self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
-            elif pointee_type == "uint16_t" and self.target.int_size > 2:
+            elif pointee_type == "unsigned short" and self.target.int_size > 2:
                 self.emit(f"        mov word [{self.target.si_register}], {self.target.low_word(self.target.acc)}")
             else:
                 self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")

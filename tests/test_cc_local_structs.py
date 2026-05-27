@@ -23,7 +23,7 @@ CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 
-# Auto-prepended so inline C snippets get ``uint*_t`` typedefs without
+# Auto-prepended so inline C snippets get standard typedefs without
 # each test repeating the include directive.
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
 
@@ -101,8 +101,8 @@ def test_addressof_local_bitfield_rejected(*, work: Path) -> None:
         message_fragment="cannot take address of bitfield",
         name="addressof_local_bitfield",
         source=(
-            "struct flags { uint8_t a : 1; uint8_t b : 7; };\n"
-            "int wrap() { struct flags f; uint8_t *p = &f.a; return 0; }\n"
+            "struct flags { unsigned char a : 1; unsigned char b : 7; };\n"
+            "int wrap() { struct flags f; unsigned char *p = &f.a; return 0; }\n"
             "int main() { return wrap(); }\n"
         ),
         work=work,
@@ -159,7 +159,7 @@ def test_bitfield_local_byte_uses_frame_addressing(*, work: Path) -> None:
     asm = compile_snippet(
         name="bitfield_local_byte",
         source=(
-            "struct flags { uint8_t a : 1; uint8_t b : 1; uint8_t c : 6; };\n"
+            "struct flags { unsigned char a : 1; unsigned char b : 1; unsigned char c : 6; };\n"
             "int wrap() {\n"
             "    struct flags f;\n"
             "    f.a = 1;\n"
@@ -191,7 +191,7 @@ def test_designated_init_multi_field_const_fold(*, work: Path) -> None:
     asm = compile_snippet(
         name="designated_init_multi",
         source=(
-            "struct flags { uint8_t a : 1; uint8_t b : 1; uint8_t c : 6; };\n"
+            "struct flags { unsigned char a : 1; unsigned char b : 1; unsigned char c : 6; };\n"
             "int main() {\n"
             "    struct flags f = { .a = 1, .b = 1, .c = 5 };\n"
             "    return f.a;\n"
@@ -216,7 +216,10 @@ def test_designated_init_single_bitfield(*, work: Path) -> None:
     """
     asm = compile_snippet(
         name="designated_init_single",
-        source=("struct flags { uint8_t a : 1; uint8_t b : 7; };\nint main() {\n    struct flags f = { .a = 1 };\n    return f.a;\n}\n"),
+        source=(
+            "struct flags { unsigned char a : 1; unsigned char b : 7; };\n"
+            "int main() {\n    struct flags f = { .a = 1 };\n    return f.a;\n}\n"
+        ),
         work=work,
     )
     body = asm.split("main:", 1)[1]

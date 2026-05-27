@@ -203,7 +203,7 @@ of straight-line C.  Tightening `ne2k_receive`'s C declaration with
 `out_register("edi")` / `out_register("ecx")` + `carry_return` lets the C side
 capture the multi-register output cleanly (no asm shim needed; the asm body of
 `ne2k_receive` is unchanged).  `fd_write_buffer` lifts out of `fs/fd.c`'s asm()
-block to a C-level `uint8_t *` global with an `asm("fd_write_buffer equ
+block to a C-level `unsigned char *` global with an `asm("fd_write_buffer equ
 _g_fd_write_buffer")` shim so the surviving `fs/fd/{console,fs}.asm` references
 resolve unchanged.  The +16 is mostly cc.py's per-function frame setup on the
 two ports plus the prologue zero-extend around the `in_register("ecx")` count

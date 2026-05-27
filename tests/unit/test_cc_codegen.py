@@ -31,7 +31,7 @@ INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 
 # Auto-prepended to every inline C snippet compiled through the helpers
-# below so test sources can use ``uint8_t`` / ``uint16_t`` / ``uint32_t``
+# below so test sources can use ``unsigned char`` / ``unsigned short`` / ``unsigned int``
 # without each test snippet repeating the include.  The names come from
 # ``user/libbboeos/include/stdint.h`` (cc.py reaches it via the ``-I``
 # flag we add to every subprocess call).
@@ -136,7 +136,7 @@ def _user(source_text: str, /, *, bits: int = 16) -> str:
 def test_address_of_array_element_compiles() -> None:
     """``&array[i]`` parses and lowers to scaled pointer arithmetic."""
     asm = _kernel("""
-        struct entry { uint8_t ip[4]; };
+        struct entry { unsigned char ip[4]; };
         struct entry table[8];
         void test() {
             struct entry *e;
@@ -205,7 +205,7 @@ def test_address_of_local_disqualifies_auto_pin() -> None:
 def test_asm_name_global_compiles() -> None:
     """asm_name globals compile without emitting storage."""
     source = textwrap.dedent("""
-        uint16_t my_sym __attribute__((asm_name("ext_sym")));
+        unsigned short my_sym __attribute__((asm_name("ext_sym")));
         int read_sym(int *result __attribute__((out_register("ax")))) {
             *result = my_sym;
             return 1;
@@ -220,7 +220,7 @@ def test_asm_name_global_compiles() -> None:
 def test_asm_name_with_offset_compiles() -> None:
     """asm_name with expression offset emits correct symbol reference."""
     source = textwrap.dedent("""
-        uint16_t size_hi __attribute__((asm_name("vfs_found_size+2")));
+        unsigned short size_hi __attribute__((asm_name("vfs_found_size+2")));
         void set_size_hi(int v) {
             size_hi = v;
         }
@@ -723,9 +723,9 @@ def test_builtin_sys_break_emits_break_syscall() -> None:
     asm = _user(
         """
         int main(int argc, char *argv[]) {
-            uint32_t current = sys_break(0);
-            uint32_t requested = current + 65536;
-            uint32_t got = sys_break(requested);
+            unsigned int current = sys_break(0);
+            unsigned int requested = current + 65536;
+            unsigned int got = sys_break(requested);
             if (got != requested) {
                 die("oom\\n");
             }
@@ -829,12 +829,12 @@ def test_builtin_write_loads_buffer_after_strlen_sibling() -> None:
 
 
 def test_cast_in_compound_expression_compiles() -> None:
-    """``base + (uint8_t *)offset`` cast inside a larger expression."""
+    """``base + (unsigned char *)offset`` cast inside a larger expression."""
     asm = _kernel("""
-        uint8_t buffer[16];
+        unsigned char buffer[16];
         void f(int n) {
-            uint8_t *p;
-            p = buffer + (uint8_t *)n;
+            unsigned char *p;
+            p = buffer + (unsigned char *)n;
             p[0] = 0;
         }
     """)
@@ -852,16 +852,16 @@ def test_cast_int_compiles() -> None:
 
 
 def test_cast_pointer_byte_compiles() -> None:
-    """``(uint8_t *)expr`` parses as a transparent pointer cast.
+    """``(unsigned char *)expr`` parses as a transparent pointer cast.
 
     cc.py's type system is loose; the cast is parsed and discarded so
     the operand carries through unchanged.  This lets the source use
     casts for clang compatibility without diverging behaviour.
     """
     asm = _kernel("""
-        void f(uint16_t *src) {
-            uint8_t *dst;
-            dst = (uint8_t *)src;
+        void f(unsigned short *src) {
+            unsigned char *dst;
+            dst = (unsigned char *)src;
             dst[0] = 0;
         }
     """)
@@ -1310,7 +1310,7 @@ def test_dot_access_on_extern_struct_global_reads_via_symbol() -> None:
     """
     asm = _kernel(
         """
-        struct vfs_found_t { uint8_t type; uint8_t mode; uint16_t inode; uint32_t size; };
+        struct vfs_found_t { unsigned char type; unsigned char mode; unsigned short inode; unsigned int size; };
         extern struct vfs_found_t vfs_found;
         int read_size(int *r __attribute__((out_register("ax")))) {
             *r = vfs_found.size;
@@ -1326,7 +1326,7 @@ def test_dot_access_on_local_struct_emits_frame_relative_load() -> None:
     """Dot-access on a stack-local struct value reads via [ebp-N+offset]."""
     asm = _kernel(
         """
-        struct s { uint8_t x; };
+        struct s { unsigned char x; };
         void read_x() {
             struct s local;
             int y;
@@ -1345,7 +1345,7 @@ def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
     """``obj.field = expr;`` on a file-scope struct global emits direct stores."""
     asm = _kernel(
         """
-        struct slot { uint8_t kind; uint16_t value; };
+        struct slot { unsigned char kind; unsigned short value; };
         struct slot entry;
         void set() {
             entry.kind = 5;
@@ -1355,7 +1355,7 @@ def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
         bits=32,
     )
     # cc.py packs struct fields tightly (no alignment padding), so the
-    # uint16_t value sits immediately after the uint8_t kind at offset 1.
+    # unsigned short value sits immediately after the unsigned char kind at offset 1.
     assert "mov byte [_g_entry], al" in asm, f"expected byte write to _g_entry\n{asm}"
     assert "mov word [_g_entry+1], ax" in asm, f"expected word write to _g_entry+1\n{asm}"
 
@@ -1363,17 +1363,17 @@ def test_dot_assign_on_extern_struct_global_writes_via_symbol() -> None:
 def test_double_pointer_argv_with_out_register_cx_argc() -> None:
     """The ``shared_parse_argv`` shape compiles end to end.
 
-    Combines double-pointer parameter (uint8_t **argv), in_register("di"),
-    out_register("cx") for argc, and a uint8_t* alias of a NAMED_CONSTANT
+    Combines double-pointer parameter (unsigned char **argv), in_register("di"),
+    out_register("cx") for argc, and an unsigned char * alias of a NAMED_CONSTANT
     address — exactly what the ported lib/proc.c version needs.
     """
     src = """
-        uint8_t *exec_arg_pointer __attribute__((asm_name("EXEC_ARG")));
-        void shared_parse_argv(uint8_t **argv __attribute__((in_register("di"))),
+        unsigned char *exec_arg_pointer __attribute__((asm_name("EXEC_ARG")));
+        void shared_parse_argv(unsigned char **argv __attribute__((in_register("di"))),
                                int *argc __attribute__((out_register("cx")))) {
             int count;
             int slot;
-            uint8_t *str;
+            unsigned char *str;
             count = 0;
             slot = 0;
             str = exec_arg_pointer;
@@ -1407,9 +1407,9 @@ def test_double_pointer_argv_with_out_register_cx_argc() -> None:
 
 
 def test_double_pointer_arithmetic_advances_by_two() -> None:
-    """``argv = argv + 1`` on ``uint8_t**`` advances by 2 bytes (sizeof pointer)."""
+    """``argv = argv + 1`` on ``unsigned char **`` advances by 2 bytes (sizeof pointer)."""
     src = """
-        void f(uint8_t **argv __attribute__((in_register("di")))) {
+        void f(unsigned char **argv __attribute__((in_register("di")))) {
             argv = argv + 1;
         }
     """
@@ -1450,10 +1450,10 @@ def test_double_pointer_deref_assign_emits_indirect_store() -> None:
 
 
 def test_double_pointer_indexed_assign_uses_word_stride() -> None:
-    """``argv[i] = ptr`` on ``uint8_t**`` writes a 16-bit value (slot is a pointer)."""
+    """``argv[i] = ptr`` on ``unsigned char **`` writes a 16-bit value (slot is a pointer)."""
     src = """
-        void f(uint8_t **argv __attribute__((in_register("di"))),
-               uint8_t *value __attribute__((in_register("si")))) {
+        void f(unsigned char **argv __attribute__((in_register("di"))),
+               unsigned char *value __attribute__((in_register("si")))) {
             argv[0] = value;
         }
     """
@@ -1480,7 +1480,7 @@ def test_double_pointer_null_compare_classifies_as_pointer() -> None:
     """``if (p != NULL)`` compiles when *p* is ``char**`` (regression).
 
     Used to be rejected with ``NULL compared to non-pointer`` because
-    ``_type_of_operand`` only knew about ``char*`` and ``uint8_t*``.
+    ``_type_of_operand`` only knew about ``char*`` and ``unsigned char*``.
     """
     src = """
         void f(char **endptr) {
@@ -1494,9 +1494,9 @@ def test_double_pointer_null_compare_classifies_as_pointer() -> None:
 
 
 def test_double_pointer_parameter_compiles() -> None:
-    """``uint8_t **argv`` is accepted as a parameter type."""
+    """``unsigned char **argv`` is accepted as a parameter type."""
     src = """
-        void f(uint8_t **argv __attribute__((in_register("di")))) {
+        void f(unsigned char **argv __attribute__((in_register("di")))) {
             argv[0] = argv[1];
         }
     """
@@ -1584,7 +1584,7 @@ def test_extern_scalar_global_no_storage() -> None:
     fs/fd/console.c want to reference it without redefining storage.
     """
     source = textwrap.dedent("""
-        extern uint8_t *fd_write_buffer;
+        extern unsigned char *fd_write_buffer;
         int read_buf(int *result __attribute__((out_register("ax")))) {
             *result = fd_write_buffer[0];
             return 1;
@@ -1768,7 +1768,7 @@ def test_file_scope_multi_declarator_with_attribute_rejected() -> None:
     raised when a COMMA follows an attributed declarator.
     """
     error = _kernel_error("""
-        uint8_t a __attribute__((asm_name("sym_a"))), b;
+        unsigned char a __attribute__((asm_name("sym_a"))), b;
     """)
     assert "multi-declarator" in error, f"expected multi-declarator + attribute error, got: {error}"
 
@@ -2346,7 +2346,7 @@ def test_kernel_outb_constant_port_runtime_value_no_push_pop() -> None:
     the codegen elides it.
     """
     asm = _kernel("""
-        uint8_t status() { return 5; }
+        unsigned char status() { return 5; }
         void send_status() {
             kernel_outb(0x20, status());
         }
@@ -2624,7 +2624,7 @@ def test_member_access_offset_zero() -> None:
 
 
 def test_member_access_uint16_read_32bit() -> None:
-    """p->start where start is uint16_t emits ``movzx eax, word [...]`` in 32-bit mode.
+    """p->start where start is unsigned short emits ``movzx eax, word [...]`` in 32-bit mode.
 
     Without the zero-extend, the load would either spill into adjacent
     bytes (32-bit ``mov eax, [...]``) or leave EAX's upper word stale
@@ -2634,9 +2634,9 @@ def test_member_access_uint16_read_32bit() -> None:
     asm = _user(
         """
         struct fd {
-            uint8_t type;
-            uint8_t flags;
-            uint16_t start;
+            unsigned char type;
+            unsigned char flags;
+            unsigned short start;
         };
         int read_start(struct fd *p) {
             return p->start;
@@ -2644,7 +2644,7 @@ def test_member_access_uint16_read_32bit() -> None:
     """,
         bits=32,
     )
-    assert "movzx eax, word [ebx+2]" in asm, f"Expected 'movzx eax, word [ebx+2]' for uint16_t field read\n{asm}"
+    assert "movzx eax, word [ebx+2]" in asm, f"Expected 'movzx eax, word [ebx+2]' for unsigned short field read\n{asm}"
 
 
 def test_member_access_uint16_write_32bit() -> None:
@@ -2657,9 +2657,9 @@ def test_member_access_uint16_write_32bit() -> None:
     asm = _user(
         """
         struct fd {
-            uint8_t type;
-            uint8_t flags;
-            uint16_t start;
+            unsigned char type;
+            unsigned char flags;
+            unsigned short start;
         };
         void write_start(struct fd *p, int value) {
             p->start = value;
@@ -2667,18 +2667,18 @@ def test_member_access_uint16_write_32bit() -> None:
     """,
         bits=32,
     )
-    assert "mov word [ebx+2], ax" in asm, f"Expected 'mov word [ebx+2], ax' for uint16_t field write\n{asm}"
+    assert "mov word [ebx+2], ax" in asm, f"Expected 'mov word [ebx+2], ax' for unsigned short field write\n{asm}"
 
 
 def test_member_access_uint32_read_32bit() -> None:
-    """p->size where size is uint32_t emits a full 4-byte load in 32-bit mode."""
+    """p->size where size is unsigned int emits a full 4-byte load in 32-bit mode."""
     asm = _user(
         """
         struct fd {
-            uint8_t type;
-            uint8_t flags;
-            uint16_t start;
-            uint32_t size;
+            unsigned char type;
+            unsigned char flags;
+            unsigned short start;
+            unsigned int size;
         };
         int read_size(struct fd *p) {
             return p->size;
@@ -2686,18 +2686,18 @@ def test_member_access_uint32_read_32bit() -> None:
     """,
         bits=32,
     )
-    assert "mov eax, [ebx+4]" in asm, f"Expected 'mov eax, [ebx+4]' for uint32_t field read\n{asm}"
+    assert "mov eax, [ebx+4]" in asm, f"Expected 'mov eax, [ebx+4]' for unsigned int field read\n{asm}"
 
 
 def test_member_access_uint32_write_32bit() -> None:
-    """p->size = x where size is uint32_t emits a full 4-byte store in 32-bit mode."""
+    """p->size = x where size is unsigned int emits a full 4-byte store in 32-bit mode."""
     asm = _user(
         """
         struct fd {
-            uint8_t type;
-            uint8_t flags;
-            uint16_t start;
-            uint32_t size;
+            unsigned char type;
+            unsigned char flags;
+            unsigned short start;
+            unsigned int size;
         };
         void write_size(struct fd *p, int value) {
             p->size = value;
@@ -2705,7 +2705,7 @@ def test_member_access_uint32_write_32bit() -> None:
     """,
         bits=32,
     )
-    assert "mov [ebx+4], eax" in asm, f"Expected 'mov [ebx+4], eax' for uint32_t field write\n{asm}"
+    assert "mov [ebx+4], eax" in asm, f"Expected 'mov [ebx+4], eax' for unsigned int field write\n{asm}"
 
 
 def test_member_access_via_cast_arrow_bitfield() -> None:
@@ -2994,7 +2994,7 @@ def test_memcmp_emits_repe_cmpsb() -> None:
     """memcmp(a, b, n) compiles to repe cmpsb."""
     asm = _kernel(
         """
-        int compare(uint8_t *a, uint8_t *b, int n) {
+        int compare(unsigned char *a, unsigned char *b, int n) {
             return memcmp(a, b, n);
         }
     """,
@@ -3015,7 +3015,7 @@ def test_memcmp_n_zero_short_circuits() -> None:
     """
     asm = _kernel(
         """
-        int compare(uint8_t *a, uint8_t *b, int n) {
+        int compare(unsigned char *a, unsigned char *b, int n) {
             return memcmp(a, b, n);
         }
     """,
@@ -3029,7 +3029,7 @@ def test_memcmp_not_equal_branch() -> None:
     """Memcmp result != 0 branch works correctly."""
     asm = _kernel(
         """
-        int differs(uint8_t *a, uint8_t *b, int n) {
+        int differs(unsigned char *a, unsigned char *b, int n) {
             if (memcmp(a, b, n) != 0) {
                 return 1;
             }
@@ -3045,7 +3045,7 @@ def test_memcmp_preserves_cld() -> None:
     """Memcmp must retain cld — peephole_unused_cld must not strip it."""
     asm = _kernel(
         """
-        int compare(uint8_t *a, uint8_t *b, int n) {
+        int compare(unsigned char *a, unsigned char *b, int n) {
             return memcmp(a, b, n);
         }
     """,
@@ -3058,7 +3058,7 @@ def test_memcmp_result_used_as_condition() -> None:
     """Memcmp result used in an if condition compiles without extra cmp."""
     asm = _kernel(
         """
-        int is_equal(uint8_t *a, uint8_t *b, int n) {
+        int is_equal(unsigned char *a, unsigned char *b, int n) {
             if (memcmp(a, b, n) == 0) {
                 return 1;
             }
@@ -3079,7 +3079,7 @@ def test_memcmp_returns_signed_difference() -> None:
     """
     asm = _kernel(
         """
-        int compare(uint8_t *a, uint8_t *b, int n) {
+        int compare(unsigned char *a, unsigned char *b, int n) {
             return memcmp(a, b, n);
         }
     """,
@@ -3152,7 +3152,7 @@ def test_memset_emits_rep_stosb() -> None:
     """memset(dst, value, count) compiles to rep stosb."""
     asm = _kernel(
         """
-        void zero_buf(uint8_t *buf, int n) {
+        void zero_buf(unsigned char *buf, int n) {
             memset(buf, 0, n);
         }
     """,
@@ -3167,7 +3167,7 @@ def test_memset_nonzero_value() -> None:
     """Memset with a non-zero literal value loads AL correctly."""
     asm = _kernel(
         """
-        void fill_buf(uint8_t *buf, int n) {
+        void fill_buf(unsigned char *buf, int n) {
             memset(buf, 0xFF, n);
         }
     """,
@@ -3181,7 +3181,7 @@ def test_memset_zero_literal_loads_correctly() -> None:
     """Memset with a zero value literal loads the value into AX."""
     asm = _kernel(
         """
-        void zero_buf(uint8_t *buf, int n) {
+        void zero_buf(unsigned char *buf, int n) {
             memset(buf, 0, n);
         }
     """,
@@ -3246,7 +3246,7 @@ def test_naked_if_else_dispatch_both_branches_tail_jmp() -> None:
     is acceptable — both transfer control without a ``ret`` and without ``call``.
     """
     src = """
-        uint8_t flag __attribute__((asm_name("flag")));
+        unsigned char flag __attribute__((asm_name("flag")));
         __attribute__((carry_return)) int fn_a(int x __attribute__((in_register("ax"))));
         __attribute__((carry_return)) int fn_b(int x __attribute__((in_register("ax"))));
         __attribute__((carry_return)) __attribute__((naked))
@@ -4003,7 +4003,7 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     """``mov byte [ebp-N], <imm>; movzx eax, byte [ebp-N]`` folds to ``mov eax, <imm>``.
 
     Motivating idiom: a bitfield-struct local whose only use is
-    ``*(uint8_t *)&local`` (typical of the driver port-I/O sites).
+    ``*(unsigned char *)&local`` (typical of the driver port-I/O sites).
     cc.py emits the byte store from the const-folded designated init,
     then the pointer-deref load.  The peephole observes that the
     movzx reads exactly the value just stored and rewrites it to a
@@ -4013,16 +4013,16 @@ def test_peephole_fold_byte_immediate_through_local() -> None:
     asm = _kernel(
         """
         struct cr {
-            uint8_t start: 1;
-            uint8_t stop: 1;
-            uint8_t txp: 1;
-            uint8_t reserved: 1;
-            uint8_t page: 2;
-            uint8_t rd: 2;
+            unsigned char start: 1;
+            unsigned char stop: 1;
+            unsigned char txp: 1;
+            unsigned char reserved: 1;
+            unsigned char page: 2;
+            unsigned char rd: 2;
         };
         void probe() {
             struct cr c = { .stop = 1, .rd = 4, .page = 1 };
-            kernel_outb(0x300, *(uint8_t *)&c);
+            kernel_outb(0x300, *(unsigned char *)&c);
         }
     """,
         bits=32,
@@ -4047,16 +4047,16 @@ def test_peephole_fold_single_write_byte_constant_local() -> None:
 
     Motivating shape (driver port init sequence): designated-init
     byte stores at function entry, then a loop or two, then far below
-    a ``kernel_outb(port, *(uint8_t *)&local)`` consumes the value.
+    a ``kernel_outb(port, *(unsigned char *)&local)`` consumes the value.
     The block-local fold gave up at the first ``._ir_wloop:`` label.
     """
     asm = _kernel(
         """
         struct cmd {
-            uint8_t start: 1;
-            uint8_t stop: 1;
-            uint8_t rd: 3;
-            uint8_t page: 3;
+            unsigned char start: 1;
+            unsigned char stop: 1;
+            unsigned char rd: 3;
+            unsigned char page: 3;
         };
         void f() {
             struct cmd c = { .stop = 1, .rd = 4, .page = 1 };
@@ -4065,7 +4065,7 @@ def test_peephole_fold_single_write_byte_constant_local() -> None:
                 kernel_outb(0x100 + i, 0);
                 i = i + 1;
             }
-            kernel_outb(0x110, *(uint8_t *)&c);
+            kernel_outb(0x110, *(unsigned char *)&c);
         }
     """,
         bits=32,
@@ -4098,20 +4098,20 @@ def test_peephole_fuse_byte_modify_in_place() -> None:
     asm = _kernel(
         """
         struct imr {
-            uint8_t irq0: 1;
-            uint8_t irq1: 1;
-            uint8_t irq2: 1;
-            uint8_t irq3: 1;
-            uint8_t irq4: 1;
-            uint8_t irq5: 1;
-            uint8_t irq6: 1;
-            uint8_t irq7: 1;
+            unsigned char irq0: 1;
+            unsigned char irq1: 1;
+            unsigned char irq2: 1;
+            unsigned char irq3: 1;
+            unsigned char irq4: 1;
+            unsigned char irq5: 1;
+            unsigned char irq6: 1;
+            unsigned char irq7: 1;
         };
         void unmask_irq5() {
             struct imr mask;
-            *(uint8_t *)&mask = kernel_inb(0x21);
+            *(unsigned char *)&mask = kernel_inb(0x21);
             mask.irq5 = 0;
-            kernel_outb(0x21, *(uint8_t *)&mask);
+            kernel_outb(0x21, *(unsigned char *)&mask);
         }
     """,
         bits=32,
@@ -4132,12 +4132,12 @@ def test_peephole_narrow_acc_immediate_for_byte_out() -> None:
     """
     asm = _kernel(
         """
-        struct cr { uint8_t start: 1; uint8_t stop: 1; uint8_t txp: 1;
-                    uint8_t reserved: 1; uint8_t page: 2; uint8_t rd: 2; };
+        struct cr { unsigned char start: 1; unsigned char stop: 1; unsigned char txp: 1;
+                    unsigned char reserved: 1; unsigned char page: 2; unsigned char rd: 2; };
         void other();
         void probe() {
             struct cr c = { .stop = 1, .rd = 4, .page = 1 };
-            kernel_outb(0x300, *(uint8_t *)&c);
+            kernel_outb(0x300, *(unsigned char *)&c);
             other();
         }
     """,
@@ -4349,11 +4349,11 @@ def test_pinned_register_save_skipped_before_first_store() -> None:
     """
     asm = _kernel(
         """
-        struct ata_status { uint8_t err: 1; uint8_t idx: 1;
-            uint8_t corr: 1; uint8_t drq: 1; uint8_t srv: 1;
-            uint8_t df: 1; uint8_t rdy: 1; uint8_t bsy: 1; };
+        struct ata_status { unsigned char err: 1; unsigned char idx: 1;
+            unsigned char corr: 1; unsigned char drq: 1; unsigned char srv: 1;
+            unsigned char df: 1; unsigned char rdy: 1; unsigned char bsy: 1; };
         void test_init() {
-            uint8_t status;
+            unsigned char status;
             struct ata_status *status_bits;
             kernel_outb(0x3F6, 4);
             kernel_outb(0x3F6, 0);
@@ -4534,10 +4534,10 @@ def test_read_deref_int_pointer_compiles() -> None:
 
 
 def test_read_deref_uint16_pointer_compiles() -> None:
-    """``x = *p;`` for ``uint16_t *p`` parses and lowers to a load."""
+    """``x = *p;`` for ``unsigned short *p`` parses and lowers to a load."""
     asm = _kernel("""
-        void f(uint16_t *p) {
-            uint16_t x;
+        void f(unsigned short *p) {
+            unsigned short x;
             x = *p;
         }
     """)
@@ -4662,7 +4662,7 @@ def test_static_keyword_accepted_on_functions_and_globals() -> None:
 def test_struct_array_initializer_emits_fields() -> None:
     """A struct array with a partial initializer emits per-field directives."""
     asm = _kernel("""
-        struct point { uint16_t x; uint16_t y; };
+        struct point { unsigned short x; unsigned short y; };
         struct point points[4] = {
             {1, 2},
             {3, 4},
@@ -4704,7 +4704,7 @@ def test_struct_array_initializer_function_symbol_fields() -> None:
 def test_struct_array_initializer_unspecified_fields_zero() -> None:
     """Unspecified trailing fields in a struct initializer are zero-filled."""
     asm = _kernel("""
-        struct entry { uint8_t type; uint8_t flags; uint16_t value; };
+        struct entry { unsigned char type; unsigned char flags; unsigned short value; };
         struct entry table[2] = {
             {1},
         };
@@ -4718,7 +4718,7 @@ def test_struct_array_initializer_unspecified_fields_zero() -> None:
 def test_struct_array_member_index_emits_byte_load() -> None:
     """``ptr->byte_array[i]`` loads one byte (zero-extended), not its address."""
     asm = _kernel("""
-        struct entry { uint8_t ip[4]; };
+        struct entry { unsigned char ip[4]; };
         void test(struct entry *e) {
             int b;
             b = e->ip[2];
@@ -4734,7 +4734,7 @@ def test_struct_array_member_index_emits_byte_load() -> None:
 def test_struct_array_member_index_variable() -> None:
     """``ptr->byte_array[var_index]`` scales the index and loads a byte."""
     asm = _kernel("""
-        struct entry { uint8_t mac[6]; };
+        struct entry { unsigned char mac[6]; };
         int byte_at(struct entry *e, int i) {
             return e->mac[i];
         }
@@ -4747,8 +4747,8 @@ def test_struct_array_member_index_variable() -> None:
 def test_struct_array_member_no_index_emits_field_address() -> None:
     """``ptr->byte_array`` (no index) decays to the field's address."""
     asm = _kernel("""
-        struct entry { uint8_t mac[6]; uint16_t ts; };
-        void copy_mac(struct entry *e, uint8_t *dst) {
+        struct entry { unsigned char mac[6]; unsigned short ts; };
+        void copy_mac(struct entry *e, unsigned char *dst) {
             memcpy(dst, e->mac, 6);
         }
     """)
@@ -4933,11 +4933,11 @@ def test_typedef_signed_short_long_long_parse() -> None:
 
     ``signed`` is a no-op leading modifier; ``short`` aliases to ``int``
     (width-faithful int16_t is future work); ``unsigned short`` /
-    ``unsigned char`` route through the existing uint16_t / uint8_t
-    machinery; ``long long`` collapses to ``unsigned long``.  And the
-    alias name itself is allowed to clash with a built-in type token
-    (`typedef unsigned short uint16_t;`) — the typedef silently no-ops
-    in that case so stdint.h doesn't need a cc.py-specific fork.
+    ``unsigned char`` are the canonical 2-byte / 1-byte unsigned types;
+    ``long long`` collapses to ``unsigned long``.  And the alias name
+    itself is allowed to clash with a built-in type token
+    (``typedef unsigned short unsigned short;``) — the typedef silently
+    no-ops in that case so stdint.h doesn't need a cc.py-specific fork.
     """
     asm = _user(
         """
@@ -4978,19 +4978,19 @@ def test_typedef_struct_alias_resolves_in_pointer_param() -> None:
 
 
 def test_uint16_pointer_load_is_word() -> None:
-    """``uint16_t *p; r = p[0];`` loads exactly 2 bytes, not 4 (32-bit target regression).
+    """``unsigned short *p; r = p[0];`` loads exactly 2 bytes, not 4 (32-bit target regression).
 
     Symptom: when the acc is 32-bit (``eax``), a bare ``mov eax, [esi]``
     reads 4 bytes from the pointer target — but the pointee is 16 bits,
-    so the high two bytes belong to the adjacent uint16_t.  The fix
+    so the high two bytes belong to the adjacent unsigned short.  The fix
     routes the load through ``movzx eax, word [esi]``.  On the 16-bit
     target the acc width already matches the pointee, so this is a
     32-bit-target-only test.
     """
     asm = _kernel(
         """
-            void test(uint16_t *p __attribute__((in_register("di")))) {
-                uint16_t r = p[0];
+            void test(unsigned short *p __attribute__((in_register("di")))) {
+                unsigned short r = p[0];
                 (void)r;
             }
         """,
@@ -4999,20 +4999,20 @@ def test_uint16_pointer_load_is_word() -> None:
     # Either ``movzx eax, word [esi]`` or ``mov ax, [esi]`` then ``movzx``
     # would be acceptable — what's forbidden is a bare ``mov eax, [esi]``
     # (which reads 4 bytes).
-    assert "mov eax, [esi]" not in asm, f"uint16_t* read must not use a 32-bit acc load (would read 4 bytes):\n{asm}"
-    assert "word" in asm, f"expected a ``word``-sized load for uint16_t*:\n{asm}"
+    assert "mov eax, [esi]" not in asm, f"unsigned short * read must not use a 32-bit acc load (would read 4 bytes):\n{asm}"
+    assert "word" in asm, f"expected a ``word``-sized load for unsigned short *:\n{asm}"
 
 
-def test_uint16_t_global_array_accepted_and_halfword() -> None:
-    """File-scope ``uint16_t arr[N]`` is allowed and uses halfword load/store.
+def test_unsigned_short_global_array_accepted_and_halfword() -> None:
+    """File-scope ``unsigned short arr[N]`` is allowed and uses halfword load/store.
 
     Previously rejected by the GLOBAL_ARRAY_PRIMITIVE_TYPES allowlist
     because the codegen had no halfword path.
     """
     asm = _kernel(
         """
-            uint16_t g[4];
-            uint16_t f() {
+            unsigned short g[4];
+            unsigned short f() {
                 g[1] = 0x2222;
                 return g[1];
             }
@@ -5020,16 +5020,16 @@ def test_uint16_t_global_array_accepted_and_halfword() -> None:
         bits=32,
     )
     assert "_g_g" in asm, f"expected global symbol _g_g:\n{asm}"
-    assert "mov dword" not in asm, f"global uint16_t store must not be dword:\n{asm}"
+    assert "mov dword" not in asm, f"global unsigned short store must not be dword:\n{asm}"
     assert "mov word [_g_g+2]" in asm, f"expected halfword store at stride 2:\n{asm}"
     assert "movzx eax, word [_g_g+2]" in asm, f"expected halfword load:\n{asm}"
 
 
-def test_uint16_t_global_array_bss_size_uses_halfword_stride() -> None:
-    """``uint16_t g[N];`` reserves ``N*2`` bytes in BSS, not ``N*int_size``."""
+def test_unsigned_short_global_array_bss_size_uses_halfword_stride() -> None:
+    """``unsigned short g[N];`` reserves ``N*2`` bytes in BSS, not ``N*int_size``."""
     asm = _kernel(
         """
-            uint16_t g[8];
+            unsigned short g[8];
             int f() { return 0; }
         """,
         bits=32,
@@ -5037,21 +5037,21 @@ def test_uint16_t_global_array_bss_size_uses_halfword_stride() -> None:
     assert "_g_g: resb 16" in asm, f"expected 8*2=16-byte BSS reservation:\n{asm}"
 
 
-def test_uint16_t_global_array_initialized_uses_dw_directive() -> None:
-    """``uint16_t g[3] = {1,2,3};`` lays out as ``dw`` cells, not ``dd``."""
+def test_unsigned_short_global_array_initialized_uses_dw_directive() -> None:
+    """``unsigned short g[3] = {1,2,3};`` lays out as ``dw`` cells, not ``dd``."""
     asm = _kernel(
         """
-            uint16_t g[3] = {0x1111, 0x2222, 0x3333};
-            uint16_t f() { return g[1]; }
+            unsigned short g[3] = {0x1111, 0x2222, 0x3333};
+            unsigned short f() { return g[1]; }
         """,
         bits=32,
     )
     assert "_g_g: dw " in asm, f"expected halfword initializer directive:\n{asm}"
-    assert "_g_g: dd " not in asm, f"must not lay out uint16_t as dd cells:\n{asm}"
+    assert "_g_g: dd " not in asm, f"must not lay out unsigned short as dd cells:\n{asm}"
 
 
-def test_uint16_t_global_array_variable_index_load_scales_by_two() -> None:
-    """``uint16_t g[N]; return g[i];`` scales the var index by 2, not int_size.
+def test_unsigned_short_global_array_variable_index_load_scales_by_two() -> None:
+    """``unsigned short g[N]; return g[i];`` scales the var index by 2, not int_size.
 
     The global-base, variable-index load path threads ``element_size``
     through ``_emit_constant_base_index_addr`` so ``[_g_g+esi]`` is
@@ -5059,28 +5059,28 @@ def test_uint16_t_global_array_variable_index_load_scales_by_two() -> None:
     """
     asm = _kernel(
         """
-            uint16_t g[8];
-            uint16_t f(int i) {
+            unsigned short g[8];
+            unsigned short f(int i) {
                 return g[i];
             }
         """,
         bits=32,
     )
-    assert "shl esi, 2" not in asm, f"must not scale by 4 for uint16_t global:\n{asm}"
-    assert "shl eax, 2" not in asm, f"must not scale by 4 for uint16_t global:\n{asm}"
+    assert "shl esi, 2" not in asm, f"must not scale by 4 for unsigned short global:\n{asm}"
+    assert "shl eax, 2" not in asm, f"must not scale by 4 for unsigned short global:\n{asm}"
     assert "movzx eax, word [_g_g" in asm, f"expected halfword load:\n{asm}"
 
 
-def test_uint16_t_local_array_load_const_index_is_halfword() -> None:
-    """``uint16_t arr[N]; return arr[k];`` must load exactly 2 bytes (not 4).
+def test_unsigned_short_local_array_load_const_index_is_halfword() -> None:
+    """``unsigned short arr[N]; return arr[k];`` must load exactly 2 bytes (not 4).
 
     The 32-bit acc (``eax``) load would read 4 bytes — clobbering the
     next element's low half into the high half of the result.
     """
     asm = _kernel(
         """
-            uint16_t f() {
-                uint16_t arr[4];
+            unsigned short f() {
+                unsigned short arr[4];
                 arr[0] = 0x1111;
                 arr[1] = 0x2222;
                 return arr[1];
@@ -5089,21 +5089,21 @@ def test_uint16_t_local_array_load_const_index_is_halfword() -> None:
         bits=32,
     )
     assert "movzx eax, word [esi+2]" in asm, f"expected halfword load at stride 2:\n{asm}"
-    assert "mov eax, [esi+4]" not in asm, f"must not load 4 bytes at uint16_t stride 4:\n{asm}"
+    assert "mov eax, [esi+4]" not in asm, f"must not load 4 bytes at unsigned short stride 4:\n{asm}"
 
 
-def test_uint16_t_local_array_store_const_index_is_halfword() -> None:
-    """``uint16_t arr[N]; arr[k] = v;`` for local arrays must stride by 2 and store ``word``.
+def test_unsigned_short_local_array_store_const_index_is_halfword() -> None:
+    """``unsigned short arr[N]; arr[k] = v;`` for local arrays must stride by 2 and store ``word``.
 
     Regression: cc.py's local-array codegen had a binary byte-vs-word
-    switch — anything not ``char`` / ``uint8_t`` got ``int_size`` stride
-    and a full-width store, silently miscompiling ``uint16_t`` arrays
+    switch — anything not ``char`` / ``unsigned char`` got ``int_size`` stride
+    and a full-width store, silently miscompiling ``unsigned short`` arrays
     (stride 4, ``mov dword``) and overwriting adjacent elements.
     """
     asm = _kernel(
         """
             void f() {
-                uint16_t arr[4];
+                unsigned short arr[4];
                 arr[0] = 0x1111;
                 arr[1] = 0x2222;
                 arr[2] = 0x3333;
@@ -5111,19 +5111,19 @@ def test_uint16_t_local_array_store_const_index_is_halfword() -> None:
         """,
         bits=32,
     )
-    assert "mov dword" not in asm, f"uint16_t store must not use mov dword:\n{asm}"
+    assert "mov dword" not in asm, f"unsigned short store must not use mov dword:\n{asm}"
     assert "mov word [esi], 4369" in asm, f"expected halfword store at arr[0]:\n{asm}"
     assert "mov word [esi+2], 8738" in asm, f"expected halfword store at arr[1] (stride 2):\n{asm}"
     assert "mov word [esi+4], 13107" in asm, f"expected halfword store at arr[2]:\n{asm}"
     assert "sub esp, 8" in asm, f"expected 8-byte (4*2) stack reservation:\n{asm}"
 
 
-def test_uint16_t_local_array_variable_index_scales_by_two() -> None:
-    """``arr[i]`` for uint16_t arrays scales index by 2, not int_size."""
+def test_unsigned_short_local_array_variable_index_scales_by_two() -> None:
+    """``arr[i]`` for unsigned short arrays scales index by 2, not int_size."""
     asm = _kernel(
         """
-            uint16_t f(int i) {
-                uint16_t arr[8];
+            unsigned short f(int i) {
+                unsigned short arr[8];
                 arr[i] = 0x4242;
                 return arr[i];
             }
@@ -5131,60 +5131,60 @@ def test_uint16_t_local_array_variable_index_scales_by_two() -> None:
         bits=32,
     )
     # Scaling: i*2 must use ``add eax, eax`` (shift-by-1), never ``shl eax, 2``.
-    assert "shl eax, 2" not in asm, f"uint16_t arr[i] must not scale by 4:\n{asm}"
+    assert "shl eax, 2" not in asm, f"unsigned short arr[i] must not scale by 4:\n{asm}"
     # Halfword store: the register form ``mov [si], ax`` is the 2-byte
     # store (NASM infers width from the ``ax`` operand).  What's
     # forbidden is the full-width ``mov [si], eax`` (would clobber the
     # adjacent element).
     assert "mov [esi], ax" in asm, f"expected halfword store via ax:\n{asm}"
-    assert "mov [esi], eax" not in asm, f"must not use 4-byte store for uint16_t:\n{asm}"
+    assert "mov [esi], eax" not in asm, f"must not use 4-byte store for unsigned short:\n{asm}"
     assert "movzx eax, word [esi" in asm, f"expected halfword load:\n{asm}"
 
 
-def test_uint16_t_pointer_store_is_halfword() -> None:
-    """``uint16_t *p; p[i] = v;`` stores exactly 2 bytes (not 4).
+def test_unsigned_short_pointer_store_is_halfword() -> None:
+    """``unsigned short *p; p[i] = v;`` stores exactly 2 bytes (not 4).
 
     Companion to :func:`test_uint16_pointer_load_is_word` — the load
-    path was fixed for ``uint16_t*`` but the store path kept the binary
+    path was fixed for ``unsigned short *`` but the store path kept the binary
     byte-vs-word switch, silently overwriting the adjacent element.
     """
     asm = _kernel(
         """
-            void f(uint16_t *p) {
+            void f(unsigned short *p) {
                 p[0] = 0x1111;
                 p[1] = 0x2222;
             }
         """,
         bits=32,
     )
-    assert "mov dword" not in asm, f"uint16_t* store must not use mov dword:\n{asm}"
+    assert "mov dword" not in asm, f"unsigned short * store must not use mov dword:\n{asm}"
     assert "mov word [esi], 4369" in asm, f"expected halfword store at p[0]:\n{asm}"
     assert "mov word [esi+2], 8738" in asm, f"expected halfword store at p[1]:\n{asm}"
 
 
-def test_uint16_t_size_is_always_two_bytes_16bit() -> None:
-    """sizeof(uint16_t) == 2 in --bits 16 mode."""
-    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=16)
-    assert "mov ax, 2" in asm, f"expected sizeof(uint16_t)==2 in 16-bit mode\n{asm}"
+def test_unsigned_short_size_is_always_two_bytes_16bit() -> None:
+    """sizeof(unsigned short) == 2 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned short); }", bits=16)
+    assert "mov ax, 2" in asm, f"expected sizeof(unsigned short)==2 in 16-bit mode\n{asm}"
 
 
-def test_uint16_t_size_is_always_two_bytes_32bit() -> None:
-    """sizeof(uint16_t) == 2 in --bits 32 mode (not widened to 4)."""
-    asm = _kernel("int f() { return sizeof(uint16_t); }", bits=32)
-    assert "mov eax, 2" in asm, f"expected sizeof(uint16_t)==2 in 32-bit mode\n{asm}"
+def test_unsigned_short_size_is_always_two_bytes_32bit() -> None:
+    """sizeof(unsigned short) == 2 in --bits 32 mode (not widened to 4)."""
+    asm = _kernel("int f() { return sizeof(unsigned short); }", bits=32)
+    assert "mov eax, 2" in asm, f"expected sizeof(unsigned short)==2 in 32-bit mode\n{asm}"
 
 
-def test_uint32_pointer_load_is_dword_on_kernel() -> None:
-    """``uint32_t *p; return p[0];`` reads all 4 bytes on the 16-bit target.
+def test_unsigned_long_pointer_load_is_dword_on_kernel_via_spelling() -> None:
+    """``unsigned long *p; return p[0];`` reads all 4 bytes on the 16-bit target.
 
     Mirrors :func:`test_unsigned_long_pointer_load_is_dword_on_kernel`;
-    this is the same fix extended to the ``uint32_t`` spelling, which
-    is the same 4-byte unsigned type on the 16-bit target.  Without
-    the broadening, ``uint32_t *`` silently loaded only the low 16
-    bits while ``unsigned long *`` loaded all four.
+    ``unsigned long`` is the canonical 4-byte unsigned spelling on the
+    16-bit target (``unsigned int`` is only 2 bytes there).  Without
+    the long-pointer dispatch, ``unsigned long *`` silently loaded only
+    the low 16 bits.
     """
     src = """
-        uint32_t test(uint32_t *p __attribute__((in_register("di")))) {
+        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
             return p[0];
         }
     """
@@ -5195,23 +5195,23 @@ def test_uint32_pointer_load_is_dword_on_kernel() -> None:
     assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
 
 
-def test_uint32_t_size_is_always_four_bytes_16bit() -> None:
-    """sizeof(uint32_t) == 4 in --bits 16 mode."""
-    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=16)
-    assert "mov ax, 4" in asm, f"expected sizeof(uint32_t)==4 in 16-bit mode\n{asm}"
+def test_unsigned_long_size_is_always_four_bytes_16bit() -> None:
+    """sizeof(unsigned long) == 4 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=16)
+    assert "mov ax, 4" in asm, f"expected sizeof(unsigned long)==4 in 16-bit mode\n{asm}"
 
 
-def test_uint32_t_size_is_always_four_bytes_32bit() -> None:
-    """sizeof(uint32_t) == 4 in --bits 32 mode (not widened to 8 for future 64-bit)."""
-    asm = _kernel("int f() { return sizeof(uint32_t); }", bits=32)
-    assert "mov eax, 4" in asm, f"expected sizeof(uint32_t)==4 in 32-bit mode\n{asm}"
+def test_unsigned_long_size_is_always_four_bytes_32bit() -> None:
+    """sizeof(unsigned long) == 4 in --bits 32 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(unsigned long)==4 in 32-bit mode\n{asm}"
 
 
-def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
-    """``uint8_t`` classifies as integer (per the docstring), so ``b == 0`` is allowed."""
+def test_unsigned_char_local_compared_to_int_literal_compiles() -> None:
+    """``unsigned char`` classifies as integer (per the docstring), so ``b == 0`` is allowed."""
     asm = _kernel("""
         void f() {
-            uint8_t b;
+            unsigned char b;
             b = 0;
             if (b == 0) {
                 b = 1;
@@ -5222,7 +5222,7 @@ def test_uint8_t_local_compared_to_int_literal_compiles() -> None:
 
 
 def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
-    """The ``read_sector`` shape (uint8_t global ``< 0x80``, naked, tail dispatch) compiles to ``cmp / jb / jmp``.
+    """The ``read_sector`` shape (unsigned char global ``< 0x80``, naked, tail dispatch) compiles to ``cmp / jb / jmp``.
 
     Regression test for the entire change: the unsigned compare picks
     the right mnemonic, the naked attribute elides the frame, and the
@@ -5231,7 +5231,7 @@ def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
     into ``jb fdc ; jmp ata``.
     """
     src = """
-        uint8_t boot_disk __attribute__((asm_name("boot_disk")));
+        unsigned char boot_disk __attribute__((asm_name("boot_disk")));
         __attribute__((carry_return)) int fdc(int s __attribute__((in_register("ax"))));
         __attribute__((carry_return)) int ata(int s __attribute__((in_register("ax"))));
         __attribute__((carry_return)) __attribute__((naked))
@@ -5250,9 +5250,9 @@ def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
 
 
 def test_unsigned_byte_global_less_than_emits_jb() -> None:
-    """``uint8_t < literal`` uses unsigned ``jb`` (false-branch ``jae``)."""
+    """``unsigned char < literal`` uses unsigned ``jb`` (false-branch ``jae``)."""
     src = """
-        uint8_t flag __attribute__((asm_name("flag")));
+        unsigned char flag __attribute__((asm_name("flag")));
         void test() {
             if (flag < 0x80) {
                 kernel_outb(0, 1);
@@ -5264,8 +5264,8 @@ def test_unsigned_byte_global_less_than_emits_jb() -> None:
     # or jumps past the body on the false branch (``jae``).  Either way
     # the unsigned mnemonic must appear and the signed equivalent ``jge``
     # must not.
-    assert "jae" in asm or "jb " in asm, f"expected unsigned 'jae' / 'jb' for uint8_t < 0x80\n{asm}"
-    assert "jge" not in asm, f"signed 'jge' must not appear for uint8_t comparison\n{asm}"
+    assert "jae" in asm or "jb " in asm, f"expected unsigned 'jae' / 'jb' for unsigned char < 0x80\n{asm}"
+    assert "jge" not in asm, f"signed 'jge' must not appear for unsigned char comparison\n{asm}"
 
 
 def test_unsigned_int_compiles_and_uses_unsigned_compare() -> None:
@@ -5379,25 +5379,25 @@ def test_unsigned_pointer_double_indirect_compares_unsigned() -> None:
 
 
 def test_unsigned_pointer_uint8_double_indirect_compares_unsigned() -> None:
-    """``uint8_t **`` comparison uses unsigned mnemonics (suffix-detected)."""
+    """``unsigned char **`` comparison uses unsigned mnemonics (suffix-detected)."""
     src = """
-        uint8_t **p __attribute__((asm_name("p")));
-        uint8_t **q __attribute__((asm_name("q")));
+        unsigned char **p __attribute__((asm_name("p")));
+        unsigned char **q __attribute__((asm_name("q")));
         int check() { return p < q; }
     """
     asm = _kernel(src)
-    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for uint8_t** comparison\n{asm}"
-    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for uint8_t** comparison\n{asm}"
+    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for unsigned char ** comparison\n{asm}"
+    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for unsigned char ** comparison\n{asm}"
 
 
-def test_unsigned_uint16_t_greater_or_equal_emits_jae() -> None:
-    """``uint16_t >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
+def test_unsigned_short_greater_or_equal_emits_jae() -> None:
+    """``unsigned short >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
     src = """
-        uint16_t timeout __attribute__((asm_name("timeout")));
+        unsigned short timeout __attribute__((asm_name("timeout")));
         int check() { return timeout >= 32768; }
     """
     asm = _kernel(src)
-    assert "jae" in asm or "jb " in asm, f"expected unsigned mnemonic for uint16_t >= 32768\n{asm}"
+    assert "jae" in asm or "jb " in asm, f"expected unsigned mnemonic for unsigned short >= 32768\n{asm}"
     assert "jge" not in asm and "jl " not in asm, f"signed mnemonic must not appear\n{asm}"
 
 
@@ -5749,10 +5749,10 @@ def test_user_file_scope_bss_globals() -> None:
 
 
 def test_user_global_array_accepts_uint16_element() -> None:
-    """uint16_t global arrays compile and use the halfword codegen path."""
+    """Unsigned short global arrays compile and use the halfword codegen path."""
     ok, output = _compile(
         r"""
-        uint16_t halfwords[4];
+        unsigned short halfwords[4];
 
         int main() {
             halfwords[0] = 0xAABB;
@@ -5763,29 +5763,29 @@ def test_user_global_array_accepts_uint16_element() -> None:
         bits=32,
     )
     assert ok, f"unexpected compile error:\n{output}"
-    assert "mov dword" not in output, f"uint16_t global must not store dword:\n{output}"
+    assert "mov dword" not in output, f"unsigned short global must not store dword:\n{output}"
     assert "mov word [_g_halfwords]" in output, f"expected halfword store:\n{output}"
 
 
 def test_user_global_array_pointer_and_uint32_elements() -> None:
-    """Pointer-typed and uint32_t global arrays land in BSS as word-strided slots.
+    """Pointer-typed and unsigned int global arrays land in BSS as word-strided slots.
 
-    ``char *slots[N]`` and ``uint32_t counters[N]`` both follow the
+    ``char *slots[N]`` and ``unsigned int counters[N]`` both follow the
     existing word-stride codegen path; the file-scope allowlist accepts
-    pointer element types and uint32_t (alongside the original
-    char/int/uint8_t/struct).
+    pointer element types and unsigned int (alongside the original
+    char/int/unsigned char/struct).
     """
     ok, asm = _compile(
         r"""
         char *slots[4];
-        uint32_t counters[3];
+        unsigned int counters[3];
 
         int main() {
             slots[0] = "hi";
             slots[1] = 0;
             counters[2] = 0xDEADBEEF;
             char *p = slots[0];
-            uint32_t c = counters[2];
+            unsigned int c = counters[2];
             return c;
         }
         """,

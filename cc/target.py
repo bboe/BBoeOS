@@ -174,9 +174,8 @@ class X86CodegenTarget(CodegenTarget):
         "char": 1,
         "double": 8,
         "float": 4,
-        "uint8_t": 1,
-        "uint16_t": 2,
-        "uint32_t": 4,
+        "unsigned char": 1,
+        "unsigned short": 2,
         "unsigned long": 4,
         "void": 0,
     }
