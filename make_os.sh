@@ -19,6 +19,19 @@ for arg in "$@"; do
     esac
 done
 
+case "$(uname -s)" in
+    Darwin)
+        CROSS_AR=x86_64-elf-ar
+        CROSS_LD=x86_64-elf-ld
+        CROSS_OBJCOPY=x86_64-elf-objcopy
+        ;;
+    *)
+        CROSS_AR=ar
+        CROSS_LD=ld
+        CROSS_OBJCOPY=objcopy
+        ;;
+esac
+
 KBUILD=build/kernel-c
 rm -rf "$KBUILD" && mkdir -p "$KBUILD"
 find kernel -name '*.c' | while read -r source; do
@@ -54,15 +67,15 @@ python3 tools/generate_syscalls_h.py
 for name in builtins ctype dirent errno math signal stdio stdlib string syscall; do
     build_libbboeos_ccpy "$name" || exit 1
 done
-make -C user/libbboeos libbboeos.a >/dev/null || exit 1
+make -C user/libbboeos libbboeos.a AR="$CROSS_AR" >/dev/null || exit 1
 nasm -f elf32 -i kernel/include/ -o build/libbboeos.o user/libbboeos/libbboeos.asm || exit 1
 # --gc-sections drops every clang-compiled libbboeos function the
 # pointer-table LONG()s don't reference, so the blob pays only for
 # what it actually exports.
-ld -m elf_i386 -T user/libbboeos/libbboeos.ld -Map=build/libbboeos.map \
+$CROSS_LD -m elf_i386 -T user/libbboeos/libbboeos.ld -Map=build/libbboeos.map \
     --gc-sections -o build/libbboeos.elf \
     build/libbboeos.o user/libbboeos/libbboeos.a || exit 1
-objcopy -O binary build/libbboeos.elf build/libbboeos || exit 1
+$CROSS_OBJCOPY -O binary build/libbboeos.elf build/libbboeos || exit 1
 
 # Two-pass build: assemble kernel.bin first, measure its sector count,
 # then pass that as -DKERNEL_SECTORS=N when assembling boot.bin so the
