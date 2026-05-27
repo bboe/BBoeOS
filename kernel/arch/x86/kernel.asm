@@ -585,7 +585,7 @@ section .bss
         ;; point.  Re-align before the kernel.asm-internal labels —
         ;; every one of them is `resd 1` / `resd N` / `resb 4·N` and
         ;; expects 4-aligned access.
-        align 4
+        alignb 4
 
 ;;; Labels below are strict-alphabetical (matching the codebase's `equ`
 ;;; convention).  Every reservation is `resd 1`, `resd N`, or `resb N`
