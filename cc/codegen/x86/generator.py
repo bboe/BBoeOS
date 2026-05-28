@@ -604,63 +604,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if not pinned_locals:
             return {}
         initial: set[str] = set(self._prologue_initialized_pinned_registers())
-
-        def store_targets(instruction: object) -> list[str]:
-            """Return every local name written by *instruction*.
-
-            Most shapes write at most one local; ``ir.Call`` is the
-            exception — beyond its (optional) ``destination``, every
-            ``out_register`` arg captures into the named local AFTER
-            the call returns, so all of them count as stores for the
-            purposes of "is the pin live around the next call".
-            """
-            if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
-                return [instruction.destination]
-            if isinstance(instruction, ir.Block):
-                # Block-wrapped AST escape hatch.  A VarDecl with
-                # initialiser is a store to its name; ditto an
-                # ``unsigned long`` Assign that the IR builder routes
-                # through Block.  Pinned-to-register locals can't be
-                # ``unsigned long`` (they wouldn't fit a single register),
-                # so only the VarDecl case can hit a pinned target —
-                # but we still extract Assign / MemberAssign destinations
-                # defensively in case future IR shapes wrap them.
-                node = instruction.node
-                if isinstance(node, Assign):
-                    return [node.name]
-                if isinstance(node, VarDecl) and node.init is not None:
-                    return [node.name]
-                # MemberAssign / IndexAssign / inline asm write through
-                # pointers or are opaque — they don't store to a single
-                # named local register.  Skip.
-                return []
-            if isinstance(instruction, ir.Call):
-                stores: list[str] = []
-                if instruction.destination is not None:
-                    stores.append(instruction.destination)
-                out_regs = self.out_register_params.get(instruction.name, {})
-                for index, arg in enumerate(instruction.args):
-                    if index in out_regs and isinstance(arg, AddressOf):
-                        stores.append(arg.var.name)
-                return stores
-            if isinstance(instruction, ir.CarryBranch):
-                # ``carry_return`` callees can also have ``out_register``
-                # captures — match the ir.Call handling so the pin
-                # tracker sees their writes too.
-                call_ast = instruction.call_ast
-                stores = []
-                out_regs = self.out_register_params.get(call_ast.name, {})
-                for index, arg in enumerate(call_ast.args):
-                    if index in out_regs and isinstance(arg, AddressOf):
-                        stores.append(arg.var.name)
-                return stores
-            if isinstance(instruction, ir.IndexAssign):
-                # IndexAssign writes through a base pointer, not to the
-                # named base itself — leaves the base's register
-                # contents unchanged.  Not a store to the pin.
-                return []
-            return []
-
         label_positions: dict[str, int] = {}
         for index, instruction in enumerate(ir_body):
             if isinstance(instruction, ir.Label):
@@ -675,7 +618,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for start, end in loop_ranges:
             stores: set[str] = set()
             for k in range(start, end + 1):
-                for target_name in store_targets(ir_body[k]):
+                for target_name in self._ir_instruction_store_targets(ir_body[k]):
                     if target_name in pinned_locals:
                         stores.add(pinned_locals[target_name])
             loop_stores.append(stores)
@@ -694,7 +637,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # conservative full save-set.
             if isinstance(instruction, (ir.Call, ir.CarryBranch)):
                 result[id(instruction)] = frozenset(defined)
-            for target_name in store_targets(instruction):
+            for target_name in self._ir_instruction_store_targets(instruction):
                 if target_name in pinned_locals:
                     defined.add(pinned_locals[target_name])
         return result
@@ -2091,6 +2034,65 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             and self._is_modulo_of(base=left, expression=remainder_left)
             and remainder_left.right.value % right.value == 0
         )
+
+    def _ir_instruction_store_targets(self, instruction: object, /) -> list[str]:
+        """Return every local name written by *instruction*.
+
+        Most shapes write at most one local; ``ir.Call`` is the
+        exception — beyond its (optional) ``destination``, every
+        ``out_register`` arg captures into the named local AFTER the
+        call returns, so all of them count as stores for the purposes
+        of "is the pin live around the next call".
+
+        Used by :meth:`_compute_pinned_initialized_per_call` to mark
+        which pinned-locals become defined at each IR instruction.
+        """
+        if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
+            return [instruction.destination]
+        if isinstance(instruction, ir.Block):
+            # Block-wrapped AST escape hatch.  A VarDecl with
+            # initialiser is a store to its name; ditto an
+            # ``unsigned long`` Assign that the IR builder routes
+            # through Block.  Pinned-to-register locals can't be
+            # ``unsigned long`` (they wouldn't fit a single register),
+            # so only the VarDecl case can hit a pinned target —
+            # but we still extract Assign / MemberAssign destinations
+            # defensively in case future IR shapes wrap them.
+            node = instruction.node
+            if isinstance(node, Assign):
+                return [node.name]
+            if isinstance(node, VarDecl) and node.init is not None:
+                return [node.name]
+            # MemberAssign / IndexAssign / inline asm write through
+            # pointers or are opaque — they don't store to a single
+            # named local register.  Skip.
+            return []
+        if isinstance(instruction, ir.Call):
+            stores: list[str] = []
+            if instruction.destination is not None:
+                stores.append(instruction.destination)
+            out_regs = self.out_register_params.get(instruction.name, {})
+            for index, arg in enumerate(instruction.args):
+                if index in out_regs and isinstance(arg, AddressOf):
+                    stores.append(arg.var.name)
+            return stores
+        if isinstance(instruction, ir.CarryBranch):
+            # ``carry_return`` callees can also have ``out_register``
+            # captures — match the ir.Call handling so the pin
+            # tracker sees their writes too.
+            call_ast = instruction.call_ast
+            stores = []
+            out_regs = self.out_register_params.get(call_ast.name, {})
+            for index, arg in enumerate(call_ast.args):
+                if index in out_regs and isinstance(arg, AddressOf):
+                    stores.append(arg.var.name)
+            return stores
+        if isinstance(instruction, ir.IndexAssign):
+            # IndexAssign writes through a base pointer, not to the
+            # named base itself — leaves the base's register
+            # contents unchanged.  Not a store to the pin.
+            return []
+        return []
 
     def _local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local or global scalar.
