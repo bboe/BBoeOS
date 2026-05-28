@@ -4387,18 +4387,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        mov {self.target.acc}, {addr}")
             self.ax_clear()
             return
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=expression.line)
-        tag = struct_type[7:-1]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=expression.line)
-        if expression.member_name not in layout:
-            message = f"struct '{tag}' has no field '{expression.member_name}'"
-            raise CompileError(message, line=expression.line)
-        info = layout[expression.member_name]
+        info = self._resolve_member_index_layout(
+            arrow=True,
+            line=expression.line,
+            member_name=expression.member_name,
+            object_name=object_name,
+        )
         offset = info.byte_offset
         field_size = info.field_size
         element_size = info.element_size
@@ -4587,18 +4581,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 self.emit(f"        mov {addr}, {self.target.acc}")
             return
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=statement.line)
-        tag = struct_type[7:-1]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=statement.line)
-        if statement.member_name not in layout:
-            message = f"struct '{tag}' has no field '{statement.member_name}'"
-            raise CompileError(message, line=statement.line)
-        info = layout[statement.member_name]
+        info = self._resolve_member_index_layout(
+            arrow=True,
+            line=statement.line,
+            member_name=statement.member_name,
+            object_name=object_name,
+        )
         offset = info.byte_offset
         field_size = info.field_size
         if info.bit_width is not None:
